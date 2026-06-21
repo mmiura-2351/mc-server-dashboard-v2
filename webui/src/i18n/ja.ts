@@ -1343,6 +1343,8 @@ export const ja: Record<TranslationKey, string> = {
   "plugins.search.by": "作者:",
   "plugins.search.install": "インストール",
   "plugins.search.installing": "インストール中…",
+  "plugins.search.installed": "インストール済み",
+  "plugins.search.update": "更新",
   "plugins.search.versions": "バージョン",
   "plugins.search.back": "検索に戻る",
   "plugins.enabled": "{Noun}を有効にしました。",

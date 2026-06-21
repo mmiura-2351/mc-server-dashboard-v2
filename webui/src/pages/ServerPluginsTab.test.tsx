@@ -793,3 +793,366 @@ describe("ServerPluginsTab error messages (issue #1345)", () => {
     });
   });
 });
+
+describe("Modrinth modal: popular mods on initial open (issue #1351)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("fires a search with empty query on open and shows popular results", async () => {
+    mockGets({ plugins: [plugin()], validation: EMPTY_VALIDATION });
+    // The empty-query catalog search returns popular mods.
+    mockApi.get.mockImplementation((url: string) => {
+      if (url.includes("/catalog/search")) {
+        return Promise.resolve({
+          hits: [
+            {
+              project_id: "PROJ1",
+              slug: "sodium",
+              title: "Sodium",
+              description: "Rendering engine",
+              author: "CaffeineMC",
+              downloads: 50000,
+              icon_url: null,
+              categories: [],
+              latest_game_versions: ["1.21"],
+            },
+          ],
+          limit: 20,
+          offset: 0,
+          total_hits: 1,
+        });
+      }
+      if (url.endsWith("/plugins/validate")) {
+        return Promise.resolve(EMPTY_VALIDATION);
+      }
+      if (url.endsWith("/plugins/updates")) {
+        return Promise.resolve({ updates: [] });
+      }
+      if (url.endsWith("/plugins")) {
+        return Promise.resolve({ plugins: [plugin()] });
+      }
+      return Promise.resolve({});
+    });
+    renderTab();
+
+    await waitFor(() => {
+      expect(screen.getByText("Sodium")).toBeInTheDocument();
+    });
+
+    // Open the Modrinth browse modal.
+    fireEvent.click(screen.getByText("Browse Modrinth"));
+
+    // The popular results should appear without typing anything.
+    await waitFor(() => {
+      // The search result hit shows the title "Sodium" in the search results.
+      const hits = screen.getAllByText("Sodium");
+      // At least one is in the search results area (the others are in the
+      // installed plugins table).
+      expect(hits.length).toBeGreaterThanOrEqual(2);
+    });
+  });
+});
+
+describe("Modrinth modal: installed version indicator (issue #1350)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  /** Helper to open the browse modal and select a project. */
+  function mockBrowseAndDetail({
+    plugins: pluginsList,
+    projectId,
+    versions,
+  }: {
+    plugins: ReturnType<typeof plugin>[];
+    projectId: string;
+    versions: {
+      version_id: string;
+      version_number: string;
+      name: string;
+      game_versions: string[];
+    }[];
+  }) {
+    mockApi.get.mockImplementation((url: string) => {
+      if (url.includes("/catalog/projects/")) {
+        return Promise.resolve({
+          project: {
+            project_id: projectId,
+            slug: "sodium",
+            title: "Sodium",
+            description: "Rendering engine",
+            author: "CaffeineMC",
+            downloads: 50000,
+            icon_url: null,
+            categories: [],
+            game_versions: ["1.21"],
+            loaders: ["fabric"],
+            body: "",
+          },
+          versions: versions.map((v) => ({
+            ...v,
+            date_published: "2026-06-20T00:00:00Z",
+            dependencies: [],
+            files: [],
+            loaders: ["fabric"],
+          })),
+        });
+      }
+      if (url.includes("/catalog/search")) {
+        return Promise.resolve({
+          hits: [
+            {
+              project_id: projectId,
+              slug: "sodium",
+              title: "Sodium",
+              description: "Rendering engine",
+              author: "CaffeineMC",
+              downloads: 50000,
+              icon_url: null,
+              categories: [],
+              latest_game_versions: ["1.21"],
+            },
+          ],
+          limit: 20,
+          offset: 0,
+          total_hits: 1,
+        });
+      }
+      if (url.endsWith("/plugins/validate")) {
+        return Promise.resolve(EMPTY_VALIDATION);
+      }
+      if (url.endsWith("/plugins/updates")) {
+        return Promise.resolve({ updates: [] });
+      }
+      if (url.endsWith("/plugins")) {
+        return Promise.resolve({ plugins: pluginsList });
+      }
+      return Promise.resolve({});
+    });
+  }
+
+  it("shows 'Installed' badge on the currently-installed version", async () => {
+    const installed = plugin({
+      source: "modrinth",
+      source_project_id: "PROJ1",
+      source_version_id: "V1",
+    });
+    mockBrowseAndDetail({
+      plugins: [installed],
+      projectId: "PROJ1",
+      versions: [
+        {
+          version_id: "V1",
+          version_number: "0.5.0",
+          name: "Sodium 0.5.0",
+          game_versions: ["1.21"],
+        },
+        {
+          version_id: "V2",
+          version_number: "0.6.0",
+          name: "Sodium 0.6.0",
+          game_versions: ["1.21"],
+        },
+      ],
+    });
+    renderTab();
+    await waitFor(() => {
+      expect(screen.getByText("Browse Modrinth")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText("Browse Modrinth"));
+
+    // Click the search result to view versions.
+    await waitFor(() => {
+      expect(screen.getByText("Rendering engine")).toBeInTheDocument();
+    });
+    fireEvent.click(
+      screen.getByText("Rendering engine").closest("button") as HTMLElement,
+    );
+
+    // The installed version shows "Installed" badge, not a button.
+    await waitFor(() => {
+      expect(screen.getByText("Installed")).toBeInTheDocument();
+    });
+  });
+
+  it("shows 'Update' on other versions of an installed project", async () => {
+    const installed = plugin({
+      source: "modrinth",
+      source_project_id: "PROJ1",
+      source_version_id: "V1",
+    });
+    mockBrowseAndDetail({
+      plugins: [installed],
+      projectId: "PROJ1",
+      versions: [
+        {
+          version_id: "V1",
+          version_number: "0.5.0",
+          name: "Sodium 0.5.0",
+          game_versions: ["1.21"],
+        },
+        {
+          version_id: "V2",
+          version_number: "0.6.0",
+          name: "Sodium 0.6.0",
+          game_versions: ["1.21"],
+        },
+      ],
+    });
+    renderTab();
+    await waitFor(() => {
+      expect(screen.getByText("Browse Modrinth")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText("Browse Modrinth"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Rendering engine")).toBeInTheDocument();
+    });
+    fireEvent.click(
+      screen.getByText("Rendering engine").closest("button") as HTMLElement,
+    );
+
+    // The other version shows "Update" button.
+    await waitFor(() => {
+      // Find the Update button in the version list.
+      const updateButtons = screen
+        .getAllByText("Update")
+        .filter((el) => el.tagName === "BUTTON");
+      expect(updateButtons).toHaveLength(1);
+    });
+  });
+
+  it("shows 'Install' on versions of a not-installed project", async () => {
+    // No plugin installed for this project.
+    mockBrowseAndDetail({
+      plugins: [plugin()],
+      projectId: "PROJ1",
+      versions: [
+        {
+          version_id: "V1",
+          version_number: "0.5.0",
+          name: "Sodium 0.5.0",
+          game_versions: ["1.21"],
+        },
+      ],
+    });
+    renderTab();
+    await waitFor(() => {
+      expect(screen.getByText("Browse Modrinth")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText("Browse Modrinth"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Rendering engine")).toBeInTheDocument();
+    });
+    fireEvent.click(
+      screen.getByText("Rendering engine").closest("button") as HTMLElement,
+    );
+
+    // Version shows "Install" button.
+    await waitFor(() => {
+      const installButtons = screen
+        .getAllByText("Install")
+        .filter((el) => el.tagName === "BUTTON");
+      expect(installButtons).toHaveLength(1);
+    });
+    // No "Installed" badge or "Update" button.
+    expect(screen.queryByText("Installed")).not.toBeInTheDocument();
+  });
+});
+
+describe("Modrinth modal: simplified version display (issue #1354)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("shows version_number as primary and game_versions as secondary, without name", async () => {
+    mockApi.get.mockImplementation((url: string) => {
+      if (url.includes("/catalog/projects/")) {
+        return Promise.resolve({
+          project: {
+            project_id: "PROJ1",
+            slug: "sodium",
+            title: "Sodium",
+            description: "Rendering engine",
+            author: "CaffeineMC",
+            downloads: 50000,
+            icon_url: null,
+            categories: [],
+            game_versions: ["1.21"],
+            loaders: ["fabric"],
+            body: "",
+          },
+          versions: [
+            {
+              version_id: "V1",
+              version_number: "0.8.12-beta.1",
+              name: "Sodium 0.8.12-beta.1 for Fabric 1.21.1",
+              game_versions: ["1.21", "1.21.1"],
+              date_published: "2026-06-20T00:00:00Z",
+              dependencies: [],
+              files: [],
+              loaders: ["fabric"],
+            },
+          ],
+        });
+      }
+      if (url.includes("/catalog/search")) {
+        return Promise.resolve({
+          hits: [
+            {
+              project_id: "PROJ1",
+              slug: "sodium",
+              title: "Sodium",
+              description: "Rendering engine",
+              author: "CaffeineMC",
+              downloads: 50000,
+              icon_url: null,
+              categories: [],
+              latest_game_versions: ["1.21"],
+            },
+          ],
+          limit: 20,
+          offset: 0,
+          total_hits: 1,
+        });
+      }
+      if (url.endsWith("/plugins/validate")) {
+        return Promise.resolve(EMPTY_VALIDATION);
+      }
+      if (url.endsWith("/plugins/updates")) {
+        return Promise.resolve({ updates: [] });
+      }
+      if (url.endsWith("/plugins")) {
+        return Promise.resolve({ plugins: [plugin()] });
+      }
+      return Promise.resolve({});
+    });
+
+    renderTab();
+    await waitFor(() => {
+      expect(screen.getByText("Browse Modrinth")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText("Browse Modrinth"));
+
+    // Click the search result to view versions.
+    await waitFor(() => {
+      expect(screen.getByText("Rendering engine")).toBeInTheDocument();
+    });
+    fireEvent.click(
+      screen.getByText("Rendering engine").closest("button") as HTMLElement,
+    );
+
+    // The version number is displayed.
+    await waitFor(() => {
+      expect(screen.getByText("0.8.12-beta.1")).toBeInTheDocument();
+    });
+    // The game versions are displayed as secondary text.
+    expect(screen.getByText("1.21, 1.21.1")).toBeInTheDocument();
+    // The verbose name is NOT displayed.
+    expect(
+      screen.queryByText("Sodium 0.8.12-beta.1 for Fabric 1.21.1"),
+    ).not.toBeInTheDocument();
+  });
+});
