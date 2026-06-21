@@ -225,9 +225,8 @@ function Header({
 }) {
   const state = normalizeState(server.observed_state);
   const pill = statePill(state);
-  const desired = normalizeState(server.desired_state);
-  // The reconciler has not yet converged when desired ≠ observed; show a
-  // settling hint (WEBUI_SPEC.md 6.4).
+  // The reconciler has not yet converged when desired ≠ observed; show an
+  // applying hint (WEBUI_SPEC.md 6.4).
   const drifting = server.desired_state !== server.observed_state;
 
   // Clickable-copy state for the join-hostname badge.
@@ -321,8 +320,6 @@ function Header({
               ? `${t("serverDetail.worker")}: ${shortId(server.assigned_worker_id)}`
               : t("serverDetail.noWorker")}
           </span>
-          {" · "}
-          {t("serverDetail.desired")}: {desired}
         </div>
       </div>
       <Controls server={server} communityId={communityId} can={can} />
@@ -756,12 +753,6 @@ function Overview({
           <LogView entries={tail} follow={true} />
         )}
       </div>
-      <dl className="kv card">
-        <dt>{t("serverDetail.observed")}</dt>
-        <dd>{server.observed_state}</dd>
-        <dt>{t("serverDetail.desired")}</dt>
-        <dd>{server.desired_state}</dd>
-      </dl>
     </section>
   );
 }

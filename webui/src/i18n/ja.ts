@@ -59,7 +59,7 @@ export const ja: Record<TranslationKey, string> = {
   // signed-in account belongs to zero communities.
   "noCommunity.title": "コミュニティがありません",
   "noCommunity.body":
-    "このアカウントはまだどのコミュニティにも所属していません。コミュニティはサーバー・メンバー・設定の範囲を定めます。",
+    "このアカウントはまだどのコミュニティにも所属していません。コミュニティ単位でサーバー・メンバー・設定が管理されます。",
   "noCommunity.memberHint":
     "コミュニティに追加してもらうには、プラットフォーム管理者に依頼してください。",
   "noCommunity.adminHint":
@@ -106,8 +106,9 @@ export const ja: Record<TranslationKey, string> = {
   "register.reason.too_short": "パスワードが短すぎます。",
   "register.reason.too_long_for_bcrypt": "パスワードが長すぎます。",
   "register.reason.insufficient_complexity":
-    "パスワードの複雑さが不十分です。より長く、または多様な文字を使用してください。",
-  "register.reason.common_password": "パスワードがありふれすぎています。",
+    "パスワードが単純すぎます。より長く、または多様な文字を使ってください。",
+  "register.reason.common_password":
+    "よく使われるパスワードです。別のものにしてください。",
   "register.reason.contains_user_info":
     "パスワードにユーザー名やメールアドレスを含めることはできません。",
   "register.reason.simple_pattern":
@@ -133,7 +134,7 @@ export const ja: Record<TranslationKey, string> = {
   "upload.elapsed": "{seconds}秒経過",
 
   // Account page (WEBUI_SPEC.md 6.11)
-  "account.subtitle": "プロフィール、セキュリティ、メンバーシップ。",
+  "account.subtitle": "プロフィール・セキュリティ・所属コミュニティの管理。",
   "account.signOut": "サインアウト",
   "account.loading": "読み込み中…",
   "account.loadError":
@@ -171,7 +172,7 @@ export const ja: Record<TranslationKey, string> = {
     "アカウントを完全に削除します。この操作は元に戻せません。確認のためユーザー名とパスワードを入力してください。",
   "account.delete.confirm": "アカウントを削除",
   "account.delete.prompt": "削除を有効にするにはユーザー名を入力",
-  "account.delete.password": "パスワードを確認のため入力",
+  "account.delete.password": "確認のためパスワードを入力",
 
   // API reason codes (RFC 9457 `reason`) surfaced inline / via toast.
   "account.error.username_taken": "そのユーザー名はすでに使用されています。",
@@ -184,7 +185,8 @@ export const ja: Record<TranslationKey, string> = {
   "account.error.too_long_for_bcrypt": "パスワードが長すぎます。",
   "account.error.insufficient_complexity":
     "パスワードが単純すぎます — 文字種を混ぜるか、より長くしてください。",
-  "account.error.common_password": "そのパスワードはありふれすぎています。",
+  "account.error.common_password":
+    "そのパスワードはよく使われています。別のものにしてください。",
   "account.error.contains_user_info":
     "パスワードにユーザー名やメールアドレスを含めることはできません。",
   "account.error.simple_pattern":
@@ -203,7 +205,7 @@ export const ja: Record<TranslationKey, string> = {
   "dashboard.empty": "まだサーバーがありません。",
   "dashboard.emptyHint": "最初のサーバーを作成して始めましょう。",
   "dashboard.createServer": "サーバーを作成",
-  "dashboard.noWorker": "Worker未割り当て",
+  "dashboard.noWorker": "ホスト未割り当て",
   "dashboard.start": "起動",
   "dashboard.stop": "停止",
   "dashboard.restart": "再起動",
@@ -218,7 +220,7 @@ export const ja: Record<TranslationKey, string> = {
   "dashboard.col.backend": "バックエンド",
   "dashboard.col.port": "ポート",
   "dashboard.col.address": "アドレス",
-  "dashboard.col.worker": "Worker",
+  "dashboard.col.worker": "ホスト",
   "dashboard.col.actions": "操作",
   // Observed-state pill labels (WEBUI_SPEC.md 2.3).
   "dashboard.state.starting": "起動中",
@@ -237,16 +239,16 @@ export const ja: Record<TranslationKey, string> = {
   "dashboard.lifecycle.portConflict":
     "起動できませんでした: ポートがすでに使用されています。",
   "dashboard.lifecycle.imageMissing":
-    "起動できませんでした: サーバーイメージが見つかりません。",
+    "起動できませんでした: サーバーのファイルが準備できていません。しばらくしてから再試行してください。",
   // 503 service-unavailable reasons (issue #1092).
   "dashboard.lifecycle.noEligibleWorker":
-    "ワーカーが利用できません。システムが起動中の場合は、しばらく待ってから再試行してください。",
+    "現在利用可能なサーバーホストがありません。システムが起動中の場合は、しばらく待ってから再試行してください。",
   "dashboard.lifecycle.workerUnavailable":
-    "ワーカーとの通信に失敗しました。しばらく待ってから再試行してください。",
+    "サーバーホストとの通信に失敗しました。しばらく待ってから再試行してください。",
   "dashboard.lifecycle.jarUnavailable":
-    "サーバーJARの取得に失敗しました。しばらく待ってから再試行してください。",
+    "サーバーファイルを準備できませんでした。しばらく待ってから再試行してください。",
   // Live-status degraded indicator: WS down, polling fallback (SPEC 6.2 / 7.2).
-  "dashboard.liveDegraded": "ライブ更新が低下 — ポーリング中",
+  "dashboard.liveDegraded": "再接続中 — 表示の更新が遅れることがあります",
   // Clickable join-hostname copy feedback.
   "dashboard.copiedJoinHostname": "コピーしました！",
   // Filter and sort controls (#1123).
@@ -265,11 +267,9 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.breadcrumb": "サーバー",
   // Overview header.
   "serverDetail.crashDetail": "クラッシュ理由:",
-  "serverDetail.converging": "収束中…",
-  "serverDetail.desired": "目標",
-  "serverDetail.observed": "現在",
-  "serverDetail.noWorker": "Worker未割り当て",
-  "serverDetail.worker": "Worker",
+  "serverDetail.converging": "反映中…",
+  "serverDetail.noWorker": "ホスト未割り当て",
+  "serverDetail.worker": "ホスト",
   "serverDetail.noPort": "ポートなし",
   // Relay join hostname (issue #961).
   "serverDetail.copiedJoinHostname": "コピーしました！",
@@ -296,7 +296,7 @@ export const ja: Record<TranslationKey, string> = {
   // Inline divider where the client fell behind and missed events (SPEC 7.2).
   "serverDetail.missedEvents": "— 欠落したイベント —",
   // Console tab (issue #440, WEBUI_SPEC.md 6.5).
-  "serverDetail.console.follow": "追従",
+  "serverDetail.console.follow": "自動スクロール",
   "serverDetail.console.filter": "絞り込み…",
   "serverDetail.console.clear": "クリア",
   "serverDetail.console.send": "送信",
@@ -331,11 +331,11 @@ export const ja: Record<TranslationKey, string> = {
     "値はJSONとして解釈されます: 12 は数値、true は真偽値、それ以外は文字列です。",
   // Per-server memory limit (issue #709).
   "serverDetail.settings.memoryLimit": "メモリ上限（MiB）",
-  "serverDetail.settings.memoryLimitDefault": "ドライバー既定値",
+  "serverDetail.settings.memoryLimitDefault": "既定値",
   "serverDetail.settings.memoryLimitHint":
-    "このサーバーに割り当てるメモリの上限（MiB）。空欄にするとドライバーの既定値を使用します。",
+    "このサーバーに割り当てるメモリの上限（MiB）。空欄にすると既定値を使用します。",
   "serverDetail.settings.memoryLimitRange":
-    "512〜1048576 MiB の整数を入力するか、空欄にしてドライバー既定値を使用してください。",
+    "512〜1048576 MiB の整数を入力するか、空欄にして既定値を使用してください。",
   // Per-server CPU allocation (issue #726).
   "serverDetail.settings.cpuAllocation": "CPU割り当て（ミリコア）",
   "serverDetail.settings.cpuAllocationDefault": "自動",
@@ -365,7 +365,7 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.danger.heading": "危険な操作",
   "serverDetail.danger.exportTitle": "サーバーをエクスポート",
   "serverDetail.danger.exportDesc":
-    "作業セット全体をZIPアーカイブとしてダウンロードします。",
+    "サーバーのすべてのファイルをZIPアーカイブとしてダウンロードします。",
   "serverDetail.danger.exportButton": "ZIPをエクスポート",
   "serverDetail.danger.deleteTitle": "サーバーを削除",
   "serverDetail.danger.deleteDesc":
@@ -423,10 +423,10 @@ export const ja: Record<TranslationKey, string> = {
   "backups.stat.oldest": "最古",
   // Table.
   "backups.col.created": "作成日時",
-  "backups.col.source": "ソース",
+  "backups.col.source": "作成方法",
   "backups.col.condition": "状態",
   "backups.col.size": "サイズ",
-  "backups.col.creator": "実行者",
+  "backups.col.creator": "作成者",
   "backups.unknownSize": "不明",
   "backups.unknownCreator": "—",
   // Condition badge (API `health`: healthy / quarantined / unknown). Plain
@@ -469,8 +469,7 @@ export const ja: Record<TranslationKey, string> = {
   // makes the deliberate, damaged-data nature explicit (#745).
   "backups.restoreDialog.damagedWarning":
     "このバックアップのデータは破損していることが判明しています。復元するとサーバーのワールドが壊れた状態になる可能性があり、その後修復する方法はありません。",
-  "backups.restoreDialog.damagedConfirm":
-    "破損したバックアップを承知のうえで復元",
+  "backups.restoreDialog.damagedConfirm": "破損したバックアップをそれでも復元",
   // Acknowledgement checkbox label gating the force-restore — affirmation phrased
   // (the user asserts they accept the risk), not a restatement of the warning.
   "backups.restoreDialog.damagedAck":
@@ -490,11 +489,11 @@ export const ja: Record<TranslationKey, string> = {
   "backups.error.notStopped":
     "バックアップを復元する前にサーバーを停止してください。",
   "backups.error.unsettled":
-    "サーバーが収束中です — 停止または稼働状態になってから再度お試しください。",
+    "サーバーが起動／停止の途中です。完全に停止または稼働してから再度お試しください。",
   "backups.error.invalidArchive":
     "そのファイルは有効なバックアップアーカイブではありません。",
   "backups.error.workerUnavailable":
-    "現在、バックアップを取得できるWorkerがありません。",
+    "現在、バックアップを取得できるサーバーホストがありません。",
   "backups.error.invalidSchedule":
     "backup_interval_hours は1以上の整数の時間数である必要があります。",
   "backups.error.tooLarge":
@@ -504,7 +503,7 @@ export const ja: Record<TranslationKey, string> = {
   // Files tab (WEBUI_SPEC.md 6.6).
   "files.denied": "このサーバーのファイルを表示する権限がありません。",
   "files.runningNotice":
-    "サーバーは稼働中です — ファイルの編集はライブ作業セットに反映されます。アップロードとフォルダの作成にはサーバーを停止する必要があります。",
+    "サーバーは稼働中です — ファイルの編集は稼働中のサーバーに即座に反映されます。アップロードとフォルダの作成にはサーバーを停止する必要があります。",
   "files.root": "ルート",
   "files.loading": "読み込み中…",
   "files.listError":
@@ -546,7 +545,7 @@ export const ja: Record<TranslationKey, string> = {
   "files.history.title": "バージョン履歴",
   "files.history.loading": "バージョンを読み込んでいます…",
   "files.history.error": "バージョン履歴を読み込めませんでした。",
-  "files.history.empty": "保持された以前のバージョンはまだありません。",
+  "files.history.empty": "以前のバージョンはまだ保存されていません。",
   "files.history.hint":
     "最新のバージョンのみが保持され（既定で10件）、古いものは破棄されます。",
   "files.history.rollback": "ロールバック",
@@ -568,24 +567,24 @@ export const ja: Record<TranslationKey, string> = {
     "ファイルサイズが512 MiBのアップロード上限を超えています。",
   "files.error.generic": "問題が発生しました。もう一度お試しください。",
 
-  // Players tab — attached op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8).
-  "players.heading": "アタッチ済みグループ",
+  // Players tab — applied op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8).
+  "players.heading": "適用中のグループ",
   "players.loading": "グループを読み込んでいます…",
   "players.loadError": "グループを読み込めませんでした。更新してみてください。",
-  "players.empty": "このサーバーにはまだグループがアタッチされていません。",
+  "players.empty": "このサーバーにはまだグループが適用されていません。",
   "players.kind.op": "op",
   "players.kind.whitelist": "whitelist",
   // Member count shown next to each group (the group's player list length).
   "players.memberCount": "人",
-  "players.detach": "デタッチ",
-  "players.detached": "グループをデタッチしました。",
-  // Attach picker: community groups not yet attached to this server.
-  "players.attachHeading": "グループをアタッチ",
-  "players.attachEmpty": "このコミュニティのグループはすべてアタッチ済みです。",
+  "players.detach": "解除",
+  "players.detached": "グループを解除しました。",
+  // Apply picker: community groups not yet applied to this server.
+  "players.attachHeading": "グループを適用",
+  "players.attachEmpty": "このコミュニティのグループはすべて適用済みです。",
   // Distinct from attachEmpty: the community has no groups at all (issue #642).
   "players.attachNoGroups": "このコミュニティにはまだグループがありません。",
-  "players.attach": "アタッチ",
-  "players.attached": "グループをアタッチしました。",
+  "players.attach": "適用",
+  "players.attached": "グループを適用しました。",
   // Inline pointer to the full Groups management surface (Phase 6).
   "players.manageHint": "グループの作成と編集はコミュニティ設定で行えます。",
   "players.manageLink": "コミュニティ設定",
@@ -608,7 +607,7 @@ export const ja: Record<TranslationKey, string> = {
   "sessions.next": "次へ",
 
   // Server create wizard (WEBUI_SPEC.md 6.3).
-  "serverCreate.subtitle": "新しいMinecraftサーバーをプロビジョニングします。",
+  "serverCreate.subtitle": "新しいMinecraftサーバーを作成します。",
   "serverCreate.denied": "サーバーを作成する権限がありません。",
   "serverCreate.tab.new": "新規サーバー",
   "serverCreate.tab.import": "ZIPをインポート",
@@ -645,7 +644,7 @@ export const ja: Record<TranslationKey, string> = {
   "serverCreate.backendLabel": "実行バックエンド",
   "serverCreate.backend.container": "コンテナ",
   "serverCreate.portLabel": "ゲームポート",
-  "serverCreate.portHint": "次の空きポートから自動提案されました。",
+  "serverCreate.portHint": "空いている次のポートを自動入力しました。",
   "serverCreate.portChecking": "ポートの空き状況を確認しています…",
   "serverCreate.portAvailable": "ポートは利用可能です。",
   "serverCreate.portTaken": "ポートはすでに使用されています。",
@@ -656,11 +655,11 @@ export const ja: Record<TranslationKey, string> = {
   "serverCreate.namePlaceholder": "survival",
   // Per-server resource allocation in the create wizard (issue #715).
   "serverCreate.memoryLimitLabel": "メモリ上限（MiB）",
-  "serverCreate.memoryLimitDefault": "ドライバー既定値",
+  "serverCreate.memoryLimitDefault": "既定値",
   "serverCreate.memoryLimitHint":
-    "このサーバーに割り当てるメモリの上限（MiB）。空欄にするとドライバーの既定値を使用します。",
+    "このサーバーに割り当てるメモリの上限（MiB）。空欄にすると既定値を使用します。",
   "serverCreate.memoryLimitRange":
-    "512〜1048576 MiB の整数を入力するか、空欄にしてドライバー既定値を使用してください。",
+    "512〜1048576 MiB の整数を入力するか、空欄にして既定値を使用してください。",
   "serverCreate.cpuAllocationLabel": "CPU割り当て（ミリコア）",
   "serverCreate.cpuAllocationDefault": "自動",
   "serverCreate.cpuAllocationHint":
@@ -746,7 +745,7 @@ export const ja: Record<TranslationKey, string> = {
   "communitySettings.members.noRolesLeft": "すべてのロールを割り当て済み。",
   "communitySettings.members.addDialogTitle": "メンバーを追加",
   "communitySettings.members.addDialogBody":
-    "既存のユーザーを正確なユーザー名でこのコミュニティに追加します。",
+    "ユーザー名を正確に入力して、既存のユーザーをこのコミュニティに追加します。",
   "communitySettings.members.usernameLabel": "ユーザー名",
   "communitySettings.members.usernamePlaceholder": "ユーザー名",
   "communitySettings.members.addSubmit": "メンバーを追加",
@@ -849,9 +848,9 @@ export const ja: Record<TranslationKey, string> = {
   "communitySettings.audit.op.file:mkdir": "フォルダ作成",
   "communitySettings.audit.op.file:search": "ファイル検索",
   "communitySettings.audit.op.version:refresh": "バージョンカタログ更新",
-  "communitySettings.audit.op.version:jar_gc": "JARプールの整理",
-  "communitySettings.audit.op.worker:drain_set": "ワーカーをドレイン",
-  "communitySettings.audit.op.worker:drain_clear": "ワーカーのドレイン解除",
+  "communitySettings.audit.op.version:jar_gc": "ディスク容量を解放",
+  "communitySettings.audit.op.worker:drain_set": "Workerをドレイン",
+  "communitySettings.audit.op.worker:drain_clear": "Workerのドレイン解除",
   "communitySettings.audit.op.group:create": "プレイヤーグループ作成",
   "communitySettings.audit.op.group:update": "プレイヤーグループ更新",
   "communitySettings.audit.op.group:delete": "プレイヤーグループ削除",
@@ -866,7 +865,7 @@ export const ja: Record<TranslationKey, string> = {
   "communitySettings.audit.targetType.grant": "権限付与",
   "communitySettings.audit.targetType.server": "サーバー",
   "communitySettings.audit.targetType.backup": "バックアップ",
-  "communitySettings.audit.targetType.worker": "ワーカー",
+  "communitySettings.audit.targetType.worker": "Worker",
   "communitySettings.audit.targetType.file": "ファイル",
   "communitySettings.audit.targetType.group": "プレイヤーグループ",
 
@@ -1036,7 +1035,7 @@ export const ja: Record<TranslationKey, string> = {
   "communitySettings.groups.renamed": "グループ名を変更しました。",
   "communitySettings.groups.deleteDialogTitle": "グループを削除",
   "communitySettings.groups.deleteDialogBody":
-    "このグループを削除すると、アタッチされているすべてのサーバーから削除されます。この操作は元に戻せません。",
+    "このグループを削除すると、適用されているすべてのサーバーから削除されます。この操作は元に戻せません。",
   "communitySettings.groups.deleteConfirm": "グループを削除",
   "communitySettings.groups.deletePrompt": "確認のためグループ名を入力。",
   "communitySettings.groups.deleted": "グループを削除しました。",
@@ -1057,26 +1056,25 @@ export const ja: Record<TranslationKey, string> = {
   "communitySettings.groups.playerFieldsEmpty":
     "UUIDとユーザー名を入力してください。",
   "communitySettings.groups.playerAdded": "プレイヤーを追加しました。",
-  "communitySettings.groups.serversHeading": "アタッチ済みサーバー",
+  "communitySettings.groups.serversHeading": "適用中のサーバー",
   "communitySettings.groups.serversLoading": "サーバーを読み込んでいます…",
   "communitySettings.groups.serversLoadError":
     "サーバーを読み込めませんでした。",
   "communitySettings.groups.serversEmpty":
-    "このグループはまだどのサーバーにもアタッチされていません。",
-  "communitySettings.groups.detach": "デタッチ",
-  "communitySettings.groups.detached": "サーバーをデタッチしました。",
-  "communitySettings.groups.attachHeading": "サーバーをアタッチ",
+    "このグループはまだどのサーバーにも適用されていません。",
+  "communitySettings.groups.detach": "解除",
+  "communitySettings.groups.detached": "サーバーへの適用を解除しました。",
+  "communitySettings.groups.attachHeading": "サーバーに適用",
   "communitySettings.groups.attachEmpty":
-    "すべてのコミュニティサーバーがアタッチ済みです。",
-  "communitySettings.groups.attach": "アタッチ",
-  "communitySettings.groups.attached": "サーバーをアタッチしました。",
+    "すべてのコミュニティサーバーに適用済みです。",
+  "communitySettings.groups.attach": "適用",
+  "communitySettings.groups.attached": "サーバーに適用しました。",
   "communitySettings.groups.unknownServer": "（不明なサーバー）",
 
   // Platform admin area (WEBUI_SPEC.md 6.12, Section 3) — #474
   "admin.denied.title": "プラットフォーム管理者専用",
   "admin.denied.body": "プラットフォーム管理エリアへのアクセス権がありません。",
-  "admin.overview.subtitle":
-    "フリートと全体の統計 — プラットフォーム管理者専用",
+  "admin.overview.subtitle": "Workerと全体の統計 — プラットフォーム管理者専用",
   "admin.overview.loading": "プラットフォーム統計を読み込んでいます…",
   "admin.overview.loadError": "プラットフォーム統計を読み込めませんでした。",
   "admin.overview.workers": "Worker",
@@ -1084,18 +1082,18 @@ export const ja: Record<TranslationKey, string> = {
   "admin.overview.workersDraining": "ドレイン中",
   "admin.overview.workersOffline": "オフライン",
   "admin.overview.servers": "稼働中サーバー",
-  "admin.overview.serversHint": "フリート全体で割り当て済み",
+  "admin.overview.serversHint": "Worker全体で割り当て済み",
   "admin.overview.backups": "バックアップ（全体）",
-  "admin.overview.jarPool": "JARプール",
+  "admin.overview.jarPool": "サーバーダウンロード",
   "admin.overview.jars": "JAR",
-  "admin.overview.fleet": "Workerフリート",
+  "admin.overview.fleet": "Worker一覧",
   "admin.overview.fleetWorker": "Worker",
   "admin.overview.fleetStatus": "ステータス",
   "admin.overview.fleetLoad": "負荷",
   "admin.overview.fleetHeartbeat": "ハートビート",
   "admin.overview.fleetEmpty": "登録されているWorkerがありません。",
   "admin.versions.subtitle":
-    "バージョンカタログと共有JARキャッシュ — プラットフォーム管理者専用",
+    "バージョンカタログと共有サーバーダウンロード — プラットフォーム管理者専用",
   "admin.versions.loading": "バージョンカタログを読み込んでいます…",
   "admin.versions.loadError": "バージョンカタログを読み込めませんでした。",
   "admin.versions.catalog": "サーバー種類カタログ",
@@ -1107,29 +1105,27 @@ export const ja: Record<TranslationKey, string> = {
   "admin.versions.latest": "最新",
   "admin.versions.empty": "カタログ化されたサーバーの種類がありません。",
   "admin.versions.typeError": "利用不可",
-  "admin.versions.refreshedAll":
-    "カタログを無効化しました。一覧は次回の読み込み時に再取得されます。",
+  "admin.versions.refreshedAll": "バージョン一覧を再読み込みします。",
   // Interpolated with the server type, e.g. "Refreshed catalog: paper".
   "admin.versions.refreshedOne": "カタログを更新しました: {type}",
   "admin.versions.refreshError": "カタログを更新できませんでした。",
-  "admin.versions.jarPool": "JARプール",
-  "admin.versions.jarPoolCached": "キャッシュ済みJAR",
+  "admin.versions.jarPool": "サーバーダウンロード",
+  "admin.versions.jarPoolCached": "ダウンロード済みJAR",
   "admin.versions.jarPoolSize": "合計サイズ",
-  "admin.versions.gc": "ガベージコレクションを実行",
+  "admin.versions.gc": "ディスク容量を解放",
   "admin.versions.gcRunning": "実行しています…",
   "admin.versions.gcHint":
-    "どのサーバーからも参照されなくなったJARを削除します。",
-  "admin.versions.gcDialog.title":
-    "JARプールのガベージコレクションを実行しますか?",
+    "どのサーバーも使用していないダウンロード済みサーバーJARを削除します。",
+  "admin.versions.gcDialog.title": "ディスク容量を解放しますか?",
   "admin.versions.gcDialog.body":
-    "稼働中のサーバーが参照していないプール済みJARを削除します。参照されていないJARは必要に応じて再ダウンロードされます。",
-  "admin.versions.gcDialog.confirm": "GCを実行",
-  "admin.versions.gcDialog.promptLabel": "確認のため GC と入力",
+    "稼働中のどのサーバーも使用していないダウンロード済みサーバーJARを削除します。次に必要になったときに再ダウンロードされます。",
+  "admin.versions.gcDialog.confirm": "未使用ファイルを削除",
+  "admin.versions.gcDialog.promptLabel": "確認のため CLEAN と入力",
   // Interpolated with freed bytes + deleted count, e.g.
   // "Freed 412 MiB by deleting 3 unused JARs.".
   "admin.versions.gcDone":
     "未使用のJAR {count} 個を削除し、{bytes} を解放しました。",
-  "admin.versions.gcError": "ガベージコレクションに失敗しました。",
+  "admin.versions.gcError": "ディスク容量を解放できませんでした。",
   // Communities (WEBUI_SPEC.md 6.12) — #476, #489
   "admin.communities.subtitle":
     "プラットフォーム上のすべてのコミュニティ。プロビジョニングは管理者専用で、セルフサービスでの作成には対応していません。",
@@ -1207,7 +1203,7 @@ export const ja: Record<TranslationKey, string> = {
   "admin.workers.drainedCount":
     "Workerをドレインしました。{count} 台のサーバーを停止対象としてマークしました — 各サーバーが停止済み・未割り当てになるまでこのWorkerを接続したままにしてください。",
   "admin.workers.drainDialogConvergenceWarning":
-    "停止と最終スナップショットはWorkerが接続している間のみ、グレース期間（約120秒）＋各サーバー1ティック後に非同期で実行されます。廃止する場合、すべての割り当て済みサーバーが停止済み・未割り当てになるまでこのWorkerを起動し続けてください。接続を早期に切断すると、停止とスナップショットが次の再接続まで延期されますが、廃止シナリオでは再接続が行われない可能性があります。収束の確認はサーバー一覧で個別に行ってください（Workerの負荷カウンターは停止前にゼロになるため、目安にはなりません）。",
+    "停止と最終スナップショットは、Workerが接続している間のみ実行されます。このWorkerに割り当てられていたすべてのサーバーが停止済み・未割り当てになるまで、このWorkerを起動したままにしてください。早期に停止すると、それらのサーバーは最終スナップショットを取れなくなります。各サーバーが停止したかどうかはサーバー一覧で確認してください。",
   "admin.workers.undrained": "Workerのドレインを解除しました。",
   "admin.workers.drainError": "Workerをドレインできませんでした。",
   "admin.workers.undrainError": "Workerのドレインを解除できませんでした。",
@@ -1254,7 +1250,7 @@ export const ja: Record<TranslationKey, string> = {
   "admin.users.deleteConfirm": "ユーザーを削除",
   // Conflict reasons the lifecycle routes return (admin_users.py).
   "admin.users.error.self_target":
-    "自分自身のアカウントにここでこの操作はできません — アカウントページを使用してください。",
+    "この画面では自分自身のアカウントを操作できません。アカウントページから行ってください。",
   "admin.users.error.last_platform_admin":
     "最後の有効なプラットフォーム管理者は削除できません。",
   "admin.users.error.owns_community":
