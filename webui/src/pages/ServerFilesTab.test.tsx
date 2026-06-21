@@ -23,18 +23,23 @@ const SID = "s1";
 const mockApi = vi.hoisted(() => ({
   get: vi.fn(),
   post: vi.fn(),
-  postForm: vi.fn(),
   put: vi.fn(),
   patch: vi.fn(),
   delete: vi.fn(),
 }));
+
+const mockPostFormWithProgress = vi.hoisted(() => vi.fn());
 
 vi.mock("../api/client.ts", async () => {
   const actual =
     await vi.importActual<typeof import("../api/client.ts")>(
       "../api/client.ts",
     );
-  return { ...actual, api: mockApi };
+  return {
+    ...actual,
+    api: mockApi,
+    postFormWithProgress: mockPostFormWithProgress,
+  };
 });
 
 const mockDownload = vi.hoisted(() => ({ downloadFile: vi.fn() }));
@@ -138,10 +143,10 @@ beforeEach(() => {
   setAccessToken("tok-1");
   mockApi.get.mockReset();
   mockApi.post.mockReset();
-  mockApi.postForm.mockReset();
   mockApi.put.mockReset();
   mockApi.patch.mockReset();
   mockApi.delete.mockReset();
+  mockPostFormWithProgress.mockReset();
   mockDownload.downloadFile.mockReset();
   mockDownload.downloadFile.mockResolvedValue(undefined);
   mockCan = () => true;
@@ -273,7 +278,7 @@ describe("ServerFilesTab operations", () => {
       detail: server(),
       list: listing([]),
     });
-    mockApi.postForm.mockResolvedValue(undefined);
+    mockPostFormWithProgress.mockResolvedValue(undefined);
     renderPage();
     await openFiles();
     await screen.findByText(t("files.empty"));
@@ -284,8 +289,8 @@ describe("ServerFilesTab operations", () => {
       target: { files: [file] },
     });
 
-    await waitFor(() => expect(mockApi.postForm).toHaveBeenCalled());
-    const [url, form] = mockApi.postForm.mock.calls[0];
+    await waitFor(() => expect(mockPostFormWithProgress).toHaveBeenCalled());
+    const [url, form] = mockPostFormWithProgress.mock.calls[0];
     expect(url).toBe(`${FILES_BASE}/upload?path=&extract=true`);
     expect((form as FormData).get("file")).toBe(file);
   });
@@ -774,7 +779,7 @@ describe("ServerFilesTab 409 reason toasts", () => {
       detail: server({ observed_state: "stopped" }),
       list: listing([]),
     });
-    mockApi.postForm.mockRejectedValue(
+    mockPostFormWithProgress.mockRejectedValue(
       new ApiError(409, { reason: "server_unsettled" }),
     );
     renderPage();

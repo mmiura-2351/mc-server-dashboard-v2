@@ -126,6 +126,12 @@ export const ja: Record<TranslationKey, string> = {
   "common.chooseFile": "ファイルを選択",
   "common.noFileChosen": "ファイルが選択されていません",
 
+  // Upload progress (issue #1207).
+  "upload.label": "アップロード中",
+  "upload.bytes": "{loaded} / {total}",
+  "upload.percent": "{percent}%",
+  "upload.elapsed": "{seconds}秒経過",
+
   // Account page (WEBUI_SPEC.md 6.11)
   "account.subtitle": "プロフィール、セキュリティ、メンバーシップ。",
   "account.signOut": "サインアウト",

@@ -119,13 +119,16 @@ function isAuthPath(path: string): boolean {
 }
 
 /**
- * Whether the response declares a JSON content-type the API uses: regular
+ * Whether a `content-type` header declares a JSON type the API uses: regular
  * `application/json` or RFC 9457 `application/problem+json` (AUTH_API.md 2).
  * Anything else (an HTML proxy/LB error page) is treated as non-JSON.
  */
+function isJsonContentTypeHeader(contentType: string | null): boolean {
+  return /\bapplication\/(problem\+)?json\b/i.test(contentType ?? "");
+}
+
 function isJsonContentType(response: Response): boolean {
-  const contentType = response.headers.get("content-type") ?? "";
-  return /\bapplication\/(problem\+)?json\b/i.test(contentType);
+  return isJsonContentTypeHeader(response.headers.get("content-type"));
 }
 
 async function rawRequest(
@@ -203,16 +206,95 @@ async function request<P extends keyof paths, M extends string>(
   return body as JsonResponse<Op<P, M>>;
 }
 
+/** Reports upload progress in bytes; `total` is 0 when the size is unknown. */
+export type UploadProgress = (loaded: number, total: number) => void;
+
+/**
+ * One XHR attempt: POST a FormData body, emitting upload progress through
+ * `onProgress`. Resolves the raw {@link XMLHttpRequest} once it loads (any
+ * status) and rejects only on a transport-level failure — the status branching
+ * (JSON parse, refresh, ApiError) is the caller's job, mirroring how `request`
+ * inspects a fetch `Response`.
+ */
+function sendForm(
+  url: string,
+  body: FormData,
+  onProgress?: UploadProgress,
+): Promise<XMLHttpRequest> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    // Carry the same-origin session cookie, matching the fetch path's
+    // `credentials: "same-origin"`.
+    xhr.withCredentials = true;
+    const token = getAccessToken();
+    if (token != null) {
+      xhr.setRequestHeader("authorization", `Bearer ${token}`);
+    }
+    // A FormData body is multipart: leave content-type unset so the browser adds
+    // it with the generated boundary (same rule as the fetch path).
+    if (onProgress !== undefined) {
+      xhr.upload.onprogress = (event) => {
+        onProgress(event.loaded, event.lengthComputable ? event.total : 0);
+      };
+    }
+    xhr.onload = () => resolve(xhr);
+    xhr.onerror = () => reject(new ApiError(0, undefined));
+    xhr.send(body);
+  });
+}
+
+/**
+ * Multipart POST with real-time upload progress (issue #1207). XHR is the
+ * pragmatic choice: fetch cannot surface bytes-uploaded progress. It runs the
+ * FormData body through the same auth, single-flight 401 refresh, and typed
+ * error/JSON handling as {@link request}, adding the `onProgress` feedback.
+ */
+export async function postFormWithProgress<P extends PathsWith<"post">>(
+  path: P,
+  body: FormData,
+  onProgress?: UploadProgress,
+): Promise<JsonResponse<Op<P, "post">>> {
+  const url = path as string;
+  let xhr = await sendForm(url, body, onProgress);
+
+  // Transparent refresh, mirroring `request`: a 401 from a non-auth endpoint
+  // means the access token expired — refresh once and retry the upload.
+  if (xhr.status === 401 && refresher !== null && !isAuthPath(url)) {
+    const refreshed = await refresher();
+    if (refreshed) {
+      xhr = await sendForm(url, body, onProgress);
+    }
+  }
+
+  const text = xhr.responseText;
+  const jsonBody = isJsonContentTypeHeader(
+    xhr.getResponseHeader("content-type"),
+  );
+  let parsed: unknown;
+  if (jsonBody && text.length > 0) {
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      // Fall through to the failure paths with a body-less ApiError.
+    }
+  }
+
+  const ok = xhr.status >= 200 && xhr.status < 300;
+  if (!ok) {
+    throw new ApiError(xhr.status, parsed);
+  }
+  if (text.length > 0 && parsed === undefined) {
+    throw new ApiError(xhr.status, undefined);
+  }
+  return parsed as JsonResponse<Op<P, "post">>;
+}
+
 export const api = {
   get: <P extends PathsWith<"get">>(path: P, init?: RequestInit) =>
     request("get", path, init),
   post: <P extends PathsWith<"post">>(path: P, init?: RequestInit) =>
     request("post", path, init),
-  // Multipart POST: the only typed-client escape hatch for `multipart/form-data`
-  // endpoints (server import / file & backup upload). Sends a FormData body
-  // through the same refresh/error pipeline; the browser sets the boundary.
-  postForm: <P extends PathsWith<"post">>(path: P, body: FormData) =>
-    request("post", path, { body }),
   put: <P extends PathsWith<"put">>(path: P, init?: RequestInit) =>
     request("put", path, init),
   patch: <P extends PathsWith<"patch">>(path: P, init?: RequestInit) =>

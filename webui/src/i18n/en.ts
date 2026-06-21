@@ -119,6 +119,13 @@ export const en = {
   "common.chooseFile": "Choose file",
   "common.noFileChosen": "No file chosen",
 
+  // Upload progress (issue #1207). `{loaded}`/`{total}` are humanized byte
+  // sizes; `{percent}` is an integer; `{seconds}` is the elapsed seconds.
+  "upload.label": "Uploading",
+  "upload.bytes": "{loaded} / {total}",
+  "upload.percent": "{percent}%",
+  "upload.elapsed": "{seconds}s elapsed",
+
   // Account page (WEBUI_SPEC.md 6.11) — one contiguous block to minimise
   // merge conflicts with sibling PRs adding keys under other prefixes.
   "account.subtitle": "Your profile, security, and memberships.",
