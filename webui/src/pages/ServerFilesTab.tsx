@@ -55,7 +55,9 @@ type FileVersions = components["schemas"]["FileVersionsResponse"];
 /**
  * Map a file-operation error to its toast message. 409 reasons
  * `server_unsettled` and `server_not_stopped` (at-rest-only precondition
- * failures) get an actionable message; everything else falls back to generic.
+ * failures) get an actionable message; `content_dir_protected` is handled
+ * separately (inline notice, not a toast); everything else falls back to
+ * generic.
  */
 function fileOperationErrorMessage(error: unknown): TranslationKey {
   if (error instanceof ApiError && error.status === 409) {
@@ -65,6 +67,20 @@ function fileOperationErrorMessage(error: unknown): TranslationKey {
     }
   }
   return "files.error.generic";
+}
+
+/** True when the error is a 409 content_dir_protected rejection. */
+function isContentDirProtected(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    error.status === 409 &&
+    error.reason === "content_dir_protected"
+  );
+}
+
+/** The loader-aware noun for the managed-content tab (Mods vs Plugins). */
+function contentTabNoun(serverType: string): string {
+  return serverType === "fabric" || serverType === "forge" ? "Mods" : "Plugins";
 }
 
 /** Base `/communities/{cid}/servers/{sid}/files` path for `server`. */
@@ -121,9 +137,14 @@ export function ServerFilesTab({
   // Current directory rel-path ("" is the working-set root) and the open file.
   const [dir, setDir] = useState("");
   const [openFile, setOpenFile] = useState<string | null>(null);
+  const [contentDirNotice, setContentDirNotice] = useState(false);
 
   const onError = (error: unknown) => {
     if (onForbidden(error)) {
+      return;
+    }
+    if (isContentDirProtected(error)) {
+      setContentDirNotice(true);
       return;
     }
     showToast(t(fileOperationErrorMessage(error)), "error");
@@ -166,6 +187,12 @@ export function ServerFilesTab({
     <section className="files">
       {notAtRest && (
         <div className="notice info">{t("files.runningNotice")}</div>
+      )}
+      {contentDirNotice && (
+        <ContentDirNotice
+          serverType={server.server_type}
+          onDismiss={() => setContentDirNotice(false)}
+        />
       )}
       <SearchBox
         communityId={communityId}
@@ -259,6 +286,37 @@ function Crumbs({
           </button>
         </span>
       ))}
+    </div>
+  );
+}
+
+// ── Content-dir redirect notice ─────────────────────────────────────────────
+
+function ContentDirNotice({
+  serverType,
+  onDismiss,
+}: {
+  serverType: string;
+  onDismiss: () => void;
+}) {
+  const noun = contentTabNoun(serverType);
+  const message = t("files.error.contentDirProtected").replace(
+    /\{noun\}/g,
+    noun,
+  );
+  const linkLabel = t("files.error.goToContentTab").replace(/\{noun\}/g, noun);
+
+  return (
+    <div className="notice warn" role="alert">
+      <span>{message}</span> <a href="#plugins">{linkLabel}</a>
+      <button
+        type="button"
+        className="btn sm ghost"
+        onClick={onDismiss}
+        aria-label={t("common.close")}
+      >
+        {t("common.close")}
+      </button>
     </div>
   );
 }

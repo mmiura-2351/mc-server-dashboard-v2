@@ -558,6 +558,9 @@ export const ja: Record<TranslationKey, string> = {
   "files.rolledBack": "選択したバージョンにロールバックしました。",
   "files.error.serverMustBeStopped":
     "ファイルのアップロードやフォルダの作成を行う前にサーバーを停止してください。",
+  "files.error.contentDirProtected":
+    "このディレクトリは{noun}タブで管理されています。コンテンツの追加・削除は{noun}タブをご利用ください。",
+  "files.error.goToContentTab": "{noun}タブへ移動",
   "files.error.tooLarge":
     "ファイルサイズが512 MiBのアップロード上限を超えています。",
   "files.error.generic": "問題が発生しました。もう一度お試しください。",
