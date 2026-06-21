@@ -1296,7 +1296,7 @@ export const en = {
   "plugins.col.name": "Name",
   "plugins.col.version": "Version",
   "plugins.col.source": "Source",
-  "plugins.col.side": "Side",
+  "plugins.col.side": "Runs on",
   "plugins.col.status": "Status",
   "plugins.col.size": "Size",
   "plugins.col.actions": "Actions",
@@ -1306,7 +1306,7 @@ export const en = {
   "plugins.source.local": "Local",
   "plugins.source.modrinth": "Modrinth",
   // Side (server / client / both, issue #1308).
-  "plugins.side.label": "Side",
+  "plugins.side.label": "Runs on",
   "plugins.side.server": "Server",
   "plugins.side.client": "Client",
   "plugins.side.both": "Both",

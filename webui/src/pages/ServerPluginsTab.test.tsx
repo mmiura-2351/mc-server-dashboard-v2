@@ -430,7 +430,7 @@ describe("ServerPluginsTab side + client modpack (issue #1308)", () => {
       validation: EMPTY_VALIDATION,
     });
     renderTab();
-    const select = await screen.findByLabelText<HTMLSelectElement>("Side");
+    const select = await screen.findByLabelText<HTMLSelectElement>("Runs on");
     expect(select.value).toBe("client");
   });
 
@@ -438,7 +438,7 @@ describe("ServerPluginsTab side + client modpack (issue #1308)", () => {
     mockApi.post.mockResolvedValue({});
     mockGets({ plugins: [plugin()], validation: EMPTY_VALIDATION });
     renderTab();
-    const select = await screen.findByLabelText<HTMLSelectElement>("Side");
+    const select = await screen.findByLabelText<HTMLSelectElement>("Runs on");
     const { fireEvent } = await import("@testing-library/react");
     fireEvent.change(select, { target: { value: "client" } });
     await waitFor(() => {
@@ -665,10 +665,10 @@ describe("ServerPluginsTab Paper: no side column, no download button (issue #134
     });
     // The Side column header should not be rendered.
     expect(
-      screen.queryByText("Side", { selector: "th" }),
+      screen.queryByText("Runs on", { selector: "th" }),
     ).not.toBeInTheDocument();
     // The Side select should not be rendered.
-    expect(screen.queryByLabelText("Side")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Runs on")).not.toBeInTheDocument();
   });
 
   it("hides the download button on a paper server even with client-side plugins", async () => {
@@ -691,7 +691,7 @@ describe("ServerPluginsTab Paper: no side column, no download button (issue #134
       validation: EMPTY_VALIDATION,
     });
     renderTabFor("fabric");
-    const select = await screen.findByLabelText<HTMLSelectElement>("Side");
+    const select = await screen.findByLabelText<HTMLSelectElement>("Runs on");
     expect(select).toBeInTheDocument();
   });
 
