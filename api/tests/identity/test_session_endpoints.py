@@ -170,7 +170,13 @@ def test_revoke_others_passes_presented_token_and_audits() -> None:
     )
 
     assert resp.status_code == 204
-    assert fake.calls == [{"user_id": user.id, "current_refresh_token": "current"}]
+    assert fake.calls == [
+        {
+            "user_id": user.id,
+            "current_refresh_token": "current",
+            "keep_session_id": None,
+        }
+    ]
     assert [e.operation for e in recorder.events] == [ops.AUTH_SESSION_REVOKE]
 
 
@@ -182,4 +188,35 @@ def test_revoke_others_without_body_passes_none() -> None:
     resp = client.delete("/api/users/me/sessions")
 
     assert resp.status_code == 204
-    assert fake.calls == [{"user_id": user.id, "current_refresh_token": None}]
+    assert fake.calls == [
+        {
+            "user_id": user.id,
+            "current_refresh_token": None,
+            "keep_session_id": None,
+        }
+    ]
+
+
+def test_revoke_others_with_keep_session_id() -> None:
+    """keep_session_id is threaded to the use case as a RefreshTokenId (#606)."""
+    user = make_user()
+    recorder = RecordingAuditRecorder()
+    fake = _Fake(result=None)
+    client = next(_client(user, revoke_other_sessions=fake, recorder=recorder))
+    session_id = uuid.uuid4()
+
+    resp = client.request(
+        "DELETE",
+        "/api/users/me/sessions",
+        json={"keep_session_id": str(session_id)},
+    )
+
+    assert resp.status_code == 204
+    assert fake.calls == [
+        {
+            "user_id": user.id,
+            "current_refresh_token": None,
+            "keep_session_id": RefreshTokenId(session_id),
+        }
+    ]
+    assert [e.operation for e in recorder.events] == [ops.AUTH_SESSION_REVOKE]

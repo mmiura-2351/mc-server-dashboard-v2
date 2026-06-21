@@ -129,6 +129,7 @@ class _FakeRefreshTokenRepository(RefreshTokenRepository):
         user_id: UserId,
         *,
         keep_token_hash: str | None,
+        keep_session_id: RefreshTokenId | None = None,
         revoked_at: dt.datetime,
         reason: str,
     ) -> None:
