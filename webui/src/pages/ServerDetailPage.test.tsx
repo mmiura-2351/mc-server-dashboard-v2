@@ -607,7 +607,9 @@ describe("ServerDetailPage lifecycle controls", () => {
     );
 
     expect(
-      await screen.findByText(`${t("permissions.deniedNamed")}server:restart`),
+      await screen.findByText(
+        t("permissions.deniedNamed", { permission: "server:restart" }),
+      ),
     ).toBeInTheDocument();
   });
 

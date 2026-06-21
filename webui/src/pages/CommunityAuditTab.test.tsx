@@ -369,7 +369,9 @@ describe("CommunityAuditTab", () => {
     await openAuditTab();
 
     expect(
-      await screen.findByText(`${t("permissions.deniedNamed")}audit:read`),
+      await screen.findByText(
+        t("permissions.deniedNamed", { permission: "audit:read" }),
+      ),
     ).toBeInTheDocument();
   });
 });

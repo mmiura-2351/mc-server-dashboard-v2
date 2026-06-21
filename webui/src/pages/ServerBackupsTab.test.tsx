@@ -664,7 +664,9 @@ describe("ServerBackupsTab permission gating", () => {
       await screen.findByRole("button", { name: t("backups.create") }),
     );
     expect(
-      await screen.findByText(`${t("permissions.deniedNamed")}backup:create`),
+      await screen.findByText(
+        t("permissions.deniedNamed", { permission: "backup:create" }),
+      ),
     ).toBeInTheDocument();
   });
 });

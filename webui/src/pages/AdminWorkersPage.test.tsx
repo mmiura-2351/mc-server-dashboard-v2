@@ -203,13 +203,9 @@ describe("admin workers page", () => {
       }),
     );
 
-    // The toast must include the base message and the count suffix.
+    // The toast must report the count of marked servers.
     expect(
-      await screen.findByText(
-        t("admin.workers.drained") +
-          " 3" +
-          t("admin.workers.drainedCountSuffix"),
-      ),
+      await screen.findByText(t("admin.workers.drainedCount", { count: 3 })),
     ).toBeInTheDocument();
   });
 

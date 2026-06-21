@@ -302,12 +302,11 @@ describe("admin communities owner picker", () => {
     const dialog = await screen.findByRole("dialog");
     await within(dialog).findByRole("option", { name: /alice/ });
 
-    const prefix = within(dialog).getByText(
-      t("admin.communities.usersTruncatedPrefix"),
-      { exact: false },
-    );
-    expect(prefix.textContent).toContain("2");
-    expect(prefix.textContent).toContain("150");
+    expect(
+      within(dialog).getByText(
+        t("admin.communities.usersTruncated", { n: 2, total: 150 }),
+      ),
+    ).toBeInTheDocument();
   });
 
   it("does not warn when the whole user list fits in one page", async () => {
@@ -327,10 +326,14 @@ describe("admin communities owner picker", () => {
     const dialog = await screen.findByRole("dialog");
     await within(dialog).findByRole("option", { name: /alice/ });
 
+    // No truncation hint at all: match the static, value-free tail of the
+    // single interpolated sentence (last segment after the final placeholder).
+    const truncatedTail = t("admin.communities.usersTruncated")
+      .split("}")
+      .pop();
+    if (truncatedTail === undefined) throw new Error("no tail");
     expect(
-      within(dialog).queryByText(t("admin.communities.usersTruncatedPrefix"), {
-        exact: false,
-      }),
+      within(dialog).queryByText(truncatedTail, { exact: false }),
     ).not.toBeInTheDocument();
   });
 });

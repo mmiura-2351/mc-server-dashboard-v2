@@ -35,7 +35,7 @@ export function useOnForbidden(): OnForbidden {
       }
       const message =
         error.permission !== undefined
-          ? t("permissions.deniedNamed") + error.permission
+          ? t("permissions.deniedNamed", { permission: error.permission })
           : t("permissions.denied");
       showToast(message, "error");
       if (communityId !== null) {
