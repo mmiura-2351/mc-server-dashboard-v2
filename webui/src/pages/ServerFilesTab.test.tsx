@@ -844,15 +844,15 @@ describe("ServerFilesTab 409 reason toasts", () => {
     const file = new File(["x"], "test.jar");
     fireEvent.change(fileInput, { target: { files: [file] } });
 
-    // The notice contains the Plugins noun and a link to #plugins.
+    // The notice contains the tab noun and a link to #plugins.
     const notice = await screen.findByRole("alert");
-    expect(notice).toHaveTextContent(/Plugins/);
+    expect(notice).toHaveTextContent(t("serverDetail.tab.plugins"));
     const link = notice.querySelector("a[href='#plugins']");
     expect(link).toBeInTheDocument();
-    expect(link).toHaveTextContent(/Plugins/);
+    expect(link).toHaveTextContent(t("serverDetail.tab.plugins"));
   });
 
-  it("shows Mods in the redirect notice for a fabric server", async () => {
+  it("shows the mods tab noun in the redirect notice for a fabric server", async () => {
     routeGet({
       detail: server({ server_type: "fabric" }),
       list: listing([]),
@@ -869,6 +869,6 @@ describe("ServerFilesTab 409 reason toasts", () => {
     fireEvent.change(fileInput, { target: { files: [file] } });
 
     const notice = await screen.findByRole("alert");
-    expect(notice).toHaveTextContent(/Mods/);
+    expect(notice).toHaveTextContent(t("serverDetail.tab.mods"));
   });
 });
