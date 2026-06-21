@@ -76,6 +76,25 @@ export function setLanguage(lang: Language): void {
   }
 }
 
-export function t(key: TranslationKey): string {
-  return dictionaries[currentLanguage][key];
+/**
+ * Look up a string in the active dictionary, optionally substituting `{token}`
+ * placeholders from `params`. Keeping interpolation in `t()` lets a string embed
+ * a runtime value (count/bytes/name) as one key in natural word order per
+ * language, instead of concatenating fragment keys around the value in English
+ * order (which Japanese cannot read naturally). No i18n library is used
+ * (WEBUI_SPEC.md Section 7.5); this is a single regex replace.
+ *
+ * Tokens with no matching param are left verbatim. Values are stringified.
+ */
+export function t(
+  key: TranslationKey,
+  params?: Record<string, string | number>,
+): string {
+  const template = dictionaries[currentLanguage][key];
+  if (params === undefined) {
+    return template;
+  }
+  return template.replace(/\{(\w+)\}/g, (match, token: string) =>
+    token in params ? String(params[token]) : match,
+  );
 }

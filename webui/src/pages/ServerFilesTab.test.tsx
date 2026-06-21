@@ -425,7 +425,9 @@ describe("ServerFilesTab permission gating", () => {
     );
 
     expect(
-      await screen.findByText(`${t("permissions.deniedNamed")}file:edit`),
+      await screen.findByText(
+        t("permissions.deniedNamed", { permission: "file:edit" }),
+      ),
     ).toBeInTheDocument();
   });
 });

@@ -1103,8 +1103,8 @@ export const ja: Record<TranslationKey, string> = {
   "admin.versions.typeError": "利用不可",
   "admin.versions.refreshedAll":
     "カタログを無効化しました。一覧は次回の読み込み時に再取得されます。",
-  // Composed with the server type, e.g. "Refreshed catalog: paper".
-  "admin.versions.refreshedOne": "カタログを更新しました: ",
+  // Interpolated with the server type, e.g. "Refreshed catalog: paper".
+  "admin.versions.refreshedOne": "カタログを更新しました: {type}",
   "admin.versions.refreshError": "カタログを更新できませんでした。",
   "admin.versions.jarPool": "JARプール",
   "admin.versions.jarPoolCached": "キャッシュ済みJAR",
@@ -1119,10 +1119,10 @@ export const ja: Record<TranslationKey, string> = {
     "稼働中のサーバーが参照していないプール済みJARを削除します。参照されていないJARは必要に応じて再ダウンロードされます。",
   "admin.versions.gcDialog.confirm": "GCを実行",
   "admin.versions.gcDialog.promptLabel": "確認のため GC と入力",
-  // Composed with freed bytes + deleted count, e.g. "Reclaimed 412 MiB across 3 JARs.".
-  "admin.versions.gcDoneReclaimed": "回収しました ",
-  "admin.versions.gcDoneAcross": " / ",
-  "admin.versions.gcDoneJars": " 個のJAR。",
+  // Interpolated with freed bytes + deleted count, e.g.
+  // "Freed 412 MiB by deleting 3 unused JARs.".
+  "admin.versions.gcDone":
+    "未使用のJAR {count} 個を削除し、{bytes} を解放しました。",
   "admin.versions.gcError": "ガベージコレクションに失敗しました。",
   // Communities (WEBUI_SPEC.md 6.12) — #476, #489
   "admin.communities.subtitle":
@@ -1157,11 +1157,10 @@ export const ja: Record<TranslationKey, string> = {
   "admin.communities.ownerHint":
     "オーナーにはプリセットのOwnerロール（すべてのコミュニティ権限）が付与されます。",
   "admin.communities.usersLoadError": "ユーザー一覧を読み込めませんでした。",
-  // Truncation hint composed around the loaded/total counts, e.g.
+  // Truncation hint interpolated with the loaded/total counts, e.g.
   // "Showing the first 100 of 150 users."
-  "admin.communities.usersTruncatedPrefix": "最初の ",
-  "admin.communities.usersTruncatedMid": " / ",
-  "admin.communities.usersTruncatedSuffix": " 人のユーザーを表示しています。",
+  "admin.communities.usersTruncated":
+    "{total} 人中、最初の {n} 人のユーザーを表示しています。",
   "admin.communities.provisioned": "コミュニティをプロビジョニングしました。",
   "admin.communities.errNameRequired": "コミュニティ名を入力してください。",
   "admin.communities.errOwnerRequired": "初期オーナーを選択してください。",
@@ -1198,9 +1197,9 @@ export const ja: Record<TranslationKey, string> = {
     "ドレインを解除すると、このWorkerは再び新規配置を受け入れられるようになります。",
   "admin.workers.undrainConfirm": "Workerのドレインを解除",
   "admin.workers.drained": "Workerをドレインしました。",
-  // Appended after "Workerをドレインしました。" when servers_stopped > 0.
-  "admin.workers.drainedCountSuffix":
-    " 台のサーバーを停止対象としてマークしました — 各サーバーが停止済み・未割り当てになるまでこのWorkerを接続したままにしてください。",
+  // Shown when servers_stopped > 0, interpolated with the count.
+  "admin.workers.drainedCount":
+    "Workerをドレインしました。{count} 台のサーバーを停止対象としてマークしました — 各サーバーが停止済み・未割り当てになるまでこのWorkerを接続したままにしてください。",
   "admin.workers.drainDialogConvergenceWarning":
     "停止と最終スナップショットはWorkerが接続している間のみ、グレース期間（約120秒）＋各サーバー1ティック後に非同期で実行されます。廃止する場合、すべての割り当て済みサーバーが停止済み・未割り当てになるまでこのWorkerを起動し続けてください。接続を早期に切断すると、停止とスナップショットが次の再接続まで延期されますが、廃止シナリオでは再接続が行われない可能性があります。収束の確認はサーバー一覧で個別に行ってください（Workerの負荷カウンターは停止前にゼロになるため、目安にはなりません）。",
   "admin.workers.undrained": "Workerのドレインを解除しました。",
@@ -1272,10 +1271,8 @@ export const ja: Record<TranslationKey, string> = {
   "admin.audit.filterCommunity": "コミュニティ",
   "admin.audit.filterCommunityAll": "すべてのコミュニティ",
   "admin.audit.colCommunity": "コミュニティ",
-  "admin.audit.communitiesTruncatedPrefix": "最初の ",
-  "admin.audit.communitiesTruncatedMid": " / ",
-  "admin.audit.communitiesTruncatedSuffix":
-    " 件のコミュニティを表示しています。",
+  "admin.audit.communitiesTruncated":
+    "{total} 件中、最初の {n} 件のコミュニティを表示しています。",
 
   // Resource pack library (issue #1178).
   "nav.resourcePacks": "リソースパック",
@@ -1361,8 +1358,8 @@ export const ja: Record<TranslationKey, string> = {
 
   // Permission / authorization feedback (WEBUI_SPEC.md 7.3 / 7.4)
   "permissions.denied": "この操作を行う権限がありません。",
-  // Composed with the missing permission code, e.g. "You lack: server:start".
-  "permissions.deniedNamed": "不足している権限: ",
+  // Interpolated with the missing permission code, e.g. "You lack: server:start".
+  "permissions.deniedNamed": "不足している権限: {permission}",
 
   // Error boundary (#1211)
   "errorBoundary.title": "問題が発生しました",

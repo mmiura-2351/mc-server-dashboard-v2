@@ -526,7 +526,9 @@ describe("CommunityGroupsTab", () => {
     );
 
     expect(
-      await screen.findByText(`${t("permissions.deniedNamed")}group:manage`),
+      await screen.findByText(
+        t("permissions.deniedNamed", { permission: "group:manage" }),
+      ),
     ).toBeInTheDocument();
   });
 });

@@ -1091,8 +1091,8 @@ export const en = {
   "admin.versions.typeError": "unavailable",
   "admin.versions.refreshedAll":
     "Catalogs invalidated; listings refetch on next read.",
-  // Composed with the server type, e.g. "Refreshed catalog: paper".
-  "admin.versions.refreshedOne": "Refreshed catalog: ",
+  // Interpolated with the server type, e.g. "Refreshed catalog: paper".
+  "admin.versions.refreshedOne": "Refreshed catalog: {type}",
   "admin.versions.refreshError": "Could not refresh the catalog.",
   "admin.versions.jarPool": "JAR pool",
   "admin.versions.jarPoolCached": "Cached JARs",
@@ -1105,10 +1105,9 @@ export const en = {
     "This deletes pooled JARs that no live server references. Unreferenced JARs are re-downloaded on demand.",
   "admin.versions.gcDialog.confirm": "Run GC",
   "admin.versions.gcDialog.promptLabel": "Type GC to confirm",
-  // Composed with freed bytes + deleted count, e.g. "Reclaimed 412 MiB across 3 JARs.".
-  "admin.versions.gcDoneReclaimed": "Reclaimed ",
-  "admin.versions.gcDoneAcross": " across ",
-  "admin.versions.gcDoneJars": " JARs.",
+  // Interpolated with freed bytes + deleted count, e.g.
+  // "Freed 412 MiB by deleting 3 unused JARs.".
+  "admin.versions.gcDone": "Freed {bytes} by deleting {count} unused JARs.",
   "admin.versions.gcError": "Garbage collection failed.",
   // Communities (WEBUI_SPEC.md 6.12) — #476, #489
   "admin.communities.subtitle":
@@ -1145,9 +1144,7 @@ export const en = {
   // Truncation hint composed around the loaded/total counts, e.g.
   // "Showing the first 100 of 150 users." The owner picker requests the API
   // max page (100); when more accounts exist the later ones are omitted.
-  "admin.communities.usersTruncatedPrefix": "Showing the first ",
-  "admin.communities.usersTruncatedMid": " of ",
-  "admin.communities.usersTruncatedSuffix": " users.",
+  "admin.communities.usersTruncated": "Showing the first {n} of {total} users.",
   "admin.communities.provisioned": "Community provisioned.",
   "admin.communities.errNameRequired": "Enter a community name.",
   "admin.communities.errOwnerRequired": "Select an initial owner.",
@@ -1182,10 +1179,10 @@ export const en = {
     "Undraining lets this worker accept new placements again.",
   "admin.workers.undrainConfirm": "Undrain worker",
   "admin.workers.drained": "Worker draining.",
-  // Appended after "Worker draining." when servers_stopped > 0, e.g.
+  // Shown when servers_stopped > 0, interpolated with the count, e.g.
   // "Worker draining. 3 servers marked — keep this worker connected until each is stopped and unassigned."
-  "admin.workers.drainedCountSuffix":
-    " servers marked — keep this worker connected until each is stopped and unassigned.",
+  "admin.workers.drainedCount":
+    "Worker draining. {count} servers marked — keep this worker connected until each is stopped and unassigned.",
   "admin.workers.drainDialogConvergenceWarning":
     "Stops and final snapshots run asynchronously (~120 s grace + a tick per server) and only while the worker stays connected. Keep this worker up until every formerly-assigned server reaches stopped and unassigned — shutting down early defers stops and snapshots to a reconnect that never happens in a decommission. Confirm convergence per server in the server list, not by the worker's load counter (which drops to 0 before any stop runs).",
   "admin.workers.undrained": "Worker undrained.",
@@ -1265,9 +1262,8 @@ export const en = {
   // Truncation hint composed around the loaded/total counts, e.g. "Showing the
   // first 100 of 150 communities." The picker requests the API max page (100);
   // when more communities exist the later ones are omitted (#476/#488).
-  "admin.audit.communitiesTruncatedPrefix": "Showing the first ",
-  "admin.audit.communitiesTruncatedMid": " of ",
-  "admin.audit.communitiesTruncatedSuffix": " communities.",
+  "admin.audit.communitiesTruncated":
+    "Showing the first {n} of {total} communities.",
 
   // Resource pack library (issue #1178). One contiguous block to keep merge
   // conflicts with sibling i18n PRs minimal.
@@ -1350,8 +1346,8 @@ export const en = {
 
   // Permission / authorization feedback (WEBUI_SPEC.md 7.3 / 7.4)
   "permissions.denied": "You do not have permission to do that.",
-  // Composed with the missing permission code, e.g. "You lack: server:start".
-  "permissions.deniedNamed": "You lack: ",
+  // Interpolated with the missing permission code, e.g. "You lack: server:start".
+  "permissions.deniedNamed": "You lack: {permission}",
 
   // Error boundary (#1211): shown when an unhandled rendering error crashes a
   // component subtree instead of the default white-screen unmount.

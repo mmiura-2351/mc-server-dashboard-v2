@@ -174,12 +174,11 @@ describe("AdminAuditPage", () => {
     renderApp({ path: "/admin/audit" });
     await screen.findByText(t("communitySettings.audit.op.server:start"));
 
-    const hint = await screen.findByText(
-      t("admin.audit.communitiesTruncatedPrefix"),
-      { exact: false },
-    );
-    expect(hint.textContent).toContain("1");
-    expect(hint.textContent).toContain("150");
+    expect(
+      await screen.findByText(
+        t("admin.audit.communitiesTruncated", { n: 1, total: 150 }),
+      ),
+    ).toBeInTheDocument();
   });
 
   it("does not warn when the whole community list fits in one page", async () => {
@@ -188,10 +187,14 @@ describe("AdminAuditPage", () => {
     renderApp({ path: "/admin/audit" });
     await screen.findByText(t("communitySettings.audit.op.server:start"));
 
+    // No truncation hint at all: match the static, value-free tail of the
+    // single interpolated sentence (last segment after the final placeholder).
+    const truncatedTail = t("admin.audit.communitiesTruncated")
+      .split("}")
+      .pop();
+    if (truncatedTail === undefined) throw new Error("no tail");
     expect(
-      screen.queryByText(t("admin.audit.communitiesTruncatedPrefix"), {
-        exact: false,
-      }),
+      screen.queryByText(truncatedTail, { exact: false }),
     ).not.toBeInTheDocument();
   });
 
