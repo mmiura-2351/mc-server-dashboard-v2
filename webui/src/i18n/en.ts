@@ -1320,14 +1320,12 @@ export const en = {
   "plugins.downloadClientModpack": "Download client modpack",
   // Update indicators.
   "plugins.updateAvailable": "Update available: ",
-  // Remove dialog. `{Noun}` is the capitalized loader-aware noun, `{noun}` the
-  // lowercase form (#1320).
-  "plugins.removeDialog.title": "Remove {Noun}",
+  // Remove dialog. `{name}` is the plugin's display_name; `{noun}` the
+  // lowercase loader-aware content noun (#1320, #1353).
+  "plugins.removeDialog.title": "Remove {name}?",
   "plugins.removeDialog.body":
-    "This permanently removes the {noun} file from the server. This cannot be undone.",
-  "plugins.removeDialog.confirm": "Remove {Noun}",
-  "plugins.removeDialog.prompt": "Type REMOVE to confirm",
-  "plugins.removeDialog.phrase": "REMOVE",
+    "This will permanently remove this {noun} from the server.",
+  "plugins.removeDialog.confirm": "Remove",
   // Dependencies.
   "plugins.dependencies": "Dependencies",
   "plugins.dependencies.loading": "Loading dependencies…",

@@ -1241,6 +1241,12 @@ body.col-resizing {
   gap: 10px;
   margin-bottom: 14px;
 }
+/* Table top-right header (download button, right-aligned). */
+.plugins-table-header {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
+}
 .plugins-table {
   padding: 0;
 }
@@ -1283,6 +1289,11 @@ body.col-resizing {
 }
 .plugins-side-select:disabled {
   opacity: 0.6;
+}
+/* Active state for the Dependencies toggle button (#1357). */
+.plugins-table .btn.ghost.active {
+  background: var(--bg-overlay);
+  border-color: var(--accent-dim);
 }
 /* An inert placeholder standing in for a conditional action button ("Update" or
  * "Dependencies") on rows that lack it, so the always-present actions stay
