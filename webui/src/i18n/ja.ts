@@ -205,6 +205,7 @@ export const ja: Record<TranslationKey, string> = {
   "dashboard.createServer": "サーバーを作成",
   "dashboard.noWorker": "ホスト未割り当て",
   "dashboard.start": "起動",
+  "dashboard.startCrashed": "再起動",
   "dashboard.stop": "停止",
   "dashboard.restart": "再起動",
   // Card/table view toggle (#541); cards remain the default.
@@ -265,6 +266,9 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.breadcrumb": "サーバー",
   // Overview header.
   "serverDetail.crashDetail": "クラッシュ理由:",
+  "serverDetail.crashBanner.guidance":
+    "サーバーがクラッシュしました。再起動をクリックして再試行するか、コンソールで詳細を確認してください。",
+  "serverDetail.crashBanner.viewConsole": "コンソールを表示",
   "serverDetail.converging": "反映中…",
   "serverDetail.noWorker": "ホスト未割り当て",
   "serverDetail.worker": "ホスト",
@@ -303,6 +307,7 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.commandFailed": "コマンドが失敗しました。",
   // Lifecycle controls.
   "serverDetail.start": "起動",
+  "serverDetail.startCrashed": "再起動",
   "serverDetail.stop": "停止",
   "serverDetail.stopGraceful": "停止（通常）",
   "serverDetail.stopForce": "強制停止",
