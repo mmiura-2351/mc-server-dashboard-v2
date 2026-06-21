@@ -75,10 +75,10 @@ window.MOCK = {
   ],
 
   backups: [
-    { id: "b-1", created_at: "2026-06-06 04:00", source: "scheduled", size: "412 MiB", created_by: "system" },
-    { id: "b-2", created_at: "2026-06-05 21:14", source: "manual", size: "408 MiB", created_by: "miura" },
-    { id: "b-3", created_at: "2026-06-05 04:00", source: "scheduled", size: "395 MiB", created_by: "system" },
-    { id: "b-4", created_at: "2026-06-04 04:00", source: "scheduled", size: "390 MiB", created_by: "system" },
+    { id: "b-1", created_at: "2026-06-06 04:00", source: "scheduled", size: "412 MiB", created_by: "system", created_by_username: "system" },
+    { id: "b-2", created_at: "2026-06-05 21:14", source: "manual", size: "408 MiB", created_by: "miura", created_by_username: "miura" },
+    { id: "b-3", created_at: "2026-06-05 04:00", source: "scheduled", size: "395 MiB", created_by: "system", created_by_username: "system" },
+    { id: "b-4", created_at: "2026-06-04 04:00", source: "scheduled", size: "390 MiB", created_by: "system", created_by_username: "system" },
   ],
 
   files: [
@@ -119,14 +119,14 @@ window.MOCK = {
   ],
 
   auditRecords: [
-    { id: "a-1", created_at: "2026-06-06 10:01:44", operation: "server:start", outcome: "success", actor: "miura", target: "server/creative-build" },
-    { id: "a-2", created_at: "2026-06-06 09:58:12", operation: "server:restart", outcome: "success", actor: "alex_dig", target: "server/survival" },
-    { id: "a-3", created_at: "2026-06-06 09:12:03", operation: "server:start", outcome: "failure", actor: "miura", target: "server/modded-forge" },
-    { id: "a-4", created_at: "2026-06-05 21:14:50", operation: "backup:create", outcome: "success", actor: "miura", target: "server/survival" },
-    { id: "a-5", created_at: "2026-06-05 19:03:22", operation: "file:edit", outcome: "success", actor: "alex_dig", target: "survival:/server.properties" },
-    { id: "a-6", created_at: "2026-06-05 18:55:09", operation: "member:add", outcome: "success", actor: "miura", target: "user/enderchan" },
-    { id: "a-7", created_at: "2026-06-05 18:54:41", operation: "role:manage", outcome: "success", actor: "miura", target: "role/Backup-op" },
-    { id: "a-8", created_at: "2026-06-05 13:22:17", operation: "auth:login", outcome: "failure", actor: "steve_99", target: "—" },
+    { id: "a-1", created_at: "2026-06-06 10:01:44", operation: "server:start", outcome: "success", actor: "u-1", actor_username: "miura", target: "s-2", target_name: "creative-build", community_name: "Sakura SMP" },
+    { id: "a-2", created_at: "2026-06-06 09:58:12", operation: "server:restart", outcome: "success", actor: "u-2", actor_username: "alex_dig", target: "s-1", target_name: "survival", community_name: "Sakura SMP" },
+    { id: "a-3", created_at: "2026-06-06 09:12:03", operation: "server:start", outcome: "failure", actor: "u-1", actor_username: "miura", target: "s-3", target_name: "modded-forge", community_name: "Sakura SMP" },
+    { id: "a-4", created_at: "2026-06-05 21:14:50", operation: "backup:create", outcome: "success", actor: "u-1", actor_username: "miura", target: "s-1", target_name: "survival", community_name: "Sakura SMP" },
+    { id: "a-5", created_at: "2026-06-05 19:03:22", operation: "file:edit", outcome: "success", actor: "u-2", actor_username: "alex_dig", target: "s-1", target_name: "survival", community_name: "Sakura SMP" },
+    { id: "a-6", created_at: "2026-06-05 18:55:09", operation: "member:add", outcome: "success", actor: "u-1", actor_username: "miura", target: "u-4", target_name: "enderchan", community_name: "Sakura SMP" },
+    { id: "a-7", created_at: "2026-06-05 18:54:41", operation: "role:manage", outcome: "success", actor: "u-1", actor_username: "miura", target: "r-4", target_name: "Backup-op", community_name: "Sakura SMP" },
+    { id: "a-8", created_at: "2026-06-05 13:22:17", operation: "auth:login", outcome: "failure", actor: "u-3", actor_username: "steve_99", target: "—", target_name: "—", community_name: "—" },
   ],
 
   workers: [
@@ -198,5 +198,11 @@ window.MOCK = {
     group: ["read", "manage"],
     community: ["read", "update", "delete"],
     audit: ["read"],
+    session: ["read"],
   },
+
+  accountSessions: [
+    { id: "sess-1", created_at: "2026-06-06 08:12", last_used: "2026-06-06 10:05", ip: "192.168.1.42", user_agent: "Chrome 131 / macOS", current: true },
+    { id: "sess-2", created_at: "2026-06-05 14:30", last_used: "2026-06-05 23:11", ip: "10.0.0.7", user_agent: "Firefox 130 / Linux", current: false },
+  ],
 };

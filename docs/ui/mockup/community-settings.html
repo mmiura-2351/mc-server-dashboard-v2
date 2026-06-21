@@ -83,7 +83,7 @@
       <!-- ============ GROUPS ============ -->
       <section class="tabpane" id="pane-groups">
         <div class="toolbar-row">
-          <span style="font-size:13px;color:var(--text-dim)">Player groups sync OP / whitelist lists to every attached server.</span>
+          <span style="font-size:13px;color:var(--text-dim)">Player groups sync OP / whitelist lists to every applied server.</span>
           <div class="right"><button class="btn primary sm" onclick="mockToast('Create group: name + kind (op | whitelist)')">+ New group</button></div>
         </div>
         <div class="grid cols-2" id="group-cards"></div>
@@ -227,9 +227,9 @@ document.addEventListener("DOMContentLoaded", () => {
         <input type="text" placeholder="player name or uuid" style="flex:1">
         <button class="btn sm" onclick="mockToast('POST …/groups/${g.id}/players')">Add</button>
       </div>
-      <div style="font-size:12px;color:var(--text-dim)">Attached to:
-        ${g.servers.map((s) => `<span class="chip">${s} <span class="x" onclick="mockToast('Detach from ${s}')">×</span></span>`).join(" ")}
-        <button class="btn sm ghost" onclick="mockToast('Attach to server picker')">+</button>
+      <div style="font-size:12px;color:var(--text-dim)">Applied to:
+        ${g.servers.map((s) => `<span class="chip">${s} <span class="x" onclick="mockToast('Remove from ${s}')">×</span></span>`).join(" ")}
+        <button class="btn sm ghost" onclick="mockToast('Apply to server picker')">+</button>
       </div>
     </div>`).join("");
 
@@ -238,8 +238,8 @@ document.addEventListener("DOMContentLoaded", () => {
     <tr>
       <td class="num">${a.created_at}</td>
       <td class="num">${a.operation}</td>
-      <td>${a.actor}</td>
-      <td class="num" style="color:var(--text-dim)">${a.target}</td>
+      <td title="${a.actor}">${a.actor_username}</td>
+      <td class="num" style="color:var(--text-dim)" title="${a.target}">${a.target_name}</td>
       <td>${a.outcome === "success"
         ? '<span class="pill running" style="font-size:11px">success</span>'
         : '<span class="pill crashed" style="font-size:11px">failure</span>'}</td>
