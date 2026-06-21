@@ -62,17 +62,39 @@
 
     const degraded = document.body.dataset.conn === "degraded";
     topbar.innerHTML = `
+      <button class="menu-toggle" aria-label="Open menu">☰</button>
       <div class="community-switcher" onclick="mockToast()">
         ${MOCK.currentCommunity.name} <span class="chev">▼</span>
       </div>
       <div class="spacer"></div>
       <div class="conn-indicator${degraded ? " degraded" : ""}">
-        <span class="dot"></span>${degraded ? t("conn.degraded") : t("conn.live")}
+        <span class="dot"></span><span class="conn-label">${degraded ? t("conn.degraded") : t("conn.live")}</span>
       </div>
       <a class="user-menu" href="account.html" title="${t("nav.account")}">
         <span class="avatar">${MOCK.me.username.slice(0, 1).toUpperCase()}</span>
-        ${MOCK.me.username}
+        <span class="user-label">${MOCK.me.username}</span>
       </a>`;
+
+    // Drawer backdrop (inserted after sidebar in the DOM)
+    const backdrop = document.createElement("div");
+    backdrop.className = "drawer-backdrop";
+    sidebar.parentNode.insertBefore(backdrop, sidebar.nextSibling);
+
+    // Drawer toggle wiring
+    function openDrawer() {
+      sidebar.classList.add("open");
+      backdrop.classList.add("open");
+    }
+    function closeDrawer() {
+      sidebar.classList.remove("open");
+      backdrop.classList.remove("open");
+    }
+    topbar.querySelector(".menu-toggle").addEventListener("click", () => {
+      sidebar.classList.contains("open") ? closeDrawer() : openDrawer();
+    });
+    backdrop.addEventListener("click", closeDrawer);
+    sidebar.querySelectorAll(".nav-item").forEach((link) =>
+      link.addEventListener("click", closeDrawer));
 
     const banner = document.createElement("div");
     banner.className = "mock-banner";
