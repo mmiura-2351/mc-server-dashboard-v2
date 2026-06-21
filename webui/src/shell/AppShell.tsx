@@ -1,4 +1,4 @@
-import { Suspense, useCallback, useEffect, useState } from "react";
+import { Suspense, useEffect } from "react";
 import { Link, NavLink, Outlet, useNavigate, useParams } from "react-router";
 import { useCurrentUser } from "../auth/useCurrentUser.ts";
 import {
@@ -143,30 +143,9 @@ export function AppShell() {
   const isAdmin = useCurrentUser().data?.is_platform_admin === true;
   useUrlCommunitySync();
 
-  // Mobile drawer state (#583): below the phone breakpoint the sidebar becomes
-  // a toggleable off-canvas drawer. Clicking a nav link or the backdrop closes
-  // it; above the breakpoint the sidebar renders normally and the toggle is
-  // hidden via CSS.
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const closeDrawer = useCallback(() => setDrawerOpen(false), []);
-
   return (
     <div className="shell">
-      {/* Backdrop overlay — visible only when the drawer is open on mobile. */}
-      {drawerOpen && (
-        <div
-          className="sidebar-backdrop"
-          onClick={closeDrawer}
-          aria-hidden="true"
-        />
-      )}
-      {/* biome-ignore lint/a11y/useKeyWithClickEvents: the sidebar drawer close
-          only supplements the real nav links inside (which are keyboard-
-          accessible); the click-on-wrapper is a touch/mouse convenience. */}
-      <aside
-        className={`sidebar${drawerOpen ? " open" : ""}`}
-        onClick={drawerOpen ? closeDrawer : undefined}
-      >
+      <aside className="sidebar">
         <Link className="brand" to={LANDING_PATH} aria-label={t("shell.brand")}>
           <span className="cube" aria-hidden="true" />
           <span className="label">{t("shell.brand")}</span>
@@ -200,14 +179,6 @@ export function AppShell() {
       </aside>
       <div className="main">
         <header className="topbar">
-          <button
-            type="button"
-            className="menu-toggle"
-            onClick={() => setDrawerOpen((prev) => !prev)}
-            aria-label={drawerOpen ? t("shell.menuClose") : t("shell.menuOpen")}
-          >
-            ☰
-          </button>
           <CommunitySwitcher />
           <div className="spacer" />
           <LanguageSwitcher />

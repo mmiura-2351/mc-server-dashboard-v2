@@ -17,8 +17,6 @@ export const ja: Record<TranslationKey, string> = {
   "shell.language": "言語",
   "shell.language.en": "English",
   "shell.language.ja": "日本語",
-  "shell.menuOpen": "メニューを開く",
-  "shell.menuClose": "メニューを閉じる",
 
   // Sidebar navigation (WEBUI_SPEC.md Section 5)
   "nav.community": "コミュニティ",
