@@ -349,6 +349,8 @@ export function ServerPluginsTab({
   const hasClientMods = plugins.some(
     (p) => p.enabled && (p.side === "client" || p.side === "both"),
   );
+  // Side column + client modpack download are mod-loader features (issue #1342).
+  const showSide = isModLoader(server.server_type);
 
   return (
     <section className="plugins">
@@ -399,7 +401,7 @@ export function ServerPluginsTab({
         </div>
       )}
 
-      {hasClientMods && (
+      {hasClientMods && isModLoader(server.server_type) && (
         <div className="plugins-toolbar">
           <button
             type="button"
@@ -419,7 +421,7 @@ export function ServerPluginsTab({
               <th>{t("plugins.col.name")}</th>
               <th>{t("plugins.col.version")}</th>
               <th>{t("plugins.col.source")}</th>
-              <th>{t("plugins.col.side")}</th>
+              {showSide && <th>{t("plugins.col.side")}</th>}
               <th>{t("plugins.col.status")}</th>
               <th>{t("plugins.col.size")}</th>
               {canManage && <th aria-label={t("plugins.col.actions")} />}
@@ -428,7 +430,10 @@ export function ServerPluginsTab({
           <tbody>
             {plugins.length === 0 ? (
               <tr>
-                <td colSpan={canManage ? 7 : 6} className="sub">
+                <td
+                  colSpan={(showSide ? 6 : 5) + (canManage ? 1 : 0)}
+                  className="sub"
+                >
                   {tn("plugins.empty")}
                 </td>
               </tr>
@@ -445,6 +450,7 @@ export function ServerPluginsTab({
                     hasUpdate={hasUpdate}
                     updateVersion={update?.latest_version ?? null}
                     canManage={canManage}
+                    showSide={showSide}
                     serverAtRest={serverAtRest}
                     busy={busy}
                     communityId={communityId}
@@ -526,6 +532,7 @@ function PluginRow({
   hasUpdate,
   updateVersion,
   canManage,
+  showSide,
   serverAtRest,
   busy,
   communityId,
@@ -540,6 +547,7 @@ function PluginRow({
   hasUpdate: boolean;
   updateVersion: components["schemas"]["CatalogVersionItem"] | null;
   canManage: boolean;
+  showSide: boolean;
   serverAtRest: boolean;
   busy: boolean;
   communityId: string;
@@ -572,23 +580,25 @@ function PluginRow({
               : t("plugins.source.local")}
           </span>
         </td>
-        <td>
-          {canManage ? (
-            <select
-              className="plugins-side-select"
-              aria-label={t("plugins.side.label")}
-              value={plugin.side}
-              disabled={busy || !serverAtRest}
-              onChange={(e) => onSetSide(e.target.value)}
-            >
-              <option value="both">{t("plugins.side.both")}</option>
-              <option value="server">{t("plugins.side.server")}</option>
-              <option value="client">{t("plugins.side.client")}</option>
-            </select>
-          ) : (
-            <span className="badge">{sideLabel(plugin.side)}</span>
-          )}
-        </td>
+        {showSide && (
+          <td>
+            {canManage ? (
+              <select
+                className="plugins-side-select"
+                aria-label={t("plugins.side.label")}
+                value={plugin.side}
+                disabled={busy || !serverAtRest}
+                onChange={(e) => onSetSide(e.target.value)}
+              >
+                <option value="both">{t("plugins.side.both")}</option>
+                <option value="server">{t("plugins.side.server")}</option>
+                <option value="client">{t("plugins.side.client")}</option>
+              </select>
+            ) : (
+              <span className="badge">{sideLabel(plugin.side)}</span>
+            )}
+          </td>
+        )}
         <td>
           <span className={`pill ${plugin.enabled ? "running" : "stopped"}`}>
             {plugin.enabled
@@ -655,7 +665,7 @@ function PluginRow({
       </tr>
       {depsOpen && (
         <tr>
-          <td colSpan={canManage ? 7 : 6}>
+          <td colSpan={(showSide ? 6 : 5) + (canManage ? 1 : 0)}>
             <DependenciesView
               communityId={communityId}
               serverId={serverId}

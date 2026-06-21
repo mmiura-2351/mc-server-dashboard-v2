@@ -754,3 +754,188 @@ async def test_download_client_modpack_streams_zip_from_cache() -> None:
         assert names == {"c.jar", "b.jar"}
         assert zf.read("c.jar") == c_bytes
         assert zf.read("b.jar") == b_bytes
+
+
+# -- Paper: plugins are always server-side only (issue #1342) --
+
+
+async def test_paper_install_forces_side_server() -> None:
+    """A plugin installed on a Paper server always gets side='server'."""
+    uow = FakeUnitOfWork()
+    server = _server(server_type=ServerType.PAPER)
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+    cache = FakePluginCacheStore()
+    uc = InstallPlugin(uow=uow, file_store=fs, cache=cache, clock=FakeClock(_NOW))
+
+    plugin = await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        filename="worldguard.jar",
+        display_name="WorldGuard",
+        content=b"jar-bytes",
+    )
+    assert plugin.side == "server"
+
+
+async def test_paper_catalog_install_forces_side_server() -> None:
+    """A Modrinth install on a Paper server always gets side='server',
+    regardless of the catalog's client_side/server_side hint."""
+    uow = FakeUnitOfWork()
+    server = _server(server_type=ServerType.PAPER)
+    uow.servers.seed(server)
+
+    # The catalog project declares both sides as required -- normally 'both'.
+    project = CatalogProject(
+        project_id="proj-wg",
+        slug="worldguard",
+        title="WorldGuard",
+        description="Protection plugin",
+        body="",
+        author="sk89q",
+        icon_url=None,
+        downloads=100_000,
+        categories=[],
+        game_versions=["1.20.4"],
+        loaders=["paper"],
+        client_side="required",
+        server_side="required",
+    )
+    content = b"wg-jar-bytes"
+    sha512 = hashlib.sha512(content).hexdigest()
+    version = CatalogVersion(
+        version_id="ver-wg",
+        version_number="7.0.0",
+        name="WorldGuard 7.0.0",
+        game_versions=["1.20.4"],
+        loaders=["paper"],
+        files=[
+            CatalogFile(
+                url="https://cdn.modrinth.com/data/worldguard.jar",
+                filename="worldguard-7.0.jar",
+                size=len(content),
+                sha512=sha512,
+                primary=True,
+            ),
+        ],
+        date_published="2024-01-15T12:00:00Z",
+    )
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(project, [version])
+    catalog.seed_file(version.files[0].url, content)
+
+    uc = InstallFromCatalog(
+        uow=uow,
+        catalog=catalog,
+        file_store=FakeFileStore(),
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+    )
+    plugin = await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        project_id="proj-wg",
+        version_id="ver-wg",
+    )
+    assert plugin.side == "server"
+
+
+async def test_paper_set_side_client_rejected() -> None:
+    """SetPluginSide rejects side='client' on a Paper server."""
+    uow = FakeUnitOfWork()
+    server = _server(server_type=ServerType.PAPER)
+    uow.servers.seed(server)
+    plugin = _plugin(
+        server_id=server.id,
+        side="server",
+        rel_path="plugins/wg.jar",
+        filename="wg.jar",
+    )
+    uow.plugins.seed(plugin)
+    uc = SetPluginSide(
+        uow=uow,
+        file_store=FakeFileStore(),
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+    )
+    with pytest.raises(InvalidPluginSideError, match="paper"):
+        await uc(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            plugin_id=plugin.id,
+            side="client",
+        )
+
+
+async def test_paper_set_side_both_rejected() -> None:
+    """SetPluginSide rejects side='both' on a Paper server."""
+    uow = FakeUnitOfWork()
+    server = _server(server_type=ServerType.PAPER)
+    uow.servers.seed(server)
+    plugin = _plugin(
+        server_id=server.id,
+        side="server",
+        rel_path="plugins/wg.jar",
+        filename="wg.jar",
+    )
+    uow.plugins.seed(plugin)
+    uc = SetPluginSide(
+        uow=uow,
+        file_store=FakeFileStore(),
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+    )
+    with pytest.raises(InvalidPluginSideError, match="paper"):
+        await uc(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            plugin_id=plugin.id,
+            side="both",
+        )
+
+
+async def test_paper_set_side_server_noop() -> None:
+    """SetPluginSide accepts side='server' on a Paper server (no-op)."""
+    uow = FakeUnitOfWork()
+    server = _server(server_type=ServerType.PAPER)
+    uow.servers.seed(server)
+    plugin = _plugin(
+        server_id=server.id,
+        side="server",
+        rel_path="plugins/wg.jar",
+        filename="wg.jar",
+    )
+    uow.plugins.seed(plugin)
+    uc = SetPluginSide(
+        uow=uow,
+        file_store=FakeFileStore(),
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+    )
+    result = await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        plugin_id=plugin.id,
+        side="server",
+    )
+    assert result.side == "server"
+
+
+async def test_fabric_install_respects_manifest_side() -> None:
+    """Fabric install still uses the manifest side (not forced to 'server')."""
+    uow = FakeUnitOfWork()
+    server = _server(server_type=ServerType.FABRIC)
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+    cache = FakePluginCacheStore()
+    uc = InstallPlugin(uow=uow, file_store=fs, cache=cache, clock=FakeClock(_NOW))
+
+    content = _fabric_jar("clientmod", "client")
+    plugin = await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        filename="clientmod.jar",
+        display_name="Client Mod",
+        content=content,
+    )
+    assert plugin.side == "client"

@@ -185,10 +185,11 @@ class TestSide:
         )
         assert meta.side == "both"
 
-    def test_paper_side_defaults_to_both(self) -> None:
+    def test_paper_side_is_server(self) -> None:
+        """Paper plugins are always server-side only (issue #1342)."""
         yml = "name: P\nversion: 1.0.0\n"
         meta = parse_manifest(_make_jar({"plugin.yml": yml}), server_type="paper")
-        assert meta.side == "both"
+        assert meta.side == "server"
 
 
 class TestQuilt:
@@ -443,6 +444,12 @@ depend:
         yml = "name: Foo#Bar\nversion: 1.0.0\n"
         meta = parse_manifest(_make_jar({"plugin.yml": yml}), server_type="paper")
         assert meta.mod_identifier == "Foo#Bar"
+
+    def test_paper_manifest_side_is_server(self) -> None:
+        """Paper plugins are always server-side only (issue #1342)."""
+        yml = "name: P\nversion: 1.0.0\n"
+        meta = parse_manifest(_make_jar({"plugin.yml": yml}), server_type="paper")
+        assert meta.side == "server"
 
     def test_paper_plugin_yml_preferred(self) -> None:
         paper_yml = "name: NewStyle\nversion: 1.0.0\n"
