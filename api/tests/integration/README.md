@@ -24,6 +24,22 @@ able to `CREATE DATABASE`.
 CI is unaffected: it provisions a fresh Postgres service per run, and the per-run
 database derived from that service's URL is just as fresh.
 
+## Known limitation: cluster-level contention under concurrent runs
+
+The per-session scratch database removes *name collisions* and orphan tables, so
+two sessions never touch the same data. It does **not** isolate the shared
+Postgres *cluster's* resources (connection slots, shared buffers, disk IO). When
+several full suites hammer one local cluster at once, the DB-gated integration
+tests — most visibly `test_lifecycle_repositories` / `test_lifecycle_scenarios`
+— can throw transient errors that vanish when run in isolation (issue #1373).
+
+This is inherent to sharing one cluster across concurrent runs; a proper fix
+(a dedicated cluster per run, or cross-process serialization the Makefile cannot
+coordinate) is out of scope here and deliberately not built. If you hit it
+locally, point the overlapping run at its own Postgres (a second container on a
+different port) or re-run the affected test. CI is unaffected — each run gets its
+own Postgres service.
+
 ## Running locally
 
 Point at a *scratch* Postgres — never the live deployment database. For example:
