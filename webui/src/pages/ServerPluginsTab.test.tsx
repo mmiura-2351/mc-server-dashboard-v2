@@ -10,6 +10,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ApiError } from "../api/client.ts";
 import type { components } from "../api/schema";
 import { ToastProvider } from "../components/Toast.tsx";
 import type { Can } from "../permissions/useCan.ts";
@@ -703,5 +704,92 @@ describe("ServerPluginsTab Paper: no side column, no download button (issue #134
     renderTabFor("fabric");
     const button = await screen.findByText("Download client modpack");
     expect(button).toBeInTheDocument();
+  });
+});
+
+describe("ServerPluginsTab error messages (issue #1345)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  /** Trigger the file upload mutation with a failing ApiError. */
+  async function triggerUploadError(reason: string) {
+    mockGets({ plugins: [plugin()], validation: EMPTY_VALIDATION });
+    mockApi.postForm.mockRejectedValue(new ApiError(409, { reason }));
+    renderTab();
+    await waitFor(() => {
+      expect(screen.getByText("Sodium")).toBeInTheDocument();
+    });
+    // Click the Upload JAR button to open the file picker, then simulate a
+    // file selection via the hidden input.
+    const input = document.querySelector(
+      'input[type="file"]',
+    ) as HTMLInputElement;
+    const file = new File(["x"], "test.jar", {
+      type: "application/java-archive",
+    });
+    fireEvent.change(input, { target: { files: [file] } });
+  }
+
+  it("shows a specific message for plugin_already_exists", async () => {
+    await triggerUploadError("plugin_already_exists");
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "A mod with the same name or project is already installed.",
+        ),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("shows a specific message for server_unsettled", async () => {
+    await triggerUploadError("server_unsettled");
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "The server is not ready. Wait for the current operation to finish.",
+        ),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("shows a specific message for catalog_unavailable", async () => {
+    await triggerUploadError("catalog_unavailable");
+    await waitFor(() => {
+      expect(
+        screen.getByText("Could not reach Modrinth. Please try again later."),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("shows a specific message for invalid_path", async () => {
+    await triggerUploadError("invalid_path");
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "Invalid file. Only .jar files can be uploaded as mods.",
+        ),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("shows a specific message for file_too_large", async () => {
+    await triggerUploadError("file_too_large");
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "The file is too large. Maximum upload size is 512 MB.",
+        ),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("falls back to the generic message for an unknown reason", async () => {
+    await triggerUploadError("some_unknown_reason");
+    await waitFor(() => {
+      expect(
+        screen.getByText("Something went wrong. Please try again."),
+      ).toBeInTheDocument();
+    });
   });
 });

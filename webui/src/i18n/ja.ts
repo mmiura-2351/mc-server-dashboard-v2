@@ -1349,8 +1349,28 @@ export const ja: Record<TranslationKey, string> = {
   "plugins.installed": "{Noun}をインストールしました。",
   "plugins.sideUpdated": "{Noun}のサイドを更新しました。",
   "plugins.catalogInstalled": "Modrinthから{Noun}をインストールしました。",
+  "plugins.error.alreadyExists":
+    "同じ名前またはプロジェクトの{noun}がすでにインストールされています。",
   "plugins.error.notStopped":
     "{nouns}を管理するにはサーバーを停止してください。",
+  "plugins.error.unsettled":
+    "サーバーの準備ができていません。現在の操作が完了するまでお待ちください。",
+  "plugins.error.busy": "別の操作が進行中です。しばらくお待ちください。",
+  "plugins.error.invalidPath":
+    "無効なファイルです。{nouns}としてアップロードできるのは .jar ファイルのみです。",
+  "plugins.error.tooLarge":
+    "ファイルが大きすぎます。アップロードの上限は 512 MB です。",
+  "plugins.error.catalogUnavailable":
+    "Modrinth に接続できませんでした。しばらくしてからもう一度お試しください。",
+  "plugins.error.catalogNotFound":
+    "Modrinth でプロジェクトまたはバージョンが見つかりませんでした。",
+  "plugins.error.checksumMismatch":
+    "ダウンロードの整合性チェックに失敗しました。もう一度お試しください。",
+  "plugins.error.unsupportedServerType":
+    "このサーバータイプは{nouns}に対応していません。",
+  "plugins.error.invalidSide": "このサーバータイプには無効なサイドです。",
+  "plugins.error.notFound":
+    "{Noun}が見つかりません。削除された可能性があります。",
   "plugins.error.generic": "エラーが発生しました。もう一度お試しください。",
   // Dependency / compatibility validation checklist (issue #1307).
   "plugins.validation.heading": "依存関係と互換性",
