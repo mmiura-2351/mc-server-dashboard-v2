@@ -1259,12 +1259,12 @@ describe("ServerPluginsTab dependencies toggle active state (#1357)", () => {
   });
 });
 
-describe("ServerPluginsTab download button position (#1352)", () => {
+describe("ServerPluginsTab download button position (#1360)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it("renders the download button inside the table header area", async () => {
+  it("renders the download button inside the toolbar row", async () => {
     mockDownload.downloadFile.mockResolvedValue(undefined);
     mockGets({
       plugins: [plugin({ side: "client" })],
@@ -1272,7 +1272,7 @@ describe("ServerPluginsTab download button position (#1352)", () => {
     });
     renderTab();
     const button = await screen.findByText("Download client modpack");
-    // The button should be inside the .plugins-table-header wrapper.
-    expect(button.closest(".plugins-table-header")).not.toBeNull();
+    // The button should be inside the .plugins-toolbar wrapper (#1360).
+    expect(button.closest(".plugins-toolbar")).not.toBeNull();
   });
 });
