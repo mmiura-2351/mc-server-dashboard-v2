@@ -485,7 +485,9 @@ describe("CommunityGrantsTab", () => {
     );
 
     expect(
-      await screen.findByText(`${t("permissions.deniedNamed")}grant:manage`),
+      await screen.findByText(
+        t("permissions.deniedNamed", { permission: "grant:manage" }),
+      ),
     ).toBeInTheDocument();
   });
 });

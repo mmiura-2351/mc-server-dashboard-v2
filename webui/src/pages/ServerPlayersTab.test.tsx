@@ -322,7 +322,9 @@ describe("ServerPlayersTab", () => {
       await screen.findByRole("button", { name: t("players.detach") }),
     );
     expect(
-      await screen.findByText(`${t("permissions.deniedNamed")}group:manage`),
+      await screen.findByText(
+        t("permissions.deniedNamed", { permission: "group:manage" }),
+      ),
     ).toBeInTheDocument();
   });
 });

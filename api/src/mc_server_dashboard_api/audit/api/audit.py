@@ -24,10 +24,13 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 
 from mc_server_dashboard_api.audit.application.list_audit_log import ListAuditLog
+from mc_server_dashboard_api.audit.domain import operations as ops
 from mc_server_dashboard_api.audit.domain.events import AuditRecord
+from mc_server_dashboard_api.audit.domain.name_resolver import NameResolver
 from mc_server_dashboard_api.audit.domain.query import AuditFilter
 from mc_server_dashboard_api.community.domain.value_objects import AuthUser, Permission
 from mc_server_dashboard_api.dependencies import (
+    get_audit_name_resolver,
     get_list_audit_log,
     require_permission,
     require_platform_admin,
@@ -42,32 +45,120 @@ _MAX_LIMIT = 200
 _DEFAULT_LIMIT = 50
 
 
+# Target types whose ``target_id`` is a server UUID and so resolves to a server
+# name. ``file`` targets carry the owning server's id (the audit convention), so
+# they resolve the same way (issue #682).
+_SERVER_TARGET_TYPES = frozenset({ops.TARGET_SERVER, ops.TARGET_FILE})
+
+
 class AuditRecordResponse(BaseModel):
-    """Public view of one audit-log row (DATABASE.md Section 9)."""
+    """Public view of one audit-log row (DATABASE.md Section 9).
+
+    ``actor_username``/``target_name``/``community_name`` are read-time display
+    fields resolved from the live tables (issue #682); they are ``None`` when the
+    soft-referenced subject was deleted or has no name source, in which case the
+    client falls back to the raw id.
+    """
 
     id: str
     operation: str
     outcome: str
     created_at: UtcDatetime
     actor_id: str | None
+    actor_username: str | None
     community_id: str | None
+    community_name: str | None
     target_type: str | None
     target_id: str | None
+    target_name: str | None
 
     @classmethod
-    def from_record(cls, record: AuditRecord) -> "AuditRecordResponse":
+    def from_record(
+        cls,
+        record: AuditRecord,
+        *,
+        usernames: dict[uuid.UUID, str],
+        server_names: dict[uuid.UUID, str],
+        community_names: dict[uuid.UUID, str],
+    ) -> "AuditRecordResponse":
         return cls(
             id=str(record.id),
             operation=record.operation,
             outcome=record.outcome.value,
             created_at=record.created_at,
             actor_id=str(record.actor_id) if record.actor_id is not None else None,
+            actor_username=(
+                usernames.get(record.actor_id) if record.actor_id is not None else None
+            ),
             community_id=(
                 str(record.community_id) if record.community_id is not None else None
             ),
+            community_name=(
+                community_names.get(record.community_id)
+                if record.community_id is not None
+                else None
+            ),
             target_type=record.target_type,
             target_id=str(record.target_id) if record.target_id is not None else None,
+            target_name=_target_name(record, usernames, server_names),
         )
+
+
+def _target_name(
+    record: AuditRecord,
+    usernames: dict[uuid.UUID, str],
+    server_names: dict[uuid.UUID, str],
+) -> str | None:
+    """Resolve a row's ``target_id`` to a display name by ``target_type``.
+
+    ``user`` resolves to the username; ``server``/``file`` to the server name;
+    every other type has no name source, so the result is ``None``.
+    """
+    if record.target_id is None:
+        return None
+    if record.target_type == ops.TARGET_USER:
+        return usernames.get(record.target_id)
+    if record.target_type in _SERVER_TARGET_TYPES:
+        return server_names.get(record.target_id)
+    return None
+
+
+async def _enriched_responses(
+    records: list[AuditRecord], resolver: NameResolver
+) -> list[AuditRecordResponse]:
+    """Resolve the page's ids to names in batched lookups, then build responses.
+
+    Collects the distinct user/server/community ids across the page and resolves
+    each kind in one call (``WHERE id IN (...)``) — not per row — then maps the
+    results back onto each record (issue #682).
+    """
+    user_ids: set[uuid.UUID] = set()
+    server_ids: set[uuid.UUID] = set()
+    community_ids: set[uuid.UUID] = set()
+    for record in records:
+        if record.actor_id is not None:
+            user_ids.add(record.actor_id)
+        if record.community_id is not None:
+            community_ids.add(record.community_id)
+        if record.target_id is not None:
+            if record.target_type == ops.TARGET_USER:
+                user_ids.add(record.target_id)
+            elif record.target_type in _SERVER_TARGET_TYPES:
+                server_ids.add(record.target_id)
+
+    usernames = await resolver.resolve_usernames(list(user_ids))
+    server_names = await resolver.resolve_server_names(list(server_ids))
+    community_names = await resolver.resolve_community_names(list(community_ids))
+
+    return [
+        AuditRecordResponse.from_record(
+            record,
+            usernames=usernames,
+            server_names=server_names,
+            community_names=community_names,
+        )
+        for record in records
+    ]
 
 
 class AuditLogResponse(BaseModel):
@@ -77,6 +168,7 @@ class AuditLogResponse(BaseModel):
 @router.get("/audit", dependencies=[Depends(require_platform_admin)])
 async def list_audit_log(
     use_case: Annotated[ListAuditLog, Depends(get_list_audit_log)],
+    resolver: Annotated[NameResolver, Depends(get_audit_name_resolver)],
     community: uuid.UUID | None = None,
     operation: str | None = None,
     actor: uuid.UUID | None = None,
@@ -96,9 +188,7 @@ async def list_audit_log(
             offset=offset,
         )
     )
-    return AuditLogResponse(
-        records=[AuditRecordResponse.from_record(r) for r in records]
-    )
+    return AuditLogResponse(records=await _enriched_responses(records, resolver))
 
 
 @router.get("/communities/{community_id}/audit")
@@ -108,6 +198,7 @@ async def list_community_audit_log(
         AuthUser, Depends(require_permission(Permission("audit:read")))
     ],
     use_case: Annotated[ListAuditLog, Depends(get_list_audit_log)],
+    resolver: Annotated[NameResolver, Depends(get_audit_name_resolver)],
     operation: str | None = None,
     actor: uuid.UUID | None = None,
     since: dt.datetime | None = None,
@@ -127,6 +218,4 @@ async def list_community_audit_log(
             offset=offset,
         )
     )
-    return AuditLogResponse(
-        records=[AuditRecordResponse.from_record(r) for r in records]
-    )
+    return AuditLogResponse(records=await _enriched_responses(records, resolver))

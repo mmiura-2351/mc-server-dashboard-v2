@@ -8,7 +8,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { ApiError, api } from "../api/client.ts";
+import { ApiError, api, postFormWithProgress } from "../api/client.ts";
 import { downloadFile } from "../api/download.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
@@ -17,6 +17,8 @@ import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { FilePicker } from "../components/FilePicker.tsx";
 import { Modal } from "../components/Modal.tsx";
 import { useToast } from "../components/Toast.tsx";
+import { UploadProgress } from "../components/UploadProgress.tsx";
+import { useUploadProgress } from "../components/useUploadProgress.ts";
 import { formatDateTime, humanizeBytes, shortId } from "../format.ts";
 import { t } from "../i18n/index.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
@@ -212,16 +214,23 @@ function UploadDialog({
   const onForbidden = useOnForbidden();
   const [displayName, setDisplayName] = useState("");
   const [file, setFile] = useState<File | null>(null);
+  const progress = useUploadProgress();
 
   const upload = useMutation({
     mutationFn: ({ name, f }: { name: string; f: File }) => {
       const form = new FormData();
       form.append("display_name", name);
       form.append("file", f);
-      return api.postForm("/api/resource-packs", form);
+      progress.start(f.size);
+      return postFormWithProgress(
+        "/api/resource-packs",
+        form,
+        progress.onProgress,
+      );
     },
     onSuccess,
     onError: (error) => {
+      progress.reset();
       if (onForbidden(error)) return;
       showToast(t("resourcePacks.error.uploadFailed"), "error");
     },
@@ -277,6 +286,14 @@ function UploadDialog({
         file={file}
         onSelect={setFile}
       />
+      {progress.active && (
+        <UploadProgress
+          loaded={progress.loaded}
+          total={progress.total}
+          percent={progress.percent}
+          elapsedMs={progress.elapsedMs}
+        />
+      )}
     </Modal>
   );
 }

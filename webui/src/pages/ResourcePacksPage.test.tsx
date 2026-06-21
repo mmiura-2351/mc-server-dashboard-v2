@@ -2,6 +2,7 @@ import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAccessToken } from "../auth/tokenStore.ts";
 import { t } from "../i18n/index.ts";
+import { installMockXhrUpload } from "../test/mockXhrUpload.ts";
 import { renderApp } from "../test/render.tsx";
 
 // Resource packs library page (#1178). Driven through the real router +
@@ -164,14 +165,19 @@ function signedIn(overrides: MockOverrides = {}) {
   );
 }
 
+let restoreXhr: () => void;
 beforeEach(() => {
   vi.stubGlobal("fetch", fetchMock);
   fetchMock.mockReset();
   calls = [];
   clearAccessToken();
+  // Uploads go through postFormWithProgress (XHR, #1207); route XHR through the
+  // same fetch dispatcher so the upload hits the mocked POST handler.
+  restoreXhr = installMockXhrUpload(fetchMock);
 });
 
 afterEach(() => {
+  restoreXhr();
   vi.unstubAllGlobals();
 });
 

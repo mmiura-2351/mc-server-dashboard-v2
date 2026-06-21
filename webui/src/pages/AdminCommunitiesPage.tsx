@@ -370,11 +370,10 @@ function ProvisionDialog({
       <div className="hint">{t("admin.communities.ownerHint")}</div>
       {usersTruncated && (
         <div className="hint">
-          {t("admin.communities.usersTruncatedPrefix")}
-          {userList.length}
-          {t("admin.communities.usersTruncatedMid")}
-          {userTotal}
-          {t("admin.communities.usersTruncatedSuffix")}
+          {t("admin.communities.usersTruncated", {
+            n: userList.length,
+            total: userTotal,
+          })}
         </div>
       )}
       {users.isError && (

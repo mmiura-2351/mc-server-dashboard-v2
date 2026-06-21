@@ -240,7 +240,9 @@ describe("DashboardPage lifecycle actions", () => {
     fireEvent.click(screen.getByRole("button", { name: t("dashboard.stop") }));
 
     expect(
-      await screen.findByText(`${t("permissions.deniedNamed")}server:stop`),
+      await screen.findByText(
+        t("permissions.deniedNamed", { permission: "server:stop" }),
+      ),
     ).toBeInTheDocument();
     expect(
       screen.queryByText(t("dashboard.actionFailed")),

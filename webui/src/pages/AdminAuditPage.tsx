@@ -151,11 +151,10 @@ export function AdminAuditPage() {
           </select>
           {communitiesTruncated && communities !== undefined && (
             <div className="hint">
-              {t("admin.audit.communitiesTruncatedPrefix")}
-              {communities.length}
-              {t("admin.audit.communitiesTruncatedMid")}
-              {communityTotal}
-              {t("admin.audit.communitiesTruncatedSuffix")}
+              {t("admin.audit.communitiesTruncated", {
+                n: communities.length,
+                total: communityTotal,
+              })}
             </div>
           )}
         </label>

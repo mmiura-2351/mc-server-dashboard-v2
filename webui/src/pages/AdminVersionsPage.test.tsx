@@ -176,7 +176,9 @@ describe("admin versions catalog", () => {
       ).toBe(true);
     });
     expect(
-      await screen.findByText(`${t("admin.versions.refreshedOne")}paper`),
+      await screen.findByText(
+        t("admin.versions.refreshedOne", { type: "paper" }),
+      ),
     ).toBeInTheDocument();
   });
 
@@ -248,11 +250,7 @@ describe("admin versions JAR pool", () => {
     // freed_bytes 432013312 → "412.0 MiB"; deleted 3.
     expect(
       await screen.findByText(
-        t("admin.versions.gcDoneReclaimed") +
-          "412.0 MiB" +
-          t("admin.versions.gcDoneAcross") +
-          "3" +
-          t("admin.versions.gcDoneJars"),
+        t("admin.versions.gcDone", { bytes: "412.0 MiB", count: 3 }),
       ),
     ).toBeInTheDocument();
   });

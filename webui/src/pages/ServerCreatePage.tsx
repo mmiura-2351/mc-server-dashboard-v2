@@ -1,11 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
 import { type FormEvent, useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router";
-import { ApiError, api } from "../api/client.ts";
+import { ApiError, api, postFormWithProgress } from "../api/client.ts";
 import { apiPath } from "../api/path.ts";
 import { fieldErrorsFromValidation } from "../api/validationErrors.ts";
 import { FilePicker } from "../components/FilePicker.tsx";
 import { useToast } from "../components/Toast.tsx";
+import { UploadProgress } from "../components/UploadProgress.tsx";
+import { useUploadProgress } from "../components/useUploadProgress.ts";
 import { type TranslationKey, t } from "../i18n/index.ts";
 import { useActiveCommunity } from "../permissions/ActiveCommunityProvider.tsx";
 import { useCanCode } from "../permissions/useCan.ts";
@@ -832,6 +834,7 @@ function ImportForm({ communityId }: { communityId: string }) {
   const [file, setFile] = useState<File | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [nameError, setNameError] = useState<string | undefined>();
+  const progress = useUploadProgress();
 
   async function onSubmit(event: FormEvent) {
     event.preventDefault();
@@ -845,15 +848,18 @@ function ImportForm({ communityId }: { communityId: string }) {
     form.append("file", file);
     form.append("name", name);
     form.append("execution_backend", backend);
+    progress.start(file.size);
     try {
-      const server = await api.postForm(
+      const server = await postFormWithProgress(
         apiPath("/api/communities/{community_id}/servers/import", {
           community_id: communityId,
         }),
         form,
+        progress.onProgress,
       );
       navigate(`${dashboardPath(communityId)}/servers/${server.id}`);
     } catch (err) {
+      progress.reset();
       if (!handleImportError(err, showToast, setNameError)) {
         showToast(t("serverCreate.genericError"), "error");
       }
@@ -906,6 +912,14 @@ function ImportForm({ communityId }: { communityId: string }) {
           onSelect={setFile}
         />
       </div>
+      {progress.active && (
+        <UploadProgress
+          loaded={progress.loaded}
+          total={progress.total}
+          percent={progress.percent}
+          elapsedMs={progress.elapsedMs}
+        />
+      )}
       <div className="wizard-foot">
         <button
           type="submit"

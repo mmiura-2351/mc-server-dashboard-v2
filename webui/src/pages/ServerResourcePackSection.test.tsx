@@ -16,7 +16,6 @@ const SID = "s1";
 const mockApi = vi.hoisted(() => ({
   get: vi.fn(),
   post: vi.fn(),
-  postForm: vi.fn(),
   patch: vi.fn(),
   delete: vi.fn(),
 }));
@@ -151,7 +150,6 @@ beforeEach(() => {
   setAccessToken("tok-1");
   mockApi.get.mockReset();
   mockApi.post.mockReset();
-  mockApi.postForm.mockReset();
   mockApi.patch.mockReset();
   mockApi.delete.mockReset();
   mockDownload.downloadFile.mockReset();

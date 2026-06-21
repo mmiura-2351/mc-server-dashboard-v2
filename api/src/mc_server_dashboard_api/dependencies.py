@@ -24,10 +24,12 @@ from starlette.requests import HTTPConnection
 from mc_server_dashboard_api.audit.adapters.clock import (
     SystemClock as AuditSystemClock,
 )
+from mc_server_dashboard_api.audit.adapters.name_resolver import SqlAlchemyNameResolver
 from mc_server_dashboard_api.audit.adapters.query import SqlAlchemyAuditQuery
 from mc_server_dashboard_api.audit.adapters.recorder import LoggingAuditRecorder
 from mc_server_dashboard_api.audit.adapters.writer import SqlAlchemyAuditWriter
 from mc_server_dashboard_api.audit.application.list_audit_log import ListAuditLog
+from mc_server_dashboard_api.audit.domain.name_resolver import NameResolver
 from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
 from mc_server_dashboard_api.community.adapters.clock import (
     SystemClock as CommunitySystemClock,
@@ -591,6 +593,17 @@ def get_list_audit_log(request: Request) -> ListAuditLog:
 
     session_factory = create_session_factory(get_engine(request))
     return ListAuditLog(query=SqlAlchemyAuditQuery(session_factory))
+
+
+def get_audit_name_resolver(request: Request) -> NameResolver:
+    """Assemble the audit read-time :class:`NameResolver` (issue #682).
+
+    Resolves the audit page's actor/target/community ids to display names against
+    the live user/server/community tables.
+    """
+
+    session_factory = create_session_factory(get_engine(request))
+    return SqlAlchemyNameResolver(session_factory)
 
 
 def _build_password_hasher(password: PasswordSettings) -> PasswordHasher:
