@@ -360,6 +360,28 @@ describe("DashboardPage lifecycle actions", () => {
     expect(screen.getAllByText(t("dashboard.state.running"))).toHaveLength(1);
   });
 
+  it("labels the Start button as Restart when the server is crashed", async () => {
+    mockApi.get.mockResolvedValue([
+      server({
+        observed_state: "crashed",
+        desired_state: "stopped",
+      }),
+    ]);
+    renderPage();
+
+    await screen.findByText("survival");
+    // Both the start and restart buttons carry the "Restart" label, but only
+    // the start button has the `.success` class. Find the success-styled one
+    // to confirm the start action was relabeled.
+    const restartButtons = screen.getAllByRole("button", {
+      name: t("dashboard.startCrashed"),
+    });
+    const startButton = restartButtons.find((btn) =>
+      btn.className.includes("success"),
+    );
+    expect(startButton).toBeDefined();
+  });
+
   it("reverts the pill to the previous state on error", async () => {
     mockApi.get.mockResolvedValue([server({ observed_state: "stopped" })]);
     mockApi.post.mockRejectedValue(

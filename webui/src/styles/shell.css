@@ -875,6 +875,9 @@ body.col-resizing {
   color: var(--pill-crashed-fg);
   margin-top: calc(-1 * var(--space-2));
   margin-bottom: var(--space-2);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 .crash-detail-label {
   font-weight: 600;
@@ -888,6 +891,11 @@ button.link {
 }
 button.link:hover {
   opacity: 0.8;
+}
+button.link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
 }
 .pill.settling {
   font-size: 11px;
