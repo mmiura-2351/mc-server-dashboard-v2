@@ -28,12 +28,8 @@ export const en = {
   "nav.sharedResources": "Shared resources",
 
   // Placeholder pages (Phase 1: routing skeleton only)
-  "page.login": "Sign in",
-  "page.register": "Register",
   "page.dashboard": "Servers",
   "page.serverCreate": "Create server",
-  "page.serverDetail": "Server detail",
-  "page.communitySettings": "Community settings",
   "page.account": "Account",
   "page.adminOverview": "Platform overview",
   "page.adminUsers": "User management",
@@ -274,7 +270,6 @@ export const en = {
   "serverDetail.tab.backups": "Backups",
   "serverDetail.tab.players": "Players",
   "serverDetail.tab.settings": "Settings",
-  "serverDetail.tabPlaceholder": "Coming in a later phase.",
   // Overview live metrics strip + log tail (issue #440, WEBUI_SPEC.md 6.4).
   "serverDetail.metric.cpu": "CPU",
   "serverDetail.metric.memory": "Memory",
@@ -520,7 +515,6 @@ export const en = {
   "files.delete.dialogBody":
     "This permanently deletes the selected file or directory. Type its name to confirm.",
   "files.delete.confirm": "Delete permanently",
-  "files.delete.prompt": "Type the name to enable deletion",
   // Search (files/search).
   "files.search.label": "Search files",
   "files.search.placeholder": "Search by name…",
@@ -754,8 +748,6 @@ export const en = {
   "communitySettings.members.removeDialogBody":
     "Removing this member revokes all their roles and per-server grants in this community. This cannot be undone.",
   "communitySettings.members.removeConfirm": "Remove member",
-  "communitySettings.members.removePrompt":
-    "Type the username to enable removal",
   "communitySettings.members.removed": "Member removed.",
   "communitySettings.members.removeError":
     "Could not remove the member. Please try again.",
@@ -891,8 +883,6 @@ export const en = {
   "communitySettings.roles.deleteDialogBody":
     "Deleting this role removes it from every member who holds it. This cannot be undone.",
   "communitySettings.roles.deleteConfirm": "Delete role",
-  "communitySettings.roles.deletePrompt":
-    "Type the role name to enable deletion",
   // Permission family group labels (WEBUI_SPEC.md 2.2).
   "communitySettings.roles.family.server": "Servers",
   "communitySettings.roles.family.file": "Files",
@@ -959,8 +949,6 @@ export const en = {
   "communitySettings.grants.revokeDialogBody":
     "This removes the member's per-server permissions on this server. This cannot be undone.",
   "communitySettings.grants.revokeConfirm": "Revoke grant",
-  "communitySettings.grants.revokePrompt": "Type REVOKE to confirm",
-  "communitySettings.grants.revokeConfirmPhrase": "REVOKE",
   "communitySettings.grants.createDialogTitle": "Grant per-server access",
   "communitySettings.grants.createDialogBody":
     "Grant a member extra permissions on one server, beyond their roles.",
@@ -1028,7 +1016,6 @@ export const en = {
   "communitySettings.groups.deleteDialogBody":
     "Deleting this group removes it from every server it is applied to. This cannot be undone.",
   "communitySettings.groups.deleteConfirm": "Delete group",
-  "communitySettings.groups.deletePrompt": "Type the group name to confirm.",
   "communitySettings.groups.deleted": "Group deleted.",
   "communitySettings.groups.playersHeading": "Players",
   "communitySettings.groups.playersEmpty": "No players in this group yet.",
@@ -1109,7 +1096,6 @@ export const en = {
   "admin.versions.gcDialog.body":
     "This deletes downloaded server JARs that no live server uses. They are downloaded again when next needed.",
   "admin.versions.gcDialog.confirm": "Delete unused files",
-  "admin.versions.gcDialog.promptLabel": "Type CLEAN to confirm",
   // Interpolated with freed bytes + deleted count, e.g.
   // "Freed 412 MiB by deleting 3 unused JARs.".
   "admin.versions.gcDone": "Freed {bytes} by deleting {count} unused JARs.",
@@ -1198,7 +1184,6 @@ export const en = {
 
   // Admin Users page (WEBUI_SPEC.md 6.12) — user lifecycle, admin flag,
   // create-user dialog. One contiguous block (#475).
-  "admin.users.subtitle": "Platform-wide user administration",
   "admin.users.loading": "Loading users…",
   "admin.users.loadError": "Could not load users.",
   "admin.users.empty": "No users.",
@@ -1293,8 +1278,6 @@ export const en = {
   "resourcePacks.uploadDialog.file": "File (.zip)",
   "resourcePacks.uploadDialog.submit": "Upload",
   "resourcePacks.uploadDialog.uploading": "Uploading…",
-  "resourcePacks.uploadDialog.nameRequired": "Enter a display name.",
-  "resourcePacks.uploadDialog.fileRequired": "Choose a .zip file.",
   "resourcePacks.uploaded": "Resource pack uploaded.",
   "resourcePacks.deleted": "Resource pack deleted.",
   "resourcePacks.deleteDialog.title": "Delete resource pack",
