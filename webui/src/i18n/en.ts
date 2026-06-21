@@ -195,6 +195,7 @@ export const en = {
   "dashboard.createServer": "Create server",
   "dashboard.noWorker": "no host assigned",
   "dashboard.start": "Start",
+  "dashboard.startCrashed": "Restart",
   "dashboard.stop": "Stop",
   "dashboard.restart": "Restart",
   // Card/table view toggle (#541); cards remain the default.
@@ -256,6 +257,9 @@ export const en = {
   "serverDetail.breadcrumb": "Servers",
   // Overview header.
   "serverDetail.crashDetail": "Crash reason:",
+  "serverDetail.crashBanner.guidance":
+    "The server has crashed. Click Restart to try again, or check the console for details.",
+  "serverDetail.crashBanner.viewConsole": "View Console",
   "serverDetail.converging": "applying…",
   "serverDetail.noWorker": "no host assigned",
   "serverDetail.worker": "Host",
@@ -295,6 +299,7 @@ export const en = {
   "serverDetail.commandFailed": "Command failed.",
   // Lifecycle controls.
   "serverDetail.start": "Start",
+  "serverDetail.startCrashed": "Restart",
   "serverDetail.stop": "Stop",
   "serverDetail.stopGraceful": "Stop (graceful)",
   "serverDetail.stopForce": "Force stop",

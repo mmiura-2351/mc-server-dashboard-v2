@@ -879,6 +879,16 @@ body.col-resizing {
 .crash-detail-label {
   font-weight: 600;
 }
+button.link {
+  all: unset;
+  cursor: pointer;
+  color: var(--accent);
+  text-decoration: underline;
+  font: inherit;
+}
+button.link:hover {
+  opacity: 0.8;
+}
 .pill.settling {
   font-size: 11px;
 }

@@ -954,7 +954,11 @@ function Action({ action, server, state, pending, can, onRun }: ActionProps) {
       disabled={disabled}
       onClick={() => onRun(action)}
     >
-      {t(LABEL_KEY[action])}
+      {t(
+        action === "start" && state === "crashed"
+          ? "dashboard.startCrashed"
+          : LABEL_KEY[action],
+      )}
     </button>
   );
 }

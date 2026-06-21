@@ -114,6 +114,7 @@ function Loaded({
         can={can}
         degraded={events.degraded}
         statusDetail={events.statusDetail}
+        onOpenConsole={() => setTab("console")}
       />
       <div className="tabs" role="tablist">
         {TABS.map((name) => (
@@ -216,12 +217,14 @@ function Header({
   can,
   degraded,
   statusDetail,
+  onOpenConsole,
 }: {
   server: ServerResponse;
   communityId: string;
   can: Can;
   degraded: boolean;
   statusDetail: string;
+  onOpenConsole: () => void;
 }) {
   const state = normalizeState(server.observed_state);
   const pill = statePill(state);
@@ -280,15 +283,32 @@ function Header({
             </span>
           )}
         </div>
-        {(state === "crashed" || state === "unknown") &&
-          statusDetail.length > 0 && (
-            <div className="crash-detail">
-              <span className="crash-detail-label">
-                {t("serverDetail.crashDetail")}
-              </span>{" "}
-              {statusDetail}
+        {state === "crashed" && (
+          <div className="crash-detail">
+            {statusDetail.length > 0 && (
+              <div>
+                <span className="crash-detail-label">
+                  {t("serverDetail.crashDetail")}
+                </span>{" "}
+                {statusDetail}
+              </div>
+            )}
+            <div>
+              {t("serverDetail.crashBanner.guidance")}{" "}
+              <button type="button" className="link" onClick={onOpenConsole}>
+                {t("serverDetail.crashBanner.viewConsole")}
+              </button>
             </div>
-          )}
+          </div>
+        )}
+        {state === "unknown" && statusDetail.length > 0 && (
+          <div className="crash-detail">
+            <span className="crash-detail-label">
+              {t("serverDetail.crashDetail")}
+            </span>{" "}
+            {statusDetail}
+          </div>
+        )}
         <div className="sub">
           <span className="badge type">
             {server.server_type} {server.mc_version}
@@ -422,7 +442,11 @@ function Controls({
               disabled={pending}
               onClick={() => lifecycle.mutate(`${base}/start`)}
             >
-              {t("serverDetail.start")}
+              {t(
+                state === "crashed"
+                  ? "serverDetail.startCrashed"
+                  : "serverDetail.start",
+              )}
             </button>
           )}
         {can("server:stop", { serverId: server.id }) &&
