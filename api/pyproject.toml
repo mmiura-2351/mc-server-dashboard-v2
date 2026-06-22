@@ -80,7 +80,7 @@ dependencies = [
 dev = [
     # ruff 0.15.15 (2026-05-28) is inside the 7-day cooldown as of this
     # change; cap below it. Lift the cap once it ages out (Section 3).
-    "ruff>=0.15.14,<0.15.15",
+    "ruff>=0.15.14,<0.15.19",
     "mypy>=2.1.0",
     "pytest>=9.0.3",
     "import-linter>=2.11",
