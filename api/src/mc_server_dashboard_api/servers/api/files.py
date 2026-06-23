@@ -100,6 +100,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
 )
 from mc_server_dashboard_api.servers.domain.errors import (
     CommandDispatchError,
+    ContentDirProtectedError,
     FileAlreadyExistsError,
     FileTooLargeError,
     InvalidFilePathError,
@@ -318,6 +319,8 @@ async def write_file(
         # The edge cap (MAX_EDIT_BYTES) and the Worker's payload_too_large reason
         # (issue #548) both surface here as 413.
         raise _too_large() from exc
+    except ContentDirProtectedError as exc:
+        raise _conflict("content_dir_protected") from exc
     except ServerFilesUnsettledError as exc:
         await _record_file_failure(
             recorder, ops.FILE_WRITE, authorized, community_id, server_id
@@ -473,6 +476,8 @@ async def upload_file(
         raise _unprocessable("invalid_path") from exc
     except FileTooLargeError as exc:
         raise _too_large() from exc
+    except ContentDirProtectedError as exc:
+        raise _conflict("content_dir_protected") from exc
     except ServerFilesUnsettledError as exc:
         await _record_file_failure(
             recorder, ops.FILE_UPLOAD, authorized, community_id, server_id
@@ -612,6 +617,8 @@ async def rename_file(
         raise _unprocessable("invalid_path") from exc
     except FileAlreadyExistsError as exc:
         raise _conflict("destination_exists") from exc
+    except ContentDirProtectedError as exc:
+        raise _conflict("content_dir_protected") from exc
     except ServerFilesUnsettledError as exc:
         await _record_file_failure(
             recorder, ops.FILE_RENAME, authorized, community_id, server_id
@@ -666,6 +673,8 @@ async def delete_file(
         raise _not_found() from exc
     except InvalidFilePathError as exc:
         raise _unprocessable("invalid_path") from exc
+    except ContentDirProtectedError as exc:
+        raise _conflict("content_dir_protected") from exc
     except ServerFilesUnsettledError as exc:
         await _record_file_failure(
             recorder, ops.FILE_DELETE, authorized, community_id, server_id

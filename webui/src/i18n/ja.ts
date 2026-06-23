@@ -562,6 +562,9 @@ export const ja: Record<TranslationKey, string> = {
   "files.rolledBack": "選択したバージョンにロールバックしました。",
   "files.error.serverMustBeStopped":
     "ファイルのアップロードやフォルダの作成を行う前にサーバーを停止してください。",
+  "files.error.contentDirProtected":
+    "このディレクトリは{noun}タブで管理されています。コンテンツの追加・削除は{noun}タブをご利用ください。",
+  "files.error.goToContentTab": "{noun}タブへ移動",
   "files.error.tooLarge":
     "ファイルサイズが512 MiBのアップロード上限を超えています。",
   "files.error.generic": "問題が発生しました。もう一度お試しください。",
@@ -1266,6 +1269,144 @@ export const ja: Record<TranslationKey, string> = {
   "admin.audit.colCommunity": "コミュニティ",
   "admin.audit.communitiesTruncated":
     "{total} 件中、最初の {n} 件のコミュニティを表示しています。",
+
+  // Plugins tab (issue #1153).
+  "serverDetail.tab.plugins": "プラグイン",
+  // Loader-aware tab label + noun (#1320): Fabric/Forge は Mod、Paper はプラグイン
+  // を管理する。日本語では語形は一つだが、英語の `{nouns}` / `{noun}` / `{Noun}`
+  // と対になるよう三つのキーを揃える。
+  "serverDetail.tab.mods": "Mod",
+  "plugins.contentNoun.plural.plugins": "プラグイン",
+  "plugins.contentNoun.plural.mods": "Mod",
+  "plugins.contentNoun.singular.plugins": "プラグイン",
+  "plugins.contentNoun.singular.mods": "Mod",
+  "plugins.contentNoun.singularCap.plugins": "プラグイン",
+  "plugins.contentNoun.singularCap.mods": "Mod",
+  "plugins.loading": "{nouns}を読み込み中…",
+  "plugins.loadError": "{nouns}を読み込めませんでした。",
+  "plugins.noRead": "{nouns}を閲覧する権限がありません。",
+  "plugins.empty": "{nouns}がインストールされていません。",
+  "plugins.unsupported":
+    "このサーバータイプはプラグインやModに対応していません。",
+  "plugins.serverNotStopped":
+    "{nouns}を管理するにはサーバーを停止してください。",
+  "plugins.col.name": "名前",
+  "plugins.col.version": "バージョン",
+  "plugins.col.source": "ソース",
+  "plugins.col.side": "動作環境",
+  "plugins.col.status": "状態",
+  "plugins.col.size": "サイズ",
+  "plugins.col.actions": "操作",
+  "plugins.status.enabled": "有効",
+  "plugins.status.disabled": "無効",
+  "plugins.source.local": "ローカル",
+  "plugins.source.modrinth": "Modrinth",
+  "plugins.side.label": "動作環境",
+  "plugins.side.server": "サーバー",
+  "plugins.side.client": "クライアント",
+  "plugins.side.both": "両方",
+  "plugins.enable": "有効化",
+  "plugins.disable": "無効化",
+  "plugins.remove": "削除",
+  "plugins.update": "更新",
+  "plugins.install": "JARをアップロード",
+  "plugins.browse": "Modrinthで検索",
+  "plugins.downloadClientModpack": "クライアント用ModをDL",
+  "plugins.updateAvailable": "更新あり: ",
+  "plugins.removeDialog.title": "{name}を削除しますか？",
+  "plugins.removeDialog.body": "この{noun}をサーバーから完全に削除します。",
+  "plugins.removeDialog.confirm": "削除",
+  "plugins.dependencies": "依存関係",
+  "plugins.dependencies.loading": "依存関係を読み込み中…",
+  "plugins.dependencies.empty": "依存関係なし。",
+  "plugins.dependencies.required": "必須",
+  "plugins.dependencies.optional": "オプション",
+  "plugins.dependencies.installed": "インストール済み",
+  "plugins.dependencies.missing": "未インストール",
+  "plugins.search.title": "Modrinthで検索",
+  "plugins.search.placeholder": "プラグインやModを検索…",
+  "plugins.search.empty": "結果がありません。",
+  "plugins.search.downloads": "ダウンロード",
+  "plugins.search.by": "作者:",
+  "plugins.search.install": "インストール",
+  "plugins.search.installing": "インストール中…",
+  "plugins.search.installed": "インストール済み",
+  "plugins.search.update": "更新",
+  "plugins.search.versions": "バージョン",
+  "plugins.search.back": "検索に戻る",
+  "plugins.enabled": "{Noun}を有効にしました。",
+  "plugins.disabled": "{Noun}を無効にしました。",
+  "plugins.removed": "{Noun}を削除しました。",
+  "plugins.updated": "{Noun}を更新しました。",
+  "plugins.installed": "{Noun}をインストールしました。",
+  "plugins.sideUpdated": "{Noun}のサイドを更新しました。",
+  "plugins.catalogInstalled": "Modrinthから{Noun}をインストールしました。",
+  "plugins.error.alreadyExists":
+    "同じ名前またはプロジェクトの{noun}がすでにインストールされています。",
+  "plugins.error.notStopped":
+    "{nouns}を管理するにはサーバーを停止してください。",
+  "plugins.error.unsettled":
+    "サーバーの準備ができていません。現在の操作が完了するまでお待ちください。",
+  "plugins.error.busy": "別の操作が進行中です。しばらくお待ちください。",
+  "plugins.error.invalidPath":
+    "無効なファイルです。{nouns}としてアップロードできるのは .jar ファイルのみです。",
+  "plugins.error.tooLarge":
+    "ファイルが大きすぎます。アップロードの上限は 512 MB です。",
+  "plugins.error.catalogUnavailable":
+    "Modrinth に接続できませんでした。しばらくしてからもう一度お試しください。",
+  "plugins.error.catalogNotFound":
+    "Modrinth でプロジェクトまたはバージョンが見つかりませんでした。",
+  "plugins.error.checksumMismatch":
+    "ダウンロードの整合性チェックに失敗しました。もう一度お試しください。",
+  "plugins.error.unsupportedServerType":
+    "このサーバータイプは{nouns}に対応していません。",
+  "plugins.error.invalidSide": "このサーバータイプには無効なサイドです。",
+  "plugins.error.notFound":
+    "{Noun}が見つかりません。削除された可能性があります。",
+  "plugins.error.generic": "エラーが発生しました。もう一度お試しください。",
+  // Dependency / compatibility validation checklist (issue #1307).
+  "plugins.validation.heading": "依存関係と互換性",
+  "plugins.validation.ok": "問題は見つかりませんでした。",
+  "plugins.validation.missingDep":
+    "{mod} は {dependency}（{range}）を必要としますが、インストールされていません。",
+  "plugins.validation.missingCatalogDep":
+    "{mod} は {dependency} を必要としますが、インストールされていません。",
+  "plugins.validation.versionUnsatisfied":
+    "{mod} は {dependency}（{range}）を必要としますが、インストール済みの {present} は条件を満たしません。",
+  "plugins.validation.conflict": "{mod} は {other} と競合します。",
+  "plugins.validation.mcMismatch":
+    "{mod} は MC {serverVersion} に対応していません（対応: {modVersions}）。",
+  // 依存関係の自動解決 (issue #1309)。
+  "plugins.resolve.action": "依存関係を解決",
+  "plugins.resolve.loading": "解決プランを計算中…",
+  "plugins.resolve.title": "依存関係を解決",
+  "plugins.resolve.nothing": "必要な依存関係はすべて満たされています。",
+  "plugins.resolve.importsHeading": "Modrinth からインストールします",
+  "plugins.resolve.importItem": "{dependency} → {project} {version}",
+  "plugins.resolve.satisfiedHeading": "解決済み",
+  "plugins.resolve.satisfiedItem": "{dependency}",
+  "plugins.resolve.conflictsHeading": "競合によりブロック",
+  "plugins.resolve.conflictItem":
+    "{dependency} はインストールできません（インストール済みプラグインと競合します）。",
+  "plugins.resolve.unresolvableHeading": "解決できません",
+  "plugins.resolve.unresolvableItem":
+    "{dependency} — 互換性のある Modrinth バージョンが見つかりません。",
+  "plugins.resolve.apply": "依存関係をインストール",
+  "plugins.resolve.cancel": "キャンセル",
+  "plugins.resolve.applied": "依存関係をインストールしました。",
+  "plugins.resolve.appliedWithFailures":
+    "一部の依存関係をインストールできませんでした。",
+  "communitySettings.roles.family.plugin": "プラグイン",
+  "communitySettings.roles.code.plugin:read": "閲覧",
+  "communitySettings.roles.code.plugin:manage": "管理",
+  "communitySettings.audit.op.plugin:install": "プラグインをインストール",
+  "communitySettings.audit.op.plugin:remove": "プラグインを削除",
+  "communitySettings.audit.op.plugin:enable": "プラグインを有効化",
+  "communitySettings.audit.op.plugin:disable": "プラグインを無効化",
+  "communitySettings.audit.op.plugin:update": "プラグインを更新",
+  "communitySettings.audit.op.plugin:set_side": "プラグインのサイドを設定",
+  "communitySettings.audit.op.plugin:resolve": "プラグインの依存関係を解決",
+  "communitySettings.audit.targetType.plugin": "プラグイン",
 
   // Resource pack library (issue #1178).
   "nav.resourcePacks": "リソースパック",

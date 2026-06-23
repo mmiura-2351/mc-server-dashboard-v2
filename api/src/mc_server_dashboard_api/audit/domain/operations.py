@@ -155,6 +155,19 @@ GROUP_PLAYER_REMOVE: Final = "group:player_remove"
 GROUP_ATTACH: Final = "group:attach"
 GROUP_DETACH: Final = "group:detach"
 
+# Plugin/mod content management (issue #1150). Recorded under the
+# plugin:manage permission the mutating routes require.
+PLUGIN_INSTALL: Final = "plugin:install"
+PLUGIN_REMOVE: Final = "plugin:remove"
+PLUGIN_ENABLE: Final = "plugin:enable"
+PLUGIN_DISABLE: Final = "plugin:disable"
+PLUGIN_UPDATE: Final = "plugin:update"
+# Manual side override on an installed plugin (issue #1308).
+PLUGIN_SET_SIDE: Final = "plugin:set_side"
+# Dependency auto-resolution apply (issue #1309): installs the planned missing
+# required deps from Modrinth onto the server. Recorded under plugin:manage.
+PLUGIN_RESOLVE: Final = "plugin:resolve"
+
 # Resource pack upload / delete / download (issue #1176). Names the operation,
 # not a permission code — upload is gated by server:update in any community,
 # delete by uploader-or-admin, download by authenticated. The ``operation``
@@ -168,6 +181,7 @@ RESOURCE_PACK_ASSIGN: Final = "resource_pack:assign"
 RESOURCE_PACK_UNASSIGN: Final = "resource_pack:unassign"
 
 # Target-type names (the ``target_type`` column).
+TARGET_PLUGIN: Final = "plugin"
 TARGET_COMMUNITY: Final = "community"
 TARGET_USER: Final = "user"
 TARGET_ROLE: Final = "role"

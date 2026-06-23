@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   formatDateTime,
+  formatRange,
   heartbeatAge,
   humanizeBytes,
   shortId,
@@ -56,6 +57,37 @@ describe("statusPill", () => {
   it("maps anything else to crashed", () => {
     expect(statusPill("offline")).toBe("crashed");
     expect(statusPill("unknown")).toBe("crashed");
+  });
+});
+
+describe("formatRange", () => {
+  it("converts lower-bounded inclusive to 'version+'", () => {
+    expect(formatRange("[1.9.10,)")).toBe("1.9.10+");
+    expect(formatRange("[1.0,)")).toBe("1.0+");
+  });
+
+  it("converts upper-bounded exclusive to '< version'", () => {
+    expect(formatRange("(,2.0)")).toBe("< 2.0");
+  });
+
+  it("converts upper-bounded inclusive to '<= version'", () => {
+    expect(formatRange("(,2.0]")).toBe("<= 2.0");
+  });
+
+  it("converts closed ranges to 'lo - hi'", () => {
+    expect(formatRange("[1.5,1.8]")).toBe("1.5 – 1.8");
+    expect(formatRange("(1.0,2.0)")).toBe("1.0 – 2.0");
+  });
+
+  it("returns empty for wildcard or empty input", () => {
+    expect(formatRange("*")).toBe("");
+    expect(formatRange("")).toBe("");
+  });
+
+  it("passes through non-Maven ranges as-is", () => {
+    expect(formatRange(">=0.100.0")).toBe(">=0.100.0");
+    expect(formatRange("~1.21-")).toBe("~1.21-");
+    expect(formatRange("1.0.0")).toBe("1.0.0");
   });
 });
 

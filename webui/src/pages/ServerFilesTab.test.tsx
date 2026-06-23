@@ -834,4 +834,48 @@ describe("ServerFilesTab 409 reason toasts", () => {
       await screen.findByText(t("files.error.generic")),
     ).toBeInTheDocument();
   });
+
+  it("shows a redirect notice with a link to #plugins on content_dir_protected (paper)", async () => {
+    routeGet({
+      detail: server({ server_type: "paper" }),
+      list: listing([]),
+    });
+    mockPostFormWithProgress.mockRejectedValue(
+      new ApiError(409, { reason: "content_dir_protected" }),
+    );
+    renderPage();
+    await openFiles();
+    await screen.findByText(t("files.empty"));
+
+    const fileInput = screen.getByLabelText(t("files.upload"));
+    const file = new File(["x"], "test.jar");
+    fireEvent.change(fileInput, { target: { files: [file] } });
+
+    // The notice contains the tab noun and a link to #plugins.
+    const notice = await screen.findByRole("alert");
+    expect(notice).toHaveTextContent(t("serverDetail.tab.plugins"));
+    const link = notice.querySelector("a[href='#plugins']");
+    expect(link).toBeInTheDocument();
+    expect(link).toHaveTextContent(t("serverDetail.tab.plugins"));
+  });
+
+  it("shows the mods tab noun in the redirect notice for a fabric server", async () => {
+    routeGet({
+      detail: server({ server_type: "fabric" }),
+      list: listing([]),
+    });
+    mockPostFormWithProgress.mockRejectedValue(
+      new ApiError(409, { reason: "content_dir_protected" }),
+    );
+    renderPage();
+    await openFiles();
+    await screen.findByText(t("files.empty"));
+
+    const fileInput = screen.getByLabelText(t("files.upload"));
+    const file = new File(["x"], "test.jar");
+    fireEvent.change(fileInput, { target: { files: [file] } });
+
+    const notice = await screen.findByRole("alert");
+    expect(notice).toHaveTextContent(t("serverDetail.tab.mods"));
+  });
 });
