@@ -300,6 +300,16 @@ class ServerFilesUnsettledError(ServerError):
     """
 
 
+class ContentDirProtectedError(ServerError):
+    """A Files API operation targeted a path under the plugin content directory.
+
+    The content directory (``mods/`` for Fabric/Forge, ``plugins/`` for Paper)
+    is managed exclusively by the Plugin API; writes, deletes, renames, and
+    uploads through the Files API are rejected to prevent DB/FS divergence
+    (issue #1331). The edge maps this to 409 ``content_dir_protected``.
+    """
+
+
 class BackupNotFoundError(ServerError):
     """A backup operation targeted a backup that does not exist for the server.
 
@@ -437,6 +447,69 @@ class SlugExhaustedError(ServerError):
 
     This is a transient capacity condition (extremely unlikely in practice); the
     edge maps it to 503 so the caller can retry without a client-side code change.
+    """
+
+
+class PluginNotFoundError(ServerError):
+    """A plugin operation targeted a plugin that does not exist for the server.
+
+    Raised when the plugin id is unknown or belongs to a different server;
+    reported as not-found so no cross-server existence signal leaks. The edge
+    maps this to 404.
+    """
+
+
+class UnsupportedPluginServerTypeError(ServerError):
+    """The server type does not support plugin/mod content management.
+
+    Vanilla and Spigot have no managed content directory; the edge maps this
+    to 422 ``unsupported_server_type``.
+    """
+
+
+class InvalidModJarError(ServerError):
+    """A jar's bytes could not be read as a bounded zip (issue #1307).
+
+    Raised by the manifest parser when the bytes are not a readable zip, carry
+    too many entries, or decompress past the size cap (a decompression bomb). A
+    readable jar with no recognized manifest is *not* an error -- the parser
+    returns empty metadata so the install still proceeds (the loader is known
+    from the server type regardless of the manifest).
+    """
+
+
+class PluginAlreadyExistsError(ServerError):
+    """A plugin install hit the per-server rel_path uniqueness constraint.
+
+    The edge maps this to 409 ``plugin_already_exists``.
+    """
+
+
+class InvalidPluginSideError(ServerError):
+    """A side override requested a value outside server/client/both (issue #1308).
+
+    The edge maps this to 422 ``invalid_side``.
+    """
+
+
+class CatalogUnavailableError(ServerError):
+    """External catalog API unreachable or errored.
+
+    The edge maps this to 502 ``catalog_unavailable``.
+    """
+
+
+class CatalogProjectNotFoundError(ServerError):
+    """Project/version not found on the catalog.
+
+    The edge maps this to 404 ``catalog_project_not_found``.
+    """
+
+
+class CatalogChecksumMismatchError(ServerError):
+    """Downloaded file SHA-512 doesn't match catalog's published hash.
+
+    The edge maps this to 502 ``checksum_mismatch``.
     """
 
 

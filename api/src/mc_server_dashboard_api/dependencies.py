@@ -217,6 +217,19 @@ from mc_server_dashboard_api.servers.application.backups import (
     ServerBackupStatistics,
     UploadBackup,
 )
+from mc_server_dashboard_api.servers.application.catalog import (
+    CheckPluginUpdate,
+    CheckUpdates,
+    GetCatalogProject,
+    InstallFromCatalog,
+    ListPluginDependencies,
+    SearchCatalog,
+    UpdatePlugin,
+)
+from mc_server_dashboard_api.servers.application.client_modpack import (
+    DownloadClientModpack,
+    ListClientMods,
+)
 from mc_server_dashboard_api.servers.application.export_import import (
     ExportServer,
     ImportServer,
@@ -264,6 +277,19 @@ from mc_server_dashboard_api.servers.application.manage_server import (
     ReadServer,
     UpdateServer,
 )
+from mc_server_dashboard_api.servers.application.plugin_resolution import (
+    ApplyPluginResolution,
+    ResolvePluginDependencies,
+)
+from mc_server_dashboard_api.servers.application.plugins import (
+    GetPlugin,
+    InstallPlugin,
+    ListPlugins,
+    RemovePlugin,
+    SetPluginSide,
+    TogglePlugin,
+    ValidatePluginSet,
+)
 from mc_server_dashboard_api.servers.application.port_availability import (
     CheckPort,
     ListAvailablePorts,
@@ -283,11 +309,17 @@ from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
 from mc_server_dashboard_api.servers.domain.backup_store import (
     BackupArchiveStore,
 )
+from mc_server_dashboard_api.servers.domain.catalog_provider import (
+    CatalogProvider,
+)
 from mc_server_dashboard_api.servers.domain.control_plane import (
     ControlPlane as ServersControlPlane,
 )
 from mc_server_dashboard_api.servers.domain.file_store import (
     FileStore as ServersFileStore,
+)
+from mc_server_dashboard_api.servers.domain.plugin_cache_store import (
+    PluginCacheStore,
 )
 from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.resource_pack_store import (
@@ -1537,6 +1569,24 @@ def get_servers_file_store(
     return StorageFileStoreAdapter(storage=storage)
 
 
+def get_plugin_cache_store(request: Request) -> PluginCacheStore:
+    """Return the content-addressed plugin cache store from app state (issue #1306).
+
+    Built by the app factory from the storage config; ``None`` when the storage
+    backend is ``fs`` (no fs adapter yet). A missing store is a 503.
+    """
+
+    store: PluginCacheStore | None = getattr(
+        request.app.state, "plugin_cache_store", None
+    )
+    if store is None:
+        raise problem(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "plugin_cache_store_unavailable",
+        )
+    return store
+
+
 def get_read_file(
     request: Request,
     control_plane: Annotated[ServersControlPlane, Depends(get_servers_control_plane)],
@@ -1876,6 +1926,202 @@ def get_global_backup_statistics(request: Request) -> GlobalBackupStatistics:
     return GlobalBackupStatistics(uow=ServersUnitOfWork(session_factory))
 
 
+def get_list_plugins(request: Request) -> ListPlugins:
+    """Assemble the :class:`ListPlugins` use case (plugin:read, issue #1150)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ListPlugins(uow=ServersUnitOfWork(session_factory))
+
+
+def get_get_plugin(request: Request) -> GetPlugin:
+    """Assemble the :class:`GetPlugin` use case (plugin:read, issue #1161)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return GetPlugin(uow=ServersUnitOfWork(session_factory))
+
+
+def get_validate_plugin_set(request: Request) -> ValidatePluginSet:
+    """Assemble the :class:`ValidatePluginSet` use case (plugin:read, issue #1307)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ValidatePluginSet(uow=ServersUnitOfWork(session_factory))
+
+
+def get_install_plugin(
+    request: Request,
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+    cache: Annotated[PluginCacheStore, Depends(get_plugin_cache_store)],
+) -> InstallPlugin:
+    """Assemble the :class:`InstallPlugin` use case (plugin:manage, issue #1150)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return InstallPlugin(
+        uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
+        cache=cache,
+        clock=ServersSystemClock(),
+        lifecycle_lock=get_lifecycle_lock(request),
+    )
+
+
+def get_remove_plugin(
+    request: Request,
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+) -> RemovePlugin:
+    """Assemble the :class:`RemovePlugin` use case (plugin:manage, issue #1150)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return RemovePlugin(
+        uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
+        lifecycle_lock=get_lifecycle_lock(request),
+    )
+
+
+def get_toggle_plugin(
+    request: Request,
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+    cache: Annotated[PluginCacheStore, Depends(get_plugin_cache_store)],
+) -> TogglePlugin:
+    """Assemble the :class:`TogglePlugin` use case (plugin:manage, issue #1150)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return TogglePlugin(
+        uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
+        cache=cache,
+        clock=ServersSystemClock(),
+        lifecycle_lock=get_lifecycle_lock(request),
+    )
+
+
+def get_set_plugin_side(
+    request: Request,
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+    cache: Annotated[PluginCacheStore, Depends(get_plugin_cache_store)],
+) -> SetPluginSide:
+    """Assemble the :class:`SetPluginSide` use case (plugin:manage, issue #1308)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return SetPluginSide(
+        uow=ServersUnitOfWork(session_factory),
+        file_store=file_store,
+        cache=cache,
+        clock=ServersSystemClock(),
+        lifecycle_lock=get_lifecycle_lock(request),
+    )
+
+
+def get_list_client_mods(request: Request) -> ListClientMods:
+    """Assemble the :class:`ListClientMods` use case (plugin:read, issue #1308)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ListClientMods(uow=ServersUnitOfWork(session_factory))
+
+
+def get_download_client_modpack(
+    request: Request,
+    cache: Annotated[PluginCacheStore, Depends(get_plugin_cache_store)],
+) -> DownloadClientModpack:
+    """Assemble the :class:`DownloadClientModpack` use case (plugin:read, #1308)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return DownloadClientModpack(
+        uow=ServersUnitOfWork(session_factory),
+        cache=cache,
+    )
+
+
+def get_catalog_provider() -> CatalogProvider:
+    """Provide a per-request :class:`CatalogProvider` (Modrinth, issue #1151).
+
+    Stateless adapter; each request creates a fresh httpx client per call.
+    The import is local to avoid pulling the adapter at module level (the
+    adapter is bound at the edge, not importable from domain/application).
+    """
+
+    from mc_server_dashboard_api.servers.adapters.modrinth_catalog import (
+        ModrinthCatalog,
+    )
+
+    return ModrinthCatalog()
+
+
+def get_search_catalog(
+    request: Request,
+    catalog: Annotated[CatalogProvider, Depends(get_catalog_provider)],
+) -> SearchCatalog:
+    """Assemble the :class:`SearchCatalog` use case (plugin:read, issue #1151)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return SearchCatalog(
+        uow=ServersUnitOfWork(session_factory),
+        catalog=catalog,
+    )
+
+
+def get_get_catalog_project(
+    request: Request,
+    catalog: Annotated[CatalogProvider, Depends(get_catalog_provider)],
+) -> GetCatalogProject:
+    """Assemble the :class:`GetCatalogProject` use case (plugin:read, issue #1151)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return GetCatalogProject(
+        uow=ServersUnitOfWork(session_factory),
+        catalog=catalog,
+    )
+
+
+def get_install_from_catalog(
+    request: Request,
+    catalog: Annotated[CatalogProvider, Depends(get_catalog_provider)],
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+    cache: Annotated[PluginCacheStore, Depends(get_plugin_cache_store)],
+) -> InstallFromCatalog:
+    """Assemble :class:`InstallFromCatalog` (plugin:manage, issue #1151)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return InstallFromCatalog(
+        uow=ServersUnitOfWork(session_factory),
+        catalog=catalog,
+        file_store=file_store,
+        cache=cache,
+        clock=ServersSystemClock(),
+        lifecycle_lock=get_lifecycle_lock(request),
+    )
+
+
+def get_resolve_plugin_dependencies(
+    request: Request,
+    catalog: Annotated[CatalogProvider, Depends(get_catalog_provider)],
+) -> ResolvePluginDependencies:
+    """Assemble :class:`ResolvePluginDependencies` (plugin:read, issue #1309)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ResolvePluginDependencies(
+        uow=ServersUnitOfWork(session_factory),
+        catalog=catalog,
+    )
+
+
+def get_apply_plugin_resolution(
+    request: Request,
+    catalog: Annotated[CatalogProvider, Depends(get_catalog_provider)],
+    install_from_catalog: Annotated[
+        InstallFromCatalog, Depends(get_install_from_catalog)
+    ],
+) -> ApplyPluginResolution:
+    """Assemble :class:`ApplyPluginResolution` (plugin:manage, issue #1309)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ApplyPluginResolution(
+        uow=ServersUnitOfWork(session_factory),
+        catalog=catalog,
+        install_from_catalog=install_from_catalog,
+    )
+
+
 def get_resource_pack_store(request: Request) -> ResourcePackStore:
     """Return the :class:`ResourcePackStore` adapter from app state (issue #1176).
 
@@ -1956,6 +2202,51 @@ def get_assign_resource_pack(
     )
 
 
+def get_check_updates(
+    request: Request,
+    catalog: Annotated[CatalogProvider, Depends(get_catalog_provider)],
+) -> CheckUpdates:
+    """Assemble :class:`CheckUpdates` (plugin:read, issue #1152)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return CheckUpdates(
+        uow=ServersUnitOfWork(session_factory),
+        catalog=catalog,
+    )
+
+
+def get_check_plugin_update(
+    request: Request,
+    catalog: Annotated[CatalogProvider, Depends(get_catalog_provider)],
+) -> CheckPluginUpdate:
+    """Assemble :class:`CheckPluginUpdate` (plugin:read, issue #1152)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return CheckPluginUpdate(
+        uow=ServersUnitOfWork(session_factory),
+        catalog=catalog,
+    )
+
+
+def get_update_plugin(
+    request: Request,
+    catalog: Annotated[CatalogProvider, Depends(get_catalog_provider)],
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
+    cache: Annotated[PluginCacheStore, Depends(get_plugin_cache_store)],
+) -> UpdatePlugin:
+    """Assemble :class:`UpdatePlugin` (plugin:manage, issue #1152)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return UpdatePlugin(
+        uow=ServersUnitOfWork(session_factory),
+        catalog=catalog,
+        file_store=file_store,
+        cache=cache,
+        clock=ServersSystemClock(),
+        lifecycle_lock=get_lifecycle_lock(request),
+    )
+
+
 def get_unassign_resource_pack(
     request: Request,
     file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
@@ -1967,6 +2258,19 @@ def get_unassign_resource_pack(
         uow=ServersUnitOfWork(session_factory),
         file_store=file_store,
         lifecycle_lock=get_lifecycle_lock(request),
+    )
+
+
+def get_list_plugin_dependencies(
+    request: Request,
+    catalog: Annotated[CatalogProvider, Depends(get_catalog_provider)],
+) -> ListPluginDependencies:
+    """Assemble :class:`ListPluginDependencies` (plugin:read, issue #1152)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ListPluginDependencies(
+        uow=ServersUnitOfWork(session_factory),
+        catalog=catalog,
     )
 
 

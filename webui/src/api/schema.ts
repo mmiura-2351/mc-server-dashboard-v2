@@ -777,6 +777,106 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/communities/{community_id}/servers/{server_id}/catalog/install": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Install From Catalog
+         * @description Install a plugin/mod from the Modrinth catalog (plugin:manage).
+         */
+        post: operations["install_from_catalog_api_communities__community_id__servers__server_id__catalog_install_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/catalog/projects/{project_id_or_slug}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Catalog Project
+         * @description Fetch catalog project detail + compatible versions (plugin:read).
+         */
+        get: operations["get_catalog_project_api_communities__community_id__servers__server_id__catalog_projects__project_id_or_slug__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/catalog/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Search Catalog
+         * @description Search the Modrinth catalog with auto-applied server facets (plugin:read).
+         */
+        get: operations["search_catalog_api_communities__community_id__servers__server_id__catalog_search_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/client-mods": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Client Mods
+         * @description List a server's enabled client-relevant plugins (plugin:read, issue #1308).
+         */
+        get: operations["list_client_mods_api_communities__community_id__servers__server_id__client_mods_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/client-mods/download": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download Client Modpack
+         * @description Download a server's client mods as a zip (plugin:read, issue #1308).
+         */
+        get: operations["download_client_modpack_api_communities__community_id__servers__server_id__client_mods_download_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/communities/{community_id}/servers/{server_id}/command": {
         parameters: {
             query?: never;
@@ -1040,6 +1140,273 @@ export interface paths {
         };
         /** List Server Groups */
         get: operations["list_server_groups_api_communities__community_id__servers__server_id__groups_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/plugins": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Plugins
+         * @description List installed plugins for a server (plugin:read).
+         */
+        get: operations["list_plugins_api_communities__community_id__servers__server_id__plugins_get"];
+        put?: never;
+        /**
+         * Install Plugin
+         * @description Install a plugin jar via multipart upload (plugin:manage).
+         */
+        post: operations["install_plugin_api_communities__community_id__servers__server_id__plugins_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/plugins/resolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resolve Plugin Dependencies
+         * @description Plan dependency auto-resolution (plugin:read, issue #1309).
+         *
+         *     Computes the transitive closure of the server's required deps: each is
+         *     classified already-satisfied (present in range), needs-import (a Modrinth
+         *     project@version to install), unresolvable (no Modrinth match), or blocked (a
+         *     transitive conflict). Read-only: nothing is downloaded or installed.
+         */
+        post: operations["resolve_plugin_dependencies_api_communities__community_id__servers__server_id__plugins_resolve_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/plugins/resolve/apply": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Apply Plugin Resolution
+         * @description Apply dependency auto-resolution (plugin:manage, issue #1309).
+         *
+         *     Installs each non-blocked needs-import dep from Modrinth onto the server via
+         *     the catalog install path, then re-plans. At-rest gated (409
+         *     ``server_unsettled`` while the server is running); a per-dep install failure
+         *     is isolated and reported in ``failed``; a blocked (conflicting) dep is never
+         *     installed.
+         */
+        post: operations["apply_plugin_resolution_api_communities__community_id__servers__server_id__plugins_resolve_apply_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/plugins/updates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Check Updates
+         * @description Batch check for plugin updates (plugin:read).
+         */
+        get: operations["check_updates_api_communities__community_id__servers__server_id__plugins_updates_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/plugins/validate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Validate Plugins
+         * @description Validate the server's installed plugin set (plugin:read, issue #1307).
+         *
+         *     Returns the phase-B dependency/compatibility checklist (missing required
+         *     deps, version-unsatisfied deps, conflicts, MC-version mismatch). Read-only:
+         *     it never mutates the set.
+         */
+        get: operations["validate_plugins_api_communities__community_id__servers__server_id__plugins_validate_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Plugin
+         * @description Get a single installed plugin by id (plugin:read).
+         */
+        get: operations["get_plugin_api_communities__community_id__servers__server_id__plugins__plugin_id__get"];
+        put?: never;
+        post?: never;
+        /**
+         * Remove Plugin
+         * @description Remove an installed plugin (plugin:manage).
+         */
+        delete: operations["remove_plugin_api_communities__community_id__servers__server_id__plugins__plugin_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}/dependencies": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Plugin Dependencies
+         * @description List dependencies for an installed plugin (plugin:read).
+         */
+        get: operations["list_plugin_dependencies_api_communities__community_id__servers__server_id__plugins__plugin_id__dependencies_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}/disable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Disable Plugin
+         * @description Disable an enabled plugin (plugin:manage).
+         */
+        post: operations["disable_plugin_api_communities__community_id__servers__server_id__plugins__plugin_id__disable_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}/enable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Enable Plugin
+         * @description Enable a disabled plugin (plugin:manage).
+         */
+        post: operations["enable_plugin_api_communities__community_id__servers__server_id__plugins__plugin_id__enable_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}/side": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Set Plugin Side
+         * @description Override an installed plugin's side (plugin:manage, issue #1308).
+         *
+         *     Changing the side re-materializes the working set: a client-only jar is
+         *     removed from the running server, and a server-relevant jar is materialized
+         *     from the content-addressed cache. At-rest gated (409 ``server_unsettled``).
+         */
+        post: operations["set_plugin_side_api_communities__community_id__servers__server_id__plugins__plugin_id__side_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}/update": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Update Plugin
+         * @description Execute a plugin update to a specific version (plugin:manage).
+         */
+        post: operations["update_plugin_api_communities__community_id__servers__server_id__plugins__plugin_id__update_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}/updates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Check Plugin Update
+         * @description Check for a single plugin update (plugin:read).
+         */
+        get: operations["check_plugin_update_api_communities__community_id__servers__server_id__plugins__plugin_id__updates_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1793,6 +2160,21 @@ export interface components {
             /** Username */
             username: string;
         };
+        /**
+         * ApplyResolutionResponse
+         * @description The result of applying a resolution: the re-plan, installs, and failures.
+         *
+         *     ``installed`` are the plugins newly installed from Modrinth; ``failed`` are
+         *     the dep identifiers whose Modrinth lookup/install failed (isolated per dep);
+         *     ``plan`` is the re-computed plan after the installs.
+         */
+        ApplyResolutionResponse: {
+            /** Failed */
+            failed: string[];
+            /** Installed */
+            installed: components["schemas"]["PluginResponse"][];
+            plan: components["schemas"]["ResolutionPlanResponse"];
+        };
         /** AssignResourcePackRequest */
         AssignResourcePackRequest: {
             /**
@@ -1926,6 +2308,13 @@ export interface components {
             /** Name */
             name: string;
         };
+        /** Body_install_plugin_api_communities__community_id__servers__server_id__plugins_post */
+        Body_install_plugin_api_communities__community_id__servers__server_id__plugins_post: {
+            /** Display Name */
+            display_name: string;
+            /** File */
+            file: string;
+        };
         /** Body_upload_backup_api_communities__community_id__servers__server_id__backups_upload_post */
         Body_upload_backup_api_communities__community_id__servers__server_id__backups_upload_post: {
             /** File */
@@ -1951,12 +2340,175 @@ export interface components {
             max_servers: number;
             resources: components["schemas"]["HostResourcesResponse"];
         };
+        /** CatalogDependencyItem */
+        CatalogDependencyItem: {
+            /** Dependency Type */
+            dependency_type: string;
+            /** Project Id */
+            project_id: string;
+            /** Version Id */
+            version_id: string | null;
+        };
+        /** CatalogDependencyResponse */
+        CatalogDependencyResponse: {
+            /** Dependency Type */
+            dependency_type: string;
+            /** Project Id */
+            project_id: string;
+            /** Version Id */
+            version_id: string | null;
+        };
+        /** CatalogFileItem */
+        CatalogFileItem: {
+            /** Filename */
+            filename: string;
+            /** Primary */
+            primary: boolean;
+            /** Sha512 */
+            sha512: string;
+            /** Size */
+            size: number;
+            /** Url */
+            url: string;
+        };
+        /** CatalogFileResponse */
+        CatalogFileResponse: {
+            /** Filename */
+            filename: string;
+            /** Primary */
+            primary: boolean;
+            /** Sha512 */
+            sha512: string;
+            /** Size */
+            size: number;
+            /** Url */
+            url: string;
+        };
+        /** CatalogInstallRequest */
+        CatalogInstallRequest: {
+            /** Project Id */
+            project_id: string;
+            /** Version Id */
+            version_id: string;
+        };
+        /** CatalogProjectDetailResponse */
+        CatalogProjectDetailResponse: {
+            project: components["schemas"]["CatalogProjectResponse"];
+            /** Versions */
+            versions: components["schemas"]["CatalogVersionResponse"][];
+        };
+        /** CatalogProjectResponse */
+        CatalogProjectResponse: {
+            /** Author */
+            author: string | null;
+            /** Body */
+            body: string;
+            /** Categories */
+            categories: string[];
+            /** Description */
+            description: string;
+            /** Downloads */
+            downloads: number;
+            /** Game Versions */
+            game_versions: string[];
+            /** Icon Url */
+            icon_url: string | null;
+            /** Loaders */
+            loaders: string[];
+            /** Project Id */
+            project_id: string;
+            /** Slug */
+            slug: string;
+            /** Title */
+            title: string;
+        };
+        /** CatalogSearchListResponse */
+        CatalogSearchListResponse: {
+            /** Hits */
+            hits: components["schemas"]["CatalogSearchResultResponse"][];
+            /** Limit */
+            limit: number;
+            /** Offset */
+            offset: number;
+            /** Total Hits */
+            total_hits: number;
+        };
+        /** CatalogSearchResultResponse */
+        CatalogSearchResultResponse: {
+            /** Author */
+            author: string;
+            /** Categories */
+            categories: string[];
+            /** Description */
+            description: string;
+            /** Downloads */
+            downloads: number;
+            /** Icon Url */
+            icon_url: string | null;
+            /** Latest Game Versions */
+            latest_game_versions: string[];
+            /** Project Id */
+            project_id: string;
+            /** Slug */
+            slug: string;
+            /** Title */
+            title: string;
+        };
+        /**
+         * CatalogVersionItem
+         * @description Inline catalog version response to avoid circular import with catalog.py.
+         */
+        CatalogVersionItem: {
+            /** Date Published */
+            date_published: string;
+            /** Dependencies */
+            dependencies: components["schemas"]["CatalogDependencyItem"][];
+            /** Files */
+            files: components["schemas"]["CatalogFileItem"][];
+            /** Game Versions */
+            game_versions: string[];
+            /** Loaders */
+            loaders: string[];
+            /** Name */
+            name: string;
+            /** Version Id */
+            version_id: string;
+            /** Version Number */
+            version_number: string;
+        };
+        /** CatalogVersionResponse */
+        CatalogVersionResponse: {
+            /** Date Published */
+            date_published: string;
+            /** Dependencies */
+            dependencies: components["schemas"]["CatalogDependencyResponse"][];
+            /** Files */
+            files: components["schemas"]["CatalogFileResponse"][];
+            /** Game Versions */
+            game_versions: string[];
+            /** Loaders */
+            loaders: string[];
+            /** Name */
+            name: string;
+            /** Version Id */
+            version_id: string;
+            /** Version Number */
+            version_number: string;
+        };
         /** ChangePasswordRequest */
         ChangePasswordRequest: {
             /** Current Password */
             current_password: string;
             /** New Password */
             new_password: string;
+        };
+        /**
+         * ClientModsResponse
+         * @description A server's enabled client-relevant plugins (issue #1308).
+         */
+        ClientModsResponse: {
+            /** Plugins */
+            plugins: components["schemas"]["PluginResponse"][];
         };
         /**
          * CommunityResponse
@@ -1967,6 +2519,13 @@ export interface components {
             id: string;
             /** Name */
             name: string;
+        };
+        /** ConflictResponse */
+        ConflictResponse: {
+            /** Conflicts With */
+            conflicts_with: string;
+            /** Mod Id */
+            mod_id: string;
         };
         /** CreateGrantRequest */
         CreateGrantRequest: {
@@ -2207,6 +2766,15 @@ export interface components {
             /** Refresh Token */
             refresh_token?: string | null;
         };
+        /** McMismatchResponse */
+        McMismatchResponse: {
+            /** Mod Id */
+            mod_id: string;
+            /** Mod Mc Versions */
+            mod_mc_versions: string[];
+            /** Server Mc Version */
+            server_mc_version: string;
+        };
         /**
          * MemberResponse
          * @description A member of a community with their username and the roles they hold.
@@ -2248,6 +2816,29 @@ export interface components {
             /** Relay Enabled */
             relay_enabled: boolean;
         };
+        /**
+         * MissingCatalogDependencyResponse
+         * @description A required Modrinth catalog dep no installed project covers (issue #1321).
+         */
+        MissingCatalogDependencyResponse: {
+            /** Mod Id */
+            mod_id: string;
+            /** Project Id */
+            project_id: string;
+            /** Slug */
+            slug: string | null;
+            /** Title */
+            title: string | null;
+        };
+        /** MissingDependencyResponse */
+        MissingDependencyResponse: {
+            /** Depends On */
+            depends_on: string;
+            /** Mod Id */
+            mod_id: string;
+            /** Version Range */
+            version_range: string;
+        };
         /** PlatformAdminRequest */
         PlatformAdminRequest: {
             /** Grant */
@@ -2259,6 +2850,113 @@ export interface components {
             username: string;
             /** Uuid */
             uuid: string;
+        };
+        /** PluginDependenciesResponse */
+        PluginDependenciesResponse: {
+            /** Dependencies */
+            dependencies: components["schemas"]["PluginDependencyResponse"][];
+        };
+        /** PluginDependencyResponse */
+        PluginDependencyResponse: {
+            /** Dependency Type */
+            dependency_type: string;
+            /** Installed */
+            installed: boolean;
+            /** Project Id */
+            project_id: string;
+            /** Project Slug */
+            project_slug: string | null;
+            /** Project Title */
+            project_title: string | null;
+            /** Version Id */
+            version_id: string | null;
+        };
+        /** PluginListResponse */
+        PluginListResponse: {
+            /** Plugins */
+            plugins: components["schemas"]["PluginResponse"][];
+        };
+        /**
+         * PluginResponse
+         * @description One plugin's metadata.
+         */
+        PluginResponse: {
+            /** Checksum Sha512 */
+            checksum_sha512: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Description */
+            description: string | null;
+            /** Display Name */
+            display_name: string;
+            /** Enabled */
+            enabled: boolean;
+            /** Filename */
+            filename: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Installed By */
+            installed_by: string | null;
+            /** Loader Type */
+            loader_type: string;
+            /** Mod Identifier */
+            mod_identifier: string | null;
+            /** Rel Path */
+            rel_path: string;
+            /**
+             * Server Id
+             * Format: uuid
+             */
+            server_id: string;
+            /** Side */
+            side: string;
+            /** Size Bytes */
+            size_bytes: number | null;
+            /** Source */
+            source: string;
+            /** Source Project Id */
+            source_project_id: string | null;
+            /** Source Version Id */
+            source_version_id: string | null;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Version Number */
+            version_number: string | null;
+        };
+        /** PluginUpdateInfoResponse */
+        PluginUpdateInfoResponse: {
+            latest_version: components["schemas"]["CatalogVersionItem"] | null;
+            plugin: components["schemas"]["PluginResponse"];
+        };
+        /** PluginUpdatesResponse */
+        PluginUpdatesResponse: {
+            /** Updates */
+            updates: components["schemas"]["PluginUpdateInfoResponse"][];
+        };
+        /**
+         * PluginValidationResponse
+         * @description The phase-B dependency/compatibility checklist for a server's plugin set.
+         */
+        PluginValidationResponse: {
+            /** Conflicts */
+            conflicts: components["schemas"]["ConflictResponse"][];
+            /** Mc Mismatch */
+            mc_mismatch: components["schemas"]["McMismatchResponse"][];
+            /** Missing Catalog Deps */
+            missing_catalog_deps: components["schemas"]["MissingCatalogDependencyResponse"][];
+            /** Missing Deps */
+            missing_deps: components["schemas"]["MissingDependencyResponse"][];
+            /** Version Unsatisfied */
+            version_unsatisfied: components["schemas"]["VersionUnsatisfiedResponse"][];
         };
         /**
          * PortCheckResponse
@@ -2329,6 +3027,34 @@ export interface components {
             from: string;
             /** To */
             to: string;
+        };
+        /**
+         * ResolutionEntryResponse
+         * @description One required dependency and how it resolves in the plan.
+         */
+        ResolutionEntryResponse: {
+            /** Blocked */
+            blocked: boolean;
+            /** Dep Identifier */
+            dep_identifier: string;
+            /** Depth */
+            depth: number;
+            /** Required By */
+            required_by: string | null;
+            /** Required Range */
+            required_range: string;
+            /** Status */
+            status: string;
+            will_import: components["schemas"]["WillImportResponse"] | null;
+        };
+        /**
+         * ResolutionPlanResponse
+         * @description The dependency-resolution plan plus the phase-B validation checklist.
+         */
+        ResolutionPlanResponse: {
+            /** Entries */
+            entries: components["schemas"]["ResolutionEntryResponse"][];
+            validation: components["schemas"]["PluginValidationResponse"];
         };
         /** ResourcePackAssignmentResponse */
         ResourcePackAssignmentResponse: {
@@ -2527,6 +3253,14 @@ export interface components {
             id: string;
         };
         /**
+         * SetPluginSideRequest
+         * @description Manual side override for an installed plugin (issue #1308).
+         */
+        SetPluginSideRequest: {
+            /** Side */
+            side: string;
+        };
+        /**
          * TokenResponse
          * @description An issued access + refresh pair. ``token_type`` is the OAuth2 bearer hint.
          */
@@ -2540,6 +3274,11 @@ export interface components {
              * @default bearer
              */
             token_type: string;
+        };
+        /** UpdatePluginRequest */
+        UpdatePluginRequest: {
+            /** Version Id */
+            version_id: string;
         };
         /** UpdateProfileRequest */
         UpdateProfileRequest: {
@@ -2606,6 +3345,17 @@ export interface components {
             /** Error Type */
             type: string;
         };
+        /** VersionUnsatisfiedResponse */
+        VersionUnsatisfiedResponse: {
+            /** Depends On */
+            depends_on: string;
+            /** Mod Id */
+            mod_id: string;
+            /** Present Version */
+            present_version: string;
+            /** Version Range */
+            version_range: string;
+        };
         /**
          * VersionsResponse
          * @description The versions offered for a server type (issue #286).
@@ -2613,6 +3363,20 @@ export interface components {
         VersionsResponse: {
             /** Versions */
             versions: string[];
+        };
+        /**
+         * WillImportResponse
+         * @description The Modrinth project@version a ``needs_import`` dep resolves to.
+         */
+        WillImportResponse: {
+            /** Project Id */
+            project_id: string;
+            /** Slug */
+            slug: string;
+            /** Version Id */
+            version_id: string;
+            /** Version Number */
+            version_number: string;
         };
         /** WorkerResponse */
         WorkerResponse: {
@@ -4444,6 +5208,175 @@ export interface operations {
             };
         };
     };
+    install_from_catalog_api_communities__community_id__servers__server_id__catalog_install_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CatalogInstallRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PluginResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_catalog_project_api_communities__community_id__servers__server_id__catalog_projects__project_id_or_slug__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+                project_id_or_slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogProjectDetailResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    search_catalog_api_communities__community_id__servers__server_id__catalog_search_get: {
+        parameters: {
+            query?: {
+                q?: string;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogSearchListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_client_mods_api_communities__community_id__servers__server_id__client_mods_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClientModsResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    download_client_modpack_api_communities__community_id__servers__server_id__client_mods_download_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     send_server_command_api_communities__community_id__servers__server_id__command_post: {
         parameters: {
             query?: never;
@@ -4877,6 +5810,472 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["GroupResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_plugins_api_communities__community_id__servers__server_id__plugins_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PluginListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    install_plugin_api_communities__community_id__servers__server_id__plugins_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_install_plugin_api_communities__community_id__servers__server_id__plugins_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PluginResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    resolve_plugin_dependencies_api_communities__community_id__servers__server_id__plugins_resolve_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResolutionPlanResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    apply_plugin_resolution_api_communities__community_id__servers__server_id__plugins_resolve_apply_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApplyResolutionResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    check_updates_api_communities__community_id__servers__server_id__plugins_updates_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PluginUpdatesResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    validate_plugins_api_communities__community_id__servers__server_id__plugins_validate_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PluginValidationResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_plugin_api_communities__community_id__servers__server_id__plugins__plugin_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+                plugin_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PluginResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    remove_plugin_api_communities__community_id__servers__server_id__plugins__plugin_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+                plugin_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_plugin_dependencies_api_communities__community_id__servers__server_id__plugins__plugin_id__dependencies_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+                plugin_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PluginDependenciesResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    disable_plugin_api_communities__community_id__servers__server_id__plugins__plugin_id__disable_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+                plugin_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PluginResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    enable_plugin_api_communities__community_id__servers__server_id__plugins__plugin_id__enable_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+                plugin_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PluginResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_plugin_side_api_communities__community_id__servers__server_id__plugins__plugin_id__side_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+                plugin_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetPluginSideRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PluginResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_plugin_api_communities__community_id__servers__server_id__plugins__plugin_id__update_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+                plugin_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdatePluginRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PluginResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    check_plugin_update_api_communities__community_id__servers__server_id__plugins__plugin_id__updates_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+                plugin_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PluginUpdateInfoResponse"];
                 };
             };
             /** @description Validation Error */
