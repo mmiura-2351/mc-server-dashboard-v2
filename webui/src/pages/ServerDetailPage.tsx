@@ -25,6 +25,7 @@ import { isEulaNotAccepted, lifecycleErrorMessage } from "./lifecycleErrors.ts";
 import { ServerBackupsTab } from "./ServerBackupsTab.tsx";
 import { ServerFilesTab } from "./ServerFilesTab.tsx";
 import { ServerPlayersTab } from "./ServerPlayersTab.tsx";
+import { ServerPluginsTab } from "./ServerPluginsTab.tsx";
 import { ServerResourcePackSection } from "./ServerResourcePackSection.tsx";
 import { serverKey } from "./serverKey.ts";
 import {
@@ -52,6 +53,7 @@ const TABS = [
   "console",
   "files",
   "backups",
+  "plugins",
   "players",
   "settings",
 ] as const;
@@ -62,9 +64,27 @@ const TAB_LABEL: Record<Tab, TranslationKey> = {
   console: "serverDetail.tab.console",
   files: "serverDetail.tab.files",
   backups: "serverDetail.tab.backups",
+  plugins: "serverDetail.tab.plugins",
   players: "serverDetail.tab.players",
   settings: "serverDetail.tab.settings",
 };
+
+/** Server types that do not support plugins/mods (no backend support). */
+const PLUGIN_UNSUPPORTED_TYPES = new Set(["vanilla", "spigot"]);
+
+/**
+ * Server types whose managed content lives in `mods/` rather than `plugins/`,
+ * mirroring the backend mapping (servers/domain/plugin.py): Fabric/Forge are
+ * mods, Paper is plugins (#1320).
+ */
+const MOD_LOADER_TYPES = new Set(["fabric", "forge"]);
+
+/** The loader-aware label key for the content tab (Mods vs Plugins). */
+function pluginTabLabelKey(serverType: string): TranslationKey {
+  return MOD_LOADER_TYPES.has(serverType)
+    ? "serverDetail.tab.mods"
+    : "serverDetail.tab.plugins";
+}
 
 export function ServerDetailPage() {
   const { cid, sid } = useParams();
@@ -106,6 +126,10 @@ function Loaded({
   }
 
   const server = query.data;
+  const hidePlugins = PLUGIN_UNSUPPORTED_TYPES.has(server.server_type);
+  const visibleTabs = hidePlugins
+    ? TABS.filter((name) => name !== "plugins")
+    : TABS;
   return (
     <>
       <Header
@@ -117,7 +141,7 @@ function Loaded({
         onOpenConsole={() => setTab("console")}
       />
       <div className="tabs" role="tablist">
-        {TABS.map((name) => (
+        {visibleTabs.map((name) => (
           <button
             key={name}
             id={tabId("sd", name)}
@@ -130,7 +154,11 @@ function Loaded({
             onClick={() => setTab(name)}
             onKeyDown={(e) => handleTabKeyDown(e, TABS, tab, setTab, "sd")}
           >
-            {t(TAB_LABEL[name])}
+            {t(
+              name === "plugins"
+                ? pluginTabLabelKey(server.server_type)
+                : TAB_LABEL[name],
+            )}
           </button>
         ))}
       </div>
@@ -182,6 +210,9 @@ function Loaded({
             can={can}
           />
         </div>
+      )}
+      {tab === "plugins" && (
+        <ServerPluginsTab server={server} communityId={communityId} can={can} />
       )}
       {tab === "players" && (
         <div

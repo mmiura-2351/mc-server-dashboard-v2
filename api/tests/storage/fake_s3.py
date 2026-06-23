@@ -41,6 +41,11 @@ class FakeS3Store:
     def __init__(self) -> None:
         self.objects: dict[str, bytes] = {}
         self.multipart_parts: dict[str, int] = {}
+        # Per-key count of completed multipart uploads. Unlike ``multipart_parts``
+        # (which records only the last upload's part count, so re-uploading
+        # identical content leaves it unchanged), this tally rises on every
+        # upload — letting a dedup-skip test prove no second upload occurred.
+        self.upload_calls: dict[str, int] = {}
         # Per-key store time, mirroring S3 ``LastModified`` for the JAR-pool GC
         # safety window (#293). Set on every write; defaulted to "now" on read for
         # any key a test seeded directly into ``objects``.
@@ -92,6 +97,7 @@ class FakeS3Client:
             count += 1
         self._store.objects[key] = bytes(buf)
         self._store.multipart_parts[key] = count
+        self._store.upload_calls[key] = self._store.upload_calls.get(key, 0) + 1
         self._store.mtimes[key] = dt.datetime.now(dt.UTC)
 
     async def head_object(self, key: str) -> int | None:
