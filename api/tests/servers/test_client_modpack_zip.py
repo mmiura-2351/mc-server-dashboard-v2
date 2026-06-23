@@ -95,3 +95,45 @@ async def test_stream_skips_plugin_without_sha256() -> None:
     archive = b"".join([chunk async for chunk in stream_client_modpack(cache, plugins)])
     with zipfile.ZipFile(io.BytesIO(archive)) as zf:
         assert set(zf.namelist()) == {"mods/kept.jar"}
+
+
+async def test_stream_sanitizes_backslash_traversal() -> None:
+    """Defense-in-depth: a filename with backslash path traversal is reduced (#1400)."""
+    cache = FakePluginCacheStore()
+    content = b"jar-bytes"
+    sha = hashlib.sha256(content).hexdigest()
+    cache.blobs[sha] = content
+
+    plugins = [_plugin(filename="a\\..\\..\\evil.jar", sha256=sha)]
+    archive = b"".join([chunk async for chunk in stream_client_modpack(cache, plugins)])
+    with zipfile.ZipFile(io.BytesIO(archive)) as zf:
+        names = zf.namelist()
+        assert names == ["mods/evil.jar"]
+
+
+async def test_stream_sanitizes_forward_slash() -> None:
+    """Defense-in-depth: a filename with forward slash is reduced (#1400)."""
+    cache = FakePluginCacheStore()
+    content = b"jar-bytes"
+    sha = hashlib.sha256(content).hexdigest()
+    cache.blobs[sha] = content
+
+    plugins = [_plugin(filename="subdir/evil.jar", sha256=sha)]
+    archive = b"".join([chunk async for chunk in stream_client_modpack(cache, plugins)])
+    with zipfile.ZipFile(io.BytesIO(archive)) as zf:
+        names = zf.namelist()
+        assert names == ["mods/evil.jar"]
+
+
+async def test_stream_sanitizes_mixed_separators() -> None:
+    """Defense-in-depth: a filename with mixed separators is reduced (#1400)."""
+    cache = FakePluginCacheStore()
+    content = b"jar-bytes"
+    sha = hashlib.sha256(content).hexdigest()
+    cache.blobs[sha] = content
+
+    plugins = [_plugin(filename="a/b\\c.jar", sha256=sha)]
+    archive = b"".join([chunk async for chunk in stream_client_modpack(cache, plugins)])
+    with zipfile.ZipFile(io.BytesIO(archive)) as zf:
+        names = zf.namelist()
+        assert names == ["mods/c.jar"]

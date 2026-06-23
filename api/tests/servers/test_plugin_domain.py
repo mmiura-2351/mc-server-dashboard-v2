@@ -17,6 +17,7 @@ from mc_server_dashboard_api.servers.domain.plugin import (
     ServerPlugin,
     content_dir_for_server_type,
     loader_type_for_server_type,
+    sanitize_plugin_filename,
     working_set_present,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId, ServerType
@@ -146,3 +147,31 @@ class TestEnumValues:
     def test_plugin_source_values(self) -> None:
         assert PluginSource.LOCAL.value == "local"
         assert PluginSource.MODRINTH.value == "modrinth"
+
+
+class TestSanitizePluginFilename:
+    """Filenames are reduced to a safe basename to prevent zip-slip (#1400)."""
+
+    def test_normal_filename_unchanged(self) -> None:
+        assert sanitize_plugin_filename("my-plugin-1.0.jar") == "my-plugin-1.0.jar"
+
+    def test_backslash_path_traversal(self) -> None:
+        assert sanitize_plugin_filename("a\\..\\..\\evil.jar") == "evil.jar"
+
+    def test_forward_slash_subdir(self) -> None:
+        assert sanitize_plugin_filename("subdir/evil.jar") == "evil.jar"
+
+    def test_mixed_separators(self) -> None:
+        assert sanitize_plugin_filename("a/b\\c.jar") == "c.jar"
+
+    def test_empty_after_strip_raises(self) -> None:
+        with pytest.raises(ValueError):
+            sanitize_plugin_filename("")
+
+    def test_dot_raises(self) -> None:
+        with pytest.raises(ValueError):
+            sanitize_plugin_filename(".")
+
+    def test_dotdot_raises(self) -> None:
+        with pytest.raises(ValueError):
+            sanitize_plugin_filename("..")

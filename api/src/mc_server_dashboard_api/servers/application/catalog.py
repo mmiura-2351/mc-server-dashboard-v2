@@ -52,6 +52,7 @@ from mc_server_dashboard_api.servers.domain.plugin import (
     content_dir_for_server_type,
     loader_type_for_server_type,
     modrinth_loader_for_server_type,
+    sanitize_plugin_filename,
     working_set_path,
     working_set_present,
 )
@@ -290,6 +291,7 @@ class InstallFromCatalog:
 
         if not file.filename.lower().endswith(".jar"):
             raise InvalidFilePathError(file.filename)
+        safe_filename = sanitize_plugin_filename(file.filename)
 
         project = await self.catalog.get_project(project_id)
 
@@ -319,7 +321,7 @@ class InstallFromCatalog:
         catalog_dependencies = await capture_catalog_dependencies(self.catalog, version)
 
         # Phase 4: At-rest gate + write (hold lock, short duration).
-        rel_path = f"{content_dir}/{file.filename}"
+        rel_path = f"{content_dir}/{safe_filename}"
         async with self.lifecycle_lock.hold(server_id):
             async with self.uow:
                 server = await _load(self.uow, community_id, server_id)
@@ -356,7 +358,7 @@ class InstallFromCatalog:
                     id=PluginId.new(),
                     server_id=server_id,
                     rel_path=rel_path,
-                    filename=file.filename,
+                    filename=safe_filename,
                     display_name=project.title,
                     description=project.description,
                     loader_type=loader_type,
@@ -551,6 +553,7 @@ class UpdatePlugin:
 
         if not file.filename.lower().endswith(".jar"):
             raise InvalidFilePathError(file.filename)
+        safe_filename = sanitize_plugin_filename(file.filename)
 
         # Phase 3: Resolve bytes from the cache or download + verify (no lock).
         # The download cache skips the HTTP fetch when this version is cached.
@@ -574,7 +577,7 @@ class UpdatePlugin:
         # a disabled server/both jar lives at the .disabled path, a client jar has
         # no file. Reconciling old -> new keeps rel_path and the on-disk file
         # consistent and never orphans the prior .disabled file.
-        new_clean_path = f"{content_dir}/{file.filename}"
+        new_clean_path = f"{content_dir}/{safe_filename}"
         old_path = working_set_path(
             clean_path=plugin.rel_path.removesuffix(".disabled"),
             enabled=plugin.enabled,
@@ -623,7 +626,7 @@ class UpdatePlugin:
                     id=plugin.id,
                     server_id=plugin.server_id,
                     rel_path=new_path if new_path is not None else new_clean_path,
-                    filename=file.filename,
+                    filename=safe_filename,
                     display_name=plugin.display_name,
                     description=plugin.description,
                     loader_type=plugin.loader_type,
