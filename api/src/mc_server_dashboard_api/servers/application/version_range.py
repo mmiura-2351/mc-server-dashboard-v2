@@ -267,7 +267,18 @@ def _maven_satisfies(version: str, spec: str) -> bool:
     intervals = _split_maven_intervals(spec)
     if not intervals:
         return True
-    return any(_maven_interval(version, token) for token in intervals)
+    any_parsed = False
+    for token in intervals:
+        try:
+            if _maven_interval(version, token):
+                return True
+            any_parsed = True
+        except (ValueError, IndexError):
+            continue
+    if not any_parsed:
+        # Every token was unparseable -> re-raise so the outer fallback fires.
+        raise ValueError(f"no parseable maven interval in: {spec!r}")
+    return False
 
 
 def _split_maven_intervals(spec: str) -> list[str]:
