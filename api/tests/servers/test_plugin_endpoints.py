@@ -19,6 +19,8 @@ from collections.abc import Iterator
 from fastapi.testclient import TestClient
 
 from mc_server_dashboard_api.app import create_app
+from mc_server_dashboard_api.audit.domain import operations as ops
+from mc_server_dashboard_api.audit.domain.events import Outcome
 from mc_server_dashboard_api.community.domain.permission_checker import (
     MembershipVisibility,
     PermissionChecker,
@@ -31,6 +33,8 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     UserId,
 )
 from mc_server_dashboard_api.dependencies import (
+    get_apply_plugin_resolution,
+    get_audit_recorder,
     get_check_plugin_update,
     get_check_updates,
     get_current_user,
@@ -52,6 +56,9 @@ from mc_server_dashboard_api.servers.application.catalog import (
     PluginDependencyInfo,
     PluginUpdateInfo,
 )
+from mc_server_dashboard_api.servers.application.plugin_resolution import (
+    ResolutionPlan,
+)
 from mc_server_dashboard_api.servers.application.plugin_validation import (
     McMismatch,
     MissingCatalogDependency,
@@ -64,6 +71,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidPluginSideError,
     PluginAlreadyExistsError,
     PluginNotFoundError,
+    ServerBusyError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
     UnsupportedPluginServerTypeError,
@@ -75,6 +83,7 @@ from mc_server_dashboard_api.servers.domain.plugin import (
     ServerPlugin,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
+from tests.audit.fakes import RecordingAuditRecorder
 from tests.identity.fakes import make_user
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
@@ -177,6 +186,8 @@ def _app(
     set_side: _FakeUseCase | None = None,
     list_client: _FakeUseCase | None = None,
     download_modpack: _FakeUseCase | None = None,
+    resolve_apply: _FakeUseCase | None = None,
+    recorder: RecordingAuditRecorder | None = None,
 ) -> object:
     app = create_app()
     app.dependency_overrides[get_current_user] = lambda: make_user()
@@ -210,6 +221,10 @@ def _app(
         app.dependency_overrides[get_list_client_mods] = lambda: list_client
     if download_modpack is not None:
         app.dependency_overrides[get_download_client_modpack] = lambda: download_modpack
+    if resolve_apply is not None:
+        app.dependency_overrides[get_apply_plugin_resolution] = lambda: resolve_apply
+    if recorder is not None:
+        app.dependency_overrides[get_audit_recorder] = lambda: recorder
     return app
 
 
@@ -718,3 +733,97 @@ def test_download_client_modpack_member_without_permission_is_403() -> None:
     client = next(_client(app))
     resp = client.get(_client_url(uuid.uuid4(), uuid.uuid4(), "/download"))
     assert resp.status_code == 403
+
+
+# --- audit target_type correctness (issue #1414) ----------------------------
+
+
+def test_install_success_audit_targets_plugin() -> None:
+    p = _plugin()
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True, allow=True, install=_FakeInstall(result=p), recorder=recorder
+    )
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4()),
+        data={"display_name": "Test Plugin"},
+        files={"file": ("test.jar", b"jar-bytes", "application/java-archive")},
+    )
+    assert resp.status_code == 201
+    assert [e.operation for e in recorder.events] == [ops.PLUGIN_INSTALL]
+    assert recorder.events[0].outcome is Outcome.SUCCESS
+    assert recorder.events[0].target_type == ops.TARGET_PLUGIN
+
+
+def test_install_unsettled_audit_targets_server() -> None:
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        install=_FakeInstall(error=ServerFilesUnsettledError("x")),
+        recorder=recorder,
+    )
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4()),
+        data={"display_name": "Test"},
+        files={"file": ("test.jar", b"jar-bytes", "application/java-archive")},
+    )
+    assert resp.status_code == 409
+    assert [e.operation for e in recorder.events] == [ops.PLUGIN_INSTALL]
+    assert recorder.events[0].outcome is Outcome.DENIED
+    assert recorder.events[0].target_type == ops.TARGET_SERVER
+
+
+def test_install_busy_audit_targets_server() -> None:
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        install=_FakeInstall(error=ServerBusyError("x")),
+        recorder=recorder,
+    )
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4()),
+        data={"display_name": "Test"},
+        files={"file": ("test.jar", b"jar-bytes", "application/java-archive")},
+    )
+    assert resp.status_code == 409
+    assert [e.operation for e in recorder.events] == [ops.PLUGIN_INSTALL]
+    assert recorder.events[0].outcome is Outcome.DENIED
+    assert recorder.events[0].target_type == ops.TARGET_SERVER
+
+
+def test_resolve_apply_success_audit_targets_server() -> None:
+    plan = ResolutionPlan()
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        resolve_apply=_FakeUseCase(result=(plan, [], [])),
+        recorder=recorder,
+    )
+    client = next(_client(app))
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/resolve/apply"))
+    assert resp.status_code == 200
+    assert [e.operation for e in recorder.events] == [ops.PLUGIN_RESOLVE]
+    assert recorder.events[0].outcome is Outcome.SUCCESS
+    assert recorder.events[0].target_type == ops.TARGET_SERVER
+
+
+def test_resolve_apply_unsettled_audit_targets_server() -> None:
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        resolve_apply=_FakeUseCase(error=ServerFilesUnsettledError("x")),
+        recorder=recorder,
+    )
+    client = next(_client(app))
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/resolve/apply"))
+    assert resp.status_code == 409
+    assert [e.operation for e in recorder.events] == [ops.PLUGIN_RESOLVE]
+    assert recorder.events[0].outcome is Outcome.DENIED
+    assert recorder.events[0].target_type == ops.TARGET_SERVER
