@@ -6,6 +6,7 @@ host-allowlist enforcement — these cannot be tested through the FakeCatalogPro
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
@@ -157,6 +158,58 @@ async def test_get_json_oversized_response_raises() -> None:
             )
     finally:
         httpx.AsyncClient.__init__ = real_init  # type: ignore[method-assign]
+
+
+async def test_get_json_enforces_limit_during_streaming() -> None:
+    """Size limit is enforced during streaming, not after full buffering.
+
+    A body 5x the limit should trigger CatalogUnavailableError without the
+    entire body being consumed by the application-level reader.
+    """
+    chunk_size = 64 * 1024
+    total_body_size = _MAX_JSON_BYTES * 5
+    chunks_yielded = 0
+
+    class _TrackingStream(httpx.AsyncByteStream):
+        """Yields chunks and tracks how many were consumed."""
+
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            nonlocal chunks_yielded
+            sent = 0
+            while sent < total_body_size:
+                size = min(chunk_size, total_body_size - sent)
+                yield b"x" * size
+                chunks_yielded += 1
+                sent += size
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=_TrackingStream())
+
+    transport = httpx.MockTransport(_handler)
+    catalog = ModrinthCatalog(base_url="https://api.modrinth.com/v2")
+
+    real_init = httpx.AsyncClient.__init__
+
+    def patched_init(self_client: httpx.AsyncClient, **kwargs: Any) -> None:
+        kwargs["transport"] = transport
+        real_init(self_client, **kwargs)
+
+    httpx.AsyncClient.__init__ = patched_init  # type: ignore[assignment]
+    try:
+        with pytest.raises(CatalogUnavailableError, match="response too large"):
+            await catalog.search(
+                query="test", loader="fabric", game_versions=["1.20.4"]
+            )
+    finally:
+        httpx.AsyncClient.__init__ = real_init  # type: ignore[method-assign]
+
+    # With streaming, we should stop well before consuming all chunks.
+    # total chunks if fully consumed = total_body_size / chunk_size = ~800.
+    # With streaming cutoff just past _MAX_JSON_BYTES, ~160 chunks at most.
+    total_chunks = total_body_size // chunk_size
+    assert chunks_yielded < total_chunks, (
+        f"Expected early cutoff but consumed {chunks_yielded}/{total_chunks} chunks"
+    )
 
 
 # -- Constants sanity --
