@@ -1249,6 +1249,179 @@ button.link:focus-visible {
   justify-content: flex-end;
 }
 
+/* ---------- Server detail Plugins tab (issue #1153) ---------- */
+.plugins-notice {
+  margin-bottom: 12px;
+}
+.plugins-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.plugins-table {
+  padding: 0;
+}
+.plugins-table table.data {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.plugins-table table.data th {
+  text-align: left;
+  color: var(--text-dim);
+  font-weight: 600;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.plugins-table table.data td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.plugins-table .row-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+/* Per-row "Side" selector — mirror the form-control `.field select` styling so
+ * it matches the table rather than rendering as a bare browser default (#1320).
+ * The smaller padding/font keep it in scale with the 13px table rows. */
+.plugins-side-select {
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+}
+.plugins-side-select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.plugins-side-select:disabled {
+  opacity: 0.6;
+}
+/* Active state for the Dependencies toggle button (#1357). */
+.plugins-table .btn.ghost.active {
+  background: var(--bg-overlay);
+  border-color: var(--accent-dim);
+}
+/* An inert placeholder standing in for a conditional action button ("Update" or
+ * "Dependencies") on rows that lack it, so the always-present actions stay
+ * column-aligned across rows (#1320). Occupies the slot but is invisible and
+ * non-interactive. */
+.plugins-table .row-actions-spacer {
+  visibility: hidden;
+  pointer-events: none;
+}
+.plugins-update-badge {
+  margin-left: 8px;
+  font-size: 11px;
+}
+.plugins-deps {
+  list-style: none;
+  padding: 4px 12px;
+  margin: 0;
+}
+.plugins-deps li {
+  padding: 4px 0;
+}
+/* Dependency / compatibility validation checklist (issue #1307) */
+.plugins-validation {
+  margin-top: 12px;
+  padding: 12px 16px;
+}
+.plugins-validation h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+.plugins-validation ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+}
+.plugins-validation .field-error {
+  color: var(--red);
+}
+.plugins-validation .field-hint {
+  color: var(--text-dim);
+}
+.plugins-validation .field-hint.warn {
+  color: var(--amber);
+}
+/* Modrinth search modal */
+.plugins-search-input {
+  width: 100%;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  margin-bottom: 12px;
+}
+.plugins-search-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.plugins-search-results {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+.plugins-search-hit {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font: inherit;
+}
+.plugins-search-hit:hover {
+  background: var(--bg-inset);
+}
+.plugins-search-hit:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.plugins-search-icon {
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+}
+.plugins-search-hit-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.plugins-versions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+.plugins-version-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
 /* ---------- Server detail Files tab (WEBUI_SPEC.md 6.6) ---------- */
 .files .notice {
   border-radius: var(--radius-sm);
@@ -1263,9 +1436,15 @@ button.link:focus-visible {
   background: rgba(77, 159, 255, 0.08);
 }
 .files .notice.warn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   color: var(--amber);
   border-color: var(--pill-transition-border);
   background: var(--pill-transition-bg);
+}
+.files .notice.warn .btn {
+  margin-left: auto;
 }
 .files-toolbar {
   display: flex;
