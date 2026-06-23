@@ -156,6 +156,27 @@ class TestGuardContentDir:
         # "mods-extra/foo" should not match "mods/".
         _guard_content_dir(ServerType.FABRIC, "mods-extra/foo.jar")
 
+    # -- Dot-segment bypass regression tests (issue #1399) -----------------
+
+    def test_rejects_dot_prefix_mods(self) -> None:
+        """``./mods/x`` normalizes to ``mods/x`` -- must be blocked."""
+        with pytest.raises(ContentDirProtectedError):
+            _guard_content_dir(ServerType.FABRIC, "./mods/evil.jar")
+
+    def test_rejects_double_slash_prefix_mods(self) -> None:
+        """``.//mods/x`` normalizes to ``mods/x`` -- must be blocked."""
+        with pytest.raises(ContentDirProtectedError):
+            _guard_content_dir(ServerType.FABRIC, ".//mods/evil.jar")
+
+    def test_rejects_dot_inside_mods(self) -> None:
+        """``mods/./x`` normalizes to ``mods/x`` -- must be blocked."""
+        with pytest.raises(ContentDirProtectedError):
+            _guard_content_dir(ServerType.FABRIC, "mods/./evil.jar")
+
+    def test_allows_config_not_in_content_dir(self) -> None:
+        """``config/test.yml`` is outside the content dir -- must be allowed."""
+        _guard_content_dir(ServerType.FABRIC, "config/test.yml")
+
 
 # ---------------------------------------------------------------------------
 # Part 1b: Use-case integration -- WriteFile
