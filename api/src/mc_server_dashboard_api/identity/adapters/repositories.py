@@ -281,6 +281,7 @@ class SqlAlchemyRefreshTokenRepository(RefreshTokenRepository):
         user_id: UserId,
         *,
         keep_token_hash: str | None,
+        keep_session_id: RefreshTokenId | None = None,
         revoked_at: dt.datetime,
         reason: str,
     ) -> None:
@@ -290,5 +291,7 @@ class SqlAlchemyRefreshTokenRepository(RefreshTokenRepository):
         )
         if keep_token_hash is not None:
             stmt = stmt.where(RefreshTokenModel.token_hash != keep_token_hash)
+        if keep_session_id is not None:
+            stmt = stmt.where(RefreshTokenModel.id != keep_session_id.value)
         stmt = stmt.values(revoked_at=revoked_at, revoked_reason=reason)
         await self._session.execute(stmt)

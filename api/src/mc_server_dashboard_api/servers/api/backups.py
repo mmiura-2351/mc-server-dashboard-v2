@@ -50,6 +50,7 @@ from mc_server_dashboard_api.servers.application.backups import (
     DownloadBackup,
     GlobalBackupStatistics,
     ListBackups,
+    ListedBackup,
     RestoreBackup,
     ServerBackupStatistics,
     UploadBackup,
@@ -104,6 +105,11 @@ class BackupResponse(BaseModel):
     health: str
     size_bytes: int | None
     created_by: uuid.UUID | None
+    # The author's display username, resolved server-side at read time (issue #688).
+    # ``None`` when the backup has no actor (scheduled) or the author no longer
+    # resolves (deleted user) — the client then falls back to the raw ``created_by``.
+    # Only the listing resolves it; the single-create responses leave it ``None``.
+    created_by_username: str | None = None
     created_at: UtcDatetime
 
     @classmethod
@@ -116,6 +122,19 @@ class BackupResponse(BaseModel):
             size_bytes=backup.size_bytes,
             created_by=backup.created_by,
             created_at=backup.created_at,
+        )
+
+    @classmethod
+    def from_listed(cls, listed: ListedBackup) -> "BackupResponse":
+        return cls(
+            id=listed.backup.id.value,
+            server_id=listed.backup.server_id.value,
+            source=listed.backup.source.value,
+            health=listed.backup.health.value,
+            size_bytes=listed.backup.size_bytes,
+            created_by=listed.backup.created_by,
+            created_by_username=listed.created_by_username,
+            created_at=listed.backup.created_at,
         )
 
 
@@ -275,7 +294,7 @@ async def list_backups(
         )
     except ServerNotFoundError as exc:
         raise _not_found() from exc
-    return BackupListResponse(backups=[BackupResponse.from_backup(b) for b in backups])
+    return BackupListResponse(backups=[BackupResponse.from_listed(b) for b in backups])
 
 
 @router.post(

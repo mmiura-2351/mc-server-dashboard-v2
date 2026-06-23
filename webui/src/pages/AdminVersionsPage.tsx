@@ -86,7 +86,7 @@ function Catalog({ types }: { types: string[] }) {
       showToast(
         serverType === null
           ? t("admin.versions.refreshedAll")
-          : t("admin.versions.refreshedOne") + serverType,
+          : t("admin.versions.refreshedOne", { type: serverType }),
         "success",
       );
     },
@@ -192,11 +192,10 @@ function JarPool() {
         queryKey: ["versions", "jar-pool", "stats"],
       });
       showToast(
-        t("admin.versions.gcDoneReclaimed") +
-          humanizeBytes(data?.freed_bytes ?? 0) +
-          t("admin.versions.gcDoneAcross") +
-          (data?.deleted ?? 0) +
-          t("admin.versions.gcDoneJars"),
+        t("admin.versions.gcDone", {
+          bytes: humanizeBytes(data?.freed_bytes ?? 0),
+          count: data?.deleted ?? 0,
+        }),
         "success",
       );
     },

@@ -138,6 +138,7 @@ function Loaded({
         can={can}
         degraded={events.degraded}
         statusDetail={events.statusDetail}
+        onOpenConsole={() => setTab("console")}
       />
       <div className="tabs" role="tablist">
         {visibleTabs.map((name) => (
@@ -247,18 +248,19 @@ function Header({
   can,
   degraded,
   statusDetail,
+  onOpenConsole,
 }: {
   server: ServerResponse;
   communityId: string;
   can: Can;
   degraded: boolean;
   statusDetail: string;
+  onOpenConsole: () => void;
 }) {
   const state = normalizeState(server.observed_state);
   const pill = statePill(state);
-  const desired = normalizeState(server.desired_state);
-  // The reconciler has not yet converged when desired ≠ observed; show a
-  // settling hint (WEBUI_SPEC.md 6.4).
+  // The reconciler has not yet converged when desired ≠ observed; show an
+  // applying hint (WEBUI_SPEC.md 6.4).
   const drifting = server.desired_state !== server.observed_state;
 
   // Clickable-copy state for the join-hostname badge.
@@ -312,15 +314,32 @@ function Header({
             </span>
           )}
         </div>
-        {(state === "crashed" || state === "unknown") &&
-          statusDetail.length > 0 && (
-            <div className="crash-detail">
-              <span className="crash-detail-label">
-                {t("serverDetail.crashDetail")}
-              </span>{" "}
-              {statusDetail}
+        {state === "crashed" && (
+          <div className="crash-detail">
+            {statusDetail.length > 0 && (
+              <div>
+                <span className="crash-detail-label">
+                  {t("serverDetail.crashDetail")}
+                </span>{" "}
+                {statusDetail}
+              </div>
+            )}
+            <div>
+              {t("serverDetail.crashBanner.guidance")}{" "}
+              <button type="button" className="link" onClick={onOpenConsole}>
+                {t("serverDetail.crashBanner.viewConsole")}
+              </button>
             </div>
-          )}
+          </div>
+        )}
+        {state === "unknown" && statusDetail.length > 0 && (
+          <div className="crash-detail">
+            <span className="crash-detail-label">
+              {t("serverDetail.crashDetail")}
+            </span>{" "}
+            {statusDetail}
+          </div>
+        )}
         <div className="sub">
           <span className="badge type">
             {server.server_type} {server.mc_version}
@@ -352,8 +371,6 @@ function Header({
               ? `${t("serverDetail.worker")}: ${shortId(server.assigned_worker_id)}`
               : t("serverDetail.noWorker")}
           </span>
-          {" · "}
-          {t("serverDetail.desired")}: {desired}
         </div>
       </div>
       <Controls server={server} communityId={communityId} can={can} />
@@ -456,7 +473,11 @@ function Controls({
               disabled={pending}
               onClick={() => lifecycle.mutate(`${base}/start`)}
             >
-              {t("serverDetail.start")}
+              {t(
+                state === "crashed"
+                  ? "serverDetail.startCrashed"
+                  : "serverDetail.start",
+              )}
             </button>
           )}
         {can("server:stop", { serverId: server.id }) &&
@@ -787,12 +808,6 @@ function Overview({
           <LogView entries={tail} follow={true} />
         )}
       </div>
-      <dl className="kv card">
-        <dt>{t("serverDetail.observed")}</dt>
-        <dd>{server.observed_state}</dd>
-        <dt>{t("serverDetail.desired")}</dt>
-        <dd>{server.desired_state}</dd>
-      </dl>
     </section>
   );
 }

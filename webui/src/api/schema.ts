@@ -2203,12 +2203,21 @@ export interface components {
         /**
          * AuditRecordResponse
          * @description Public view of one audit-log row (DATABASE.md Section 9).
+         *
+         *     ``actor_username``/``target_name``/``community_name`` are read-time display
+         *     fields resolved from the live tables (issue #682); they are ``None`` when the
+         *     soft-referenced subject was deleted or has no name source, in which case the
+         *     client falls back to the raw id.
          */
         AuditRecordResponse: {
             /** Actor Id */
             actor_id: string | null;
+            /** Actor Username */
+            actor_username: string | null;
             /** Community Id */
             community_id: string | null;
+            /** Community Name */
+            community_name: string | null;
             /**
              * Created At
              * Format: date-time
@@ -2222,6 +2231,8 @@ export interface components {
             outcome: string;
             /** Target Id */
             target_id: string | null;
+            /** Target Name */
+            target_name: string | null;
             /** Target Type */
             target_type: string | null;
         };
@@ -2250,6 +2261,8 @@ export interface components {
             created_at: string;
             /** Created By */
             created_by: string | null;
+            /** Created By Username */
+            created_by_username?: string | null;
             /** Health */
             health: string;
             /**
@@ -3108,6 +3121,8 @@ export interface components {
         };
         /** RevokeOtherSessionsRequest */
         RevokeOtherSessionsRequest: {
+            /** Keep Session Id */
+            keep_session_id?: string | null;
             /** Refresh Token */
             refresh_token?: string | null;
         };

@@ -49,10 +49,10 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("audit-rows").innerHTML = MOCK.auditRecords.map((a) => `
     <tr>
       <td class="num">${a.created_at}</td>
-      <td>${a.operation.startsWith("auth") ? "—" : "Sakura SMP"}</td>
+      <td>${a.community_name === "—" ? "—" : a.community_name}</td>
       <td class="num">${a.operation}</td>
-      <td>${a.actor}</td>
-      <td class="num" style="color:var(--text-dim)">${a.target}</td>
+      <td title="${a.actor}">${a.actor_username}</td>
+      <td class="num" style="color:var(--text-dim)" title="${a.target}">${a.target_name}</td>
       <td>${a.outcome === "success"
         ? '<span class="pill running" style="font-size:11px">success</span>'
         : '<span class="pill crashed" style="font-size:11px">failure</span>'}</td>

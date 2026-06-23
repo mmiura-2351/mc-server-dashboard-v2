@@ -36,7 +36,7 @@
             <span class="badge">:25565</span>
           </div>
           <div class="stats">
-            <span>players 7/20</span><span>cpu 38%</span><span>mem 3.2 GiB</span><span>worker-a</span>
+            <span>players 7/20</span><span>cpu 38%</span><span>mem 3.2 GiB</span><span>host</span>
           </div>
           <div class="foot">
             <button class="btn sm" onclick="mockToast('Stop requested (graceful)')">Stop</button>
@@ -56,7 +56,7 @@
             <span class="badge">:25566</span>
           </div>
           <div class="stats">
-            <span>players —</span><span>cpu 71%</span><span>mem 1.8 GiB</span><span>worker-a</span>
+            <span>players —</span><span>cpu 71%</span><span>mem 1.8 GiB</span><span>host</span>
           </div>
           <div class="foot">
             <button class="btn sm" disabled>Stop</button>
@@ -79,8 +79,8 @@
             <span style="color:var(--red)">boot crash · restart backoff (3/5)</span>
           </div>
           <div class="foot">
-            <button class="btn sm success" onclick="mockToast('Start requested')">Start</button>
-            <button class="btn sm" onclick="mockToast('Stop requested — clears desired_state')">Stop</button>
+            <button class="btn sm success" onclick="mockToast('Restart requested')">Restart</button>
+            <button class="btn sm" onclick="mockToast('Stop requested')">Stop</button>
             <span class="right">crashed 52m ago</span>
           </div>
         </div>
@@ -100,7 +100,7 @@
           </div>
           <div class="foot">
             <button class="btn sm success" onclick="mockToast('Start requested')">Start</button>
-            <span class="right">no worker assigned</span>
+            <span class="right">no host assigned</span>
           </div>
         </div>
 

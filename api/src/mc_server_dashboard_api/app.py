@@ -75,6 +75,7 @@ from mc_server_dashboard_api.identity.application.prune_login_attempts import (
 from mc_server_dashboard_api.logging import configure_logging
 from mc_server_dashboard_api.middleware import (
     correlation_id_middleware,
+    security_headers_middleware,
     strip_no_content_body_headers_middleware,
 )
 from mc_server_dashboard_api.servers.adapters.backup_loop import run_backup_loop
@@ -979,6 +980,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # correlation-id one makes it the outer wrapper, so it times the full request
     # handling and labels by route template (issue #282).
     app.middleware("http")(correlation_id_middleware)
+    # Defence-in-depth security headers (issue #635): CSP, X-Frame-Options,
+    # nosniff, Referrer-Policy, Permissions-Policy, conditional Cache-Control
+    # and HSTS. Registered after the correlation-ID middleware so it is inside
+    # that wrapper (outermost-last ordering).
+    app.middleware("http")(security_headers_middleware)
     app.middleware("http")(metrics_middleware)
     # Strip the spurious Content-Type/Content-Length the default JSONResponse
     # stamps onto a 204 No Content (issue #633). Registered last so it is the

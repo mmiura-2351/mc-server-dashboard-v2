@@ -24,17 +24,22 @@ const BID = "b9";
 const mockApi = vi.hoisted(() => ({
   get: vi.fn(),
   post: vi.fn(),
-  postForm: vi.fn(),
   patch: vi.fn(),
   delete: vi.fn(),
 }));
+
+const mockPostFormWithProgress = vi.hoisted(() => vi.fn());
 
 vi.mock("../api/client.ts", async () => {
   const actual =
     await vi.importActual<typeof import("../api/client.ts")>(
       "../api/client.ts",
     );
-  return { ...actual, api: mockApi };
+  return {
+    ...actual,
+    api: mockApi,
+    postFormWithProgress: mockPostFormWithProgress,
+  };
 });
 
 const mockDownload = vi.hoisted(() => ({ downloadFile: vi.fn() }));
@@ -150,9 +155,9 @@ beforeEach(() => {
   setAccessToken("tok-1");
   mockApi.get.mockReset();
   mockApi.post.mockReset();
-  mockApi.postForm.mockReset();
   mockApi.patch.mockReset();
   mockApi.delete.mockReset();
+  mockPostFormWithProgress.mockReset();
   mockDownload.downloadFile.mockReset();
   mockCan = () => true;
   // The detail page opens a per-server events socket; without a mock the events
@@ -202,6 +207,21 @@ describe("ServerBackupsTab stats + table", () => {
       "title",
       authorId,
     );
+  });
+
+  it("shows the resolved author username with the full id in the title (#688)", async () => {
+    const authorId = "ad1051a7-1234-5678-9abc-def012345678";
+    routeGet({
+      backups: [backup({ created_by: authorId, created_by_username: "alice" })],
+    });
+    await openBackups();
+
+    // The username is shown instead of the shortened id, and the full id stays
+    // in the cell title for hover.
+    const cell = (await screen.findByText("alice")).closest("td");
+    expect(cell).toHaveAttribute("title", authorId);
+    // The shortened id is not shown when a username resolved.
+    expect(screen.queryByText("ad1051a7")).not.toBeInTheDocument();
   });
 
   it("formats the newest/oldest stat timestamps (#644)", async () => {
@@ -293,9 +313,9 @@ describe("ServerBackupsTab create / upload / download / delete", () => {
     );
   });
 
-  it("uploads a chosen file via postForm multipart", async () => {
+  it("uploads a chosen file via multipart with progress", async () => {
     routeGet();
-    mockApi.postForm.mockResolvedValue(backup());
+    mockPostFormWithProgress.mockResolvedValue(backup());
     await openBackups();
 
     const input = (await screen.findByLabelText(
@@ -304,8 +324,8 @@ describe("ServerBackupsTab create / upload / download / delete", () => {
     const file = new File(["x"], "b.tar.gz", { type: "application/gzip" });
     fireEvent.change(input, { target: { files: [file] } });
 
-    await waitFor(() => expect(mockApi.postForm).toHaveBeenCalled());
-    const [path, form] = mockApi.postForm.mock.calls[0];
+    await waitFor(() => expect(mockPostFormWithProgress).toHaveBeenCalled());
+    const [path, form] = mockPostFormWithProgress.mock.calls[0];
     expect(path).toBe(`/api/communities/${CID}/servers/${SID}/backups/upload`);
     expect(form).toBeInstanceOf(FormData);
     expect((form as FormData).get("file")).toBe(file);
@@ -659,7 +679,9 @@ describe("ServerBackupsTab permission gating", () => {
       await screen.findByRole("button", { name: t("backups.create") }),
     );
     expect(
-      await screen.findByText(`${t("permissions.deniedNamed")}backup:create`),
+      await screen.findByText(
+        t("permissions.deniedNamed", { permission: "backup:create" }),
+      ),
     ).toBeInTheDocument();
   });
 });

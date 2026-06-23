@@ -144,10 +144,11 @@ export function AdminCommunitiesPage() {
           {t("admin.communities.prev")}
         </button>
         <span className="sub">
-          {t("admin.communities.range")
-            .replace("{from}", String(rangeFrom))
-            .replace("{to}", String(rangeTo))
-            .replace("{total}", String(total))}
+          {t("admin.communities.range", {
+            from: rangeFrom,
+            to: rangeTo,
+            total,
+          })}
         </span>
         <button
           type="button"
@@ -370,11 +371,10 @@ function ProvisionDialog({
       <div className="hint">{t("admin.communities.ownerHint")}</div>
       {usersTruncated && (
         <div className="hint">
-          {t("admin.communities.usersTruncatedPrefix")}
-          {userList.length}
-          {t("admin.communities.usersTruncatedMid")}
-          {userTotal}
-          {t("admin.communities.usersTruncatedSuffix")}
+          {t("admin.communities.usersTruncated", {
+            n: userList.length,
+            total: userTotal,
+          })}
         </div>
       )}
       {users.isError && (

@@ -398,7 +398,9 @@ describe("CommunityMembersTab", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: "Moderator" }));
 
     expect(
-      await screen.findByText(`${t("permissions.deniedNamed")}role:manage`),
+      await screen.findByText(
+        t("permissions.deniedNamed", { permission: "role:manage" }),
+      ),
     ).toBeInTheDocument();
   });
 });

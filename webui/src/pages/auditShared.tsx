@@ -284,32 +284,43 @@ function AuditRow({
   showCommunity: boolean;
 }) {
   // Raw "type:id" target (type/id alone shown bare), kept verbatim for the hover
-  // title; the id is still a raw UUID until id→name resolution lands (#643 needs
-  // an API field, deferred). The displayed type prefix is humanized.
+  // title; the displayed type prefix is humanized and the id is shown as a
+  // resolved name when the backend supplies one (#682), falling back to the raw
+  // UUID otherwise.
   const rawTarget = [entry.target_type, entry.target_id]
     .filter((part) => part !== null)
     .join(":");
+  // Prefer the resolved name over the raw id for the target's id part (#682).
+  const targetIdPart = entry.target_name ?? entry.target_id;
   const displayTarget =
     entry.target_type !== null
-      ? [targetTypeLabel(entry.target_type), entry.target_id]
+      ? [targetTypeLabel(entry.target_type), targetIdPart]
           .filter((part) => part !== null)
           .join(": ")
-      : rawTarget;
-  const actor = entry.actor_id ?? t("communitySettings.audit.systemActor");
+      : (targetIdPart ?? rawTarget);
+  // The actor's resolved username if available, else the raw id, else the
+  // system-actor label (#682).
+  const actor =
+    entry.actor_username ??
+    entry.actor_id ??
+    t("communitySettings.audit.systemActor");
+  // The actor's raw id stays discoverable on hover; the system actor has none.
+  const actorTitle = entry.actor_id ?? actor;
+  // The community's resolved name if available, else the raw id (#682).
+  const community = entry.community_name ?? entry.community_id;
   const targetText = rawTarget === "" ? "—" : displayTarget;
   // `title` reveals the full value on hover for the long, often-ellipsizable
   // id/operation/target columns (#519). Hover-only (no keyboard affordance);
-  // see #496's a11y posture. The operation/target titles carry the raw code so
-  // the underlying value stays discoverable after humanization (#643).
+  // see #496's a11y posture. The operation/target/actor/community titles carry
+  // the raw code/id so the underlying value stays discoverable after the
+  // humanization and id→name resolution (#643, #682).
   return (
     <tr>
       <td>{new Date(entry.created_at).toLocaleString()}</td>
       {showCommunity ? (
-        <td title={entry.community_id ?? undefined}>
-          {entry.community_id ?? "—"}
-        </td>
+        <td title={entry.community_id ?? undefined}>{community ?? "—"}</td>
       ) : null}
-      <td title={actor}>{actor}</td>
+      <td title={actorTitle}>{actor}</td>
       <td title={entry.operation}>{operationLabel(entry.operation)}</td>
       <td>{entry.outcome}</td>
       <td title={rawTarget === "" ? undefined : rawTarget}>{targetText}</td>

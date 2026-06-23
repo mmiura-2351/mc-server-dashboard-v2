@@ -21,6 +21,47 @@ describe("dictionaries", () => {
   });
 });
 
+describe("t() interpolation", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    initLanguage(); // en default in jsdom
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+    initLanguage();
+  });
+
+  it("returns the raw template when no params are given", () => {
+    expect(t("admin.versions.refreshedOne")).toBe("Refreshed catalog: {type}");
+  });
+
+  it("substitutes a single named token", () => {
+    expect(t("admin.versions.refreshedOne", { type: "paper" })).toBe(
+      "Refreshed catalog: paper",
+    );
+  });
+
+  it("substitutes multiple tokens and stringifies numbers", () => {
+    expect(t("admin.versions.gcDone", { bytes: "412.0 MiB", count: 3 })).toBe(
+      "Freed 412.0 MiB by deleting 3 unused JARs.",
+    );
+  });
+
+  it("leaves unknown tokens verbatim", () => {
+    expect(t("admin.versions.refreshedOne", { other: "x" })).toBe(
+      "Refreshed catalog: {type}",
+    );
+  });
+
+  it("interpolates against the active language", () => {
+    setLanguage("ja");
+    expect(t("admin.versions.refreshedOne", { type: "paper" })).toBe(
+      ja["admin.versions.refreshedOne"].replace("{type}", "paper"),
+    );
+  });
+});
+
 describe("language detection and override", () => {
   beforeEach(() => {
     localStorage.clear();

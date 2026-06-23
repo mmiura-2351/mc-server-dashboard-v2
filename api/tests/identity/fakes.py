@@ -180,16 +180,18 @@ class FakeRefreshTokenRepository(RefreshTokenRepository):
         user_id: UserId,
         *,
         keep_token_hash: str | None,
+        keep_session_id: RefreshTokenId | None = None,
         revoked_at: dt.datetime,
         reason: str,
     ) -> None:
         for token_hash, token in list(self.by_hash.items()):
-            if (
-                token.user_id == user_id
-                and token.revoked_at is None
-                and token_hash != keep_token_hash
-            ):
-                self.by_hash[token_hash] = _with_revoked(token, revoked_at, reason)
+            if token.user_id != user_id or token.revoked_at is not None:
+                continue
+            if keep_token_hash is not None and token_hash == keep_token_hash:
+                continue
+            if keep_session_id is not None and token.id == keep_session_id:
+                continue
+            self.by_hash[token_hash] = _with_revoked(token, revoked_at, reason)
 
 
 def _with_revoked(

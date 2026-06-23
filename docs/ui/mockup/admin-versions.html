@@ -14,8 +14,8 @@
     <main class="content">
       <div class="page-head">
         <div>
-          <h1>Versions &amp; JAR pool</h1>
-          <div class="sub">Version catalog freshness and the shared JAR cache.</div>
+          <h1>Versions &amp; JARs</h1>
+          <div class="sub">Version catalog and shared server downloads — platform administrators only</div>
         </div>
         <div class="actions">
           <button class="btn" onclick="mockToast('POST /versions/refresh — all catalogs invalidated')">Refresh all catalogs</button>
@@ -31,15 +31,15 @@
 
       <div class="grid cols-2">
         <div class="card">
-          <h2>JAR pool</h2>
+          <h2>Server downloads</h2>
           <dl class="kv">
-            <dt>Cached JARs</dt><dd>14</dd>
+            <dt>Downloaded JARs</dt><dd>14</dd>
             <dt>Total size</dt><dd>1.9 GiB</dd>
           </dl>
           <div style="margin-top:12px">
-            <button class="btn" onclick="mockToast('POST /versions/jar-pool/gc → removed 3 jars, reclaimed 412 MiB', 'ok')">Run garbage collection</button>
+            <button class="btn" onclick="mockToast('Freed 412 MiB by deleting 3 unused JARs.', 'ok')">Free up disk space</button>
           </div>
-          <div class="hint" style="margin-top:8px;color:var(--text-faint)">Removes JARs no longer referenced by any server.</div>
+          <div class="hint" style="margin-top:8px;color:var(--text-faint)">Deletes downloaded server JARs that no server uses any more.</div>
         </div>
         <div class="card">
           <h2>Notes</h2>

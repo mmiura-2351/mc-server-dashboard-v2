@@ -652,7 +652,9 @@ describe("ServerDetailPage lifecycle controls", () => {
     );
 
     expect(
-      await screen.findByText(`${t("permissions.deniedNamed")}server:restart`),
+      await screen.findByText(
+        t("permissions.deniedNamed", { permission: "server:restart" }),
+      ),
     ).toBeInTheDocument();
   });
 
@@ -2200,6 +2202,69 @@ describe("ServerDetailPage Overview live streams", () => {
     expect(
       screen.queryByText(t("serverDetail.crashDetail")),
     ).not.toBeInTheDocument();
+  });
+
+  it("shows crash guidance banner with View Console link when server is crashed", async () => {
+    mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
+    renderPage();
+    await screen.findByText("survival");
+
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        serverFrame("status", { state: "crashed", detail: "" }),
+      );
+    });
+
+    expect(
+      screen.getByText(t("serverDetail.crashBanner.guidance")),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: t("serverDetail.crashBanner.viewConsole"),
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("switches to the Console tab when the crash banner View Console link is clicked", async () => {
+    mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
+    renderPage();
+    await screen.findByText("survival");
+
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        serverFrame("status", { state: "crashed", detail: "" }),
+      );
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: t("serverDetail.crashBanner.viewConsole"),
+      }),
+    );
+
+    // The Console tab content is now visible.
+    expect(
+      screen.getByRole("checkbox", { name: t("serverDetail.console.follow") }),
+    ).toBeInTheDocument();
+  });
+
+  it("labels the Start button as Restart when the server is crashed", async () => {
+    mockApi.get.mockResolvedValue(
+      server({
+        observed_state: "crashed",
+        desired_state: "stopped",
+      }),
+    );
+    renderPage();
+    await screen.findByText("survival");
+
+    expect(
+      screen.getByRole("button", {
+        name: t("serverDetail.startCrashed"),
+      }),
+    ).toBeInTheDocument();
   });
 });
 
