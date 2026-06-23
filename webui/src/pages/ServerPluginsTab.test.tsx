@@ -25,17 +25,22 @@ const SID = "s1";
 const mockApi = vi.hoisted(() => ({
   get: vi.fn(),
   post: vi.fn(),
-  postForm: vi.fn(),
   patch: vi.fn(),
   delete: vi.fn(),
 }));
+
+const mockPostFormWithProgress = vi.hoisted(() => vi.fn());
 
 vi.mock("../api/client.ts", async () => {
   const actual =
     await vi.importActual<typeof import("../api/client.ts")>(
       "../api/client.ts",
     );
-  return { ...actual, api: mockApi };
+  return {
+    ...actual,
+    api: mockApi,
+    postFormWithProgress: mockPostFormWithProgress,
+  };
 });
 
 const mockDownload = vi.hoisted(() => ({ downloadFile: vi.fn() }));
@@ -715,7 +720,7 @@ describe("ServerPluginsTab error messages (issue #1345)", () => {
   /** Trigger the file upload mutation with a failing ApiError. */
   async function triggerUploadError(reason: string) {
     mockGets({ plugins: [plugin()], validation: EMPTY_VALIDATION });
-    mockApi.postForm.mockRejectedValue(new ApiError(409, { reason }));
+    mockPostFormWithProgress.mockRejectedValue(new ApiError(409, { reason }));
     renderTab();
     await waitFor(() => {
       expect(screen.getByText("Sodium")).toBeInTheDocument();
