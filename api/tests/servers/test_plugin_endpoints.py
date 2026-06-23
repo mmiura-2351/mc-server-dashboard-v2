@@ -827,3 +827,19 @@ def test_resolve_apply_unsettled_audit_targets_server() -> None:
     assert [e.operation for e in recorder.events] == [ops.PLUGIN_RESOLVE]
     assert recorder.events[0].outcome is Outcome.DENIED
     assert recorder.events[0].target_type == ops.TARGET_SERVER
+
+
+def test_resolve_apply_busy_audit_targets_server() -> None:
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        resolve_apply=_FakeUseCase(error=ServerBusyError("x")),
+        recorder=recorder,
+    )
+    client = next(_client(app))
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/resolve/apply"))
+    assert resp.status_code == 409
+    assert [e.operation for e in recorder.events] == [ops.PLUGIN_RESOLVE]
+    assert recorder.events[0].outcome is Outcome.DENIED
+    assert recorder.events[0].target_type == ops.TARGET_SERVER
