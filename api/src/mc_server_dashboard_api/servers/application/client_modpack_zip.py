@@ -35,7 +35,10 @@ import os
 import zipfile
 from collections.abc import AsyncIterator
 
-from mc_server_dashboard_api.servers.domain.plugin import ServerPlugin
+from mc_server_dashboard_api.servers.domain.plugin import (
+    ServerPlugin,
+    sanitize_plugin_filename,
+)
 from mc_server_dashboard_api.servers.domain.plugin_cache_store import PluginCacheStore
 
 
@@ -115,7 +118,9 @@ async def stream_client_modpack(
         for plugin in plugins:
             if plugin.sha256 is None:
                 continue
-            entry_name = _unique_name(plugin.filename, used_names)
+            entry_name = _unique_name(
+                sanitize_plugin_filename(plugin.filename), used_names
+            )
             with zf.open(f"mods/{entry_name}", "w") as entry:
                 async for chunk in cache.open(plugin.sha256):
                     entry.write(chunk)

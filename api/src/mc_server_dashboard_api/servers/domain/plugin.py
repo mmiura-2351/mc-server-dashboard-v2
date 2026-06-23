@@ -17,12 +17,28 @@ import datetime as dt
 import enum
 import uuid
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 from typing import Literal
 
 from mc_server_dashboard_api.servers.domain.errors import (
     UnsupportedPluginServerTypeError,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId, ServerType
+
+
+def sanitize_plugin_filename(filename: str) -> str:
+    """Reduce ``filename`` to a safe basename, stripping path components.
+
+    Prevents zip-slip (issue #1400): a filename like ``a\\..\\..\\evil.jar``
+    is reduced to ``evil.jar``. Raises :class:`ValueError` for filenames that
+    are empty or ``..`` after sanitization.
+    """
+
+    safe = PurePosixPath(filename.replace("\\", "/")).name
+    if not safe or safe == "..":
+        raise ValueError(f"unsafe plugin filename: {filename!r}")
+    return safe
+
 
 # Where a mod/plugin is needed: ``server`` only, ``client`` only, or ``both``
 # (issue #1308). ``both`` is the safe default -- a ``both`` jar is present

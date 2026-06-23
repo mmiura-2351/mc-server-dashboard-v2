@@ -45,6 +45,7 @@ from mc_server_dashboard_api.servers.domain.plugin import (
     content_dir_for_server_type,
     loader_type_for_server_type,
     modrinth_loader_for_server_type,
+    sanitize_plugin_filename,
     working_set_path,
     working_set_present,
 )
@@ -236,6 +237,7 @@ class InstallPlugin:
             raise FileTooLargeError(str(len(content)))
         if not filename.lower().endswith(".jar"):
             raise InvalidFilePathError(filename)
+        filename = sanitize_plugin_filename(filename)
 
         async with self.lifecycle_lock.hold(server_id):
             async with self.uow:
