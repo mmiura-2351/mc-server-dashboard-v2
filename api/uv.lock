@@ -801,7 +801,7 @@ dev = [
     { name = "pytest-cov", specifier = ">=7.1.0,<8" },
     { name = "pytest-timeout", specifier = ">=2.4.0,<3" },
     { name = "pytest-xdist", specifier = ">=3.6.1,<4" },
-    { name = "ruff", specifier = ">=0.15.14,<0.15.15" },
+    { name = "ruff", specifier = ">=0.15.14,<0.15.19" },
 ]
 
 [[package]]
