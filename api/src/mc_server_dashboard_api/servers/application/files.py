@@ -40,6 +40,7 @@ import tarfile
 import zipfile
 from collections.abc import AsyncGenerator, AsyncIterator, Iterator
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import IO, cast
 
 from mc_server_dashboard_api.servers.application.command_dispatch import (
@@ -176,7 +177,7 @@ def _guard_content_dir(server_type: ServerType, rel_path: str) -> None:
     except UnsupportedPluginServerTypeError:
         return
 
-    normalized = rel_path.rstrip("/")
+    normalized = str(PurePosixPath(rel_path))
     if normalized == content_dir or normalized.startswith(f"{content_dir}/"):
         raise ContentDirProtectedError(rel_path)
 
