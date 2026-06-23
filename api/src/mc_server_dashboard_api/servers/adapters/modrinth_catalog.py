@@ -197,16 +197,21 @@ class ModrinthCatalog(CatalogProvider):
                 timeout=_METADATA_TIMEOUT,
                 headers=self._headers(),
             ) as client:
-                response = await client.get(path, params=params)
-                if response.status_code == 404:
-                    raise CatalogProjectNotFoundError(path)
-                response.raise_for_status()
-                if len(response.content) > _MAX_JSON_BYTES:
-                    raise CatalogUnavailableError(
-                        f"response too large: {len(response.content)} bytes"
-                    )
-                return response.json()
-        except CatalogProjectNotFoundError:
+                async with client.stream("GET", path, params=params) as response:
+                    if response.status_code == 404:
+                        raise CatalogProjectNotFoundError(path)
+                    response.raise_for_status()
+                    chunks: list[bytes] = []
+                    total = 0
+                    async for chunk in response.aiter_bytes():
+                        total += len(chunk)
+                        if total > _MAX_JSON_BYTES:
+                            raise CatalogUnavailableError(
+                                f"response too large: {total} bytes"
+                            )
+                        chunks.append(chunk)
+                    return json.loads(b"".join(chunks))
+        except (CatalogProjectNotFoundError, CatalogUnavailableError):
             raise
         except httpx.HTTPStatusError as exc:
             raise CatalogUnavailableError(str(exc)) from exc
