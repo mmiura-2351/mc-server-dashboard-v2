@@ -28,13 +28,15 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { ApiError, api } from "../api/client.ts";
+import { ApiError, api, postFormWithProgress } from "../api/client.ts";
 import { downloadFile } from "../api/download.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
 import { Modal } from "../components/Modal.tsx";
 import { SimpleConfirmDialog } from "../components/SimpleConfirmDialog.tsx";
 import { useToast } from "../components/Toast.tsx";
+import { UploadProgress } from "../components/UploadProgress.tsx";
+import { useUploadProgress } from "../components/useUploadProgress.ts";
 import { type TranslationKey, t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
@@ -848,24 +850,31 @@ function Toolbar({
   const { showToast } = useToast();
   const [mkdirOpen, setMkdirOpen] = useState(false);
   const [extract, setExtract] = useState(false);
+  const progress = useUploadProgress();
 
   const upload = useMutation({
     mutationFn: (file: File) => {
       const form = new FormData();
       form.append("file", file);
-      return api.postForm(
+      progress.start(file.size);
+      return postFormWithProgress(
         `${apiPath(
           "/api/communities/{community_id}/servers/{server_id}/files/upload",
           { community_id: communityId, server_id: serverId },
         )}?path=${encodeURIComponent(dir)}&extract=${extract}` as never,
         form,
+        progress.onProgress,
       );
     },
     onSuccess: () => {
+      progress.reset();
       showToast(t("files.uploaded"), "success");
       onChanged();
     },
-    onError,
+    onError: (error) => {
+      progress.reset();
+      onError(error);
+    },
   });
 
   if (!canEdit) {
@@ -877,54 +886,64 @@ function Toolbar({
     : undefined;
 
   return (
-    <div className="toolbar-row files-toolbar">
-      <label className="files-extract">
-        <input
-          type="checkbox"
-          checked={extract}
-          onChange={(e) => setExtract(e.target.checked)}
-        />
-        {t("files.extractZip")}
-      </label>
-      {running ? (
+    <>
+      <div className="toolbar-row files-toolbar">
+        <label className="files-extract">
+          <input
+            type="checkbox"
+            checked={extract}
+            onChange={(e) => setExtract(e.target.checked)}
+          />
+          {t("files.extractZip")}
+        </label>
+        {running ? (
+          <button
+            type="button"
+            className="btn sm file-upload"
+            disabled
+            title={atRestTooltip}
+          >
+            {t("files.upload")}
+          </button>
+        ) : (
+          <label className="btn sm file-upload">
+            {t("files.upload")}
+            <input
+              type="file"
+              hidden
+              aria-label={t("files.upload")}
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file !== undefined) {
+                  if (file.size > MAX_UPLOAD_BYTES) {
+                    showToast(t("files.error.tooLarge"), "error");
+                  } else {
+                    upload.mutate(file);
+                  }
+                }
+                e.target.value = "";
+              }}
+            />
+          </label>
+        )}
         <button
           type="button"
-          className="btn sm file-upload"
-          disabled
+          className="btn sm"
+          disabled={running}
           title={atRestTooltip}
+          onClick={() => setMkdirOpen(true)}
         >
-          {t("files.upload")}
+          {t("files.newFolder")}
         </button>
-      ) : (
-        <label className="btn sm file-upload">
-          {t("files.upload")}
-          <input
-            type="file"
-            hidden
-            aria-label={t("files.upload")}
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file !== undefined) {
-                if (file.size > MAX_UPLOAD_BYTES) {
-                  showToast(t("files.error.tooLarge"), "error");
-                } else {
-                  upload.mutate(file);
-                }
-              }
-              e.target.value = "";
-            }}
-          />
-        </label>
+      </div>
+      {progress.active && (
+        <UploadProgress
+          loaded={progress.loaded}
+          total={progress.total}
+          percent={progress.percent}
+          elapsedMs={progress.elapsedMs}
+        />
       )}
-      <button
-        type="button"
-        className="btn sm"
-        disabled={running}
-        title={atRestTooltip}
-        onClick={() => setMkdirOpen(true)}
-      >
-        {t("files.newFolder")}
-      </button>
       {mkdirOpen && (
         <MkdirDialog
           dir={dir}
@@ -938,7 +957,7 @@ function Toolbar({
           onError={onError}
         />
       )}
-    </div>
+    </>
   );
 }
 

@@ -62,6 +62,9 @@ from mc_server_dashboard_api.servers.domain.backup import (
     BackupSource,
     BackupStatistics,
 )
+from mc_server_dashboard_api.servers.domain.backup_author_directory import (
+    BackupAuthorDirectory,
+)
 from mc_server_dashboard_api.servers.domain.backup_store import BackupArchiveStore
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.control_plane import (
@@ -210,12 +213,37 @@ class CreateBackup:
         )
 
 
+class _NullAuthorDirectory(BackupAuthorDirectory):
+    """A directory that resolves no names (the default when none is wired)."""
+
+    async def usernames_for(self, user_ids: list[uuid.UUID]) -> dict[uuid.UUID, str]:
+        return {}
+
+
+@dataclass(frozen=True)
+class ListedBackup:
+    """A backup with its author's display username resolved (issue #688).
+
+    ``created_by_username`` is resolved through the :class:`BackupAuthorDirectory`
+    seam. It is ``None`` when the backup has no actor (a scheduled backup) or when
+    the author id no longer resolves (a deleted user) — the client then falls back
+    to showing the raw id.
+    """
+
+    backup: Backup
+    created_by_username: str | None
+
+
 @dataclass(frozen=True)
 class ListBackups:
     """List a server's backups newest-first (backup:read).
 
     Community-scoped: a backup whose server is outside the path community is never
     returned (no cross-community signal, FR-COMM-3).
+
+    Resolves each backup's ``created_by`` to a display username through the
+    :class:`BackupAuthorDirectory` seam (issue #688), in a single batch lookup over
+    the page's distinct author ids — never one lookup per row.
 
     Lazily backfills legacy NULL ``size_bytes`` rows on read (issue #661): a row
     created before size tracking landed (#281) keeps ``size_bytes = NULL``, so the
@@ -227,16 +255,30 @@ class ListBackups:
 
     uow: UnitOfWork
     backup_store: BackupArchiveStore
+    users: BackupAuthorDirectory = _NullAuthorDirectory()
 
     async def __call__(
         self, *, community_id: CommunityId, server_id: ServerId
-    ) -> list[Backup]:
+    ) -> list[ListedBackup]:
         async with self.uow:
             await _load(self.uow, community_id, server_id)
             rows = await self.uow.backups.list_for_server(server_id)
-            return await _backfill_null_sizes(
+            rows = await _backfill_null_sizes(
                 self.uow, self.backup_store, community_id, server_id, rows
             )
+        author_ids = {row.created_by for row in rows if row.created_by is not None}
+        usernames = await self.users.usernames_for(list(author_ids))
+        return [
+            ListedBackup(
+                backup=row,
+                created_by_username=(
+                    usernames.get(row.created_by)
+                    if row.created_by is not None
+                    else None
+                ),
+            )
+            for row in rows
+        ]
 
 
 @dataclass(frozen=True)

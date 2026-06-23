@@ -28,12 +28,8 @@ export const en = {
   "nav.sharedResources": "Shared resources",
 
   // Placeholder pages (Phase 1: routing skeleton only)
-  "page.login": "Sign in",
-  "page.register": "Register",
   "page.dashboard": "Servers",
   "page.serverCreate": "Create server",
-  "page.serverDetail": "Server detail",
-  "page.communitySettings": "Community settings",
   "page.account": "Account",
   "page.adminOverview": "Platform overview",
   "page.adminUsers": "User management",
@@ -119,6 +115,13 @@ export const en = {
   "common.chooseFile": "Choose file",
   "common.noFileChosen": "No file chosen",
 
+  // Upload progress (issue #1207). `{loaded}`/`{total}` are humanized byte
+  // sizes; `{percent}` is an integer; `{seconds}` is the elapsed seconds.
+  "upload.label": "Uploading",
+  "upload.bytes": "{loaded} / {total}",
+  "upload.percent": "{percent}%",
+  "upload.elapsed": "{seconds}s elapsed",
+
   // Account page (WEBUI_SPEC.md 6.11) — one contiguous block to minimise
   // merge conflicts with sibling PRs adding keys under other prefixes.
   "account.subtitle": "Your profile, security, and memberships.",
@@ -190,8 +193,9 @@ export const en = {
   "dashboard.empty": "No servers yet.",
   "dashboard.emptyHint": "Create your first server to get started.",
   "dashboard.createServer": "Create server",
-  "dashboard.noWorker": "no worker assigned",
+  "dashboard.noWorker": "no host assigned",
   "dashboard.start": "Start",
+  "dashboard.startCrashed": "Restart",
   "dashboard.stop": "Stop",
   "dashboard.restart": "Restart",
   // Card/table view toggle (#541); cards remain the default.
@@ -205,7 +209,7 @@ export const en = {
   "dashboard.col.backend": "Backend",
   "dashboard.col.port": "Port",
   "dashboard.col.address": "Address",
-  "dashboard.col.worker": "Worker",
+  "dashboard.col.worker": "Host",
   "dashboard.col.actions": "Actions",
   // Observed-state pill labels (WEBUI_SPEC.md 2.3).
   "dashboard.state.starting": "starting",
@@ -224,17 +228,17 @@ export const en = {
   "dashboard.lifecycle.portConflict":
     "Could not start: a port is already in use.",
   "dashboard.lifecycle.imageMissing":
-    "Could not start: the server image is missing.",
+    "Could not start: the server's files are not ready. Try again shortly.",
   // 503 service-unavailable reasons (issue #1092): post-restart scenarios where
-  // the Worker or JAR backend is not yet ready.
+  // a host or the server files are not yet ready.
   "dashboard.lifecycle.noEligibleWorker":
-    "No worker is available. If the system just restarted, wait a moment and try again.",
+    "No server host is available right now. If the system just restarted, wait a moment and try again.",
   "dashboard.lifecycle.workerUnavailable":
-    "Could not reach the worker. Please wait a moment and try again.",
+    "Could not reach the server host. Please wait a moment and try again.",
   "dashboard.lifecycle.jarUnavailable":
-    "Could not provision the server JAR. Please wait a moment and try again.",
+    "Could not prepare the server files. Please wait a moment and try again.",
   // Live-status degraded indicator: WS down, polling fallback (SPEC 6.2 / 7.2).
-  "dashboard.liveDegraded": "Live updates degraded — polling",
+  "dashboard.liveDegraded": "Reconnecting — updates may lag",
   // Clickable join-hostname copy feedback.
   "dashboard.copiedJoinHostname": "Copied!",
   // Filter and sort controls (#1123).
@@ -253,11 +257,12 @@ export const en = {
   "serverDetail.breadcrumb": "Servers",
   // Overview header.
   "serverDetail.crashDetail": "Crash reason:",
-  "serverDetail.converging": "settling…",
-  "serverDetail.desired": "desired",
-  "serverDetail.observed": "observed",
-  "serverDetail.noWorker": "no worker assigned",
-  "serverDetail.worker": "Worker",
+  "serverDetail.crashBanner.guidance":
+    "The server has crashed. Click Restart to try again, or check the console for details.",
+  "serverDetail.crashBanner.viewConsole": "View Console",
+  "serverDetail.converging": "applying…",
+  "serverDetail.noWorker": "no host assigned",
+  "serverDetail.worker": "Host",
   "serverDetail.noPort": "no port",
   // Relay join hostname (issue #961): shown in the header when the relay is enabled.
   "serverDetail.copiedJoinHostname": "Copied!",
@@ -269,7 +274,6 @@ export const en = {
   "serverDetail.tab.backups": "Backups",
   "serverDetail.tab.players": "Players",
   "serverDetail.tab.settings": "Settings",
-  "serverDetail.tabPlaceholder": "Coming in a later phase.",
   // Overview live metrics strip + log tail (issue #440, WEBUI_SPEC.md 6.4).
   "serverDetail.metric.cpu": "CPU",
   "serverDetail.metric.memory": "Memory",
@@ -295,6 +299,7 @@ export const en = {
   "serverDetail.commandFailed": "Command failed.",
   // Lifecycle controls.
   "serverDetail.start": "Start",
+  "serverDetail.startCrashed": "Restart",
   "serverDetail.stop": "Stop",
   "serverDetail.stopGraceful": "Stop (graceful)",
   "serverDetail.stopForce": "Force stop",
@@ -319,13 +324,13 @@ export const en = {
   "serverDetail.settings.configHint":
     "Values are read as JSON: 12 is a number, true a boolean, anything else text.",
   // Per-server memory limit (issue #709). Unset means the JVM picks its own
-  // default heap, so the field reads as "driver default" rather than 0/blank.
+  // default heap, so the field reads as "Default" rather than 0/blank.
   "serverDetail.settings.memoryLimit": "Memory limit (MiB)",
-  "serverDetail.settings.memoryLimitDefault": "Driver default",
+  "serverDetail.settings.memoryLimitDefault": "Default",
   "serverDetail.settings.memoryLimitHint":
-    "Maximum memory for this server, in MiB. Leave blank to use the driver default.",
+    "Maximum memory for this server, in MiB. Leave blank to use the default.",
   "serverDetail.settings.memoryLimitRange":
-    "Enter a whole number between 512 and 1048576 MiB, or leave blank for the driver default.",
+    "Enter a whole number between 512 and 1048576 MiB, or leave blank for the default.",
   // Per-server CPU allocation (issue #726). A soft, relative share of host CPU
   // in millicores (1000 = one core), not a hard cap; unset reads as "auto".
   "serverDetail.settings.cpuAllocation": "CPU allocation (millicores)",
@@ -356,7 +361,7 @@ export const en = {
   "serverDetail.danger.heading": "Danger zone",
   "serverDetail.danger.exportTitle": "Export server",
   "serverDetail.danger.exportDesc":
-    "Download the full working set as a ZIP archive.",
+    "Download all of the server's files as a ZIP archive.",
   "serverDetail.danger.exportButton": "Export ZIP",
   "serverDetail.danger.deleteTitle": "Delete server",
   "serverDetail.danger.deleteDesc":
@@ -413,7 +418,7 @@ export const en = {
   "backups.stat.oldest": "Oldest",
   // Table.
   "backups.col.created": "Created",
-  "backups.col.source": "Source",
+  "backups.col.source": "Origin",
   "backups.col.condition": "Condition",
   "backups.col.size": "Size",
   "backups.col.creator": "By",
@@ -478,10 +483,10 @@ export const en = {
   "backups.restored": "Backup restored.",
   "backups.error.notStopped": "Stop the server before restoring a backup.",
   "backups.error.unsettled":
-    "The server is settling — try again once it is stopped or running.",
+    "The server is starting or stopping — try again once it is fully stopped or running.",
   "backups.error.invalidArchive": "That file is not a valid backup archive.",
   "backups.error.workerUnavailable":
-    "No worker is available to take the backup right now.",
+    "No server host is available to take the backup right now.",
   "backups.error.invalidSchedule":
     "backup_interval_hours must be a whole number of hours of at least 1.",
   "backups.error.tooLarge": "That file exceeds the 512 MiB upload limit.",
@@ -491,7 +496,7 @@ export const en = {
   // conflicts with sibling tab PRs minimal.
   "files.denied": "You do not have permission to view this server's files.",
   "files.runningNotice":
-    "Server is running — file edits go to the live working set. Upload and folder creation require stopping the server first.",
+    "Server is running — file edits apply to the running server immediately. Upload and folder creation require stopping the server first.",
   "files.root": "root",
   "files.loading": "Loading…",
   "files.listError": "Could not list this directory. Try refreshing.",
@@ -515,7 +520,6 @@ export const en = {
   "files.delete.dialogBody":
     "This permanently deletes the selected file or directory. Type its name to confirm.",
   "files.delete.confirm": "Delete permanently",
-  "files.delete.prompt": "Type the name to enable deletion",
   // Search (files/search).
   "files.search.label": "Search files",
   "files.search.placeholder": "Search by name…",
@@ -557,23 +561,23 @@ export const en = {
 
   // Players tab — attached op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8).
   // One contiguous block to keep merge conflicts with sibling i18n PRs minimal.
-  "players.heading": "Attached groups",
+  "players.heading": "Applied groups",
   "players.loading": "Loading groups…",
   "players.loadError": "Could not load groups. Try refreshing.",
-  "players.empty": "No groups are attached to this server yet.",
+  "players.empty": "No groups are applied to this server yet.",
   "players.kind.op": "op",
   "players.kind.whitelist": "whitelist",
   // Member count shown next to each group (the group's player list length).
   "players.memberCount": "members",
-  "players.detach": "Detach",
-  "players.detached": "Group detached.",
-  // Attach picker: community groups not yet attached to this server.
-  "players.attachHeading": "Attach a group",
-  "players.attachEmpty": "All of this community's groups are already attached.",
+  "players.detach": "Remove",
+  "players.detached": "Group removed.",
+  // Apply picker: community groups not yet applied to this server.
+  "players.attachHeading": "Apply a group",
+  "players.attachEmpty": "All of this community's groups are already applied.",
   // Distinct from attachEmpty: the community has no groups at all (issue #642).
   "players.attachNoGroups": "This community has no groups yet.",
-  "players.attach": "Attach",
-  "players.attached": "Group attached.",
+  "players.attach": "Apply",
+  "players.attached": "Group applied.",
   // Inline pointer to the full Groups management surface (Phase 6).
   "players.manageHint": "Create and edit groups in community settings.",
   "players.manageLink": "Community settings",
@@ -599,7 +603,7 @@ export const en = {
 
   // Server create wizard (WEBUI_SPEC.md 6.3). One contiguous block to keep
   // merge conflicts with sibling i18n PRs minimal.
-  "serverCreate.subtitle": "Provision a new Minecraft server.",
+  "serverCreate.subtitle": "Set up a new Minecraft server.",
   "serverCreate.denied": "You do not have permission to create servers.",
   "serverCreate.tab.new": "New server",
   "serverCreate.tab.import": "Import ZIP",
@@ -646,13 +650,13 @@ export const en = {
   "serverCreate.namePlaceholder": "survival",
   // Per-server resource allocation in the create wizard (issue #715), mirroring
   // the Settings tab: a memory limit (MiB) and a soft CPU share (millicores).
-  // Both are optional — blank means the driver default / auto.
+  // Both are optional — blank means the default / auto.
   "serverCreate.memoryLimitLabel": "Memory limit (MiB)",
-  "serverCreate.memoryLimitDefault": "Driver default",
+  "serverCreate.memoryLimitDefault": "Default",
   "serverCreate.memoryLimitHint":
-    "Maximum memory for this server, in MiB. Leave blank to use the driver default.",
+    "Maximum memory for this server, in MiB. Leave blank to use the default.",
   "serverCreate.memoryLimitRange":
-    "Enter a whole number between 512 and 1048576 MiB, or leave blank for the driver default.",
+    "Enter a whole number between 512 and 1048576 MiB, or leave blank for the default.",
   "serverCreate.cpuAllocationLabel": "CPU allocation (millicores)",
   "serverCreate.cpuAllocationDefault": "Auto",
   "serverCreate.cpuAllocationHint":
@@ -752,8 +756,6 @@ export const en = {
   "communitySettings.members.removeDialogBody":
     "Removing this member revokes all their roles and per-server grants in this community. This cannot be undone.",
   "communitySettings.members.removeConfirm": "Remove member",
-  "communitySettings.members.removePrompt":
-    "Type the username to enable removal",
   "communitySettings.members.removed": "Member removed.",
   "communitySettings.members.removeError":
     "Could not remove the member. Please try again.",
@@ -838,7 +840,7 @@ export const en = {
   "communitySettings.audit.op.file:mkdir": "Create folder",
   "communitySettings.audit.op.file:search": "Search files",
   "communitySettings.audit.op.version:refresh": "Refresh version catalog",
-  "communitySettings.audit.op.version:jar_gc": "Clean up JAR pool",
+  "communitySettings.audit.op.version:jar_gc": "Free up disk space",
   "communitySettings.audit.op.worker:drain_set": "Drain worker",
   "communitySettings.audit.op.worker:drain_clear": "Undrain worker",
   "communitySettings.audit.op.group:create": "Create player group",
@@ -846,8 +848,8 @@ export const en = {
   "communitySettings.audit.op.group:delete": "Delete player group",
   "communitySettings.audit.op.group:player_add": "Add player to group",
   "communitySettings.audit.op.group:player_remove": "Remove player from group",
-  "communitySettings.audit.op.group:attach": "Attach player group",
-  "communitySettings.audit.op.group:detach": "Detach player group",
+  "communitySettings.audit.op.group:attach": "Apply player group",
+  "communitySettings.audit.op.group:detach": "Remove player group",
   "communitySettings.audit.targetType.community": "Community",
   "communitySettings.audit.targetType.user": "User",
   "communitySettings.audit.targetType.role": "Role",
@@ -889,8 +891,6 @@ export const en = {
   "communitySettings.roles.deleteDialogBody":
     "Deleting this role removes it from every member who holds it. This cannot be undone.",
   "communitySettings.roles.deleteConfirm": "Delete role",
-  "communitySettings.roles.deletePrompt":
-    "Type the role name to enable deletion",
   // Permission family group labels (WEBUI_SPEC.md 2.2).
   "communitySettings.roles.family.server": "Servers",
   "communitySettings.roles.family.file": "Files",
@@ -957,8 +957,6 @@ export const en = {
   "communitySettings.grants.revokeDialogBody":
     "This removes the member's per-server permissions on this server. This cannot be undone.",
   "communitySettings.grants.revokeConfirm": "Revoke grant",
-  "communitySettings.grants.revokePrompt": "Type REVOKE to confirm",
-  "communitySettings.grants.revokeConfirmPhrase": "REVOKE",
   "communitySettings.grants.createDialogTitle": "Grant per-server access",
   "communitySettings.grants.createDialogBody":
     "Grant a member extra permissions on one server, beyond their roles.",
@@ -1024,9 +1022,8 @@ export const en = {
   "communitySettings.groups.renamed": "Group renamed.",
   "communitySettings.groups.deleteDialogTitle": "Delete group",
   "communitySettings.groups.deleteDialogBody":
-    "Deleting this group removes it from every server it is attached to. This cannot be undone.",
+    "Deleting this group removes it from every server it is applied to. This cannot be undone.",
   "communitySettings.groups.deleteConfirm": "Delete group",
-  "communitySettings.groups.deletePrompt": "Type the group name to confirm.",
   "communitySettings.groups.deleted": "Group deleted.",
   "communitySettings.groups.playersHeading": "Players",
   "communitySettings.groups.playersEmpty": "No players in this group yet.",
@@ -1043,25 +1040,25 @@ export const en = {
   "communitySettings.groups.usernamePlaceholder": "username",
   "communitySettings.groups.playerFieldsEmpty": "Enter a UUID and username.",
   "communitySettings.groups.playerAdded": "Player added.",
-  "communitySettings.groups.serversHeading": "Attached servers",
+  "communitySettings.groups.serversHeading": "Applied to servers",
   "communitySettings.groups.serversLoading": "Loading servers…",
   "communitySettings.groups.serversLoadError": "Could not load servers.",
   "communitySettings.groups.serversEmpty":
-    "This group is not attached to any server yet.",
-  "communitySettings.groups.detach": "Detach",
-  "communitySettings.groups.detached": "Server detached.",
-  "communitySettings.groups.attachHeading": "Attach a server",
+    "This group is not applied to any server yet.",
+  "communitySettings.groups.detach": "Remove",
+  "communitySettings.groups.detached": "Group removed from the server.",
+  "communitySettings.groups.attachHeading": "Apply to a server",
   "communitySettings.groups.attachEmpty":
-    "Every community server is already attached.",
-  "communitySettings.groups.attach": "Attach",
-  "communitySettings.groups.attached": "Server attached.",
+    "Every community server already has this group applied.",
+  "communitySettings.groups.attach": "Apply",
+  "communitySettings.groups.attached": "Group applied to the server.",
   "communitySettings.groups.unknownServer": "(unknown server)",
 
   // Platform admin area (WEBUI_SPEC.md 6.12, Section 3) — #474
   "admin.denied.title": "Platform administrators only",
   "admin.denied.body": "You do not have access to the platform admin area.",
   "admin.overview.subtitle":
-    "Fleet and global statistics — platform administrators only",
+    "Worker and global statistics — platform administrators only",
   "admin.overview.loading": "Loading platform statistics…",
   "admin.overview.loadError": "Could not load platform statistics.",
   "admin.overview.workers": "Workers",
@@ -1069,18 +1066,18 @@ export const en = {
   "admin.overview.workersDraining": "draining",
   "admin.overview.workersOffline": "offline",
   "admin.overview.servers": "Servers running",
-  "admin.overview.serversHint": "assigned across the fleet",
+  "admin.overview.serversHint": "assigned across all workers",
   "admin.overview.backups": "Backups (global)",
-  "admin.overview.jarPool": "jar pool",
+  "admin.overview.jarPool": "Server downloads",
   "admin.overview.jars": "jars",
-  "admin.overview.fleet": "Worker fleet",
+  "admin.overview.fleet": "All workers",
   "admin.overview.fleetWorker": "Worker",
   "admin.overview.fleetStatus": "Status",
   "admin.overview.fleetLoad": "Load",
   "admin.overview.fleetHeartbeat": "Heartbeat",
   "admin.overview.fleetEmpty": "No workers registered.",
   "admin.versions.subtitle":
-    "Version catalog and the shared JAR cache — platform administrators only",
+    "Version catalog and shared server downloads — platform administrators only",
   "admin.versions.loading": "Loading version catalog…",
   "admin.versions.loadError": "Could not load the version catalog.",
   "admin.versions.catalog": "Server type catalog",
@@ -1092,27 +1089,25 @@ export const en = {
   "admin.versions.latest": "Latest",
   "admin.versions.empty": "No server types catalogued.",
   "admin.versions.typeError": "unavailable",
-  "admin.versions.refreshedAll":
-    "Catalogs invalidated; listings refetch on next read.",
-  // Composed with the server type, e.g. "Refreshed catalog: paper".
-  "admin.versions.refreshedOne": "Refreshed catalog: ",
+  "admin.versions.refreshedAll": "Version lists will reload from upstream.",
+  // Interpolated with the server type, e.g. "Refreshed catalog: paper".
+  "admin.versions.refreshedOne": "Refreshed catalog: {type}",
   "admin.versions.refreshError": "Could not refresh the catalog.",
-  "admin.versions.jarPool": "JAR pool",
-  "admin.versions.jarPoolCached": "Cached JARs",
+  "admin.versions.jarPool": "Server downloads",
+  "admin.versions.jarPoolCached": "Downloaded JARs",
   "admin.versions.jarPoolSize": "Total size",
-  "admin.versions.gc": "Run garbage collection",
+  "admin.versions.gc": "Free up disk space",
   "admin.versions.gcRunning": "Running…",
-  "admin.versions.gcHint": "Removes JARs no longer referenced by any server.",
-  "admin.versions.gcDialog.title": "Run JAR-pool garbage collection?",
+  "admin.versions.gcHint":
+    "Deletes downloaded server JARs that no server uses any more.",
+  "admin.versions.gcDialog.title": "Free up disk space?",
   "admin.versions.gcDialog.body":
-    "This deletes pooled JARs that no live server references. Unreferenced JARs are re-downloaded on demand.",
-  "admin.versions.gcDialog.confirm": "Run GC",
-  "admin.versions.gcDialog.promptLabel": "Type GC to confirm",
-  // Composed with freed bytes + deleted count, e.g. "Reclaimed 412 MiB across 3 JARs.".
-  "admin.versions.gcDoneReclaimed": "Reclaimed ",
-  "admin.versions.gcDoneAcross": " across ",
-  "admin.versions.gcDoneJars": " JARs.",
-  "admin.versions.gcError": "Garbage collection failed.",
+    "This deletes downloaded server JARs that no live server uses. They are downloaded again when next needed.",
+  "admin.versions.gcDialog.confirm": "Delete unused files",
+  // Interpolated with freed bytes + deleted count, e.g.
+  // "Freed 412 MiB by deleting 3 unused JARs.".
+  "admin.versions.gcDone": "Freed {bytes} by deleting {count} unused JARs.",
+  "admin.versions.gcError": "Could not free up disk space.",
   // Communities (WEBUI_SPEC.md 6.12) — #476, #489
   "admin.communities.subtitle":
     "All communities on the platform. Provisioning is admin-only; self-service creation is not supported.",
@@ -1148,9 +1143,7 @@ export const en = {
   // Truncation hint composed around the loaded/total counts, e.g.
   // "Showing the first 100 of 150 users." The owner picker requests the API
   // max page (100); when more accounts exist the later ones are omitted.
-  "admin.communities.usersTruncatedPrefix": "Showing the first ",
-  "admin.communities.usersTruncatedMid": " of ",
-  "admin.communities.usersTruncatedSuffix": " users.",
+  "admin.communities.usersTruncated": "Showing the first {n} of {total} users.",
   "admin.communities.provisioned": "Community provisioned.",
   "admin.communities.errNameRequired": "Enter a community name.",
   "admin.communities.errOwnerRequired": "Select an initial owner.",
@@ -1185,12 +1178,12 @@ export const en = {
     "Undraining lets this worker accept new placements again.",
   "admin.workers.undrainConfirm": "Undrain worker",
   "admin.workers.drained": "Worker draining.",
-  // Appended after "Worker draining." when servers_stopped > 0, e.g.
+  // Shown when servers_stopped > 0, interpolated with the count, e.g.
   // "Worker draining. 3 servers marked — keep this worker connected until each is stopped and unassigned."
-  "admin.workers.drainedCountSuffix":
-    " servers marked — keep this worker connected until each is stopped and unassigned.",
+  "admin.workers.drainedCount":
+    "Worker draining. {count} servers marked — keep this worker connected until each is stopped and unassigned.",
   "admin.workers.drainDialogConvergenceWarning":
-    "Stops and final snapshots run asynchronously (~120 s grace + a tick per server) and only while the worker stays connected. Keep this worker up until every formerly-assigned server reaches stopped and unassigned — shutting down early defers stops and snapshots to a reconnect that never happens in a decommission. Confirm convergence per server in the server list, not by the worker's load counter (which drops to 0 before any stop runs).",
+    "Stops and final snapshots only run while the worker stays connected. Keep this worker up until every server that was assigned to it shows as stopped and unassigned — shutting it down early leaves those servers without a final snapshot. Check each server in the server list to confirm it has stopped.",
   "admin.workers.undrained": "Worker undrained.",
   "admin.workers.drainError": "Could not drain the worker.",
   "admin.workers.undrainError": "Could not undrain the worker.",
@@ -1199,7 +1192,6 @@ export const en = {
 
   // Admin Users page (WEBUI_SPEC.md 6.12) — user lifecycle, admin flag,
   // create-user dialog. One contiguous block (#475).
-  "admin.users.subtitle": "Platform-wide user administration",
   "admin.users.loading": "Loading users…",
   "admin.users.loadError": "Could not load users.",
   "admin.users.empty": "No users.",
@@ -1268,9 +1260,8 @@ export const en = {
   // Truncation hint composed around the loaded/total counts, e.g. "Showing the
   // first 100 of 150 communities." The picker requests the API max page (100);
   // when more communities exist the later ones are omitted (#476/#488).
-  "admin.audit.communitiesTruncatedPrefix": "Showing the first ",
-  "admin.audit.communitiesTruncatedMid": " of ",
-  "admin.audit.communitiesTruncatedSuffix": " communities.",
+  "admin.audit.communitiesTruncated":
+    "Showing the first {n} of {total} communities.",
 
   // Plugins tab (issue #1153). One contiguous block to keep merge conflicts
   // with sibling i18n PRs minimal.
@@ -1443,8 +1434,6 @@ export const en = {
   "resourcePacks.uploadDialog.file": "File (.zip)",
   "resourcePacks.uploadDialog.submit": "Upload",
   "resourcePacks.uploadDialog.uploading": "Uploading…",
-  "resourcePacks.uploadDialog.nameRequired": "Enter a display name.",
-  "resourcePacks.uploadDialog.fileRequired": "Choose a .zip file.",
   "resourcePacks.uploaded": "Resource pack uploaded.",
   "resourcePacks.deleted": "Resource pack deleted.",
   "resourcePacks.deleteDialog.title": "Delete resource pack",
@@ -1501,8 +1490,8 @@ export const en = {
 
   // Permission / authorization feedback (WEBUI_SPEC.md 7.3 / 7.4)
   "permissions.denied": "You do not have permission to do that.",
-  // Composed with the missing permission code, e.g. "You lack: server:start".
-  "permissions.deniedNamed": "You lack: ",
+  // Interpolated with the missing permission code, e.g. "You lack: server:start".
+  "permissions.deniedNamed": "You lack: {permission}",
 
   // Error boundary (#1211): shown when an unhandled rendering error crashes a
   // component subtree instead of the default white-screen unmount.

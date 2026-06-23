@@ -22,7 +22,7 @@
       "nav.adminAudit": "Global audit",
       "nav.account": "Account",
       "conn.live": "live",
-      "conn.degraded": "degraded — polling",
+      "conn.degraded": "Reconnecting — updates may lag",
       "toast.mock": "Mockup: no real API call was made.",
     },
   };
@@ -58,7 +58,7 @@
         ${navItem("admin-versions.html", "⬇", t("nav.adminVersions"), page === "admin-versions")}
         ${navItem("admin-audit.html", "≡", t("nav.adminAudit"), page === "admin-audit")}
       </div>
-      <div class="sidebar-foot">api v0.9 · ui mockup</div>`;
+      <div class="sidebar-foot">api v1.0 · ui mockup</div>`;
 
     const degraded = document.body.dataset.conn === "degraded";
     topbar.innerHTML = `
@@ -69,6 +69,7 @@
       <div class="conn-indicator${degraded ? " degraded" : ""}">
         <span class="dot"></span>${degraded ? t("conn.degraded") : t("conn.live")}
       </div>
+      <span class="lang-switcher" style="font-size:12px;color:var(--text-dim);cursor:pointer" onclick="mockToast('Language toggled')" title="Language"><strong>EN</strong> / JA</span>
       <a class="user-menu" href="account.html" title="${t("nav.account")}">
         <span class="avatar">${MOCK.me.username.slice(0, 1).toUpperCase()}</span>
         ${MOCK.me.username}
