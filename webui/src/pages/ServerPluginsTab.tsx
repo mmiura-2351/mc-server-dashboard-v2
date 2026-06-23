@@ -10,7 +10,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
-import { ApiError, api } from "../api/client.ts";
+import { ApiError, api, postFormWithProgress } from "../api/client.ts";
 import { downloadFile } from "../api/download.ts";
 import { apiPath } from "../api/path.ts";
 import {
@@ -318,7 +318,7 @@ export function ServerPluginsTab({
       const form = new FormData();
       form.append("file", file);
       form.append("display_name", file.name.replace(/\.jar$/i, ""));
-      return api.postForm(
+      return postFormWithProgress(
         apiPath("/api/communities/{community_id}/servers/{server_id}/plugins", {
           community_id: communityId,
           server_id: serverId,

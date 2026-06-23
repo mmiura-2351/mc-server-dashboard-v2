@@ -840,7 +840,7 @@ describe("ServerFilesTab 409 reason toasts", () => {
       detail: server({ server_type: "paper" }),
       list: listing([]),
     });
-    mockApi.postForm.mockRejectedValue(
+    mockPostFormWithProgress.mockRejectedValue(
       new ApiError(409, { reason: "content_dir_protected" }),
     );
     renderPage();
@@ -864,7 +864,7 @@ describe("ServerFilesTab 409 reason toasts", () => {
       detail: server({ server_type: "fabric" }),
       list: listing([]),
     });
-    mockApi.postForm.mockRejectedValue(
+    mockPostFormWithProgress.mockRejectedValue(
       new ApiError(409, { reason: "content_dir_protected" }),
     );
     renderPage();
