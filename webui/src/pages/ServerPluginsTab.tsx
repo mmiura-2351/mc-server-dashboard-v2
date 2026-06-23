@@ -500,7 +500,7 @@ export function ServerPluginsTab({
           removeTarget !== null
             ? t("plugins.removeDialog.title").replace(
                 "{name}",
-                removeTarget.display_name,
+                () => removeTarget.display_name,
               )
             : ""
         }
@@ -789,9 +789,9 @@ function PluginValidationChecklist({
               className="field-error"
             >
               {t("plugins.validation.missingDep")
-                .replace("{mod}", nameOf(finding.mod_id))
-                .replace("{dependency}", finding.depends_on)
-                .replace("{range}", formatRange(finding.version_range))
+                .replace("{mod}", () => nameOf(finding.mod_id))
+                .replace("{dependency}", () => finding.depends_on)
+                .replace("{range}", () => formatRange(finding.version_range))
                 .replace(" ()", "")
                 .replace("（）", "")}
             </li>
@@ -802,10 +802,10 @@ function PluginValidationChecklist({
               className="field-error"
             >
               {t("plugins.validation.missingCatalogDep")
-                .replace("{mod}", nameOf(finding.mod_id))
+                .replace("{mod}", () => nameOf(finding.mod_id))
                 .replace(
                   "{dependency}",
-                  finding.title ?? finding.slug ?? finding.project_id,
+                  () => finding.title ?? finding.slug ?? finding.project_id,
                 )}
             </li>
           ))}
@@ -815,12 +815,12 @@ function PluginValidationChecklist({
               className="field-error"
             >
               {t("plugins.validation.versionUnsatisfied")
-                .replace("{mod}", nameOf(finding.mod_id))
-                .replace("{dependency}", finding.depends_on)
-                .replace("{range}", formatRange(finding.version_range))
+                .replace("{mod}", () => nameOf(finding.mod_id))
+                .replace("{dependency}", () => finding.depends_on)
+                .replace("{range}", () => formatRange(finding.version_range))
                 .replace(" ()", "")
                 .replace("（）", "")
-                .replace("{present}", finding.present_version)}
+                .replace("{present}", () => finding.present_version)}
             </li>
           ))}
           {validation.conflicts.map((finding) => (
@@ -829,16 +829,18 @@ function PluginValidationChecklist({
               className="field-error"
             >
               {t("plugins.validation.conflict")
-                .replace("{mod}", nameOf(finding.mod_id))
-                .replace("{other}", finding.conflicts_with)}
+                .replace("{mod}", () => nameOf(finding.mod_id))
+                .replace("{other}", () => finding.conflicts_with)}
             </li>
           ))}
           {validation.mc_mismatch.map((finding) => (
             <li key={`mc-${finding.mod_id}`} className="field-hint warn">
               {t("plugins.validation.mcMismatch")
-                .replace("{mod}", nameOf(finding.mod_id))
-                .replace("{serverVersion}", finding.server_mc_version)
-                .replace("{modVersions}", finding.mod_mc_versions.join(", "))}
+                .replace("{mod}", () => nameOf(finding.mod_id))
+                .replace("{serverVersion}", () => finding.server_mc_version)
+                .replace("{modVersions}", () =>
+                  finding.mod_mc_versions.join(", "),
+                )}
             </li>
           ))}
         </ul>
@@ -937,11 +939,11 @@ function PluginResolveModal({
                 {imports.map((e) => (
                   <li key={`import-${e.dep_identifier}`}>
                     {t("plugins.resolve.importItem")
-                      .replace("{dependency}", e.dep_identifier)
-                      .replace("{project}", e.will_import?.slug ?? "")
+                      .replace("{dependency}", () => e.dep_identifier)
+                      .replace("{project}", () => e.will_import?.slug ?? "")
                       .replace(
                         "{version}",
-                        e.will_import?.version_number ?? "",
+                        () => e.will_import?.version_number ?? "",
                       )}
                   </li>
                 ))}
@@ -960,7 +962,7 @@ function PluginResolveModal({
                   >
                     {t("plugins.resolve.conflictItem").replace(
                       "{dependency}",
-                      e.will_import?.slug ?? e.dep_identifier,
+                      () => e.will_import?.slug ?? e.dep_identifier,
                     )}
                   </li>
                 ))}
@@ -979,7 +981,7 @@ function PluginResolveModal({
                   >
                     {t("plugins.resolve.unresolvableItem").replace(
                       "{dependency}",
-                      e.dep_identifier,
+                      () => e.dep_identifier,
                     )}
                   </li>
                 ))}
@@ -995,7 +997,7 @@ function PluginResolveModal({
                   <li key={`satisfied-${e.dep_identifier}`} className="sub">
                     {t("plugins.resolve.satisfiedItem").replace(
                       "{dependency}",
-                      nameOf(e.dep_identifier),
+                      () => nameOf(e.dep_identifier),
                     )}
                   </li>
                 ))}

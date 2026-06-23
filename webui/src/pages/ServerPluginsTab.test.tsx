@@ -307,6 +307,30 @@ describe("ServerPluginsTab validation checklist", () => {
       screen.queryByText("Dependencies & compatibility"),
     ).not.toBeInTheDocument();
   });
+
+  it("renders $-patterns in plugin names literally (#1406)", async () => {
+    mockGets({
+      plugins: [
+        plugin({ display_name: "Cash$&Money", mod_identifier: "cashmod" }),
+      ],
+      validation: {
+        ...EMPTY_VALIDATION,
+        missing_deps: [
+          {
+            mod_id: "cashmod",
+            depends_on: "fabric-api",
+            version_range: "",
+          },
+        ],
+      },
+    });
+    renderTab();
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Cash\$&Money requires fabric-api/),
+      ).toBeInTheDocument();
+    });
+  });
 });
 
 describe("ServerPluginsTab loader-aware noun (#1320)", () => {
