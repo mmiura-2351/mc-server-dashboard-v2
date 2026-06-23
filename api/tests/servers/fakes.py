@@ -26,6 +26,13 @@ from mc_server_dashboard_api.servers.domain.backup_repository import (
     BackupRepository,
 )
 from mc_server_dashboard_api.servers.domain.backup_store import BackupArchiveStore
+from mc_server_dashboard_api.servers.domain.catalog_provider import (
+    CatalogProject,
+    CatalogProvider,
+    CatalogSearchResponse,
+    CatalogSearchResult,
+    CatalogVersion,
+)
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.committed_resources import (
     CommittedResources,
@@ -59,6 +66,16 @@ from mc_server_dashboard_api.servers.domain.jar_provisioner import (
 )
 from mc_server_dashboard_api.servers.domain.lifecycle_lock import LifecycleLock
 from mc_server_dashboard_api.servers.domain.memory_limit import memory_limit_from_config
+from mc_server_dashboard_api.servers.domain.plugin import (
+    PluginId,
+    PluginSource,
+    ServerPlugin,
+)
+from mc_server_dashboard_api.servers.domain.plugin_cache_store import (
+    CacheEntry,
+    PluginCacheStore,
+)
+from mc_server_dashboard_api.servers.domain.plugin_repository import PluginRepository
 from mc_server_dashboard_api.servers.domain.repositories import (
     ResourceGrantSweeper,
     ServerRepository,
@@ -659,6 +676,87 @@ class FakeGroupRepository(GroupRepository):
         ]
 
 
+class FakePluginRepository(PluginRepository):
+    def __init__(self) -> None:
+        self.by_id: dict[PluginId, ServerPlugin] = {}
+
+    def seed(self, plugin: ServerPlugin) -> None:
+        self.by_id[plugin.id] = plugin
+
+    async def add(self, plugin: ServerPlugin) -> None:
+        self.by_id[plugin.id] = plugin
+
+    async def get_by_id(
+        self, server_id: ServerId, plugin_id: PluginId
+    ) -> ServerPlugin | None:
+        plugin = self.by_id.get(plugin_id)
+        if plugin is not None and plugin.server_id != server_id:
+            return None
+        return plugin
+
+    async def list_for_server(self, server_id: ServerId) -> list[ServerPlugin]:
+        return sorted(
+            (p for p in self.by_id.values() if p.server_id == server_id),
+            key=lambda p: (p.display_name, str(p.id.value)),
+        )
+
+    async def delete(self, plugin_id: PluginId) -> None:
+        self.by_id.pop(plugin_id, None)
+
+    async def get_by_rel_path(
+        self, server_id: ServerId, rel_path: str
+    ) -> ServerPlugin | None:
+        # Normalize the .disabled suffix so a clean path and its disabled variant
+        # share the same per-server slot (issue #1316), mirroring the adapter:
+        # prefer an exact-path match, else fall back to the suffix sibling.
+        clean = rel_path.removesuffix(".disabled")
+        candidates = [
+            plugin
+            for plugin in self.by_id.values()
+            if plugin.server_id == server_id
+            and plugin.rel_path.removesuffix(".disabled") == clean
+        ]
+        exact = next((p for p in candidates if p.rel_path == rel_path), None)
+        if exact is not None:
+            return exact
+        return candidates[0] if candidates else None
+
+    async def update(self, plugin: ServerPlugin) -> None:
+        self.by_id[plugin.id] = plugin
+
+    async def list_modrinth_plugins(self, server_id: ServerId) -> list[ServerPlugin]:
+        return sorted(
+            (
+                p
+                for p in self.by_id.values()
+                if p.server_id == server_id
+                and p.source is PluginSource.MODRINTH
+                and p.source_project_id is not None
+            ),
+            key=lambda p: (p.display_name, str(p.id.value)),
+        )
+
+    async def get_by_source_project_id(
+        self, server_id: ServerId, source_project_id: str
+    ) -> ServerPlugin | None:
+        for plugin in self.by_id.values():
+            if (
+                plugin.server_id == server_id
+                and plugin.source_project_id == source_project_id
+            ):
+                return plugin
+        return None
+
+    async def all_sha256s(self) -> set[str]:
+        return {p.sha256 for p in self.by_id.values() if p.sha256 is not None}
+
+    async def find_sha256_by_sha512(self, checksum_sha512: str) -> str | None:
+        for plugin in self.by_id.values():
+            if plugin.checksum_sha512 == checksum_sha512 and plugin.sha256 is not None:
+                return plugin.sha256
+        return None
+
+
 class FakeResourcePackRepository(ResourcePackRepository):
     def __init__(self) -> None:
         self.packs: dict[ResourcePackId, ResourcePack] = {}
@@ -704,6 +802,7 @@ class FakeUnitOfWork(UnitOfWork):
     backups: FakeBackupRepository
     groups: FakeGroupRepository
     game_sessions: FakeGameSessionRepository
+    plugins: FakePluginRepository
     resource_packs: FakeResourcePackRepository
 
     def __init__(
@@ -713,6 +812,7 @@ class FakeUnitOfWork(UnitOfWork):
         backups: FakeBackupRepository | None = None,
         groups: FakeGroupRepository | None = None,
         game_sessions: FakeGameSessionRepository | None = None,
+        plugins: FakePluginRepository | None = None,
         resource_packs: FakeResourcePackRepository | None = None,
     ) -> None:
         self.servers = servers or FakeServerRepository()
@@ -720,6 +820,7 @@ class FakeUnitOfWork(UnitOfWork):
         self.backups = backups or FakeBackupRepository()
         self.groups = groups or FakeGroupRepository()
         self.game_sessions = game_sessions or FakeGameSessionRepository()
+        self.plugins = plugins or FakePluginRepository()
         self.resource_packs = resource_packs or FakeResourcePackRepository()
         self.commits = 0
 
@@ -1069,6 +1170,120 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         return len(self.bytes_by_ref[storage_ref])
 
 
+class FakeCatalogProvider(CatalogProvider):
+    """In-memory :class:`CatalogProvider` double for catalog use-case tests.
+
+    Stores projects, versions, and downloadable file bytes. Search returns all
+    seeded projects (no actual text matching). ``unavailable`` makes every call
+    raise :class:`CatalogUnavailableError`.
+    """
+
+    def __init__(self, *, unavailable: bool = False) -> None:
+        self.projects: dict[str, CatalogProject] = {}
+        self.versions: dict[str, list[CatalogVersion]] = {}
+        self.file_bytes: dict[str, bytes] = {}
+        # Records each download_file URL so a test can assert the download cache
+        # skipped an HTTP fetch for an already-cached Modrinth version (#1306).
+        self.downloads: list[str] = []
+        self._unavailable = unavailable
+
+    def seed_project(
+        self,
+        project: CatalogProject,
+        versions: list[CatalogVersion] | None = None,
+    ) -> None:
+        self.projects[project.project_id] = project
+        self.projects[project.slug] = project
+        if versions:
+            self.versions.setdefault(project.project_id, []).extend(versions)
+            self.versions.setdefault(project.slug, []).extend(versions)
+
+    def seed_file(self, url: str, content: bytes) -> None:
+        self.file_bytes[url] = content
+
+    async def search(
+        self,
+        *,
+        query: str,
+        loader: str,
+        game_versions: list[str],
+        limit: int = 20,
+        offset: int = 0,
+    ) -> CatalogSearchResponse:
+        from mc_server_dashboard_api.servers.domain.errors import (
+            CatalogUnavailableError,
+        )
+
+        if self._unavailable:
+            raise CatalogUnavailableError("fake unavailable")
+        # Deduplicate by project_id (seeded twice: by id and slug).
+        seen: set[str] = set()
+        hits: list[CatalogSearchResult] = []
+        for project in self.projects.values():
+            if project.project_id in seen:
+                continue
+            seen.add(project.project_id)
+            hits.append(
+                CatalogSearchResult(
+                    project_id=project.project_id,
+                    slug=project.slug,
+                    title=project.title,
+                    description=project.description,
+                    author=project.author or "",
+                    icon_url=project.icon_url,
+                    downloads=project.downloads,
+                    categories=project.categories,
+                    latest_game_versions=project.game_versions,
+                )
+            )
+        page = hits[offset : offset + limit]
+        return CatalogSearchResponse(
+            hits=page, total_hits=len(hits), offset=offset, limit=limit
+        )
+
+    async def get_project(self, project_id_or_slug: str) -> CatalogProject:
+        from mc_server_dashboard_api.servers.domain.errors import (
+            CatalogProjectNotFoundError,
+            CatalogUnavailableError,
+        )
+
+        if self._unavailable:
+            raise CatalogUnavailableError("fake unavailable")
+        project = self.projects.get(project_id_or_slug)
+        if project is None:
+            raise CatalogProjectNotFoundError(project_id_or_slug)
+        return project
+
+    async def list_versions(
+        self,
+        project_id_or_slug: str,
+        *,
+        loader: str | None = None,
+        game_versions: list[str] | None = None,
+    ) -> list[CatalogVersion]:
+        from mc_server_dashboard_api.servers.domain.errors import (
+            CatalogUnavailableError,
+        )
+
+        if self._unavailable:
+            raise CatalogUnavailableError("fake unavailable")
+        return self.versions.get(project_id_or_slug, [])
+
+    async def download_file(self, url: str) -> bytes:
+        from mc_server_dashboard_api.servers.domain.errors import (
+            CatalogProjectNotFoundError,
+            CatalogUnavailableError,
+        )
+
+        if self._unavailable:
+            raise CatalogUnavailableError("fake unavailable")
+        self.downloads.append(url)
+        content = self.file_bytes.get(url)
+        if content is None:
+            raise CatalogProjectNotFoundError(url)
+        return content
+
+
 class FakeResourcePackStore(ResourcePackStore):
     """In-memory resource pack blob store for use-case tests (issue #1176)."""
 
@@ -1097,3 +1312,47 @@ class FakeResourcePackStore(ResourcePackStore):
 
     async def size(self, pack_id: ResourcePackId, filename: str) -> int:
         return len(self.blobs[pack_id])
+
+
+class FakePluginCacheStore(PluginCacheStore):
+    """In-memory content-addressed plugin cache for use-case tests (issue #1306).
+
+    Keyed by SHA-256 content address. ``puts`` records each ``put`` call (even the
+    deduped ones) and ``stored`` holds the keys actually persisted, so a test can
+    assert dedup (a second put of identical bytes does not grow ``stored``) and the
+    download cache (a cached ``has`` short-circuits the HTTP download).
+    """
+
+    def __init__(self) -> None:
+        self.blobs: dict[str, bytes] = {}
+        self.puts: list[str] = []
+
+    async def has(self, sha256: str) -> bool:
+        return sha256 in self.blobs
+
+    async def put(self, sha256: str, stream: AsyncIterator[bytes]) -> None:
+        self.puts.append(sha256)
+        data = b"".join([chunk async for chunk in stream])
+        # Dedup-on-ingest: identical content addresses the same key.
+        self.blobs.setdefault(sha256, data)
+
+    def open(self, sha256: str) -> AsyncIterator[bytes]:
+        data = self.blobs[sha256]
+
+        async def _gen() -> AsyncIterator[bytes]:
+            yield data
+
+        return _gen()
+
+    async def list_entries(self) -> list[CacheEntry]:
+        return [
+            CacheEntry(
+                sha256=sha,
+                size_bytes=len(data),
+                modified_at=dt.datetime.now(dt.UTC),
+            )
+            for sha, data in self.blobs.items()
+        ]
+
+    async def delete(self, sha256: str) -> None:
+        self.blobs.pop(sha256, None)

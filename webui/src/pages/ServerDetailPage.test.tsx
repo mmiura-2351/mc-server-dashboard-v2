@@ -212,6 +212,51 @@ describe("ServerDetailPage scaffold + header", () => {
   });
 });
 
+describe("ServerDetailPage loader-aware content tab (#1320)", () => {
+  it("labels the content tab 'Plugins' for a paper server", async () => {
+    mockApi.get.mockResolvedValue(server({ server_type: "paper" }));
+    renderPage();
+
+    expect(
+      await screen.findByRole("tab", { name: t("serverDetail.tab.plugins") }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("tab", { name: t("serverDetail.tab.mods") }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("labels the content tab 'Mods' for fabric and forge servers", async () => {
+    for (const type of ["fabric", "forge"]) {
+      mockApi.get.mockResolvedValue(server({ server_type: type }));
+      const { unmount } = renderPage();
+
+      expect(
+        await screen.findByRole("tab", { name: t("serverDetail.tab.mods") }),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByRole("tab", { name: t("serverDetail.tab.plugins") }),
+      ).not.toBeInTheDocument();
+      unmount();
+    }
+  });
+
+  it("hides the content tab for vanilla and spigot servers", async () => {
+    for (const type of ["vanilla", "spigot"]) {
+      mockApi.get.mockResolvedValue(server({ server_type: type }));
+      const { unmount } = renderPage();
+
+      await screen.findByRole("tab", { name: t("serverDetail.tab.overview") });
+      expect(
+        screen.queryByRole("tab", { name: t("serverDetail.tab.plugins") }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("tab", { name: t("serverDetail.tab.mods") }),
+      ).not.toBeInTheDocument();
+      unmount();
+    }
+  });
+});
+
 describe("ServerDetailPage URL-driven tabs (#514)", () => {
   let restoreWs: () => void;
   beforeEach(() => {
