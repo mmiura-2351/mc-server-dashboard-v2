@@ -73,6 +73,14 @@ class RunPluginCacheGc:
                 # Inside the safety window: may be an in-flight install's
                 # just-cached blob whose plugin row has not committed yet.
                 continue
+            # Re-check live references immediately before delete (issue #1404):
+            # a dedup install reuses an existing blob without refreshing its
+            # modified_at, so the safety window alone cannot protect it.
+            # Between the snapshot above and this point, a new plugin row may
+            # have committed — re-checking avoids reclaiming a live blob.
+            fresh_live = await self.references.live()
+            if entry.sha256 in fresh_live:
+                continue
             await self.cache.delete(entry.sha256)
             deleted += 1
             freed_bytes += entry.size_bytes

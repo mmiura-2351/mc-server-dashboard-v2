@@ -1775,3 +1775,94 @@ async def test_install_from_catalog_cache_hit_skips_download_when_url_dead() -> 
     assert plugin.sha256 == sha256
     # No HTTP download happened (the cache served the bytes).
     assert catalog.downloads == []
+
+
+async def test_cache_hit_verifies_sha512_rejects_corrupted_blob() -> None:
+    """A cache hit re-hashes the blob and rejects it when SHA-512 no longer matches.
+
+    If the cached blob is corrupted or tampered with in object storage, the
+    cache-hit path must detect the mismatch instead of silently serving bad data
+    (issue #1402).
+    """
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+
+    project = _project()
+    version, content = _version()
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(project, [version])
+    # Do NOT seed the file URL: if the cache hit falls through, the test fails
+    # for the wrong reason (download error instead of checksum mismatch).
+
+    sha256 = hashlib.sha256(content).hexdigest()
+    cache = FakePluginCacheStore()
+    # Seed the cache with CORRUPTED bytes under the correct sha256 key.
+    cache.blobs[sha256] = b"corrupted-blob-bytes"
+    # Seed the download-cache index so the cache-hit path is taken.
+    prior = _plugin(
+        server_id=ServerId.new(),
+        checksum_sha512=version.files[0].sha512,
+        sha256=sha256,
+    )
+    uow.plugins.seed(prior)
+
+    uc = InstallFromCatalog(
+        uow=uow,
+        catalog=catalog,
+        file_store=FakeFileStore(),
+        cache=cache,
+        clock=FakeClock(_NOW),
+    )
+    with pytest.raises(CatalogChecksumMismatchError):
+        await uc(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            project_id="proj-1",
+            version_id="ver-1",
+        )
+
+
+async def test_cache_hit_does_not_reupload_blob() -> None:
+    """A cache hit skips the upload; GC protection is in the GC re-check (#1404).
+
+    The real object-store adapter's ``put`` skips the upload when the blob
+    already exists (dedup-on-ingest), so re-putting would be a no-op anyway.
+    The GC race is handled by re-checking live() before each delete in
+    ``RunPluginCacheGc`` instead.
+    """
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+
+    project = _project()
+    version, content = _version()
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(project, [version])
+
+    sha256 = hashlib.sha256(content).hexdigest()
+    cache = FakePluginCacheStore()
+    cache.blobs[sha256] = content
+    prior = _plugin(
+        server_id=ServerId.new(),
+        checksum_sha512=version.files[0].sha512,
+        sha256=sha256,
+    )
+    uow.plugins.seed(prior)
+
+    uc = InstallFromCatalog(
+        uow=uow,
+        catalog=catalog,
+        file_store=FakeFileStore(),
+        cache=cache,
+        clock=FakeClock(_NOW),
+    )
+    plugin = await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        project_id="proj-1",
+        version_id="ver-1",
+    )
+    assert plugin.sha256 == sha256
+    # No put call on the cache-hit path (the blob already exists).
+    assert cache.puts == []

@@ -170,6 +170,12 @@ async def _resolve_modrinth_content(
         cached_sha256 = await uow.plugins.find_sha256_by_sha512(file.sha512)
     if cached_sha256 is not None and await cache.has(cached_sha256):
         content = b"".join([chunk async for chunk in cache.open(cached_sha256)])
+        # Re-verify integrity: the blob may have been corrupted or tampered
+        # with in object storage since it was originally cached (issue #1402).
+        if hashlib.sha512(content).hexdigest() != file.sha512:
+            raise CatalogChecksumMismatchError(
+                f"cached blob {cached_sha256} failed SHA-512 re-verification"
+            )
         return content, cached_sha256
 
     content = await catalog.download_file(file.url)
