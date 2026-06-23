@@ -1305,3 +1305,73 @@ describe("ServerPluginsTab download button position (#1360)", () => {
     expect(button.closest(".plugins-toolbar")).not.toBeNull();
   });
 });
+
+describe("ServerPluginsTab upload progress (issue #1419)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("shows a progress bar during JAR upload and hides it on success", async () => {
+    mockGets({ plugins: [plugin()], validation: EMPTY_VALIDATION });
+
+    let resolveUpload!: (value: unknown) => void;
+    mockPostFormWithProgress.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveUpload = resolve;
+        }),
+    );
+    renderTab();
+    await waitFor(() => {
+      expect(screen.getByText("Sodium")).toBeInTheDocument();
+    });
+
+    // Trigger a file upload.
+    const input = document.querySelector(
+      'input[type="file"]',
+    ) as HTMLInputElement;
+    const file = new File(["x"], "test.jar", {
+      type: "application/java-archive",
+    });
+    Object.defineProperty(file, "size", { value: 1024 });
+    fireEvent.change(input, { target: { files: [file] } });
+
+    // The progress bar should appear.
+    await waitFor(() => {
+      expect(screen.getByRole("progressbar")).toBeInTheDocument();
+    });
+
+    // Resolve the upload.
+    resolveUpload({});
+
+    // The progress bar should disappear.
+    await waitFor(() => {
+      expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+    });
+  });
+
+  it("hides the progress bar on upload error", async () => {
+    mockGets({ plugins: [plugin()], validation: EMPTY_VALIDATION });
+    mockPostFormWithProgress.mockRejectedValue(
+      new ApiError(500, { reason: "server_busy" }),
+    );
+    renderTab();
+    await waitFor(() => {
+      expect(screen.getByText("Sodium")).toBeInTheDocument();
+    });
+
+    const input = document.querySelector(
+      'input[type="file"]',
+    ) as HTMLInputElement;
+    const file = new File(["x"], "test.jar", {
+      type: "application/java-archive",
+    });
+    Object.defineProperty(file, "size", { value: 1024 });
+    fireEvent.change(input, { target: { files: [file] } });
+
+    // The progress bar should disappear after the error.
+    await waitFor(() => {
+      expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+    });
+  });
+});
