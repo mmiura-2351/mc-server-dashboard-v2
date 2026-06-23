@@ -204,6 +204,35 @@
         "title": "AdminUserResponse",
         "type": "object"
       },
+      "ApplyResolutionResponse": {
+        "description": "The result of applying a resolution: the re-plan, installs, and failures.\n\n``installed`` are the plugins newly installed from Modrinth; ``failed`` are\nthe dep identifiers whose Modrinth lookup/install failed (isolated per dep);\n``plan`` is the re-computed plan after the installs.",
+        "properties": {
+          "failed": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Failed",
+            "type": "array"
+          },
+          "installed": {
+            "items": {
+              "$ref": "#/components/schemas/PluginResponse"
+            },
+            "title": "Installed",
+            "type": "array"
+          },
+          "plan": {
+            "$ref": "#/components/schemas/ResolutionPlanResponse"
+          }
+        },
+        "required": [
+          "plan",
+          "installed",
+          "failed"
+        ],
+        "title": "ApplyResolutionResponse",
+        "type": "object"
+      },
       "AssignResourcePackRequest": {
         "properties": {
           "require_resource_pack": {
@@ -560,6 +589,25 @@
         "title": "Body_import_server_api_communities__community_id__servers_import_post",
         "type": "object"
       },
+      "Body_install_plugin_api_communities__community_id__servers__server_id__plugins_post": {
+        "properties": {
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file",
+          "display_name"
+        ],
+        "title": "Body_install_plugin_api_communities__community_id__servers__server_id__plugins_post",
+        "type": "object"
+      },
       "Body_upload_backup_api_communities__community_id__servers__server_id__backups_upload_post": {
         "properties": {
           "file": {
@@ -632,6 +680,474 @@
         "title": "CapabilitiesResponse",
         "type": "object"
       },
+      "CatalogDependencyItem": {
+        "properties": {
+          "dependency_type": {
+            "title": "Dependency Type",
+            "type": "string"
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "string"
+          },
+          "version_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version Id"
+          }
+        },
+        "required": [
+          "version_id",
+          "project_id",
+          "dependency_type"
+        ],
+        "title": "CatalogDependencyItem",
+        "type": "object"
+      },
+      "CatalogDependencyResponse": {
+        "properties": {
+          "dependency_type": {
+            "title": "Dependency Type",
+            "type": "string"
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "string"
+          },
+          "version_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version Id"
+          }
+        },
+        "required": [
+          "version_id",
+          "project_id",
+          "dependency_type"
+        ],
+        "title": "CatalogDependencyResponse",
+        "type": "object"
+      },
+      "CatalogFileItem": {
+        "properties": {
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "primary": {
+            "title": "Primary",
+            "type": "boolean"
+          },
+          "sha512": {
+            "title": "Sha512",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "filename",
+          "size",
+          "sha512",
+          "primary"
+        ],
+        "title": "CatalogFileItem",
+        "type": "object"
+      },
+      "CatalogFileResponse": {
+        "properties": {
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "primary": {
+            "title": "Primary",
+            "type": "boolean"
+          },
+          "sha512": {
+            "title": "Sha512",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "filename",
+          "size",
+          "sha512",
+          "primary"
+        ],
+        "title": "CatalogFileResponse",
+        "type": "object"
+      },
+      "CatalogInstallRequest": {
+        "properties": {
+          "project_id": {
+            "title": "Project Id",
+            "type": "string"
+          },
+          "version_id": {
+            "title": "Version Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_id",
+          "version_id"
+        ],
+        "title": "CatalogInstallRequest",
+        "type": "object"
+      },
+      "CatalogProjectDetailResponse": {
+        "properties": {
+          "project": {
+            "$ref": "#/components/schemas/CatalogProjectResponse"
+          },
+          "versions": {
+            "items": {
+              "$ref": "#/components/schemas/CatalogVersionResponse"
+            },
+            "title": "Versions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "project",
+          "versions"
+        ],
+        "title": "CatalogProjectDetailResponse",
+        "type": "object"
+      },
+      "CatalogProjectResponse": {
+        "properties": {
+          "author": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Author"
+          },
+          "body": {
+            "title": "Body",
+            "type": "string"
+          },
+          "categories": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Categories",
+            "type": "array"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "downloads": {
+            "title": "Downloads",
+            "type": "integer"
+          },
+          "game_versions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Game Versions",
+            "type": "array"
+          },
+          "icon_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Icon Url"
+          },
+          "loaders": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Loaders",
+            "type": "array"
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "string"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_id",
+          "slug",
+          "title",
+          "description",
+          "body",
+          "author",
+          "icon_url",
+          "downloads",
+          "categories",
+          "game_versions",
+          "loaders"
+        ],
+        "title": "CatalogProjectResponse",
+        "type": "object"
+      },
+      "CatalogSearchListResponse": {
+        "properties": {
+          "hits": {
+            "items": {
+              "$ref": "#/components/schemas/CatalogSearchResultResponse"
+            },
+            "title": "Hits",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total_hits": {
+            "title": "Total Hits",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "hits",
+          "total_hits",
+          "offset",
+          "limit"
+        ],
+        "title": "CatalogSearchListResponse",
+        "type": "object"
+      },
+      "CatalogSearchResultResponse": {
+        "properties": {
+          "author": {
+            "title": "Author",
+            "type": "string"
+          },
+          "categories": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Categories",
+            "type": "array"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "downloads": {
+            "title": "Downloads",
+            "type": "integer"
+          },
+          "icon_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Icon Url"
+          },
+          "latest_game_versions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Latest Game Versions",
+            "type": "array"
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "string"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_id",
+          "slug",
+          "title",
+          "description",
+          "author",
+          "icon_url",
+          "downloads",
+          "categories",
+          "latest_game_versions"
+        ],
+        "title": "CatalogSearchResultResponse",
+        "type": "object"
+      },
+      "CatalogVersionItem": {
+        "description": "Inline catalog version response to avoid circular import with catalog.py.",
+        "properties": {
+          "date_published": {
+            "title": "Date Published",
+            "type": "string"
+          },
+          "dependencies": {
+            "items": {
+              "$ref": "#/components/schemas/CatalogDependencyItem"
+            },
+            "title": "Dependencies",
+            "type": "array"
+          },
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/CatalogFileItem"
+            },
+            "title": "Files",
+            "type": "array"
+          },
+          "game_versions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Game Versions",
+            "type": "array"
+          },
+          "loaders": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Loaders",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "version_id": {
+            "title": "Version Id",
+            "type": "string"
+          },
+          "version_number": {
+            "title": "Version Number",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version_id",
+          "version_number",
+          "name",
+          "game_versions",
+          "loaders",
+          "files",
+          "date_published",
+          "dependencies"
+        ],
+        "title": "CatalogVersionItem",
+        "type": "object"
+      },
+      "CatalogVersionResponse": {
+        "properties": {
+          "date_published": {
+            "title": "Date Published",
+            "type": "string"
+          },
+          "dependencies": {
+            "items": {
+              "$ref": "#/components/schemas/CatalogDependencyResponse"
+            },
+            "title": "Dependencies",
+            "type": "array"
+          },
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/CatalogFileResponse"
+            },
+            "title": "Files",
+            "type": "array"
+          },
+          "game_versions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Game Versions",
+            "type": "array"
+          },
+          "loaders": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Loaders",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "version_id": {
+            "title": "Version Id",
+            "type": "string"
+          },
+          "version_number": {
+            "title": "Version Number",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version_id",
+          "version_number",
+          "name",
+          "game_versions",
+          "loaders",
+          "files",
+          "date_published",
+          "dependencies"
+        ],
+        "title": "CatalogVersionResponse",
+        "type": "object"
+      },
       "ChangePasswordRequest": {
         "properties": {
           "current_password": {
@@ -653,6 +1169,23 @@
         "title": "ChangePasswordRequest",
         "type": "object"
       },
+      "ClientModsResponse": {
+        "description": "A server's enabled client-relevant plugins (issue #1308).",
+        "properties": {
+          "plugins": {
+            "items": {
+              "$ref": "#/components/schemas/PluginResponse"
+            },
+            "title": "Plugins",
+            "type": "array"
+          }
+        },
+        "required": [
+          "plugins"
+        ],
+        "title": "ClientModsResponse",
+        "type": "object"
+      },
       "CommunityResponse": {
         "description": "Public view of a community (DATABASE.md Section 5; quotas unused in M1).",
         "properties": {
@@ -670,6 +1203,24 @@
           "name"
         ],
         "title": "CommunityResponse",
+        "type": "object"
+      },
+      "ConflictResponse": {
+        "properties": {
+          "conflicts_with": {
+            "title": "Conflicts With",
+            "type": "string"
+          },
+          "mod_id": {
+            "title": "Mod Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mod_id",
+          "conflicts_with"
+        ],
+        "title": "ConflictResponse",
         "type": "object"
       },
       "CreateGrantRequest": {
@@ -1296,6 +1847,32 @@
         "title": "LogoutRequest",
         "type": "object"
       },
+      "McMismatchResponse": {
+        "properties": {
+          "mod_id": {
+            "title": "Mod Id",
+            "type": "string"
+          },
+          "mod_mc_versions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Mod Mc Versions",
+            "type": "array"
+          },
+          "server_mc_version": {
+            "title": "Server Mc Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mod_id",
+          "mod_mc_versions",
+          "server_mc_version"
+        ],
+        "title": "McMismatchResponse",
+        "type": "object"
+      },
       "MemberResponse": {
         "description": "A member of a community with their username and the roles they hold.\n\n``username`` is ``null`` only when the id does not resolve in the identity\nstore \u2014 unreachable in normal operation given the ``ON DELETE CASCADE`` FK\nfrom ``membership`` to ``user`` (DATABASE.md Section 5); it is a defensive\nfallback so a UI client always receives the member row (issue #78).",
         "properties": {
@@ -1392,6 +1969,72 @@
         "title": "MetaResponse",
         "type": "object"
       },
+      "MissingCatalogDependencyResponse": {
+        "description": "A required Modrinth catalog dep no installed project covers (issue #1321).",
+        "properties": {
+          "mod_id": {
+            "title": "Mod Id",
+            "type": "string"
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "string"
+          },
+          "slug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slug"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "required": [
+          "mod_id",
+          "project_id",
+          "slug",
+          "title"
+        ],
+        "title": "MissingCatalogDependencyResponse",
+        "type": "object"
+      },
+      "MissingDependencyResponse": {
+        "properties": {
+          "depends_on": {
+            "title": "Depends On",
+            "type": "string"
+          },
+          "mod_id": {
+            "title": "Mod Id",
+            "type": "string"
+          },
+          "version_range": {
+            "title": "Version Range",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mod_id",
+          "depends_on",
+          "version_range"
+        ],
+        "title": "MissingDependencyResponse",
+        "type": "object"
+      },
       "PlatformAdminRequest": {
         "properties": {
           "grant": {
@@ -1421,6 +2064,350 @@
           "username"
         ],
         "title": "PlayerResponse",
+        "type": "object"
+      },
+      "PluginDependenciesResponse": {
+        "properties": {
+          "dependencies": {
+            "items": {
+              "$ref": "#/components/schemas/PluginDependencyResponse"
+            },
+            "title": "Dependencies",
+            "type": "array"
+          }
+        },
+        "required": [
+          "dependencies"
+        ],
+        "title": "PluginDependenciesResponse",
+        "type": "object"
+      },
+      "PluginDependencyResponse": {
+        "properties": {
+          "dependency_type": {
+            "title": "Dependency Type",
+            "type": "string"
+          },
+          "installed": {
+            "title": "Installed",
+            "type": "boolean"
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "string"
+          },
+          "project_slug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Slug"
+          },
+          "project_title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Title"
+          },
+          "version_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version Id"
+          }
+        },
+        "required": [
+          "project_id",
+          "version_id",
+          "dependency_type",
+          "project_title",
+          "project_slug",
+          "installed"
+        ],
+        "title": "PluginDependencyResponse",
+        "type": "object"
+      },
+      "PluginListResponse": {
+        "properties": {
+          "plugins": {
+            "items": {
+              "$ref": "#/components/schemas/PluginResponse"
+            },
+            "title": "Plugins",
+            "type": "array"
+          }
+        },
+        "required": [
+          "plugins"
+        ],
+        "title": "PluginListResponse",
+        "type": "object"
+      },
+      "PluginResponse": {
+        "description": "One plugin's metadata.",
+        "properties": {
+          "checksum_sha512": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checksum Sha512"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "installed_by": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Installed By"
+          },
+          "loader_type": {
+            "title": "Loader Type",
+            "type": "string"
+          },
+          "mod_identifier": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mod Identifier"
+          },
+          "rel_path": {
+            "title": "Rel Path",
+            "type": "string"
+          },
+          "server_id": {
+            "format": "uuid",
+            "title": "Server Id",
+            "type": "string"
+          },
+          "side": {
+            "title": "Side",
+            "type": "string"
+          },
+          "size_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Size Bytes"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "source_project_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Project Id"
+          },
+          "source_version_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Version Id"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "version_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version Number"
+          }
+        },
+        "required": [
+          "id",
+          "server_id",
+          "rel_path",
+          "filename",
+          "display_name",
+          "description",
+          "loader_type",
+          "source",
+          "source_project_id",
+          "source_version_id",
+          "version_number",
+          "checksum_sha512",
+          "size_bytes",
+          "enabled",
+          "installed_by",
+          "created_at",
+          "updated_at",
+          "mod_identifier",
+          "side"
+        ],
+        "title": "PluginResponse",
+        "type": "object"
+      },
+      "PluginUpdateInfoResponse": {
+        "properties": {
+          "latest_version": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CatalogVersionItem"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "plugin": {
+            "$ref": "#/components/schemas/PluginResponse"
+          }
+        },
+        "required": [
+          "plugin",
+          "latest_version"
+        ],
+        "title": "PluginUpdateInfoResponse",
+        "type": "object"
+      },
+      "PluginUpdatesResponse": {
+        "properties": {
+          "updates": {
+            "items": {
+              "$ref": "#/components/schemas/PluginUpdateInfoResponse"
+            },
+            "title": "Updates",
+            "type": "array"
+          }
+        },
+        "required": [
+          "updates"
+        ],
+        "title": "PluginUpdatesResponse",
+        "type": "object"
+      },
+      "PluginValidationResponse": {
+        "description": "The phase-B dependency/compatibility checklist for a server's plugin set.",
+        "properties": {
+          "conflicts": {
+            "items": {
+              "$ref": "#/components/schemas/ConflictResponse"
+            },
+            "title": "Conflicts",
+            "type": "array"
+          },
+          "mc_mismatch": {
+            "items": {
+              "$ref": "#/components/schemas/McMismatchResponse"
+            },
+            "title": "Mc Mismatch",
+            "type": "array"
+          },
+          "missing_catalog_deps": {
+            "items": {
+              "$ref": "#/components/schemas/MissingCatalogDependencyResponse"
+            },
+            "title": "Missing Catalog Deps",
+            "type": "array"
+          },
+          "missing_deps": {
+            "items": {
+              "$ref": "#/components/schemas/MissingDependencyResponse"
+            },
+            "title": "Missing Deps",
+            "type": "array"
+          },
+          "version_unsatisfied": {
+            "items": {
+              "$ref": "#/components/schemas/VersionUnsatisfiedResponse"
+            },
+            "title": "Version Unsatisfied",
+            "type": "array"
+          }
+        },
+        "required": [
+          "missing_deps",
+          "missing_catalog_deps",
+          "version_unsatisfied",
+          "conflicts",
+          "mc_mismatch"
+        ],
+        "title": "PluginValidationResponse",
         "type": "object"
       },
       "PortCheckResponse": {
@@ -1597,6 +2584,84 @@
           "to"
         ],
         "title": "RenameRequest",
+        "type": "object"
+      },
+      "ResolutionEntryResponse": {
+        "description": "One required dependency and how it resolves in the plan.",
+        "properties": {
+          "blocked": {
+            "title": "Blocked",
+            "type": "boolean"
+          },
+          "dep_identifier": {
+            "title": "Dep Identifier",
+            "type": "string"
+          },
+          "depth": {
+            "title": "Depth",
+            "type": "integer"
+          },
+          "required_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Required By"
+          },
+          "required_range": {
+            "title": "Required Range",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "will_import": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WillImportResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "dep_identifier",
+          "required_range",
+          "status",
+          "will_import",
+          "depth",
+          "required_by",
+          "blocked"
+        ],
+        "title": "ResolutionEntryResponse",
+        "type": "object"
+      },
+      "ResolutionPlanResponse": {
+        "description": "The dependency-resolution plan plus the phase-B validation checklist.",
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/ResolutionEntryResponse"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "validation": {
+            "$ref": "#/components/schemas/PluginValidationResponse"
+          }
+        },
+        "required": [
+          "entries",
+          "validation"
+        ],
+        "title": "ResolutionPlanResponse",
         "type": "object"
       },
       "ResourcePackAssignmentResponse": {
@@ -2061,6 +3126,20 @@
         "title": "SessionResponse",
         "type": "object"
       },
+      "SetPluginSideRequest": {
+        "description": "Manual side override for an installed plugin (issue #1308).",
+        "properties": {
+          "side": {
+            "title": "Side",
+            "type": "string"
+          }
+        },
+        "required": [
+          "side"
+        ],
+        "title": "SetPluginSideRequest",
+        "type": "object"
+      },
       "TokenResponse": {
         "description": "An issued access + refresh pair. ``token_type`` is the OAuth2 bearer hint.",
         "properties": {
@@ -2083,6 +3162,19 @@
           "refresh_token"
         ],
         "title": "TokenResponse",
+        "type": "object"
+      },
+      "UpdatePluginRequest": {
+        "properties": {
+          "version_id": {
+            "title": "Version Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version_id"
+        ],
+        "title": "UpdatePluginRequest",
         "type": "object"
       },
       "UpdateProfileRequest": {
@@ -2302,6 +3394,34 @@
         "title": "ValidationError",
         "type": "object"
       },
+      "VersionUnsatisfiedResponse": {
+        "properties": {
+          "depends_on": {
+            "title": "Depends On",
+            "type": "string"
+          },
+          "mod_id": {
+            "title": "Mod Id",
+            "type": "string"
+          },
+          "present_version": {
+            "title": "Present Version",
+            "type": "string"
+          },
+          "version_range": {
+            "title": "Version Range",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mod_id",
+          "depends_on",
+          "version_range",
+          "present_version"
+        ],
+        "title": "VersionUnsatisfiedResponse",
+        "type": "object"
+      },
       "VersionsResponse": {
         "description": "The versions offered for a server type (issue #286).",
         "properties": {
@@ -2317,6 +3437,35 @@
           "versions"
         ],
         "title": "VersionsResponse",
+        "type": "object"
+      },
+      "WillImportResponse": {
+        "description": "The Modrinth project@version a ``needs_import`` dep resolves to.",
+        "properties": {
+          "project_id": {
+            "title": "Project Id",
+            "type": "string"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          },
+          "version_id": {
+            "title": "Version Id",
+            "type": "string"
+          },
+          "version_number": {
+            "title": "Version Number",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_id",
+          "version_id",
+          "slug",
+          "version_number"
+        ],
+        "title": "WillImportResponse",
         "type": "object"
       },
       "WorkerResponse": {
@@ -5411,6 +6560,336 @@
         "summary": "Restore Backup"
       }
     },
+    "/api/communities/{community_id}/servers/{server_id}/catalog/install": {
+      "post": {
+        "description": "Install a plugin/mod from the Modrinth catalog (plugin:manage).",
+        "operationId": "install_from_catalog_api_communities__community_id__servers__server_id__catalog_install_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CatalogInstallRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Install From Catalog"
+      }
+    },
+    "/api/communities/{community_id}/servers/{server_id}/catalog/projects/{project_id_or_slug}": {
+      "get": {
+        "description": "Fetch catalog project detail + compatible versions (plugin:read).",
+        "operationId": "get_catalog_project_api_communities__community_id__servers__server_id__catalog_projects__project_id_or_slug__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "project_id_or_slug",
+            "required": true,
+            "schema": {
+              "title": "Project Id Or Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogProjectDetailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Catalog Project"
+      }
+    },
+    "/api/communities/{community_id}/servers/{server_id}/catalog/search": {
+      "get": {
+        "description": "Search the Modrinth catalog with auto-applied server facets (plugin:read).",
+        "operationId": "search_catalog_api_communities__community_id__servers__server_id__catalog_search_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Q",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogSearchListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Search Catalog"
+      }
+    },
+    "/api/communities/{community_id}/servers/{server_id}/client-mods": {
+      "get": {
+        "description": "List a server's enabled client-relevant plugins (plugin:read, issue #1308).",
+        "operationId": "list_client_mods_api_communities__community_id__servers__server_id__client_mods_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClientModsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Client Mods"
+      }
+    },
+    "/api/communities/{community_id}/servers/{server_id}/client-mods/download": {
+      "get": {
+        "description": "Download a server's client mods as a zip (plugin:read, issue #1308).",
+        "operationId": "download_client_modpack_api_communities__community_id__servers__server_id__client_mods_download_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Download Client Modpack"
+      }
+    },
     "/api/communities/{community_id}/servers/{server_id}/command": {
       "post": {
         "operationId": "send_server_command_api_communities__community_id__servers__server_id__command_post",
@@ -6253,6 +7732,889 @@
           }
         ],
         "summary": "List Server Groups"
+      }
+    },
+    "/api/communities/{community_id}/servers/{server_id}/plugins": {
+      "get": {
+        "description": "List installed plugins for a server (plugin:read).",
+        "operationId": "list_plugins_api_communities__community_id__servers__server_id__plugins_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Plugins"
+      },
+      "post": {
+        "description": "Install a plugin jar via multipart upload (plugin:manage).",
+        "operationId": "install_plugin_api_communities__community_id__servers__server_id__plugins_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_install_plugin_api_communities__community_id__servers__server_id__plugins_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Install Plugin"
+      }
+    },
+    "/api/communities/{community_id}/servers/{server_id}/plugins/resolve": {
+      "post": {
+        "description": "Plan dependency auto-resolution (plugin:read, issue #1309).\n\nComputes the transitive closure of the server's required deps: each is\nclassified already-satisfied (present in range), needs-import (a Modrinth\nproject@version to install), unresolvable (no Modrinth match), or blocked (a\ntransitive conflict). Read-only: nothing is downloaded or installed.",
+        "operationId": "resolve_plugin_dependencies_api_communities__community_id__servers__server_id__plugins_resolve_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResolutionPlanResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Resolve Plugin Dependencies"
+      }
+    },
+    "/api/communities/{community_id}/servers/{server_id}/plugins/resolve/apply": {
+      "post": {
+        "description": "Apply dependency auto-resolution (plugin:manage, issue #1309).\n\nInstalls each non-blocked needs-import dep from Modrinth onto the server via\nthe catalog install path, then re-plans. At-rest gated (409\n``server_unsettled`` while the server is running); a per-dep install failure\nis isolated and reported in ``failed``; a blocked (conflicting) dep is never\ninstalled.",
+        "operationId": "apply_plugin_resolution_api_communities__community_id__servers__server_id__plugins_resolve_apply_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApplyResolutionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Apply Plugin Resolution"
+      }
+    },
+    "/api/communities/{community_id}/servers/{server_id}/plugins/updates": {
+      "get": {
+        "description": "Batch check for plugin updates (plugin:read).",
+        "operationId": "check_updates_api_communities__community_id__servers__server_id__plugins_updates_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginUpdatesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Check Updates"
+      }
+    },
+    "/api/communities/{community_id}/servers/{server_id}/plugins/validate": {
+      "get": {
+        "description": "Validate the server's installed plugin set (plugin:read, issue #1307).\n\nReturns the phase-B dependency/compatibility checklist (missing required\ndeps, version-unsatisfied deps, conflicts, MC-version mismatch). Read-only:\nit never mutates the set.",
+        "operationId": "validate_plugins_api_communities__community_id__servers__server_id__plugins_validate_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginValidationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Validate Plugins"
+      }
+    },
+    "/api/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}": {
+      "delete": {
+        "description": "Remove an installed plugin (plugin:manage).",
+        "operationId": "remove_plugin_api_communities__community_id__servers__server_id__plugins__plugin_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "plugin_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Plugin Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Remove Plugin"
+      },
+      "get": {
+        "description": "Get a single installed plugin by id (plugin:read).",
+        "operationId": "get_plugin_api_communities__community_id__servers__server_id__plugins__plugin_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "plugin_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Plugin Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Plugin"
+      }
+    },
+    "/api/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}/dependencies": {
+      "get": {
+        "description": "List dependencies for an installed plugin (plugin:read).",
+        "operationId": "list_plugin_dependencies_api_communities__community_id__servers__server_id__plugins__plugin_id__dependencies_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "plugin_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Plugin Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginDependenciesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Plugin Dependencies"
+      }
+    },
+    "/api/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}/disable": {
+      "post": {
+        "description": "Disable an enabled plugin (plugin:manage).",
+        "operationId": "disable_plugin_api_communities__community_id__servers__server_id__plugins__plugin_id__disable_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "plugin_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Plugin Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Disable Plugin"
+      }
+    },
+    "/api/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}/enable": {
+      "post": {
+        "description": "Enable a disabled plugin (plugin:manage).",
+        "operationId": "enable_plugin_api_communities__community_id__servers__server_id__plugins__plugin_id__enable_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "plugin_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Plugin Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Enable Plugin"
+      }
+    },
+    "/api/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}/side": {
+      "post": {
+        "description": "Override an installed plugin's side (plugin:manage, issue #1308).\n\nChanging the side re-materializes the working set: a client-only jar is\nremoved from the running server, and a server-relevant jar is materialized\nfrom the content-addressed cache. At-rest gated (409 ``server_unsettled``).",
+        "operationId": "set_plugin_side_api_communities__community_id__servers__server_id__plugins__plugin_id__side_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "plugin_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Plugin Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetPluginSideRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Set Plugin Side"
+      }
+    },
+    "/api/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}/update": {
+      "post": {
+        "description": "Execute a plugin update to a specific version (plugin:manage).",
+        "operationId": "update_plugin_api_communities__community_id__servers__server_id__plugins__plugin_id__update_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "plugin_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Plugin Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdatePluginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Update Plugin"
+      }
+    },
+    "/api/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}/updates": {
+      "get": {
+        "description": "Check for a single plugin update (plugin:read).",
+        "operationId": "check_plugin_update_api_communities__community_id__servers__server_id__plugins__plugin_id__updates_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "plugin_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Plugin Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginUpdateInfoResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Check Plugin Update"
       }
     },
     "/api/communities/{community_id}/servers/{server_id}/resource-pack": {

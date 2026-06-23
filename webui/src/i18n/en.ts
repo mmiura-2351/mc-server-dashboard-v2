@@ -553,6 +553,9 @@ export const en = {
   "files.rolledBack": "Rolled back to the selected version.",
   "files.error.serverMustBeStopped":
     "Stop the server before uploading files or creating folders.",
+  "files.error.contentDirProtected":
+    "This directory is managed by the {noun} tab. Use the {noun} tab to add or remove content.",
+  "files.error.goToContentTab": "Go to {noun} tab",
   "files.error.tooLarge": "That file exceeds the 512 MiB upload limit.",
   "files.error.generic": "Something went wrong. Please try again.",
 
@@ -1259,6 +1262,154 @@ export const en = {
   // when more communities exist the later ones are omitted (#476/#488).
   "admin.audit.communitiesTruncated":
     "Showing the first {n} of {total} communities.",
+
+  // Plugins tab (issue #1153). One contiguous block to keep merge conflicts
+  // with sibling i18n PRs minimal.
+  "serverDetail.tab.plugins": "Plugins",
+  // Loader-aware tab label + noun (#1320): Fabric/Forge servers manage mods,
+  // Paper manages plugins. Three grammatical forms feed the `{…}` placeholders
+  // in the tab strings: `{nouns}` lowercase plural, `{noun}` lowercase
+  // singular, `{Noun}` capitalized singular (Japanese has one invariant form).
+  "serverDetail.tab.mods": "Mods",
+  "plugins.contentNoun.plural.plugins": "plugins",
+  "plugins.contentNoun.plural.mods": "mods",
+  "plugins.contentNoun.singular.plugins": "plugin",
+  "plugins.contentNoun.singular.mods": "mod",
+  "plugins.contentNoun.singularCap.plugins": "Plugin",
+  "plugins.contentNoun.singularCap.mods": "Mod",
+  "plugins.loading": "Loading {nouns}…",
+  "plugins.loadError": "Could not load {nouns}.",
+  "plugins.noRead": "You do not have permission to view {nouns}.",
+  "plugins.empty": "No {nouns} installed.",
+  "plugins.unsupported": "This server type does not support plugins or mods.",
+  "plugins.serverNotStopped": "Stop the server to manage {nouns}.",
+  // Table columns.
+  "plugins.col.name": "Name",
+  "plugins.col.version": "Version",
+  "plugins.col.source": "Source",
+  "plugins.col.side": "Runs on",
+  "plugins.col.status": "Status",
+  "plugins.col.size": "Size",
+  "plugins.col.actions": "Actions",
+  // Status / source labels.
+  "plugins.status.enabled": "Enabled",
+  "plugins.status.disabled": "Disabled",
+  "plugins.source.local": "Local",
+  "plugins.source.modrinth": "Modrinth",
+  // Side (server / client / both, issue #1308).
+  "plugins.side.label": "Runs on",
+  "plugins.side.server": "Server",
+  "plugins.side.client": "Client",
+  "plugins.side.both": "Both",
+  // Actions.
+  "plugins.enable": "Enable",
+  "plugins.disable": "Disable",
+  "plugins.remove": "Remove",
+  "plugins.update": "Update",
+  "plugins.install": "Upload JAR",
+  "plugins.browse": "Browse Modrinth",
+  "plugins.downloadClientModpack": "Download client modpack",
+  // Update indicators.
+  "plugins.updateAvailable": "Update available: ",
+  // Remove dialog. `{name}` is the plugin's display_name; `{noun}` the
+  // lowercase loader-aware content noun (#1320, #1353).
+  "plugins.removeDialog.title": "Remove {name}?",
+  "plugins.removeDialog.body":
+    "This will permanently remove this {noun} from the server.",
+  "plugins.removeDialog.confirm": "Remove",
+  // Dependencies.
+  "plugins.dependencies": "Dependencies",
+  "plugins.dependencies.loading": "Loading dependencies…",
+  "plugins.dependencies.empty": "No dependencies.",
+  "plugins.dependencies.required": "required",
+  "plugins.dependencies.optional": "optional",
+  "plugins.dependencies.installed": "installed",
+  "plugins.dependencies.missing": "missing",
+  // Modrinth search modal.
+  "plugins.search.title": "Browse Modrinth",
+  "plugins.search.placeholder": "Search plugins or mods…",
+  "plugins.search.empty": "No results.",
+  "plugins.search.downloads": "downloads",
+  "plugins.search.by": "by",
+  "plugins.search.install": "Install",
+  "plugins.search.installing": "Installing…",
+  "plugins.search.installed": "Installed",
+  "plugins.search.update": "Update",
+  "plugins.search.versions": "Versions",
+  "plugins.search.back": "Back to search",
+  // Outcomes (toasts). `{Noun}` is the capitalized loader-aware noun (#1320).
+  "plugins.enabled": "{Noun} enabled.",
+  "plugins.disabled": "{Noun} disabled.",
+  "plugins.removed": "{Noun} removed.",
+  "plugins.updated": "{Noun} updated.",
+  "plugins.installed": "{Noun} installed.",
+  "plugins.sideUpdated": "{Noun} side updated.",
+  "plugins.catalogInstalled": "{Noun} installed from Modrinth.",
+  "plugins.error.alreadyExists":
+    "A {noun} with the same name or project is already installed.",
+  "plugins.error.notStopped": "Stop the server before managing {nouns}.",
+  "plugins.error.unsettled":
+    "The server is not ready. Wait for the current operation to finish.",
+  "plugins.error.busy": "Another operation is in progress. Please wait.",
+  "plugins.error.invalidPath":
+    "Invalid file. Only .jar files can be uploaded as {nouns}.",
+  "plugins.error.tooLarge":
+    "The file is too large. Maximum upload size is 512 MB.",
+  "plugins.error.catalogUnavailable":
+    "Could not reach Modrinth. Please try again later.",
+  "plugins.error.catalogNotFound": "Project or version not found on Modrinth.",
+  "plugins.error.checksumMismatch":
+    "Download integrity check failed. Please try again.",
+  "plugins.error.unsupportedServerType":
+    "This server type does not support {nouns}.",
+  "plugins.error.invalidSide": "Invalid side for this server type.",
+  "plugins.error.notFound": "{Noun} not found. It may have been removed.",
+  "plugins.error.generic": "Something went wrong. Please try again.",
+  // Dependency / compatibility validation checklist (issue #1307).
+  "plugins.validation.heading": "Dependencies & compatibility",
+  "plugins.validation.ok": "No issues found.",
+  "plugins.validation.missingDep":
+    "{mod} requires {dependency} ({range}), which is not installed.",
+  "plugins.validation.missingCatalogDep":
+    "{mod} requires {dependency}, which is not installed.",
+  "plugins.validation.versionUnsatisfied":
+    "{mod} requires {dependency} ({range}), but the installed {present} does not satisfy it.",
+  "plugins.validation.conflict": "{mod} conflicts with {other}.",
+  "plugins.validation.mcMismatch":
+    "{mod} does not list MC {serverVersion} (supports {modVersions}).",
+  // Dependency auto-resolution (issue #1309).
+  "plugins.resolve.action": "Resolve dependencies",
+  "plugins.resolve.loading": "Computing resolution plan…",
+  "plugins.resolve.title": "Resolve dependencies",
+  "plugins.resolve.nothing": "All required dependencies are already satisfied.",
+  "plugins.resolve.importsHeading": "Will install from Modrinth",
+  "plugins.resolve.importItem": "{dependency} → {project} {version}",
+  "plugins.resolve.satisfiedHeading": "Already satisfied",
+  "plugins.resolve.satisfiedItem": "{dependency}",
+  "plugins.resolve.conflictsHeading": "Blocked by conflicts",
+  "plugins.resolve.conflictItem":
+    "{dependency} cannot be installed — it conflicts with an installed plugin.",
+  "plugins.resolve.unresolvableHeading": "Cannot be resolved",
+  "plugins.resolve.unresolvableItem":
+    "{dependency} — no compatible Modrinth version found.",
+  "plugins.resolve.apply": "Install dependencies",
+  "plugins.resolve.cancel": "Cancel",
+  "plugins.resolve.applied": "Dependencies installed.",
+  "plugins.resolve.appliedWithFailures":
+    "Some dependencies could not be installed.",
+  // Permission family and code labels for the role/grant matrix.
+  "communitySettings.roles.family.plugin": "Plugins",
+  "communitySettings.roles.code.plugin:read": "Read",
+  "communitySettings.roles.code.plugin:manage": "Manage",
+  // Audit operation labels for plugin actions.
+  "communitySettings.audit.op.plugin:install": "Install plugin",
+  "communitySettings.audit.op.plugin:remove": "Remove plugin",
+  "communitySettings.audit.op.plugin:enable": "Enable plugin",
+  "communitySettings.audit.op.plugin:disable": "Disable plugin",
+  "communitySettings.audit.op.plugin:update": "Update plugin",
+  "communitySettings.audit.op.plugin:set_side": "Set plugin side",
+  "communitySettings.audit.op.plugin:resolve": "Resolve plugin dependencies",
+  "communitySettings.audit.targetType.plugin": "Plugin",
 
   // Resource pack library (issue #1178). One contiguous block to keep merge
   // conflicts with sibling i18n PRs minimal.

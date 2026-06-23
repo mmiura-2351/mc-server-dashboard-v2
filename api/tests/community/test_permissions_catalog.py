@@ -57,6 +57,8 @@ def test_community_codes_match_appendix_a() -> None:
         "community:delete",
         "audit:read",
         "session:read",
+        "plugin:read",
+        "plugin:manage",
     }
 
 
@@ -114,11 +116,11 @@ def test_require_community_permission_rejects_unknown_code() -> None:
 
 
 def test_grant_permissions_for_server_are_resource_scoped_families() -> None:
-    # A server grant may carry only server / file / backup operation codes.
+    # A server grant may carry only server / file / backup / plugin operation codes.
     assert {p.value for p in GRANT_PERMISSIONS_BY_RESOURCE_TYPE["server"]} == {
         p.value
         for p in COMMUNITY_PERMISSIONS
-        if p.value.split(":", 1)[0] in ("server", "file", "backup")
+        if p.value.split(":", 1)[0] in ("server", "file", "backup", "plugin")
     }
 
 
