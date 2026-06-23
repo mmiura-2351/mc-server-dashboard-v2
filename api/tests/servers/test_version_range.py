@@ -187,6 +187,23 @@ class TestMavenIntervals:
         assert version_satisfies("20.4.100", "[20.4,)", "neoforge") is True
         assert version_satisfies("20.3.0", "[20.4,)", "neoforge") is False
 
+    def test_malformed_token_in_union_does_not_widen_range(self) -> None:
+        # A garbage token should be ignored, not widen the range to "any".
+        # 2.5 is NOT in [1,2), and [garbage is unparseable -> False.
+        assert version_satisfies("2.5", "[1,2),[garbage", "forge") is False
+
+    def test_valid_token_matches_despite_malformed_sibling(self) -> None:
+        # 1.5 IS in [1,2); the garbage token is ignored.
+        assert version_satisfies("1.5", "[1,2),[garbage", "forge") is True
+
+    def test_all_tokens_malformed_falls_back_to_any(self) -> None:
+        # Every token is unparseable -> tolerant fallback returns True.
+        assert version_satisfies("1.0", "[garbage", "forge") is True
+
+    def test_normal_maven_range_still_works(self) -> None:
+        assert version_satisfies("1.0", "[1,2)", "forge") is True
+        assert version_satisfies("3.0", "[1,2)", "forge") is False
+
 
 class TestPaperApiVersionFloor:
     # A Bukkit ``api-version`` is a major.minor minimum floor, not an exact
