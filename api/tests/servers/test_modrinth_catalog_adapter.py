@@ -225,3 +225,66 @@ def test_max_json_bytes_is_positive() -> None:
 
 def test_allowed_download_hosts_non_empty() -> None:
     assert len(_ALLOWED_DOWNLOAD_HOSTS) > 0
+
+
+# -- URL path encoding (issue #1416) --
+
+
+async def test_get_project_encodes_slug_in_url_path() -> None:
+    """Slugs with special characters are percent-encoded in the URL path."""
+    captured_urls: list[str] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured_urls.append(str(request.url))
+        return httpx.Response(
+            200,
+            content=b'{"id":"abc","slug":"my mod","title":"My Mod"}',
+        )
+
+    transport = httpx.MockTransport(_handler)
+    catalog = ModrinthCatalog(base_url="https://api.modrinth.com/v2")
+
+    real_init = httpx.AsyncClient.__init__
+
+    def patched_init(self_client: httpx.AsyncClient, **kwargs: Any) -> None:
+        kwargs["transport"] = transport
+        real_init(self_client, **kwargs)
+
+    httpx.AsyncClient.__init__ = patched_init  # type: ignore[assignment]
+    try:
+        await catalog.get_project("my mod/v2")
+    finally:
+        httpx.AsyncClient.__init__ = real_init  # type: ignore[method-assign]
+
+    assert len(captured_urls) == 1
+    # Space → %20, slash → %2F — must not appear unencoded in the path.
+    assert "my%20mod%2Fv2" in captured_urls[0] or "my+mod" not in captured_urls[0]
+    assert "/project/my mod/v2" not in captured_urls[0]
+    assert "my%20mod%2Fv2" in captured_urls[0]
+
+
+async def test_list_versions_encodes_slug_in_url_path() -> None:
+    """list_versions also percent-encodes the slug in the URL path."""
+    captured_urls: list[str] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured_urls.append(str(request.url))
+        return httpx.Response(200, content=b"[]")
+
+    transport = httpx.MockTransport(_handler)
+    catalog = ModrinthCatalog(base_url="https://api.modrinth.com/v2")
+
+    real_init = httpx.AsyncClient.__init__
+
+    def patched_init(self_client: httpx.AsyncClient, **kwargs: Any) -> None:
+        kwargs["transport"] = transport
+        real_init(self_client, **kwargs)
+
+    httpx.AsyncClient.__init__ = patched_init  # type: ignore[assignment]
+    try:
+        await catalog.list_versions("slug/with/slashes")
+    finally:
+        httpx.AsyncClient.__init__ = real_init  # type: ignore[method-assign]
+
+    assert len(captured_urls) == 1
+    assert "slug%2Fwith%2Fslashes" in captured_urls[0]
