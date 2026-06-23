@@ -31,11 +31,11 @@ def sanitize_plugin_filename(filename: str) -> str:
 
     Prevents zip-slip (issue #1400): a filename like ``a\\..\\..\\evil.jar``
     is reduced to ``evil.jar``. Raises :class:`ValueError` for filenames that
-    are empty, ``.``, or ``..`` after sanitization.
+    are empty or ``..`` after sanitization.
     """
 
     safe = PurePosixPath(filename.replace("\\", "/")).name
-    if not safe or safe in (".", ".."):
+    if not safe or safe == "..":
         raise ValueError(f"unsafe plugin filename: {filename!r}")
     return safe
 

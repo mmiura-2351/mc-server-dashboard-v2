@@ -137,3 +137,24 @@ async def test_stream_sanitizes_mixed_separators() -> None:
     with zipfile.ZipFile(io.BytesIO(archive)) as zf:
         names = zf.namelist()
         assert names == ["mods/c.jar"]
+
+
+async def test_stream_dedups_after_sanitization() -> None:
+    """Filenames that share a basename after sanitization are deduped (#1400)."""
+    cache = FakePluginCacheStore()
+    a = b"jar-a"
+    b = b"jar-b"
+    a_sha = hashlib.sha256(a).hexdigest()
+    b_sha = hashlib.sha256(b).hexdigest()
+    cache.blobs[a_sha] = a
+    cache.blobs[b_sha] = b
+
+    plugins = [
+        _plugin(filename="a/evil.jar", sha256=a_sha),
+        _plugin(filename="b/evil.jar", sha256=b_sha),
+    ]
+    archive = b"".join([chunk async for chunk in stream_client_modpack(cache, plugins)])
+    with zipfile.ZipFile(io.BytesIO(archive)) as zf:
+        assert set(zf.namelist()) == {"mods/evil.jar", "mods/evil (1).jar"}
+        assert zf.read("mods/evil.jar") == a
+        assert zf.read("mods/evil (1).jar") == b

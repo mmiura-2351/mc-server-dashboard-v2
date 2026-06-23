@@ -118,8 +118,8 @@ async def stream_client_modpack(
         for plugin in plugins:
             if plugin.sha256 is None:
                 continue
-            entry_name = sanitize_plugin_filename(
-                _unique_name(plugin.filename, used_names)
+            entry_name = _unique_name(
+                sanitize_plugin_filename(plugin.filename), used_names
             )
             with zf.open(f"mods/{entry_name}", "w") as entry:
                 async for chunk in cache.open(plugin.sha256):
