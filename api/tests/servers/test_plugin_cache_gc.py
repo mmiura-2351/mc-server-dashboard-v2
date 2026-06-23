@@ -59,8 +59,19 @@ class _FakeCache(PluginCacheStore):
 class _FakeReferences(LivePluginCacheReferences):
     def __init__(self, keys: set[str]) -> None:
         self._keys = keys
+        # Optional: keys to add after the first live() call, simulating a new
+        # plugin row committing between the initial snapshot and a re-check.
+        self._add_after_first: set[str] = set()
+        self._calls = 0
+
+    def add_after_first_call(self, key: str) -> None:
+        """Schedule *key* to appear in live() only from the second call onward."""
+        self._add_after_first.add(key)
 
     async def live(self) -> set[str]:
+        self._calls += 1
+        if self._calls > 1:
+            self._keys = self._keys | self._add_after_first
         return self._keys
 
 
@@ -145,23 +156,23 @@ async def test_empty_cache_is_a_noop() -> None:
     assert result.freed_bytes == 0
 
 
-async def test_reused_blob_with_refreshed_timestamp_is_spared() -> None:
-    """A blob whose modified_at was refreshed by a cache-hit re-put survives GC.
+async def test_recheck_before_delete_spares_newly_referenced_blob() -> None:
+    """A blob that becomes referenced between the initial snapshot and the delete
+    is spared by the pre-delete re-check (issue #1404).
 
-    When a dedup install reuses an existing cached blob, the install re-puts it
-    to reset modified_at (issue #1404). Even if the old plugin reference is
-    deleted before the new row commits, the refreshed timestamp moves the blob
-    inside the safety window so the GC cannot reclaim it.
+    When a dedup install reuses a cached blob, the old reference may be deleted
+    before the new plugin row commits. The blob appears orphaned in the initial
+    live() snapshot, but by the time the GC reaches the delete the new row has
+    committed. The GC re-checks live() immediately before each delete to catch
+    this race.
     """
-    # The blob is unreferenced (old row deleted, new row not yet committed)
-    # but its modified_at was just refreshed by the re-put — inside the window.
-    refreshed = _entry(
-        "e" * 64,
-        size=50,
-        age=_NOW - dt.timedelta(seconds=30),  # well inside the 1-hour window
-    )
-    cache = _FakeCache([refreshed])
-    refs = _FakeReferences(set())  # no live references
+    sha = "e" * 64
+    cache = _FakeCache([_entry(sha, size=50)])
+    refs = _FakeReferences(set())  # unreferenced at initial snapshot
+    # The new plugin row commits after the first live() call (the initial
+    # snapshot) but before the GC attempts the delete (the re-check).
+    refs.add_after_first_call(sha)
+
     result = await _gc(cache, refs)()
     assert cache.deleted == []
     assert result.scanned == 1

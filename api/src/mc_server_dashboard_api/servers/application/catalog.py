@@ -176,10 +176,6 @@ async def _resolve_modrinth_content(
             raise CatalogChecksumMismatchError(
                 f"cached blob {cached_sha256} failed SHA-512 re-verification"
             )
-        # Re-put the blob to reset the GC safety window (issue #1404): without
-        # this, a dedup-reuse does not touch modified_at and the GC could
-        # reclaim the blob before the new plugin row commits.
-        await ingest_into_cache(cache, content)
         return content, cached_sha256
 
     content = await catalog.download_file(file.url)

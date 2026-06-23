@@ -1823,12 +1823,13 @@ async def test_cache_hit_verifies_sha512_rejects_corrupted_blob() -> None:
         )
 
 
-async def test_cache_hit_refreshes_blob_in_cache() -> None:
-    """A cache-hit re-puts the blob so the GC safety window is reset (issue #1404).
+async def test_cache_hit_does_not_reupload_blob() -> None:
+    """A cache hit skips the upload; GC protection is in the GC re-check (#1404).
 
-    Without this, a dedup-reuse install does not touch the blob's modified_at,
-    and the GC could reclaim it between the old reference being deleted and the
-    new plugin row's commit.
+    The real object-store adapter's ``put`` skips the upload when the blob
+    already exists (dedup-on-ingest), so re-putting would be a no-op anyway.
+    The GC race is handled by re-checking live() before each delete in
+    ``RunPluginCacheGc`` instead.
     """
     uow = FakeUnitOfWork()
     server = _server()
@@ -1863,5 +1864,5 @@ async def test_cache_hit_refreshes_blob_in_cache() -> None:
         version_id="ver-1",
     )
     assert plugin.sha256 == sha256
-    # The cache-hit path must have called put to refresh the blob's timestamp.
-    assert sha256 in cache.puts
+    # No put call on the cache-hit path (the blob already exists).
+    assert cache.puts == []
