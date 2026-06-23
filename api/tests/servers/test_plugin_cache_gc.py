@@ -143,3 +143,26 @@ async def test_empty_cache_is_a_noop() -> None:
     assert result.scanned == 0
     assert result.deleted == 0
     assert result.freed_bytes == 0
+
+
+async def test_reused_blob_with_refreshed_timestamp_is_spared() -> None:
+    """A blob whose modified_at was refreshed by a cache-hit re-put survives GC.
+
+    When a dedup install reuses an existing cached blob, the install re-puts it
+    to reset modified_at (issue #1404). Even if the old plugin reference is
+    deleted before the new row commits, the refreshed timestamp moves the blob
+    inside the safety window so the GC cannot reclaim it.
+    """
+    # The blob is unreferenced (old row deleted, new row not yet committed)
+    # but its modified_at was just refreshed by the re-put — inside the window.
+    refreshed = _entry(
+        "e" * 64,
+        size=50,
+        age=_NOW - dt.timedelta(seconds=30),  # well inside the 1-hour window
+    )
+    cache = _FakeCache([refreshed])
+    refs = _FakeReferences(set())  # no live references
+    result = await _gc(cache, refs)()
+    assert cache.deleted == []
+    assert result.scanned == 1
+    assert result.deleted == 0
