@@ -228,7 +228,20 @@ class FakeFileStore(FileStore):
     async def list_dir(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> list[FileEntry]:
-        return []
+        prefix = "" if rel_path == "." else rel_path.rstrip("/") + "/"
+        seen: set[str] = set()
+        entries: list[FileEntry] = []
+        for path, content in self.files.items():
+            if not path.startswith(prefix):
+                continue
+            rest = path[len(prefix) :]
+            # Direct child only (no nested slashes).
+            if "/" in rest:
+                continue
+            if rest not in seen:
+                seen.add(rest)
+                entries.append(FileEntry(name=rest, is_dir=False, size=len(content)))
+        return entries
 
     async def write_file(
         self,

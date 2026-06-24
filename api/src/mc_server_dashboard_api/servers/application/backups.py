@@ -36,6 +36,8 @@ retry.
 
 from __future__ import annotations
 
+import datetime as dt
+import hashlib
 import io
 import logging
 import tarfile
@@ -51,6 +53,12 @@ from mc_server_dashboard_api.servers.application.files import (
     MAX_ARCHIVE_ENTRIES,
     MAX_DECOMPRESSED_BYTES,
     MAX_UPLOAD_BYTES,
+)
+from mc_server_dashboard_api.servers.application.plugin_cache import (
+    ingest_into_cache,
+)
+from mc_server_dashboard_api.servers.application.plugin_manifest import (
+    parse_manifest_at_ingest,
 )
 from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
     SnapshotServer,
@@ -79,11 +87,22 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidBackupArchiveError,
     ServerNotFoundError,
     ServerNotStoppedError,
+    UnsupportedPluginServerTypeError,
 )
+from mc_server_dashboard_api.servers.domain.file_store import FileStore
 from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
     LifecycleLock,
     NullLifecycleLock,
 )
+from mc_server_dashboard_api.servers.domain.plugin import (
+    PluginId,
+    PluginSource,
+    ServerPlugin,
+    content_dir_for_server_type,
+    loader_type_for_server_type,
+    modrinth_loader_for_server_type,
+)
+from mc_server_dashboard_api.servers.domain.plugin_cache_store import PluginCacheStore
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -310,11 +329,20 @@ class RestoreBackup:
     publishes the corrupt working set anyway, marks the backup ``QUARANTINED`` (it
     IS known-corrupt), and the returned :class:`RestoreResult` flags the forced
     corrupt restore so the edge audits who forced it.
+
+    After a successful restore, plugin rows are reconciled against the restored
+    filesystem (issue #1336): orphan DB rows are dropped, ghost files are ingested,
+    and shifted checksums are updated. The reconciliation requires ``file_store``,
+    ``cache``, and ``clock``; when not provided (``None``) it is skipped so existing
+    callers without plugin support are unaffected.
     """
 
     uow: UnitOfWork
     backup_store: BackupArchiveStore
     lifecycle_lock: LifecycleLock = NullLifecycleLock()
+    file_store: FileStore | None = None
+    cache: PluginCacheStore | None = None
+    clock: Clock | None = None
 
     async def __call__(
         self,
@@ -357,12 +385,206 @@ class RestoreBackup:
                 # corrupt restore.
                 await self._quarantine(backup_id)
                 return RestoreResult(forced_corrupt=True, corrupt_count=corrupt_count)
+            # Reconcile plugin rows against the restored filesystem (#1336).
+            if self.file_store is not None:
+                await _reconcile_plugins(
+                    uow=self.uow,
+                    file_store=self.file_store,
+                    cache=self.cache,
+                    clock=self.clock,
+                    community_id=community_id,
+                    server_id=server_id,
+                    server=server,
+                )
             return RestoreResult(forced_corrupt=False, corrupt_count=0)
 
     async def _quarantine(self, backup_id: BackupId) -> None:
         async with self.uow:
             await self.uow.backups.update_health(backup_id, BackupHealth.QUARANTINED)
             await self.uow.commit()
+
+
+async def _reconcile_plugins(
+    *,
+    uow: UnitOfWork,
+    file_store: FileStore,
+    cache: PluginCacheStore | None,
+    clock: Clock | None,
+    community_id: CommunityId,
+    server_id: ServerId,
+    server: Server,
+) -> None:
+    """Reconcile ``server_plugin`` rows against the restored filesystem (#1336).
+
+    After a backup restore replaces the working set, plugin rows may be stale:
+
+    1. **Orphans** -- DB rows whose ``rel_path`` file no longer exists on disk.
+       Deleted.
+    2. **Ghosts** -- ``.jar`` files on disk with no matching DB row. Ingested
+       with manifest parsing.
+    3. **Shifted** -- DB rows where the file exists but its checksum changed.
+       Updated with new checksums and re-parsed manifest metadata.
+
+    Errors during ghost ingestion or manifest parsing for a single file are
+    logged and skipped (the restore must not fail for a bad jar).
+    """
+
+    try:
+        content_dir = content_dir_for_server_type(server.server_type)
+    except UnsupportedPluginServerTypeError:
+        return  # Vanilla/Spigot: no plugin content directory.
+
+    async with uow:
+        db_plugins = await uow.plugins.list_for_server(server_id)
+
+        # Build a map of rel_path -> plugin for quick lookup.
+        db_by_path: dict[str, ServerPlugin] = {p.rel_path: p for p in db_plugins}
+
+        # Scan the content directory for .jar files on disk after restore.
+        try:
+            entries = await file_store.list_dir(
+                community_id=community_id, server_id=server_id, rel_path=content_dir
+            )
+        except Exception:  # noqa: BLE001 - content dir may not exist
+            entries = []
+
+        disk_jars: set[str] = set()
+        for entry in entries:
+            if not entry.is_dir and entry.name.lower().endswith(".jar"):
+                disk_jars.add(f"{content_dir}/{entry.name}")
+
+        changed = False
+
+        # 1. Drop orphans: DB rows whose file is gone.
+        for plugin in db_plugins:
+            if plugin.rel_path not in disk_jars:
+                await uow.plugins.delete(plugin.id)
+                changed = True
+
+        # 2. Ingest ghosts: files on disk with no DB row.
+        for jar_path in sorted(disk_jars):
+            if jar_path in db_by_path:
+                continue
+            try:
+                jar_bytes = await file_store.read_file(
+                    community_id=community_id,
+                    server_id=server_id,
+                    rel_path=jar_path,
+                )
+            except Exception:  # noqa: BLE001
+                _LOG.warning("plugin reconcile: could not read %s; skipping", jar_path)
+                continue
+            try:
+                await _ingest_ghost(
+                    uow=uow,
+                    cache=cache,
+                    clock=clock,
+                    server=server,
+                    server_id=server_id,
+                    content_dir=content_dir,
+                    jar_path=jar_path,
+                    jar_bytes=jar_bytes,
+                )
+            except Exception:  # noqa: BLE001
+                _LOG.warning(
+                    "plugin reconcile: failed to ingest %s; skipping", jar_path
+                )
+                continue
+            changed = True
+
+        # 3. Update shifted records: file exists but checksum changed.
+        for plugin in db_plugins:
+            if plugin.rel_path not in disk_jars:
+                continue  # Already deleted as orphan.
+            try:
+                jar_bytes = await file_store.read_file(
+                    community_id=community_id,
+                    server_id=server_id,
+                    rel_path=plugin.rel_path,
+                )
+            except Exception:  # noqa: BLE001
+                continue
+            new_checksum = hashlib.sha512(jar_bytes).hexdigest()
+            if new_checksum == plugin.checksum_sha512:
+                continue
+            # Content changed: update checksums and re-parse manifest.
+            plugin.checksum_sha512 = new_checksum
+            plugin.size_bytes = len(jar_bytes)
+            if cache is not None:
+                try:
+                    plugin.sha256 = await ingest_into_cache(cache, jar_bytes)
+                except Exception:  # noqa: BLE001
+                    pass
+            try:
+                loader = modrinth_loader_for_server_type(server.server_type)
+                manifest = parse_manifest_at_ingest(jar_bytes, loader=loader)
+                plugin.mod_identifier = manifest.mod_identifier or None
+                plugin.provides = manifest.provides
+                plugin.dependencies = manifest.dependencies
+                plugin.mc_versions = manifest.mc_versions
+                plugin.side = manifest.side
+            except Exception:  # noqa: BLE001
+                pass
+            if clock is not None:
+                plugin.updated_at = clock.now()
+            await uow.plugins.update(plugin)
+            changed = True
+
+        if changed:
+            await uow.commit()
+
+
+async def _ingest_ghost(
+    *,
+    uow: UnitOfWork,
+    cache: PluginCacheStore | None,
+    clock: Clock | None,
+    server: Server,
+    server_id: ServerId,
+    content_dir: str,
+    jar_path: str,
+    jar_bytes: bytes,
+) -> None:
+    """Create a new plugin row for a ghost file on disk (#1336)."""
+
+    filename = jar_path.removeprefix(f"{content_dir}/")
+    loader_type = loader_type_for_server_type(server.server_type)
+    loader = modrinth_loader_for_server_type(server.server_type)
+    manifest = parse_manifest_at_ingest(jar_bytes, loader=loader)
+    checksum = hashlib.sha512(jar_bytes).hexdigest()
+
+    sha256: str | None = None
+    if cache is not None:
+        sha256 = await ingest_into_cache(cache, jar_bytes)
+
+    ts = clock.now() if clock is not None else dt.datetime.now(dt.timezone.utc)
+
+    plugin = ServerPlugin(
+        id=PluginId.new(),
+        server_id=server_id,
+        rel_path=jar_path,
+        filename=filename,
+        display_name=manifest.mod_identifier or filename.removesuffix(".jar"),
+        description=None,
+        loader_type=loader_type,
+        source=PluginSource.LOCAL,
+        source_project_id=None,
+        source_version_id=None,
+        version_number=None,
+        checksum_sha512=checksum,
+        sha256=sha256,
+        size_bytes=len(jar_bytes),
+        enabled=True,
+        installed_by=None,
+        created_at=ts,
+        updated_at=ts,
+        mod_identifier=manifest.mod_identifier or None,
+        provides=manifest.provides,
+        dependencies=manifest.dependencies,
+        mc_versions=manifest.mc_versions,
+        side=manifest.side,
+    )
+    await uow.plugins.add(plugin)
 
 
 @dataclass(frozen=True)
