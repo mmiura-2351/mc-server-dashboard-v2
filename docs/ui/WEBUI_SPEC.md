@@ -81,16 +81,18 @@ Complete endpoint list as of `main` (dumped from the FastAPI OpenAPI schema).
 | POST / DELETE | `/communities/{cid}/members/{uid}/roles[/{rid}]` | Assign / unassign a role. |
 | GET / POST | `/communities/{cid}/roles` | List / create custom role (name + permission codes). |
 | GET / PATCH / DELETE | `/communities/{cid}/roles/{rid}` | Read / update / delete. Preset `Owner` role is `is_preset`. |
-| GET / POST | `/communities/{cid}/grants` | List (`?user_id=` filter) / create per-resource grant. `resource_type` = `server` only; permission families `server:*`, `file:*`, `backup:*`. |
+| GET / POST | `/communities/{cid}/grants` | List (`?user_id=` filter) / create per-resource grant. `resource_type` = `server` only; permission families `server:*`, `file:*`, `backup:*`, `plugin:*`. |
 | DELETE | `/communities/{cid}/grants/{gid}` | Revoke. |
 
-Permission catalog (community axis, 31 codes — the role/grant editor's source
+Permission catalog (community axis, 33 codes — the role/grant editor's source
 of truth): `server:{create,read,update,delete,start,stop,restart,command}`,
 `file:{read,edit,history,rollback}`, `backup:{create,read,restore,delete,schedule}`,
 `member:{read,add,remove}`, `role:{read,manage}`, `grant:{read,manage}`,
 `group:{read,manage}`, `community:{read,update,delete}`, `audit:read`,
 `session:read` (relay game-session moderation surface — player IPs are PII,
-RELAY.md Section 8; seeded on the Owner role by migration 0017).
+RELAY.md Section 8; seeded on the Owner role by migration 0017),
+`plugin:{read,manage}` (plugin/mod content management, issue #1150;
+seeded on the Owner role by migration 0019).
 Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 `community:provision`, `platform:monitor`.
 
@@ -387,9 +389,9 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   (explains grant/role revocation).
 - **Roles**: list (preset Owner locked); editor = name + permission-matrix
   grouped by family (server/file/backup/member/role/grant/group/community/
-  audit) with select-all per family.
+  audit/plugin) with select-all per family.
 - **Grants**: per-user list (user filter); create = pick member → pick server
-  → pick permissions (restricted to server/file/backup families).
+  → pick permissions (restricted to server/file/backup/plugin families).
 - **Groups**: op/whitelist groups; player list (uuid + name) with add/remove;
   attached-servers list with attach/detach.
 - **Audit**: filterable table (operation, actor, since/until, paging).
