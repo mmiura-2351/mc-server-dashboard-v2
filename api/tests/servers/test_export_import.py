@@ -42,6 +42,12 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerFilesUnsettledError,
     WorkingSetSeedFailedError,
 )
+from mc_server_dashboard_api.servers.domain.plugin import (
+    LoaderType,
+    PluginId,
+    PluginSource,
+    ServerPlugin,
+)
 from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -502,3 +508,166 @@ async def test_import_publish_failure_is_seed_failed() -> None:
         )
     # The row was created before the publish failed (degraded but repairable).
     assert len(dst_uow.servers.by_id) == 1
+
+
+# --- plugin metadata in export/import (issue #1335) --------------------------
+
+
+def _plugin(
+    *, server_id: uuid.UUID, mod_identifier: str = "fabric-api"
+) -> ServerPlugin:
+    return ServerPlugin(
+        id=PluginId.new(),
+        server_id=ServerId(server_id),
+        rel_path=f"mods/{mod_identifier}.jar",
+        filename=f"{mod_identifier}.jar",
+        display_name=mod_identifier.title(),
+        description="A test plugin",
+        loader_type=LoaderType.MOD,
+        source=PluginSource.MODRINTH,
+        source_project_id="proj-1",
+        source_version_id="ver-1",
+        version_number="1.0.0",
+        checksum_sha512="abc123",
+        sha256="def456",
+        size_bytes=1024,
+        enabled=True,
+        installed_by=None,
+        created_at=_NOW,
+        updated_at=_NOW,
+        mod_identifier=mod_identifier,
+        provides=["fabric-api-base"],
+        dependencies=[
+            {
+                "mod_identifier": "minecraft",
+                "version_range": ">=1.21",
+                "required": True,
+                "conflict": False,
+            }
+        ],
+        mc_versions=["1.21.1"],
+        side="both",
+        catalog_dependencies=[
+            {
+                "project_id": "P7dR8mSH",
+                "required": True,
+                "slug": "fabric-api",
+                "title": "Fabric API",
+            }
+        ],
+    )
+
+
+async def test_export_includes_plugin_metadata() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    plugin = _plugin(server_id=server_id)
+    uow.plugins.seed(plugin)
+    store = FakeFileStore()
+    store.files["mods/fabric-api.jar"] = b"\x00jar"
+    use_case = ExportServer(uow=uow, clock=FakeClock(_NOW), file_store=store)
+
+    stream = await use_case(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    data = await _drain(stream)
+
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        meta = json.loads(zf.read(EXPORT_METADATA_FILENAME))
+    assert "plugins" in meta
+    assert len(meta["plugins"]) == 1
+    p = meta["plugins"][0]
+    assert p["mod_identifier"] == "fabric-api"
+    assert p["rel_path"] == "mods/fabric-api.jar"
+    assert p["loader_type"] == "mod"
+    assert p["source"] == "modrinth"
+    assert p["side"] == "both"
+    assert p["provides"] == ["fabric-api-base"]
+    assert p["catalog_dependencies"] == plugin.catalog_dependencies
+
+
+async def test_export_no_plugins_has_empty_list() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    store = FakeFileStore()
+    store.files["server.properties"] = b"motd=hi"
+    use_case = ExportServer(uow=uow, clock=FakeClock(_NOW), file_store=store)
+
+    stream = await use_case(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    data = await _drain(stream)
+
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        meta = json.loads(zf.read(EXPORT_METADATA_FILENAME))
+    assert meta["plugins"] == []
+
+
+async def test_import_recreates_plugin_records_from_metadata() -> None:
+    community = uuid.uuid4()
+    src_id = uuid.uuid4()
+
+    # Build an export archive from a server that has a plugin.
+    src_uow = FakeUnitOfWork()
+    src_uow.servers.seed(_server(community_id=community, server_id=src_id))
+    plugin = _plugin(server_id=src_id)
+    src_uow.plugins.seed(plugin)
+    src_store = FakeFileStore()
+    src_store.files["mods/fabric-api.jar"] = b"\x00jar"
+    export = ExportServer(uow=src_uow, clock=FakeClock(_NOW), file_store=src_store)
+    archive = await _drain(
+        await export(community_id=CommunityId(community), server_id=ServerId(src_id))
+    )
+
+    # Import the archive.
+    dst_uow = FakeUnitOfWork()
+    dst_store = FakeFileStore()
+    imp = ImportServer(
+        create_server=_create_server(dst_uow, dst_store), file_store=dst_store
+    )
+    server = await imp(
+        community_id=CommunityId(community),
+        name="imported",
+        execution_backend="container",
+        content=archive,
+    )
+
+    # The imported server should have the plugin record.
+    imported_plugins = await dst_uow.plugins.list_for_server(server.id)
+    assert len(imported_plugins) == 1
+    p = imported_plugins[0]
+    assert p.mod_identifier == "fabric-api"
+    assert p.rel_path == "mods/fabric-api.jar"
+    assert p.display_name == plugin.display_name
+    assert p.loader_type is LoaderType.MOD
+    assert p.source is PluginSource.MODRINTH
+    assert p.source_project_id == "proj-1"
+    assert p.provides == ["fabric-api-base"]
+    assert p.side == "both"
+    assert p.catalog_dependencies == plugin.catalog_dependencies
+    assert p.dependencies == plugin.dependencies
+    # The id should be fresh (not the source server's id).
+    assert p.id != plugin.id
+    assert p.server_id == server.id
+
+
+async def test_import_old_archive_without_plugins_succeeds() -> None:
+    # An archive from before #1335 has no "plugins" key; import proceeds
+    # without error and has no plugin rows.
+    community = uuid.uuid4()
+    dst_uow = FakeUnitOfWork()
+    dst_store = FakeFileStore()
+    imp = ImportServer(
+        create_server=_create_server(dst_uow, dst_store), file_store=dst_store
+    )
+    archive = _zip({EXPORT_METADATA_FILENAME: _metadata(), "world/level.dat": b"\x00"})
+    server = await imp(
+        community_id=CommunityId(community),
+        name="fresh",
+        execution_backend="container",
+        content=archive,
+    )
+    imported_plugins = await dst_uow.plugins.list_for_server(server.id)
+    assert imported_plugins == []
