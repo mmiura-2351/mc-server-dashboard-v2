@@ -525,7 +525,7 @@ class TestZipSafety:
     def test_decompression_bomb_raises(self) -> None:
         from mc_server_dashboard_api.servers.application import plugin_manifest
 
-        bomb = b"\x00" * (plugin_manifest._MAX_DECOMPRESSED_BYTES + 1)
+        bomb = b"\x00" * (plugin_manifest._MAX_MANIFEST_BYTES + 1)
         entries: dict[str, str | bytes] = {"fabric.mod.json": bomb}
         with pytest.raises(InvalidModJarError):
             parse_manifest(_make_jar(entries), server_type="fabric")
