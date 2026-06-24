@@ -1855,14 +1855,21 @@ def get_list_game_sessions(request: Request) -> ListGameSessions:
 def get_restore_backup(
     request: Request,
     backup_store: Annotated[BackupArchiveStore, Depends(get_servers_backup_store)],
+    file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
 ) -> RestoreBackup:
     """Assemble the :class:`RestoreBackup` use case (backup:restore)."""
 
     session_factory = create_session_factory(get_engine(request))
+    cache: PluginCacheStore | None = getattr(
+        request.app.state, "plugin_cache_store", None
+    )
     return RestoreBackup(
         uow=ServersUnitOfWork(session_factory),
         backup_store=backup_store,
         lifecycle_lock=get_lifecycle_lock(request),
+        file_store=file_store,
+        cache=cache,
+        clock=ServersSystemClock(),
     )
 
 
