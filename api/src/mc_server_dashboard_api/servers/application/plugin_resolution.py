@@ -768,7 +768,9 @@ def _block_and_prune(
       endpoint is present/being-imported.
     * **Orphan-of-blocked** -- it exists in the closure *only* because a blocked
       mod required it: none of its requirers is an installed root or a surviving
-      (non-blocked) import.
+      (non-blocked) import. This applies to all entry types, including
+      non-import entries (``unresolvable``, ``depth_exceeded``,
+      ``already_satisfied``) that would otherwise be cosmetic noise (#1304).
 
     Blocking one mod and pruning its subtree changes which ids are present, which
     can change conflict detection for other mods, so this iterates to a fixpoint.
@@ -813,18 +815,22 @@ def _block_and_prune(
             if idx in blocked:
                 continue
             added_id = _entry_added_id(entry)
-            if added_id is None:
-                continue
-            if added_id in conflict_ids:
-                new_blocked.add(idx)
-                continue
-            added_project_id = _entry_added_project_id(entry)
-            if (
-                added_project_id is not None
-                and added_project_id in conflict_project_ids
-            ):
-                new_blocked.add(idx)
-                continue
+            if added_id is not None:
+                # Import entries: check conflicts first.
+                if added_id in conflict_ids:
+                    new_blocked.add(idx)
+                    continue
+                added_project_id = _entry_added_project_id(entry)
+                if (
+                    added_project_id is not None
+                    and added_project_id in conflict_project_ids
+                ):
+                    new_blocked.add(idx)
+                    continue
+            # Orphan check: applies to all entries (import and non-import).
+            # A non-import entry (unresolvable, depth_exceeded,
+            # already_satisfied) that exists only because a blocked mod
+            # required it is noise and should also be blocked (#1304).
             edge_requirers = requirers.get(entry.dep_identifier, {entry.required_by})
             if any(
                 req is None or req in installed_ids or req in added_ids

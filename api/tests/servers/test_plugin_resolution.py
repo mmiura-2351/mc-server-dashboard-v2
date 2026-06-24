@@ -1489,3 +1489,143 @@ class TestApplyPluginResolution:
         assert len(installed) == 1
         assert installed[0].source_project_id == "LIB"
         assert len(failed) == 1
+
+
+# ---------------------------------------------------------------------------
+# Resolve-closure reporting polish (issue #1304)
+# ---------------------------------------------------------------------------
+
+
+class TestBlockedModDepNoise:
+    """Item 1: a blocked mod's unresolvable dep should not appear as non-blocked."""
+
+    async def test_unresolvable_dep_of_blocked_mod_is_blocked(self) -> None:
+        # mod-a -> fabric-api (blocked by rival); fabric-api -> MISSING_LIB
+        # (unresolvable -- no Modrinth match). MISSING_LIB only exists because
+        # blocked fabric-api needs it; it must also be blocked.
+        server = _server()
+        uow = FakeUnitOfWork()
+        a = _plugin(
+            server_id=server.id,
+            mod_identifier="mod-a",
+            dependencies=[_dep("fabric-api", project_id="FABRICAPI")],
+        )
+        rival = _plugin(
+            server_id=server.id,
+            mod_identifier="rival",
+            dependencies=[_dep("fabric-api", conflict=True)],
+        )
+        _seed(uow, server, a, rival)
+        catalog = FakeCatalogProvider()
+        fa_version = _version(
+            dependencies=[
+                CatalogDependency(
+                    version_id=None,
+                    project_id="MISSING_LIB",
+                    dependency_type="required",
+                )
+            ]
+        )
+        catalog.seed_project(_project(), versions=[fa_version])
+        # MISSING_LIB is NOT seeded in the catalog -> unresolvable.
+
+        plan = await ResolvePluginDependencies(uow, catalog)(
+            community_id=_COMMUNITY, server_id=server.id
+        )
+        by_id = {e.dep_identifier: e for e in plan.entries}
+        assert by_id["fabric-api"].blocked is True
+        # The unresolvable dep of the blocked mod must also be blocked.
+        assert by_id["MISSING_LIB"].status == "unresolvable"
+        assert by_id["MISSING_LIB"].blocked is True
+
+    async def test_unresolvable_dep_with_surviving_requirer_not_blocked(self) -> None:
+        # mod-a -> fabric-api (blocked by rival); fabric-api -> SHARED_LIB.
+        # mod-b (installed, no conflict) also requires SHARED_LIB directly.
+        # SHARED_LIB is unresolvable but has a surviving requirer, so it must
+        # NOT be blocked.
+        server = _server()
+        uow = FakeUnitOfWork()
+        a = _plugin(
+            server_id=server.id,
+            mod_identifier="mod-a",
+            dependencies=[_dep("fabric-api", project_id="FABRICAPI")],
+        )
+        b = _plugin(
+            server_id=server.id,
+            mod_identifier="mod-b",
+            dependencies=[_dep("SHARED_LIB", project_id="SHARED_LIB")],
+        )
+        rival = _plugin(
+            server_id=server.id,
+            mod_identifier="rival",
+            dependencies=[_dep("fabric-api", conflict=True)],
+        )
+        _seed(uow, server, a, b, rival)
+        catalog = FakeCatalogProvider()
+        fa_version = _version(
+            dependencies=[
+                CatalogDependency(
+                    version_id=None,
+                    project_id="SHARED_LIB",
+                    dependency_type="required",
+                )
+            ]
+        )
+        catalog.seed_project(_project(), versions=[fa_version])
+        # SHARED_LIB not seeded -> unresolvable.
+
+        plan = await ResolvePluginDependencies(uow, catalog)(
+            community_id=_COMMUNITY, server_id=server.id
+        )
+        by_id = {e.dep_identifier: e for e in plan.entries}
+        assert by_id["fabric-api"].blocked is True
+        # SHARED_LIB has mod-b (installed root) as a surviving requirer.
+        assert by_id["SHARED_LIB"].status == "unresolvable"
+        assert by_id["SHARED_LIB"].blocked is False
+
+    async def test_already_satisfied_dep_of_blocked_mod_is_blocked(self) -> None:
+        # mod-a -> fabric-api (blocked by rival); fabric-api -> DEEPLIB.
+        # DEEPLIB is installed (already_satisfied), but its only requirer
+        # (fabric-api) is blocked. The already_satisfied entry should be
+        # blocked as an orphan -- it was only surfaced because of the blocked
+        # mod.
+        server = _server()
+        uow = FakeUnitOfWork()
+        a = _plugin(
+            server_id=server.id,
+            mod_identifier="mod-a",
+            dependencies=[_dep("fabric-api", project_id="FABRICAPI")],
+        )
+        deeplib_installed = _plugin(
+            server_id=server.id,
+            mod_identifier="deeplib",
+            source=PluginSource.MODRINTH,
+            source_project_id="DEEPLIB",
+        )
+        rival = _plugin(
+            server_id=server.id,
+            mod_identifier="rival",
+            dependencies=[_dep("fabric-api", conflict=True)],
+        )
+        _seed(uow, server, a, rival, deeplib_installed)
+        catalog = FakeCatalogProvider()
+        fa_version = _version(
+            dependencies=[
+                CatalogDependency(
+                    version_id=None,
+                    project_id="DEEPLIB",
+                    dependency_type="required",
+                )
+            ]
+        )
+        catalog.seed_project(_project(), versions=[fa_version])
+
+        plan = await ResolvePluginDependencies(uow, catalog)(
+            community_id=_COMMUNITY, server_id=server.id
+        )
+        by_id = {e.dep_identifier: e for e in plan.entries}
+        assert by_id["fabric-api"].blocked is True
+        # DEEPLIB is already_satisfied (installed), but its only requirer
+        # (fabric-api) is blocked. It should be blocked as an orphan.
+        assert by_id["DEEPLIB"].status == "already_satisfied"
+        assert by_id["DEEPLIB"].blocked is True
