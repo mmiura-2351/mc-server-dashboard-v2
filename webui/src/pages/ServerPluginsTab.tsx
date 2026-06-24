@@ -24,6 +24,8 @@ import type { components } from "../api/schema";
 import { Modal } from "../components/Modal.tsx";
 import { SimpleConfirmDialog } from "../components/SimpleConfirmDialog.tsx";
 import { useToast } from "../components/Toast.tsx";
+import { UploadProgress } from "../components/UploadProgress.tsx";
+import { useUploadProgress } from "../components/useUploadProgress.ts";
 import { formatRange, humanizeBytes } from "../format.ts";
 import { type TranslationKey, t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
@@ -130,6 +132,7 @@ export function ServerPluginsTab({
   const onForbidden = useOnForbidden();
   const queryClient = useQueryClient();
   const fileInput = useRef<HTMLInputElement>(null);
+  const progress = useUploadProgress();
   const [removeTarget, setRemoveTarget] = useState<PluginResponse | null>(null);
   const [browseOpen, setBrowseOpen] = useState(false);
   const [resolveOpen, setResolveOpen] = useState(false);
@@ -318,19 +321,25 @@ export function ServerPluginsTab({
       const form = new FormData();
       form.append("file", file);
       form.append("display_name", file.name.replace(/\.jar$/i, ""));
+      progress.start(file.size);
       return postFormWithProgress(
         apiPath("/api/communities/{community_id}/servers/{server_id}/plugins", {
           community_id: communityId,
           server_id: serverId,
         }),
         form,
+        progress.onProgress,
       );
     },
     onSuccess: () => {
+      progress.reset();
       showToast(tn("plugins.installed"), "success");
       refresh();
     },
-    onError,
+    onError: (error) => {
+      progress.reset();
+      onError(error);
+    },
   });
 
   // -- Guards --
@@ -429,6 +438,15 @@ export function ServerPluginsTab({
             </button>
           )}
         </div>
+      )}
+
+      {progress.active && (
+        <UploadProgress
+          loaded={progress.loaded}
+          total={progress.total}
+          percent={progress.percent}
+          elapsedMs={progress.elapsedMs}
+        />
       )}
 
       <div className="card plugins-table">

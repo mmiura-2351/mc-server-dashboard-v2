@@ -502,12 +502,22 @@ async def install_plugin(
         raise _conflict("plugin_already_exists") from exc
     except ServerFilesUnsettledError as exc:
         await _record_plugin_failure(
-            recorder, ops.PLUGIN_INSTALL, authorized, community_id, server_id
+            recorder,
+            ops.PLUGIN_INSTALL,
+            authorized,
+            community_id,
+            server_id,
+            target_type=ops.TARGET_SERVER,
         )
         raise _conflict("server_unsettled") from exc
     except ServerBusyError as exc:
         await _record_plugin_failure(
-            recorder, ops.PLUGIN_INSTALL, authorized, community_id, server_id
+            recorder,
+            ops.PLUGIN_INSTALL,
+            authorized,
+            community_id,
+            server_id,
+            target_type=ops.TARGET_SERVER,
         )
         raise _conflict("server_busy") from exc
     await _record_plugin(
@@ -675,16 +685,31 @@ async def apply_plugin_resolution(
         raise _bad_gateway("catalog_unavailable") from exc
     except ServerFilesUnsettledError as exc:
         await _record_plugin_failure(
-            recorder, ops.PLUGIN_RESOLVE, authorized, community_id, server_id
+            recorder,
+            ops.PLUGIN_RESOLVE,
+            authorized,
+            community_id,
+            server_id,
+            target_type=ops.TARGET_SERVER,
         )
         raise _conflict("server_unsettled") from exc
     except ServerBusyError as exc:
         await _record_plugin_failure(
-            recorder, ops.PLUGIN_RESOLVE, authorized, community_id, server_id
+            recorder,
+            ops.PLUGIN_RESOLVE,
+            authorized,
+            community_id,
+            server_id,
+            target_type=ops.TARGET_SERVER,
         )
         raise _conflict("server_busy") from exc
     await _record_plugin(
-        recorder, ops.PLUGIN_RESOLVE, authorized, community_id, server_id
+        recorder,
+        ops.PLUGIN_RESOLVE,
+        authorized,
+        community_id,
+        server_id,
+        target_type=ops.TARGET_SERVER,
     )
     return ApplyResolutionResponse(
         plan=ResolutionPlanResponse.from_plan(plan),
@@ -1173,6 +1198,7 @@ async def _record_plugin(
     authorized: AuthUser,
     community_id: uuid.UUID,
     target_id: uuid.UUID,
+    target_type: str = ops.TARGET_PLUGIN,
 ) -> None:
     await recorder.record(
         AuditEvent(
@@ -1180,7 +1206,7 @@ async def _record_plugin(
             outcome=Outcome.SUCCESS,
             actor_id=authorized.user_id.value,
             community_id=community_id,
-            target_type=ops.TARGET_PLUGIN,
+            target_type=target_type,
             target_id=target_id,
         )
     )
@@ -1192,6 +1218,7 @@ async def _record_plugin_failure(
     authorized: AuthUser,
     community_id: uuid.UUID,
     target_id: uuid.UUID,
+    target_type: str = ops.TARGET_PLUGIN,
 ) -> None:
     await recorder.record(
         AuditEvent(
@@ -1199,7 +1226,7 @@ async def _record_plugin_failure(
             outcome=Outcome.DENIED,
             actor_id=authorized.user_id.value,
             community_id=community_id,
-            target_type=ops.TARGET_PLUGIN,
+            target_type=target_type,
             target_id=target_id,
         )
     )
