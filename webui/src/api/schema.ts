@@ -565,12 +565,11 @@ export interface paths {
          * Import Server
          * @description Import a whole server from a ZIP export (server:create, issue #274).
          *
-         *     Multipart: the ``file`` is the export zip; ``name`` and ``execution_backend``
-         *     come from the request (the name is NOT taken from the metadata, so the usual
-         *     uniqueness 409 applies). The archive's ``export_metadata.json`` is parsed and
-         *     validated (wrong/missing format or malformed -> 422 ``invalid_export_metadata``;
-         *     the server_type/version run the SAME create-path validator). A row is created
-         *     with an auto-assigned game port
+         *     Multipart: the ``file`` is the export zip; ``name`` comes from the request (the
+         *     name is NOT taken from the metadata, so the usual uniqueness 409 applies). The
+         *     archive's ``export_metadata.json`` is parsed and validated (wrong/missing format
+         *     or malformed -> 422 ``invalid_export_metadata``; the server_type/version run the
+         *     SAME create-path validator). A row is created with an auto-assigned game port
          *     (#243); ``accept_eula`` is never implied. The archive contents then publish as
          *     the initial working set through the hardened extraction (zip-slip / size / entry
          *     caps -> 413 / 422). A publish failure after the row commits is 503
@@ -605,13 +604,13 @@ export interface paths {
          *     **Permission gate (issue #458).** The required permission branches by the
          *     changed-key set rather than a single fixed code: an edit that changes only the
          *     backup-scheduling key (``backup_interval_hours``) requires ``backup:schedule``;
-         *     any other change (name, game port, backend, or any non-scheduling config key)
-         *     requires ``server:update``; a mixed edit requires both. ``server:update`` no
-         *     longer implies scheduling — a ``backup:schedule``-only holder may set the
-         *     cadence, and a ``server:update``-only holder may not. A missing required
-         *     permission is 403 carrying it in the ``permission`` member (#425/#555). Layer-1
-         *     membership is checked at the edge (non-member -> 404); the changed-key decision
-         *     runs in the use case, which has the current config in hand.
+         *     any other change (name, game port, or any non-scheduling config key) requires
+         *     ``server:update``; a mixed edit requires both. ``server:update`` no longer
+         *     implies scheduling — a ``backup:schedule``-only holder may set the cadence, and
+         *     a ``server:update``-only holder may not. A missing required permission is 403
+         *     carrying it in the ``permission`` member (#425/#555). Layer-1 membership is
+         *     checked at the edge (non-member -> 404); the changed-key decision runs in the
+         *     use case, which has the current config in hand.
          *
          *     **Error precedence (issue #115).** Validation runs first: config-bounds
          *     (``config_too_large`` / ``config_invalid_shape``), the cadence-override
@@ -2301,8 +2300,6 @@ export interface components {
         };
         /** Body_import_server_api_communities__community_id__servers_import_post */
         Body_import_server_api_communities__community_id__servers_import_post: {
-            /** Execution Backend */
-            execution_backend: string;
             /** File */
             file: string;
             /** Name */
@@ -2561,8 +2558,6 @@ export interface components {
             accept_eula: boolean;
             /** Config */
             config?: unknown;
-            /** Execution Backend */
-            execution_backend: string;
             /** Game Port */
             game_port?: number | null;
             /** Mc Edition */
@@ -3197,8 +3192,6 @@ export interface components {
             cpu_millis: number | null;
             /** Desired State */
             desired_state: string;
-            /** Execution Backend */
-            execution_backend: string;
             /** Game Port */
             game_port: number | null;
             /** Id */
@@ -3298,8 +3291,6 @@ export interface components {
         UpdateServerRequest: {
             /** Config */
             config?: unknown;
-            /** Execution Backend */
-            execution_backend?: string | null;
             /** Game Port */
             game_port?: number | null;
             /** Name */

@@ -2,8 +2,8 @@
 
 Pure data with its at-rest policy, standard-library only. A ``Server`` is the
 authoritative record of a Minecraft server (FR-SRV-3): community-scoped, with a
-config blob, the desired/observed state split (FR-SRV-4), an immutable execution
-backend (FR-EXE-3), and a nullable assigned Worker (FR-WRK-4). The shape mirrors
+config blob, the desired/observed state split (FR-SRV-4), and a nullable
+assigned Worker (FR-WRK-4). The shape mirrors
 DATABASE.md Section 7.
 """
 
@@ -16,7 +16,6 @@ from typing import Any
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     DesiredState,
-    ExecutionBackend,
     ObservedState,
     ServerId,
     ServerName,
@@ -32,8 +31,7 @@ class Server:
     ``config`` is the configuration blob (properties, JVM args, snapshot-interval
     override per FR-DATA-7). ``desired_state`` is the source of truth for intent;
     ``observed_state`` + ``observed_at`` are a cache of the last Worker report and
-    are never an authority. ``execution_backend`` is immutable for the server's
-    lifetime (FR-EXE-3). ``assigned_worker_id`` is null until placement.
+    are never an authority. ``assigned_worker_id`` is null until placement.
     """
 
     id: ServerId
@@ -42,7 +40,6 @@ class Server:
     mc_edition: str
     mc_version: str
     server_type: ServerType
-    execution_backend: ExecutionBackend
     config: dict[str, Any]
     desired_state: DesiredState
     observed_state: ObservedState

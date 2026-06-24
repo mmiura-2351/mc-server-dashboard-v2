@@ -105,7 +105,6 @@ async def _seed_server(engine: AsyncEngine) -> ServerId:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={},
     )
     return server.id

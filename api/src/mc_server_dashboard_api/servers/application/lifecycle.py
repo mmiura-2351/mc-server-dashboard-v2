@@ -624,7 +624,6 @@ class StartServer:
         return await self.control_plane.start(
             worker_id=worker_id,
             server_id=server_id,
-            backend=server.execution_backend,
             server_type=server.server_type,
             jar_relpath=_DEFAULT_JAR_RELPATH,
             minecraft_version=server.mc_version,
@@ -647,7 +646,6 @@ class StartServer:
         )
         return await self.control_plane.place(
             server_id=server.id,
-            backend=server.execution_backend,
             memory_limit_mb=memory_limit_from_config(server.config),
             committed_by_worker=committed,
         )

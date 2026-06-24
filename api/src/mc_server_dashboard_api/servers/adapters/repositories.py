@@ -21,7 +21,6 @@ from mc_server_dashboard_api.servers.domain.repositories import ServerRepository
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     DesiredState,
-    ExecutionBackend,
     ObservedState,
     ServerId,
     ServerName,
@@ -38,7 +37,6 @@ def _to_server(row: ServerModel) -> Server:
         mc_edition=row.mc_edition,
         mc_version=row.mc_version,
         server_type=ServerType(row.server_type),
-        execution_backend=ExecutionBackend(row.execution_backend),
         config=dict(row.config),
         game_port=row.game_port,
         slug=row.slug,
@@ -68,7 +66,6 @@ class SqlAlchemyServerRepository(ServerRepository):
                 mc_edition=server.mc_edition,
                 mc_version=server.mc_version,
                 server_type=server.server_type.value,
-                execution_backend=server.execution_backend.value,
                 config=server.config,
                 game_port=server.game_port,
                 slug=server.slug,

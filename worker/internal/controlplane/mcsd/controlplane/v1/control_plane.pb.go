@@ -34,29 +34,23 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// ExecutionDriverKind enumerates the execution backends (FR-EXE-2, FR-EXE-4).
+// ExecutionDriverKind enumerates the execution backends.
 type ExecutionDriverKind int32
 
 const (
 	ExecutionDriverKind_EXECUTION_DRIVER_KIND_UNSPECIFIED ExecutionDriverKind = 0
-	// HOST_PROCESS named the host-process driver, removed in issue #781. The
-	// number stays reserved (the enum is NOT renumbered) to preserve wire
-	// compatibility, but no Worker advertises it and no shipped driver maps to it.
-	ExecutionDriverKind_EXECUTION_DRIVER_KIND_HOST_PROCESS ExecutionDriverKind = 1
-	ExecutionDriverKind_EXECUTION_DRIVER_KIND_CONTAINER    ExecutionDriverKind = 2
+	ExecutionDriverKind_EXECUTION_DRIVER_KIND_CONTAINER   ExecutionDriverKind = 2
 )
 
 // Enum value maps for ExecutionDriverKind.
 var (
 	ExecutionDriverKind_name = map[int32]string{
 		0: "EXECUTION_DRIVER_KIND_UNSPECIFIED",
-		1: "EXECUTION_DRIVER_KIND_HOST_PROCESS",
 		2: "EXECUTION_DRIVER_KIND_CONTAINER",
 	}
 	ExecutionDriverKind_value = map[string]int32{
-		"EXECUTION_DRIVER_KIND_UNSPECIFIED":  0,
-		"EXECUTION_DRIVER_KIND_HOST_PROCESS": 1,
-		"EXECUTION_DRIVER_KIND_CONTAINER":    2,
+		"EXECUTION_DRIVER_KIND_UNSPECIFIED": 0,
+		"EXECUTION_DRIVER_KIND_CONTAINER":   2,
 	}
 )
 
@@ -2653,10 +2647,9 @@ const file_mcsd_controlplane_v1_control_plane_proto_rawDesc = "" +
 	"cpu_millis\x18\x01 \x01(\rR\tcpuMillis\x12!\n" +
 	"\fmemory_bytes\x18\x02 \x01(\x04R\vmemoryBytes\x12!\n" +
 	"\fplayer_count\x18\x03 \x01(\rR\vplayerCount\"\v\n" +
-	"\tHeartbeat*\x89\x01\n" +
+	"\tHeartbeat*a\n" +
 	"\x13ExecutionDriverKind\x12%\n" +
-	"!EXECUTION_DRIVER_KIND_UNSPECIFIED\x10\x00\x12&\n" +
-	"\"EXECUTION_DRIVER_KIND_HOST_PROCESS\x10\x01\x12#\n" +
+	"!EXECUTION_DRIVER_KIND_UNSPECIFIED\x10\x00\x12#\n" +
 	"\x1fEXECUTION_DRIVER_KIND_CONTAINER\x10\x02*^\n" +
 	"\n" +
 	"LaunchMode\x12\x1b\n" +

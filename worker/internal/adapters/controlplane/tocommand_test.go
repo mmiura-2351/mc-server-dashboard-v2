@@ -15,7 +15,7 @@ func TestToCommandStartDefaultLaunchModeIsEmpty(t *testing.T) {
 		ServerId:  "s1",
 		Command: &controlplanev1.ApiCommand_Start{
 			Start: &controlplanev1.StartServer{
-				Driver:           controlplanev1.ExecutionDriverKind_EXECUTION_DRIVER_KIND_HOST_PROCESS,
+				Driver:           controlplanev1.ExecutionDriverKind_EXECUTION_DRIVER_KIND_CONTAINER,
 				JarRelpath:       "server.jar",
 				MinecraftVersion: "1.21",
 			},

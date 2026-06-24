@@ -665,7 +665,7 @@ A whole server moves in and out as a single ZIP archive:
   ZIP upload, creates a fresh server (auto-assigned game port; EULA is **not**
   implied — the imported working set carries its own `eula.txt` if any), and
   publishes the archive contents as the new server's initial working set. The new
-  server's `name` and `execution_backend` come from the request, not the archive.
+  server's `name` comes from the request, not the archive.
 
 ### Export format (`format: 1`)
 

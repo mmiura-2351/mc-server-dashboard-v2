@@ -58,10 +58,10 @@ async def test_backfill_assigns_unique_valid_slugs() -> None:
                     text(
                         "INSERT INTO server "
                         "(id, community_id, name, mc_edition, mc_version, "
-                        "server_type, execution_backend, config, "
+                        "server_type, config, "
                         "desired_state, observed_state, created_at, updated_at) "
                         "VALUES (:id, :cid, :name, 'java', '1.21.1', 'vanilla', "
-                        "'container', '{}', 'stopped', 'stopped', :at, :at)"
+                        "'{}', 'stopped', 'stopped', :at, :at)"
                     ),
                     {
                         "id": server_id,

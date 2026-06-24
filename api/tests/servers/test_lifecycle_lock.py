@@ -68,7 +68,6 @@ from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     DesiredState,
-    ExecutionBackend,
     ObservedState,
     ServerId,
     ServerName,
@@ -100,7 +99,6 @@ def _at_rest() -> Server:
         mc_edition="java",
         mc_version="1.21",
         server_type=ServerType.VANILLA,
-        execution_backend=ExecutionBackend.CONTAINER,
         config={},
         game_port=25565,
         desired_state=DesiredState.STOPPED,

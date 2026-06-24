@@ -344,7 +344,6 @@ function Header({
           <span className="badge type">
             {server.server_type} {server.mc_version}
           </span>
-          <span className="badge">{server.execution_backend}</span>
           {server.join_hostname !== null ? (
             <button
               type="button"
@@ -1598,13 +1597,6 @@ function Settings({
               )}
             </label>
           )}
-          <label className="field">
-            {t("serverDetail.settings.executionBackend")}
-            <input type="text" value={server.execution_backend} disabled />
-            <span className="field-hint">
-              {t("serverDetail.settings.executionBackendHint")}
-            </span>
-          </label>
         </div>
         <label className="field">
           {t("serverDetail.settings.memoryLimit")}

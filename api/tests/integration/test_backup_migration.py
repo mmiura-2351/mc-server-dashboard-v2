@@ -93,10 +93,10 @@ async def test_health_backfills_existing_rows_to_unknown() -> None:
             await conn.execute(
                 text(
                     "INSERT INTO server (id, community_id, name, mc_edition, "
-                    "mc_version, server_type, execution_backend, config, "
+                    "mc_version, server_type, config, "
                     "desired_state, observed_state, created_at, updated_at) VALUES "
                     "(:id, :community_id, :name, 'java', '1.21.1', 'vanilla', "
-                    "'container', '{}', 'stopped', 'unknown', now(), now())"
+                    "'{}', 'stopped', 'unknown', now(), now())"
                 ),
                 {"id": server_id, "community_id": community_id, "name": "survival"},
             )
@@ -215,10 +215,10 @@ async def test_downgrade_remaps_uploaded_rows_before_narrowing_check() -> None:
             await conn.execute(
                 text(
                     "INSERT INTO server (id, community_id, name, mc_edition, "
-                    "mc_version, server_type, execution_backend, config, slug, "
+                    "mc_version, server_type, config, slug, "
                     "desired_state, observed_state, created_at, updated_at) VALUES "
                     "(:id, :community_id, :name, 'java', '1.21.1', 'vanilla', "
-                    "'container', '{}', :slug, 'stopped', 'unknown', now(), now())"
+                    "'{}', :slug, 'stopped', 'unknown', now(), now())"
                 ),
                 {
                     "id": server_id,

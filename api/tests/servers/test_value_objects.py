@@ -11,7 +11,6 @@ import pytest
 from mc_server_dashboard_api.servers.domain.errors import InvalidServerNameError
 from mc_server_dashboard_api.servers.domain.value_objects import (
     DesiredState,
-    ExecutionBackend,
     ObservedState,
     ServerName,
     ServerType,
@@ -25,11 +24,6 @@ def test_server_name_trims_whitespace() -> None:
 def test_server_name_rejects_blank() -> None:
     with pytest.raises(InvalidServerNameError):
         ServerName("   ")
-
-
-def test_execution_backend_values_match_database_check_enum() -> None:
-    # DATABASE.md Section 7 spells the backend with underscores.
-    assert {b.value for b in ExecutionBackend} == {"host_process", "container"}
 
 
 # The migration that pins the live ``ck_server_type`` CHECK. Update this pointer

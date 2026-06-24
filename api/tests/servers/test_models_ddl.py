@@ -38,17 +38,10 @@ def test_game_port_is_nullable_and_unique() -> None:
 def test_check_constraints_present() -> None:
     for name in (
         "ck_server_type",
-        "ck_server_execution_backend",
         "ck_server_desired_state",
         "ck_server_observed_state",
     ):
         assert _check_constraint(name) is not None
-
-
-def test_execution_backend_check_uses_underscore_spelling() -> None:
-    sqltext = str(_check_constraint("ck_server_execution_backend").sqltext)
-    assert "host_process" in sqltext
-    assert "container" in sqltext
 
 
 def test_assigned_worker_id_has_no_foreign_key() -> None:

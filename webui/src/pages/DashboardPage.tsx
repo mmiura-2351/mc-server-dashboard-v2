@@ -701,7 +701,6 @@ function ServerCard({ server, communityId, can }: ServerRowProps) {
         <span className="badge type">
           {server.server_type} {server.mc_version}
         </span>
-        <span className="badge">{server.execution_backend}</span>
         {server.join_hostname !== null ? (
           <button
             type="button"
@@ -773,7 +772,6 @@ function ServerTable({
             <SortableHeader field="type" sort={sort} onSort={onSort}>
               {t("dashboard.col.type")}
             </SortableHeader>
-            <th>{t("dashboard.col.backend")}</th>
             <th>{t("dashboard.col.address")}</th>
             <th>{t("dashboard.col.worker")}</th>
             <th>{t("dashboard.col.actions")}</th>
@@ -839,7 +837,6 @@ function ServerRow({ server, communityId, can }: ServerRowProps) {
       <td>
         {server.server_type} {server.mc_version}
       </td>
-      <td>{server.execution_backend}</td>
       <td>
         {server.join_hostname !== null ? (
           <button
