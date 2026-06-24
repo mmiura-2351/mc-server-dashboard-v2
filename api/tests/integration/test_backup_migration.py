@@ -93,10 +93,10 @@ async def test_health_backfills_existing_rows_to_unknown() -> None:
             await conn.execute(
                 text(
                     "INSERT INTO server (id, community_id, name, mc_edition, "
-                    "mc_version, server_type, config, "
+                    "mc_version, server_type, execution_backend, config, "
                     "desired_state, observed_state, created_at, updated_at) VALUES "
                     "(:id, :community_id, :name, 'java', '1.21.1', 'vanilla', "
-                    "'{}', 'stopped', 'unknown', now(), now())"
+                    "'container', '{}', 'stopped', 'unknown', now(), now())"
                 ),
                 {"id": server_id, "community_id": community_id, "name": "survival"},
             )
