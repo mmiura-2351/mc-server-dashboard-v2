@@ -872,7 +872,14 @@ func (i *instance) superviseInstall(installID string) {
 		}
 
 		i.mu.Lock()
-		stopping := i.stopping
+		// Mark the install exit observed so the survived-kill restore, re-acquiring
+		// the lock, skips its reset rather than stomping the terminal state set
+		// below (mirrors supervise's exitObserved guard, issue #595/#392). Read
+		// the sticky stop intent: a container that survived the kill window and
+		// then died after the latch was reset is still a requested stop, so report
+		// stopped (mirrors issue #257).
+		i.exitObserved = true
+		stopping := i.stopRequested
 		i.mu.Unlock()
 
 		if stopping {
@@ -920,12 +927,19 @@ func (i *instance) superviseInstall(installID string) {
 		}
 		installID = newID
 		i.setContainerID(newID)
+		// Reset exitObserved for the new container: the old container's exit must
+		// not prevent the survived-kill restore from running against the new one
+		// (issue #595).
+		i.mu.Lock()
+		i.exitObserved = false
+		i.mu.Unlock()
 	}
 
 	// The install exited cleanly. A Stop that arrived after the wait returned
-	// but before the re-plan still wins — report stopped and clean up.
+	// but before the re-plan still wins — report stopped and clean up. Read the
+	// sticky stopRequested, consistent with the in-loop check (issue #595).
 	i.mu.Lock()
-	stopping := i.stopping
+	stopping := i.stopRequested
 	i.mu.Unlock()
 	if stopping {
 		_ = i.docker.Remove(context.Background(), installID)

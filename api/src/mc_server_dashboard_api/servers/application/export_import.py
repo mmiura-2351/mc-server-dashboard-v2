@@ -37,12 +37,13 @@ so a converter can be written later.
 
 from __future__ import annotations
 
+import datetime as dt
 import io
 import json
 import logging
 import zipfile
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from mc_server_dashboard_api.http_datetime import serialize_utc
 from mc_server_dashboard_api.servers.application.files import (
@@ -63,6 +64,12 @@ from mc_server_dashboard_api.servers.domain.errors import (
     WorkingSetSeedFailedError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileStore
+from mc_server_dashboard_api.servers.domain.plugin import (
+    LoaderType,
+    PluginId,
+    PluginSource,
+    ServerPlugin,
+)
 from mc_server_dashboard_api.servers.domain.server_properties import (
     set_rcon_properties,
 )
@@ -126,6 +133,7 @@ class ExportServer:
     ) -> AsyncIterator[bytes]:
         async with self.uow:
             server = await _load(self.uow, community_id, server_id)
+            plugins = await self.uow.plugins.list_for_server(server_id)
         if not server.is_at_rest():
             raise ServerFilesUnsettledError(str(server_id.value))
 
@@ -136,6 +144,7 @@ class ExportServer:
             "mc_version": server.mc_version,
             "server_type": server.server_type.value,
             "exported_at": serialize_utc(self.clock.now()),
+            "plugins": [_serialize_plugin(p) for p in plugins],
         }
         metadata_bytes = json.dumps(metadata, indent=2).encode("utf-8")
         return self.file_store.export_dir(
@@ -224,6 +233,11 @@ class ImportServer:
         await self._publish_working_set(
             community_id=community_id, server_id=server.id, content=content
         )
+        await self._import_plugins(
+            server_id=server.id,
+            plugin_dicts=metadata.plugins,
+            now=self.create_server.clock.now(),
+        )
         return server
 
     async def _publish_working_set(
@@ -281,12 +295,31 @@ class ImportServer:
             )
             raise WorkingSetSeedFailedError(str(server_id.value)) from exc
 
+    async def _import_plugins(
+        self,
+        *,
+        server_id: ServerId,
+        plugin_dicts: list[dict[str, object]],
+        now: dt.datetime,
+    ) -> None:
+        """Re-create plugin rows from the exported metadata (issue #1335)."""
+
+        if not plugin_dicts:
+            return
+        uow = self.create_server.uow
+        async with uow:
+            for raw in plugin_dicts:
+                plugin = _deserialize_plugin(raw, server_id=server_id, now=now)
+                await uow.plugins.add(plugin)
+            await uow.commit()
+
 
 @dataclass(frozen=True)
 class _Metadata:
     mc_edition: str
     mc_version: str
     server_type: str
+    plugins: list[dict[str, object]] = field(default_factory=list)
 
 
 def _parse_metadata(content: bytes) -> _Metadata:
@@ -342,6 +375,76 @@ def _parse_metadata(content: bytes) -> _Metadata:
         isinstance(value, str) for value in (mc_edition, mc_version, server_type)
     ):
         raise InvalidExportMetadataError("metadata field is not a string")
+    # Optional plugin metadata (issue #1335): old exports lack the key, so
+    # default to an empty list for backward compatibility.
+    plugins = parsed.get("plugins", [])
+    if not isinstance(plugins, list):
+        raise InvalidExportMetadataError("plugins is not a list")
     return _Metadata(
-        mc_edition=mc_edition, mc_version=mc_version, server_type=server_type
+        mc_edition=mc_edition,
+        mc_version=mc_version,
+        server_type=server_type,
+        plugins=plugins,
+    )
+
+
+# --- plugin serialization (issue #1335) --------------------------------------
+
+
+def _serialize_plugin(plugin: ServerPlugin) -> dict[str, object]:
+    """Flatten a :class:`ServerPlugin` to a JSON-safe dict for export."""
+
+    return {
+        "rel_path": plugin.rel_path,
+        "filename": plugin.filename,
+        "display_name": plugin.display_name,
+        "description": plugin.description,
+        "loader_type": plugin.loader_type.value,
+        "source": plugin.source.value,
+        "source_project_id": plugin.source_project_id,
+        "source_version_id": plugin.source_version_id,
+        "version_number": plugin.version_number,
+        "checksum_sha512": plugin.checksum_sha512,
+        "sha256": plugin.sha256,
+        "size_bytes": plugin.size_bytes,
+        "enabled": plugin.enabled,
+        "mod_identifier": plugin.mod_identifier,
+        "provides": plugin.provides,
+        "dependencies": plugin.dependencies,
+        "mc_versions": plugin.mc_versions,
+        "side": plugin.side,
+        "catalog_dependencies": plugin.catalog_dependencies,
+    }
+
+
+def _deserialize_plugin(
+    raw: dict[str, object], *, server_id: ServerId, now: dt.datetime
+) -> ServerPlugin:
+    """Reconstruct a :class:`ServerPlugin` from an exported dict."""
+
+    return ServerPlugin(
+        id=PluginId.new(),
+        server_id=server_id,
+        rel_path=str(raw.get("rel_path", "")),
+        filename=str(raw.get("filename", "")),
+        display_name=str(raw.get("display_name", "")),
+        description=raw.get("description"),  # type: ignore[arg-type]
+        loader_type=LoaderType(raw.get("loader_type", "mod")),
+        source=PluginSource(raw.get("source", "local")),
+        source_project_id=raw.get("source_project_id"),  # type: ignore[arg-type]
+        source_version_id=raw.get("source_version_id"),  # type: ignore[arg-type]
+        version_number=raw.get("version_number"),  # type: ignore[arg-type]
+        checksum_sha512=raw.get("checksum_sha512"),  # type: ignore[arg-type]
+        sha256=raw.get("sha256"),  # type: ignore[arg-type]
+        size_bytes=raw.get("size_bytes"),  # type: ignore[arg-type]
+        enabled=bool(raw.get("enabled", True)),
+        installed_by=None,
+        created_at=now,
+        updated_at=now,
+        mod_identifier=raw.get("mod_identifier"),  # type: ignore[arg-type]
+        provides=raw.get("provides", []),  # type: ignore[arg-type]
+        dependencies=raw.get("dependencies", []),  # type: ignore[arg-type]
+        mc_versions=raw.get("mc_versions", []),  # type: ignore[arg-type]
+        side=raw.get("side", "both"),  # type: ignore[arg-type]
+        catalog_dependencies=raw.get("catalog_dependencies", []),  # type: ignore[arg-type]
     )
