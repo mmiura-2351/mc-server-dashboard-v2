@@ -826,6 +826,23 @@ func TestForgeInstallRetryStopDuringBackoff(t *testing.T) {
 	}
 }
 
+// installBackoffOrStopping must detect a stop via the sticky stopRequested flag,
+// not the transient stopping flag: a Stop whose kill fails or is survived clears
+// stopping but leaves stopRequested set. Without the sticky read, the backoff
+// poll misses the abort and the retry proceeds (issue #1442).
+func TestInstallBackoffOrStoppingReadsStopRequested(t *testing.T) {
+	inst := &instance{}
+	// Simulate a Stop whose kill was survived: stopping is cleared but
+	// stopRequested remains set.
+	inst.stopRequested = true
+	inst.stopping = false
+
+	got := inst.installBackoffOrStopping(100 * time.Millisecond)
+	if !got {
+		t.Fatal("installBackoffOrStopping returned false with stopRequested=true, stopping=false; want true (issue #1442)")
+	}
+}
+
 // An install container that survives docker kill and then dies after the
 // survived-kill latch reset must still be recorded stopped (not a spurious
 // crash): the sticky stopRequested flag tells superviseInstall the exit was
