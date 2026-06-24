@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse
 
 import httpx
 
@@ -96,7 +96,7 @@ class ModrinthCatalog(CatalogProvider):
         )
 
     async def get_project(self, project_id_or_slug: str) -> CatalogProject:
-        data = await self._get_json(f"/project/{project_id_or_slug}")
+        data = await self._get_json(f"/project/{quote(project_id_or_slug, safe='')}")
         return CatalogProject(
             project_id=data["id"],
             slug=data.get("slug", ""),
@@ -126,7 +126,7 @@ class ModrinthCatalog(CatalogProvider):
         if game_versions:
             params["game_versions"] = json.dumps(game_versions)
         data = await self._get_json(
-            f"/project/{project_id_or_slug}/version", params=params
+            f"/project/{quote(project_id_or_slug, safe='')}/version", params=params
         )
         return [self._parse_version(v) for v in data]
 
