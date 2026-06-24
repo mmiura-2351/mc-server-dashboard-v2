@@ -923,6 +923,61 @@ func TestInstallSurvivedKillRestoreDoesNotStompTerminalState(t *testing.T) {
 	}
 }
 
+// When install attempt N exits (non-zero, triggering a retry) and attempt N+1
+// starts a new container, exitObserved must be reset so a Stop during attempt
+// N+1 whose kill is survived still triggers the survived-kill restore. Without
+// the reset, exitObserved stays true from the old container and Stop returns a
+// false nil — the new container is still alive (issue #595).
+func TestInstallRetryResetsExitObservedForNewContainer(t *testing.T) {
+	prev := installRetryBackoff
+	installRetryBackoff = []time.Duration{time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { installRetryBackoff = prev })
+
+	dir := t.TempDir()
+	docker := newForgeFakeDocker()
+	installID := "mcsd-s1-install"
+	installErr := statusError{method: "POST", path: "/wait", code: 200, message: "install exited 1"}
+	// Attempt 0: non-zero exit → retry. Attempt 1: blocks on waitGate so Stop
+	// can race it.
+	docker.waitGates[installID] = make(chan waitResult, 1)
+	docker.waitGates[installID] <- waitResult{code: 1, err: installErr}
+	// Stop and Kill on the retry container must NOT release Wait (survived kill).
+	docker.stopNoExitIDs = map[string]bool{installID: true}
+	docker.killNoExitIDs = map[string]bool{installID: true}
+	d := New(docker, images(), func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
+		return nil, errors.New("no rcon")
+	}, Options{
+		WorkerID:             "w1",
+		StopTimeout:          50 * time.Millisecond,
+		GameBindIP:           "0.0.0.0",
+		ReadinessTimeout:     20 * time.Millisecond,
+		ConflictPollInterval: time.Millisecond,
+		ConflictDeadline:     100 * time.Millisecond,
+	})
+
+	inst, err := d.Start(context.Background(), forgeSpec(dir))
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Wait until the retry container is created (attempt 1).
+	deadline := time.After(2 * time.Second)
+	for len(docker.names()) < 2 {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for retry install container")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	// Stop during attempt 1: the kill survives, so Stop must fail (not return
+	// a false nil from a stale exitObserved left by attempt 0).
+	if err := inst.Stop(context.Background(), false); err == nil {
+		t.Fatal("expected Stop to fail when the retry container survives docker kill; got nil (stale exitObserved?)")
+	}
+}
+
 // drainToEvent collects status events until it sees want, returning the matching
 // event so the caller can inspect its Detail field.
 func drainToEvent(t *testing.T, ch <-chan execution.StatusEvent, want execution.ServerState) execution.StatusEvent {

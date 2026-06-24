@@ -927,6 +927,12 @@ func (i *instance) superviseInstall(installID string) {
 		}
 		installID = newID
 		i.setContainerID(newID)
+		// Reset exitObserved for the new container: the old container's exit must
+		// not prevent the survived-kill restore from running against the new one
+		// (issue #595).
+		i.mu.Lock()
+		i.exitObserved = false
+		i.mu.Unlock()
 	}
 
 	// The install exited cleanly. A Stop that arrived after the wait returned
