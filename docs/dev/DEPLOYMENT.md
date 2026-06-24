@@ -455,7 +455,8 @@ Its handling depends on `driver.container.network` (env
 ### HTTPS requirement for the browser UI
 
 The browser UI **must be reached over HTTPS** for the default configuration to
-work. The refresh cookie is issued with `Secure; HttpOnly; SameSite=Strict`
+work. The refresh cookie is issued with `Secure; HttpOnly; SameSite=Strict;
+Path=/api/auth`
 (`auth.py`, `config.py` `refresh_cookie_secure=True`). Over plain HTTP the
 browser refuses to store a `Secure` cookie, so the silent token refresh always
 fails and the user is forced to re-login when the access token expires (~900 s /
@@ -465,9 +466,8 @@ hard-logged-out because the refresh cookie was never stored.
 #### Cloudflare Tunnel (recommended)
 
 The `cloudflared` service in `compose.yaml` (issue #1090) is the supported
-HTTPS path. It is gated behind the `tunnel` compose profile — the same profile
-used by the relay, but the tunnel is independently useful for HTTPS even without
-the relay.
+HTTPS path. It is gated behind the `tunnel` compose profile (the relay uses a
+separate `relay` profile).
 
 How it works: the browser reaches the Cloudflare edge over HTTPS (the public
 hostname is configured in the Cloudflare Zero Trust dashboard); `cloudflared`
