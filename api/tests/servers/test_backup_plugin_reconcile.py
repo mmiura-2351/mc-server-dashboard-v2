@@ -199,6 +199,39 @@ async def test_restore_preserves_disabled_plugin_records() -> None:
     assert rows[0].id == disabled.id
 
 
+async def test_restore_preserves_client_only_plugin_records() -> None:
+    """A client-only plugin survives reconciliation even with no file on disk.
+
+    Client-only plugins (side == "client") are metadata-only on the server --
+    the jar is tracked and cached but never deployed to the working set. Since
+    backups capture filesystem state (which excludes client-only jars), their
+    DB rows must not be deleted as orphans (#1445).
+    """
+    server = _server()
+    repo, backups, backup, archive = _seed_restore_fixture(server)
+    plugins = FakePluginRepository()
+    client_mod = _plugin(
+        server_id=server.id,
+        rel_path="mods/client-mod.jar",
+        filename="client-mod.jar",
+        display_name="Client Mod",
+    )
+    client_mod.side = "client"
+    plugins.seed(client_mod)
+    # No file on disk -- client-only jars are never in the working set.
+    file_store = FakeFileStore()
+    uow = FakeUnitOfWork(servers=repo, backups=backups, plugins=plugins)
+
+    await _make_restore(uow, archive, file_store=file_store)(
+        community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id
+    )
+
+    rows = await plugins.list_for_server(server.id)
+    assert len(rows) == 1
+    assert rows[0].id == client_mod.id
+    assert rows[0].side == "client"
+
+
 # --- ghost ingestion --------------------------------------------------------
 
 

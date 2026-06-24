@@ -461,8 +461,12 @@ async def _reconcile_plugins(
 
         changed = False
 
-        # 1. Drop orphans: DB rows whose file is gone.
+        # 1. Drop orphans: DB rows whose file is gone.  Client-only plugins
+        #    (side == "client") are excluded: they have no working-set file, so
+        #    they cannot be matched against the restored filesystem (#1445).
         for plugin in db_plugins:
+            if plugin.side == "client":
+                continue
             if plugin.rel_path not in disk_jars:
                 await uow.plugins.delete(plugin.id)
                 changed = True
