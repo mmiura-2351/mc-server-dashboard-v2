@@ -7,7 +7,7 @@ import (
 )
 
 func TestIPCapsMaxConns(t *testing.T) {
-	caps := NewIPCaps(2, 0, nil)
+	caps := NewIPCaps(2, 0, -1, nil)
 	first := caps.Acquire("1.1.1.1")
 	second := caps.Acquire("1.1.1.1")
 	if !first || !second {
@@ -33,7 +33,7 @@ func TestIPCapsMaxConns(t *testing.T) {
 // eviction the tunnel listener relies on so hostile per-IP churn cannot grow the
 // map without bound.
 func TestIPCapsConnsBounded(t *testing.T) {
-	caps := NewIPCaps(4, 0, nil)
+	caps := NewIPCaps(4, 0, -1, nil)
 	for i := 0; i < 1000; i++ {
 		ip := uniqueIP(i)
 		if !caps.Acquire(ip) {
@@ -48,7 +48,7 @@ func TestIPCapsConnsBounded(t *testing.T) {
 
 func TestIPCapsJoinRate(t *testing.T) {
 	now := time.Unix(100, 0)
-	caps := NewIPCaps(0, 3, func() time.Time { return now })
+	caps := NewIPCaps(0, 3, -1, func() time.Time { return now })
 
 	for i := 0; i < 3; i++ {
 		if !caps.AllowJoin("1.1.1.1") {
@@ -73,7 +73,7 @@ func TestIPCapsJoinRate(t *testing.T) {
 // active IPs rather than retaining every IP forever.
 func TestIPCapsJoinWindowsBounded(t *testing.T) {
 	now := time.Unix(0, 0)
-	caps := NewIPCaps(0, 10, func() time.Time { return now })
+	caps := NewIPCaps(0, 10, -1, func() time.Time { return now })
 
 	// 1000 unique IPs each join once at t=0.
 	for i := 0; i < 1000; i++ {
@@ -97,10 +97,70 @@ func uniqueIP(i int) string {
 }
 
 func TestIPCapsZeroDisables(t *testing.T) {
-	caps := NewIPCaps(0, 0, nil)
+	caps := NewIPCaps(0, 0, -1, nil)
 	for i := 0; i < 100; i++ {
 		if !caps.Acquire("x") || !caps.AllowJoin("x") {
 			t.Fatal("zero caps should never block")
 		}
+	}
+}
+
+// TestGlobalCapRejectsAtCeiling asserts that once the global connection ceiling
+// is reached, Acquire rejects new connections even from distinct IPs that are
+// individually under their per-IP cap.
+func TestGlobalCapRejectsAtCeiling(t *testing.T) {
+	caps := NewIPCaps(10, 0, 3, nil) // per-IP 10, global 3
+	if !caps.Acquire("1.1.1.1") || !caps.Acquire("2.2.2.2") || !caps.Acquire("3.3.3.3") {
+		t.Fatal("first three acquires from distinct IPs should succeed")
+	}
+	// Global cap reached — a fourth distinct IP is rejected.
+	if caps.Acquire("4.4.4.4") {
+		t.Error("acquire beyond global cap should be rejected")
+	}
+	// Releasing one slot allows the next acquire.
+	caps.Release("2.2.2.2")
+	if !caps.Acquire("5.5.5.5") {
+		t.Error("acquire after release should succeed")
+	}
+}
+
+// TestGlobalCapDefaultApplied asserts that passing zero for globalMax applies
+// DefaultGlobalMax rather than disabling the cap.
+func TestGlobalCapDefaultApplied(t *testing.T) {
+	caps := NewIPCaps(0, 0, 0, nil)
+	if caps.globalMax != DefaultGlobalMax {
+		t.Errorf("globalMax = %d, want %d", caps.globalMax, DefaultGlobalMax)
+	}
+}
+
+// TestGlobalCapNegativeDisables asserts that a negative globalMax disables the
+// global cap entirely, matching pre-existing behavior.
+func TestGlobalCapNegativeDisables(t *testing.T) {
+	caps := NewIPCaps(0, 0, -1, nil)
+	// With global cap disabled, even many acquires succeed (limited only by
+	// per-IP cap, which is also disabled here).
+	for i := 0; i < 200; i++ {
+		if !caps.Acquire(uniqueIP(i)) {
+			t.Fatalf("acquire %d should succeed with global cap disabled", i)
+		}
+	}
+}
+
+// TestGlobalCapWithPerIPCap asserts that per-IP rejection releases the global
+// slot so the global counter stays accurate.
+func TestGlobalCapWithPerIPCap(t *testing.T) {
+	caps := NewIPCaps(1, 0, 5, nil) // per-IP 1, global 5
+	// First acquire from an IP succeeds.
+	if !caps.Acquire("1.1.1.1") {
+		t.Fatal("first acquire should succeed")
+	}
+	// Second from the same IP is rejected by per-IP cap.
+	if caps.Acquire("1.1.1.1") {
+		t.Error("per-IP cap should reject second acquire")
+	}
+	// The global counter should still be 1 (the per-IP rejection did not leak a
+	// global slot).
+	if got := caps.globalConns.Load(); got != 1 {
+		t.Errorf("globalConns = %d after per-IP rejection, want 1", got)
 	}
 }

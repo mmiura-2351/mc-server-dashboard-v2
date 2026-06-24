@@ -83,8 +83,8 @@ func run(ctx context.Context) error {
 
 	tokens := tunnel.NewTokenTable(tokenTTL, time.Now)
 	cache := game.NewStatusCache(time.Duration(cfg.Game.StatusCacheSeconds)*time.Second, int(cfg.Game.StatusCacheMaxEntries), time.Now)
-	caps := ipcaps.NewIPCaps(cfg.Game.MaxConnsPerIP, cfg.Game.JoinsPerIPPerSecond, time.Now)
-	tunnelCaps := ipcaps.NewIPCaps(cfg.Tunnel.MaxConnsPerIP, 0, time.Now)
+	caps := ipcaps.NewIPCaps(cfg.Game.MaxConnsPerIP, cfg.Game.JoinsPerIPPerSecond, 0, time.Now)
+	tunnelCaps := ipcaps.NewIPCaps(cfg.Tunnel.MaxConnsPerIP, 0, 0, time.Now)
 
 	tunnelTLS, err := buildTunnelTLS(cfg.Tunnel.TLS)
 	if err != nil {

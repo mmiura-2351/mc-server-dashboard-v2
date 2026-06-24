@@ -48,7 +48,7 @@ func newCapConn(ip string) (server *capConn, clientEnd net.Conn) {
 func newCapListener(maxConns uint32) *Listener {
 	return &Listener{
 		tokens: NewTokenTable(10*time.Second, time.Now),
-		caps:   ipcaps.NewIPCaps(maxConns, 0, time.Now),
+		caps:   ipcaps.NewIPCaps(maxConns, 0, -1, time.Now),
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 }

@@ -8,6 +8,7 @@ package ipcaps
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -18,6 +19,8 @@ import (
 type IPCaps struct {
 	maxConns    uint32
 	joinsPerSec uint32
+	globalMax   int64
+	globalConns atomic.Int64
 	now         func() time.Time
 	mu          sync.Mutex
 	conns       map[string]uint32
@@ -36,15 +39,26 @@ type rateWindow struct {
 	count       uint32
 }
 
+// DefaultGlobalMax is the default global connection ceiling used when callers
+// pass zero for globalMax. It is defense-in-depth against distributed source
+// exhaustion (RELAY.md Section 16 defers volumetric DDoS to the provider).
+const DefaultGlobalMax int64 = 10_000
+
 // NewIPCaps builds the caps. now is injectable for tests; pass time.Now in
 // production. A zero maxConns or joinsPerSec disables that particular cap.
-func NewIPCaps(maxConns, joinsPerSec uint32, now func() time.Time) *IPCaps {
+// globalMax sets the hard ceiling on total concurrent connections across all IPs;
+// zero applies DefaultGlobalMax, negative disables the global cap.
+func NewIPCaps(maxConns, joinsPerSec uint32, globalMax int64, now func() time.Time) *IPCaps {
 	if now == nil {
 		now = time.Now
+	}
+	if globalMax == 0 {
+		globalMax = DefaultGlobalMax
 	}
 	return &IPCaps{
 		maxConns:    maxConns,
 		joinsPerSec: joinsPerSec,
+		globalMax:   globalMax,
 		now:         now,
 		conns:       make(map[string]uint32),
 		joinWindows: make(map[string]*rateWindow),
@@ -52,15 +66,32 @@ func NewIPCaps(maxConns, joinsPerSec uint32, now func() time.Time) *IPCaps {
 }
 
 // Acquire registers a new connection from ip. It returns false if ip is already
-// at the concurrent-connection cap, in which case the connection must be
-// dropped and Release must NOT be called.
+// at the concurrent-connection cap or the global connection ceiling has been
+// reached, in which case the connection must be dropped and Release must NOT be
+// called.
 func (c *IPCaps) Acquire(ip string) bool {
+	// Check global cap first (lock-free fast path).
+	if c.globalMax > 0 && c.globalConns.Load() >= c.globalMax {
+		return false
+	}
+	// Reserve a global slot atomically. Add(1) returns the new value; if it
+	// exceeds the ceiling another goroutine raced past the fast path, so undo.
+	if c.globalMax > 0 {
+		if c.globalConns.Add(1) > c.globalMax {
+			c.globalConns.Add(-1)
+			return false
+		}
+	}
 	if c.maxConns == 0 {
 		return true
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.conns[ip] >= c.maxConns {
+		// Per-IP cap hit — release the global slot we just reserved.
+		if c.globalMax > 0 {
+			c.globalConns.Add(-1)
+		}
 		return false
 	}
 	c.conns[ip]++
@@ -70,6 +101,9 @@ func (c *IPCaps) Acquire(ip string) bool {
 // Release drops one concurrent-connection count for ip. It must be called once
 // per successful Acquire.
 func (c *IPCaps) Release(ip string) {
+	if c.globalMax > 0 {
+		c.globalConns.Add(-1)
+	}
 	if c.maxConns == 0 {
 		return
 	}
