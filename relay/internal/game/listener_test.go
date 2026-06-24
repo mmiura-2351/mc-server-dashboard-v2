@@ -103,6 +103,56 @@ func TestAwaitTunnelNilConnFromSweptChannel(t *testing.T) {
 	}
 }
 
+// TestDrainReturnsImmediatelyWhenIdle proves Drain returns true immediately
+// when there are no in-flight handle goroutines.
+func TestDrainReturnsImmediatelyWhenIdle(t *testing.T) {
+	l := &Listener{}
+	if !l.Drain(time.Second) {
+		t.Error("Drain should return true when no goroutines are in flight")
+	}
+}
+
+// TestDrainWaitsForInflight proves Drain blocks until all in-flight handle
+// goroutines finish and returns true.
+func TestDrainWaitsForInflight(t *testing.T) {
+	l := &Listener{}
+	l.inflight.Add(1)
+
+	done := make(chan bool, 1)
+	go func() { done <- l.Drain(2 * time.Second) }()
+
+	// Drain should be blocked because the WaitGroup counter is 1.
+	select {
+	case <-done:
+		t.Fatal("Drain returned before the in-flight goroutine finished")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Simulate the goroutine finishing.
+	l.inflight.Done()
+
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Error("Drain should return true when goroutines finish within the deadline")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Drain did not return after the in-flight goroutine finished")
+	}
+}
+
+// TestDrainTimesOut proves Drain returns false when in-flight goroutines do
+// not finish within the deadline.
+func TestDrainTimesOut(t *testing.T) {
+	l := &Listener{}
+	l.inflight.Add(1)
+	defer l.inflight.Done() // clean up so the test does not leak
+
+	if l.Drain(50 * time.Millisecond) {
+		t.Error("Drain should return false when the deadline elapses with goroutines still in flight")
+	}
+}
+
 // deadlineConn records the write deadline set on it and discards writes, so the
 // disconnect-path deadline (issue #971) is observable.
 type deadlineConn struct {
