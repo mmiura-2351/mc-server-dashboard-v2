@@ -240,20 +240,17 @@ describe("ServerDetailPage loader-aware content tab (#1320)", () => {
     }
   });
 
-  it("hides the content tab for vanilla and spigot servers", async () => {
-    for (const type of ["vanilla", "spigot"]) {
-      mockApi.get.mockResolvedValue(server({ server_type: type }));
-      const { unmount } = renderPage();
+  it("hides the content tab for vanilla servers", async () => {
+    mockApi.get.mockResolvedValue(server({ server_type: "vanilla" }));
+    renderPage();
 
-      await screen.findByRole("tab", { name: t("serverDetail.tab.overview") });
-      expect(
-        screen.queryByRole("tab", { name: t("serverDetail.tab.plugins") }),
-      ).not.toBeInTheDocument();
-      expect(
-        screen.queryByRole("tab", { name: t("serverDetail.tab.mods") }),
-      ).not.toBeInTheDocument();
-      unmount();
-    }
+    await screen.findByRole("tab", { name: t("serverDetail.tab.overview") });
+    expect(
+      screen.queryByRole("tab", { name: t("serverDetail.tab.plugins") }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("tab", { name: t("serverDetail.tab.mods") }),
+    ).not.toBeInTheDocument();
   });
 });
 

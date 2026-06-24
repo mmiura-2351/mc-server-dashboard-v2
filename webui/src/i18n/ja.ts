@@ -630,18 +630,14 @@ export const ja: Record<TranslationKey, string> = {
   "serverCreate.versionLoading": "バージョンを読み込んでいます…",
   "serverCreate.versionLoadError":
     "この種類のバージョンを読み込めませんでした。",
-  "serverCreate.spigotHint":
-    "公式の配布APIがありません — 代わりにPaperを使用してください。",
   "serverCreate.type.vanilla": "Vanilla",
   "serverCreate.type.paper": "Paper",
   "serverCreate.type.fabric": "Fabric",
   "serverCreate.type.forge": "Forge",
-  "serverCreate.type.spigot": "Spigot",
   "serverCreate.typeSub.vanilla": "公式",
   "serverCreate.typeSub.paper": "高性能フォーク",
   "serverCreate.typeSub.fabric": "軽量Mod",
   "serverCreate.typeSub.forge": "本格Mod",
-  "serverCreate.typeSub.spigot": "非対応",
   // Step 2 — runtime.
   "serverCreate.backendLabel": "実行バックエンド",
   "serverCreate.backend.container": "コンテナ",
@@ -686,8 +682,6 @@ export const ja: Record<TranslationKey, string> = {
   "serverCreate.eulaWarning":
     "EULAに同意しない場合、サーバーは作成されますが、後で同意するまで起動できません。",
   // Create error surfacing.
-  "serverCreate.error.spigot_unsupported":
-    "Spigotは非対応です — 代わりにPaperを使用してください。",
   "serverCreate.error.port_taken":
     "そのゲームポートはすでに使用されています。別のポートを選択してください。",
   "serverCreate.error.port_out_of_range":

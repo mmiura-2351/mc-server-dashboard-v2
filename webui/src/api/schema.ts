@@ -569,8 +569,8 @@ export interface paths {
          *     come from the request (the name is NOT taken from the metadata, so the usual
          *     uniqueness 409 applies). The archive's ``export_metadata.json`` is parsed and
          *     validated (wrong/missing format or malformed -> 422 ``invalid_export_metadata``;
-         *     the server_type/version run the SAME create-path validator, so spigot is 422
-         *     ``spigot_unsupported`` etc.). A row is created with an auto-assigned game port
+         *     the server_type/version run the SAME create-path validator). A row is created
+         *     with an auto-assigned game port
          *     (#243); ``accept_eula`` is never implied. The archive contents then publish as
          *     the initial working set through the hardened extraction (zip-slip / size / entry
          *     caps -> 413 / 422). A publish failure after the row commits is 503

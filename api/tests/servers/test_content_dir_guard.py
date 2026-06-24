@@ -2,7 +2,7 @@
 
 Part 1: Files API write/delete/rename/upload targeting the server's content
 directory (``mods/`` for Fabric/Forge, ``plugins/`` for Paper) is rejected with
-``ContentDirProtectedError``. Vanilla/Spigot servers are unguarded.
+``ContentDirProtectedError``. Vanilla servers are unguarded.
 
 Part 2: ``_reconcile_working_set`` falls back to materializing from the
 content-addressed cache when the on-disk file is missing, instead of 500-ing.
@@ -148,9 +148,6 @@ class TestGuardContentDir:
 
     def test_allows_vanilla_unguarded(self) -> None:
         _guard_content_dir(ServerType.VANILLA, "mods/anything.jar")
-
-    def test_allows_spigot_unguarded(self) -> None:
-        _guard_content_dir(ServerType.SPIGOT, "plugins/anything.jar")
 
     def test_allows_prefix_collision(self) -> None:
         # "mods-extra/foo" should not match "mods/".

@@ -38,21 +38,21 @@ _SERVER_TYPE_MIGRATION = (
     Path(__file__).resolve().parents[2]
     / "migrations"
     / "versions"
-    / "0010_server_type_fabric.py"
+    / "0025_remove_server_type_spigot.py"
 )
 
 
 def _migration_check_values() -> set[str]:
     """The ``server_type`` values the latest migration's CHECK admits.
 
-    Loads migration 0010 and parses its ``_NEW_CHECK`` ``IN (...)`` clause so the
+    Loads migration 0025 and parses its ``_NEW_CHECK`` ``IN (...)`` clause so the
     enum is pinned to what the database actually enforces -- enum-vs-migration
     drift (the #267 bug class) then fails this test instead of only a 500 against
     a real database.
     """
 
     spec = importlib.util.spec_from_file_location(
-        "_server_type_migration_0010", _SERVER_TYPE_MIGRATION
+        "_server_type_migration_0025", _SERVER_TYPE_MIGRATION
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -61,7 +61,7 @@ def _migration_check_values() -> set[str]:
 
 
 def test_server_type_values_match_database_check_enum() -> None:
-    documented = {"vanilla", "paper", "fabric", "forge", "spigot"}
+    documented = {"vanilla", "paper", "fabric", "forge"}
     assert {t.value for t in ServerType} == documented
     # And the migration's CHECK must admit exactly that set: the enum and the
     # live schema constraint can never silently diverge (issue #267).

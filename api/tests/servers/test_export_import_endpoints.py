@@ -7,7 +7,7 @@ cases and authorization Ports faked (NFR-TEST-1, no database). Verifies:
 - export is gated by ``file:read`` and streams ``application/zip``; a running
   server is 409 ``server_unsettled`` and audited DENIED;
 - import is gated by ``server:create`` (multipart) and maps the domain errors:
-  invalid metadata -> 422, spigot -> 422, name conflict -> 409, oversized -> 413,
+  invalid metadata -> 422, name conflict -> 409, oversized -> 413,
   seed failure -> 503;
 - the success audit codes (``server:export`` / ``server:import``).
 """
@@ -63,9 +63,6 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerId,
     ServerName,
     ServerType,
-)
-from mc_server_dashboard_api.servers.domain.version_validator import (
-    SpigotUnsupportedError,
 )
 from tests.audit.fakes import RecordingAuditRecorder
 from tests.identity.fakes import make_user
@@ -318,23 +315,6 @@ def test_import_removed_backend_is_422() -> None:
     )
     assert resp.status_code == 422
     assert resp.json()["reason"] == "removed_execution_backend"
-
-
-def test_import_spigot_metadata_is_422() -> None:
-    app = _app(
-        member=True,
-        allow=True,
-        import_=_FakeImport(error=SpigotUnsupportedError("use paper")),
-    )
-    client = next(_client(app))
-    files, data = _zip_upload()
-    resp = client.post(
-        f"/api/communities/{uuid.uuid4()}/servers/import",
-        files=files,
-        data=data,
-    )
-    assert resp.status_code == 422
-    assert resp.json()["reason"] == "spigot_unsupported"
 
 
 def test_import_name_conflict_is_409() -> None:

@@ -623,18 +623,14 @@ export const en = {
   "serverCreate.versionLabel": "Minecraft version",
   "serverCreate.versionLoading": "Loading versions…",
   "serverCreate.versionLoadError": "Could not load versions for this type.",
-  "serverCreate.spigotHint":
-    "No official distribution API — use Paper instead.",
   "serverCreate.type.vanilla": "Vanilla",
   "serverCreate.type.paper": "Paper",
   "serverCreate.type.fabric": "Fabric",
   "serverCreate.type.forge": "Forge",
-  "serverCreate.type.spigot": "Spigot",
   "serverCreate.typeSub.vanilla": "official",
   "serverCreate.typeSub.paper": "performance fork",
   "serverCreate.typeSub.fabric": "light modding",
   "serverCreate.typeSub.forge": "heavy modding",
-  "serverCreate.typeSub.spigot": "unsupported",
   // Step 2 — runtime.
   "serverCreate.backendLabel": "Execution backend",
   "serverCreate.backend.container": "Container",
@@ -681,8 +677,6 @@ export const en = {
   "serverCreate.eulaWarning":
     "Without accepting the EULA the server is created but cannot start until you accept it later.",
   // Create error surfacing.
-  "serverCreate.error.spigot_unsupported":
-    "Spigot is not supported — use Paper instead.",
   "serverCreate.error.port_taken":
     "That game port is already in use. Pick another.",
   "serverCreate.error.port_out_of_range":

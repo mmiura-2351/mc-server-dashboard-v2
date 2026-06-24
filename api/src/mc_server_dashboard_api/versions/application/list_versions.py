@@ -2,8 +2,7 @@
 
 Thin wrappers over the :class:`VersionCatalog` Port. The types index is the set of
 server types the catalog can resolve (``vanilla`` / ``paper`` / ``fabric`` /
-``forge``) — it is the catalog's own ``ServerType`` enum, so ``spigot`` is absent
-by construction.
+``forge``) — it is the catalog's own ``ServerType`` enum.
 """
 
 from __future__ import annotations

@@ -682,7 +682,7 @@ A whole server moves in and out as a single ZIP archive:
 
 On import the `format` field must equal `1`, and `server_type` / `mc_version` are
 re-validated against the version catalog (the same check `create` runs), so an
-unsupported type — e.g. `spigot` — is rejected. The `export_metadata.json` member
+unsupported type is rejected. The `export_metadata.json` member
 itself is never written into the new working set.
 
 **Legacy incompatibility (one honest line):** archives produced by the legacy

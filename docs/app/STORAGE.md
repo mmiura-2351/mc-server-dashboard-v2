@@ -872,11 +872,9 @@ set's members; when there is a resolved JAR but no published snapshot, the body 
 a tar carrying just `server.jar` (a `200`, not the `204` of the nothing-to-send
 case) so the Worker can still launch.
 
-spigot is **not** resolved: the version catalog lists/resolves vanilla (Mojang
+The version catalog lists/resolves vanilla (Mojang
 manifest), Paper (PaperMC API), fabric (meta.fabricmc.net), and forge (the Forge
-Maven + promotions feed). The `server_type` CHECK enum still permits `spigot`,
-but server create-validation rejects it — the catalog has no usable source (no
-official distribution API; create recommends Paper instead). Forge resolves to
+Maven + promotions feed). Forge resolves to
 the *installer* JAR, injected into the working set at `server.jar` like the other
 types; the worker runs `--installServer` on first start, so the same hydrate
 mechanism serves it. The fabric server launcher JAR has no upstream checksum, so

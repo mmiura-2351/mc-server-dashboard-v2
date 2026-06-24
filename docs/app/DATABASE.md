@@ -338,7 +338,7 @@ assigned Worker.
 | `name` | text | unique within the Community |
 | `mc_edition` | text | e.g. `java` |
 | `mc_version` | text | e.g. `1.21.1` (FR-SRV-1) |
-| `server_type` | text | `vanilla` / `paper` / `fabric` / `forge` / `spigot` (CHECK enum). `vanilla`/`paper`/`fabric`/`forge` are resolvable by the version catalog (forge resolves to the installer JAR — the worker runs `--installServer` on first start); `spigot` (no official distribution API) is accepted by the schema but rejected at create-time by version-validation (FR-VER-1) |
+| `server_type` | text | `vanilla` / `paper` / `fabric` / `forge` (CHECK enum). All are resolvable by the version catalog (forge resolves to the installer JAR — the worker runs `--installServer` on first start) |
 | `execution_backend` | text | `host_process` / `container` (CHECK enum). `container` is the only shipped backend; `host_process` is retained in the CHECK for historical rows only — the Worker host-process driver was removed in issue #781, so no new server uses it (the value is left in place to avoid a migration; see issue #781) |
 | `config` | jsonb | server configuration blob (properties, JVM args, plus the reserved keys catalogued below) |
 | `game_port` | integer nullable | the Minecraft game port (issue #243), assigned at create from the configured range (CONFIGURATION.md Section 5.8) and **unique deployment-wide**. Nullable: legacy/imported rows predating port tracking carry none, and Postgres treats `NULL`s as distinct so they never collide |

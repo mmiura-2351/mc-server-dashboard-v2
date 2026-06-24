@@ -2,9 +2,8 @@
 
 The servers ``VersionValidator`` maps the persisted ``server_type`` onto the
 version catalog. ``vanilla`` / ``paper`` / ``fabric`` / ``forge`` are catalogued
-and validated against the catalog; ``spigot`` is rejected with a distinct error
-recommending Paper (no official distribution API). A catalogued type whose
-version is not offered is the unknown-version case.
+and validated against the catalog. A catalogued type whose version is not
+offered is the unknown-version case.
 """
 
 from __future__ import annotations
@@ -15,7 +14,6 @@ from mc_server_dashboard_api.servers.adapters.version_validator import (
     CatalogVersionValidator,
 )
 from mc_server_dashboard_api.servers.domain.version_validator import (
-    SpigotUnsupportedError,
     UnknownVersionError,
 )
 from mc_server_dashboard_api.versions.adapters.composite import CompositeCatalog
@@ -77,10 +75,3 @@ async def test_accepts_offered_forge_version() -> None:
 async def test_unknown_forge_version_rejected() -> None:
     with pytest.raises(UnknownVersionError):
         await _validator().validate(server_type="forge", version="9.9.9")
-
-
-@pytest.mark.asyncio
-async def test_spigot_rejected_recommending_paper() -> None:
-    with pytest.raises(SpigotUnsupportedError) as exc:
-        await _validator().validate(server_type="spigot", version="1.21.1")
-    assert "paper" in str(exc.value).lower()

@@ -132,7 +132,6 @@ from mc_server_dashboard_api.servers.domain.memory_limit import (
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
 from mc_server_dashboard_api.servers.domain.version_validator import (
     CatalogUnavailableError,
-    SpigotUnsupportedError,
     UnsupportedServerTypeError,
 )
 from mc_server_dashboard_api.servers.domain.version_validator import (
@@ -331,13 +330,8 @@ async def create_server(
         # A known-but-removed backend (host_process, issue #781): no Worker can run
         # it, so reject create rather than stage an unplaceable server.
         raise _unprocessable("removed_execution_backend") from exc
-    except SpigotUnsupportedError as exc:
-        # Spigot is schema-valid but has no official distribution API
-        # (BuildTools-only): a distinct reason so the client can surface the
-        # recommendation to use Paper (FR-VER-1).
-        raise _unprocessable("spigot_unsupported") from exc
     except UnsupportedServerTypeError as exc:
-        # A schema-valid type the catalog cannot resolve (forge): rejected as
+        # A schema-valid type the catalog cannot resolve: rejected as
         # unsupported, distinct from a wholly invalid type (FR-VER-1).
         raise _unprocessable("unsupported_server_type") from exc
     except CatalogUnknownVersionError as exc:
@@ -413,8 +407,8 @@ async def import_server(
     come from the request (the name is NOT taken from the metadata, so the usual
     uniqueness 409 applies). The archive's ``export_metadata.json`` is parsed and
     validated (wrong/missing format or malformed -> 422 ``invalid_export_metadata``;
-    the server_type/version run the SAME create-path validator, so spigot is 422
-    ``spigot_unsupported`` etc.). A row is created with an auto-assigned game port
+    the server_type/version run the SAME create-path validator). A row is created
+    with an auto-assigned game port
     (#243); ``accept_eula`` is never implied. The archive contents then publish as
     the initial working set through the hardened extraction (zip-slip / size / entry
     caps -> 413 / 422). A publish failure after the row commits is 503
@@ -441,8 +435,6 @@ async def import_server(
         # Import shares the create use case, so a removed backend (host_process,
         # issue #781) is rejected here too.
         raise _unprocessable("removed_execution_backend") from exc
-    except SpigotUnsupportedError as exc:
-        raise _unprocessable("spigot_unsupported") from exc
     except UnsupportedServerTypeError as exc:
         raise _unprocessable("unsupported_server_type") from exc
     except CatalogUnknownVersionError as exc:

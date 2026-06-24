@@ -56,11 +56,11 @@ from mc_server_dashboard_api.servers.application.version_range import version_sa
 from mc_server_dashboard_api.servers.domain.plugin import ServerPlugin
 
 # The version-range dialect used for each server loader (see :mod:`version_range`).
-# Forge/NeoForge ranges are Maven intervals; Paper/Spigot MC compat is a Bukkit
+# Forge/NeoForge ranges are Maven intervals; Paper MC compat is a Bukkit
 # ``api-version`` floor; everything else uses semver predicates. A server runs a
 # single loader family, so the dialect is the same for every plugin on it.
 _MAVEN_SERVER_TYPES = frozenset({"forge"})
-_PAPER_SERVER_TYPES = frozenset({"paper", "spigot"})
+_PAPER_SERVER_TYPES = frozenset({"paper"})
 
 
 def _loader_dialect(server_type: str) -> str:

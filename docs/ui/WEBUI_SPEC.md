@@ -100,7 +100,7 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 
 | Method | Path | Notes |
 |---|---|---|
-| GET / POST | `/communities/{cid}/servers` | List / create (`name`, `mc_edition`, `mc_version`, `server_type`, `execution_backend`, `config`, `accept_eula`, optional `game_port`). `spigot` → 422 `spigot_unsupported`. |
+| GET / POST | `/communities/{cid}/servers` | List / create (`name`, `mc_edition`, `mc_version`, `server_type`, `execution_backend`, `config`, `accept_eula`, optional `game_port`). |
 | POST | `/communities/{cid}/servers/import` | ZIP import (multipart). |
 | GET | `…/{sid}/export` | ZIP export (download). |
 | GET / PATCH / DELETE | `…/{sid}` | Read / update (name, config, game_port; backend immutable) / delete. PATCH gate branches by changed-key set (#458): a cadence-only edit (`backup_interval_hours`) needs `backup:schedule`; any other change needs `server:update`; a mixed edit needs both. |
@@ -139,7 +139,7 @@ enabled, else null), `desired_state`, `observed_state`, `observed_at`,
 Server state model: `desired_state` ∈ {running, stopped};
 `observed_state` ∈ {starting, running, stopping, stopped, restarting, crashed,
 unknown} + `observed_at` + `assigned_worker_id`.
-Server types: vanilla / paper / fabric / forge (spigot persisted but rejected).
+Server types: vanilla / paper / fabric / forge.
 Execution backends: `container` (the only shipped backend; the host-process driver was removed in issue #781, so `host_process` is no longer offered in the create wizard).
 
 ### 2.4 Versions, ports, fleet, audit, platform
@@ -300,8 +300,7 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 
 ### 6.3 Server create wizard
 1. **Type & version** — type cards from `GET /versions`; version dropdown
-   from `GET /versions/{type}` (latest preselected). Spigot shown disabled
-   with "use Paper" hint.
+   from `GET /versions/{type}` (latest preselected).
 2. **Runtime** — execution backend (`container`; host_process removed in issue #781), game port:
    auto-suggest from `GET /ports/available`, validate via
    `GET /ports/check/{port}` on blur.

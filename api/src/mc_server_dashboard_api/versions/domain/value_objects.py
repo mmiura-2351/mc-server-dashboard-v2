@@ -8,11 +8,9 @@ JARs are shared across all Communities).
 ``ServerType`` is duplicated here rather than imported from the servers domain:
 the versions domain owns the *catalog* notion of a distribution and must not
 depend on another context (import-linter contract). The two enums share values
-on purpose (``vanilla`` / ``paper`` / ``fabric`` / ``forge``); ``spigot`` is
-deliberately absent — it is listed nowhere and not resolvable (no official
-distribution API, only BuildTools), so create-validation rejects it explicitly
-even though the DB CHECK enum permits the value. ``forge`` resolves to the
-*installer* JAR (the worker runs ``--installServer`` on first start, issue #307).
+on purpose (``vanilla`` / ``paper`` / ``fabric`` / ``forge``). ``forge`` resolves
+to the *installer* JAR (the worker runs ``--installServer`` on first start,
+issue #307).
 """
 
 from __future__ import annotations
@@ -27,10 +25,7 @@ class ServerType(enum.Enum):
     ``vanilla`` (Mojang version manifest), ``paper`` (PaperMC API), ``fabric``
     (meta.fabricmc.net), and ``forge`` (the Forge Maven, issue #307) are
     resolvable. ``forge`` resolves to the *installer* JAR — the worker runs the
-    supervised ``--installServer`` step on first start. ``spigot`` is intentionally
-    not a member: it is not listed or resolvable here, and server create-validation
-    rejects it even though the DB CHECK enum still permits the value (no official
-    distribution API, only BuildTools).
+    supervised ``--installServer`` step on first start.
     """
 
     VANILLA = "vanilla"

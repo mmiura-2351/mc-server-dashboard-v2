@@ -222,7 +222,3 @@ class TestPaperApiVersionFloor:
     )
     def test_floor(self, version: str, spec: str, expected: bool) -> None:
         assert version_satisfies(version, spec, "paper") is expected
-
-    def test_spigot_uses_paper_dialect(self) -> None:
-        assert version_satisfies("1.21.1", "1.21", "spigot") is True
-        assert version_satisfies("1.20.4", "1.21", "spigot") is False

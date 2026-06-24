@@ -20,24 +20,19 @@ import { handleTabKeyDown, panelId, tabId, useTabHash } from "./urlState.ts";
 // server stays authoritative (any 403/422/409 is surfaced honestly).
 
 // The catalogued types `GET /versions` can resolve (vanilla/paper/fabric/forge).
-// Spigot is intentionally not catalogued — it is shown as a disabled card with a
-// "use Paper" hint (the create/import endpoints 422 `spigot_unsupported`).
 type CatalogType = "vanilla" | "paper" | "fabric" | "forge";
-const SPIGOT = "spigot";
 
 const TYPE_LABEL: Record<string, TranslationKey> = {
   vanilla: "serverCreate.type.vanilla",
   paper: "serverCreate.type.paper",
   fabric: "serverCreate.type.fabric",
   forge: "serverCreate.type.forge",
-  spigot: "serverCreate.type.spigot",
 };
 const TYPE_SUB: Record<string, TranslationKey> = {
   vanilla: "serverCreate.typeSub.vanilla",
   paper: "serverCreate.typeSub.paper",
   fabric: "serverCreate.typeSub.fabric",
   forge: "serverCreate.typeSub.forge",
-  spigot: "serverCreate.typeSub.spigot",
 };
 
 // host_process was dropped as a selectable backend in issue #781 (the worker
@@ -98,7 +93,6 @@ function slugCreateValid(value: string): boolean {
 // 409 `port_taken` is surfaced specifically (issue requirement); everything else
 // falls back to the generic toast.
 const CREATE_ERROR_KEY: Record<string, TranslationKey> = {
-  spigot_unsupported: "serverCreate.error.spigot_unsupported",
   port_taken: "serverCreate.error.port_taken",
   port_out_of_range: "serverCreate.error.port_out_of_range",
   server_name_exists: "serverCreate.error.server_name_exists",
@@ -431,15 +425,6 @@ function NewServerWizard({ communityId }: { communityId: string }) {
                     </div>
                   </button>
                 ))}
-                <button
-                  type="button"
-                  className="type-card disabled"
-                  disabled
-                  title={t("serverCreate.spigotHint")}
-                >
-                  <div className="t-name">{t(TYPE_LABEL[SPIGOT])}</div>
-                  <div className="t-sub">{t("serverCreate.spigotHint")}</div>
-                </button>
               </div>
               {type !== null && (
                 <div className="field">
@@ -983,7 +968,7 @@ function handleCreateError(
 }
 
 // Import-specific surfacing: a bad archive / oversize upload, plus the create
-// reasons it shares (spigot, name conflict, …). Import has no slug field, so
+// reasons it shares (name conflict, …). Import has no slug field, so
 // slug errors (not reachable from import) fall back to the generic toast path.
 function handleImportError(
   err: unknown,
