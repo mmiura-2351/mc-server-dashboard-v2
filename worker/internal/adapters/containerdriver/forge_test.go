@@ -41,6 +41,14 @@ type forgeFakeDocker struct {
 	// succeeds. Tests use it to inject side effects (e.g., writing files) when
 	// a specific container is created.
 	onCreateHook func(spec CreateSpec)
+	// stopNoExitIDs prevents Stop from releasing Wait for the named containers,
+	// so the Stop falls through to the kill escalation (mirroring fakeDocker's
+	// stopNoExit for install-phase survived-kill tests).
+	stopNoExitIDs map[string]bool
+	// killNoExitIDs prevents Kill from releasing Wait for the named containers,
+	// so the post-Kill waitExitDone times out and triggers the survived-kill
+	// path.
+	killNoExitIDs map[string]bool
 }
 
 func newForgeFakeDocker() *forgeFakeDocker {
@@ -72,12 +80,22 @@ func (f *forgeFakeDocker) ImagePull(_ context.Context, _ string) error { return 
 func (f *forgeFakeDocker) Start(_ context.Context, _ string) error { return nil }
 
 func (f *forgeFakeDocker) Stop(_ context.Context, id string, _ time.Duration) error {
-	f.exit(id, 0, nil)
+	f.mu.Lock()
+	suppress := f.stopNoExitIDs[id]
+	f.mu.Unlock()
+	if !suppress {
+		f.exit(id, 0, nil)
+	}
 	return nil
 }
 
 func (f *forgeFakeDocker) Kill(_ context.Context, id string) error {
-	f.exit(id, 137, nil)
+	f.mu.Lock()
+	suppress := f.killNoExitIDs[id]
+	f.mu.Unlock()
+	if !suppress {
+		f.exit(id, 137, nil)
+	}
 	return nil
 }
 
@@ -805,6 +823,158 @@ func TestForgeInstallRetryStopDuringBackoff(t *testing.T) {
 	// Only 1 install container created (the retry never ran because Stop arrived).
 	if got := docker.names(); len(got) != 1 {
 		t.Fatalf("created containers = %v, want only 1 install (retry aborted)", got)
+	}
+}
+
+// An install container that survives docker kill and then dies after the
+// survived-kill latch reset must still be recorded stopped (not a spurious
+// crash): the sticky stopRequested flag tells superviseInstall the exit was
+// operator-requested, even though the transient stopping latch was cleared by
+// the survived-kill failure path (issue #595, mirrors #257 for the install phase).
+func TestInstallSurvivedKillThenLateExitRecordsStopped(t *testing.T) {
+	dir := t.TempDir()
+	docker := newForgeFakeDocker()
+	installID := "mcsd-s1-install"
+	// Use waitGates so superviseInstall's Wait blocks until we push a result.
+	docker.waitGates[installID] = make(chan waitResult)
+	// Stop must not release the install Wait (falls through to kill), and Kill
+	// must not release it either (the container "survives" the kill for the full
+	// waitExitDone timeout).
+	docker.stopNoExitIDs = map[string]bool{installID: true}
+	docker.killNoExitIDs = map[string]bool{installID: true}
+	d := New(docker, images(), func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
+		return nil, errors.New("no rcon")
+	}, Options{
+		WorkerID:             "w1",
+		StopTimeout:          50 * time.Millisecond,
+		GameBindIP:           "0.0.0.0",
+		ReadinessTimeout:     20 * time.Millisecond,
+		ConflictPollInterval: time.Millisecond,
+		ConflictDeadline:     100 * time.Millisecond,
+	})
+
+	inst, err := d.Start(context.Background(), forgeSpec(dir))
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Stop escalates to kill, the kill "survives" the whole waitExitDone timeout,
+	// so Stop returns an error and resets the stopping latch.
+	if err := inst.Stop(context.Background(), false); err == nil {
+		t.Fatal("expected Stop to fail when the install container survives docker kill")
+	}
+
+	// The install container finally exits. superviseInstall must read the sticky
+	// stopRequested (not the cleared stopping) and report stopped.
+	docker.waitGates[installID] <- waitResult{code: 137}
+
+	drainTo(t, inst.Events(), execution.StateStopped)
+	if got := inst.Status(); got != execution.StateStopped {
+		t.Fatalf("Status = %v after the late install exit, want stopped (not a spurious crash)", got)
+	}
+}
+
+// The exitObserved guard in the install phase prevents the survived-kill restore
+// from stomping a terminal state that superviseInstall already set. The install
+// container exits in the window between waitExitDone timing out and the
+// survived-kill restore re-acquiring the lock; superviseInstall sets exitObserved
+// under the lock, and the restore skips the reset (issue #595, mirrors #392 for
+// the install phase).
+func TestInstallSurvivedKillRestoreDoesNotStompTerminalState(t *testing.T) {
+	dir := t.TempDir()
+	docker := newForgeFakeDocker()
+	installID := "mcsd-s1-install"
+	// Use waitGates so superviseInstall's Wait blocks until we push a result.
+	docker.waitGates[installID] = make(chan waitResult)
+	// Stop falls through to kill; kill does not release the container.
+	docker.stopNoExitIDs = map[string]bool{installID: true}
+	docker.killNoExitIDs = map[string]bool{installID: true}
+	d := New(docker, images(), func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
+		return nil, errors.New("no rcon")
+	}, Options{
+		WorkerID:             "w1",
+		StopTimeout:          50 * time.Millisecond,
+		GameBindIP:           "0.0.0.0",
+		ReadinessTimeout:     20 * time.Millisecond,
+		ConflictPollInterval: time.Millisecond,
+		ConflictDeadline:     100 * time.Millisecond,
+	})
+
+	inst, err := d.Start(context.Background(), forgeSpec(dir))
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	contInst := inst.(*instance)
+
+	contInst.beforeSurvivedReset = func() {
+		// The install container exits in the window; wait for superviseInstall to
+		// record the terminal state before the restore re-acquires the lock.
+		docker.waitGates[installID] <- waitResult{code: 137}
+		drainTo(t, inst.Events(), execution.StateStopped)
+	}
+
+	// The container exits during the window, so Stop succeeds rather than
+	// reporting a survived-kill failure.
+	if err := inst.Stop(context.Background(), false); err != nil {
+		t.Fatalf("Stop = %v, want nil once the container exits in the wait window", err)
+	}
+	if got := inst.Status(); got != execution.StateStopped {
+		t.Fatalf("Status = %v after the exit-in-window Stop, want stopped (not stomped back)", got)
+	}
+}
+
+// When install attempt N exits (non-zero, triggering a retry) and attempt N+1
+// starts a new container, exitObserved must be reset so a Stop during attempt
+// N+1 whose kill is survived still triggers the survived-kill restore. Without
+// the reset, exitObserved stays true from the old container and Stop returns a
+// false nil — the new container is still alive (issue #595).
+func TestInstallRetryResetsExitObservedForNewContainer(t *testing.T) {
+	prev := installRetryBackoff
+	installRetryBackoff = []time.Duration{time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { installRetryBackoff = prev })
+
+	dir := t.TempDir()
+	docker := newForgeFakeDocker()
+	installID := "mcsd-s1-install"
+	installErr := statusError{method: "POST", path: "/wait", code: 200, message: "install exited 1"}
+	// Attempt 0: non-zero exit → retry. Attempt 1: blocks on waitGate so Stop
+	// can race it.
+	docker.waitGates[installID] = make(chan waitResult, 1)
+	docker.waitGates[installID] <- waitResult{code: 1, err: installErr}
+	// Stop and Kill on the retry container must NOT release Wait (survived kill).
+	docker.stopNoExitIDs = map[string]bool{installID: true}
+	docker.killNoExitIDs = map[string]bool{installID: true}
+	d := New(docker, images(), func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
+		return nil, errors.New("no rcon")
+	}, Options{
+		WorkerID:             "w1",
+		StopTimeout:          50 * time.Millisecond,
+		GameBindIP:           "0.0.0.0",
+		ReadinessTimeout:     20 * time.Millisecond,
+		ConflictPollInterval: time.Millisecond,
+		ConflictDeadline:     100 * time.Millisecond,
+	})
+
+	inst, err := d.Start(context.Background(), forgeSpec(dir))
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Wait until the retry container is created (attempt 1).
+	deadline := time.After(2 * time.Second)
+	for len(docker.names()) < 2 {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for retry install container")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	// Stop during attempt 1: the kill survives, so Stop must fail (not return
+	// a false nil from a stale exitObserved left by attempt 0).
+	if err := inst.Stop(context.Background(), false); err == nil {
+		t.Fatal("expected Stop to fail when the retry container survives docker kill; got nil (stale exitObserved?)")
 	}
 }
 
