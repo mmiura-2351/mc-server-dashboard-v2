@@ -1,14 +1,20 @@
 package game
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/adapters/apiclient"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/ipcaps"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/mc"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/tunnel"
 )
 
@@ -187,5 +193,251 @@ func TestDisconnectSetsWriteDeadline(t *testing.T) {
 	}
 	if !conn.closed.Load() {
 		t.Error("disconnect must close the connection")
+	}
+}
+
+// --- fakeResolver ---
+
+type fakeResolver struct {
+	result apiclient.ResolveResult
+	err    error
+	domain string
+}
+
+func (f *fakeResolver) ResolveJoin(_ context.Context, _, _ string, _ apiclient.Intent) (apiclient.ResolveResult, error) {
+	return f.result, f.err
+}
+
+func (f *fakeResolver) BaseDomain() string { return f.domain }
+
+// --- fakeSessionRecorder ---
+
+type fakeSessionRecorder struct {
+	started int
+	ended   int
+}
+
+func (f *fakeSessionRecorder) Start(_, _, _, _, _ string) string { f.started++; return "sess-1" }
+func (f *fakeSessionRecorder) End(_ string)                      { f.ended++ }
+
+// --- test helpers ---
+
+// handshakePacket builds a valid Minecraft handshake packet.
+func handshakePacket(protocol int32, addr string, port uint16, next int32) []byte {
+	var body []byte
+	body = appendTestVarInt(body, protocol)
+	body = appendTestString(body, addr)
+	body = append(body, byte(port>>8), byte(port))
+	body = appendTestVarInt(body, next)
+	return frameTestPacket(0x00, body)
+}
+
+// loginStartPacket builds a Login Start packet (protocol 765 form: name + 16-byte UUID).
+func loginStartPacket(name string) []byte {
+	body := appendTestString(nil, name)
+	body = append(body, make([]byte, 16)...) // 16-byte UUID
+	return frameTestPacket(0x00, body)
+}
+
+func frameTestPacket(id int32, body []byte) []byte {
+	inner := appendTestVarInt(nil, id)
+	inner = append(inner, body...)
+	out := appendTestVarInt(nil, int32(len(inner)))
+	return append(out, inner...)
+}
+
+func appendTestVarInt(dst []byte, v int32) []byte {
+	u := uint32(v)
+	for {
+		b := byte(u & 0x7F)
+		u >>= 7
+		if u != 0 {
+			b |= 0x80
+		}
+		dst = append(dst, b)
+		if u == 0 {
+			return dst
+		}
+	}
+}
+
+func appendTestString(dst []byte, s string) []byte {
+	dst = appendTestVarInt(dst, int32(len(s)))
+	return append(dst, s...)
+}
+
+// --- fetchStatusThroughTunnel tests ---
+
+// TestFetchStatusThroughTunnelHappyPath delivers a tunnel connection that speaks
+// the status exchange protocol and verifies the JSON is returned.
+func TestFetchStatusThroughTunnelHappyPath(t *testing.T) {
+	tokens := tunnel.NewTokenTable(10*time.Second, time.Now)
+	l := &Listener{tokens: tokens, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	const wantJSON = `{"description":{"text":"hello"}}`
+	hs := mc.Handshake{
+		ProtocolVersion: 765,
+		ServerAddress:   "amber.mc.example.com",
+		Port:            25565,
+		NextState:       mc.NextStateStatus,
+		Raw:             handshakePacket(765, "amber.mc.example.com", 25565, 1),
+	}
+
+	workerSide, relaySide := net.Pipe()
+
+	// Simulate the worker (tunnel) side in a goroutine: read "OK\n", read the
+	// replayed handshake + status request, write a Status Response.
+	go func() {
+		defer func() { _ = workerSide.Close() }()
+		br := bufio.NewReader(workerSide)
+
+		// Read the "OK\n" ack from ConfirmAndAttach.
+		ack := make([]byte, 3)
+		if _, err := io.ReadFull(br, ack); err != nil || string(ack) != "OK\n" {
+			t.Errorf("expected OK ack, got %q (err %v)", ack, err)
+			return
+		}
+
+		// Read and discard the replayed handshake packet.
+		readTestPacket(t, br)
+		// Read and discard the status request packet.
+		readTestPacket(t, br)
+
+		// Write a Status Response back.
+		if _, err := workerSide.Write(mc.StatusResponsePacket(wantJSON)); err != nil {
+			t.Errorf("write status response: %v", err)
+		}
+	}()
+
+	// Deliver the relay side concurrently: fetchStatusThroughTunnel calls
+	// awaitTunnel which calls Register then blocks; the Deliver must happen after
+	// the Register. A short sleep lets the goroutine reach the blocking select.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		tokens.Deliver("tok-status", relaySide)
+	}()
+
+	gotJSON, ok := l.fetchStatusThroughTunnel(context.Background(), hs, "tok-status")
+	if !ok {
+		t.Fatal("fetchStatusThroughTunnel returned ok=false")
+	}
+	if gotJSON != wantJSON {
+		t.Errorf("got %q, want %q", gotJSON, wantJSON)
+	}
+}
+
+// readTestPacket reads one length-prefixed Minecraft packet from r and returns
+// its body (excluding the length prefix).
+func readTestPacket(t *testing.T, r *bufio.Reader) []byte {
+	t.Helper()
+	length, err := readTestVarInt(r)
+	if err != nil {
+		t.Fatalf("readTestPacket: read length: %v", err)
+	}
+	body := make([]byte, length)
+	if _, err := io.ReadFull(r, body); err != nil {
+		t.Fatalf("readTestPacket: read body: %v", err)
+	}
+	return body
+}
+
+func readTestVarInt(r *bufio.Reader) (int32, error) {
+	var value uint32
+	for n := 0; n < 5; n++ {
+		b, err := r.ReadByte()
+		if err != nil {
+			return 0, err
+		}
+		value |= uint32(b&0x7F) << (7 * n)
+		if b&0x80 == 0 {
+			return int32(value), nil
+		}
+	}
+	return 0, io.ErrUnexpectedEOF
+}
+
+// --- resolveStatus tests ---
+
+// TestResolveStatusAPIError verifies that when the API returns an error (and no
+// cache), resolveStatus returns the "unavailable" synthesized response.
+func TestResolveStatusAPIError(t *testing.T) {
+	resolver := &fakeResolver{err: errors.New("connection refused")}
+	cache := NewStatusCache(5*time.Second, 1024, time.Now)
+	l := &Listener{
+		resolver: resolver,
+		cache:    cache,
+		logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	hs := mc.Handshake{
+		ProtocolVersion: 765,
+		ServerAddress:   "amber.mc.example.com",
+		NextState:       mc.NextStateStatus,
+	}
+
+	got := l.resolveStatus(context.Background(), hs, "amber", "10.0.0.1")
+	want := mc.SynthesizedStatus(mc.UnavailableMOTD)
+	if got != want {
+		t.Errorf("resolveStatus on API error:\n  got  %q\n  want %q", got, want)
+	}
+}
+
+// --- handleLogin tests ---
+
+// TestHandleLoginStoppedDecision verifies that a login to a stopped server sends
+// a Login Disconnect with the stopped MOTD and closes the connection.
+func TestHandleLoginStoppedDecision(t *testing.T) {
+	const displayName = "Test Server"
+	resolver := &fakeResolver{
+		result: apiclient.ResolveResult{
+			Decision:    apiclient.DecisionStopped,
+			DisplayName: displayName,
+		},
+		domain: "mc.example.com",
+	}
+	tokens := tunnel.NewTokenTable(10*time.Second, time.Now)
+	cache := NewStatusCache(5*time.Second, 1024, time.Now)
+	caps := ipcaps.NewIPCaps(32, 10, time.Now)
+	sessions := &fakeSessionRecorder{}
+	l := &Listener{
+		resolver: resolver,
+		tokens:   tokens,
+		cache:    cache,
+		caps:     caps,
+		sessions: sessions,
+		logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	playerSide, relaySide := net.Pipe()
+	defer func() { _ = playerSide.Close() }()
+
+	// Build a valid handshake (login, next_state=2) and login start.
+	hsBytes := handshakePacket(765, "stopped.mc.example.com", 25565, 2)
+	lsBytes := loginStartPacket("Steve")
+	hs, err := mc.ReadHandshake(bufio.NewReaderSize(
+		strings.NewReader(string(hsBytes)), mc.MaxPreRouteBytes))
+	if err != nil {
+		t.Fatalf("parse handshake: %v", err)
+	}
+
+	// Simulate writing the login start into a bufio.Reader that handleLogin reads.
+	r := bufio.NewReaderSize(strings.NewReader(string(lsBytes)), mc.MaxPreRouteBytes)
+
+	go l.handleLogin(context.Background(), relaySide, r, hs, "stopped", "10.0.0.1")
+
+	// The player should receive a Login Disconnect packet with the stopped MOTD.
+	_ = playerSide.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 1024)
+	n, err := playerSide.Read(buf)
+	if err != nil && err != io.EOF {
+		t.Fatalf("player read: %v", err)
+	}
+	got := string(buf[:n])
+	wantMOTD := mc.StoppedMOTD(displayName)
+	if !strings.Contains(got, wantMOTD) {
+		t.Errorf("Login Disconnect should contain %q, got %q", wantMOTD, got)
+	}
+	if sessions.started != 0 {
+		t.Errorf("no session should be started for a stopped server, got %d", sessions.started)
 	}
 }
