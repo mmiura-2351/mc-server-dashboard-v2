@@ -793,7 +793,8 @@ the stored objects. The reason is structural: the object backend has no local
 working-set directory to walk; the fsck implementation walks a local filesystem
 tree (the `current/` symlink target on fs), and no equivalent materialisation
 exists on the object side. The **publish-time** fsck (`_check_staged_regions`,
-wired on `commit_snapshot` and `restore_backup`) **is** implemented on the
+wired on `commit_snapshot`, `restore_backup`, and `create_backup_from_current`)
+**is** implemented on the
 object adapter and remains the authoritative gate — it downloads and validates
 each `.mca` member during staging, so a corrupt region is refused before it
 becomes authoritative. The gap is limited to the **read-only sweep** that
