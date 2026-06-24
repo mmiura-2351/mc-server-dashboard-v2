@@ -2647,10 +2647,10 @@ const file_mcsd_controlplane_v1_control_plane_proto_rawDesc = "" +
 	"cpu_millis\x18\x01 \x01(\rR\tcpuMillis\x12!\n" +
 	"\fmemory_bytes\x18\x02 \x01(\x04R\vmemoryBytes\x12!\n" +
 	"\fplayer_count\x18\x03 \x01(\rR\vplayerCount\"\v\n" +
-	"\tHeartbeat*a\n" +
+	"\tHeartbeat*\x8b\x01\n" +
 	"\x13ExecutionDriverKind\x12%\n" +
 	"!EXECUTION_DRIVER_KIND_UNSPECIFIED\x10\x00\x12#\n" +
-	"\x1fEXECUTION_DRIVER_KIND_CONTAINER\x10\x02*^\n" +
+	"\x1fEXECUTION_DRIVER_KIND_CONTAINER\x10\x02\"\x04\b\x01\x10\x01*\"EXECUTION_DRIVER_KIND_HOST_PROCESS*^\n" +
 	"\n" +
 	"LaunchMode\x12\x1b\n" +
 	"\x17LAUNCH_MODE_UNSPECIFIED\x10\x00\x12\x13\n" +

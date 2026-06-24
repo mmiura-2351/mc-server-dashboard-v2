@@ -147,6 +147,8 @@ message HostResources {
 // ExecutionDriverKind enumerates the execution backends.
 enum ExecutionDriverKind {
   EXECUTION_DRIVER_KIND_UNSPECIFIED = 0;
+  reserved 1;
+  reserved "EXECUTION_DRIVER_KIND_HOST_PROCESS";
   EXECUTION_DRIVER_KIND_CONTAINER = 2;
 }
 

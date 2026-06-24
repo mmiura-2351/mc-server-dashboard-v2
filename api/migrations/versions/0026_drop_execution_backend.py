@@ -31,9 +31,10 @@ def upgrade() -> None:
     count = conn.execute(
         text("SELECT count(*) FROM server WHERE execution_backend = 'host_process'")
     ).scalar()
-    assert count == 0, (
-        f"cannot drop execution_backend: {count} host_process row(s) exist"
-    )
+    if count != 0:
+        raise RuntimeError(
+            f"Cannot drop execution_backend: {count} non-container rows exist"
+        )
     op.drop_constraint(_CONSTRAINT, "server", type_="check")
     op.drop_column("server", "execution_backend")
 
