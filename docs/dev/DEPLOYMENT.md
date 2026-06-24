@@ -3,9 +3,11 @@
 How to run mc-server-dashboard v2 on a single host with Docker Compose. This is
 the minimum container-first deployment (issue #189): one `db`, one `api`, one
 `worker`, and the Minecraft server containers the worker creates at runtime. It
-covers the in-compose single-host topology; a reverse proxy, TLS termination for
-the public HTTP surface, and multi-host workers are out of scope here (see the
-TLS section for the cross-host control-plane requirement).
+covers the in-compose single-host topology; multi-host workers are out of scope
+here. TLS for the browser UI plane is covered in
+[Section 8](#8-tls-guidance) (HTTPS is required for the default cookie
+configuration); the cross-host gRPC control-plane TLS requirement is also
+there.
 
 ## 1. Architecture in one paragraph
 
@@ -449,6 +451,80 @@ Its handling depends on `driver.container.network` (env
   (`127.0.0.1`) and dialed there, the historical behavior.
 
 ## 8. TLS guidance
+
+### HTTPS requirement for the browser UI
+
+The browser UI **must be reached over HTTPS** for the default configuration to
+work. The refresh cookie is issued with `Secure; HttpOnly; SameSite=Strict`
+(`auth.py`, `config.py` `refresh_cookie_secure=True`). Over plain HTTP the
+browser refuses to store a `Secure` cookie, so the silent token refresh always
+fails and the user is forced to re-login when the access token expires (~900 s /
+15 minutes). This is not an idle timeout — there is no such feature; the user is
+hard-logged-out because the refresh cookie was never stored.
+
+#### Cloudflare Tunnel (recommended)
+
+The `cloudflared` service in `compose.yaml` (issue #1090) is the supported
+HTTPS path. It is gated behind the `tunnel` compose profile — the same profile
+used by the relay, but the tunnel is independently useful for HTTPS even without
+the relay.
+
+How it works: the browser reaches the Cloudflare edge over HTTPS (the public
+hostname is configured in the Cloudflare Zero Trust dashboard); `cloudflared`
+runs inside the compose network and forwards traffic to `api:8000` over plain
+HTTP on the internal Docker network. No inbound port, no TLS certificate, and
+no reverse proxy are needed on the host.
+
+To enable:
+
+1. Add `tunnel` to `COMPOSE_PROFILES` in `.env`:
+
+   ```sh
+   # example: object backend + Cloudflare Tunnel
+   COMPOSE_PROFILES=object,tunnel
+   ```
+
+2. Create a tunnel in the Cloudflare Zero Trust dashboard, add a public
+   hostname pointing to `http://api:8000`, and copy the tunnel token.
+
+3. Set the token in `.env`:
+
+   ```sh
+   CLOUDFLARE_TUNNEL_TOKEN=<token from the dashboard>
+   ```
+
+4. Rebuild:
+
+   ```sh
+   docker compose up -d --build
+   ```
+
+The browser now reaches the UI over HTTPS at the public hostname, the `Secure`
+cookie is stored, and silent refresh works.
+
+#### Reverse proxy + Let's Encrypt (alternative)
+
+For deployments that do not use Cloudflare, any TLS-terminating reverse proxy
+(Caddy, nginx, Traefik, etc.) in front of the API's HTTP port achieves the same
+result. The proxy terminates TLS with a certificate from Let's Encrypt (or
+another CA) and forwards to `http://localhost:${API_HTTP_PORT}`. This is a
+standard reverse-proxy setup and is not detailed here.
+
+#### HTTP-only fallback (LAN / development)
+
+For plain-HTTP deployments (local network, development) where HTTPS is not
+available, set:
+
+```sh
+MCD_API_AUTH__TOKEN__REFRESH_COOKIE_SECURE=false
+```
+
+This drops the `Secure` attribute from the refresh cookie so the browser stores
+it over HTTP and silent refresh works. **Security caveat:** the cookie is then
+sent over plaintext, exposing the refresh token to network observers. Use this
+only on trusted networks.
+
+### gRPC control-plane TLS (cross-host worker)
 
 The in-compose deployment runs the control plane in plaintext on the private
 compose network: `api` sets `MCD_API_CONTROL__TLS__INSECURE=true` and `worker`
