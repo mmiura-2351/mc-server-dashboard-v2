@@ -102,6 +102,10 @@ _SERVER_RESOURCE_TYPE = "server"
 # upload cap (the bounded-read loop).
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
 
+# Upper bound for a plugin's display name (applies to the user-facing upload
+# endpoint; catalog installs use the project title from the trusted catalog).
+_MAX_DISPLAY_NAME_LENGTH = 200
+
 
 class PluginResponse(BaseModel):
     """One plugin's metadata."""
@@ -468,6 +472,12 @@ async def install_plugin(
     display_name: Annotated[str, Form()],
 ) -> PluginResponse:
     """Install a plugin jar via multipart upload (plugin:manage)."""
+
+    display_name = display_name.strip()
+    if not display_name:
+        raise _unprocessable("invalid_display_name")
+    if len(display_name) > _MAX_DISPLAY_NAME_LENGTH:
+        raise _unprocessable("invalid_display_name")
 
     filename = file.filename or ""
     content = await _read_capped_upload(file)
