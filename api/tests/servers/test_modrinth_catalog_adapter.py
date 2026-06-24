@@ -6,7 +6,7 @@ host-allowlist enforcement — these cannot be tested through the FakeCatalogPro
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import httpx
@@ -17,6 +17,7 @@ from mc_server_dashboard_api.servers.adapters.modrinth_catalog import (
     _MAX_JSON_BYTES,
     _MAX_REDIRECTS,
     ModrinthCatalog,
+    _assert_no_private_ips,
 )
 from mc_server_dashboard_api.servers.domain.errors import CatalogUnavailableError
 
@@ -131,6 +132,91 @@ async def test_download_redirect_to_non_https_raises() -> None:
         await _patched_download("https://cdn.modrinth.com/data/test.jar")
 
 
+# -- DNS-rebinding / private-IP check (issue #1417) --
+
+
+def _resolver_for(*addrs: str) -> Callable[[str], list[str]]:
+    """Return a resolver callback that yields the given addresses."""
+
+    def _resolve(host: str) -> list[str]:
+        return list(addrs)
+
+    return _resolve
+
+
+def test_assert_no_private_ips_allows_public() -> None:
+    """A hostname resolving to a public IP passes."""
+    _assert_no_private_ips("example.com", _resolver=_resolver_for("93.184.216.34"))
+
+
+def test_assert_no_private_ips_rejects_loopback() -> None:
+    """A hostname resolving to 127.0.0.1 is rejected."""
+    with pytest.raises(CatalogUnavailableError, match="private"):
+        _assert_no_private_ips("evil.example.com", _resolver=_resolver_for("127.0.0.1"))
+
+
+def test_assert_no_private_ips_rejects_rfc1918() -> None:
+    """A hostname resolving to an RFC 1918 address is rejected."""
+    with pytest.raises(CatalogUnavailableError, match="private"):
+        _assert_no_private_ips(
+            "evil.example.com", _resolver=_resolver_for("192.168.1.1")
+        )
+
+
+def test_assert_no_private_ips_rejects_link_local() -> None:
+    """A hostname resolving to a link-local address is rejected."""
+    with pytest.raises(CatalogUnavailableError, match="private"):
+        _assert_no_private_ips(
+            "evil.example.com", _resolver=_resolver_for("169.254.169.254")
+        )
+
+
+def test_assert_no_private_ips_rejects_ipv6_loopback() -> None:
+    """A hostname resolving to ::1 is rejected."""
+    with pytest.raises(CatalogUnavailableError, match="private"):
+        _assert_no_private_ips("evil.example.com", _resolver=_resolver_for("::1"))
+
+
+def test_assert_no_private_ips_rejects_cgnat() -> None:
+    """A hostname resolving to a CGNAT address (100.64.0.0/10) is rejected."""
+    with pytest.raises(CatalogUnavailableError, match="private"):
+        _assert_no_private_ips(
+            "evil.example.com", _resolver=_resolver_for("100.64.0.1")
+        )
+
+
+def test_assert_no_private_ips_rejects_if_any_addr_private() -> None:
+    """If any resolved address is private, the check fails."""
+    with pytest.raises(CatalogUnavailableError, match="private"):
+        _assert_no_private_ips(
+            "evil.example.com",
+            _resolver=_resolver_for("93.184.216.34", "10.0.0.1"),
+        )
+
+
+async def test_download_rejects_hostname_resolving_to_private_ip() -> None:
+    """download_file rejects an allowed hostname that resolves to a private IP."""
+    catalog = ModrinthCatalog()
+
+    def _private_resolver(host: str) -> list[str]:
+        return ["10.0.0.1"]
+
+    original = catalog.download_file
+
+    async def _patched(url: str) -> bytes:
+        import mc_server_dashboard_api.servers.adapters.modrinth_catalog as mod
+
+        saved = mod._resolve_host
+        mod._resolve_host = _private_resolver
+        try:
+            return await original(url)
+        finally:
+            mod._resolve_host = saved
+
+    with pytest.raises(CatalogUnavailableError, match="private"):
+        await _patched("https://cdn.modrinth.com/data/test.jar")
+
+
 # -- Unbounded JSON response --
 
 
@@ -225,3 +311,66 @@ def test_max_json_bytes_is_positive() -> None:
 
 def test_allowed_download_hosts_non_empty() -> None:
     assert len(_ALLOWED_DOWNLOAD_HOSTS) > 0
+
+
+# -- URL path encoding (issue #1416) --
+
+
+async def test_get_project_encodes_slug_in_url_path() -> None:
+    """Slugs with special characters are percent-encoded in the URL path."""
+    captured_urls: list[str] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured_urls.append(str(request.url))
+        return httpx.Response(
+            200,
+            content=b'{"id":"abc","slug":"my mod","title":"My Mod"}',
+        )
+
+    transport = httpx.MockTransport(_handler)
+    catalog = ModrinthCatalog(base_url="https://api.modrinth.com/v2")
+
+    real_init = httpx.AsyncClient.__init__
+
+    def patched_init(self_client: httpx.AsyncClient, **kwargs: Any) -> None:
+        kwargs["transport"] = transport
+        real_init(self_client, **kwargs)
+
+    httpx.AsyncClient.__init__ = patched_init  # type: ignore[assignment]
+    try:
+        await catalog.get_project("my mod/v2")
+    finally:
+        httpx.AsyncClient.__init__ = real_init  # type: ignore[method-assign]
+
+    assert len(captured_urls) == 1
+    # Space → %20, slash → %2F — must not appear unencoded in the path.
+    assert "my%20mod%2Fv2" in captured_urls[0] or "my+mod" not in captured_urls[0]
+    assert "/project/my mod/v2" not in captured_urls[0]
+    assert "my%20mod%2Fv2" in captured_urls[0]
+
+
+async def test_list_versions_encodes_slug_in_url_path() -> None:
+    """list_versions also percent-encodes the slug in the URL path."""
+    captured_urls: list[str] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured_urls.append(str(request.url))
+        return httpx.Response(200, content=b"[]")
+
+    transport = httpx.MockTransport(_handler)
+    catalog = ModrinthCatalog(base_url="https://api.modrinth.com/v2")
+
+    real_init = httpx.AsyncClient.__init__
+
+    def patched_init(self_client: httpx.AsyncClient, **kwargs: Any) -> None:
+        kwargs["transport"] = transport
+        real_init(self_client, **kwargs)
+
+    httpx.AsyncClient.__init__ = patched_init  # type: ignore[assignment]
+    try:
+        await catalog.list_versions("slug/with/slashes")
+    finally:
+        httpx.AsyncClient.__init__ = real_init  # type: ignore[method-assign]
+
+    assert len(captured_urls) == 1
+    assert "slug%2Fwith%2Fslashes" in captured_urls[0]

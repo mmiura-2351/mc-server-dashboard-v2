@@ -7,9 +7,12 @@ descriptive User-Agent.
 
 from __future__ import annotations
 
+import ipaddress
 import json
+import socket
+from collections.abc import Callable
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse
 
 import httpx
 
@@ -43,6 +46,39 @@ _ALLOWED_DOWNLOAD_HOSTS = frozenset(
         "objects.githubusercontent.com",
     }
 )
+
+
+def _default_resolve_host(hostname: str) -> list[str]:
+    """Resolve *hostname* to a list of IP address strings via DNS."""
+    results = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
+    return list({str(addr[4][0]) for addr in results})
+
+
+_resolve_host: Callable[[str], list[str]] = _default_resolve_host
+
+
+def _assert_no_private_ips(
+    hostname: str,
+    *,
+    _resolver: Callable[[str], list[str]] | None = None,
+) -> None:
+    """Raise :class:`CatalogUnavailableError` if *hostname* resolves to a private IP.
+
+    Guards against DNS-rebinding attacks where an attacker-controlled hostname
+    initially passes the allowlist check but resolves to a private/loopback
+    address.
+    """
+    resolver = _resolver or _resolve_host
+    try:
+        addrs = resolver(hostname)
+    except (socket.gaierror, OSError) as exc:
+        raise CatalogUnavailableError(f"DNS resolution failed for {hostname}") from exc
+    for addr in addrs:
+        ip = ipaddress.ip_address(addr)
+        if not ip.is_global:
+            raise CatalogUnavailableError(
+                f"hostname {hostname} resolved to private/reserved IP: {addr}"
+            )
 
 
 class ModrinthCatalog(CatalogProvider):
@@ -96,7 +132,7 @@ class ModrinthCatalog(CatalogProvider):
         )
 
     async def get_project(self, project_id_or_slug: str) -> CatalogProject:
-        data = await self._get_json(f"/project/{project_id_or_slug}")
+        data = await self._get_json(f"/project/{quote(project_id_or_slug, safe='')}")
         return CatalogProject(
             project_id=data["id"],
             slug=data.get("slug", ""),
@@ -126,7 +162,7 @@ class ModrinthCatalog(CatalogProvider):
         if game_versions:
             params["game_versions"] = json.dumps(game_versions)
         data = await self._get_json(
-            f"/project/{project_id_or_slug}/version", params=params
+            f"/project/{quote(project_id_or_slug, safe='')}/version", params=params
         )
         return [self._parse_version(v) for v in data]
 
@@ -138,6 +174,7 @@ class ModrinthCatalog(CatalogProvider):
             raise CatalogUnavailableError(
                 f"download URL host not allowed: {parsed.hostname}"
             )
+        _assert_no_private_ips(parsed.hostname)
         try:
             async with httpx.AsyncClient(
                 timeout=_DOWNLOAD_TIMEOUT,
@@ -163,6 +200,7 @@ class ModrinthCatalog(CatalogProvider):
                                     f"redirect to disallowed host: "
                                     f"{redirect_parsed.hostname}"
                                 )
+                            _assert_no_private_ips(redirect_parsed.hostname)
                             current_url = location
                             continue
                         response.raise_for_status()

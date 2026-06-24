@@ -34,6 +34,7 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/game"
 	relayv1 "github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/genproto/mcsd/relay/v1"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/ipcaps"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/mc"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/relaysvc"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/session"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/tunnel"
@@ -393,6 +394,71 @@ func TestUnknownHostDropped(t *testing.T) {
 	_ = player.SetReadDeadline(time.Now().Add(2 * time.Second))
 	if n, err := player.Read(make([]byte, 1)); err == nil && n > 0 {
 		t.Errorf("unknown host should be dropped without a response, got %d bytes", n)
+	}
+}
+
+// TestStatusRunningThroughTunnel verifies the status-through-tunnel path for a
+// running server: the relay resolves a TUNNEL decision, opens a tunnel to the
+// fake Worker, exchanges the status protocol, and returns the live status JSON
+// to the player.
+func TestStatusRunningThroughTunnel(t *testing.T) {
+	h := newHarness(t)
+
+	const liveStatusJSON = `{"version":{"name":"1.21","protocol":765},"players":{"max":20,"online":3},"description":{"text":"A live server"}}`
+
+	// Fake Worker: when the API dispatches a TunnelDial, dial back the tunnel
+	// listener, read the replayed handshake + status request, and write a real
+	// Status Response.
+	go func() {
+		token := <-h.api.dialTunnel
+		tlsConn := dialTunnelWithRetry(t, h.tunnelAddr, token)
+		if tlsConn == nil {
+			return
+		}
+		defer func() { _ = tlsConn.Close() }()
+
+		br := bufio.NewReader(tlsConn)
+		// Read the replayed handshake packet.
+		if _, err := readOnePacket(br); err != nil {
+			t.Errorf("read replayed handshake: %v", err)
+			return
+		}
+		// Read the status request packet.
+		if _, err := readOnePacket(br); err != nil {
+			t.Errorf("read status request: %v", err)
+			return
+		}
+		// Write the Status Response.
+		if _, err := tlsConn.Write(mc.StatusResponsePacket(liveStatusJSON)); err != nil {
+			t.Errorf("write status response: %v", err)
+		}
+	}()
+
+	// Player sends a status handshake + Status Request.
+	player, err := net.Dial("tcp", h.gameAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = player.Close() }()
+
+	hs := handshakePacket(765, "amber.mc.example.com", 25565, 1)
+	statusReq := []byte{0x01, 0x00} // empty Status Request
+	if _, err := player.Write(append(hs, statusReq...)); err != nil {
+		t.Fatal(err)
+	}
+
+	_ = player.SetReadDeadline(time.Now().Add(5 * time.Second))
+	br := bufio.NewReader(player)
+	body, err := readOnePacketBody(br)
+	if err != nil {
+		t.Fatalf("read status response: %v", err)
+	}
+	// body = id(0x00) + VarInt-string JSON.
+	if body[0] != 0x00 {
+		t.Fatalf("status response id = 0x%02x", body[0])
+	}
+	if !strings.Contains(string(body), "A live server") {
+		t.Errorf("live MOTD missing from status response: %q", string(body))
 	}
 }
 

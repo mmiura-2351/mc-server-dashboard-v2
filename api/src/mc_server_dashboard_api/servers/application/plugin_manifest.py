@@ -45,7 +45,7 @@ from mc_server_dashboard_api.servers.domain.errors import InvalidModJarError
 from mc_server_dashboard_api.servers.domain.plugin import PluginSide
 
 # Safety limits (resource_pack_zip.py precedent, plugin upload hardening).
-_MAX_DECOMPRESSED_BYTES = 512 * 1024 * 1024  # 512 MiB (matches the plugin upload cap)
+_MAX_MANIFEST_BYTES = 2 * 1024 * 1024  # 2 MiB (manifests are typically a few KB)
 _MAX_ENTRY_COUNT = 50_000
 _CHUNK_SIZE = 64 * 1024  # 64 KiB
 
@@ -162,7 +162,7 @@ def parse_manifest_at_ingest(jar_bytes: bytes, *, loader: str) -> ParsedManifest
 def _read_entry_chunked(zf: zipfile.ZipFile, name: str) -> str:
     """Read a zip entry in chunks, enforcing the decompressed-size cap.
 
-    Raises :class:`InvalidModJarError` as soon as ``_MAX_DECOMPRESSED_BYTES`` is
+    Raises :class:`InvalidModJarError` as soon as ``_MAX_MANIFEST_BYTES`` is
     exceeded -- before the full entry is materialised -- so a malicious jar with
     an extreme compression ratio cannot exhaust memory.
     """
@@ -174,7 +174,7 @@ def _read_entry_chunked(zf: zipfile.ZipFile, name: str) -> str:
             if not chunk:
                 break
             total += len(chunk)
-            if total > _MAX_DECOMPRESSED_BYTES:
+            if total > _MAX_MANIFEST_BYTES:
                 raise InvalidModJarError("decompressed size exceeds limit")
             chunks.append(chunk)
     return b"".join(chunks).decode("utf-8", errors="replace")

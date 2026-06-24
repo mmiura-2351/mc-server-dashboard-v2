@@ -35,6 +35,12 @@ import (
 // late dial-back finds no waiter.
 const tokenTTL = 10 * time.Second
 
+// drainTimeout bounds how long the shutdown sequence waits for in-flight
+// handle goroutines (active splices) to finish before proceeding. After this
+// deadline the reporter shuts down and may miss End events for sessions
+// that were still splicing (issue #1051).
+const drainTimeout = 30 * time.Second
+
 // configPathEnv names the env var pointing at the TOML config file (optional).
 const configPathEnv = "MCD_RELAY_CONFIG"
 
@@ -101,12 +107,17 @@ func run(ctx context.Context) error {
 	tokens.StartSweep(sigCtx)
 	cache.StartSweep(sigCtx)
 
+	// The reporter and relaysvc get their own context so their shutdown is
+	// sequenced after in-flight handle goroutines drain (issue #1051).
+	svcCtx, svcStop := context.WithCancel(ctx)
+	defer svcStop()
+
 	logger.Info("relay starting", "game_listen", cfg.Game.Listen, "tunnel_listen", cfg.Tunnel.Listen)
 
 	var wg sync.WaitGroup
 	wg.Add(4)
-	go func() { defer wg.Done(); svc.Run(sigCtx) }()
-	go func() { defer wg.Done(); reporter.Run(sigCtx) }()
+	go func() { defer wg.Done(); svc.Run(svcCtx) }()
+	go func() { defer wg.Done(); reporter.Run(svcCtx) }()
 	go func() {
 		defer wg.Done()
 		if err := tunnelLn.Serve(sigCtx); err != nil {
@@ -120,6 +131,17 @@ func run(ctx context.Context) error {
 			logger.Error("game listener stopped", "error", err)
 			stop()
 		}
+
+		// The listener is closed; wait for in-flight handle goroutines
+		// (including active splices) to finish so their session End events
+		// reach the reporter before it shuts down (issue #1051).
+		if !gameLn.Drain(drainTimeout) {
+			logger.Warn("drain timeout; some sessions may not report End events", "timeout", drainTimeout)
+		}
+
+		// All handles drained (or timed out); now stop the reporter so it
+		// flushes any remaining End events.
+		svcStop()
 	}()
 	wg.Wait()
 	return nil
