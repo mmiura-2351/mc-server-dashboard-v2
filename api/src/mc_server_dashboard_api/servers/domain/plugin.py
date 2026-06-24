@@ -175,8 +175,8 @@ def working_set_path(*, clean_path: str, enabled: bool, side: PluginSide) -> str
 def content_dir_for_server_type(server_type: ServerType) -> str:
     """Return the content directory name for ``server_type``.
 
-    Fabric and Forge use ``mods/``; Paper uses ``plugins/``. Vanilla and Spigot
-    do not support managed content and raise
+    Fabric and Forge use ``mods/``; Paper uses ``plugins/``. Vanilla does not
+    support managed content and raises
     :class:`UnsupportedPluginServerTypeError`.
     """
 
@@ -191,7 +191,7 @@ def loader_type_for_server_type(server_type: ServerType) -> LoaderType:
     """Return the :class:`LoaderType` for ``server_type``.
 
     Same mapping as :func:`content_dir_for_server_type`: Fabric/Forge are mods,
-    Paper is plugins. Vanilla/Spigot raise.
+    Paper is plugins. Vanilla raises.
     """
 
     if server_type in (ServerType.FABRIC, ServerType.FORGE):
@@ -212,7 +212,7 @@ def modrinth_loader_for_server_type(server_type: ServerType) -> str:
     """Return the Modrinth ``loader`` facet string for ``server_type``.
 
     Fabric -> ``"fabric"``, Forge -> ``"forge"``, Paper -> ``"paper"``.
-    Vanilla/Spigot raise :class:`UnsupportedPluginServerTypeError`.
+    Vanilla raises :class:`UnsupportedPluginServerTypeError`.
     """
 
     loader = _MODRINTH_LOADER_MAP.get(server_type)

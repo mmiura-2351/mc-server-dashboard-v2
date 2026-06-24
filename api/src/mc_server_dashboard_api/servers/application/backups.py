@@ -432,7 +432,7 @@ async def _reconcile_plugins(
     try:
         content_dir = content_dir_for_server_type(server.server_type)
     except UnsupportedPluginServerTypeError:
-        return  # Vanilla/Spigot: no plugin content directory.
+        return  # Vanilla: no plugin content directory.
 
     async with uow:
         db_plugins = await uow.plugins.list_for_server(server_id)
