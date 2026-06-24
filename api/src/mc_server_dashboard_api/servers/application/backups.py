@@ -553,7 +553,11 @@ async def _ingest_ghost(
 ) -> None:
     """Create a new plugin row for a ghost file on disk (#1336)."""
 
-    filename = jar_path.removeprefix(f"{content_dir}/")
+    raw_name = jar_path.removeprefix(f"{content_dir}/")
+    # A .jar.disabled file is a disabled plugin; strip the suffix for the
+    # clean filename and derive enabled from it.
+    disabled = raw_name.lower().endswith(".jar.disabled")
+    filename = raw_name.removesuffix(".disabled") if disabled else raw_name
     loader_type = loader_type_for_server_type(server.server_type)
     loader = modrinth_loader_for_server_type(server.server_type)
     manifest = parse_manifest_at_ingest(jar_bytes, loader=loader)
@@ -580,7 +584,7 @@ async def _ingest_ghost(
         checksum_sha512=checksum,
         sha256=sha256,
         size_bytes=len(jar_bytes),
-        enabled=True,
+        enabled=not disabled,
         installed_by=None,
         created_at=ts,
         updated_at=ts,

@@ -226,6 +226,29 @@ async def test_restore_ingests_ghost_plugin_files() -> None:
     assert rows[0].checksum_sha512 == hashlib.sha512(jar_bytes).hexdigest()
 
 
+async def test_restore_ingests_ghost_disabled_plugin_file() -> None:
+    """A .jar.disabled on disk with no DB row is ingested as disabled."""
+    server = _server()
+    repo, backups, backup, archive = _seed_restore_fixture(server)
+    plugins = FakePluginRepository()
+    jar_bytes = _minimal_jar()
+    file_store = FakeFileStore()
+    file_store.files["mods/mod.jar.disabled"] = jar_bytes
+    cache = FakePluginCacheStore()
+    uow = FakeUnitOfWork(servers=repo, backups=backups, plugins=plugins)
+
+    await _make_restore(uow, archive, file_store=file_store, cache=cache)(
+        community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id
+    )
+
+    rows = await plugins.list_for_server(server.id)
+    assert len(rows) == 1
+    assert rows[0].rel_path == "mods/mod.jar.disabled"
+    assert rows[0].filename == "mod.jar"
+    assert rows[0].display_name == "mod"
+    assert rows[0].enabled is False
+
+
 # --- no plugins (no-op) -----------------------------------------------------
 
 
