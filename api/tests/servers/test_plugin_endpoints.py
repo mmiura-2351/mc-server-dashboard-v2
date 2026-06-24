@@ -372,6 +372,30 @@ def test_install_plugin_already_exists_is_409() -> None:
     assert resp.json()["reason"] == "plugin_already_exists"
 
 
+def test_install_plugin_empty_display_name_is_422() -> None:
+    app = _app(member=True, allow=True, install=_FakeInstall())
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4()),
+        data={"display_name": "   "},
+        files={"file": ("test.jar", b"jar-bytes", "application/java-archive")},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_display_name"
+
+
+def test_install_plugin_too_long_display_name_is_422() -> None:
+    app = _app(member=True, allow=True, install=_FakeInstall())
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4()),
+        data={"display_name": "x" * 201},
+        files={"file": ("test.jar", b"jar-bytes", "application/java-archive")},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_display_name"
+
+
 # --- remove plugin ---------------------------------------------------------
 
 
