@@ -63,7 +63,7 @@ _CSP = (
     "default-src 'self'; "
     "script-src 'self'; "
     "style-src 'self' 'unsafe-inline'; "
-    "img-src 'self' data:; "
+    "img-src 'self' data: https://cdn.modrinth.com; "
     "frame-ancestors 'none'"
 )
 
