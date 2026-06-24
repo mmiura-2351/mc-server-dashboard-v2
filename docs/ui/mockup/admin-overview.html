@@ -19,7 +19,7 @@
         </div>
       </div>
 
-      <div class="grid cols-4" style="margin-bottom:14px">
+      <div class="grid cols-3" style="margin-bottom:14px">
         <div class="card metric-tile">
           <div class="label">Workers</div>
           <div class="value">2<span class="unit">/ 3 online</span></div>
@@ -28,12 +28,7 @@
         <div class="card metric-tile">
           <div class="label">Servers running</div>
           <div class="value">3<span class="unit">/ 9 total</span></div>
-          <div class="hint" style="font-size:11px;color:var(--red)">1 crashed</div>
-        </div>
-        <div class="card metric-tile">
-          <div class="label">Communities</div>
-          <div class="value">2</div>
-          <div class="hint" style="font-size:11px;color:var(--text-faint)">5 users (4 active)</div>
+          <div class="hint" style="font-size:11px;color:var(--text-faint)">assigned across all workers</div>
         </div>
         <div class="card metric-tile">
           <div class="label">Backups (global)</div>
@@ -42,43 +37,29 @@
         </div>
       </div>
 
-      <div class="grid cols-2">
-        <div class="card">
-          <h2>All workers</h2>
-          <table class="data">
-            <thead><tr><th>Worker</th><th>Status</th><th>Load</th><th>Heartbeat</th></tr></thead>
-            <tbody>
-              <tr>
-                <td class="num">worker-a</td>
-                <td><span class="pill running">online</span></td>
-                <td class="num">2 / 8</td><td>2s ago</td>
-              </tr>
-              <tr>
-                <td class="num">worker-b</td>
-                <td><span class="pill starting">draining</span></td>
-                <td class="num">1 / 4</td><td>4s ago</td>
-              </tr>
-              <tr>
-                <td class="num">worker-c</td>
-                <td><span class="pill crashed">offline</span></td>
-                <td class="num">0 / 4</td><td>3h ago</td>
-              </tr>
-            </tbody>
-          </table>
-          <div style="margin-top:10px"><a href="admin-workers.html">Manage workers →</a></div>
-        </div>
-        <div class="card">
-          <h2>Recent platform activity</h2>
-          <table class="data">
-            <tbody>
-              <tr><td class="num">10:01</td><td class="num">server:start</td><td>miura</td><td><span class="pill running" style="font-size:11px">ok</span></td></tr>
-              <tr><td class="num">09:12</td><td class="num">server:start</td><td>miura</td><td><span class="pill crashed" style="font-size:11px">fail</span></td></tr>
-              <tr><td class="num">08:55</td><td class="num">worker:manage</td><td>miura</td><td><span class="pill running" style="font-size:11px">ok</span></td></tr>
-              <tr><td class="num">04:00</td><td class="num">backup:create</td><td>system</td><td><span class="pill running" style="font-size:11px">ok</span></td></tr>
-            </tbody>
-          </table>
-          <div style="margin-top:10px"><a href="admin-audit.html">Global audit log →</a></div>
-        </div>
+      <div class="card">
+        <h2>All workers</h2>
+        <table class="data">
+          <thead><tr><th>Worker</th><th>Status</th><th>Load</th><th>Heartbeat</th></tr></thead>
+          <tbody>
+            <tr>
+              <td class="num">worker-a</td>
+              <td><span class="pill running">online</span></td>
+              <td class="num">2 / 8</td><td>2s ago</td>
+            </tr>
+            <tr>
+              <td class="num">worker-b</td>
+              <td><span class="pill starting">draining</span></td>
+              <td class="num">1 / 4</td><td>4s ago</td>
+            </tr>
+            <tr>
+              <td class="num">worker-c</td>
+              <td><span class="pill crashed">offline</span></td>
+              <td class="num">0 / 4</td><td>3h ago</td>
+            </tr>
+          </tbody>
+        </table>
+        <div style="margin-top:10px"><a href="admin-workers.html">Manage workers →</a></div>
       </div>
     </main>
   </div>

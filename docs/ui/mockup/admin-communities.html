@@ -22,28 +22,33 @@
 
       <div class="card" style="padding:0">
         <table class="data">
-          <thead><tr><th>Name</th><th>Members</th><th>Servers</th><th></th></tr></thead>
+          <thead><tr><th>Name</th><th>ID</th><th>Members</th><th>Servers</th><th></th></tr></thead>
           <tbody>
             <tr>
               <td><strong>Sakura SMP</strong></td>
+              <td class="num" style="color:var(--text-faint)">c-1</td>
               <td class="num">4</td>
               <td class="num">4 (2 running)</td>
               <td class="row-actions">
-                <a class="btn sm" href="dashboard.html">Open</a>
                 <button class="btn sm danger" onclick="mockToast('Typed-confirm, then DELETE /communities/c-1', 'err')">Delete</button>
               </td>
             </tr>
             <tr>
               <td><strong>Dev Playground</strong></td>
+              <td class="num" style="color:var(--text-faint)">c-2</td>
               <td class="num">2</td>
               <td class="num">5 (1 running)</td>
               <td class="row-actions">
-                <a class="btn sm" href="dashboard.html">Open</a>
                 <button class="btn sm danger" onclick="mockToast('Typed-confirm, then DELETE /communities/c-2', 'err')">Delete</button>
               </td>
             </tr>
           </tbody>
         </table>
+      </div>
+      <div class="pagination">
+        <button class="btn sm ghost" disabled>Previous</button>
+        <span>1–2 of 2</span>
+        <button class="btn sm ghost" disabled>Next</button>
       </div>
     </main>
   </div>
@@ -58,7 +63,7 @@
     </div>
     <div class="field">
       <label>Initial owner</label>
-      <input type="text" placeholder="username of an existing account">
+      <select><option value="">Select an existing account…</option><option>miura</option><option>alex_dig</option><option>steve_99</option><option>enderchan</option><option>old_timer</option></select>
       <div class="hint">The owner gets the preset Owner role (all community permissions).</div>
     </div>
     <div class="modal-foot">

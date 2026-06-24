@@ -32,6 +32,30 @@
     </main>
   </div>
 </div>
+<!-- drain confirmation modal -->
+<div class="modal-backdrop" id="drain-modal">
+  <div class="card modal">
+    <h2>Drain worker</h2>
+    <p style="font-size:13px;color:var(--text-dim)">Draining stops new placements on this worker and stops its running servers with a final snapshot so they can be restarted elsewhere.</p>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeModal('drain-modal')">Cancel</button>
+      <button class="btn primary" onclick="mockToast('Worker draining.'); closeModal('drain-modal')">Drain worker</button>
+    </div>
+  </div>
+</div>
+
+<!-- undrain confirmation modal -->
+<div class="modal-backdrop" id="undrain-modal">
+  <div class="card modal">
+    <h2>Undrain worker</h2>
+    <p style="font-size:13px;color:var(--text-dim)">Undraining lets this worker accept new placements again.</p>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeModal('undrain-modal')">Cancel</button>
+      <button class="btn primary" onclick="mockToast('Worker undrained.'); closeModal('undrain-modal')">Undrain worker</button>
+    </div>
+  </div>
+</div>
+
 <script src="assets/mock-data.js"></script>
 <script src="assets/app.js"></script>
 <script>
@@ -51,8 +75,8 @@ document.addEventListener("DOMContentLoaded", () => {
       <td>${w.heartbeat}</td>
       <td class="row-actions">
         ${w.draining
-          ? `<button class="btn sm" onclick="mockToast('DELETE /workers/${w.id}/drain')">Undrain</button>`
-          : `<button class="btn sm" onclick="mockToast('PUT /workers/${w.id}/drain — running servers will be stopped and snapshotted', 'err')">Drain</button>`}
+          ? `<button class="btn sm" onclick="openModal('undrain-modal')">Undrain</button>`
+          : `<button class="btn sm" onclick="openModal('drain-modal')">Drain</button>`}
       </td>
     </tr>`).join("");
 });

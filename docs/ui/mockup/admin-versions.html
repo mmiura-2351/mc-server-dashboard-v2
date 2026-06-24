@@ -24,30 +24,20 @@
 
       <div class="card" style="padding:0;margin-bottom:14px">
         <table class="data">
-          <thead><tr><th>Server type</th><th>Versions</th><th>Latest</th><th>Refreshed</th><th></th></tr></thead>
+          <thead><tr><th>Server type</th><th>Versions</th><th>Latest</th><th></th></tr></thead>
           <tbody id="catalog-rows"></tbody>
         </table>
       </div>
 
-      <div class="grid cols-2">
-        <div class="card">
-          <h2>Server downloads</h2>
-          <dl class="kv">
-            <dt>Downloaded JARs</dt><dd>14</dd>
-            <dt>Total size</dt><dd>1.9 GiB</dd>
-          </dl>
-          <div style="margin-top:12px">
-            <button class="btn" onclick="mockToast('Freed 412 MiB by deleting 3 unused JARs.', 'ok')">Free up disk space</button>
-          </div>
-          <div class="hint" style="margin-top:8px;color:var(--text-faint)">Deletes downloaded server JARs that no server uses any more.</div>
-        </div>
-        <div class="card">
-          <h2>Notes</h2>
-          <ul style="margin:0;padding-left:18px;font-size:13px;color:var(--text-dim)">
-            <li><strong>spigot</strong> is not catalogued — no official distribution API; Paper is the recommended substitute.</li>
-            <li><strong>forge</strong> resolves to the installer JAR; the worker runs the install step on first start.</li>
-            <li>Catalog responses are cached with fallback when upstream APIs are unreachable.</li>
-          </ul>
+      <div class="card" style="max-width:360px">
+        <h2>Server downloads</h2>
+        <dl class="kv">
+          <dt>Downloaded JARs</dt><dd>14</dd>
+          <dt>Total size</dt><dd>1.9 GiB</dd>
+        </dl>
+        <div style="margin-top:12px">
+          <p style="font-size:12px;color:var(--text-faint);margin:0 0 8px">Are you sure? This deletes downloaded server JARs that no server uses any more.</p>
+          <button class="btn" onclick="mockToast('Freed 412 MiB by deleting 3 unused JARs.', 'ok')">Free up disk space</button>
         </div>
       </div>
     </main>
@@ -63,7 +53,6 @@ document.addEventListener("DOMContentLoaded", () => {
         <td><span class="badge type">${type}</span></td>
         <td class="num">${c.count}</td>
         <td class="num">${c.latest}</td>
-        <td>${c.refreshed}</td>
         <td class="row-actions">
           <button class="btn sm" onclick="mockToast('POST /versions/refresh?server_type=${type}')">Refresh</button>
         </td>
