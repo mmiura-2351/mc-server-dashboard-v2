@@ -10,6 +10,7 @@ import (
 	"context"
 	"log/slog"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/adapters/apiclient"
@@ -59,6 +60,9 @@ type Listener struct {
 	caps     *ipcaps.IPCaps
 	sessions SessionRecorder
 	logger   *slog.Logger
+
+	// inflight tracks handle goroutines so Drain can wait for them on shutdown.
+	inflight sync.WaitGroup
 }
 
 // NewListener binds the game listener on addr.
@@ -81,6 +85,24 @@ func NewListener(addr string, resolver Resolver, tokens *tunnel.TokenTable, cach
 // Addr returns the listener's bound address.
 func (l *Listener) Addr() net.Addr { return l.ln.Addr() }
 
+// Drain blocks until all in-flight handle goroutines finish or the timeout
+// elapses. Call after Serve returns to let active splices complete before
+// shutting down downstream services (e.g. the session reporter). It returns
+// true if all goroutines drained within the deadline, false on timeout.
+func (l *Listener) Drain(timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		l.inflight.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
 // Serve accepts player connections until ctx is cancelled or the listener
 // closes.
 func (l *Listener) Serve(ctx context.Context) error {
@@ -96,7 +118,11 @@ func (l *Listener) Serve(ctx context.Context) error {
 			}
 			return err
 		}
-		go l.handle(ctx, conn)
+		l.inflight.Add(1)
+		go func() {
+			defer l.inflight.Done()
+			l.handle(ctx, conn)
+		}()
 	}
 }
 
