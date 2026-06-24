@@ -159,19 +159,6 @@ describe("ServerCreatePage gating", () => {
 });
 
 describe("Step 1 — type & version", () => {
-  it("renders the catalog type cards plus a disabled spigot card", async () => {
-    renderPage();
-    expect(
-      await screen.findByText(t("serverCreate.type.vanilla")),
-    ).toBeInTheDocument();
-    expect(screen.getByText(t("serverCreate.type.paper"))).toBeInTheDocument();
-    const spigot = screen
-      .getByText(t("serverCreate.type.spigot"))
-      .closest("button");
-    expect(spigot).toBeDisabled();
-    expect(spigot).toHaveAttribute("title", t("serverCreate.spigotHint"));
-  });
-
   it("preselects the latest version after picking a type", async () => {
     renderPage();
     fireEvent.click(await screen.findByText(t("serverCreate.type.paper")));
@@ -576,20 +563,6 @@ describe("create error surfacing", () => {
       await screen.findByText(t("serverCreate.error.port_taken")),
     ).toBeInTheDocument();
     expect(lastPath).toBe(`/communities/${CID}/servers/new`);
-  });
-
-  it("surfaces 422 spigot_unsupported", async () => {
-    mockApi.post.mockRejectedValue(
-      new ApiError(422, { reason: "spigot_unsupported" }),
-    );
-    renderPage();
-    await reachConfigStep();
-    fireEvent.click(
-      screen.getByRole("button", { name: t("serverCreate.create") }),
-    );
-    expect(
-      await screen.findByText(t("serverCreate.error.spigot_unsupported")),
-    ).toBeInTheDocument();
   });
 
   it("maps a structural validation_error on name to the field", async () => {

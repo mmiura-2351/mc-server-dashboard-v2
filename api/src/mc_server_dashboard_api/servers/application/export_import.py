@@ -13,7 +13,7 @@ Both reuse the C1 machinery rather than re-implementing it:
   the authoritative copy is only well-defined at rest, matching the download
   posture. ``exported_at`` reads the :class:`Clock` seam, never the wall clock.
 - **Import** reuses the #267 version validator (the SAME check create runs, so
-  spigot / unknown-version are rejected identically), the #243 port
+  unknown-version is rejected identically), the #243 port
   auto-assign (via :class:`CreateServer`'s composition), and the hardened
   extraction (``_archive_entries``: zip-slip, size, and entry-count caps). The
   ``export_metadata.json`` member itself is NOT written into the working set. The
@@ -218,7 +218,7 @@ class ImportServer:
             max_entries=self.max_entries,
         )
         # Create the row through the shared use case: it runs the version validator
-        # (spigot/unknown-version -> 422), assigns the game port (#243), and
+        # (unknown-version -> 422), assigns the game port (#243), and
         # enforces name uniqueness (409). accept_eula stays false on purpose.
         server = await self.create_server(
             community_id=community_id,

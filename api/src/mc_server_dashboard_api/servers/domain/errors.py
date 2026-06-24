@@ -462,8 +462,8 @@ class PluginNotFoundError(ServerError):
 class UnsupportedPluginServerTypeError(ServerError):
     """The server type does not support plugin/mod content management.
 
-    Vanilla and Spigot have no managed content directory; the edge maps this
-    to 422 ``unsupported_server_type``.
+    Vanilla has no managed content directory; the edge maps this to 422
+    ``unsupported_server_type``.
     """
 
 

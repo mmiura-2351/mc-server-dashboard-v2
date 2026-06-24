@@ -29,7 +29,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from mc_server_dashboard_api.core.adapters.database import Base
 
-_SERVER_TYPES = ("vanilla", "paper", "fabric", "forge", "spigot")
+_SERVER_TYPES = ("vanilla", "paper", "fabric", "forge")
 # "host_process" is retained for historical rows only: the Worker host-process
 # driver was removed in issue #781, so no new server is created with it and none
 # is placeable. The CHECK value is left in place (no migration) to keep existing

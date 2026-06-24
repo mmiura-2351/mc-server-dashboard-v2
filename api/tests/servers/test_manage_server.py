@@ -67,7 +67,6 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerType,
 )
 from mc_server_dashboard_api.servers.domain.version_validator import (
-    SpigotUnsupportedError,
     UnknownVersionError,
     UnsupportedServerTypeError,
 )
@@ -501,28 +500,6 @@ async def test_create_rejects_unsupported_type_forge() -> None:
             execution_backend="container",
             config={},
         )
-    assert uow.commits == 0
-
-
-async def test_create_rejects_spigot_recommending_paper() -> None:
-    uow = FakeUnitOfWork()
-    with pytest.raises(SpigotUnsupportedError) as exc:
-        await CreateServer(
-            uow=uow,
-            clock=FakeClock(_NOW),
-            version_validator=FakeVersionValidator(),
-            file_store=FakeFileStore(),
-            port_range=_PORTS,
-        )(
-            community_id=CommunityId(uuid.uuid4()),
-            name="s",
-            mc_edition="java",
-            mc_version="1.21.1",
-            server_type="spigot",
-            execution_backend="container",
-            config={},
-        )
-    assert "paper" in str(exc.value).lower()
     assert uow.commits == 0
 
 

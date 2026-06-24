@@ -166,8 +166,8 @@ def _guard_content_dir(server_type: ServerType, rel_path: str) -> None:
     """Reject a Files API path that falls under the plugin content directory.
 
     The content directory (``mods/`` or ``plugins/``) is managed exclusively by
-    the Plugin API. Server types that do not support plugins (vanilla, spigot)
-    are unguarded -- :func:`content_dir_for_server_type` raises
+    the Plugin API. Server types that do not support plugins (vanilla) are
+    unguarded -- :func:`content_dir_for_server_type` raises
     :class:`UnsupportedPluginServerTypeError` for those, which we catch and
     skip.
     """

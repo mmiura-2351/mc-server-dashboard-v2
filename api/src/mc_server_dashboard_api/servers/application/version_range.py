@@ -26,7 +26,7 @@ Three range dialects, selected by the depending plugin's **loader**:
   with no brackets is treated as exact. Comma-separated intervals are ORed
   (Maven's union semantics).
 
-* **Paper / Spigot** -- a Bukkit ``api-version`` minimum floor compared at
+* **Paper** -- a Bukkit ``api-version`` minimum floor compared at
   major.minor granularity: ``1.21`` is satisfied by any ``1.21.x`` or newer
   major.minor, not by ``1.20.4``. (Bukkit ``api-version`` is the oldest server a
   plugin runs on, not an exact version.) Paper plugins carry no dependency range
@@ -57,7 +57,7 @@ _MAVEN_LOADERS = frozenset({"forge", "neoforge"})
 
 # Loaders whose MC-version constraint is a Bukkit ``api-version`` floor; see
 # :func:`_paper_satisfies`.
-_PAPER_LOADERS = frozenset({"paper", "spigot"})
+_PAPER_LOADERS = frozenset({"paper"})
 
 _COMPARATORS = ("<=", ">=", "<", ">")
 
@@ -232,7 +232,7 @@ def _caret(version: str, target: str) -> bool:
     return _compare(version, target) >= 0 and _compare(version, upper) < 0
 
 
-# --- Paper / Spigot api-version floor ---------------------------------------
+# --- Paper api-version floor -------------------------------------------------
 
 
 def _paper_satisfies(version: str, spec: str) -> bool:

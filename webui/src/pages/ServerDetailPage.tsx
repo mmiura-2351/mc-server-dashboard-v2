@@ -70,7 +70,7 @@ const TAB_LABEL: Record<Tab, TranslationKey> = {
 };
 
 /** Server types that do not support plugins/mods (no backend support). */
-const PLUGIN_UNSUPPORTED_TYPES = new Set(["vanilla", "spigot"]);
+const PLUGIN_UNSUPPORTED_TYPES = new Set(["vanilla"]);
 
 /**
  * Server types whose managed content lives in `mods/` rather than `plugins/`,

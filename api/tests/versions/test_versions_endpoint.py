@@ -1,8 +1,8 @@
 """Endpoint tests for the global version catalog (FR-VER-1).
 
 Exercised in-process via TestClient with the catalog overridden by a fake (no
-network). Covers: auth requirement, the types index, a version listing, the
-unknown-type 404 (spigot), and the source-down 503.
+network). Covers: auth requirement, the types index, a version listing, and the
+source-down 503.
 """
 
 from __future__ import annotations
@@ -94,14 +94,6 @@ def test_lists_versions_for_forge() -> None:
         resp = client.get("/api/versions/forge")
     assert resp.status_code == 200
     assert resp.json() == {"versions": ["1.21.1"]}
-
-
-def test_unknown_type_spigot_is_404() -> None:
-    client = _client(_FakeCatalog())
-    with client:
-        resp = client.get("/api/versions/spigot")
-    assert resp.status_code == 404
-    assert resp.json()["reason"] == "unknown_server_type"
 
 
 def test_source_down_is_503() -> None:

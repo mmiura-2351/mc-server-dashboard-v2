@@ -3,23 +3,19 @@
 Binds the create-path version-validation Port to the global version catalog
 (an adapter-layer composition across bounded contexts, the servers->fleet
 precedent). It maps the servers ``server_type`` string onto the versions
-``ServerType`` enum: ``spigot`` is special-cased (no official distribution API),
-and a value the versions enum does not carry is the unsupported case (the DB
-CHECK enum could permit a type the catalog does not). A catalogued type whose
-version the catalog does not list is the unknown-version case. ``forge`` is now
-catalogued (issue #307), so it validates against the catalog like the others.
+``ServerType`` enum: a value the versions enum does not carry is the
+unsupported case (the DB CHECK enum could permit a type the catalog does not).
+A catalogued type whose version the catalog does not list is the
+unknown-version case. ``forge`` is now catalogued (issue #307), so it validates
+against the catalog like the others.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from mc_server_dashboard_api.servers.domain.value_objects import (
-    ServerType as ServersServerType,
-)
 from mc_server_dashboard_api.servers.domain.version_validator import (
     CatalogUnavailableError,
-    SpigotUnsupportedError,
     UnknownVersionError,
     UnsupportedServerTypeError,
     VersionValidator,
@@ -38,18 +34,11 @@ class CatalogVersionValidator(VersionValidator):
     catalog: VersionCatalog
 
     async def validate(self, *, server_type: str, version: str) -> None:
-        if server_type == ServersServerType.SPIGOT.value:
-            # Spigot has no official distribution API (BuildTools-only), so it is
-            # not catalogued; recommend Paper (a Spigot-compatible fork) explicitly.
-            raise SpigotUnsupportedError(
-                f"spigot is not distributable (BuildTools-only); "
-                f"use paper for a Spigot-compatible server (requested {version})"
-            )
         try:
             catalog_type = ServerType(server_type)
         except ValueError as exc:
             # Valid in the schema CHECK enum but not catalogued (defensive: every
-            # current schema type except spigot is catalogued, forge included).
+            # current schema type is catalogued, forge included).
             raise UnsupportedServerTypeError(server_type) from exc
         try:
             offered = await self.catalog.list_versions(catalog_type)

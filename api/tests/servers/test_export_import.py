@@ -7,8 +7,7 @@ DB, no real Storage), per TESTING.md Section 4. Verifies:
   fresh server B, and the published working set + metadata-driven fields match;
 - export is at-rest only (running -> 409 via ServerFilesUnsettledError) and
   ``exported_at`` comes from the Clock seam;
-- import validation: missing/wrong-format/malformed metadata -> 422; a
-  spigot-typed metadata -> 422 (the SAME create-path validator); the name comes
+- import validation: missing/wrong-format/malformed metadata -> 422; the name comes
   from the request (uniqueness 409); the row gets an auto-assigned game port;
 - import caps: an oversized body / over-cap extraction -> 413;
 - import failure posture: a storage write failure mid-publish -> the seed-failure
@@ -57,9 +56,6 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerId,
     ServerName,
     ServerType,
-)
-from mc_server_dashboard_api.servers.domain.version_validator import (
-    SpigotUnsupportedError,
 )
 from tests.servers.fakes import (
     FakeClock,
@@ -374,21 +370,6 @@ async def test_import_rejects_malformed_json() -> None:
             name="x",
             execution_backend="container",
             content=bad,
-        )
-
-
-async def test_import_spigot_metadata_is_unsupported() -> None:
-    dst_uow, dst_store = FakeUnitOfWork(), FakeFileStore()
-    imp = ImportServer(
-        create_server=_create_server(dst_uow, dst_store), file_store=dst_store
-    )
-    archive = _zip({EXPORT_METADATA_FILENAME: _metadata(server_type="spigot")})
-    with pytest.raises(SpigotUnsupportedError):
-        await imp(
-            community_id=CommunityId(uuid.uuid4()),
-            name="x",
-            execution_backend="container",
-            content=archive,
         )
 
 

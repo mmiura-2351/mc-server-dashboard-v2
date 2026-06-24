@@ -46,10 +46,6 @@ class TestContentDirForServerType:
         with pytest.raises(UnsupportedPluginServerTypeError):
             content_dir_for_server_type(ServerType.VANILLA)
 
-    def test_spigot_raises(self) -> None:
-        with pytest.raises(UnsupportedPluginServerTypeError):
-            content_dir_for_server_type(ServerType.SPIGOT)
-
 
 class TestLoaderTypeForServerType:
     def test_fabric_returns_mod(self) -> None:

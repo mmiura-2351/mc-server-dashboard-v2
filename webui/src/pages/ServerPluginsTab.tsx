@@ -44,9 +44,9 @@ type PluginValidationResponse =
 type ResolutionPlanResponse = components["schemas"]["ResolutionPlanResponse"];
 type ApplyResolutionResponse = components["schemas"]["ApplyResolutionResponse"];
 
-/** Server types that support plugins/mods. Vanilla and Spigot do not. */
+/** Server types that support plugins/mods. Vanilla does not. */
 function supportsPlugins(serverType: string): boolean {
-  return !["vanilla", "spigot"].includes(serverType);
+  return serverType !== "vanilla";
 }
 
 /** Server types whose content is mods, mirroring the backend (#1320). */

@@ -113,7 +113,7 @@ M2 is organized as four pillars, each tracked by an epic:
 - **Pillar B — server-operation use cases complete end-to-end** (epic #240):
   EULA acceptance flow, port management (free-port discovery and
   auto-assignment), force stop on the HTTP API, additional server types (fabric
-  and forge are added; spigot is a documented exclusion — see FR-VER-1), and
+  and forge are added), and
   sanitized start-failure categories.
 - **Pillar C — data and content management** (epic #241): extended file
   operations, server ZIP import/export, backup upload/download (off-host), and
@@ -479,11 +479,7 @@ branch on server state. This policy is shared by 6.10 (File Management) and
   resolves the appropriate downloadable JAR. The catalogued (resolvable) server
   types are **vanilla** (Mojang version manifest), **paper** (PaperMC API),
   **fabric** (meta.fabricmc.net — the generated server launcher JAR), and
-  **forge** (the Forge Maven + promotions feed). One type in the persisted CHECK
-  enum is deliberately *not* catalogued and is rejected at create-time:
-  - **spigot** — has no official distribution API (built locally by BuildTools and
-    not redistributable). Create returns a `422 spigot_unsupported` recommending
-    **paper**, a Spigot-compatible fork with an official download API.
+  **forge** (the Forge Maven + promotions feed).
 
   **forge** resolves to the *installer* JAR
   (`maven.minecraftforge.net/.../forge-<v>-installer.jar`), shipped to the worker

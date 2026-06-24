@@ -106,7 +106,6 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     WorkerId,
 )
 from mc_server_dashboard_api.servers.domain.version_validator import (
-    SpigotUnsupportedError,
     UnknownVersionError,
     UnsupportedServerTypeError,
     VersionValidator,
@@ -158,9 +157,7 @@ class FakeVersionValidator(VersionValidator):
 
     Accepts any ``(server_type, version)`` by default; pass ``offered`` to restrict
     the accepted versions per type, or ``unsupported`` to mark a type unsupported
-    (the forge case). ``spigot`` is always rejected with
-    :class:`SpigotUnsupportedError`, mirroring the real adapter (no official
-    distribution API). Anything outside the offered set raises the matching domain
+    (the forge case). Anything outside the offered set raises the matching domain
     error, mirroring the real catalog-backed adapter.
     """
 
@@ -176,8 +173,6 @@ class FakeVersionValidator(VersionValidator):
 
     async def validate(self, *, server_type: str, version: str) -> None:
         self.calls.append((server_type, version))
-        if server_type == "spigot":
-            raise SpigotUnsupportedError(f"use paper instead of spigot ({version})")
         if server_type in self._unsupported:
             raise UnsupportedServerTypeError(server_type)
         if self._offered is None:

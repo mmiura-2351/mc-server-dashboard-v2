@@ -6,11 +6,10 @@ ruling: create validates, start fetches). The servers domain/application may not
 import the versions context (import-linter contract), so they depend on this
 narrow Port; the wiring binds it to a versions-catalog-backed adapter.
 
-``spigot`` is the documented non-goal (no official distribution API), rejected
-with a distinct error recommending Paper. A schema type the catalog does not
-list/resolve is the *unsupported* case — distinct from an unknown version. The
-failure modes are separate exceptions so the edge can map them to distinct,
-honest 422 reasons. ``forge`` is catalogued (issue #307) and validates normally.
+A schema type the catalog does not list/resolve is the *unsupported* case —
+distinct from an unknown version. The failure modes are separate exceptions so
+the edge can map them to distinct, honest 422 reasons. ``forge`` is catalogued
+(issue #307) and validates normally.
 """
 
 from __future__ import annotations
@@ -23,19 +22,9 @@ from mc_server_dashboard_api.servers.domain.errors import ServerError
 class UnsupportedServerTypeError(ServerError):
     """The server type is valid in the schema but not resolvable by the catalog.
 
-    Defensive: every current schema type except spigot (which has its own error)
-    is catalogued — vanilla/paper/fabric/forge. This guards against a schema CHECK
-    enum value the catalog has no source for; create rejects it as unsupported.
-    """
-
-
-class SpigotUnsupportedError(ServerError):
-    """Spigot is valid in the schema but cannot be distributed (BuildTools-only).
-
-    Spigot has no official distribution API — it is built locally from source by
-    BuildTools and cannot be redistributed — so the catalog does not list/resolve
-    it. The error message recommends Paper (a Spigot-compatible fork with an
-    official download API) so the operator has a clear path forward.
+    Defensive: every current schema type is catalogued — vanilla/paper/fabric/
+    forge. This guards against a schema CHECK enum value the catalog has no source
+    for; create rejects it as unsupported.
     """
 
 
@@ -61,9 +50,8 @@ class VersionValidator(abc.ABC):
         """Pass if the catalog offers ``version`` for ``server_type``; else raise.
 
         Raises :class:`UnsupportedServerTypeError` for a type the catalog cannot
-        resolve (forge), :class:`SpigotUnsupportedError` for spigot (no official
-        distribution API; recommends Paper), and :class:`UnknownVersionError` for an
-        unoffered version. A transient source outage is *not* swallowed: the adapter
-        surfaces it as :class:`CatalogUnavailableError` so create fails loudly (503)
-        rather than admitting an unvalidated version.
+        resolve, and :class:`UnknownVersionError` for an unoffered version. A
+        transient source outage is *not* swallowed: the adapter surfaces it as
+        :class:`CatalogUnavailableError` so create fails loudly (503) rather than
+        admitting an unvalidated version.
         """
