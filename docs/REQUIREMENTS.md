@@ -613,6 +613,7 @@ Authoritative codes are `<resource>:<action>`. Initial catalog to refine:
 | Community | `community:read`, `community:update`, `community:delete` |
 | Audit | `audit:read` (community-scoped; the audit trail query for authorized members, FR-AUD-3) |
 | Session | `session:read` (community-scoped; the relay game-session moderation surface — player IPs are PII, RELAY.md Section 8) |
+| Plugin | `plugin:read`, `plugin:manage` (community-scoped; plugin/mod content management, issue #1150) |
 | Platform (admin axis) | `worker:manage`, `community:provision`, `platform:monitor` |
 
 ## Appendix B — Core entities (sketch)

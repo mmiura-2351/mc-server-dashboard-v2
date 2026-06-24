@@ -361,7 +361,17 @@ proxies the API).
 |---|---|---|---|
 | `webui.dist_dir` | *unset* | | Directory of the built SPA to serve at `/`. When set, the API mounts it after every router (so API routes and WS endpoints take precedence) and falls back to `index.html` for unmatched paths so deep links/reloads resolve. Must be an existing directory containing `index.html`; otherwise startup fails fast. When unset, nothing is mounted. |
 
-### 5.12 Game-ingress relay
+### 5.12 Plugin-cache garbage collection
+
+The API runs a background GC that reclaims cached plugin/mod blobs no
+`server_plugin` row references (issue #1332). It is gated on the control plane
+like the JAR-pool GC (Section 5.7).
+
+| Key | Default | Secret | Meaning |
+|---|---|---|---|
+| `plugin_cache_gc.interval_seconds` | `86400` | | Loop resolution: how often the GC wakes to sweep the plugin cache. The cache grows slowly (one entry per distinct plugin blob), so a daily default is ample. Must be positive. |
+
+### 5.13 Game-ingress relay
 
 The game-ingress relay (RELAY.md, epic #659) lets players join at
 `<slug>.<base_domain>` with no port. It is **config-selectable and default off**
