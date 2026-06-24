@@ -40,7 +40,7 @@ All three endpoints accept and return JSON. Success and failure status codes:
 
 | Endpoint | Success | Body | Failure |
 |---|---|---|---|
-| `POST /api/auth/login` | `200` | access + refresh pair + `Set-Cookie` (always) | `401` invalid credentials |
+| `POST /api/auth/login` | `200` | access token only + `Set-Cookie` (always) | `401` invalid credentials |
 | `POST /api/auth/session` | `200` | access token only; **no `Set-Cookie`** (does not rotate) | `401` invalid/expired/revoked cookie, **or** no cookie |
 | `POST /api/auth/refresh` | `200` | rotated access + refresh pair; `Set-Cookie` only if the request carried the cookie | `401` invalid/expired/revoked token, **or** no token in either transport |
 | `POST /api/auth/logout` | `204` | empty; clearing `Set-Cookie` only if the request carried the cookie | — (idempotent; see below) |
@@ -48,7 +48,8 @@ All three endpoints accept and return JSON. Success and failure status codes:
 Notable contract points, each verifiable in the router:
 
 - **`POST /auth/login`** returns the FastAPI default `200` on success with a
-  `{access_token, refresh_token, token_type: "bearer"}` body, and always sets the
+  `{access_token, token_type: "bearer"}` body (no `refresh_token` — the cookie is
+  the sole refresh-token transport from login, issue #636), and always sets the
   refresh cookie (it is the entry point that grants it). Both failure modes —
   unknown user and wrong password — collapse to a single `401` with no detail
   that distinguishes them (username-enumeration defence,
@@ -131,9 +132,10 @@ emitted outside `/auth/*` by the user-management endpoints (registration
 
 The refresh token rides two transports (issue #363): the JSON body that
 worker / CLI clients use, and an httpOnly cookie for the Web UI session
-([`WEBUI_SPEC.md`](../ui/WEBUI_SPEC.md) Section 7.1). The body always carries the
-refresh token even for cookie clients, so the body-based contract is unchanged
-(non-breaking).
+([`WEBUI_SPEC.md`](../ui/WEBUI_SPEC.md) Section 7.1). Login returns only the access
+token in the body and delivers the refresh token solely via the cookie (issue
+#636). Refresh still returns the full access + refresh pair in the body, so the
+body-based contract for token rotation is unchanged.
 
 **Cookie attributes** (set on login):
 

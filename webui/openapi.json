@@ -2,7 +2,7 @@
   "components": {
     "schemas": {
       "AccessTokenResponse": {
-        "description": "Just an access token \u2014 the non-rotating session-restore response (#512).\n\nNo ``refresh_token``: restore does not rotate, so there is no new refresh\nsecret to hand back, and the existing httpOnly cookie is left untouched.",
+        "description": "Access-token-only response \u2014 used by login (#636) and session restore (#512).\n\nNo ``refresh_token``: login delivers it via the httpOnly cookie; restore\ndoes not rotate, so there is no new refresh secret to hand back.",
         "properties": {
           "access_token": {
             "title": "Access Token",
@@ -4032,7 +4032,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/TokenResponse"
+                  "$ref": "#/components/schemas/AccessTokenResponse"
                 }
               }
             },

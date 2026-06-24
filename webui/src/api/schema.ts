@@ -2064,10 +2064,10 @@ export interface components {
     schemas: {
         /**
          * AccessTokenResponse
-         * @description Just an access token — the non-rotating session-restore response (#512).
+         * @description Access-token-only response — used by login (#636) and session restore (#512).
          *
-         *     No ``refresh_token``: restore does not rotate, so there is no new refresh
-         *     secret to hand back, and the existing httpOnly cookie is left untouched.
+         *     No ``refresh_token``: login delivers it via the httpOnly cookie; restore
+         *     does not rotate, so there is no new refresh secret to hand back.
          */
         AccessTokenResponse: {
             /** Access Token */
@@ -3695,7 +3695,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["TokenResponse"];
+                    "application/json": components["schemas"]["AccessTokenResponse"];
                 };
             };
             /** @description Validation Error */

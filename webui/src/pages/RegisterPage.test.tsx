@@ -246,7 +246,6 @@ describe("RegisterPage", () => {
       new Response(
         JSON.stringify({
           access_token: "tok",
-          refresh_token: "ref",
           token_type: "bearer",
         }),
         { status: 200, headers: { "content-type": "application/json" } },

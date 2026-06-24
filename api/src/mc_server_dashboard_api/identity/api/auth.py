@@ -1,19 +1,21 @@
 """Auth endpoints: login, token refresh, and logout (FR-AUTH-2, FR-AUTH-3).
 
-Thin routers over the use cases resolved by the wiring layer. Login and refresh
-return an access + refresh pair; both failure paths surface as a uniform 401 with
-no detail that would distinguish the cause (SECURITY.md Section 2). Logout always
-returns 204 (idempotent, no enumeration signal).
+Thin routers over the use cases resolved by the wiring layer. Login returns only
+the access token in the body and delivers the refresh token solely via the
+httpOnly cookie (issue #636); refresh returns the full access + refresh pair.
+Both failure paths surface as a uniform 401 with no detail that would distinguish
+the cause (SECURITY.md Section 2). Logout always returns 204 (idempotent, no
+enumeration signal).
 
 Refresh-token transport (issue #363): alongside the body-based contract that the
 worker/CLI clients use, the refresh token also rides an httpOnly cookie for the
-Web UI session (WEBUI_SPEC.md Section 7.1). Login *sets* the cookie; refresh and
-logout *fall back* to it when the body carries no token. They re-set / clear the
-cookie only when the request itself carried it, so a body-only request leaves the
-response headers byte-for-byte unchanged — no rotated or clearing Set-Cookie that
-a non-browser client never asked for (issue #372). The body still carries the
-refresh token even for cookie clients, so the body-based contract is unchanged
-(non-breaking).
+Web UI session (WEBUI_SPEC.md Section 7.1). Login *sets* the cookie and returns
+only the access token in the body — the cookie is the sole refresh-token transport
+from login (issue #636). Refresh and logout *fall back* to the cookie when the
+body carries no token. They re-set / clear the cookie only when the request itself
+carried it, so a body-only request leaves the response headers byte-for-byte
+unchanged — no rotated or clearing Set-Cookie that a non-browser client never
+asked for (issue #372).
 
 CSRF posture: the cookie is ``HttpOnly; Secure; SameSite=Strict; Path=/api/auth``
 — SameSite=Strict keeps the browser from attaching it to cross-site requests and
@@ -117,10 +119,10 @@ class TokenResponse(BaseModel):
 
 
 class AccessTokenResponse(BaseModel):
-    """Just an access token — the non-rotating session-restore response (#512).
+    """Access-token-only response — used by login (#636) and session restore (#512).
 
-    No ``refresh_token``: restore does not rotate, so there is no new refresh
-    secret to hand back, and the existing httpOnly cookie is left untouched.
+    No ``refresh_token``: login delivers it via the httpOnly cookie; restore
+    does not rotate, so there is no new refresh secret to hand back.
     """
 
     access_token: str
@@ -135,7 +137,7 @@ async def login(
     client_ip: Annotated[str | None, Depends(get_client_ip)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
     settings: Annotated[Settings, Depends(get_settings)],
-) -> TokenResponse:
+) -> AccessTokenResponse:
     # On SUCCESS the row is actor-attributed (FR-AUD-1); on FAILURE actor_id
     # stays None (enumeration defence, SECURITY.md Section 2): the username/IP
     # forensic record lives in the login_attempt table.
@@ -156,7 +158,7 @@ async def login(
         )
     )
     _set_refresh_cookie(response, result.pair.refresh_token, settings.auth.token)
-    return TokenResponse.from_pair(result.pair)
+    return AccessTokenResponse(access_token=result.pair.access_token)
 
 
 @router.post("/auth/refresh")
