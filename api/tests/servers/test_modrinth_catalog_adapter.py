@@ -177,6 +177,14 @@ def test_assert_no_private_ips_rejects_ipv6_loopback() -> None:
         _assert_no_private_ips("evil.example.com", _resolver=_resolver_for("::1"))
 
 
+def test_assert_no_private_ips_rejects_cgnat() -> None:
+    """A hostname resolving to a CGNAT address (100.64.0.0/10) is rejected."""
+    with pytest.raises(CatalogUnavailableError, match="private"):
+        _assert_no_private_ips(
+            "evil.example.com", _resolver=_resolver_for("100.64.0.1")
+        )
+
+
 def test_assert_no_private_ips_rejects_if_any_addr_private() -> None:
     """If any resolved address is private, the check fails."""
     with pytest.raises(CatalogUnavailableError, match="private"):

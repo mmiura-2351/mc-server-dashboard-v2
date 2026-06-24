@@ -75,7 +75,7 @@ def _assert_no_private_ips(
         raise CatalogUnavailableError(f"DNS resolution failed for {hostname}") from exc
     for addr in addrs:
         ip = ipaddress.ip_address(addr)
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+        if not ip.is_global:
             raise CatalogUnavailableError(
                 f"hostname {hostname} resolved to private/reserved IP: {addr}"
             )
