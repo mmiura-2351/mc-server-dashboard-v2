@@ -258,6 +258,18 @@ class FakeFileStore(FileStore):
     ) -> None:
         return None
 
+    async def rename_file(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        from_path: str,
+        to_path: str,
+    ) -> None:
+        if from_path not in self.files:
+            raise ServerFileNotFoundError(str(server_id.value))
+        self.files[to_path] = self.files.pop(from_path)
+
     async def rename_dir(
         self,
         *,

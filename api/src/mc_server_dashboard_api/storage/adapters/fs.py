@@ -1328,6 +1328,45 @@ class FsStorage(Storage):
                 self._server_root(community_id, server_id), API_EDIT_PUBLISHER
             )
 
+    async def rename_file(
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        from_path: RelPath,
+        to_path: RelPath,
+    ) -> None:
+        await asyncio.to_thread(
+            self._rename_file, community_id, server_id, from_path, to_path
+        )
+
+    def _rename_file(
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        from_path: RelPath,
+        to_path: RelPath,
+    ) -> None:
+        # No version capture (Port contract, issue #1164): a rename changes
+        # only the name, not the content; the caller's content-addressed cache
+        # or backups cover recovery.
+        # Resolve ``current`` and check the precondition INSIDE the server lock
+        # (issue #899/#920).
+        with self._server_lock(community_id, server_id):
+            current = self._current_dir(community_id, server_id)
+            src = self._safe_target(current, from_path)
+            dst = self._safe_target(current, to_path)
+            if not src.is_file():
+                raise NotFoundError(f"file not found: {from_path.value}")
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            os.rename(src, dst)
+            _fsync_dir(src.parent)
+            if dst.parent != src.parent:
+                _fsync_dir(dst.parent)
+            # Authoritative edit -> bump the generation (issue #889).
+            self._bump_marker(
+                self._server_root(community_id, server_id), API_EDIT_PUBLISHER
+            )
+
     async def rename_dir(
         self,
         community_id: CommunityId,

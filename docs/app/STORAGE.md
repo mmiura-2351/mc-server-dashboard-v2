@@ -310,6 +310,14 @@ depend on a Worker.
 | `put_backup(community_id, server_id, WriteStream) -> BackupKey` | Store an uploaded archive verbatim under a fresh key | Upload (issue #281): the **application** has already validated the archive (opens + traversal-safe entries) before this is called; `Storage` only stores the bytes, so the new backup is restorable through `restore_backup` like a created one. |
 | `backup_size(community_id, server_id, BackupKey) -> int` | Report a stored archive's byte count | The size recorded as `size_bytes` at create/upload (issue #281). `NotFoundError` for an unknown key. |
 
+**Backup size impact of plugin/mod JARs (issue #1164).** Backups archive the
+entire authoritative `current/` working set, which includes all plugin and mod
+JARs deployed into the server's content directory (`mods/`, `plugins/`). A
+server with 500 MiB of mods will produce backups of at least that size (plus
+the world data), effectively doubling the per-server storage footprint when a
+backup is retained. Operators should account for this when sizing storage and
+setting backup retention policies for mod-heavy servers.
+
 ### 3.4 File read / edit on the authoritative copy
 
 Serve file management for **stopped** servers (FR-FILE-1, FR-FILE-2). For a
@@ -325,6 +333,8 @@ paths are not part of this Port.
 | `write_file(community_id, server_id, rel_path, bytes)` | Edit one file in `current/`, retaining the prior version | Captures the previous content into `versions/` (Section 5) before overwriting. The per-file write is atomic (Section 4.4). Bumps the generation + stamps the `api-edit` sentinel (#889). |
 | `delete_file(community_id, server_id, rel_path)` | Delete one file from `current/`, retaining the prior content | Captures the content into `versions/` (Section 5) **before** removing, so a delete is reversible by rollback exactly like an edit. Missing path → `NotFoundError`. Bumps the generation + stamps the `api-edit` sentinel (#889). |
 | `delete_dir(community_id, server_id, rel_path)` | Recursively delete a directory subtree from `current/` | **No** per-file version capture: file versioning (Section 5) is the fine-grained single-file mechanism, whereas whole-subtree recovery is what backups (Section 3.3) exist for; capturing a version per member of a large subtree would be a storage-amplification bomb. Missing dir → `NotFoundError`. Bumps the generation + stamps the `api-edit` sentinel (#889). |
+| `rename_file(community_id, server_id, from_path, to_path)` | Rename/move a single file atomically within `current/` | **No** version capture on either side (issue #1164): a rename does not change the content, so retaining versions would waste storage; the caller's content-addressed cache (plugin JARs) or backups cover recovery. Missing source → `NotFoundError`. Bumps the generation + stamps the `api-edit` sentinel (#889). |
+| `rename_dir(community_id, server_id, from_path, to_path)` | Rename/move a directory atomically within `current/` | **No** per-file version capture (same reasoning as `delete_dir`, issue #1191). Missing source dir → `NotFoundError`. Bumps the generation + stamps the `api-edit` sentinel (#889). |
 | `make_dir(community_id, server_id, rel_path)` | Create an (empty) directory in `current/` | Backend-dependent (see note). Idempotent. **Requires a published snapshot** — a never-snapshotted server has no live `current/` to create the directory under, so `make_dir` raises `NotFoundError` (behaviour aligned across both adapters in #896, including object which previously bumped the generation with no snapshot). Bumps the generation + stamps the `api-edit` sentinel (#889), uniformly with the other edits even though no content lands on object backends. |
 
 **Empty-directory limitation (`make_dir`).** fs / remote-fs materialize a real

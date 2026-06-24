@@ -90,7 +90,7 @@ async def _reconcile_working_set(
 
     * desired absent, currently present -> remove.
     * desired present, currently absent -> materialize the cached bytes.
-    * desired present elsewhere         -> rename (read -> write -> delete).
+    * desired present elsewhere         -> rename (no content buffering).
     * already at the desired path / both absent -> noop.
 
     ``current_path`` / ``desired_path`` are derived from ``(enabled, side)`` via
@@ -126,31 +126,29 @@ async def _reconcile_working_set(
         )
         return
 
-    # Rename within the working set (read old -> write new -> delete old).
-    # If the on-disk file is missing (e.g. external deletion via Files API or a
-    # backup restore), fall back to materializing from the content-addressed cache
-    # instead of 500-ing (issue #1331 defence-in-depth).
+    # Rename within the working set (issue #1164): use rename_file to avoid
+    # reading the full JAR into memory and to skip version retention (a rename
+    # does not change the content). If the on-disk file is missing (e.g.
+    # external deletion via Files API or a backup restore), fall back to
+    # materializing from the content-addressed cache instead of 500-ing
+    # (issue #1331 defence-in-depth).
     try:
-        content = await file_store.read_file(
-            community_id=community_id, server_id=server_id, rel_path=current_path
+        await file_store.rename_file(
+            community_id=community_id,
+            server_id=server_id,
+            from_path=current_path,
+            to_path=desired_path,
         )
     except ServerFileNotFoundError:
         if sha256 is None:
             return
         content = b"".join([chunk async for chunk in cache.open(sha256)])
-
-    await file_store.write_file(
-        community_id=community_id,
-        server_id=server_id,
-        rel_path=desired_path,
-        content=content,
-    )
-    try:
-        await file_store.delete_file(
-            community_id=community_id, server_id=server_id, rel_path=current_path
+        await file_store.write_file(
+            community_id=community_id,
+            server_id=server_id,
+            rel_path=desired_path,
+            content=content,
         )
-    except ServerFileNotFoundError:
-        pass
 
 
 @dataclass(frozen=True)
