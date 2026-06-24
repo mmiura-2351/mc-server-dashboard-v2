@@ -132,6 +132,23 @@ class FileStore(abc.ABC):
         """
 
     @abc.abstractmethod
+    async def rename_file(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        from_path: str,
+        to_path: str,
+    ) -> None:
+        """Rename/move a single file atomically within ``current/`` (#1164).
+
+        No version capture on either side: the bytes are unchanged by a rename,
+        so retaining versions would waste storage. The caller's content-addressed
+        cache (plugin JARs) or backups cover recovery. Raises
+        :class:`ServerFileNotFoundError` for a missing source file.
+        """
+
+    @abc.abstractmethod
     async def rename_dir(
         self,
         *,

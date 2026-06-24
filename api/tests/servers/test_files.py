@@ -216,6 +216,18 @@ class FakeFileStore(FileStore):
             raise ServerFileNotFoundError(str(server_id.value))
         self.deleted_dirs.append(rel_path)
 
+    async def rename_file(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        from_path: str,
+        to_path: str,
+    ) -> None:
+        if from_path not in self.files:
+            raise ServerFileNotFoundError(str(server_id.value))
+        self.files[to_path] = self.files.pop(from_path)
+
     async def rename_dir(
         self,
         *,
@@ -2126,9 +2138,9 @@ async def test_rename_at_rest_moves_file() -> None:
         from_path="old.txt",
         to_path="new.txt",
     )
-    # Composed read -> write(dest) -> delete(source): dest written, source gone.
+    # Atomic rename via rename_file: dest present, source gone, no version capture.
     assert store.files.get("new.txt") == b"payload"
-    assert store.deleted_files == ["old.txt"]
+    assert "old.txt" not in store.files
 
 
 async def test_rename_missing_source_is_file_not_found() -> None:
@@ -2195,13 +2207,10 @@ async def test_rename_running_is_unsettled() -> None:
     assert store.deleted_files == []
 
 
-def test_rename_docstring_notes_crash_window() -> None:
-    # Doc-only nit from the #271 review: the read/write/delete composition is not
-    # atomic, so a mid-op crash can leave BOTH source and destination present. The
-    # docstring must call this crash window out.
+def test_rename_docstring_notes_atomic_rename() -> None:
+    # File rename delegates to rename_file which is atomic (issue #1164).
     doc = RenameFile.__doc__ or ""
-    assert "crash" in doc.lower()
-    assert "both" in doc.lower()
+    assert "atomic" in doc.lower()
 
 
 # --- directory rename (issue #1191) ----------------------------------------

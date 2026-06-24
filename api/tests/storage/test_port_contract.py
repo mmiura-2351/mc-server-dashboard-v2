@@ -673,6 +673,15 @@ async def _edit_delete_dir(
     return 1
 
 
+async def _edit_rename_file(
+    harness: StorageHarness, community: CommunityId, server: ServerId
+) -> int:
+    await harness.storage.rename_file(
+        community, server, RelPath("a.txt"), RelPath("a_renamed.txt")
+    )
+    return 1
+
+
 async def _edit_rename_dir(
     harness: StorageHarness, community: CommunityId, server: ServerId
 ) -> int:
@@ -710,6 +719,7 @@ async def _edit_rollback_file(
         _edit_write_file,
         _edit_delete_file,
         _edit_delete_dir,
+        _edit_rename_file,
         _edit_rename_dir,
         _edit_make_dir,
         _edit_rollback_file,
@@ -718,6 +728,7 @@ async def _edit_rollback_file(
         "write_file",
         "delete_file",
         "delete_dir",
+        "rename_file",
         "rename_dir",
         "make_dir",
         "rollback_file",
@@ -1472,6 +1483,56 @@ async def test_make_dir_then_write_file_under_it(harness: StorageHarness) -> Non
 
     entries = await harness.storage.list_dir(community, server, RelPath("plugins"))
     assert {e.name for e in entries} == {"p.jar"}
+
+
+async def test_rename_file_moves_without_version_capture(
+    harness: StorageHarness,
+) -> None:
+    """rename_file moves a file atomically, skipping version retention (#1164)."""
+    community, server = new_scope()
+    await harness.publish(
+        community,
+        server,
+        {"mods/test.jar": b"jar-bytes", "server.properties": b"keep"},
+    )
+
+    await harness.storage.rename_file(
+        community, server, RelPath("mods/test.jar"), RelPath("mods/test.jar.disabled")
+    )
+
+    # The file is at the new path.
+    assert (
+        await harness.storage.read_file(
+            community, server, RelPath("mods/test.jar.disabled")
+        )
+        == b"jar-bytes"
+    )
+    # The old path is gone.
+    with pytest.raises(NotFoundError):
+        await harness.storage.read_file(community, server, RelPath("mods/test.jar"))
+    # No version was captured (no retention bloat).
+    versions = await harness.storage.list_file_versions(
+        community, server, RelPath("mods/test.jar")
+    )
+    assert versions == []
+    versions_new = await harness.storage.list_file_versions(
+        community, server, RelPath("mods/test.jar.disabled")
+    )
+    assert versions_new == []
+    # A sibling outside the rename survives.
+    assert (
+        await harness.storage.read_file(community, server, RelPath("server.properties"))
+        == b"keep"
+    )
+
+
+async def test_rename_missing_file_is_not_found(harness: StorageHarness) -> None:
+    community, server = new_scope()
+    await harness.publish(community, server, {"f": b"x"})
+    with pytest.raises(NotFoundError):
+        await harness.storage.rename_file(
+            community, server, RelPath("nope.txt"), RelPath("dest.txt")
+        )
 
 
 async def test_rename_dir_moves_subtree(harness: StorageHarness) -> None:

@@ -1493,6 +1493,40 @@ class ObjectStorage(Storage):
                     API_EDIT_PUBLISHER,
                 )
 
+    async def rename_file(
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        from_path: RelPath,
+        to_path: RelPath,
+    ) -> None:
+        from_sub = self._safe_subkey(from_path)
+        to_sub = self._safe_subkey(to_path)
+        async with self._client_factory() as client:
+            # No version capture (Port contract, issue #1164): a rename changes
+            # only the name, not the content. Copy + delete atomically under the
+            # server lock (issue #899/#920).
+            async with self._server_lock(community_id, server_id):
+                snapshot_prefix = await self._live_snapshot_prefix(
+                    client, community_id, server_id
+                )
+                src_key = snapshot_prefix + from_sub
+                dst_key = snapshot_prefix + to_sub
+                if await client.head_object(src_key) is None:
+                    raise NotFoundError(f"file not found: {from_path.value}")
+                await client.copy_object(src_key, dst_key)
+                await client.delete_object(src_key)
+                await client.put_object(
+                    self._pointer_key(community_id, server_id),
+                    json.dumps({"snapshot": snapshot_prefix}).encode(),
+                )
+                # Authoritative edit -> bump the generation (issue #889).
+                await self._bump_generation(
+                    client,
+                    self._server_prefix(community_id, server_id),
+                    API_EDIT_PUBLISHER,
+                )
+
     async def rename_dir(
         self,
         community_id: CommunityId,

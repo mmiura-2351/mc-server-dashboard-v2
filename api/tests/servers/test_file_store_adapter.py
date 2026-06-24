@@ -594,6 +594,77 @@ def test_validate_rel_path_rejects_traversal(tmp_path: Path) -> None:
             adapter.validate_rel_path(bad)
 
 
+async def test_rename_file_moves_without_version_capture(tmp_path: Path) -> None:
+    """rename_file moves a file atomically without version retention (#1164)."""
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await publish(
+        storage,
+        StorageCommunityId(community),
+        StorageServerId(server),
+        {"mods/test.jar": b"jar-bytes", "server.properties": b"keep"},
+    )
+    adapter = StorageFileStoreAdapter(storage=storage)
+    cid, sid = CommunityId(community), ServerId(server)
+
+    await adapter.rename_file(
+        community_id=cid,
+        server_id=sid,
+        from_path="mods/test.jar",
+        to_path="mods/test.jar.disabled",
+    )
+
+    # The file is at the new path.
+    out = await adapter.read_file(
+        community_id=cid, server_id=sid, rel_path="mods/test.jar.disabled"
+    )
+    assert out == b"jar-bytes"
+    # The old path is gone.
+    with pytest.raises(ServerFileNotFoundError):
+        await adapter.read_file(
+            community_id=cid, server_id=sid, rel_path="mods/test.jar"
+        )
+    # No version was captured on either path.
+    versions_old = await adapter.list_versions(
+        community_id=cid, server_id=sid, rel_path="mods/test.jar"
+    )
+    assert versions_old == []
+    versions_new = await adapter.list_versions(
+        community_id=cid, server_id=sid, rel_path="mods/test.jar.disabled"
+    )
+    assert versions_new == []
+
+
+async def test_rename_file_missing_is_file_not_found(tmp_path: Path) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await _seed(storage, community, server)
+    adapter = StorageFileStoreAdapter(storage=storage)
+
+    with pytest.raises(ServerFileNotFoundError):
+        await adapter.rename_file(
+            community_id=CommunityId(community),
+            server_id=ServerId(server),
+            from_path="nope.txt",
+            to_path="dest.txt",
+        )
+
+
+async def test_rename_file_traversal_is_invalid_path(tmp_path: Path) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await _seed(storage, community, server)
+    adapter = StorageFileStoreAdapter(storage=storage)
+
+    with pytest.raises(InvalidFilePathError):
+        await adapter.rename_file(
+            community_id=CommunityId(community),
+            server_id=ServerId(server),
+            from_path="../escape",
+            to_path="dest.txt",
+        )
+
+
 def test_validate_rel_path_accepts_clean_path(tmp_path: Path) -> None:
     adapter = StorageFileStoreAdapter(storage=FsStorage(tmp_path))
 
