@@ -440,7 +440,10 @@ async def _reconcile_plugins(
         # Build a map of rel_path -> plugin for quick lookup.
         db_by_path: dict[str, ServerPlugin] = {p.rel_path: p for p in db_plugins}
 
-        # Scan the content directory for .jar files on disk after restore.
+        # Scan the content directory for .jar (and .jar.disabled) files on
+        # disk after restore. Disabled plugins use a ``.jar.disabled`` suffix
+        # (issue #1308), so both must be included to avoid deleting disabled
+        # plugin rows as orphans.
         try:
             entries = await file_store.list_dir(
                 community_id=community_id, server_id=server_id, rel_path=content_dir
@@ -450,7 +453,10 @@ async def _reconcile_plugins(
 
         disk_jars: set[str] = set()
         for entry in entries:
-            if not entry.is_dir and entry.name.lower().endswith(".jar"):
+            if entry.is_dir:
+                continue
+            lower = entry.name.lower()
+            if lower.endswith(".jar") or lower.endswith(".jar.disabled"):
                 disk_jars.add(f"{content_dir}/{entry.name}")
 
         changed = False

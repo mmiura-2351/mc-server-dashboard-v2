@@ -170,6 +170,35 @@ async def test_restore_removes_orphan_plugin_records() -> None:
     assert await plugins.get_by_id(server.id, orphan.id) is None
 
 
+async def test_restore_preserves_disabled_plugin_records() -> None:
+    """A disabled plugin (.jar.disabled on disk, matching DB row) survives."""
+    server = _server()
+    repo, backups, backup, archive = _seed_restore_fixture(server)
+    plugins = FakePluginRepository()
+    jar_bytes = _minimal_jar()
+    disabled = _plugin(
+        server_id=server.id,
+        rel_path="mods/mod.jar.disabled",
+        filename="mod.jar",
+        display_name="mod",
+        checksum_sha512=hashlib.sha512(jar_bytes).hexdigest(),
+    )
+    disabled.enabled = False
+    plugins.seed(disabled)
+    # The disabled file IS on disk with the .disabled suffix.
+    file_store = FakeFileStore()
+    file_store.files["mods/mod.jar.disabled"] = jar_bytes
+    uow = FakeUnitOfWork(servers=repo, backups=backups, plugins=plugins)
+
+    await _make_restore(uow, archive, file_store=file_store)(
+        community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id
+    )
+
+    rows = await plugins.list_for_server(server.id)
+    assert len(rows) == 1
+    assert rows[0].id == disabled.id
+
+
 # --- ghost ingestion --------------------------------------------------------
 
 
