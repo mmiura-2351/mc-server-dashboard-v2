@@ -786,6 +786,25 @@ operating cost/latency scale with **operation count** (files × snapshot
 frequency), not stored size or egress; keep the snapshot interval coarse enough
 that a publish completes well within it.
 
+**At-rest integrity sweep limitation (issue #926).** The at-rest integrity sweep
+(`check_current_health`, Section 3.1; `check_backup_health`) returns a healthy
+`WorkingSetReport` unconditionally on the object backend — it does not inspect
+the stored objects. The reason is structural: the object backend has no local
+working-set directory to walk; the fsck implementation walks a local filesystem
+tree (the `current/` symlink target on fs), and no equivalent materialisation
+exists on the object side. The **publish-time** fsck (`_check_staged_regions`,
+wired on `commit_snapshot`, `restore_backup`, and `create_backup_from_current`)
+**is** implemented on the
+object adapter and remains the authoritative gate — it downloads and validates
+each `.mca` member during staging, so a corrupt region is refused before it
+becomes authoritative. The gap is limited to the **read-only sweep** that
+re-checks already-published snapshots and backups at rest: on the object backend
+that sweep sees every server and backup as healthy regardless of actual content.
+A future enhancement could fetch and structurally check the `.mca` objects from
+the store (downloading headers only, mirroring the fs walker), but it is not
+implemented — the publish-time gate is the correctness guarantee today, and the
+sweep is defense-in-depth.
+
 ### 7.4 Why backend switching stays a configuration change
 
 The contract is what callers depend on: opaque keys/handles, scope-by-id, the
