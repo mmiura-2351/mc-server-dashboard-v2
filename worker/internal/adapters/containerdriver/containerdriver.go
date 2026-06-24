@@ -907,11 +907,12 @@ func (i *instance) superviseInstall(installID string) {
 			return
 		}
 
-		// Re-check stopping after backoff: a Stop may have arrived in the
+		// Re-check stopRequested after backoff: a Stop may have arrived in the
 		// window between Remove and the backoff start that was too late for
-		// the backoff polling to observe (issue #1128).
+		// the backoff polling to observe (issue #1128). Use the sticky
+		// stopRequested, consistent with installBackoffOrStopping (issue #1442).
 		i.mu.Lock()
-		stopping = i.stopping
+		stopping = i.stopRequested
 		i.mu.Unlock()
 		if stopping {
 			i.finishTerminal(execution.StateStopped, "")
@@ -1054,9 +1055,12 @@ func (i *instance) createLaunchContainer(launchArgs []string) (string, error) {
 }
 
 // installBackoffOrStopping sleeps for d in small increments, checking the
-// stopping latch between each tick so a concurrent Stop is observed within one
-// tick rather than after the full delay. Returns true if stopping was observed
-// (the caller should abort), false if the full delay elapsed.
+// sticky stopRequested flag between each tick so a concurrent Stop is observed
+// within one tick rather than after the full delay. Returns true if a stop was
+// requested (the caller should abort), false if the full delay elapsed.
+// stopRequested is used instead of the transient stopping flag because a Stop
+// whose kill fails or is survived clears stopping but leaves stopRequested set
+// (issue #1442).
 func (i *instance) installBackoffOrStopping(d time.Duration) bool {
 	const tick = 50 * time.Millisecond
 	remaining := d
@@ -1068,7 +1072,7 @@ func (i *instance) installBackoffOrStopping(d time.Duration) bool {
 		time.Sleep(sleep)
 		remaining -= sleep
 		i.mu.Lock()
-		stopping := i.stopping
+		stopping := i.stopRequested
 		i.mu.Unlock()
 		if stopping {
 			return true
