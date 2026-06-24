@@ -31,7 +31,6 @@ function errorResponse(status: number, reason?: string): Response {
 function tokenResponse(): Response {
   return jsonResponse({
     access_token: "fresh",
-    refresh_token: "ignored",
     token_type: "bearer",
   });
 }

@@ -107,7 +107,7 @@ _PROVIDERS = {
 }
 
 
-def test_login_returns_token_pair() -> None:
+def test_login_returns_access_token() -> None:
     fake = _Fake(
         result=LoginResult(
             pair=TokenPair(access_token="acc", refresh_token="ref"),
@@ -119,7 +119,6 @@ def test_login_returns_token_pair() -> None:
     assert resp.status_code == 200
     assert resp.json() == {
         "access_token": "acc",
-        "refresh_token": "ref",
         "token_type": "bearer",
     }
 
@@ -143,20 +142,6 @@ def test_login_sets_refresh_cookie_with_security_attributes() -> None:
     assert "SameSite=strict" in cookie
     assert "Path=/api/auth" in cookie
     assert "Max-Age=1209600" in cookie
-
-
-def test_login_body_still_carries_refresh_token() -> None:
-    # Decision (issue #363): the body keeps the refresh token even for cookie
-    # clients, so the body-based worker/CLI contract is unchanged (non-breaking).
-    fake = _Fake(
-        result=LoginResult(
-            pair=TokenPair(access_token="acc", refresh_token="ref"),
-            user_id=uuid.uuid4(),
-        )
-    )
-    client = next(_client(login=fake))
-    resp = client.post("/api/auth/login", json={"username": "alice", "password": "pw"})
-    assert resp.json()["refresh_token"] == "ref"
 
 
 def test_login_passes_resolved_client_ip_to_use_case() -> None:

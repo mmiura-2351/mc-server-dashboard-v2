@@ -106,7 +106,6 @@ describe("LoginPage", () => {
       new Response(
         JSON.stringify({
           access_token: "issued",
-          refresh_token: "ignored",
           token_type: "bearer",
         }),
         { status: 200, headers: { "content-type": "application/json" } },
@@ -133,7 +132,6 @@ describe("LoginPage", () => {
       new Response(
         JSON.stringify({
           access_token: "issued",
-          refresh_token: "ignored",
           token_type: "bearer",
         }),
         { status: 200, headers: { "content-type": "application/json" } },
@@ -185,7 +183,6 @@ describe("LoginPage", () => {
       new Response(
         JSON.stringify({
           access_token: "issued",
-          refresh_token: "ignored",
           token_type: "bearer",
         }),
         { status: 200, headers: { "content-type": "application/json" } },
@@ -208,7 +205,6 @@ describe("LoginPage", () => {
       new Response(
         JSON.stringify({
           access_token: "issued",
-          refresh_token: "ignored",
           token_type: "bearer",
         }),
         { status: 200, headers: { "content-type": "application/json" } },

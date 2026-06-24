@@ -19,7 +19,6 @@ function jsonResponse(body: unknown): Response {
 function tokenResponse(): Response {
   return jsonResponse({
     access_token: "fresh",
-    refresh_token: "ignored",
     token_type: "bearer",
   });
 }

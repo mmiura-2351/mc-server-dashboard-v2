@@ -3695,7 +3695,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["TokenResponse"];
+                    "application/json": components["schemas"]["AccessTokenResponse"];
                 };
             };
             /** @description Validation Error */
