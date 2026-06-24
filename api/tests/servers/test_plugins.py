@@ -526,6 +526,33 @@ async def test_toggle_noop_if_already_desired_state() -> None:
     assert uow.commits == 0
 
 
+async def test_toggle_falls_back_to_cache_when_file_missing() -> None:
+    """Toggle uses rename_file; if the file is externally deleted, it falls back
+    to materializing from the content-addressed cache (#1331 defence-in-depth)."""
+    import hashlib
+
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+    # Seed the plugin cache with content, but do NOT seed fs.files (file is missing).
+    content = b"jar-bytes"
+    sha256 = hashlib.sha256(content).hexdigest()
+    cache = FakePluginCacheStore()
+    cache.blobs[sha256] = content
+    p = _plugin(server_id=server.id, enabled=True, rel_path="mods/test.jar")
+    p.sha256 = sha256
+    uow.plugins.seed(p)
+    uc = TogglePlugin(uow=uow, file_store=fs, cache=cache, clock=FakeClock(_NOW))
+    result = await uc(
+        community_id=_COMMUNITY, server_id=server.id, plugin_id=p.id, enable=False
+    )
+    assert result.enabled is False
+    assert result.rel_path == "mods/test.jar.disabled"
+    # The file was materialized from cache at the disabled path.
+    assert fs.files["mods/test.jar.disabled"] == content
+
+
 # -- Duplicate install (Bug 1) --
 
 

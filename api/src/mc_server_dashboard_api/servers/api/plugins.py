@@ -102,6 +102,10 @@ _SERVER_RESOURCE_TYPE = "server"
 # upload cap (the bounded-read loop).
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
 
+# Upper bound for a plugin's display name (applies to the user-facing upload
+# endpoint; catalog installs use the project title from the trusted catalog).
+_MAX_DISPLAY_NAME_LENGTH = 200
+
 
 class PluginResponse(BaseModel):
     """One plugin's metadata."""
@@ -469,6 +473,12 @@ async def install_plugin(
 ) -> PluginResponse:
     """Install a plugin jar via multipart upload (plugin:manage)."""
 
+    display_name = display_name.strip()
+    if not display_name:
+        raise _unprocessable("invalid_display_name")
+    if len(display_name) > _MAX_DISPLAY_NAME_LENGTH:
+        raise _unprocessable("invalid_display_name")
+
     filename = file.filename or ""
     content = await _read_capped_upload(file)
     try:
@@ -492,12 +502,22 @@ async def install_plugin(
         raise _conflict("plugin_already_exists") from exc
     except ServerFilesUnsettledError as exc:
         await _record_plugin_failure(
-            recorder, ops.PLUGIN_INSTALL, authorized, community_id, server_id
+            recorder,
+            ops.PLUGIN_INSTALL,
+            authorized,
+            community_id,
+            server_id,
+            target_type=ops.TARGET_SERVER,
         )
         raise _conflict("server_unsettled") from exc
     except ServerBusyError as exc:
         await _record_plugin_failure(
-            recorder, ops.PLUGIN_INSTALL, authorized, community_id, server_id
+            recorder,
+            ops.PLUGIN_INSTALL,
+            authorized,
+            community_id,
+            server_id,
+            target_type=ops.TARGET_SERVER,
         )
         raise _conflict("server_busy") from exc
     await _record_plugin(
@@ -665,16 +685,31 @@ async def apply_plugin_resolution(
         raise _bad_gateway("catalog_unavailable") from exc
     except ServerFilesUnsettledError as exc:
         await _record_plugin_failure(
-            recorder, ops.PLUGIN_RESOLVE, authorized, community_id, server_id
+            recorder,
+            ops.PLUGIN_RESOLVE,
+            authorized,
+            community_id,
+            server_id,
+            target_type=ops.TARGET_SERVER,
         )
         raise _conflict("server_unsettled") from exc
     except ServerBusyError as exc:
         await _record_plugin_failure(
-            recorder, ops.PLUGIN_RESOLVE, authorized, community_id, server_id
+            recorder,
+            ops.PLUGIN_RESOLVE,
+            authorized,
+            community_id,
+            server_id,
+            target_type=ops.TARGET_SERVER,
         )
         raise _conflict("server_busy") from exc
     await _record_plugin(
-        recorder, ops.PLUGIN_RESOLVE, authorized, community_id, server_id
+        recorder,
+        ops.PLUGIN_RESOLVE,
+        authorized,
+        community_id,
+        server_id,
+        target_type=ops.TARGET_SERVER,
     )
     return ApplyResolutionResponse(
         plan=ResolutionPlanResponse.from_plan(plan),
@@ -1163,6 +1198,7 @@ async def _record_plugin(
     authorized: AuthUser,
     community_id: uuid.UUID,
     target_id: uuid.UUID,
+    target_type: str = ops.TARGET_PLUGIN,
 ) -> None:
     await recorder.record(
         AuditEvent(
@@ -1170,7 +1206,7 @@ async def _record_plugin(
             outcome=Outcome.SUCCESS,
             actor_id=authorized.user_id.value,
             community_id=community_id,
-            target_type=ops.TARGET_PLUGIN,
+            target_type=target_type,
             target_id=target_id,
         )
     )
@@ -1182,6 +1218,7 @@ async def _record_plugin_failure(
     authorized: AuthUser,
     community_id: uuid.UUID,
     target_id: uuid.UUID,
+    target_type: str = ops.TARGET_PLUGIN,
 ) -> None:
     await recorder.record(
         AuditEvent(
@@ -1189,7 +1226,7 @@ async def _record_plugin_failure(
             outcome=Outcome.DENIED,
             actor_id=authorized.user_id.value,
             community_id=community_id,
-            target_type=ops.TARGET_PLUGIN,
+            target_type=target_type,
             target_id=target_id,
         )
     )

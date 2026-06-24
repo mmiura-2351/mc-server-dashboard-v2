@@ -6,7 +6,7 @@ host-allowlist enforcement — these cannot be tested through the FakeCatalogPro
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import httpx
@@ -17,6 +17,7 @@ from mc_server_dashboard_api.servers.adapters.modrinth_catalog import (
     _MAX_JSON_BYTES,
     _MAX_REDIRECTS,
     ModrinthCatalog,
+    _assert_no_private_ips,
 )
 from mc_server_dashboard_api.servers.domain.errors import CatalogUnavailableError
 
@@ -129,6 +130,91 @@ async def test_download_redirect_to_non_https_raises() -> None:
 
     with pytest.raises(CatalogUnavailableError, match="non-HTTPS"):
         await _patched_download("https://cdn.modrinth.com/data/test.jar")
+
+
+# -- DNS-rebinding / private-IP check (issue #1417) --
+
+
+def _resolver_for(*addrs: str) -> Callable[[str], list[str]]:
+    """Return a resolver callback that yields the given addresses."""
+
+    def _resolve(host: str) -> list[str]:
+        return list(addrs)
+
+    return _resolve
+
+
+def test_assert_no_private_ips_allows_public() -> None:
+    """A hostname resolving to a public IP passes."""
+    _assert_no_private_ips("example.com", _resolver=_resolver_for("93.184.216.34"))
+
+
+def test_assert_no_private_ips_rejects_loopback() -> None:
+    """A hostname resolving to 127.0.0.1 is rejected."""
+    with pytest.raises(CatalogUnavailableError, match="private"):
+        _assert_no_private_ips("evil.example.com", _resolver=_resolver_for("127.0.0.1"))
+
+
+def test_assert_no_private_ips_rejects_rfc1918() -> None:
+    """A hostname resolving to an RFC 1918 address is rejected."""
+    with pytest.raises(CatalogUnavailableError, match="private"):
+        _assert_no_private_ips(
+            "evil.example.com", _resolver=_resolver_for("192.168.1.1")
+        )
+
+
+def test_assert_no_private_ips_rejects_link_local() -> None:
+    """A hostname resolving to a link-local address is rejected."""
+    with pytest.raises(CatalogUnavailableError, match="private"):
+        _assert_no_private_ips(
+            "evil.example.com", _resolver=_resolver_for("169.254.169.254")
+        )
+
+
+def test_assert_no_private_ips_rejects_ipv6_loopback() -> None:
+    """A hostname resolving to ::1 is rejected."""
+    with pytest.raises(CatalogUnavailableError, match="private"):
+        _assert_no_private_ips("evil.example.com", _resolver=_resolver_for("::1"))
+
+
+def test_assert_no_private_ips_rejects_cgnat() -> None:
+    """A hostname resolving to a CGNAT address (100.64.0.0/10) is rejected."""
+    with pytest.raises(CatalogUnavailableError, match="private"):
+        _assert_no_private_ips(
+            "evil.example.com", _resolver=_resolver_for("100.64.0.1")
+        )
+
+
+def test_assert_no_private_ips_rejects_if_any_addr_private() -> None:
+    """If any resolved address is private, the check fails."""
+    with pytest.raises(CatalogUnavailableError, match="private"):
+        _assert_no_private_ips(
+            "evil.example.com",
+            _resolver=_resolver_for("93.184.216.34", "10.0.0.1"),
+        )
+
+
+async def test_download_rejects_hostname_resolving_to_private_ip() -> None:
+    """download_file rejects an allowed hostname that resolves to a private IP."""
+    catalog = ModrinthCatalog()
+
+    def _private_resolver(host: str) -> list[str]:
+        return ["10.0.0.1"]
+
+    original = catalog.download_file
+
+    async def _patched(url: str) -> bytes:
+        import mc_server_dashboard_api.servers.adapters.modrinth_catalog as mod
+
+        saved = mod._resolve_host
+        mod._resolve_host = _private_resolver
+        try:
+            return await original(url)
+        finally:
+            mod._resolve_host = saved
+
+    with pytest.raises(CatalogUnavailableError, match="private"):
+        await _patched("https://cdn.modrinth.com/data/test.jar")
 
 
 # -- Unbounded JSON response --

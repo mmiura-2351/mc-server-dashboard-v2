@@ -171,6 +171,24 @@ class StorageFileStoreAdapter(FileStore):
         except NotFoundError as exc:
             raise ServerFileNotFoundError(str(server_id.value)) from exc
 
+    async def rename_file(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        from_path: str,
+        to_path: str,
+    ) -> None:
+        community, server = _scope(community_id, server_id)
+        try:
+            await self._storage.rename_file(
+                community, server, _rel_path(from_path), _rel_path(to_path)
+            )
+        except PathTraversalError as exc:
+            raise InvalidFilePathError(from_path) from exc
+        except NotFoundError as exc:
+            raise ServerFileNotFoundError(str(server_id.value)) from exc
+
     async def rename_dir(
         self,
         *,

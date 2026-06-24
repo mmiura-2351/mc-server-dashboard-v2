@@ -966,13 +966,9 @@ class RenameFile:
     :class:`FileAlreadyExistsError` (409): rename never clobbers, so a typo cannot
     silently overwrite data.
 
-    **File rename** is composed over the existing seam — read the source, write the
-    destination, delete the source — so versioning comes for free (the destination
-    write and the source delete each capture a version). The composition (write
-    destination, then delete source) is not atomic: a crash in the window between
-    the two leaves BOTH the source and the destination present. This favours never
-    losing data (the source survives) over strict move-once semantics; a caller
-    seeing both can safely retry or delete the stale source.
+    **File rename** delegates to :meth:`FileStore.rename_file` (issue #1164), which
+    moves the file atomically without buffering its content in memory and without
+    version capture (a rename does not change the content).
 
     **Directory rename** delegates to :meth:`FileStore.rename_dir` which moves the
     subtree atomically (fs ``os.rename``; object storage copy+delete). Like
@@ -1024,21 +1020,11 @@ class RenameFile:
                     to_path=to_path,
                 )
             else:
-                content = await self.file_store.read_file(
+                await self.file_store.rename_file(
                     community_id=community_id,
                     server_id=server_id,
-                    rel_path=from_path,
-                )
-                await self.file_store.write_file(
-                    community_id=community_id,
-                    server_id=server_id,
-                    rel_path=to_path,
-                    content=content,
-                )
-                await self.file_store.delete_file(
-                    community_id=community_id,
-                    server_id=server_id,
-                    rel_path=from_path,
+                    from_path=from_path,
+                    to_path=to_path,
                 )
 
 
