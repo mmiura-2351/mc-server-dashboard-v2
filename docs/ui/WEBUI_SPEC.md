@@ -55,7 +55,7 @@ Complete endpoint list as of `main` (dumped from the FastAPI OpenAPI schema).
 | Method | Path | Notes |
 |---|---|---|
 | POST | `/users` | Register (username, email, password). Public. |
-| POST | `/auth/login` | username + password → `{access_token, refresh_token}` (bearer). |
+| POST | `/auth/login` | username + password → `{access_token, token_type}` (bearer); refresh token via cookie only (#636). |
 | POST | `/auth/session` | refresh cookie → `{access_token}` only; non-rotating bootstrap (7.1, #512). |
 | POST | `/auth/refresh` | refresh token → new pair (rotates). |
 | POST | `/auth/logout` | invalidates the refresh token. |
