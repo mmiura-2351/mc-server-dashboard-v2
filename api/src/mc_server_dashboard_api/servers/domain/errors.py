@@ -33,21 +33,6 @@ class UnsupportedEditionError(ServerError):
     """
 
 
-class UnknownExecutionBackendError(ServerError):
-    """The ``execution_backend`` is not a known driver kind (CHECK enum, FR-EXE-2)."""
-
-
-class RemovedExecutionBackendError(ServerError):
-    """Creation requested a backend that is a known enum value but no longer shipped.
-
-    ``host_process`` is retained in the CHECK enum so historical rows stay readable
-    (issue #781), but no Worker advertises it, so a freshly-created ``host_process``
-    server would be unplaceable. Create rejects it at the API validation layer; the
-    edge maps this to a 422. Update is unaffected — the immutability check compares
-    the parsed backend against the existing row, so historical rows remain updatable.
-    """
-
-
 class ServerNotFoundError(ServerError):
     """The targeted server does not exist in the community.
 
@@ -74,14 +59,6 @@ class PermissionDeniedError(ServerError):
     def __init__(self, permission: str) -> None:
         super().__init__(permission)
         self.permission = permission
-
-
-class ExecutionBackendImmutableError(ServerError):
-    """An update attempted to change the execution backend.
-
-    The backend is chosen at creation and is immutable for the server's lifetime
-    in M1 (FR-EXE-3, ARCHITECTURE.md Section 7.1).
-    """
 
 
 class PortOutOfRangeError(ServerError):
@@ -209,8 +186,8 @@ class EulaNotAcceptedError(ServerError):
 class NoEligibleWorkerError(ServerError):
     """Placement found no Worker that can host the server (FR-WRK-3).
 
-    No connected, non-draining Worker advertises the server's execution backend
-    with free capacity. The edge maps this to a typed 409.
+    No connected, non-draining Worker has free capacity. The edge maps this to
+    a typed 409.
     """
 
 

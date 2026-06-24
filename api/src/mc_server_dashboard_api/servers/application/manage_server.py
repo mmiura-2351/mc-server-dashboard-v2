@@ -37,17 +37,14 @@ from mc_server_dashboard_api.servers.domain.cpu_allocation import (
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
-    ExecutionBackendImmutableError,
     PermissionDeniedError,
     PortAlreadyTakenError,
     PortOutOfRangeError,
-    RemovedExecutionBackendError,
     ServerFileNotFoundError,
     ServerNameAlreadyExistsError,
     ServerNotFoundError,
     ServerNotStoppedError,
     SlugAlreadyTakenError,
-    UnknownExecutionBackendError,
     UnknownServerTypeError,
     UnsupportedEditionError,
     WorkingSetSeedFailedError,
@@ -81,7 +78,6 @@ from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     DesiredState,
-    ExecutionBackend,
     ObservedState,
     ServerId,
     ServerName,
@@ -214,13 +210,6 @@ def _parse_server_type(value: str) -> ServerType:
         raise UnknownServerTypeError(value) from exc
 
 
-def _parse_execution_backend(value: str) -> ExecutionBackend:
-    try:
-        return ExecutionBackend(value)
-    except ValueError as exc:
-        raise UnknownExecutionBackendError(value) from exc
-
-
 @dataclass(frozen=True)
 class CreateServer:
     """Create a server within a community (server:create, FR-SRV-1).
@@ -276,7 +265,6 @@ class CreateServer:
         mc_edition: str,
         mc_version: str,
         server_type: str,
-        execution_backend: str,
         config: dict[str, Any],
         accept_eula: bool = False,
         game_port: int | None = None,
@@ -287,16 +275,6 @@ class CreateServer:
             # before staging the row so an unprovisionable server is never created.
             raise UnsupportedEditionError(mc_edition)
         parsed_type = _parse_server_type(server_type)
-        parsed_backend = _parse_execution_backend(execution_backend)
-        if parsed_backend is ExecutionBackend.HOST_PROCESS:
-            # The host-process driver was removed (issue #781); no Worker advertises
-            # it, so a freshly-created host_process server is unplaceable. Reject it
-            # at create (a known-but-removed backend), distinct from a wholly unknown
-            # one. This guard also covers the import flow (export_import.py), which
-            # shares this use case. Update is untouched: the immutability check
-            # compares against the existing row, so historical host_process rows stay
-            # readable and updatable.
-            raise RemovedExecutionBackendError(execution_backend)
         # Apply the operator-configurable default when the request omits the key
         # (issue #1069). The default is injected into the config so it persists on
         # the row and is visible in responses. An explicit value takes precedence.
@@ -352,7 +330,6 @@ class CreateServer:
                 mc_edition=mc_edition,
                 mc_version=mc_version,
                 server_type=parsed_type,
-                execution_backend=parsed_backend,
                 config=config,
                 game_port=assigned_port,
                 slug=assigned_slug,
@@ -528,7 +505,6 @@ class UpdateServer:
         server_id: ServerId,
         name: str | None = None,
         config: dict[str, Any] | None = None,
-        execution_backend: str | None = None,
         game_port: int | None = None,
         slug: str | None = None,
         authorize: Callable[[str], Awaitable[bool]],
@@ -567,12 +543,6 @@ class UpdateServer:
                 server = await self.uow.servers.get_by_id(server_id)
                 if server is None or server.community_id != community_id:
                     raise ServerNotFoundError(str(server_id.value))
-                if execution_backend is not None and (
-                    _parse_execution_backend(execution_backend)
-                    is not server.execution_backend
-                ):
-                    # The backend is immutable for the server's lifetime (FR-EXE-3).
-                    raise ExecutionBackendImmutableError(execution_backend)
                 # The config diff drives two gates. The at-rest gate (issue #115)
                 # applies unless this is a safe-keys-only config edit: a config update
                 # whose changed keys are all in ``_SAFE_CONFIG_KEYS``, with no name
@@ -591,7 +561,6 @@ class UpdateServer:
                     authorize=authorize,
                     new_name=new_name,
                     game_port=game_port,
-                    execution_backend=execution_backend,
                     slug=slug,
                     changed_keys=changed_keys,
                 )
@@ -662,7 +631,6 @@ class UpdateServer:
         authorize: Callable[[str], Awaitable[bool]],
         new_name: ServerName | None,
         game_port: int | None,
-        execution_backend: str | None,
         slug: str | None,
         changed_keys: set[str],
     ) -> None:
@@ -683,7 +651,6 @@ class UpdateServer:
         other_change = (
             new_name is not None
             or game_port is not None
-            or execution_backend is not None
             or slug is not None
             or bool(changed_keys - _SCHEDULING_CONFIG_KEYS)
         )

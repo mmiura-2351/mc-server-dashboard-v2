@@ -21,7 +21,6 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     DesiredState,
-    ExecutionBackend,
     ObservedState,
     ServerId,
     ServerName,
@@ -40,7 +39,6 @@ def _server(*, community_id: CommunityId, game_port: int | None) -> Server:
         mc_edition="java",
         mc_version="1.21.1",
         server_type=ServerType.VANILLA,
-        execution_backend=ExecutionBackend.HOST_PROCESS,
         config={},
         game_port=game_port,
         desired_state=DesiredState.STOPPED,

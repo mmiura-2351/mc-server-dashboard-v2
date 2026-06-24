@@ -30,7 +30,6 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     DesiredState,
-    ExecutionBackend,
     ObservedState,
     ServerId,
     ServerName,
@@ -56,7 +55,6 @@ def _server(server_id: ServerId) -> Server:
         mc_edition="java",
         mc_version="1.21.1",
         server_type=ServerType.VANILLA,
-        execution_backend=ExecutionBackend.HOST_PROCESS,
         config={},
         desired_state=DesiredState.STOPPED,
         observed_state=ObservedState.STOPPED,

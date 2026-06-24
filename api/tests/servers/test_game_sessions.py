@@ -23,7 +23,6 @@ from mc_server_dashboard_api.servers.domain.game_session import GameSession
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     DesiredState,
-    ExecutionBackend,
     ObservedState,
     ServerId,
     ServerName,
@@ -42,7 +41,6 @@ def make_server(*, community_id: uuid.UUID) -> Server:
         mc_edition="java",
         mc_version="1.21.1",
         server_type=ServerType.VANILLA,
-        execution_backend=ExecutionBackend.CONTAINER,
         config={},
         desired_state=DesiredState.STOPPED,
         observed_state=ObservedState.STOPPED,

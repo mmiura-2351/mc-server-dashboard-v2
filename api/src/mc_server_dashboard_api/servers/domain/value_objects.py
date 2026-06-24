@@ -93,29 +93,6 @@ class ServerType(enum.Enum):
     FORGE = "forge"
 
 
-class ExecutionBackend(enum.Enum):
-    """Where a server runs (DATABASE.md Section 7 CHECK enum, FR-EXE-2).
-
-    These values deliberately mirror the fleet domain's ``DriverKind`` (the
-    Worker-advertised driver) but are defined here independently: the servers
-    domain must not import the fleet domain (import-linter cross-context contract;
-    ARCHITECTURE.md Section 2.1). The *values* differ on purpose — the persisted
-    ``execution_backend`` column uses the underscore spelling DATABASE.md's CHECK
-    enum mandates (``host_process``), whereas the fleet wire-facing ``DriverKind``
-    uses the hyphen spelling (``host-process``). Mapping between the two, when
-    placement lands, is an adapter concern, not a shared domain type.
-
-    ``HOST_PROCESS`` is retained but no longer a shipped backend: the Worker's
-    host-process driver was removed in issue #781. The value is kept here (and in
-    the DATABASE.md CHECK enum) so historical rows stay readable and the wire
-    round-trip is preserved; no Worker advertises it, so a ``host_process`` server
-    is unplaceable. New servers are created with ``CONTAINER`` only.
-    """
-
-    HOST_PROCESS = "host_process"
-    CONTAINER = "container"
-
-
 class DesiredState(enum.Enum):
     """What the operator wants (DATABASE.md Section 7 CHECK enum, FR-SRV-3).
 

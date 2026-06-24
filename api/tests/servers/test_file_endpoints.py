@@ -81,7 +81,6 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
     DesiredState,
-    ExecutionBackend,
     ObservedState,
     ServerName,
     ServerType,
@@ -1295,7 +1294,6 @@ def _stopped_server(community: uuid.UUID, server: uuid.UUID) -> Server:
         mc_edition="java",
         mc_version="1.21.1",
         server_type=ServerType.VANILLA,
-        execution_backend=ExecutionBackend.HOST_PROCESS,
         config={},
         desired_state=DesiredState.STOPPED,
         observed_state=ObservedState.STOPPED,

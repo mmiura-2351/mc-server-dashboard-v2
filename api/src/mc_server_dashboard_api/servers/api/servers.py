@@ -94,7 +94,6 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     CommandDispatchError,
     EulaNotAcceptedError,
-    ExecutionBackendImmutableError,
     FileTooLargeError,
     InvalidBackupScheduleError,
     InvalidCpuAllocationError,
@@ -110,7 +109,6 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PortAlreadyTakenError,
     PortOutOfRangeError,
     PortRangeExhaustedError,
-    RemovedExecutionBackendError,
     ServerBusyError,
     ServerFilesUnsettledError,
     ServerNameAlreadyExistsError,
@@ -119,7 +117,6 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNotStoppedError,
     SlugAlreadyTakenError,
     SlugExhaustedError,
-    UnknownExecutionBackendError,
     UnknownServerTypeError,
     UnsupportedEditionError,
     WorkingSetSeedFailedError,
@@ -152,7 +149,6 @@ class CreateServerRequest(BaseModel):
     mc_edition: str = Field(min_length=1)
     mc_version: str = Field(min_length=1)
     server_type: str = Field(min_length=1)
-    execution_backend: str = Field(min_length=1)
     # Typed ``Any`` (not ``dict``) so a non-object top level reaches
     # ``validate_config`` and yields the typed ``config_invalid_shape`` 422 rather
     # than Pydantic's generic validation error.
@@ -176,7 +172,6 @@ class CreateServerRequest(BaseModel):
 class UpdateServerRequest(BaseModel):
     name: str | None = None
     config: Any = None
-    execution_backend: str | None = None
     # Optional new game port (issue #311). Omitted (None) leaves the port
     # unchanged; supplied, it is validated against the range (422 out of range)
     # and the taken set (409 taken), at rest only, and rewritten into
@@ -237,7 +232,6 @@ class ServerResponse(BaseModel):
     mc_edition: str
     mc_version: str
     server_type: str
-    execution_backend: str
     config: dict[str, Any]
     # The per-server memory limit in mebibytes (#705), surfaced as a typed field
     # for clients that should not parse the reserved config key themselves. It is
@@ -272,7 +266,6 @@ class ServerResponse(BaseModel):
             mc_edition=server.mc_edition,
             mc_version=server.mc_version,
             server_type=server.server_type.value,
-            execution_backend=server.execution_backend.value,
             config=server.config,
             memory_limit_mb=memory_limit_from_config(server.config),
             cpu_millis=cpu_allocation_from_config(server.config),
@@ -312,7 +305,6 @@ async def create_server(
             mc_edition=body.mc_edition,
             mc_version=body.mc_version,
             server_type=body.server_type,
-            execution_backend=body.execution_backend,
             config=config,
             accept_eula=body.accept_eula,
             game_port=body.game_port,
@@ -324,12 +316,6 @@ async def create_server(
         raise _unprocessable("unsupported_edition") from exc
     except UnknownServerTypeError as exc:
         raise _unprocessable("invalid_server_type") from exc
-    except UnknownExecutionBackendError as exc:
-        raise _unprocessable("invalid_execution_backend") from exc
-    except RemovedExecutionBackendError as exc:
-        # A known-but-removed backend (host_process, issue #781): no Worker can run
-        # it, so reject create rather than stage an unplaceable server.
-        raise _unprocessable("removed_execution_backend") from exc
     except UnsupportedServerTypeError as exc:
         # A schema-valid type the catalog cannot resolve: rejected as
         # unsupported, distinct from a wholly invalid type (FR-VER-1).
@@ -398,17 +384,15 @@ async def import_server(
     use_case: Annotated[ImportServer, Depends(get_import_server)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
     name: Annotated[str, Form(min_length=1)],
-    execution_backend: Annotated[str, Form(min_length=1)],
     join_config: Annotated[JoinHostnameConfig, Depends(get_join_hostname_config)],
 ) -> ServerResponse:
     """Import a whole server from a ZIP export (server:create, issue #274).
 
-    Multipart: the ``file`` is the export zip; ``name`` and ``execution_backend``
-    come from the request (the name is NOT taken from the metadata, so the usual
-    uniqueness 409 applies). The archive's ``export_metadata.json`` is parsed and
-    validated (wrong/missing format or malformed -> 422 ``invalid_export_metadata``;
-    the server_type/version run the SAME create-path validator). A row is created
-    with an auto-assigned game port
+    Multipart: the ``file`` is the export zip; ``name`` comes from the request (the
+    name is NOT taken from the metadata, so the usual uniqueness 409 applies). The
+    archive's ``export_metadata.json`` is parsed and validated (wrong/missing format
+    or malformed -> 422 ``invalid_export_metadata``; the server_type/version run the
+    SAME create-path validator). A row is created with an auto-assigned game port
     (#243); ``accept_eula`` is never implied. The archive contents then publish as
     the initial working set through the hardened extraction (zip-slip / size / entry
     caps -> 413 / 422). A publish failure after the row commits is 503
@@ -420,7 +404,6 @@ async def import_server(
         server = await use_case(
             community_id=CommunityId(community_id),
             name=name,
-            execution_backend=execution_backend,
             content=content,
         )
     except InvalidExportMetadataError as exc:
@@ -429,12 +412,6 @@ async def import_server(
         raise _unprocessable("unsupported_edition") from exc
     except UnknownServerTypeError as exc:
         raise _unprocessable("invalid_server_type") from exc
-    except UnknownExecutionBackendError as exc:
-        raise _unprocessable("invalid_execution_backend") from exc
-    except RemovedExecutionBackendError as exc:
-        # Import shares the create use case, so a removed backend (host_process,
-        # issue #781) is rejected here too.
-        raise _unprocessable("removed_execution_backend") from exc
     except UnsupportedServerTypeError as exc:
         raise _unprocessable("unsupported_server_type") from exc
     except CatalogUnknownVersionError as exc:
@@ -639,13 +616,13 @@ async def update_server(
     **Permission gate (issue #458).** The required permission branches by the
     changed-key set rather than a single fixed code: an edit that changes only the
     backup-scheduling key (``backup_interval_hours``) requires ``backup:schedule``;
-    any other change (name, game port, backend, or any non-scheduling config key)
-    requires ``server:update``; a mixed edit requires both. ``server:update`` no
-    longer implies scheduling — a ``backup:schedule``-only holder may set the
-    cadence, and a ``server:update``-only holder may not. A missing required
-    permission is 403 carrying it in the ``permission`` member (#425/#555). Layer-1
-    membership is checked at the edge (non-member -> 404); the changed-key decision
-    runs in the use case, which has the current config in hand.
+    any other change (name, game port, or any non-scheduling config key) requires
+    ``server:update``; a mixed edit requires both. ``server:update`` no longer
+    implies scheduling — a ``backup:schedule``-only holder may set the cadence, and
+    a ``server:update``-only holder may not. A missing required permission is 403
+    carrying it in the ``permission`` member (#425/#555). Layer-1 membership is
+    checked at the edge (non-member -> 404); the changed-key decision runs in the
+    use case, which has the current config in hand.
 
     **Error precedence (issue #115).** Validation runs first: config-bounds
     (``config_too_large`` / ``config_invalid_shape``), the cadence-override
@@ -678,7 +655,6 @@ async def update_server(
             server_id=ServerId(server_id),
             name=body.name,
             config=config,
-            execution_backend=body.execution_backend,
             game_port=body.game_port,
             slug=body.slug,
             authorize=authz.authorize,
@@ -689,8 +665,6 @@ async def update_server(
         raise _forbidden(exc.permission) from exc
     except ServerNotFoundError as exc:
         raise _not_found() from exc
-    except ExecutionBackendImmutableError as exc:
-        raise _conflict("execution_backend_immutable") from exc
     except ServerNotStoppedError as exc:
         raise _conflict("server_not_stopped") from exc
     except ServerBusyError as exc:

@@ -40,7 +40,6 @@ from mc_server_dashboard_api.servers.domain.slug import (
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     DesiredState,
-    ExecutionBackend,
     ObservedState,
     ServerId,
     ServerName,
@@ -238,7 +237,6 @@ async def test_create_server_assigns_slug() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={},
     )
     assert server.slug
@@ -256,7 +254,6 @@ async def test_create_server_auto_slug_is_6_chars() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={},
     )
     assert len(server.slug) == 6
@@ -278,7 +275,6 @@ async def test_create_server_slug_is_unique_across_creates() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={},
     )
     s2 = await use_case(
@@ -287,7 +283,6 @@ async def test_create_server_slug_is_unique_across_creates() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={},
     )
     assert s1.slug != s2.slug
@@ -302,7 +297,6 @@ async def test_create_server_explicit_valid_slug_is_used() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={},
         slug="myslug",
     )
@@ -319,7 +313,6 @@ async def test_create_server_explicit_slug_invalid_raises_invalid_slug_error() -
             mc_edition="java",
             mc_version="1.21.1",
             server_type="vanilla",
-            execution_backend="container",
             config={},
             slug="INVALID-UPPER",
         )
@@ -335,7 +328,6 @@ async def test_create_server_explicit_slug_reserved_raises_invalid_slug_error() 
             mc_edition="java",
             mc_version="1.21.1",
             server_type="vanilla",
-            execution_backend="container",
             config={},
             slug="api",
         )
@@ -358,7 +350,6 @@ async def test_create_server_explicit_slug_taken_raises_slug_already_taken() -> 
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={},
         slug="taken1",
     )
@@ -370,7 +361,6 @@ async def test_create_server_explicit_slug_taken_raises_slug_already_taken() -> 
             mc_edition="java",
             mc_version="1.21.1",
             server_type="vanilla",
-            execution_backend="container",
             config={},
             slug="taken1",
         )
@@ -385,7 +375,6 @@ async def test_create_server_blank_slug_generates_random() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={},
         slug="",
     )
@@ -403,7 +392,6 @@ async def test_create_server_none_slug_generates_random() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={},
         slug=None,
     )
@@ -429,7 +417,6 @@ def _server(
         mc_edition="java",
         mc_version="1.21.1",
         server_type=ServerType.VANILLA,
-        execution_backend=ExecutionBackend.CONTAINER,
         config={},
         game_port=25565,
         slug=slug,

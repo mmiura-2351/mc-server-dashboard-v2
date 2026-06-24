@@ -100,10 +100,10 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 
 | Method | Path | Notes |
 |---|---|---|
-| GET / POST | `/communities/{cid}/servers` | List / create (`name`, `mc_edition`, `mc_version`, `server_type`, `execution_backend`, `config`, `accept_eula`, optional `game_port`). |
+| GET / POST | `/communities/{cid}/servers` | List / create (`name`, `mc_edition`, `mc_version`, `server_type`, `config`, `accept_eula`, optional `game_port`). |
 | POST | `/communities/{cid}/servers/import` | ZIP import (multipart). |
 | GET | `…/{sid}/export` | ZIP export (download). |
-| GET / PATCH / DELETE | `…/{sid}` | Read / update (name, config, game_port; backend immutable) / delete. PATCH gate branches by changed-key set (#458): a cadence-only edit (`backup_interval_hours`) needs `backup:schedule`; any other change needs `server:update`; a mixed edit needs both. |
+| GET / PATCH / DELETE | `…/{sid}` | Read / update (name, config, game_port) / delete. PATCH gate branches by changed-key set (#458): a cadence-only edit (`backup_interval_hours`) needs `backup:schedule`; any other change needs `server:update`; a mixed edit needs both. |
 | POST | `…/{sid}/start` · `/stop?force=` · `/restart` | Lifecycle. Stop supports force. |
 | POST | `…/{sid}/command` | RCON line → `{output}`. |
 | GET | `…/{sid}/files?path=&list=` | Read file (base64) or list directory (entries + `truncated`). |
@@ -128,7 +128,7 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 | GET / PUT / DELETE | `…/groups/{gid}/servers[/{sid}]` | List / attach / detach server. |
 
 Server response fields: `id`, `community_id`, `name`, `mc_edition`,
-`mc_version`, `server_type`, `execution_backend`, `config` (full blob),
+`mc_version`, `server_type`, `config` (full blob),
 `memory_limit_mb` (derived from `config['memory_limit_mb']`, null when unset),
 `cpu_millis` (derived from `config['cpu_millis']`, null when unset),
 `game_port`, `slug` (relay hostname prefix, auto-generated at create,
@@ -140,7 +140,7 @@ Server state model: `desired_state` ∈ {running, stopped};
 `observed_state` ∈ {starting, running, stopping, stopped, restarting, crashed,
 unknown} + `observed_at` + `assigned_worker_id`.
 Server types: vanilla / paper / fabric / forge.
-Execution backends: `container` (the only shipped backend; the host-process driver was removed in issue #781, so `host_process` is no longer offered in the create wizard).
+Execution backend: `container` (the only shipped backend).
 
 ### 2.4 Versions, ports, fleet, audit, platform
 
@@ -301,7 +301,7 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 ### 6.3 Server create wizard
 1. **Type & version** — type cards from `GET /versions`; version dropdown
    from `GET /versions/{type}` (latest preselected).
-2. **Runtime** — execution backend (`container`; host_process removed in issue #781), game port:
+2. **Runtime** — game port:
    auto-suggest from `GET /ports/available`, validate via
    `GET /ports/check/{port}` on blur.
 3. **Config & EULA** — name, optional `server.properties` overrides (key

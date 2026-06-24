@@ -129,7 +129,6 @@ async def test_create_then_read_back(engine: AsyncEngine) -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="paper",
-        execution_backend="container",
         config={"motd": "hi", "max-players": 20},
     )
 
@@ -139,7 +138,6 @@ async def test_create_then_read_back(engine: AsyncEngine) -> None:
 
     assert loaded is not None
     assert loaded.config == {"motd": "hi", "max-players": 20}
-    assert loaded.execution_backend.value == "container"
     assert loaded.observed_at is None
     assert loaded.assigned_worker_id is None
     assert [s.id for s in listed] == [created.id]
@@ -161,7 +159,6 @@ async def test_duplicate_name_in_community_conflicts(engine: AsyncEngine) -> Non
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={},
     )
     with pytest.raises(ServerNameAlreadyExistsError):
@@ -171,7 +168,6 @@ async def test_duplicate_name_in_community_conflicts(engine: AsyncEngine) -> Non
             mc_edition="java",
             mc_version="1.21.1",
             server_type="vanilla",
-            execution_backend="container",
             config={},
         )
 
@@ -196,7 +192,6 @@ async def test_delete_sweeps_resource_grants(engine: AsyncEngine) -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={},
     )
 
@@ -253,7 +248,6 @@ async def test_server_id_isolation_across_communities(engine: AsyncEngine) -> No
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={},
     )
     # Reading the A server scoped to a different (random) community id misses, so
@@ -275,10 +269,10 @@ async def _insert_legacy_server(
             text(
                 "INSERT INTO server "
                 "(id, community_id, name, mc_edition, mc_version, server_type, "
-                "execution_backend, config, game_port, slug, desired_state, "
+                "config, game_port, slug, desired_state, "
                 "observed_state, created_at, updated_at) VALUES "
                 "(:id, :community_id, :name, 'java', '1.21.1', 'vanilla', "
-                "'host_process', '{}', NULL, :slug, 'stopped', 'stopped', now(), now())"
+                "'{}', NULL, :slug, 'stopped', 'stopped', now(), now())"
             ),
             {
                 "id": server_id,
@@ -310,7 +304,6 @@ async def test_list_ids_missing_game_port_finds_only_legacy_rows(
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={},
     )
     legacy_id = await _insert_legacy_server(engine, community_id, "legacy")
@@ -356,7 +349,6 @@ async def test_update_game_port_persists_to_row(engine: AsyncEngine) -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={},
     )
 
@@ -398,7 +390,6 @@ async def test_update_game_port_rejects_taken_against_real_db(
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={},
     )
     # Another server already holds 25570 in the DB; the pre-read catches it.
@@ -408,10 +399,10 @@ async def test_update_game_port_rejects_taken_against_real_db(
             text(
                 "INSERT INTO server "
                 "(id, community_id, name, mc_edition, mc_version, server_type, "
-                "execution_backend, config, game_port, slug, desired_state, "
+                "config, game_port, slug, desired_state, "
                 "observed_state, created_at, updated_at) VALUES "
                 "(:id, :community_id, 'taker', 'java', '1.21.1', 'vanilla', "
-                "'host_process', '{}', 25570, :slug, "
+                "'{}', 25570, :slug, "
                 "'stopped', 'stopped', now(), now())"
             ),
             {

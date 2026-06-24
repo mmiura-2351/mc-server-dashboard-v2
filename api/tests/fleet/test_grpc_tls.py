@@ -47,7 +47,7 @@ _KEY_FILE = _FIXTURES / "server.key"
 
 def _register_message() -> pb.WorkerMessage:
     caps = pb.WorkerCapabilities(
-        drivers=[pb.EXECUTION_DRIVER_KIND_HOST_PROCESS],
+        drivers=[pb.EXECUTION_DRIVER_KIND_CONTAINER],
         max_servers=4,
         resources=pb.HostResources(cpu_cores=8, memory_bytes=16_000_000_000),
     )

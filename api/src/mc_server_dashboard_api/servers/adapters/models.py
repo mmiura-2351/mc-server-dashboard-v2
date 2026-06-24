@@ -30,11 +30,6 @@ from sqlalchemy.orm import Mapped, mapped_column
 from mc_server_dashboard_api.core.adapters.database import Base
 
 _SERVER_TYPES = ("vanilla", "paper", "fabric", "forge")
-# "host_process" is retained for historical rows only: the Worker host-process
-# driver was removed in issue #781, so no new server is created with it and none
-# is placeable. The CHECK value is left in place (no migration) to keep existing
-# rows valid and the blast radius small; "container" is the only shipped backend.
-_EXECUTION_BACKENDS = ("host_process", "container")
 _DESIRED_STATES = ("running", "stopped")
 _OBSERVED_STATES = (
     "starting",
@@ -68,10 +63,6 @@ class ServerModel(Base):
             _in_clause("server_type", _SERVER_TYPES), name="ck_server_type"
         ),
         CheckConstraint(
-            _in_clause("execution_backend", _EXECUTION_BACKENDS),
-            name="ck_server_execution_backend",
-        ),
-        CheckConstraint(
             _in_clause("desired_state", _DESIRED_STATES),
             name="ck_server_desired_state",
         ),
@@ -93,7 +84,6 @@ class ServerModel(Base):
     mc_edition: Mapped[str] = mapped_column(String, nullable=False)
     mc_version: Mapped[str] = mapped_column(String, nullable=False)
     server_type: Mapped[str] = mapped_column(String, nullable=False)
-    execution_backend: Mapped[str] = mapped_column(String, nullable=False)
     config: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
     # The Minecraft game port (issue #243), assigned at create from the configured
     # range and unique deployment-wide. Nullable: legacy/imported rows carry none.

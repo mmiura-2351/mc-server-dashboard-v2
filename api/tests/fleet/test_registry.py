@@ -633,7 +633,7 @@ def test_candidates_include_online_worker_with_load() -> None:
     assert len(candidates) == 1
     candidate = candidates[0]
     assert candidate.worker_id == WorkerId("worker-1")
-    assert candidate.drivers == frozenset({DriverKind.HOST_PROCESS})
+    assert candidate.drivers == frozenset({DriverKind.CONTAINER})
     assert candidate.capacity == 4
     assert candidate.load == 1
 

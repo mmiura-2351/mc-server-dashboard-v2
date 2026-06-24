@@ -52,7 +52,6 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
     DesiredState,
-    ExecutionBackend,
     ObservedState,
     ServerId,
     ServerName,
@@ -108,7 +107,6 @@ def _server(community_id: uuid.UUID) -> Server:
         mc_edition="java",
         mc_version="1.21.1",
         server_type=ServerType.VANILLA,
-        execution_backend=ExecutionBackend.HOST_PROCESS,
         config={},
         desired_state=DesiredState.RUNNING,
         observed_state=ObservedState.RUNNING,

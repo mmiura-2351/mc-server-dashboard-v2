@@ -48,7 +48,6 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     InvalidExportMetadataError,
-    RemovedExecutionBackendError,
     ServerFilesUnsettledError,
     ServerNameAlreadyExistsError,
     WorkingSetSeedFailedError,
@@ -58,7 +57,6 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
     DesiredState,
-    ExecutionBackend,
     ObservedState,
     ServerId,
     ServerName,
@@ -130,7 +128,6 @@ def _server_entity(*, community_id: uuid.UUID, name: str = "imported") -> Server
         mc_edition="java",
         mc_version="1.21.1",
         server_type=ServerType.VANILLA,
-        execution_backend=ExecutionBackend.HOST_PROCESS,
         config={},
         desired_state=DesiredState.STOPPED,
         observed_state=ObservedState.STOPPED,
@@ -177,7 +174,7 @@ def _zip_upload() -> tuple[dict[str, tuple[str, bytes, str]], dict[str, str]]:
     with zipfile.ZipFile(buf, mode="w") as zf:
         zf.writestr("export_metadata.json", b"{}")
     files = {"file": ("server.zip", buf.getvalue(), "application/zip")}
-    data = {"name": "imported", "execution_backend": "host_process"}
+    data = {"name": "imported"}
     return files, data
 
 
@@ -275,9 +272,8 @@ def test_import_creates_server_and_audits() -> None:
     body = resp.json()
     assert body["name"] == "imported"
     assert body["game_port"] == 25565
-    # The name and backend come from the request form, not the metadata.
+    # The name comes from the request form, not the metadata.
     assert use_case.calls[0]["name"] == "imported"
-    assert use_case.calls[0]["execution_backend"] == "host_process"
     assert [e.operation for e in recorder.events] == [ops.SERVER_IMPORT]
     assert recorder.events[0].outcome is Outcome.SUCCESS
     assert recorder.events[0].target_type == ops.TARGET_SERVER
@@ -298,23 +294,6 @@ def test_import_invalid_metadata_is_422() -> None:
     )
     assert resp.status_code == 422
     assert resp.json()["reason"] == "invalid_export_metadata"
-
-
-def test_import_removed_backend_is_422() -> None:
-    app = _app(
-        member=True,
-        allow=True,
-        import_=_FakeImport(error=RemovedExecutionBackendError("host_process")),
-    )
-    client = next(_client(app))
-    files, data = _zip_upload()
-    resp = client.post(
-        f"/api/communities/{uuid.uuid4()}/servers/import",
-        files=files,
-        data=data,
-    )
-    assert resp.status_code == 422
-    assert resp.json()["reason"] == "removed_execution_backend"
 
 
 def test_import_name_conflict_is_409() -> None:

@@ -35,11 +35,6 @@ const TYPE_SUB: Record<string, TranslationKey> = {
   forge: "serverCreate.typeSub.forge",
 };
 
-// host_process was dropped as a selectable backend in issue #781 (the worker
-// host-process driver was removed); container is the only shipped backend.
-type Backend = "container";
-const BACKENDS: Backend[] = ["container"];
-
 // Per-server memory limit / CPU allocation in the create wizard (issue #715),
 // mirroring the Settings tab (ServerDetailPage.tsx). Both ride the `config` blob
 // as reserved keys and are optional: blank = driver default / auto.
@@ -233,7 +228,6 @@ function NewServerWizard({ communityId }: { communityId: string }) {
   const [step, setStep] = useState(1);
   const [type, setType] = useState<CatalogType | null>(null);
   const [version, setVersion] = useState("");
-  const [backend, setBackend] = useState<Backend>("container");
   const [port, setPort] = useState("");
   // Once the user edits the port, the auto-suggest must never overwrite it.
   const [portTouched, setPortTouched] = useState(false);
@@ -367,7 +361,6 @@ function NewServerWizard({ communityId }: { communityId: string }) {
             mc_edition: "java",
             mc_version: version,
             server_type: type,
-            execution_backend: backend,
             config,
             accept_eula: acceptEula,
             // In relay mode the port is hidden and API-allocated, so omit it; in
@@ -469,22 +462,6 @@ function NewServerWizard({ communityId }: { communityId: string }) {
 
       {step === 2 && (
         <div className="card">
-          <div className="field">
-            <label htmlFor="backend-select">
-              {t("serverCreate.backendLabel")}
-            </label>
-            <select
-              id="backend-select"
-              value={backend}
-              onChange={(e) => setBackend(e.target.value as Backend)}
-            >
-              {BACKENDS.map((b) => (
-                <option key={b} value={b}>
-                  {t(`serverCreate.backend.${b}` as TranslationKey)}
-                </option>
-              ))}
-            </select>
-          </div>
           {relayEnabled ? null : (
             <div className="field">
               <label htmlFor="port-input">{t("serverCreate.portLabel")}</label>
@@ -815,7 +792,6 @@ function ImportForm({ communityId }: { communityId: string }) {
   const navigate = useNavigate();
   const { showToast } = useToast();
   const [name, setName] = useState("");
-  const [backend, setBackend] = useState<Backend>("container");
   const [file, setFile] = useState<File | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [nameError, setNameError] = useState<string | undefined>();
@@ -832,7 +808,6 @@ function ImportForm({ communityId }: { communityId: string }) {
     const form = new FormData();
     form.append("file", file);
     form.append("name", name);
-    form.append("execution_backend", backend);
     progress.start(file.size);
     try {
       const server = await postFormWithProgress(
@@ -871,20 +846,6 @@ function ImportForm({ communityId }: { communityId: string }) {
             {nameError}
           </div>
         )}
-      </div>
-      <div className="field">
-        <label htmlFor="import-backend">{t("serverCreate.backendLabel")}</label>
-        <select
-          id="import-backend"
-          value={backend}
-          onChange={(e) => setBackend(e.target.value as Backend)}
-        >
-          {BACKENDS.map((b) => (
-            <option key={b} value={b}>
-              {t(`serverCreate.backend.${b}` as TranslationKey)}
-            </option>
-          ))}
-        </select>
       </div>
       <div className="field">
         <label htmlFor="import-file">

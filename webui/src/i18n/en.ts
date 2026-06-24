@@ -206,7 +206,6 @@ export const en = {
   "dashboard.col.name": "Name",
   "dashboard.col.state": "State",
   "dashboard.col.type": "Type / version",
-  "dashboard.col.backend": "Backend",
   "dashboard.col.port": "Port",
   "dashboard.col.address": "Address",
   "dashboard.col.worker": "Host",
@@ -314,8 +313,6 @@ export const en = {
   "serverDetail.settings.general": "General",
   "serverDetail.settings.name": "Server name",
   "serverDetail.settings.gamePort": "Game port",
-  "serverDetail.settings.executionBackend": "Execution backend",
-  "serverDetail.settings.executionBackendHint": "Immutable after creation.",
   "serverDetail.settings.config": "Config overrides",
   "serverDetail.settings.configKey": "Key",
   "serverDetail.settings.configValue": "Value",
@@ -632,8 +629,6 @@ export const en = {
   "serverCreate.typeSub.fabric": "light modding",
   "serverCreate.typeSub.forge": "heavy modding",
   // Step 2 — runtime.
-  "serverCreate.backendLabel": "Execution backend",
-  "serverCreate.backend.container": "Container",
   "serverCreate.portLabel": "Game port",
   "serverCreate.portHint": "Auto-suggested from the next free port.",
   "serverCreate.portChecking": "Checking port availability…",
@@ -698,7 +693,7 @@ export const en = {
   // Import tab.
   "serverCreate.import.heading": "Import from a ZIP export",
   "serverCreate.import.hint":
-    "Upload a ZIP exported from another instance. The name and backend below apply; the EULA is never carried over.",
+    "Upload a ZIP exported from another instance. The name below applies; the EULA is never carried over.",
   "serverCreate.import.fileLabel": "Export archive (.zip)",
   "serverCreate.import.submit": "Import server",
   "serverCreate.import.importing": "Importing…",

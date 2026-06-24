@@ -8,11 +8,8 @@ bounded contexts (mirroring the servers UnitOfWork reusing the community
 resource-grant adapter); the servers *domain* and *application* never import the
 fleet context (import-linter contract).
 
-The driver-spelling map lives here, at the seam: the servers
-:class:`ExecutionBackend` uses the underscore spelling DATABASE.md's CHECK enum
-mandates (``host_process``); the fleet :class:`DriverKind` uses the hyphen
-spelling (``host-process``). The two enums are deliberately not shared, so the
-mapping is an adapter concern (servers/domain/value_objects.py).
+Container is the only execution backend. The adapter hardcodes
+``DriverKind.CONTAINER`` for placement and command dispatch.
 """
 
 from __future__ import annotations
@@ -67,18 +64,10 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
-    ExecutionBackend,
     ServerId,
     ServerType,
     WorkerId,
 )
-
-# Map the servers backend enum (underscore spelling) to the fleet driver enum
-# (hyphen spelling). The two are intentionally distinct domain types.
-_DRIVER_BY_BACKEND: dict[ExecutionBackend, DriverKind] = {
-    ExecutionBackend.HOST_PROCESS: DriverKind.HOST_PROCESS,
-    ExecutionBackend.CONTAINER: DriverKind.CONTAINER,
-}
 
 # Map the fleet result code to the servers outcome status (same names, distinct
 # enums on either side of the seam).
@@ -193,7 +182,6 @@ class FleetControlPlaneAdapter(ControlPlane):
         self,
         *,
         server_id: ServerId,
-        backend: ExecutionBackend,
         memory_limit_mb: int | None,
         committed_by_worker: dict[WorkerId, CommittedResources],
     ) -> WorkerId | None:
@@ -220,7 +208,7 @@ class FleetControlPlaneAdapter(ControlPlane):
         ]
         chosen = place(
             candidates,
-            required_driver=_DRIVER_BY_BACKEND[backend],
+            required_driver=DriverKind.CONTAINER,
             needed_memory_mb=memory_limit_mb,
         )
         if isinstance(chosen, FleetWorkerId):
@@ -294,7 +282,6 @@ class FleetControlPlaneAdapter(ControlPlane):
         *,
         worker_id: WorkerId,
         server_id: ServerId,
-        backend: ExecutionBackend,
         server_type: ServerType,
         jar_relpath: str,
         minecraft_version: str,
@@ -305,7 +292,7 @@ class FleetControlPlaneAdapter(ControlPlane):
             worker_id,
             server_id,
             StartServerCommand(
-                driver=_DRIVER_BY_BACKEND[backend],
+                driver=DriverKind.CONTAINER,
                 jar_relpath=jar_relpath,
                 minecraft_version=minecraft_version,
                 launch_mode=_launch_mode_for(server_type),

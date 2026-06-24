@@ -7,10 +7,8 @@ contract), so they depend on this narrow Port; the wiring binds it to a fleet
 adapter that drives the real ``WorkerRegistry`` and ``ControlPlane`` (mirroring
 how the server-delete grant sweep is composed at the adapter layer).
 
-The Port speaks the servers domain's own types: a :class:`WorkerId` value, the
-:class:`ExecutionBackend` enum (the adapter maps its underscore spelling to the
-fleet ``DriverKind`` hyphen spelling), and a plain :class:`CommandOutcome`. No
-fleet type crosses the seam.
+The Port speaks the servers domain's own types: a :class:`WorkerId` value
+and a plain :class:`CommandOutcome`. No fleet type crosses the seam.
 """
 
 from __future__ import annotations
@@ -25,7 +23,6 @@ from mc_server_dashboard_api.servers.domain.committed_resources import (
 from mc_server_dashboard_api.servers.domain.errors import ServerError
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
-    ExecutionBackend,
     ServerId,
     ServerType,
     WorkerId,
@@ -154,11 +151,10 @@ class ControlPlane(abc.ABC):
         self,
         *,
         server_id: ServerId,
-        backend: ExecutionBackend,
         memory_limit_mb: int | None,
         committed_by_worker: dict[WorkerId, CommittedResources],
     ) -> WorkerId | None:
-        """Choose an eligible Worker offering ``backend``, or ``None`` if none.
+        """Choose an eligible Worker, or ``None`` if none.
 
         Resource-aware placement (#710): ``memory_limit_mb`` is the new server's
         declared memory request (``None`` = unset, not memory-gated), and
@@ -261,7 +257,6 @@ class ControlPlane(abc.ABC):
         *,
         worker_id: WorkerId,
         server_id: ServerId,
-        backend: ExecutionBackend,
         server_type: ServerType,
         jar_relpath: str,
         minecraft_version: str,

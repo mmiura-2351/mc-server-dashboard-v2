@@ -17,7 +17,6 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     DesiredState,
-    ExecutionBackend,
     ObservedState,
     ServerId,
     ServerName,
@@ -37,7 +36,6 @@ def _make_server(
         mc_edition="java",
         mc_version="1.21.5",
         server_type=ServerType.VANILLA,
-        execution_backend=ExecutionBackend.CONTAINER,
         config={},
         desired_state=desired,
         observed_state=observed,

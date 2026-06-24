@@ -82,9 +82,9 @@ async def _seed_server(engine: AsyncEngine, community_id: uuid.UUID) -> uuid.UUI
         await conn.execute(
             text(
                 "INSERT INTO server (id, community_id, name, mc_edition, mc_version, "
-                "server_type, execution_backend, config, slug, desired_state, "
+                "server_type, config, slug, desired_state, "
                 "observed_state, created_at, updated_at) VALUES "
-                "(:id, :cid, 'srv', 'java', '1.21.1', 'vanilla', 'host_process', "
+                "(:id, :cid, 'srv', 'java', '1.21.1', 'vanilla', "
                 "'{}', :slug, 'stopped', 'stopped', :at, :at)"
             ),
             {

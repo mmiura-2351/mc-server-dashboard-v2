@@ -1,7 +1,7 @@
 """Use-case tests for server CRUD against in-memory fakes (TESTING.md Section 4).
 
-Covers create (+ backend/type validation), community-scoped read/list,
-cross-community not-found, update editability rules (backend immutable, at-rest
+Covers create (+ type validation), community-scoped read/list,
+cross-community not-found, update editability rules (at-rest
 gate, name clash), and delete (at-rest gate + grant sweep atomicity).
 """
 
@@ -34,7 +34,6 @@ from mc_server_dashboard_api.servers.domain.cpu_allocation import (
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
-    ExecutionBackendImmutableError,
     InvalidBackupScheduleError,
     InvalidCpuAllocationError,
     InvalidMemoryLimitError,
@@ -43,12 +42,10 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PortAlreadyTakenError,
     PortOutOfRangeError,
     PortRangeExhaustedError,
-    RemovedExecutionBackendError,
     ServerFileNotFoundError,
     ServerNameAlreadyExistsError,
     ServerNotFoundError,
     ServerNotStoppedError,
-    UnknownExecutionBackendError,
     UnknownServerTypeError,
     UnsupportedEditionError,
     WorkingSetSeedFailedError,
@@ -60,7 +57,6 @@ from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     DesiredState,
-    ExecutionBackend,
     ObservedState,
     ServerId,
     ServerName,
@@ -97,7 +93,6 @@ def _server(
     name: str = "survival",
     desired: DesiredState = DesiredState.STOPPED,
     observed: ObservedState = ObservedState.STOPPED,
-    backend: ExecutionBackend = ExecutionBackend.HOST_PROCESS,
     game_port: int | None = None,
 ) -> Server:
     return Server(
@@ -107,7 +102,6 @@ def _server(
         mc_edition="java",
         mc_version="1.21.1",
         server_type=ServerType.VANILLA,
-        execution_backend=backend,
         config={"motd": "hi"},
         game_port=game_port,
         desired_state=desired,
@@ -137,7 +131,6 @@ async def test_create_defaults_to_stopped_and_commits() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="paper",
-        execution_backend="container",
         config={"motd": "hi"},
     )
     assert server.desired_state is DesiredState.STOPPED
@@ -145,7 +138,6 @@ async def test_create_defaults_to_stopped_and_commits() -> None:
     assert server.observed_at is None
     assert server.assigned_worker_id is None
     assert server.server_type is ServerType.PAPER
-    assert server.execution_backend is ExecutionBackend.CONTAINER
     assert uow.commits == 1
     assert uow.servers.by_id[server.id] is server
 
@@ -165,7 +157,6 @@ async def test_create_accepts_java_edition() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={},
     )
     assert server.mc_edition == "java"
@@ -187,7 +178,6 @@ async def test_create_accepts_valid_memory_limit() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={MEMORY_LIMIT_CONFIG_KEY: 2048},
     )
     assert server.config[MEMORY_LIMIT_CONFIG_KEY] == 2048
@@ -210,7 +200,6 @@ async def test_create_rejects_invalid_memory_limit() -> None:
             mc_edition="java",
             mc_version="1.21.1",
             server_type="vanilla",
-            execution_backend="container",
             config={MEMORY_LIMIT_CONFIG_KEY: 1},
         )
     assert uow.commits == 0
@@ -231,7 +220,6 @@ async def test_create_without_memory_limit_writes_no_key() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={"motd": "hi"},
     )
     assert MEMORY_LIMIT_CONFIG_KEY not in server.config
@@ -254,7 +242,6 @@ async def test_create_applies_default_memory_limit() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={"motd": "hi"},
     )
     assert server.config[MEMORY_LIMIT_CONFIG_KEY] == 2048
@@ -276,7 +263,6 @@ async def test_create_explicit_memory_limit_overrides_default() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={MEMORY_LIMIT_CONFIG_KEY: 4096},
     )
     assert server.config[MEMORY_LIMIT_CONFIG_KEY] == 4096
@@ -299,7 +285,6 @@ async def test_create_rejects_memory_limit_above_custom_max() -> None:
             mc_edition="java",
             mc_version="1.21.1",
             server_type="vanilla",
-            execution_backend="container",
             config={MEMORY_LIMIT_CONFIG_KEY: 4097},
         )
     assert uow.commits == 0
@@ -321,7 +306,6 @@ async def test_create_accepts_memory_limit_at_custom_max() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={MEMORY_LIMIT_CONFIG_KEY: 4096},
     )
     assert server.config[MEMORY_LIMIT_CONFIG_KEY] == 4096
@@ -341,7 +325,6 @@ async def test_create_accepts_valid_cpu_allocation() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={CPU_ALLOCATION_CONFIG_KEY: 2000},
     )
     assert server.config[CPU_ALLOCATION_CONFIG_KEY] == 2000
@@ -364,7 +347,6 @@ async def test_create_rejects_invalid_cpu_allocation() -> None:
             mc_edition="java",
             mc_version="1.21.1",
             server_type="vanilla",
-            execution_backend="container",
             config={CPU_ALLOCATION_CONFIG_KEY: 1},
         )
     assert uow.commits == 0
@@ -385,7 +367,6 @@ async def test_create_without_cpu_allocation_writes_no_key() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={"motd": "hi"},
     )
     assert CPU_ALLOCATION_CONFIG_KEY not in server.config
@@ -407,7 +388,6 @@ async def test_create_rejects_non_java_edition() -> None:
             mc_edition="bedrock",
             mc_version="1.21.1",
             server_type="vanilla",
-            execution_backend="container",
             config={},
         )
     # Rejected before staging or even consulting the catalog (Java-only at M1).
@@ -430,53 +410,6 @@ async def test_create_rejects_unknown_server_type() -> None:
             mc_edition="java",
             mc_version="1.21.1",
             server_type="bedrock-not-supported",
-            execution_backend="container",
-            config={},
-        )
-    assert uow.commits == 0
-
-
-async def test_create_rejects_unknown_execution_backend() -> None:
-    uow = FakeUnitOfWork()
-    with pytest.raises(UnknownExecutionBackendError):
-        await CreateServer(
-            uow=uow,
-            clock=FakeClock(_NOW),
-            version_validator=FakeVersionValidator(),
-            file_store=FakeFileStore(),
-            port_range=_PORTS,
-        )(
-            community_id=CommunityId(uuid.uuid4()),
-            name="s",
-            mc_edition="java",
-            mc_version="1.21.1",
-            server_type="vanilla",
-            execution_backend="kubernetes",
-            config={},
-        )
-    assert uow.commits == 0
-
-
-async def test_create_rejects_removed_host_process_backend() -> None:
-    # host_process is a known enum value retained for historical rows (#781), but
-    # the driver was removed, so a freshly-created host_process server would be
-    # unplaceable. Create rejects it (distinct from a wholly unknown backend) and
-    # never stages a row.
-    uow = FakeUnitOfWork()
-    with pytest.raises(RemovedExecutionBackendError):
-        await CreateServer(
-            uow=uow,
-            clock=FakeClock(_NOW),
-            version_validator=FakeVersionValidator(),
-            file_store=FakeFileStore(),
-            port_range=_PORTS,
-        )(
-            community_id=CommunityId(uuid.uuid4()),
-            name="s",
-            mc_edition="java",
-            mc_version="1.21.1",
-            server_type="vanilla",
-            execution_backend="host_process",
             config={},
         )
     assert uow.commits == 0
@@ -497,7 +430,6 @@ async def test_create_rejects_unsupported_type_forge() -> None:
             mc_edition="java",
             mc_version="1.21.1",
             server_type="forge",
-            execution_backend="container",
             config={},
         )
     assert uow.commits == 0
@@ -518,7 +450,6 @@ async def test_create_rejects_unknown_version() -> None:
             mc_edition="java",
             mc_version="9.9.9",
             server_type="vanilla",
-            execution_backend="container",
             config={},
         )
     assert uow.commits == 0
@@ -550,7 +481,6 @@ async def test_create_with_accept_eula_seeds_eula_and_properties() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={},
         accept_eula=True,
     )
@@ -583,7 +513,6 @@ async def test_create_without_accept_eula_still_seeds_properties() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={},
     )
     assert file_store.writes == [("server.properties", _SEEDED_PROPERTIES)]
@@ -607,7 +536,6 @@ async def test_create_seeds_rcon_with_random_password_by_default() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={},
     )
     seeded = file_store.files["server.properties"].decode()
@@ -639,7 +567,6 @@ async def test_create_merges_config_overrides_into_seeded_properties() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={"motd": "Hello World", "pvp": "false"},
     )
     expected = (
@@ -667,7 +594,6 @@ async def test_create_skips_reserved_keys_in_properties_overrides() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={MEMORY_LIMIT_CONFIG_KEY: 2048, "motd": "hi"},
     )
     props_text = file_store.files["server.properties"].decode()
@@ -695,7 +621,6 @@ async def test_create_skips_platform_managed_properties_keys() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={
             "server-port": "99999",
             "enable-rcon": "false",
@@ -734,7 +659,6 @@ async def test_create_skips_resource_pack_properties_keys() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={
             "resource-pack": "http://evil.example.com/pack.zip",
             "resource-pack-sha1": "deadbeef",
@@ -770,7 +694,6 @@ async def test_create_with_empty_config_seeds_no_overrides() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={},
     )
     assert file_store.files["server.properties"] == _SEEDED_PROPERTIES
@@ -803,7 +726,6 @@ async def test_create_auto_assigns_lowest_free_port() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={},
     )
     assert server.game_port == 25567
@@ -835,7 +757,6 @@ async def test_create_skips_relay_reserved_port() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={},
     )
     assert server.game_port == 25566
@@ -856,7 +777,6 @@ async def test_create_honors_explicit_free_port() -> None:
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={},
         game_port=25600,
     )
@@ -882,7 +802,6 @@ async def test_create_rejects_explicit_taken_port() -> None:
             mc_edition="java",
             mc_version="1.21.1",
             server_type="vanilla",
-            execution_backend="container",
             config={},
             game_port=25600,
         )
@@ -904,7 +823,6 @@ async def test_create_rejects_explicit_out_of_range_port() -> None:
             mc_edition="java",
             mc_version="1.21.1",
             server_type="vanilla",
-            execution_backend="container",
             config={},
             game_port=80,
         )
@@ -931,7 +849,6 @@ async def test_create_raises_when_range_exhausted() -> None:
             mc_edition="java",
             mc_version="1.21.1",
             server_type="vanilla",
-            execution_backend="container",
             config={},
         )
     assert uow.commits == 0
@@ -954,7 +871,6 @@ async def test_create_seed_failure_surfaces_after_commit() -> None:
             mc_edition="java",
             mc_version="1.21.1",
             server_type="vanilla",
-            execution_backend="container",
             config={},
         )
     # The row committed before seeding; it is left in place (repairable).
@@ -1435,34 +1351,6 @@ async def test_update_empty_body_succeeds_with_server_update() -> None:
     assert authorize.seen == ["server:update"]
     assert uow.commits == 1
     assert uow.commits == 1
-
-
-async def test_update_rejects_backend_change_as_immutable() -> None:
-    uow = FakeUnitOfWork()
-    community = CommunityId(uuid.uuid4())
-    server = _server(community_id=community, backend=ExecutionBackend.HOST_PROCESS)
-    uow.servers.seed(server)
-    with pytest.raises(ExecutionBackendImmutableError):
-        await _updater(uow)(
-            community_id=community,
-            server_id=server.id,
-            execution_backend="container",
-        )
-    assert uow.commits == 0
-
-
-async def test_update_allows_same_backend_value() -> None:
-    uow = FakeUnitOfWork()
-    community = CommunityId(uuid.uuid4())
-    server = _server(community_id=community, backend=ExecutionBackend.HOST_PROCESS)
-    uow.servers.seed(server)
-    updated = await _updater(uow)(
-        community_id=community,
-        server_id=server.id,
-        execution_backend="host_process",
-        config={"k": "v"},
-    )
-    assert updated.config == {"k": "v"}
 
 
 async def test_update_rejects_while_running() -> None:
@@ -2190,7 +2078,6 @@ async def test_create_with_accept_eula_lands_at_rest_and_hydrates(
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={},
         accept_eula=True,
     )
@@ -2234,7 +2121,6 @@ async def test_create_without_accept_eula_seeds_properties_at_rest(
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={},
     )
 
@@ -2272,7 +2158,6 @@ async def test_update_game_port_rewrites_properties_at_rest(tmp_path: Path) -> N
         mc_edition="java",
         mc_version="1.21.1",
         server_type="vanilla",
-        execution_backend="container",
         config={},
     )
     assert server.game_port == 25565

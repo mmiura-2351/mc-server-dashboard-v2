@@ -63,7 +63,6 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
     DesiredState,
-    ExecutionBackend,
     ObservedState,
     ServerId,
     ServerName,
@@ -286,7 +285,6 @@ def test_create_server_records_success() -> None:
         mc_edition="java",
         mc_version="1.20.4",
         server_type=ServerType.VANILLA,
-        execution_backend=ExecutionBackend.HOST_PROCESS,
         config={},
         desired_state=DesiredState.STOPPED,
         observed_state=ObservedState.STOPPED,
@@ -305,7 +303,6 @@ def test_create_server_records_success() -> None:
             "mc_edition": "java",
             "mc_version": "1.20.4",
             "server_type": "vanilla",
-            "execution_backend": "host_process",
         },
     )
 

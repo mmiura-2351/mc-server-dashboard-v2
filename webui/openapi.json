@@ -565,11 +565,6 @@
       },
       "Body_import_server_api_communities__community_id__servers_import_post": {
         "properties": {
-          "execution_backend": {
-            "minLength": 1,
-            "title": "Execution Backend",
-            "type": "string"
-          },
           "file": {
             "contentMediaType": "application/octet-stream",
             "title": "File",
@@ -583,8 +578,7 @@
         },
         "required": [
           "file",
-          "name",
-          "execution_backend"
+          "name"
         ],
         "title": "Body_import_server_api_communities__community_id__servers_import_post",
         "type": "object"
@@ -1309,11 +1303,6 @@
           "config": {
             "title": "Config"
           },
-          "execution_backend": {
-            "minLength": 1,
-            "title": "Execution Backend",
-            "type": "string"
-          },
           "game_port": {
             "anyOf": [
               {
@@ -1363,8 +1352,7 @@
           "name",
           "mc_edition",
           "mc_version",
-          "server_type",
-          "execution_backend"
+          "server_type"
         ],
         "title": "CreateServerRequest",
         "type": "object"
@@ -2983,10 +2971,6 @@
             "title": "Desired State",
             "type": "string"
           },
-          "execution_backend": {
-            "title": "Execution Backend",
-            "type": "string"
-          },
           "game_port": {
             "anyOf": [
               {
@@ -3068,7 +3052,6 @@
           "mc_edition",
           "mc_version",
           "server_type",
-          "execution_backend",
           "config",
           "memory_limit_mb",
           "cpu_millis",
@@ -3243,17 +3226,6 @@
         "properties": {
           "config": {
             "title": "Config"
-          },
-          "execution_backend": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Execution Backend"
           },
           "game_port": {
             "anyOf": [
@@ -5917,7 +5889,7 @@
     },
     "/api/communities/{community_id}/servers/import": {
       "post": {
-        "description": "Import a whole server from a ZIP export (server:create, issue #274).\n\nMultipart: the ``file`` is the export zip; ``name`` and ``execution_backend``\ncome from the request (the name is NOT taken from the metadata, so the usual\nuniqueness 409 applies). The archive's ``export_metadata.json`` is parsed and\nvalidated (wrong/missing format or malformed -> 422 ``invalid_export_metadata``;\nthe server_type/version run the SAME create-path validator). A row is created\nwith an auto-assigned game port\n(#243); ``accept_eula`` is never implied. The archive contents then publish as\nthe initial working set through the hardened extraction (zip-slip / size / entry\ncaps -> 413 / 422). A publish failure after the row commits is 503\n``seed_failed`` (the row is repairable via the files API).",
+        "description": "Import a whole server from a ZIP export (server:create, issue #274).\n\nMultipart: the ``file`` is the export zip; ``name`` comes from the request (the\nname is NOT taken from the metadata, so the usual uniqueness 409 applies). The\narchive's ``export_metadata.json`` is parsed and validated (wrong/missing format\nor malformed -> 422 ``invalid_export_metadata``; the server_type/version run the\nSAME create-path validator). A row is created with an auto-assigned game port\n(#243); ``accept_eula`` is never implied. The archive contents then publish as\nthe initial working set through the hardened extraction (zip-slip / size / entry\ncaps -> 413 / 422). A publish failure after the row commits is 503\n``seed_failed`` (the row is repairable via the files API).",
         "operationId": "import_server_api_communities__community_id__servers_import_post",
         "parameters": [
           {
@@ -6072,7 +6044,7 @@
         "summary": "Read Server"
       },
       "patch": {
-        "description": "Edit a server's name/config/game port.\n\n**Permission gate (issue #458).** The required permission branches by the\nchanged-key set rather than a single fixed code: an edit that changes only the\nbackup-scheduling key (``backup_interval_hours``) requires ``backup:schedule``;\nany other change (name, game port, backend, or any non-scheduling config key)\nrequires ``server:update``; a mixed edit requires both. ``server:update`` no\nlonger implies scheduling \u2014 a ``backup:schedule``-only holder may set the\ncadence, and a ``server:update``-only holder may not. A missing required\npermission is 403 carrying it in the ``permission`` member (#425/#555). Layer-1\nmembership is checked at the edge (non-member -> 404); the changed-key decision\nruns in the use case, which has the current config in hand.\n\n**Error precedence (issue #115).** Validation runs first: config-bounds\n(``config_too_large`` / ``config_invalid_shape``), the cadence-override\nfloor/shape (``invalid_snapshot_interval`` / ``invalid_backup_schedule``), and\nthe game-port range (``port_out_of_range``) are 422 and are evaluated before\nany state gating. Only then does the state gate apply: an edit that requires\nthe server to be at rest but finds it running is 409 (``server_not_stopped``).\nSo a below-floor override (or an out-of-range port) on a running server is a\n422, not a 409.\n\n**Cadence-knob split (issue #115).** A config update that touches only the\noperationally-safe keys (``snapshot_interval_seconds``,\n``backup_interval_hours``) bypasses the at-rest gate and is accepted while the\nserver runs; the schedulers pick up the new value on their next tick. Any\nother config change \u2014 a name change, or a game-port change \u2014 keeps the at-rest\nrequirement.\n\n**Game port (issue #311).** A new ``game_port`` is at rest only, validated\nlike create (422 ``port_out_of_range`` / 409 ``port_taken``), and rewrites\n``server-port`` in the at-rest ``server.properties`` so the DB and bind port\nstay in sync. A storage failure during that rewrite is 503 ``seed_failed`` and\nleaves the row unchanged.",
+        "description": "Edit a server's name/config/game port.\n\n**Permission gate (issue #458).** The required permission branches by the\nchanged-key set rather than a single fixed code: an edit that changes only the\nbackup-scheduling key (``backup_interval_hours``) requires ``backup:schedule``;\nany other change (name, game port, or any non-scheduling config key) requires\n``server:update``; a mixed edit requires both. ``server:update`` no longer\nimplies scheduling \u2014 a ``backup:schedule``-only holder may set the cadence, and\na ``server:update``-only holder may not. A missing required permission is 403\ncarrying it in the ``permission`` member (#425/#555). Layer-1 membership is\nchecked at the edge (non-member -> 404); the changed-key decision runs in the\nuse case, which has the current config in hand.\n\n**Error precedence (issue #115).** Validation runs first: config-bounds\n(``config_too_large`` / ``config_invalid_shape``), the cadence-override\nfloor/shape (``invalid_snapshot_interval`` / ``invalid_backup_schedule``), and\nthe game-port range (``port_out_of_range``) are 422 and are evaluated before\nany state gating. Only then does the state gate apply: an edit that requires\nthe server to be at rest but finds it running is 409 (``server_not_stopped``).\nSo a below-floor override (or an out-of-range port) on a running server is a\n422, not a 409.\n\n**Cadence-knob split (issue #115).** A config update that touches only the\noperationally-safe keys (``snapshot_interval_seconds``,\n``backup_interval_hours``) bypasses the at-rest gate and is accepted while the\nserver runs; the schedulers pick up the new value on their next tick. Any\nother config change \u2014 a name change, or a game-port change \u2014 keeps the at-rest\nrequirement.\n\n**Game port (issue #311).** A new ``game_port`` is at rest only, validated\nlike create (422 ``port_out_of_range`` / 409 ``port_taken``), and rewrites\n``server-port`` in the at-rest ``server.properties`` so the DB and bind port\nstay in sync. A storage failure during that rewrite is 503 ``seed_failed`` and\nleaves the row unchanged.",
         "operationId": "update_server_api_communities__community_id__servers__server_id__patch",
         "parameters": [
           {

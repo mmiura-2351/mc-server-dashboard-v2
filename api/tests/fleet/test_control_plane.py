@@ -70,7 +70,7 @@ _WORKER = "22222222-2222-2222-2222-222222222222"
 
 
 def _register_message() -> pb.WorkerMessage:
-    caps = pb.WorkerCapabilities(drivers=[pb.EXECUTION_DRIVER_KIND_HOST_PROCESS])
+    caps = pb.WorkerCapabilities(drivers=[pb.EXECUTION_DRIVER_KIND_CONTAINER])
     return pb.WorkerMessage(
         correlation_id="reg-1",
         register=pb.Register(
@@ -297,7 +297,7 @@ async def test_dispatch_failure_maps_typed_code(harness: _Harness) -> None:
         worker_id=WorkerId(_WORKER),
         server_id=str(uuid.uuid4()),
         command=StartServerCommand(
-            driver=DriverKind.HOST_PROCESS,
+            driver=DriverKind.CONTAINER,
             jar_relpath="server.jar",
             minecraft_version="1.21.1",
         ),
@@ -361,7 +361,7 @@ async def test_start_carries_forge_launch_mode_on_the_wire(harness: _Harness) ->
         worker_id=WorkerId(_WORKER),
         server_id=str(uuid.uuid4()),
         command=StartServerCommand(
-            driver=DriverKind.HOST_PROCESS,
+            driver=DriverKind.CONTAINER,
             jar_relpath="server.jar",
             minecraft_version="1.21.8",
             launch_mode=LaunchMode.FORGE_ARGSFILE,
@@ -393,7 +393,7 @@ async def test_start_carries_jar_launch_mode_on_the_wire(harness: _Harness) -> N
         worker_id=WorkerId(_WORKER),
         server_id=str(uuid.uuid4()),
         command=StartServerCommand(
-            driver=DriverKind.HOST_PROCESS,
+            driver=DriverKind.CONTAINER,
             jar_relpath="server.jar",
             minecraft_version="1.21.1",
             launch_mode=LaunchMode.JAR,
@@ -425,7 +425,7 @@ async def test_start_carries_memory_limit_bytes_on_the_wire(harness: _Harness) -
         worker_id=WorkerId(_WORKER),
         server_id=str(uuid.uuid4()),
         command=StartServerCommand(
-            driver=DriverKind.HOST_PROCESS,
+            driver=DriverKind.CONTAINER,
             jar_relpath="server.jar",
             minecraft_version="1.21.1",
             memory_limit_bytes=2048 * 1024 * 1024,
@@ -457,7 +457,7 @@ async def test_start_carries_cpu_millis_on_the_wire(harness: _Harness) -> None:
         worker_id=WorkerId(_WORKER),
         server_id=str(uuid.uuid4()),
         command=StartServerCommand(
-            driver=DriverKind.HOST_PROCESS,
+            driver=DriverKind.CONTAINER,
             jar_relpath="server.jar",
             minecraft_version="1.21.1",
             cpu_millis=2000,
@@ -489,7 +489,7 @@ async def test_start_defaults_memory_limit_bytes_to_zero(harness: _Harness) -> N
         worker_id=WorkerId(_WORKER),
         server_id=str(uuid.uuid4()),
         command=StartServerCommand(
-            driver=DriverKind.HOST_PROCESS,
+            driver=DriverKind.CONTAINER,
             jar_relpath="server.jar",
             minecraft_version="1.21.1",
         ),

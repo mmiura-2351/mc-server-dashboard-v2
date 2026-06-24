@@ -63,7 +63,6 @@ from mc_server_dashboard_api.servers.domain.cpu_allocation import (
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
-    ExecutionBackendImmutableError,
     InvalidBackupScheduleError,
     InvalidCpuAllocationError,
     InvalidMemoryLimitError,
@@ -72,10 +71,8 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PortAlreadyTakenError,
     PortOutOfRangeError,
     PortRangeExhaustedError,
-    RemovedExecutionBackendError,
     ServerNotFoundError,
     ServerNotStoppedError,
-    UnknownExecutionBackendError,
     UnknownServerTypeError,
     UnsupportedEditionError,
     WorkingSetSeedFailedError,
@@ -89,7 +86,6 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
     DesiredState,
-    ExecutionBackend,
     ObservedState,
     ServerId,
     ServerName,
@@ -161,7 +157,6 @@ def _server_entity(
         mc_edition="java",
         mc_version="1.21.1",
         server_type=ServerType.VANILLA,
-        execution_backend=ExecutionBackend.HOST_PROCESS,
         config={"motd": "hi"},
         desired_state=desired,
         observed_state=observed,
@@ -211,7 +206,6 @@ def _create_body() -> dict[str, object]:
         "mc_edition": "java",
         "mc_version": "1.21.1",
         "server_type": "vanilla",
-        "execution_backend": "host_process",
         "config": {"motd": "hi"},
     }
 
@@ -242,7 +236,6 @@ def test_authorized_member_creates_server() -> None:
     resp = client.post(f"/api/communities/{community}/servers", json=_create_body())
     assert resp.status_code == 201
     assert resp.json()["desired_state"] == "stopped"
-    assert resp.json()["execution_backend"] == "host_process"
 
 
 def test_create_forwards_and_reads_back_memory_limit() -> None:
@@ -395,30 +388,6 @@ def test_create_unknown_server_type_is_422() -> None:
     assert resp.json()["reason"] == "invalid_server_type"
 
 
-def test_create_unknown_backend_is_422() -> None:
-    app = _app(
-        member=True,
-        allow=True,
-        create=_FakeUseCase(error=UnknownExecutionBackendError("x")),
-    )
-    client = next(_client(app))
-    resp = client.post(f"/api/communities/{uuid.uuid4()}/servers", json=_create_body())
-    assert resp.status_code == 422
-    assert resp.json()["reason"] == "invalid_execution_backend"
-
-
-def test_create_removed_backend_is_422() -> None:
-    app = _app(
-        member=True,
-        allow=True,
-        create=_FakeUseCase(error=RemovedExecutionBackendError("host_process")),
-    )
-    client = next(_client(app))
-    resp = client.post(f"/api/communities/{uuid.uuid4()}/servers", json=_create_body())
-    assert resp.status_code == 422
-    assert resp.json()["reason"] == "removed_execution_backend"
-
-
 def test_create_unsupported_type_forge_is_422() -> None:
     app = _app(
         member=True,
@@ -557,21 +526,6 @@ def test_create_game_port_out_of_schema_bound_is_422() -> None:
     )
     assert resp.status_code == 422
     assert use_case.calls == []
-
-
-def test_update_backend_immutable_is_409() -> None:
-    app = _app(
-        member=True,
-        allow=True,
-        update=_FakeUseCase(error=ExecutionBackendImmutableError("x")),
-    )
-    client = next(_client(app))
-    resp = client.patch(
-        f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
-        json={"execution_backend": "container"},
-    )
-    assert resp.status_code == 409
-    assert resp.json()["reason"] == "execution_backend_immutable"
 
 
 def test_update_while_running_is_409() -> None:

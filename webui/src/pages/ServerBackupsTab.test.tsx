@@ -66,7 +66,6 @@ function server(overrides: Record<string, unknown> = {}) {
     server_type: "paper",
     mc_edition: "java",
     mc_version: "1.21.6",
-    execution_backend: "container",
     game_port: 25565,
     desired_state: "running",
     observed_state: "running",
