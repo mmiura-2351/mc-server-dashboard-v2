@@ -126,7 +126,7 @@ func driveRow(t *testing.T, row contractRow) session.CommandResult {
 	case "driver_unavailable":
 		m := newManager(t, &fakeDriver{}, nil)
 		cmd := contractCmd(t, row.Kind, serverID)
-		cmd.Driver = "container" // not offered by the test worker (only host-process)
+		cmd.Driver = "nonexistent" // not offered by the test worker (only container)
 		return m.Handle(ctx, cmd)
 
 	case "port_conflict":
@@ -175,7 +175,7 @@ func contractCmd(t *testing.T, kind, serverID string) session.Command {
 	cmd := session.Command{CommandID: "contract", ServerID: serverID, Kind: kind}
 	switch kind {
 	case "StartServer":
-		cmd.Driver = "host-process"
+		cmd.Driver = "container"
 		cmd.MinecraftVersion = "1.21"
 	case "ServerCommand":
 		cmd.Line = "list"

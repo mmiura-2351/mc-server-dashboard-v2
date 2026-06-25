@@ -294,7 +294,7 @@ func TestSnapshotTriggerRunningServerRconUnavailableRefusesQuiesceUnavailable(t 
 	tr := &fakeTransfer{}
 	scratch := t.TempDir()
 	openErr := errors.New("dial tcp 127.0.0.1:25575: connect: connection refused")
-	m := New(map[string]execution.ExecutionDriver{"host-process": &fakeDriver{}}, scratch,
+	m := New(map[string]execution.ExecutionDriver{"container": &fakeDriver{}}, scratch,
 		func(context.Context, string, string) (execution.ServerControl, error) { return nil, openErr }).
 		WithTransfer(tr)
 
