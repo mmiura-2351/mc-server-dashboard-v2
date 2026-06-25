@@ -558,6 +558,7 @@ export const en = {
   "files.error.goToContentTab": "Go to {noun} tab",
   "files.error.tooLarge": "That file exceeds the 512 MiB upload limit.",
   "files.error.generic": "Something went wrong. Please try again.",
+  "files.dropZone": "Drop files here to upload",
 
   // Players tab — attached op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8).
   // One contiguous block to keep merge conflicts with sibling i18n PRs minimal.
