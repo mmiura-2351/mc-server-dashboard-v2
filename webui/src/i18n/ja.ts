@@ -602,6 +602,13 @@ export const ja: Record<TranslationKey, string> = {
   "files.error.moveConflict":
     "{name} を移動できません：移動先に同名のファイルが既に存在します。",
 
+  // Context menu (issue #1465).
+  "files.contextMenu.open": "開く",
+  "files.contextMenu.download": "ダウンロード",
+  "files.contextMenu.downloadZip": "ZIPとしてダウンロード",
+  "files.contextMenu.rename": "名前を変更",
+  "files.contextMenu.delete": "削除",
+
   // Players tab — applied op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8).
   "players.heading": "適用中のグループ",
   "players.loading": "グループを読み込んでいます…",

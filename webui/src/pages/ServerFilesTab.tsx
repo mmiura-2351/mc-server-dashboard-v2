@@ -27,7 +27,7 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, api, postFormWithProgress } from "../api/client.ts";
 import { downloadFile } from "../api/download.ts";
 import { apiPath } from "../api/path.ts";
@@ -313,6 +313,91 @@ export function ServerFilesTab({
     [dropEnabled, uploadFiles],
   );
 
+  // Keyboard-triggered delete/rename (issue #1465). These are separate from
+  // the inline button flows in Listing so the parent can drive them from
+  // keydown without refactoring Listing's internal state.
+  const [kbDeleteOpen, setKbDeleteOpen] = useState(false);
+  const [kbRenameEntry, setKbRenameEntry] = useState<DirEntry | null>(null);
+
+  const kbDelete = useMutation({
+    mutationFn: async () => {
+      const paths = Array.from(selected);
+      for (const path of paths) {
+        await api.delete(
+          `${filesBase(communityId, serverId)}?path=${encodeURIComponent(path)}` as never,
+        );
+      }
+    },
+    onSuccess: () => {
+      showToast(t("files.deleted"), "success");
+      setKbDeleteOpen(false);
+      setSelected(new Set());
+      refetchList();
+      setOpenFile(null);
+    },
+    onError: (error) => {
+      setKbDeleteOpen(false);
+      onError(error);
+      refetchList();
+    },
+  });
+
+  // Keyboard shortcuts: Delete/Backspace, F2, Ctrl+A, Escape.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      // Skip when a text input / textarea / contenteditable is focused — the
+      // user is typing, not issuing a file command.
+      const tag = (e.target as HTMLElement).tagName;
+      if (
+        tag === "INPUT" ||
+        tag === "TEXTAREA" ||
+        (e.target as HTMLElement).isContentEditable
+      ) {
+        return;
+      }
+
+      if (e.key === "Delete" || e.key === "Backspace") {
+        if (selected.size > 0 && canEdit && !notAtRest) {
+          e.preventDefault();
+          setKbDeleteOpen(true);
+        }
+        return;
+      }
+
+      if (e.key === "F2") {
+        if (selected.size === 1 && canEdit && !notAtRest && listing.data) {
+          e.preventDefault();
+          const selectedPath = Array.from(selected)[0];
+          const name = selectedPath.split("/").at(-1) ?? selectedPath;
+          const entry = listing.data.entries.find((en) => en.name === name);
+          if (entry) {
+            setKbRenameEntry(entry);
+          }
+        }
+        return;
+      }
+
+      if (e.key === "a" && (e.ctrlKey || e.metaKey)) {
+        if (listing.data) {
+          e.preventDefault();
+          setSelected(
+            new Set(listing.data.entries.map((en) => joinPath(dir, en.name))),
+          );
+        }
+        return;
+      }
+
+      if (e.key === "Escape") {
+        if (selected.size > 0) {
+          setSelected(new Set());
+        }
+      }
+    };
+
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [selected, canEdit, notAtRest, listing.data, dir]);
+
   if (!canRead) {
     return <p className="field-error">{t("files.denied")}</p>;
   }
@@ -415,6 +500,7 @@ export function ServerFilesTab({
               communityId={communityId}
               serverId={serverId}
               canEdit={canEdit}
+              running={notAtRest}
               openFile={openFile}
               onEnter={enter}
               onChanged={() => {
@@ -447,6 +533,32 @@ export function ServerFilesTab({
           )}
         </div>
       </div>
+      <SimpleConfirmDialog
+        open={kbDeleteOpen}
+        title={t("files.delete.dialogTitle")}
+        body={
+          selected.size > 1
+            ? t("files.bulk.delete.dialogBody", { count: selected.size })
+            : t("files.delete.dialogBody")
+        }
+        confirmLabel={t("files.delete.confirm")}
+        onConfirm={() => kbDelete.mutate()}
+        onClose={() => setKbDeleteOpen(false)}
+      />
+      {kbRenameEntry !== null && (
+        <RenameDialog
+          entry={kbRenameEntry}
+          dir={dir}
+          communityId={communityId}
+          serverId={serverId}
+          onClose={() => setKbRenameEntry(null)}
+          onRenamed={() => {
+            setKbRenameEntry(null);
+            refetchList();
+          }}
+          onError={onError}
+        />
+      )}
     </section>
   );
 }
@@ -660,6 +772,7 @@ function Listing({
   communityId,
   serverId,
   canEdit,
+  running,
   openFile,
   onEnter,
   onChanged,
@@ -675,6 +788,7 @@ function Listing({
   communityId: string;
   serverId: string;
   canEdit: boolean;
+  running: boolean;
   openFile: string | null;
   onEnter: (entry: DirEntry) => void;
   onChanged: () => void;
@@ -688,6 +802,11 @@ function Listing({
   const { showToast } = useToast();
   const [renaming, setRenaming] = useState<DirEntry | null>(null);
   const [deleting, setDeleting] = useState<DirEntry | null>(null);
+  const [contextMenu, setContextMenu] = useState<{
+    entry: DirEntry;
+    x: number;
+    y: number;
+  } | null>(null);
 
   const remove = useMutation({
     mutationFn: (entry: DirEntry) =>
@@ -776,6 +895,10 @@ function Listing({
               className={`file-row${openFile === full ? " active" : ""}${selected.has(full) ? " selected" : ""}${isDropTarget ? " drop-target" : ""}`}
               draggable={dropEnabled}
               onDragStart={(e) => handleDragStart(e, full)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setContextMenu({ entry, x: e.clientX, y: e.clientY });
+              }}
               {...(entry.is_dir
                 ? {
                     onDragOver: (e: React.DragEvent) =>
@@ -888,7 +1011,118 @@ function Listing({
         onConfirm={() => deleting !== null && remove.mutate(deleting)}
         onClose={() => setDeleting(null)}
       />
+      {contextMenu !== null && (
+        <FileContextMenu
+          entry={contextMenu.entry}
+          x={contextMenu.x}
+          y={contextMenu.y}
+          canEdit={canEdit}
+          running={running}
+          onClose={() => setContextMenu(null)}
+          onOpen={() => {
+            setContextMenu(null);
+            onEnter(contextMenu.entry);
+          }}
+          onDownload={() => {
+            setContextMenu(null);
+            download.mutate(contextMenu.entry);
+          }}
+          onRename={() => {
+            setContextMenu(null);
+            setRenaming(contextMenu.entry);
+          }}
+          onDelete={() => {
+            setContextMenu(null);
+            setDeleting(contextMenu.entry);
+          }}
+        />
+      )}
     </>
+  );
+}
+
+// ── Context menu ────────────────────────────────────────────────────────────
+
+function FileContextMenu({
+  entry,
+  x,
+  y,
+  canEdit,
+  running,
+  onClose,
+  onOpen,
+  onDownload,
+  onRename,
+  onDelete,
+}: {
+  entry: DirEntry;
+  x: number;
+  y: number;
+  canEdit: boolean;
+  running: boolean;
+  onClose: () => void;
+  onOpen: () => void;
+  onDownload: () => void;
+  onRename: () => void;
+  onDelete: () => void;
+}) {
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClick = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        onClose();
+      }
+    };
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopImmediatePropagation();
+        onClose();
+      }
+    };
+    document.addEventListener("mousedown", handleClick);
+    // Use capture phase so this fires before the parent's bubble-phase
+    // keydown handler (registered earlier on document). Without this,
+    // the parent's Escape handler clears selection before
+    // stopImmediatePropagation can prevent it.
+    document.addEventListener("keydown", handleKey, true);
+    return () => {
+      document.removeEventListener("mousedown", handleClick);
+      document.removeEventListener("keydown", handleKey, true);
+    };
+  }, [onClose]);
+
+  return (
+    <div
+      ref={menuRef}
+      className="file-context-menu"
+      style={{ top: y, left: x }}
+      role="menu"
+    >
+      <button type="button" role="menuitem" onClick={onOpen}>
+        {t("files.contextMenu.open")}
+      </button>
+      <button type="button" role="menuitem" onClick={onDownload}>
+        {entry.is_dir
+          ? t("files.contextMenu.downloadZip")
+          : t("files.contextMenu.download")}
+      </button>
+      {canEdit && !running && (
+        <button type="button" role="menuitem" onClick={onRename}>
+          {t("files.contextMenu.rename")}
+        </button>
+      )}
+      {canEdit && !running && (
+        <button
+          type="button"
+          role="menuitem"
+          className="danger"
+          onClick={onDelete}
+        >
+          {t("files.contextMenu.delete")}
+        </button>
+      )}
+    </div>
   );
 }
 
