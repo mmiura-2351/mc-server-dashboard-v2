@@ -1165,3 +1165,226 @@ describe("ServerFilesTab multi-select", () => {
     ).not.toBeInTheDocument();
   });
 });
+
+describe("ServerFilesTab bulk operations", () => {
+  it("shows bulk action buttons only when items are selected", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "a.txt", is_dir: false },
+        { name: "b.txt", is_dir: false },
+      ]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    // No bulk buttons when nothing is selected.
+    expect(
+      screen.queryByRole("button", { name: t("files.bulk.delete") }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: t("files.bulk.download") }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: t("files.bulk.move") }),
+    ).not.toBeInTheDocument();
+
+    // Select an item.
+    fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
+
+    // Bulk buttons now visible.
+    expect(
+      screen.getByRole("button", { name: t("files.bulk.delete") }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: t("files.bulk.download") }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: t("files.bulk.move") }),
+    ).toBeInTheDocument();
+  });
+
+  it("bulk deletes selected items after confirmation", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "a.txt", is_dir: false },
+        { name: "b.txt", is_dir: false },
+      ]),
+    });
+    mockApi.delete.mockResolvedValue(undefined);
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    // Select both items.
+    fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "b.txt" }), {
+      ctrlKey: true,
+    });
+
+    // Click bulk delete.
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.bulk.delete") }),
+    );
+    // Confirmation dialog appears.
+    expect(
+      screen.getByText(t("files.bulk.delete.dialogBody", { count: 2 })),
+    ).toBeInTheDocument();
+
+    // Confirm.
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.bulk.delete.confirm") }),
+    );
+
+    await waitFor(() => expect(mockApi.delete).toHaveBeenCalledTimes(2));
+    expect(mockApi.delete).toHaveBeenCalledWith(`${FILES_BASE}?path=a.txt`);
+    expect(mockApi.delete).toHaveBeenCalledWith(`${FILES_BASE}?path=b.txt`);
+  });
+
+  it("bulk downloads selected files sequentially", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "a.txt", is_dir: false },
+        { name: "b.txt", is_dir: false },
+      ]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    // Select both items.
+    fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "b.txt" }), {
+      ctrlKey: true,
+    });
+
+    // Click bulk download.
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.bulk.download") }),
+    );
+
+    await waitFor(() =>
+      expect(mockDownload.downloadFile).toHaveBeenCalledTimes(2),
+    );
+    expect(mockDownload.downloadFile).toHaveBeenCalledWith(
+      `${FILES_BASE}/download?path=a.txt`,
+      "a.txt",
+    );
+    expect(mockDownload.downloadFile).toHaveBeenCalledWith(
+      `${FILES_BASE}/download?path=b.txt`,
+      "b.txt",
+    );
+  });
+
+  it("bulk moves selected items to a destination directory", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "a.txt", is_dir: false },
+        { name: "b.txt", is_dir: false },
+      ]),
+    });
+    mockApi.post.mockResolvedValue(undefined);
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    // Select both items.
+    fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "b.txt" }), {
+      ctrlKey: true,
+    });
+
+    // Click bulk move.
+    fireEvent.click(screen.getByRole("button", { name: t("files.bulk.move") }));
+
+    // The move dialog appears; enter destination.
+    const input = screen.getByLabelText(t("files.bulk.move.destLabel"));
+    fireEvent.change(input, { target: { value: "archive" } });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.bulk.move.confirm") }),
+    );
+
+    await waitFor(() => expect(mockApi.post).toHaveBeenCalledTimes(2));
+    const calls = mockApi.post.mock.calls;
+    expect(calls[0][0]).toBe(`${FILES_BASE}/rename`);
+    expect(JSON.parse(calls[0][1].body)).toEqual({
+      from: "a.txt",
+      to: "archive/a.txt",
+    });
+    expect(calls[1][0]).toBe(`${FILES_BASE}/rename`);
+    expect(JSON.parse(calls[1][1].body)).toEqual({
+      from: "b.txt",
+      to: "archive/b.txt",
+    });
+  });
+
+  it("disables bulk delete and move when server is running", async () => {
+    routeGet({
+      detail: server({ observed_state: "running", desired_state: "running" }),
+      list: listing([
+        { name: "a.txt", is_dir: false },
+        { name: "b.txt", is_dir: false },
+      ]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
+
+    const deleteBtn = screen.getByRole("button", {
+      name: t("files.bulk.delete"),
+    });
+    const moveBtn = screen.getByRole("button", {
+      name: t("files.bulk.move"),
+    });
+    const downloadBtn = screen.getByRole("button", {
+      name: t("files.bulk.download"),
+    });
+
+    expect(deleteBtn).toBeDisabled();
+    expect(moveBtn).toBeDisabled();
+    // Download should still be enabled (read-only operation).
+    expect(downloadBtn).not.toBeDisabled();
+  });
+
+  it("reports partial failure on bulk delete", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "a.txt", is_dir: false },
+        { name: "b.txt", is_dir: false },
+      ]),
+    });
+    mockApi.delete.mockImplementation((path: string) => {
+      if (path.includes("a.txt")) return Promise.resolve(undefined);
+      return Promise.reject(new ApiError(500, undefined));
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "b.txt" }), {
+      ctrlKey: true,
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.bulk.delete") }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.bulk.delete.confirm") }),
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          t("files.bulk.delete.partial", { done: 1, total: 2, failed: 1 }),
+        ),
+      ).toBeInTheDocument(),
+    );
+  });
+});

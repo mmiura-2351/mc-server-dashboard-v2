@@ -326,6 +326,7 @@ export function ServerFilesTab({
           }
         }}
         onDeselectAll={() => setSelected(new Set())}
+        onClearSelection={() => setSelected(new Set())}
       />
       <Crumbs
         dir={dir}
@@ -1009,7 +1010,7 @@ function HistoryDrawer({
   );
 }
 
-// ── Toolbar: upload + mkdir ──────────────────────────────────────────────────
+// ── Toolbar: upload + mkdir + bulk operations ───────────────────────────────
 
 function Toolbar({
   dir,
@@ -1026,6 +1027,7 @@ function Toolbar({
   totalCount,
   onSelectAll,
   onDeselectAll,
+  onClearSelection,
 }: {
   dir: string;
   communityId: string;
@@ -1041,10 +1043,124 @@ function Toolbar({
   totalCount: number;
   onSelectAll: () => void;
   onDeselectAll: () => void;
+  onClearSelection: () => void;
 }) {
   const MAX_UPLOAD_BYTES = 512 * 1024 * 1024;
   const { showToast } = useToast();
   const [mkdirOpen, setMkdirOpen] = useState(false);
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+  const [bulkMoveOpen, setBulkMoveOpen] = useState(false);
+  const [bulkBusy, setBulkBusy] = useState(false);
+
+  const bulkDelete = async () => {
+    const paths = Array.from(selected);
+    const total = paths.length;
+    setBulkDeleteOpen(false);
+    setBulkBusy(true);
+    let done = 0;
+    let failed = 0;
+    for (const path of paths) {
+      showToast(t("files.bulk.delete.progress", { done, total }), "success");
+      try {
+        await api.delete(
+          `${filesBase(communityId, serverId)}?path=${encodeURIComponent(path)}` as never,
+        );
+        done += 1;
+      } catch (error) {
+        failed += 1;
+        if (onForbiddenCheck(error)) break;
+      }
+    }
+    setBulkBusy(false);
+    if (failed === 0) {
+      showToast(t("files.bulk.delete.done", { done }), "success");
+    } else {
+      showToast(
+        t("files.bulk.delete.partial", { done, total, failed }),
+        "error",
+      );
+    }
+    onClearSelection();
+    onChanged();
+  };
+
+  const bulkDownload = async () => {
+    const paths = Array.from(selected);
+    const total = paths.length;
+    setBulkBusy(true);
+    let done = 0;
+    let failed = 0;
+    for (const path of paths) {
+      showToast(t("files.bulk.download.progress", { done, total }), "success");
+      const filename = path.split("/").at(-1) ?? path;
+      try {
+        await downloadFile(
+          `${apiPath(
+            "/api/communities/{community_id}/servers/{server_id}/files/download",
+            { community_id: communityId, server_id: serverId },
+          )}?path=${encodeURIComponent(path)}`,
+          filename,
+        );
+        done += 1;
+      } catch (error) {
+        failed += 1;
+        if (onForbiddenCheck(error)) break;
+      }
+    }
+    setBulkBusy(false);
+    if (failed === 0) {
+      showToast(t("files.bulk.download.done", { done }), "success");
+    } else {
+      showToast(
+        t("files.bulk.download.partial", { done, total, failed }),
+        "error",
+      );
+    }
+  };
+
+  const bulkMove = async (dest: string) => {
+    const paths = Array.from(selected);
+    const total = paths.length;
+    setBulkMoveOpen(false);
+    setBulkBusy(true);
+    let done = 0;
+    let failed = 0;
+    for (const path of paths) {
+      showToast(t("files.bulk.move.progress", { done, total }), "success");
+      const name = path.split("/").at(-1) ?? path;
+      const to = dest === "" ? name : `${dest}/${name}`;
+      try {
+        await api.post(
+          apiPath(
+            "/api/communities/{community_id}/servers/{server_id}/files/rename",
+            { community_id: communityId, server_id: serverId },
+          ),
+          { body: JSON.stringify({ from: path, to }) },
+        );
+        done += 1;
+      } catch (error) {
+        failed += 1;
+        if (onForbiddenCheck(error)) break;
+      }
+    }
+    setBulkBusy(false);
+    if (failed === 0) {
+      showToast(t("files.bulk.move.done", { done }), "success");
+    } else {
+      showToast(t("files.bulk.move.partial", { done, total, failed }), "error");
+    }
+    onClearSelection();
+    onChanged();
+  };
+
+  /** Check if error is a 403 and route through onForbidden; returns true if so. */
+  const onForbiddenCheck = (error: unknown): boolean => {
+    if (error instanceof ApiError && error.status === 403) {
+      onError(error);
+      return true;
+    }
+    return false;
+  };
 
   if (!canEdit) {
     return null;
@@ -1075,6 +1191,36 @@ function Toolbar({
                 {t("files.selectedCount", { count: selected.size })}
               </span>
             )}
+          </>
+        )}
+        {selected.size > 0 && (
+          <>
+            <button
+              type="button"
+              className="btn sm danger"
+              disabled={running || bulkBusy}
+              title={atRestTooltip}
+              onClick={() => setBulkDeleteOpen(true)}
+            >
+              {t("files.bulk.delete")}
+            </button>
+            <button
+              type="button"
+              className="btn sm"
+              disabled={bulkBusy}
+              onClick={() => void bulkDownload()}
+            >
+              {t("files.bulk.download")}
+            </button>
+            <button
+              type="button"
+              className="btn sm"
+              disabled={running || bulkBusy}
+              title={atRestTooltip}
+              onClick={() => setBulkMoveOpen(true)}
+            >
+              {t("files.bulk.move")}
+            </button>
           </>
         )}
         <label className="files-extract">
@@ -1138,7 +1284,45 @@ function Toolbar({
           onError={onError}
         />
       )}
+      <SimpleConfirmDialog
+        open={bulkDeleteOpen}
+        title={t("files.bulk.delete.dialogTitle")}
+        body={t("files.bulk.delete.dialogBody", { count: selected.size })}
+        confirmLabel={t("files.bulk.delete.confirm")}
+        onConfirm={() => void bulkDelete()}
+        onClose={() => setBulkDeleteOpen(false)}
+      />
+      {bulkMoveOpen && (
+        <BulkMoveDialog
+          onClose={() => setBulkMoveOpen(false)}
+          onMove={(dest) => void bulkMove(dest)}
+        />
+      )}
     </>
+  );
+}
+
+// ── Bulk move dialog ────────────────────────────────────────────────────────
+
+function BulkMoveDialog({
+  onClose,
+  onMove,
+}: {
+  onClose: () => void;
+  onMove: (dest: string) => void;
+}) {
+  const [dest, setDest] = useState("");
+
+  return (
+    <PromptDialog
+      title={t("files.bulk.move.dialogTitle")}
+      label={t("files.bulk.move.destLabel")}
+      value={dest}
+      onChange={setDest}
+      confirmLabel={t("files.bulk.move.confirm")}
+      onConfirm={() => onMove(dest.trim())}
+      onClose={onClose}
+    />
   );
 }
 
