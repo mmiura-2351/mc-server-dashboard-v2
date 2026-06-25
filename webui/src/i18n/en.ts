@@ -591,6 +591,13 @@ export const en = {
   "files.error.moveConflict":
     "Cannot move {name}: a file with that name already exists in the destination.",
 
+  // Context menu (issue #1465).
+  "files.contextMenu.open": "Open",
+  "files.contextMenu.download": "Download",
+  "files.contextMenu.downloadZip": "Download as ZIP",
+  "files.contextMenu.rename": "Rename",
+  "files.contextMenu.delete": "Delete",
+
   // Players tab — attached op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8).
   // One contiguous block to keep merge conflicts with sibling i18n PRs minimal.
   "players.heading": "Applied groups",

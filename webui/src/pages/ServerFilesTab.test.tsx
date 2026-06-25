@@ -1587,3 +1587,408 @@ describe("ServerFilesTab drag-and-drop file organization", () => {
     expect(screen.queryByText(t("files.dropZone"))).not.toBeInTheDocument();
   });
 });
+
+// ── Context menu (issue #1465) ────────────────────────────────────────────────
+
+describe("Context menu", () => {
+  it("shows context menu on right-click with correct items for a file", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "readme.txt", is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+
+    const row = (await screen.findByText(/readme\.txt/)).closest(
+      "li",
+    ) as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+
+    expect(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.open") }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.download") }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.rename") }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.delete") }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows 'Download as ZIP' for folders", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "world", is_dir: true }]),
+    });
+    renderPage();
+    await openFiles();
+
+    const row = (await screen.findByText(/world/)).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+
+    expect(
+      screen.getByRole("menuitem", {
+        name: t("files.contextMenu.downloadZip"),
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("hides rename/delete when canEdit is false", async () => {
+    mockCan = (code) => code !== "file:edit";
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "readme.txt", is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+
+    const row = (await screen.findByText(/readme\.txt/)).closest(
+      "li",
+    ) as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+
+    expect(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.open") }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("menuitem", { name: t("files.contextMenu.rename") }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("menuitem", { name: t("files.contextMenu.delete") }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("hides rename/delete when server is running", async () => {
+    routeGet({
+      detail: server({ observed_state: "running", desired_state: "running" }),
+      list: listing([{ name: "readme.txt", is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+
+    const row = (await screen.findByText(/readme\.txt/)).closest(
+      "li",
+    ) as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+
+    expect(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.open") }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("menuitem", { name: t("files.contextMenu.rename") }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("menuitem", { name: t("files.contextMenu.delete") }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("dismisses context menu on click outside", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "readme.txt", is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+
+    const row = (await screen.findByText(/readme\.txt/)).closest(
+      "li",
+    ) as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+
+    // Click outside the menu.
+    fireEvent.mouseDown(document.body);
+
+    await waitFor(() =>
+      expect(screen.queryByRole("menu")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("dismisses context menu on Escape", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "readme.txt", is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+
+    const row = (await screen.findByText(/readme\.txt/)).closest(
+      "li",
+    ) as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    await waitFor(() =>
+      expect(screen.queryByRole("menu")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("triggers delete when delete menu item is clicked", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "readme.txt", is_dir: false }]),
+    });
+    mockApi.delete.mockResolvedValue(undefined);
+    renderPage();
+    await openFiles();
+
+    const row = (await screen.findByText(/readme\.txt/)).closest(
+      "li",
+    ) as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.delete") }),
+    );
+
+    // The delete confirmation dialog should appear.
+    expect(
+      await screen.findByText(t("files.delete.dialogTitle")),
+    ).toBeInTheDocument();
+  });
+
+  it("triggers rename when rename menu item is clicked", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "readme.txt", is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+
+    const row = (await screen.findByText(/readme\.txt/)).closest(
+      "li",
+    ) as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.rename") }),
+    );
+
+    // The rename dialog should appear.
+    expect(await screen.findByText(t("files.newName"))).toBeInTheDocument();
+  });
+
+  it("triggers download when download menu item is clicked", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "readme.txt", is_dir: false }]),
+    });
+    mockDownload.downloadFile.mockResolvedValue(undefined);
+    renderPage();
+    await openFiles();
+
+    const row = (await screen.findByText(/readme\.txt/)).closest(
+      "li",
+    ) as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.download") }),
+    );
+
+    await waitFor(() => expect(mockDownload.downloadFile).toHaveBeenCalled());
+  });
+});
+
+// ── Keyboard shortcuts (issue #1465) ──────────────────────────────────────────
+
+describe("Keyboard shortcuts", () => {
+  it("Ctrl+A selects all items", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "a.txt", is_dir: false },
+        { name: "b.txt", is_dir: false },
+      ]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    fireEvent.keyDown(document, { key: "a", ctrlKey: true });
+
+    // Both checkboxes should be checked.
+    await waitFor(() => {
+      expect(screen.getByRole("checkbox", { name: "a.txt" })).toBeChecked();
+      expect(screen.getByRole("checkbox", { name: "b.txt" })).toBeChecked();
+    });
+  });
+
+  it("Cmd+A (meta) selects all items", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "a.txt", is_dir: false },
+        { name: "b.txt", is_dir: false },
+      ]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    fireEvent.keyDown(document, { key: "a", metaKey: true });
+
+    await waitFor(() => {
+      expect(screen.getByRole("checkbox", { name: "a.txt" })).toBeChecked();
+      expect(screen.getByRole("checkbox", { name: "b.txt" })).toBeChecked();
+    });
+  });
+
+  it("Escape clears selection", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "a.txt", is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    // Select the file first.
+    fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
+    expect(screen.getByRole("checkbox", { name: "a.txt" })).toBeChecked();
+
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    await waitFor(() =>
+      expect(screen.getByRole("checkbox", { name: "a.txt" })).not.toBeChecked(),
+    );
+  });
+
+  it("Delete opens delete confirmation for selected item", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "a.txt", is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    // Select the file first.
+    fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
+
+    fireEvent.keyDown(document, { key: "Delete" });
+
+    expect(
+      await screen.findByText(t("files.delete.dialogTitle")),
+    ).toBeInTheDocument();
+  });
+
+  it("Backspace opens delete confirmation for selected item", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "a.txt", is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
+
+    fireEvent.keyDown(document, { key: "Backspace" });
+
+    expect(
+      await screen.findByText(t("files.delete.dialogTitle")),
+    ).toBeInTheDocument();
+  });
+
+  it("Delete does nothing when no items are selected", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "a.txt", is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    fireEvent.keyDown(document, { key: "Delete" });
+
+    expect(
+      screen.queryByText(t("files.delete.dialogTitle")),
+    ).not.toBeInTheDocument();
+  });
+
+  it("Delete does nothing when server is running", async () => {
+    routeGet({
+      detail: server({ observed_state: "running", desired_state: "running" }),
+      list: listing([{ name: "a.txt", is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    // Can't select (checkboxes hidden when running for this test -- actually
+    // canEdit is still true, just running). Let me check.
+    // Actually checkboxes appear when canEdit is true regardless of running.
+    // So we can still select.
+    fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
+
+    fireEvent.keyDown(document, { key: "Delete" });
+
+    // No dialog because server is not at rest.
+    expect(
+      screen.queryByText(t("files.delete.dialogTitle")),
+    ).not.toBeInTheDocument();
+  });
+
+  it("F2 opens rename dialog for single selected item", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "readme.txt", is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/readme\.txt/);
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "readme.txt" }));
+
+    fireEvent.keyDown(document, { key: "F2" });
+
+    expect(await screen.findByText(t("files.newName"))).toBeInTheDocument();
+  });
+
+  it("F2 does nothing when multiple items are selected", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "a.txt", is_dir: false },
+        { name: "b.txt", is_dir: false },
+      ]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    // Select both items.
+    fireEvent.keyDown(document, { key: "a", ctrlKey: true });
+
+    fireEvent.keyDown(document, { key: "F2" });
+
+    // No rename dialog.
+    expect(screen.queryByText(t("files.newName"))).not.toBeInTheDocument();
+  });
+
+  it("keyboard shortcuts are suppressed when typing in an input", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "a.txt", is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    // Focus the search input.
+    const searchInput = screen.getByRole("searchbox");
+
+    // Fire Ctrl+A on the input — should NOT select all files.
+    fireEvent.keyDown(searchInput, { key: "a", ctrlKey: true });
+
+    expect(screen.getByRole("checkbox", { name: "a.txt" })).not.toBeChecked();
+  });
+});
