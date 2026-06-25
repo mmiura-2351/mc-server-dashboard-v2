@@ -143,6 +143,18 @@ export function ServerFilesTab({
   const [openFile, setOpenFile] = useState<string | null>(null);
   const [contentDirNotice, setContentDirNotice] = useState(false);
 
+  // Multi-select: track selected file paths and the last-clicked index for
+  // shift-click range selection. Selection clears on directory change.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const lastClickedIdx = useRef<number | null>(null);
+
+  /** Wrapper around setDir that clears the selection state. */
+  const navigateDir = (next: string) => {
+    setDir(next);
+    setSelected(new Set());
+    lastClickedIdx.current = null;
+  };
+
   const onError = (error: unknown) => {
     if (onForbidden(error)) {
       return;
@@ -263,7 +275,7 @@ export function ServerFilesTab({
   const enter = (entry: DirEntry) => {
     const next = joinPath(dir, entry.name);
     if (entry.is_dir) {
-      setDir(next);
+      navigateDir(next);
       setOpenFile(null);
     } else {
       setOpenFile(next);
@@ -272,7 +284,7 @@ export function ServerFilesTab({
 
   // Point the browser at the hit's parent directory and open it in the viewer.
   const openHit = (path: string) => {
-    setDir(parentDir(path));
+    navigateDir(parentDir(path));
     setOpenFile(path);
   };
 
@@ -304,11 +316,21 @@ export function ServerFilesTab({
         upload={upload}
         onChanged={refetchList}
         onError={onError}
+        selected={selected}
+        totalCount={listing.data?.entries.length ?? 0}
+        onSelectAll={() => {
+          if (listing.data) {
+            setSelected(
+              new Set(listing.data.entries.map((e) => joinPath(dir, e.name))),
+            );
+          }
+        }}
+        onDeselectAll={() => setSelected(new Set())}
       />
       <Crumbs
         dir={dir}
         onNavigate={(next) => {
-          setDir(next);
+          navigateDir(next);
           setOpenFile(null);
         }}
       />
@@ -352,6 +374,9 @@ export function ServerFilesTab({
                 setOpenFile(null);
               }}
               onError={onError}
+              selected={selected}
+              onSelectionChange={setSelected}
+              lastClickedIdx={lastClickedIdx}
             />
           )}
         </div>
@@ -554,6 +579,9 @@ function Listing({
   onEnter,
   onChanged,
   onError,
+  selected,
+  onSelectionChange,
+  lastClickedIdx,
 }: {
   listing: DirListing;
   dir: string;
@@ -564,6 +592,9 @@ function Listing({
   onEnter: (entry: DirEntry) => void;
   onChanged: () => void;
   onError: (error: unknown) => void;
+  selected: Set<string>;
+  onSelectionChange: (next: Set<string>) => void;
+  lastClickedIdx: React.MutableRefObject<number | null>;
 }) {
   const { showToast } = useToast();
   const [renaming, setRenaming] = useState<DirEntry | null>(null);
@@ -607,13 +638,52 @@ function Listing({
         <div className="notice warn">{t("files.truncated")}</div>
       )}
       <ul className="file-list">
-        {listing.entries.map((entry) => {
+        {listing.entries.map((entry, idx) => {
           const full = joinPath(dir, entry.name);
           return (
             <li
               key={entry.name}
-              className={`file-row${openFile === full ? " active" : ""}`}
+              className={`file-row${openFile === full ? " active" : ""}${selected.has(full) ? " selected" : ""}`}
             >
+              {canEdit && (
+                <input
+                  type="checkbox"
+                  className="file-select"
+                  aria-label={entry.name}
+                  checked={selected.has(full)}
+                  onChange={() => {
+                    /* handled by onClick for modifier-key support */
+                  }}
+                  onClick={(e) => {
+                    if (e.shiftKey && lastClickedIdx.current !== null) {
+                      const lo = Math.min(lastClickedIdx.current, idx);
+                      const hi = Math.max(lastClickedIdx.current, idx);
+                      const next = new Set(selected);
+                      for (let i = lo; i <= hi; i++) {
+                        next.add(joinPath(dir, listing.entries[i].name));
+                      }
+                      onSelectionChange(next);
+                    } else if (e.ctrlKey || e.metaKey) {
+                      const next = new Set(selected);
+                      if (next.has(full)) {
+                        next.delete(full);
+                      } else {
+                        next.add(full);
+                      }
+                      onSelectionChange(next);
+                    } else {
+                      const next = new Set(selected);
+                      if (next.has(full)) {
+                        next.delete(full);
+                      } else {
+                        next.add(full);
+                      }
+                      onSelectionChange(next);
+                    }
+                    lastClickedIdx.current = idx;
+                  }}
+                />
+              )}
               <button
                 type="button"
                 className="file-name"
@@ -952,6 +1022,10 @@ function Toolbar({
   upload,
   onChanged,
   onError,
+  selected,
+  totalCount,
+  onSelectAll,
+  onDeselectAll,
 }: {
   dir: string;
   communityId: string;
@@ -963,6 +1037,10 @@ function Toolbar({
   upload: { mutate: (file: File) => void };
   onChanged: () => void;
   onError: (error: unknown) => void;
+  selected: Set<string>;
+  totalCount: number;
+  onSelectAll: () => void;
+  onDeselectAll: () => void;
 }) {
   const MAX_UPLOAD_BYTES = 512 * 1024 * 1024;
   const { showToast } = useToast();
@@ -979,6 +1057,26 @@ function Toolbar({
   return (
     <>
       <div className="toolbar-row files-toolbar">
+        {totalCount > 0 && (
+          <>
+            <button
+              type="button"
+              className="btn sm ghost"
+              onClick={
+                selected.size === totalCount ? onDeselectAll : onSelectAll
+              }
+            >
+              {selected.size === totalCount
+                ? t("files.deselectAll")
+                : t("files.selectAll")}
+            </button>
+            {selected.size > 0 && (
+              <span className="files-selected-count">
+                {t("files.selectedCount", { count: selected.size })}
+              </span>
+            )}
+          </>
+        )}
         <label className="files-extract">
           <input
             type="checkbox"
