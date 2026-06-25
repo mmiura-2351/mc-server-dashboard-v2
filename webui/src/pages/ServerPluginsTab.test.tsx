@@ -1238,8 +1238,8 @@ describe("ServerPluginsTab remove confirmation dialog (#1353)", () => {
           el.classList.contains("danger") &&
           !el.classList.contains("sm"),
       );
-    expect(confirmBtn).toBeDefined();
-    fireEvent.click(confirmBtn!);
+    if (!confirmBtn) throw new Error("confirm button not found");
+    fireEvent.click(confirmBtn);
     await waitFor(() => {
       expect(mockApi.delete).toHaveBeenCalledWith(
         expect.stringContaining("/plugins/p1"),
