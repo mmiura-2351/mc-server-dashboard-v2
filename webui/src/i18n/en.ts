@@ -563,6 +563,28 @@ export const en = {
   "files.selectAll": "Select all",
   "files.deselectAll": "Deselect all",
   "files.selectedCount": "{count} selected",
+  // Bulk operations (issue #1463).
+  "files.bulk.delete": "Delete selected",
+  "files.bulk.delete.dialogTitle": "Delete selected items",
+  "files.bulk.delete.dialogBody":
+    "This permanently deletes {count} selected item(s). This action cannot be undone.",
+  "files.bulk.delete.confirm": "Delete all",
+  "files.bulk.delete.progress": "Deleting {done}/{total}…",
+  "files.bulk.delete.done": "Deleted {done} item(s).",
+  "files.bulk.delete.partial":
+    "Deleted {done}/{total} item(s). {failed} failed.",
+  "files.bulk.download": "Download selected",
+  "files.bulk.download.progress": "Downloading {done}/{total}…",
+  "files.bulk.download.done": "Downloaded {done} file(s).",
+  "files.bulk.download.partial":
+    "Downloaded {done}/{total} file(s). {failed} failed.",
+  "files.bulk.move": "Move selected",
+  "files.bulk.move.dialogTitle": "Move selected items",
+  "files.bulk.move.destLabel": "Destination directory",
+  "files.bulk.move.confirm": "Move",
+  "files.bulk.move.progress": "Moving {done}/{total}…",
+  "files.bulk.move.done": "Moved {done} item(s).",
+  "files.bulk.move.partial": "Moved {done}/{total} item(s). {failed} failed.",
 
   // Players tab — attached op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8).
   // One contiguous block to keep merge conflicts with sibling i18n PRs minimal.

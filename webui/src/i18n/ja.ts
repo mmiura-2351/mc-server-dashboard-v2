@@ -573,6 +573,29 @@ export const ja: Record<TranslationKey, string> = {
   "files.selectAll": "すべて選択",
   "files.deselectAll": "すべて解除",
   "files.selectedCount": "{count}件選択中",
+  // Bulk operations (issue #1463).
+  "files.bulk.delete": "選択項目を削除",
+  "files.bulk.delete.dialogTitle": "選択項目の削除",
+  "files.bulk.delete.dialogBody":
+    "選択した{count}件を完全に削除します。この操作は元に戻せません。",
+  "files.bulk.delete.confirm": "すべて削除",
+  "files.bulk.delete.progress": "削除中 {done}/{total}…",
+  "files.bulk.delete.done": "{done}件を削除しました。",
+  "files.bulk.delete.partial":
+    "{done}/{total}件を削除しました。{failed}件失敗しました。",
+  "files.bulk.download": "選択項目をダウンロード",
+  "files.bulk.download.progress": "ダウンロード中 {done}/{total}…",
+  "files.bulk.download.done": "{done}件をダウンロードしました。",
+  "files.bulk.download.partial":
+    "{done}/{total}件をダウンロードしました。{failed}件失敗しました。",
+  "files.bulk.move": "選択項目を移動",
+  "files.bulk.move.dialogTitle": "選択項目の移動",
+  "files.bulk.move.destLabel": "移動先ディレクトリ",
+  "files.bulk.move.confirm": "移動",
+  "files.bulk.move.progress": "移動中 {done}/{total}…",
+  "files.bulk.move.done": "{done}件を移動しました。",
+  "files.bulk.move.partial":
+    "{done}/{total}件を移動しました。{failed}件失敗しました。",
 
   // Players tab — applied op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8).
   "players.heading": "適用中のグループ",
