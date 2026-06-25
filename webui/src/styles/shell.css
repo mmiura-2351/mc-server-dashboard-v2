@@ -1558,6 +1558,27 @@ button.link:focus-visible {
 .file-row.active {
   color: var(--accent);
 }
+/* Drop zone overlay (issue #1461): visual feedback when files are dragged over
+ * the file-tree pane. The overlay covers the pane with a dashed border and
+ * translucent background so the user knows where the files will land. */
+.file-tree.drop-zone-active {
+  position: relative;
+}
+.drop-zone-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px dashed var(--accent);
+  border-radius: 8px;
+  background: var(--bg-inset);
+  opacity: 0.9;
+  z-index: 10;
+  font-size: 15px;
+  color: var(--accent);
+  pointer-events: none;
+}
 .file-name {
   background: none;
   border: none;

@@ -879,3 +879,108 @@ describe("ServerFilesTab 409 reason toasts", () => {
     expect(notice).toHaveTextContent(t("serverDetail.tab.mods"));
   });
 });
+
+describe("ServerFilesTab drag-and-drop upload", () => {
+  function dataTransfer(files: File[]): DataTransfer {
+    return { files } as unknown as DataTransfer;
+  }
+
+  it("shows a drop zone overlay when files are dragged over the listing", async () => {
+    routeGet({ detail: server(), list: listing([]) });
+    renderPage();
+    await openFiles();
+    await screen.findByText(t("files.empty"));
+
+    const tree = document.querySelector(".file-tree") as HTMLElement;
+    fireEvent.dragEnter(tree, { dataTransfer: dataTransfer([]) });
+
+    expect(screen.getByText(t("files.dropZone"))).toBeInTheDocument();
+  });
+
+  it("hides the overlay when files are dragged away", async () => {
+    routeGet({ detail: server(), list: listing([]) });
+    renderPage();
+    await openFiles();
+    await screen.findByText(t("files.empty"));
+
+    const tree = document.querySelector(".file-tree") as HTMLElement;
+    fireEvent.dragEnter(tree, { dataTransfer: dataTransfer([]) });
+    expect(screen.getByText(t("files.dropZone"))).toBeInTheDocument();
+
+    fireEvent.dragLeave(tree, { dataTransfer: dataTransfer([]) });
+    expect(screen.queryByText(t("files.dropZone"))).not.toBeInTheDocument();
+  });
+
+  it("uploads a dropped file to the current directory", async () => {
+    routeGet({ detail: server(), list: listing([]) });
+    mockPostFormWithProgress.mockResolvedValue(undefined);
+    renderPage();
+    await openFiles();
+    await screen.findByText(t("files.empty"));
+
+    const tree = document.querySelector(".file-tree") as HTMLElement;
+    const file = new File(["hello"], "readme.txt");
+    fireEvent.drop(tree, { dataTransfer: dataTransfer([file]) });
+
+    await waitFor(() => expect(mockPostFormWithProgress).toHaveBeenCalled());
+    const [url, form] = mockPostFormWithProgress.mock.calls[0];
+    expect(url).toBe(`${FILES_BASE}/upload?path=&extract=false`);
+    expect((form as FormData).get("file")).toBe(file);
+  });
+
+  it("does not show overlay or upload when canEdit is false", async () => {
+    mockCan = (code) => code !== "file:edit";
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "a.txt", is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    const tree = document.querySelector(".file-tree") as HTMLElement;
+    fireEvent.dragEnter(tree, { dataTransfer: dataTransfer([]) });
+    expect(screen.queryByText(t("files.dropZone"))).not.toBeInTheDocument();
+
+    const file = new File(["x"], "bad.txt");
+    fireEvent.drop(tree, { dataTransfer: dataTransfer([file]) });
+    expect(mockPostFormWithProgress).not.toHaveBeenCalled();
+  });
+
+  it("does not show overlay or upload when server is running", async () => {
+    routeGet({
+      detail: server({ observed_state: "running", desired_state: "running" }),
+      list: listing([]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(t("files.runningNotice"));
+
+    const tree = document.querySelector(".file-tree") as HTMLElement;
+    fireEvent.dragEnter(tree, { dataTransfer: dataTransfer([]) });
+    expect(screen.queryByText(t("files.dropZone"))).not.toBeInTheDocument();
+
+    const file = new File(["x"], "bad.txt");
+    fireEvent.drop(tree, { dataTransfer: dataTransfer([file]) });
+    expect(mockPostFormWithProgress).not.toHaveBeenCalled();
+  });
+
+  it("respects the extract ZIP toggle for dropped .zip files", async () => {
+    routeGet({ detail: server(), list: listing([]) });
+    mockPostFormWithProgress.mockResolvedValue(undefined);
+    renderPage();
+    await openFiles();
+    await screen.findByText(t("files.empty"));
+
+    // Check the Extract ZIP checkbox
+    fireEvent.click(screen.getByLabelText(t("files.extractZip")));
+
+    const tree = document.querySelector(".file-tree") as HTMLElement;
+    const file = new File(["pk"], "world.zip");
+    fireEvent.drop(tree, { dataTransfer: dataTransfer([file]) });
+
+    await waitFor(() => expect(mockPostFormWithProgress).toHaveBeenCalled());
+    const [url] = mockPostFormWithProgress.mock.calls[0];
+    expect(url).toBe(`${FILES_BASE}/upload?path=&extract=true`);
+  });
+});

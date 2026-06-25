@@ -568,6 +568,7 @@ export const ja: Record<TranslationKey, string> = {
   "files.error.tooLarge":
     "ファイルサイズが512 MiBのアップロード上限を超えています。",
   "files.error.generic": "問題が発生しました。もう一度お試しください。",
+  "files.dropZone": "ここにファイルをドロップしてアップロード",
 
   // Players tab — applied op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8).
   "players.heading": "適用中のグループ",

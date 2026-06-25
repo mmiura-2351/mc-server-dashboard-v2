@@ -27,7 +27,7 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { ApiError, api, postFormWithProgress } from "../api/client.ts";
 import { downloadFile } from "../api/download.ts";
 import { apiPath } from "../api/path.ts";
@@ -167,6 +167,95 @@ export function ServerFilesTab({
   const refetchList = () =>
     queryClient.invalidateQueries({ queryKey: listKey });
 
+  const serverId = server.id;
+
+  // Upload state lifted from Toolbar so the drop zone can share it.
+  const MAX_UPLOAD_BYTES = 512 * 1024 * 1024;
+  const [extract, setExtract] = useState(false);
+  const progress = useUploadProgress();
+
+  const upload = useMutation({
+    mutationFn: (file: File) => {
+      const form = new FormData();
+      form.append("file", file);
+      progress.start(file.size);
+      return postFormWithProgress(
+        `${apiPath(
+          "/api/communities/{community_id}/servers/{server_id}/files/upload",
+          { community_id: communityId, server_id: serverId },
+        )}?path=${encodeURIComponent(dir)}&extract=${extract}` as never,
+        form,
+        progress.onProgress,
+      );
+    },
+    onSuccess: () => {
+      progress.reset();
+      showToast(t("files.uploaded"), "success");
+      refetchList();
+    },
+    onError: (error) => {
+      progress.reset();
+      onError(error);
+    },
+  });
+
+  // Sequential upload for multiple files (e.g. drag-and-drop).
+  const uploadFiles = useCallback(
+    async (files: File[]) => {
+      for (const file of files) {
+        if (file.size > MAX_UPLOAD_BYTES) {
+          showToast(t("files.error.tooLarge"), "error");
+          continue;
+        }
+        await upload.mutateAsync(file);
+      }
+    },
+    [upload, showToast],
+  );
+
+  // Drag-and-drop state for the file-tree drop zone.
+  const dragCounter = useRef(0);
+  const [dragOver, setDragOver] = useState(false);
+  const dropEnabled = canEdit && !notAtRest;
+
+  const onDragEnter = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      if (!dropEnabled) return;
+      dragCounter.current += 1;
+      if (dragCounter.current === 1) setDragOver(true);
+    },
+    [dropEnabled],
+  );
+
+  const onDragLeave = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      if (!dropEnabled) return;
+      dragCounter.current -= 1;
+      if (dragCounter.current === 0) setDragOver(false);
+    },
+    [dropEnabled],
+  );
+
+  const onDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+  }, []);
+
+  const onDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      dragCounter.current = 0;
+      setDragOver(false);
+      if (!dropEnabled) return;
+      const files = Array.from(e.dataTransfer.files);
+      if (files.length > 0) {
+        void uploadFiles(files);
+      }
+    },
+    [dropEnabled, uploadFiles],
+  );
+
   if (!canRead) {
     return <p className="field-error">{t("files.denied")}</p>;
   }
@@ -207,9 +296,12 @@ export function ServerFilesTab({
       <Toolbar
         dir={dir}
         communityId={communityId}
-        serverId={server.id}
+        serverId={serverId}
         canEdit={canEdit}
         running={notAtRest}
+        extract={extract}
+        setExtract={setExtract}
+        upload={upload}
         onChanged={refetchList}
         onError={onError}
       />
@@ -220,8 +312,28 @@ export function ServerFilesTab({
           setOpenFile(null);
         }}
       />
+      {progress.active && (
+        <UploadProgress
+          loaded={progress.loaded}
+          total={progress.total}
+          percent={progress.percent}
+          elapsedMs={progress.elapsedMs}
+        />
+      )}
       <div className="file-layout">
-        <div className="card file-tree">
+        {/* biome-ignore lint/a11y/noStaticElementInteractions: drop zone uses drag events only; keyboard upload is via the toolbar button */}
+        <div
+          className={`card file-tree${dragOver ? " drop-zone-active" : ""}`}
+          onDragEnter={onDragEnter}
+          onDragLeave={onDragLeave}
+          onDragOver={onDragOver}
+          onDrop={onDrop}
+        >
+          {dragOver && (
+            <div className="drop-zone-overlay">
+              <span>{t("files.dropZone")}</span>
+            </div>
+          )}
           {listing.isPending ? (
             <p className="sub">{t("files.loading")}</p>
           ) : listing.isError ? (
@@ -231,7 +343,7 @@ export function ServerFilesTab({
               listing={listing.data}
               dir={dir}
               communityId={communityId}
-              serverId={server.id}
+              serverId={serverId}
               canEdit={canEdit}
               openFile={openFile}
               onEnter={enter}
@@ -835,6 +947,9 @@ function Toolbar({
   serverId,
   canEdit,
   running,
+  extract,
+  setExtract,
+  upload,
   onChanged,
   onError,
 }: {
@@ -843,39 +958,15 @@ function Toolbar({
   serverId: string;
   canEdit: boolean;
   running: boolean;
+  extract: boolean;
+  setExtract: (v: boolean) => void;
+  upload: { mutate: (file: File) => void };
   onChanged: () => void;
   onError: (error: unknown) => void;
 }) {
   const MAX_UPLOAD_BYTES = 512 * 1024 * 1024;
   const { showToast } = useToast();
   const [mkdirOpen, setMkdirOpen] = useState(false);
-  const [extract, setExtract] = useState(false);
-  const progress = useUploadProgress();
-
-  const upload = useMutation({
-    mutationFn: (file: File) => {
-      const form = new FormData();
-      form.append("file", file);
-      progress.start(file.size);
-      return postFormWithProgress(
-        `${apiPath(
-          "/api/communities/{community_id}/servers/{server_id}/files/upload",
-          { community_id: communityId, server_id: serverId },
-        )}?path=${encodeURIComponent(dir)}&extract=${extract}` as never,
-        form,
-        progress.onProgress,
-      );
-    },
-    onSuccess: () => {
-      progress.reset();
-      showToast(t("files.uploaded"), "success");
-      onChanged();
-    },
-    onError: (error) => {
-      progress.reset();
-      onError(error);
-    },
-  });
 
   if (!canEdit) {
     return null;
@@ -936,14 +1027,6 @@ function Toolbar({
           {t("files.newFolder")}
         </button>
       </div>
-      {progress.active && (
-        <UploadProgress
-          loaded={progress.loaded}
-          total={progress.total}
-          percent={progress.percent}
-          elapsedMs={progress.elapsedMs}
-        />
-      )}
       {mkdirOpen && (
         <MkdirDialog
           dir={dir}
