@@ -882,7 +882,10 @@ describe("ServerFilesTab 409 reason toasts", () => {
 
 describe("ServerFilesTab drag-and-drop upload", () => {
   function dataTransfer(files: File[]): DataTransfer {
-    return { files } as unknown as DataTransfer;
+    return {
+      files,
+      types: files.length > 0 ? ["Files"] : [],
+    } as unknown as DataTransfer;
   }
 
   it("shows a drop zone overlay when files are dragged over the listing", async () => {
@@ -1386,5 +1389,201 @@ describe("ServerFilesTab bulk operations", () => {
         ),
       ).toBeInTheDocument(),
     );
+  });
+});
+
+describe("ServerFilesTab drag-and-drop file organization", () => {
+  function internalDataTransfer(paths: string[]): DataTransfer {
+    const data: Record<string, string> = {
+      "application/x-file-move": JSON.stringify(paths),
+    };
+    return {
+      types: ["application/x-file-move"],
+      getData: (type: string) => data[type] ?? "",
+      setData: (type: string, value: string) => {
+        data[type] = value;
+      },
+      effectAllowed: "move",
+      files: [] as unknown as FileList,
+    } as unknown as DataTransfer;
+  }
+
+  it("moves a file into a folder on drop", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "world", is_dir: true },
+        { name: "readme.txt", is_dir: false },
+      ]),
+    });
+    mockApi.post.mockResolvedValue(undefined);
+    renderPage();
+    await openFiles();
+    await screen.findByText(/readme\.txt/);
+
+    // Find the folder row (the <li> that contains "world").
+    const folderBtn = screen.getByText(/world/).closest("li") as HTMLElement;
+    const dt = internalDataTransfer(["readme.txt"]);
+
+    fireEvent.dragOver(folderBtn, { dataTransfer: dt });
+    fireEvent.drop(folderBtn, { dataTransfer: dt });
+
+    await waitFor(() => expect(mockApi.post).toHaveBeenCalled());
+    const [url, init] = mockApi.post.mock.calls[0];
+    expect(url).toBe(`${FILES_BASE}/rename`);
+    expect(JSON.parse((init as { body: string }).body)).toEqual({
+      from: "readme.txt",
+      to: "world/readme.txt",
+    });
+  });
+
+  it("moves a file to root via breadcrumb drop", async () => {
+    // Start in the "config" subdirectory.
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.includes("path=config") && path.includes("list=")) {
+        return Promise.resolve(
+          listing([{ name: "settings.yml", is_dir: false }]),
+        );
+      }
+      if (path.includes("/files?path=")) {
+        return Promise.resolve(listing([{ name: "config", is_dir: true }]));
+      }
+      return Promise.resolve(server());
+    });
+    mockApi.post.mockResolvedValue(undefined);
+    renderPage();
+    await openFiles();
+
+    // Navigate into "config".
+    fireEvent.click(await screen.findByText(/config/));
+    await screen.findByText(/settings\.yml/);
+
+    // Drop settings.yml onto the root breadcrumb.
+    const rootCrumb = screen.getByRole("button", { name: t("files.root") });
+    const dt = internalDataTransfer(["config/settings.yml"]);
+
+    fireEvent.dragOver(rootCrumb, { dataTransfer: dt });
+    fireEvent.drop(rootCrumb, { dataTransfer: dt });
+
+    await waitFor(() => expect(mockApi.post).toHaveBeenCalled());
+    // Find the rename call (not the search call, if any).
+    const renameCalls = mockApi.post.mock.calls.filter(
+      (call) => call[0] === `${FILES_BASE}/rename`,
+    );
+    expect(renameCalls.length).toBe(1);
+    expect(JSON.parse(renameCalls[0][1].body)).toEqual({
+      from: "config/settings.yml",
+      to: "settings.yml",
+    });
+  });
+
+  it("moves multiple selected items on drop", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "world", is_dir: true },
+        { name: "a.txt", is_dir: false },
+        { name: "b.txt", is_dir: false },
+      ]),
+    });
+    mockApi.post.mockResolvedValue(undefined);
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    // Select both files.
+    fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "b.txt" }), {
+      ctrlKey: true,
+    });
+
+    // Drop selected items onto the folder.
+    const folderRow = screen.getByText(/world/).closest("li") as HTMLElement;
+    const dt = internalDataTransfer(["a.txt", "b.txt"]);
+
+    fireEvent.drop(folderRow, { dataTransfer: dt });
+
+    await waitFor(() => expect(mockApi.post).toHaveBeenCalledTimes(2));
+    const calls = mockApi.post.mock.calls;
+    expect(JSON.parse(calls[0][1].body)).toEqual({
+      from: "a.txt",
+      to: "world/a.txt",
+    });
+    expect(JSON.parse(calls[1][1].body)).toEqual({
+      from: "b.txt",
+      to: "world/b.txt",
+    });
+  });
+
+  it("shows a conflict error on 409", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "world", is_dir: true },
+        { name: "readme.txt", is_dir: false },
+      ]),
+    });
+    mockApi.post.mockRejectedValue(
+      new ApiError(409, { reason: "already_exists" }),
+    );
+    renderPage();
+    await openFiles();
+    await screen.findByText(/readme\.txt/);
+
+    const folderRow = screen.getByText(/world/).closest("li") as HTMLElement;
+    const dt = internalDataTransfer(["readme.txt"]);
+
+    fireEvent.drop(folderRow, { dataTransfer: dt });
+
+    expect(
+      await screen.findByText(
+        t("files.error.moveConflict", { name: "readme.txt" }),
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("does not make rows draggable when canEdit is false", async () => {
+    mockCan = (code) => code !== "file:edit";
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "a.txt", is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    const row = screen.getByText(/a\.txt/).closest("li") as HTMLElement;
+    expect(row).not.toHaveAttribute("draggable", "true");
+  });
+
+  it("does not make rows draggable when server is running", async () => {
+    routeGet({
+      detail: server({ observed_state: "running", desired_state: "running" }),
+      list: listing([{ name: "a.txt", is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    const row = screen.getByText(/a\.txt/).closest("li") as HTMLElement;
+    expect(row).not.toHaveAttribute("draggable", "true");
+  });
+
+  it("does not show upload overlay for internal drags", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "a.txt", is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    const tree = document.querySelector(".file-tree") as HTMLElement;
+    const dt = internalDataTransfer(["a.txt"]);
+
+    fireEvent.dragEnter(tree, { dataTransfer: dt });
+
+    // The upload overlay should NOT appear for internal drags.
+    expect(screen.queryByText(t("files.dropZone"))).not.toBeInTheDocument();
   });
 });

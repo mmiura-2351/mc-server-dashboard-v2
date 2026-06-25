@@ -1582,6 +1582,20 @@ button.link:focus-visible {
 .file-row.selected {
   background: var(--bg-inset);
 }
+/* Drop target highlighting for internal drag-and-drop file organization
+ * (issue #1464). Folders in the listing and breadcrumb buttons receive this
+ * class while a dragged file hovers over them. */
+.file-row.drop-target {
+  background: var(--accent-bg, rgba(59, 130, 246, 0.15));
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.crumb.drop-target {
+  background: var(--accent-bg, rgba(59, 130, 246, 0.15));
+  border-radius: 3px;
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
 .file-select {
   flex-shrink: 0;
   cursor: pointer;
