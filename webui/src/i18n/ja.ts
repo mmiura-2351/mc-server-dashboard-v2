@@ -597,6 +597,11 @@ export const ja: Record<TranslationKey, string> = {
   "files.bulk.move.partial":
     "{done}/{total}件を移動しました。{failed}件失敗しました。",
 
+  // Drag-and-drop file organization (issue #1464).
+  "files.moved": "移動しました。",
+  "files.error.moveConflict":
+    "{name} を移動できません：移動先に同名のファイルが既に存在します。",
+
   // Players tab — applied op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8).
   "players.heading": "適用中のグループ",
   "players.loading": "グループを読み込んでいます…",

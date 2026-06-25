@@ -586,6 +586,11 @@ export const en = {
   "files.bulk.move.done": "Moved {done} item(s).",
   "files.bulk.move.partial": "Moved {done}/{total} item(s). {failed} failed.",
 
+  // Drag-and-drop file organization (issue #1464).
+  "files.moved": "Moved.",
+  "files.error.moveConflict":
+    "Cannot move {name}: a file with that name already exists in the destination.",
+
   // Players tab — attached op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8).
   // One contiguous block to keep merge conflicts with sibling i18n PRs minimal.
   "players.heading": "Applied groups",

@@ -225,6 +225,41 @@ export function ServerFilesTab({
     [upload, showToast],
   );
 
+  /** Move files via POST /files/rename. Handles multi-select. */
+  const moveFiles = async (paths: string[], destDir: string) => {
+    let movedAny = false;
+    for (const from of paths) {
+      const name = from.split("/").at(-1) ?? from;
+      const to = destDir === "" ? name : `${destDir}/${name}`;
+      if (from === to) continue;
+      try {
+        await api.post(
+          apiPath(
+            "/api/communities/{community_id}/servers/{server_id}/files/rename",
+            { community_id: communityId, server_id: serverId },
+          ),
+          { body: JSON.stringify({ from, to }) },
+        );
+        movedAny = true;
+      } catch (error) {
+        if (
+          error instanceof ApiError &&
+          error.status === 409 &&
+          error.reason === "destination_exists"
+        ) {
+          showToast(t("files.error.moveConflict", { name }), "error");
+        } else {
+          onError(error);
+        }
+      }
+    }
+    if (movedAny) {
+      showToast(t("files.moved"), "success");
+      refetchList();
+      setSelected(new Set());
+    }
+  };
+
   // Drag-and-drop state for the file-tree drop zone.
   const dragCounter = useRef(0);
   const [dragOver, setDragOver] = useState(false);
@@ -233,7 +268,11 @@ export function ServerFilesTab({
   const onDragEnter = useCallback(
     (e: React.DragEvent) => {
       e.preventDefault();
-      if (!dropEnabled) return;
+      if (
+        !dropEnabled ||
+        e.dataTransfer.types.includes("application/x-file-move")
+      )
+        return;
       dragCounter.current += 1;
       if (dragCounter.current === 1) setDragOver(true);
     },
@@ -243,7 +282,11 @@ export function ServerFilesTab({
   const onDragLeave = useCallback(
     (e: React.DragEvent) => {
       e.preventDefault();
-      if (!dropEnabled) return;
+      if (
+        !dropEnabled ||
+        e.dataTransfer.types.includes("application/x-file-move")
+      )
+        return;
       dragCounter.current -= 1;
       if (dragCounter.current === 0) setDragOver(false);
     },
@@ -260,6 +303,8 @@ export function ServerFilesTab({
       dragCounter.current = 0;
       setDragOver(false);
       if (!dropEnabled) return;
+      // Ignore internal file-move drags — those are handled by folder/crumb targets.
+      if (e.dataTransfer.types.includes("application/x-file-move")) return;
       const files = Array.from(e.dataTransfer.files);
       if (files.length > 0) {
         void uploadFiles(files);
@@ -334,6 +379,8 @@ export function ServerFilesTab({
           navigateDir(next);
           setOpenFile(null);
         }}
+        dropEnabled={dropEnabled}
+        onMoveTo={moveFiles}
       />
       {progress.active && (
         <UploadProgress
@@ -378,6 +425,8 @@ export function ServerFilesTab({
               selected={selected}
               onSelectionChange={setSelected}
               lastClickedIdx={lastClickedIdx}
+              dropEnabled={dropEnabled}
+              onMoveTo={moveFiles}
             />
           )}
         </div>
@@ -407,13 +456,47 @@ export function ServerFilesTab({
 function Crumbs({
   dir,
   onNavigate,
+  dropEnabled,
+  onMoveTo,
 }: {
   dir: string;
   onNavigate: (path: string) => void;
+  dropEnabled: boolean;
+  onMoveTo: (paths: string[], destDir: string) => Promise<void>;
 }) {
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
+
+  const crumbDrop = (targetDir: string) => ({
+    onDragOver: (e: React.DragEvent) => {
+      if (
+        !dropEnabled ||
+        !e.dataTransfer.types.includes("application/x-file-move")
+      )
+        return;
+      e.preventDefault();
+      setDropTarget(targetDir);
+    },
+    onDragLeave: () => setDropTarget(null),
+    onDrop: (e: React.DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setDropTarget(null);
+      if (!dropEnabled) return;
+      const raw = e.dataTransfer.getData("application/x-file-move");
+      if (!raw) return;
+      const paths = JSON.parse(raw) as string[];
+      void onMoveTo(paths, targetDir);
+    },
+  });
+
   return (
     <div className="file-crumbs">
-      <button type="button" className="crumb" onClick={() => onNavigate("")}>
+      <button
+        type="button"
+        className={`crumb${dropTarget === "" ? " drop-target" : ""}`}
+        onClick={() => onNavigate("")}
+        {...crumbDrop("")}
+      >
         {t("files.root")}
       </button>
       {breadcrumbs(dir).map((crumb) => (
@@ -421,8 +504,9 @@ function Crumbs({
           {" / "}
           <button
             type="button"
-            className="crumb"
+            className={`crumb${dropTarget === crumb.path ? " drop-target" : ""}`}
             onClick={() => onNavigate(crumb.path)}
+            {...crumbDrop(crumb.path)}
           >
             {crumb.name}
           </button>
@@ -583,6 +667,8 @@ function Listing({
   selected,
   onSelectionChange,
   lastClickedIdx,
+  dropEnabled,
+  onMoveTo,
 }: {
   listing: DirListing;
   dir: string;
@@ -596,6 +682,8 @@ function Listing({
   selected: Set<string>;
   onSelectionChange: (next: Set<string>) => void;
   lastClickedIdx: React.MutableRefObject<number | null>;
+  dropEnabled: boolean;
+  onMoveTo: (paths: string[], destDir: string) => Promise<void>;
 }) {
   const { showToast } = useToast();
   const [renaming, setRenaming] = useState<DirEntry | null>(null);
@@ -629,9 +717,49 @@ function Listing({
     onError,
   });
 
+  // Drop-target state: which folder name is currently highlighted.
+  const [folderDropTarget, setFolderDropTarget] = useState<string | null>(null);
+
   if (listing.entries.length === 0) {
     return <p className="sub">{t("files.empty")}</p>;
   }
+
+  const handleDragStart = (e: React.DragEvent, full: string) => {
+    if (!dropEnabled) {
+      e.preventDefault();
+      return;
+    }
+    // If the dragged item is part of the selection, move all selected items.
+    // Otherwise move just the dragged item.
+    const paths = selected.has(full) ? Array.from(selected) : [full];
+    e.dataTransfer.setData("application/x-file-move", JSON.stringify(paths));
+    e.dataTransfer.effectAllowed = "move";
+  };
+
+  const handleFolderDragOver = (e: React.DragEvent, entryName: string) => {
+    if (
+      !dropEnabled ||
+      !e.dataTransfer.types.includes("application/x-file-move")
+    )
+      return;
+    e.preventDefault();
+    e.stopPropagation();
+    setFolderDropTarget(entryName);
+  };
+
+  const handleFolderDragLeave = () => setFolderDropTarget(null);
+
+  const handleFolderDrop = (e: React.DragEvent, entry: DirEntry) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setFolderDropTarget(null);
+    if (!dropEnabled) return;
+    const raw = e.dataTransfer.getData("application/x-file-move");
+    if (!raw) return;
+    const paths = JSON.parse(raw) as string[];
+    const destDir = joinPath(dir, entry.name);
+    void onMoveTo(paths, destDir);
+  };
 
   return (
     <>
@@ -641,10 +769,21 @@ function Listing({
       <ul className="file-list">
         {listing.entries.map((entry, idx) => {
           const full = joinPath(dir, entry.name);
+          const isDropTarget = entry.is_dir && folderDropTarget === entry.name;
           return (
             <li
               key={entry.name}
-              className={`file-row${openFile === full ? " active" : ""}${selected.has(full) ? " selected" : ""}`}
+              className={`file-row${openFile === full ? " active" : ""}${selected.has(full) ? " selected" : ""}${isDropTarget ? " drop-target" : ""}`}
+              draggable={dropEnabled}
+              onDragStart={(e) => handleDragStart(e, full)}
+              {...(entry.is_dir
+                ? {
+                    onDragOver: (e: React.DragEvent) =>
+                      handleFolderDragOver(e, entry.name),
+                    onDragLeave: handleFolderDragLeave,
+                    onDrop: (e: React.DragEvent) => handleFolderDrop(e, entry),
+                  }
+                : {})}
             >
               {canEdit && (
                 <input
