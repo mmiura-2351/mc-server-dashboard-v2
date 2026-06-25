@@ -343,7 +343,6 @@ export function ServerFilesTab({
   });
 
   // Keyboard shortcuts: Delete/Backspace, F2, Ctrl+A, Escape.
-  const containerRef = useRef<HTMLElement>(null);
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       // Skip when a text input / textarea / contenteditable is focused — the
@@ -420,7 +419,7 @@ export function ServerFilesTab({
   };
 
   return (
-    <section className="files" ref={containerRef}>
+    <section className="files">
       {notAtRest && (
         <div className="notice info">{t("files.runningNotice")}</div>
       )}
@@ -1077,6 +1076,7 @@ function FileContextMenu({
     };
     const handleKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        e.stopImmediatePropagation();
         onClose();
       }
     };
