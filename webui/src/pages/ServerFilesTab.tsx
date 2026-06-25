@@ -242,7 +242,11 @@ export function ServerFilesTab({
         );
         movedAny = true;
       } catch (error) {
-        if (error instanceof ApiError && error.status === 409) {
+        if (
+          error instanceof ApiError &&
+          error.status === 409 &&
+          error.reason === "destination_exists"
+        ) {
           showToast(t("files.error.moveConflict", { name }), "error");
         } else {
           onError(error);
@@ -727,8 +731,7 @@ function Listing({
     }
     // If the dragged item is part of the selection, move all selected items.
     // Otherwise move just the dragged item.
-    const paths =
-      selected.has(full) && selected.size > 0 ? Array.from(selected) : [full];
+    const paths = selected.has(full) ? Array.from(selected) : [full];
     e.dataTransfer.setData("application/x-file-move", JSON.stringify(paths));
     e.dataTransfer.effectAllowed = "move";
   };

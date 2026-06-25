@@ -1524,7 +1524,7 @@ describe("ServerFilesTab drag-and-drop file organization", () => {
       ]),
     });
     mockApi.post.mockRejectedValue(
-      new ApiError(409, { reason: "already_exists" }),
+      new ApiError(409, { reason: "destination_exists" }),
     );
     renderPage();
     await openFiles();
