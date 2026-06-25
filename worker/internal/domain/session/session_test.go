@@ -14,7 +14,7 @@ func testCaps() Capabilities {
 	return Capabilities{
 		WorkerID:      "worker-1",
 		WorkerVersion: "test",
-		Drivers:       []string{"host-process"},
+		Drivers:       []string{"container"},
 		MaxServers:    0,
 	}
 }

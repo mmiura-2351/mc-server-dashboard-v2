@@ -180,7 +180,7 @@ func (d *rconFailDriver) Start(_ context.Context, spec execution.InstanceSpec) (
 func newManager(t *testing.T, d execution.ExecutionDriver, ctrl execution.ServerControl) *Manager {
 	t.Helper()
 	scratch := t.TempDir()
-	m := New(map[string]execution.ExecutionDriver{"host-process": d}, scratch,
+	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch,
 		func(context.Context, string, string) (execution.ServerControl, error) {
 			// The real openControl never yields a nil control without an error (main.go).
 			// Tests that don't wire one exercise RCON-free paths; surface that as a dial
@@ -199,7 +199,7 @@ func newManager(t *testing.T, d execution.ExecutionDriver, ctrl execution.Server
 }
 
 func startCmd() session.Command {
-	return session.Command{CommandID: "c1", ServerID: "s1", Kind: "StartServer", Driver: "host-process", MinecraftVersion: "1.21"}
+	return session.Command{CommandID: "c1", ServerID: "s1", Kind: "StartServer", Driver: "container", MinecraftVersion: "1.21"}
 }
 
 func TestStartServerCreatesWorkingDirAndStarts(t *testing.T) {
@@ -380,7 +380,7 @@ func TestStartUnknownDriver(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
 	cmd := startCmd()
-	cmd.Driver = "container" // not registered
+	cmd.Driver = "nonexistent" // not registered
 
 	res := m.Handle(context.Background(), cmd)
 	if res.Success || res.ErrorCode != session.CommandErrorDriverUnavailable {
@@ -550,7 +550,7 @@ func TestStopServerGracefulRedialsAfterPoisonedSaveOff(t *testing.T) {
 	freshCtrl := &fakeControl{reply: "ok", seq: &seq}
 	var dialCount int
 	scratch := t.TempDir()
-	m := New(map[string]execution.ExecutionDriver{"host-process": d}, scratch,
+	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch,
 		func(context.Context, string, string) (execution.ServerControl, error) {
 			dialCount++
 			if dialCount == 1 {
@@ -598,7 +598,7 @@ func TestStopServerGracefulCompletesWhenBothRCONCommandsFail(t *testing.T) {
 	}
 	var dialCount int
 	scratch := t.TempDir()
-	m := New(map[string]execution.ExecutionDriver{"host-process": d}, scratch,
+	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch,
 		func(context.Context, string, string) (execution.ServerControl, error) {
 			dialCount++
 			if dialCount == 1 {
@@ -641,25 +641,23 @@ func TestServerCommandForwardsOutput(t *testing.T) {
 
 // TestOpenControlReceivesRunningServerDriver pins the per-server driver
 // resolution the RCON dial host depends on: on a worker that advertises both
-// drivers and a container network, the manager must hand openControl the driver
-// that actually runs each server, so the wiring resolves a host-process server's
-// RCON to the host loopback (empty host) rather than dialing the unreachable
-// container name (issue #218). The seam carries the driver name; the empty-host
-// resolution itself lives in main.go's openControl, exercised here through the
-// driver value the manager passes.
+// drivers, the manager must hand openControl the driver that actually runs each
+// server (issue #218). The seam carries the driver name; the resolution itself
+// lives in main.go's openControl, exercised here through the driver value the
+// manager passes.
 func TestOpenControlReceivesRunningServerDriver(t *testing.T) {
 	var gotDriver string
 	scratch := t.TempDir()
 	drivers := map[string]execution.ExecutionDriver{
-		"host-process": &fakeDriver{},
-		"container":    &fakeDriver{},
+		"container": &fakeDriver{},
+		"docker":    &fakeDriver{},
 	}
 	m := New(drivers, scratch, func(_ context.Context, _ string, driver string) (execution.ServerControl, error) {
 		gotDriver = driver
 		return &fakeControl{reply: "ok"}, nil
 	})
 
-	// Start a host-process server on the mixed-driver worker.
+	// Start a container server on the mixed-driver worker.
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("StartServer = %+v, want success", res)
 	}
@@ -668,8 +666,8 @@ func TestOpenControlReceivesRunningServerDriver(t *testing.T) {
 	if !res.Success {
 		t.Fatalf("ServerCommand = %+v, want success", res)
 	}
-	if gotDriver != "host-process" {
-		t.Fatalf("openControl driver = %q, want host-process (so the host-process server resolves loopback, not the container name)", gotDriver)
+	if gotDriver != "container" {
+		t.Fatalf("openControl driver = %q, want container (the driver that started the server)", gotDriver)
 	}
 }
 
