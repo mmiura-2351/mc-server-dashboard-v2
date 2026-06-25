@@ -1579,6 +1579,17 @@ button.link:focus-visible {
   color: var(--accent);
   pointer-events: none;
 }
+.file-row.selected {
+  background: var(--bg-inset);
+}
+.file-select {
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.files-selected-count {
+  font-size: 13px;
+  color: var(--text-dim);
+}
 .file-name {
   background: none;
   border: none;

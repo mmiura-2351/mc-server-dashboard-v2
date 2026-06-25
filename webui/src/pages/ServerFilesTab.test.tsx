@@ -984,3 +984,184 @@ describe("ServerFilesTab drag-and-drop upload", () => {
     expect(url).toBe(`${FILES_BASE}/upload?path=&extract=true`);
   });
 });
+
+describe("ServerFilesTab multi-select", () => {
+  it("shows checkboxes on each file row when canEdit is true", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "a.txt", is_dir: false },
+        { name: "b.txt", is_dir: false },
+      ]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    // Each entry gets a checkbox labelled with its name.
+    expect(screen.getByRole("checkbox", { name: "a.txt" })).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "b.txt" })).toBeInTheDocument();
+  });
+
+  it("hides checkboxes when canEdit is false", async () => {
+    mockCan = (code) => code !== "file:edit";
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "a.txt", is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    expect(
+      screen.queryByRole("checkbox", { name: "a.txt" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("toggles individual selection on checkbox click", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "a.txt", is_dir: false },
+        { name: "b.txt", is_dir: false },
+      ]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    const checkA = screen.getByRole("checkbox", { name: "a.txt" });
+    fireEvent.click(checkA);
+    expect(checkA).toBeChecked();
+    expect(
+      screen.getByText(t("files.selectedCount", { count: 1 })),
+    ).toBeInTheDocument();
+
+    // Second click deselects.
+    fireEvent.click(checkA);
+    expect(checkA).not.toBeChecked();
+  });
+
+  it("selects a range with shift-click", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "a.txt", is_dir: false },
+        { name: "b.txt", is_dir: false },
+        { name: "c.txt", is_dir: false },
+        { name: "d.txt", is_dir: false },
+      ]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    // Click first item normally.
+    fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
+    // Shift-click third item to select range [a, b, c].
+    fireEvent.click(screen.getByRole("checkbox", { name: "c.txt" }), {
+      shiftKey: true,
+    });
+
+    expect(screen.getByRole("checkbox", { name: "a.txt" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "b.txt" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "c.txt" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "d.txt" })).not.toBeChecked();
+    expect(
+      screen.getByText(t("files.selectedCount", { count: 3 })),
+    ).toBeInTheDocument();
+  });
+
+  it("toggles individual items with ctrl-click", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "a.txt", is_dir: false },
+        { name: "b.txt", is_dir: false },
+      ]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "b.txt" }), {
+      ctrlKey: true,
+    });
+
+    expect(screen.getByRole("checkbox", { name: "a.txt" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "b.txt" })).toBeChecked();
+
+    // Ctrl-click again to deselect b.
+    fireEvent.click(screen.getByRole("checkbox", { name: "b.txt" }), {
+      ctrlKey: true,
+    });
+    expect(screen.getByRole("checkbox", { name: "b.txt" })).not.toBeChecked();
+  });
+
+  it("shows Select all button and selects all entries", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "a.txt", is_dir: false },
+        { name: "b.txt", is_dir: false },
+      ]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    const selectAllBtn = screen.getByRole("button", {
+      name: t("files.selectAll"),
+    });
+    fireEvent.click(selectAllBtn);
+
+    expect(screen.getByRole("checkbox", { name: "a.txt" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "b.txt" })).toBeChecked();
+    expect(
+      screen.getByText(t("files.selectedCount", { count: 2 })),
+    ).toBeInTheDocument();
+
+    // Button now says "Deselect all".
+    const deselectBtn = screen.getByRole("button", {
+      name: t("files.deselectAll"),
+    });
+    fireEvent.click(deselectBtn);
+
+    expect(screen.getByRole("checkbox", { name: "a.txt" })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "b.txt" })).not.toBeChecked();
+  });
+
+  it("clears selection on directory change", async () => {
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.includes("path=world")) {
+        return Promise.resolve(listing([{ name: "level.dat", is_dir: false }]));
+      }
+      if (path.includes("/files?path=")) {
+        return Promise.resolve(
+          listing([
+            { name: "world", is_dir: true },
+            { name: "a.txt", is_dir: false },
+          ]),
+        );
+      }
+      return Promise.resolve(server());
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    // Select a file.
+    fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
+    expect(screen.getByRole("checkbox", { name: "a.txt" })).toBeChecked();
+
+    // Navigate into a directory.
+    fireEvent.click(screen.getByText(/world/));
+    await screen.findByText(/level\.dat/);
+
+    // The selection count should be gone.
+    expect(
+      screen.queryByText(t("files.selectedCount", { count: 1 })),
+    ).not.toBeInTheDocument();
+  });
+});
