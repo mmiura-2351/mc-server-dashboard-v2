@@ -1991,4 +1991,31 @@ describe("Keyboard shortcuts", () => {
 
     expect(screen.getByRole("checkbox", { name: "a.txt" })).not.toBeChecked();
   });
+
+  it("Escape on context menu dismisses menu but preserves selection", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "readme.txt", is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/readme\.txt/);
+
+    // Select the file.
+    fireEvent.click(screen.getByRole("checkbox", { name: "readme.txt" }));
+    expect(screen.getByRole("checkbox", { name: "readme.txt" })).toBeChecked();
+
+    // Open context menu.
+    const row = screen.getByText(/readme\.txt/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+
+    // Press Escape — should dismiss menu but keep selection.
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    await waitFor(() =>
+      expect(screen.queryByRole("menu")).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole("checkbox", { name: "readme.txt" })).toBeChecked();
+  });
 });

@@ -1081,10 +1081,14 @@ function FileContextMenu({
       }
     };
     document.addEventListener("mousedown", handleClick);
-    document.addEventListener("keydown", handleKey);
+    // Use capture phase so this fires before the parent's bubble-phase
+    // keydown handler (registered earlier on document). Without this,
+    // the parent's Escape handler clears selection before
+    // stopImmediatePropagation can prevent it.
+    document.addEventListener("keydown", handleKey, true);
     return () => {
       document.removeEventListener("mousedown", handleClick);
-      document.removeEventListener("keydown", handleKey);
+      document.removeEventListener("keydown", handleKey, true);
     };
   }, [onClose]);
 
