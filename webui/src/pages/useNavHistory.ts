@@ -12,7 +12,10 @@ export type NavState = { dir: string; openFile: string | null };
  * The returned `navigate`, `goBack`, and `goForward` are referentially stable
  * (safe as useEffect deps without triggering re-runs on every render).
  */
-export function useNavHistory(initial?: NavState) {
+export function useNavHistory(
+  /** Initial state (read only on mount; later changes are ignored). */
+  initial?: NavState,
+) {
   const [, forceRender] = useState(0);
   const stateRef = useRef({
     history: [initial ?? { dir: "", openFile: null }] as NavState[],
@@ -55,5 +58,27 @@ export function useNavHistory(initial?: NavState) {
     return st.history[st.index];
   }, []);
 
-  return { current, navigate, goBack, goForward, canGoBack, canGoForward };
+  /**
+   * Replace the current position and clear forward history. Used when an
+   * external source (browser back/forward) sets the state — it must not grow
+   * the internal stack the way `navigate` does.
+   */
+  const jumpTo = useCallback((next: NavState) => {
+    const st = stateRef.current;
+    const cur = st.history[st.index];
+    if (next.dir === cur.dir && next.openFile === cur.openFile) return;
+    st.history = [...st.history.slice(0, st.index), next];
+    st.index = st.history.length - 1;
+    forceRender((n) => n + 1);
+  }, []);
+
+  return {
+    current,
+    navigate,
+    goBack,
+    goForward,
+    jumpTo,
+    canGoBack,
+    canGoForward,
+  };
 }

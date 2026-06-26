@@ -169,6 +169,7 @@ export function ServerFilesTab({
     navigate: navNavigate,
     goBack: navGoBack,
     goForward: navGoForward,
+    jumpTo,
     canGoBack,
     canGoForward,
   } = useNavHistory({ dir: urlParams.dir, openFile: urlParams.file });
@@ -204,14 +205,16 @@ export function ServerFilesTab({
 
   // URL → nav state: browser back/forward changed the URL externally. The
   // skip counter filters out URL changes triggered by our own navigate/
-  // goBack/goForward calls above.
+  // goBack/goForward calls above. Uses `jumpTo` (not `navNavigate`) so the
+  // external change replaces the current entry instead of pushing, which
+  // would corrupt the internal back/forward stack.
   useEffect(() => {
     if (skipUrlSync.current > 0) {
       skipUrlSync.current -= 1;
       return;
     }
-    navNavigate({ dir: urlParams.dir, openFile: urlParams.file });
-  }, [urlParams.dir, urlParams.file, navNavigate]);
+    jumpTo({ dir: urlParams.dir, openFile: urlParams.file });
+  }, [urlParams.dir, urlParams.file, jumpTo]);
 
   const [contentDirNotice, setContentDirNotice] = useState(false);
 
