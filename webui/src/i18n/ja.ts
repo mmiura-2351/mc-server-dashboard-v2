@@ -619,6 +619,11 @@ export const ja: Record<TranslationKey, string> = {
   "files.nav.back": "戻る",
   "files.nav.forward": "進む",
 
+  // Unsaved changes guard (issue #1486).
+  "files.unsaved.title": "未保存の変更",
+  "files.unsaved.body": "未保存の変更があります。破棄しますか？",
+  "files.unsaved.discard": "破棄",
+
   // Players tab — applied op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8).
   "players.heading": "適用中のグループ",
   "players.loading": "グループを読み込んでいます…",
