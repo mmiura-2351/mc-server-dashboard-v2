@@ -600,7 +600,7 @@ export function ServerFilesTab({
                   (e) => joinPath(dir, e.name) === openFile,
                 )?.size
               }
-              onClose={() => setOpenFile(null)}
+              onClose={() => navigate({ dir, openFile: null })}
               onError={onError}
             />
           </div>
