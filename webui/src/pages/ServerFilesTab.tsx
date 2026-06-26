@@ -28,7 +28,12 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ApiError, api, postFormWithProgress } from "../api/client.ts";
+import {
+  ApiError,
+  api,
+  getRefresher,
+  postFormWithProgress,
+} from "../api/client.ts";
 import { downloadFile } from "../api/download.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
@@ -95,6 +100,9 @@ function filesBase(communityId: string, serverId: string): string {
     server_id: serverId,
   });
 }
+
+/** Maximum file upload size (512 MiB). */
+const MAX_UPLOAD_BYTES = 512 * 1024 * 1024;
 
 /** Join a directory rel-path and a child name into a POSIX rel-path. */
 function joinPath(dir: string, name: string): string {
@@ -183,7 +191,6 @@ export function ServerFilesTab({
   const serverId = server.id;
 
   // Upload state lifted so the drop zone and context menu can share it.
-  const MAX_UPLOAD_BYTES = 512 * 1024 * 1024;
   const progress = useUploadProgress();
 
   const upload = useMutation({
@@ -823,7 +830,6 @@ function Listing({
   onUpload: { mutate: (file: File) => void };
   onExtract: (file: File) => void;
 }) {
-  const MAX_UPLOAD_BYTES = 512 * 1024 * 1024;
   const { showToast } = useToast();
   const [renaming, setRenaming] = useState<DirEntry | null>(null);
   const [deleting, setDeleting] = useState<DirEntry | null>(null);
@@ -865,10 +871,6 @@ function Listing({
 
   // Drop-target state: which folder name is currently highlighted.
   const [folderDropTarget, setFolderDropTarget] = useState<string | null>(null);
-
-  if (listing.entries.length === 0) {
-    return <p className="sub">{t("files.empty")}</p>;
-  }
 
   const handleDragStart = (e: React.DragEvent, full: string) => {
     if (!dropEnabled) {
@@ -939,6 +941,11 @@ function Listing({
           setContextMenu({ entry: null, x: e.clientX, y: e.clientY });
         }}
       >
+        {listing.entries.length === 0 && (
+          <li>
+            <p className="sub">{t("files.empty")}</p>
+          </li>
+        )}
         {listing.entries.map((entry, idx) => {
           const full = joinPath(dir, entry.name);
           const isDropTarget = entry.is_dir && folderDropTarget === entry.name;
@@ -1114,11 +1121,19 @@ function Listing({
                             "/api/communities/{community_id}/servers/{server_id}/files/download",
                             { community_id: communityId, server_id: serverId },
                           )}?path=${encodeURIComponent(joinPath(dir, ctxEntry.name))}`;
-                          const resp = await fetch(url, {
-                            headers: {
-                              Authorization: `Bearer ${getAccessToken()}`,
-                            },
-                          });
+                          const authFetch = (tok: string | null) =>
+                            fetch(url, {
+                              credentials: "same-origin",
+                              headers: tok
+                                ? { Authorization: `Bearer ${tok}` }
+                                : {},
+                            });
+                          let resp = await authFetch(getAccessToken());
+                          const refresher = getRefresher();
+                          if (resp.status === 401 && refresher) {
+                            const ok = await refresher();
+                            if (ok) resp = await authFetch(getAccessToken());
+                          }
                           if (!resp.ok)
                             throw new Error(`Download failed: ${resp.status}`);
                           const blob = await resp.blob();

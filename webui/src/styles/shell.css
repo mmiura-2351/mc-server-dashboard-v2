@@ -1452,15 +1452,6 @@ button.link:focus-visible {
   gap: 12px;
   margin-bottom: 10px;
 }
-.files-extract {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
-}
-.file-upload {
-  cursor: pointer;
-}
 /* Styled file picker (issue #539): a design-token button drives a visually
  * hidden — but still focusable — file input, with the chosen filename shown
  * alongside. */
@@ -1652,11 +1643,6 @@ button.link:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.file-actions {
-  display: flex;
-  gap: 4px;
-  flex-shrink: 0;
 }
 .file-viewer-head {
   display: flex;
