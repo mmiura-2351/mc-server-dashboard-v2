@@ -64,6 +64,15 @@ describe("useNavHistory", () => {
     expect(result.current.current).toEqual({ dir: "", openFile: null });
   });
 
+  it("accepts an initial state", () => {
+    const { result } = renderHook(() =>
+      useNavHistory({ dir: "world", openFile: null }),
+    );
+    expect(result.current.current).toEqual({ dir: "world", openFile: null });
+    expect(result.current.canGoBack).toBe(false);
+    expect(result.current.canGoForward).toBe(false);
+  });
+
   it("goBack is a no-op at the start", () => {
     const { result } = renderHook(() => useNavHistory());
     act(() => result.current.goBack());
@@ -85,6 +94,33 @@ describe("useNavHistory", () => {
     // Navigate to the same state again.
     act(() => result.current.navigate({ dir: "a", openFile: null }));
     // Should not have grown the history: one goBack should reach root.
+    act(() => result.current.goBack());
+    expect(result.current.current).toEqual({ dir: "", openFile: null });
+    expect(result.current.canGoBack).toBe(false);
+  });
+
+  it("jumpTo replaces the current entry and clears forward stack", () => {
+    const { result } = renderHook(() => useNavHistory());
+    act(() => result.current.navigate({ dir: "a", openFile: null }));
+    act(() => result.current.navigate({ dir: "b", openFile: null }));
+    // Stack: [root, a, b] at index 2.
+    act(() => result.current.jumpTo({ dir: "x", openFile: null }));
+    // Should replace "b" with "x", no forward.
+    expect(result.current.current).toEqual({ dir: "x", openFile: null });
+    expect(result.current.canGoForward).toBe(false);
+    // Back should reach "a", then root.
+    act(() => result.current.goBack());
+    expect(result.current.current).toEqual({ dir: "a", openFile: null });
+    act(() => result.current.goBack());
+    expect(result.current.current).toEqual({ dir: "", openFile: null });
+    expect(result.current.canGoBack).toBe(false);
+  });
+
+  it("jumpTo is a no-op when target matches current state", () => {
+    const { result } = renderHook(() => useNavHistory());
+    act(() => result.current.navigate({ dir: "a", openFile: null }));
+    act(() => result.current.jumpTo({ dir: "a", openFile: null }));
+    // History should not have changed.
     act(() => result.current.goBack());
     expect(result.current.current).toEqual({ dir: "", openFile: null });
     expect(result.current.canGoBack).toBe(false);

@@ -142,6 +142,51 @@ export function useFilterParams<K extends string>(
   return [filters, setFilters];
 }
 
+/**
+ * Drive the file browser's current directory and open file from `?dir=` and
+ * `?file=` query params (#1484). Root directory and no-file-open keep the URL
+ * clean (no params). Other query params are preserved. Each change pushes a
+ * history entry so browser Back/Forward restores the prior file browser state.
+ */
+export function useFileBrowserParams(): [
+  { dir: string; file: string | null },
+  (nextDir: string, nextFile: string | null) => void,
+] {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const params = new URLSearchParams(location.search);
+  const dir = params.get("dir") ?? "";
+  const file = params.get("file") ?? null;
+
+  const setParams = useCallback(
+    (nextDir: string, nextFile: string | null) => {
+      const currentDir = new URLSearchParams(location.search).get("dir") ?? "";
+      const currentFile =
+        new URLSearchParams(location.search).get("file") ?? null;
+      if (currentDir === nextDir && currentFile === nextFile) return;
+
+      const next = new URLSearchParams(location.search);
+      if (nextDir === "") {
+        next.delete("dir");
+      } else {
+        next.set("dir", nextDir);
+      }
+      if (nextFile === null) {
+        next.delete("file");
+      } else {
+        next.set("file", nextFile);
+      }
+      const search = next.toString();
+      navigate(
+        `${location.pathname}${search ? `?${search}` : ""}${location.hash}`,
+      );
+    },
+    [navigate, location.pathname, location.search, location.hash],
+  );
+
+  return [{ dir, file }, setParams];
+}
+
 // ── WAI-ARIA tab helpers (issue #1216) ────────────────────────────────────────
 
 /** Stable id for a tab button: `<prefix>-tab-<name>`. */

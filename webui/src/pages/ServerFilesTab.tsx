@@ -53,7 +53,8 @@ import {
   isProbablyText,
 } from "./fileText.ts";
 import { atRest, normalizeState } from "./serverState.ts";
-import { useNavHistory } from "./useNavHistory.ts";
+import { useFileBrowserParams } from "./urlState.ts";
+import { type NavState, useNavHistory } from "./useNavHistory.ts";
 
 /** Convert a version ID ({ns_timestamp:020d}-{hex8}) to a Date. */
 export function versionDate(versionId: string): Date {
@@ -156,18 +157,65 @@ export function ServerFilesTab({
     normalizeState(server.desired_state),
   );
 
+  // URL-driven file browser state: `?dir=` and `?file=` query params sync with
+  // the browser history so back/forward restore the prior view (#1484).
+  const [urlParams, setUrlParams] = useFileBrowserParams();
+
   // Current directory rel-path ("" is the working-set root) and the open file,
-  // tracked through a navigation history stack (issue #1475).
+  // tracked through a navigation history stack (issue #1475). The initial state
+  // is seeded from the URL so refreshing / deep-linking restores the view.
   const {
     current: nav,
-    navigate,
-    goBack,
-    goForward,
+    navigate: navNavigate,
+    goBack: navGoBack,
+    goForward: navGoForward,
+    jumpTo,
     canGoBack,
     canGoForward,
-  } = useNavHistory();
+  } = useNavHistory({ dir: urlParams.dir, openFile: urlParams.file });
   const dir = nav.dir;
   const openFile = nav.openFile;
+
+  // Sync between the internal nav stack and URL query params (#1484). All
+  // internal navigation goes through the wrapped helpers below, which push the
+  // URL synchronously — no effect-based nav→URL sync needed.
+  //
+  // For browser back/forward, React Router's location changes are detected via
+  // a useEffect on `urlParams`. A skip-counter prevents echoing our own pushes.
+  const skipUrlSync = useRef(0);
+
+  const navigate = useCallback(
+    (next: NavState) => {
+      navNavigate(next);
+      skipUrlSync.current += 1;
+      setUrlParams(next.dir, next.openFile);
+    },
+    [navNavigate, setUrlParams],
+  );
+  const goBack = useCallback(() => {
+    const target = navGoBack();
+    skipUrlSync.current += 1;
+    setUrlParams(target.dir, target.openFile);
+  }, [navGoBack, setUrlParams]);
+  const goForward = useCallback(() => {
+    const target = navGoForward();
+    skipUrlSync.current += 1;
+    setUrlParams(target.dir, target.openFile);
+  }, [navGoForward, setUrlParams]);
+
+  // URL → nav state: browser back/forward changed the URL externally. The
+  // skip counter filters out URL changes triggered by our own navigate/
+  // goBack/goForward calls above. Uses `jumpTo` (not `navNavigate`) so the
+  // external change replaces the current entry instead of pushing, which
+  // would corrupt the internal back/forward stack.
+  useEffect(() => {
+    if (skipUrlSync.current > 0) {
+      skipUrlSync.current -= 1;
+      return;
+    }
+    jumpTo({ dir: urlParams.dir, openFile: urlParams.file });
+  }, [urlParams.dir, urlParams.file, jumpTo]);
+
   const [contentDirNotice, setContentDirNotice] = useState(false);
 
   // Multi-select: track selected file paths and the last-clicked index for
