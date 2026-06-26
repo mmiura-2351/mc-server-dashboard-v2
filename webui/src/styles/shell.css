@@ -1452,15 +1452,6 @@ button.link:focus-visible {
   gap: 12px;
   margin-bottom: 10px;
 }
-.files-extract {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
-}
-.file-upload {
-  cursor: pointer;
-}
 /* Styled file picker (issue #539): a design-token button drives a visually
  * hidden — but still focusable — file input, with the chosen filename shown
  * alongside. */
@@ -1601,12 +1592,11 @@ button.link:focus-visible {
   position: fixed;
   z-index: 100;
   min-width: 160px;
-  background: var(--bg-card, #fff);
+  background: var(--bg-raised);
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm, 4px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
   padding: 4px 0;
-  margin: 0;
 }
 .file-context-menu button {
   display: block;
@@ -1614,20 +1604,25 @@ button.link:focus-visible {
   padding: 6px 12px;
   background: none;
   border: none;
-  color: var(--text);
-  font: inherit;
   text-align: left;
+  font: inherit;
+  color: var(--text);
   cursor: pointer;
 }
 .file-context-menu button:hover {
-  background: var(--bg-hover, var(--bg-inset));
+  background: var(--bg-overlay);
 }
 .file-context-menu button.danger {
-  color: var(--danger, #e53e3e);
+  color: var(--red, #e53e3e);
 }
 .file-select {
   flex-shrink: 0;
   cursor: pointer;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  margin: 0;
+  vertical-align: middle;
 }
 .files-selected-count {
   font-size: 13px;
@@ -1648,11 +1643,6 @@ button.link:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.file-actions {
-  display: flex;
-  gap: 4px;
-  flex-shrink: 0;
 }
 .file-viewer-head {
   display: flex;

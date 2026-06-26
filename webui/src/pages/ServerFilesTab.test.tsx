@@ -273,36 +273,54 @@ describe("ServerFilesTab viewer / editor", () => {
 });
 
 describe("ServerFilesTab operations", () => {
-  it("uploads via multipart with ?extract= reflecting the toggle", async () => {
+  it("uploads via context menu with extract=false", async () => {
     routeGet({
       detail: server(),
-      list: listing([]),
+      list: listing([{ name: "a.txt", is_dir: false }]),
     });
     mockPostFormWithProgress.mockResolvedValue(undefined);
     renderPage();
     await openFiles();
-    await screen.findByText(t("files.empty"));
+    await screen.findByText(/a\.txt/);
 
-    fireEvent.click(screen.getByLabelText(t("files.extractZip")));
+    // Right-click on a file row to open context menu.
+    const row = screen.getByText(/a\.txt/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+
+    // Click Upload in context menu.
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.upload") }),
+    );
+
+    // The hidden file input should be present; simulate choosing a file.
     const file = new File(["x"], "world.zip");
-    fireEvent.change(screen.getByLabelText(t("files.upload")), {
+    fireEvent.change(screen.getByLabelText(t("files.contextMenu.upload")), {
       target: { files: [file] },
     });
 
     await waitFor(() => expect(mockPostFormWithProgress).toHaveBeenCalled());
     const [url, form] = mockPostFormWithProgress.mock.calls[0];
-    expect(url).toBe(`${FILES_BASE}/upload?path=&extract=true`);
+    expect(url).toBe(`${FILES_BASE}/upload?path=&extract=false`);
     expect((form as FormData).get("file")).toBe(file);
   });
 
-  it("creates a directory at the current path", async () => {
-    routeGet({ detail: server(), list: listing([]) });
+  it("creates a directory via context menu", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "a.txt", is_dir: false }]),
+    });
     mockApi.post.mockResolvedValue(undefined);
     renderPage();
     await openFiles();
-    await screen.findByText(t("files.empty"));
+    await screen.findByText(/a\.txt/);
 
-    fireEvent.click(screen.getByRole("button", { name: t("files.newFolder") }));
+    // Right-click to open context menu.
+    const row = screen.getByText(/a\.txt/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.newFolder") }),
+    );
     fireEvent.change(screen.getByLabelText(t("files.folderName")), {
       target: { value: "datapacks" },
     });
@@ -315,7 +333,7 @@ describe("ServerFilesTab operations", () => {
     );
   });
 
-  it("renames an entry with a {from, to} body", async () => {
+  it("renames an entry via context menu with a {from, to} body", async () => {
     routeGet({
       detail: server(),
       list: listing([{ name: "old.txt", is_dir: false }]),
@@ -325,10 +343,15 @@ describe("ServerFilesTab operations", () => {
     await openFiles();
     await screen.findByText(/old\.txt/);
 
-    fireEvent.click(screen.getByRole("button", { name: t("files.rename") }));
+    // Right-click to open context menu.
+    const row = screen.getByText(/old\.txt/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.rename") }),
+    );
     const input = screen.getByLabelText(t("files.newName"));
     fireEvent.change(input, { target: { value: "new.txt" } });
-    // The dialog confirm button shares the "Rename" label; pick the modal one.
     const confirm = screen
       .getAllByRole("button", { name: t("files.rename") })
       .at(-1) as HTMLButtonElement;
@@ -343,7 +366,7 @@ describe("ServerFilesTab operations", () => {
     });
   });
 
-  it("deletes after a typed confirm with ?path=", async () => {
+  it("deletes via context menu after confirm with ?path=", async () => {
     routeGet({
       detail: server(),
       list: listing([{ name: "junk.txt", is_dir: false }]),
@@ -353,7 +376,13 @@ describe("ServerFilesTab operations", () => {
     await openFiles();
     await screen.findByText(/junk\.txt/);
 
-    fireEvent.click(screen.getByRole("button", { name: t("files.delete") }));
+    // Right-click to open context menu.
+    const row = screen.getByText(/junk\.txt/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.delete") }),
+    );
     fireEvent.click(
       screen.getByRole("button", { name: t("files.delete.confirm") }),
     );
@@ -365,7 +394,7 @@ describe("ServerFilesTab operations", () => {
     );
   });
 
-  it("downloads a file via the authenticated helper", async () => {
+  it("downloads a file via context menu", async () => {
     routeGet({
       detail: server(),
       list: listing([{ name: "log.txt", is_dir: false }]),
@@ -374,7 +403,13 @@ describe("ServerFilesTab operations", () => {
     await openFiles();
     await screen.findByText(/log\.txt/);
 
-    fireEvent.click(screen.getByRole("button", { name: t("files.download") }));
+    // Right-click to open context menu.
+    const row = screen.getByText(/log\.txt/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.download") }),
+    );
     await waitFor(() =>
       expect(mockDownload.downloadFile).toHaveBeenCalledWith(
         `${FILES_BASE}/download?path=log.txt`,
@@ -404,11 +439,25 @@ describe("ServerFilesTab permission gating", () => {
     await openFiles();
     await screen.findByText(/server\.properties/);
 
+    // Right-click to open context menu — rename/delete/upload/newFolder should be hidden.
+    const row = screen
+      .getByText(/server\.properties/)
+      .closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+
     expect(
-      screen.queryByRole("button", { name: t("files.newFolder") }),
+      screen.queryByRole("menuitem", { name: t("files.contextMenu.rename") }),
     ).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: t("files.delete") }),
+      screen.queryByRole("menuitem", { name: t("files.contextMenu.delete") }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("menuitem", { name: t("files.contextMenu.upload") }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("menuitem", {
+        name: t("files.contextMenu.newFolder"),
+      }),
     ).not.toBeInTheDocument();
   });
 
@@ -424,7 +473,12 @@ describe("ServerFilesTab permission gating", () => {
     await openFiles();
     await screen.findByText("x");
 
-    fireEvent.click(screen.getByRole("button", { name: t("files.delete") }));
+    // Use context menu to delete.
+    const row = screen.getByText("x").closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.delete") }),
+    );
     fireEvent.click(
       screen.getByRole("button", { name: t("files.delete.confirm") }),
     );
@@ -720,75 +774,97 @@ describe("ServerFilesTab running notice", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("disables Upload and New folder while the server is running", async () => {
+  it("hides Upload and New folder in context menu while the server is running", async () => {
     routeGet({
       detail: server({ observed_state: "running", desired_state: "running" }),
-      list: listing([]),
+      list: listing([{ name: "a.txt", is_dir: false }]),
     });
     renderPage();
     await openFiles();
     await screen.findByText(t("files.runningNotice"));
 
-    const uploadBtn = screen.getByRole("button", { name: t("files.upload") });
-    const newFolderBtn = screen.getByRole("button", {
-      name: t("files.newFolder"),
-    });
-    expect(uploadBtn).toBeDisabled();
-    expect(newFolderBtn).toBeDisabled();
+    // Right-click to open context menu.
+    const row = screen.getByText(/a\.txt/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+
+    expect(
+      screen.queryByRole("menuitem", { name: t("files.contextMenu.upload") }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("menuitem", {
+        name: t("files.contextMenu.newFolder"),
+      }),
+    ).not.toBeInTheDocument();
   });
 
-  it("enables Upload and New folder while the server is stopped", async () => {
+  it("shows Upload and New folder in context menu while the server is stopped", async () => {
     routeGet({
       detail: server({ observed_state: "stopped" }),
-      list: listing([]),
+      list: listing([{ name: "a.txt", is_dir: false }]),
     });
     renderPage();
     await openFiles();
-    await screen.findByText(t("files.empty"));
+    await screen.findByText(/a\.txt/);
 
-    const uploadBtn = screen.getByLabelText(t("files.upload"));
-    const newFolderBtn = screen.getByRole("button", {
-      name: t("files.newFolder"),
-    });
-    expect(uploadBtn).not.toBeDisabled();
-    expect(newFolderBtn).not.toBeDisabled();
+    // Right-click to open context menu.
+    const row = screen.getByText(/a\.txt/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+
+    expect(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.upload") }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.newFolder") }),
+    ).toBeInTheDocument();
   });
 
-  it("disables Upload and New folder while the server is stopping (transitional)", async () => {
+  it("hides Upload and New folder in context menu while the server is stopping (transitional)", async () => {
     routeGet({
       detail: server({ observed_state: "stopping", desired_state: "stopped" }),
-      list: listing([]),
+      list: listing([{ name: "a.txt", is_dir: false }]),
     });
     renderPage();
     await openFiles();
     await screen.findByText(t("files.runningNotice"));
 
-    const uploadBtn = screen.getByRole("button", { name: t("files.upload") });
-    const newFolderBtn = screen.getByRole("button", {
-      name: t("files.newFolder"),
-    });
-    expect(uploadBtn).toBeDisabled();
-    expect(newFolderBtn).toBeDisabled();
+    // Right-click to open context menu.
+    const row = screen.getByText(/a\.txt/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+
+    expect(
+      screen.queryByRole("menuitem", { name: t("files.contextMenu.upload") }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("menuitem", {
+        name: t("files.contextMenu.newFolder"),
+      }),
+    ).not.toBeInTheDocument();
   });
 });
 
 describe("ServerFilesTab 409 reason toasts", () => {
   it("maps server_unsettled to the stop-the-server message on upload", async () => {
-    // Use a stopped server so the file input is rendered; the API then returns
-    // a 409 to exercise the error handler (e.g. a race: server started between
-    // the UI check and the API call).
+    // Use a stopped server; the API then returns a 409 to exercise the error
+    // handler (e.g. a race: server started between the UI check and the API call).
     routeGet({
       detail: server({ observed_state: "stopped" }),
-      list: listing([]),
+      list: listing([{ name: "a.txt", is_dir: false }]),
     });
     mockPostFormWithProgress.mockRejectedValue(
       new ApiError(409, { reason: "server_unsettled" }),
     );
     renderPage();
     await openFiles();
-    await screen.findByText(t("files.empty"));
+    await screen.findByText(/a\.txt/);
 
-    const fileInput = screen.getByLabelText(t("files.upload"));
+    // Right-click to open context menu and trigger upload.
+    const row = screen.getByText(/a\.txt/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.upload") }),
+    );
+
+    const fileInput = screen.getByLabelText(t("files.contextMenu.upload"));
     const file = new File(["x"], "test.zip");
     fireEvent.change(fileInput, { target: { files: [file] } });
 
@@ -798,15 +874,23 @@ describe("ServerFilesTab 409 reason toasts", () => {
   });
 
   it("maps server_not_stopped to the stop-the-server message on mkdir", async () => {
-    routeGet({ detail: server(), list: listing([]) });
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "a.txt", is_dir: false }]),
+    });
     mockApi.post.mockRejectedValue(
       new ApiError(409, { reason: "server_not_stopped" }),
     );
     renderPage();
     await openFiles();
-    await screen.findByText(t("files.empty"));
+    await screen.findByText(/a\.txt/);
 
-    fireEvent.click(screen.getByRole("button", { name: t("files.newFolder") }));
+    // Right-click to open context menu and trigger new folder.
+    const row = screen.getByText(/a\.txt/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.newFolder") }),
+    );
     fireEvent.change(screen.getByLabelText(t("files.folderName")), {
       target: { value: "mods" },
     });
@@ -818,13 +902,21 @@ describe("ServerFilesTab 409 reason toasts", () => {
   });
 
   it("falls back to the generic message for other errors", async () => {
-    routeGet({ detail: server(), list: listing([]) });
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "a.txt", is_dir: false }]),
+    });
     mockApi.post.mockRejectedValue(new ApiError(500, undefined));
     renderPage();
     await openFiles();
-    await screen.findByText(t("files.empty"));
+    await screen.findByText(/a\.txt/);
 
-    fireEvent.click(screen.getByRole("button", { name: t("files.newFolder") }));
+    // Right-click to open context menu and trigger new folder.
+    const row = screen.getByText(/a\.txt/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.newFolder") }),
+    );
     fireEvent.change(screen.getByLabelText(t("files.folderName")), {
       target: { value: "mods" },
     });
@@ -838,16 +930,22 @@ describe("ServerFilesTab 409 reason toasts", () => {
   it("shows a redirect notice with a link to #plugins on content_dir_protected (paper)", async () => {
     routeGet({
       detail: server({ server_type: "paper" }),
-      list: listing([]),
+      list: listing([{ name: "a.txt", is_dir: false }]),
     });
     mockPostFormWithProgress.mockRejectedValue(
       new ApiError(409, { reason: "content_dir_protected" }),
     );
     renderPage();
     await openFiles();
-    await screen.findByText(t("files.empty"));
+    await screen.findByText(/a\.txt/);
 
-    const fileInput = screen.getByLabelText(t("files.upload"));
+    // Right-click to open context menu and trigger upload.
+    const row = screen.getByText(/a\.txt/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.upload") }),
+    );
+    const fileInput = screen.getByLabelText(t("files.contextMenu.upload"));
     const file = new File(["x"], "test.jar");
     fireEvent.change(fileInput, { target: { files: [file] } });
 
@@ -862,16 +960,22 @@ describe("ServerFilesTab 409 reason toasts", () => {
   it("shows the mods tab noun in the redirect notice for a fabric server", async () => {
     routeGet({
       detail: server({ server_type: "fabric" }),
-      list: listing([]),
+      list: listing([{ name: "a.txt", is_dir: false }]),
     });
     mockPostFormWithProgress.mockRejectedValue(
       new ApiError(409, { reason: "content_dir_protected" }),
     );
     renderPage();
     await openFiles();
-    await screen.findByText(t("files.empty"));
+    await screen.findByText(/a\.txt/);
 
-    const fileInput = screen.getByLabelText(t("files.upload"));
+    // Right-click to open context menu and trigger upload.
+    const row = screen.getByText(/a\.txt/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.upload") }),
+    );
+    const fileInput = screen.getByLabelText(t("files.contextMenu.upload"));
     const file = new File(["x"], "test.jar");
     fireEvent.change(fileInput, { target: { files: [file] } });
 
@@ -968,15 +1072,12 @@ describe("ServerFilesTab drag-and-drop upload", () => {
     expect(mockPostFormWithProgress).not.toHaveBeenCalled();
   });
 
-  it("respects the extract ZIP toggle for dropped .zip files", async () => {
+  it("uses extract=false for dropped .zip files", async () => {
     routeGet({ detail: server(), list: listing([]) });
     mockPostFormWithProgress.mockResolvedValue(undefined);
     renderPage();
     await openFiles();
     await screen.findByText(t("files.empty"));
-
-    // Check the Extract ZIP checkbox
-    fireEvent.click(screen.getByLabelText(t("files.extractZip")));
 
     const tree = document.querySelector(".file-tree") as HTMLElement;
     const file = new File(["pk"], "world.zip");
@@ -984,7 +1085,7 @@ describe("ServerFilesTab drag-and-drop upload", () => {
 
     await waitFor(() => expect(mockPostFormWithProgress).toHaveBeenCalled());
     const [url] = mockPostFormWithProgress.mock.calls[0];
-    expect(url).toBe(`${FILES_BASE}/upload?path=&extract=true`);
+    expect(url).toBe(`${FILES_BASE}/upload?path=&extract=false`);
   });
 });
 

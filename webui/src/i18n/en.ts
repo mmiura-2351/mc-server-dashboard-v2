@@ -497,7 +497,7 @@ export const en = {
   "files.denied": "You do not have permission to view this server's files.",
   "files.runningNotice":
     "Server is running — file edits apply to the running server immediately. Upload and folder creation require stopping the server first.",
-  "files.root": "root",
+  "files.root": "/",
   "files.loading": "Loading…",
   "files.listError": "Could not list this directory. Try refreshing.",
   "files.openError": "Could not open this file.",
@@ -597,6 +597,9 @@ export const en = {
   "files.contextMenu.downloadZip": "Download as ZIP",
   "files.contextMenu.rename": "Rename",
   "files.contextMenu.delete": "Delete",
+  "files.contextMenu.upload": "Upload file",
+  "files.contextMenu.newFolder": "New folder",
+  "files.contextMenu.extractHere": "Extract here",
 
   // Players tab — attached op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8).
   // One contiguous block to keep merge conflicts with sibling i18n PRs minimal.

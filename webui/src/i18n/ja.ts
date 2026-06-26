@@ -504,7 +504,7 @@ export const ja: Record<TranslationKey, string> = {
   "files.denied": "このサーバーのファイルを表示する権限がありません。",
   "files.runningNotice":
     "サーバーは稼働中です — ファイルの編集は稼働中のサーバーに即座に反映されます。アップロードとフォルダの作成にはサーバーを停止する必要があります。",
-  "files.root": "ルート",
+  "files.root": "/",
   "files.loading": "読み込み中…",
   "files.listError":
     "このディレクトリを一覧表示できませんでした。更新してみてください。",
@@ -608,6 +608,9 @@ export const ja: Record<TranslationKey, string> = {
   "files.contextMenu.downloadZip": "ZIPとしてダウンロード",
   "files.contextMenu.rename": "名前を変更",
   "files.contextMenu.delete": "削除",
+  "files.contextMenu.upload": "ファイルをアップロード",
+  "files.contextMenu.newFolder": "新しいフォルダ",
+  "files.contextMenu.extractHere": "ここに展開",
 
   // Players tab — applied op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8).
   "players.heading": "適用中のグループ",
