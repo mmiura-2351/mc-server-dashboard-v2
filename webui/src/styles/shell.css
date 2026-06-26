@@ -1524,6 +1524,11 @@ button.link:focus-visible {
 }
 .file-layout {
   display: grid;
+  gap: 14px;
+  /* Single-pane default: file tree fills the width when no viewer is open. */
+  grid-template-columns: 1fr;
+}
+.file-layout.two-pane {
   /* The name column carries a filename plus up to three action buttons, so a
    * 1:2 split left common names (server.properties, banned-players.json)
    * over-truncated next to a preview pane that is empty until a file is opened.
@@ -1531,7 +1536,6 @@ button.link:focus-visible {
    * without hover; the preview's minmax(0,…) lets it shrink instead of forcing
    * horizontal overflow at narrow widths. */
   grid-template-columns: minmax(300px, 1fr) minmax(0, 1.4fr);
-  gap: 14px;
 }
 .file-list {
   list-style: none;

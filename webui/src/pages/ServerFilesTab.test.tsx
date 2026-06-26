@@ -254,21 +254,67 @@ describe("ServerFilesTab viewer / editor", () => {
     expect(body.content_base64).toBe(encodeUtf8Base64(edited));
   });
 
-  it("offers download only for a binary file (no editor)", async () => {
+  it("offers download only for a binary file (no editor) and shows metadata", async () => {
     const binary = btoa(String.fromCharCode(0x50, 0x4b, 0x03, 0x04, 0x00));
     routeGet({
       detail: server(),
-      list: listing([{ name: "region.mca", is_dir: false }]),
+      list: listing([{ name: "region.mca", is_dir: false, size: 2048 }]),
       content: { path: "region.mca", content_base64: binary },
     });
     renderPage();
     await openFiles();
 
     fireEvent.click(await screen.findByText(/region\.mca/));
-    expect(await screen.findByText(t("files.binary"))).toBeInTheDocument();
+    expect(
+      await screen.findByText(t("files.cannotPreview")),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/2\.0 KB/)).toBeInTheDocument();
     expect(
       screen.queryByLabelText(t("files.editorLabel")),
     ).not.toBeInTheDocument();
+  });
+
+  it("hides the viewer pane when no file is selected", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "a.txt", is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    // The viewer pane should not be rendered.
+    expect(document.querySelector(".file-viewer")).toBeNull();
+    // The layout should be single-pane (no two-pane class).
+    expect(document.querySelector(".file-layout.two-pane")).toBeNull();
+  });
+
+  it("shows the viewer when a file is selected and closes on close button", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "readme.txt", is_dir: false }]),
+      content: {
+        path: "readme.txt",
+        content_base64: encodeUtf8Base64("hello"),
+      },
+    });
+    renderPage();
+    await openFiles();
+
+    fireEvent.click(await screen.findByText(/readme\.txt/));
+    // Wait for content to load and viewer pane to appear with two-pane layout.
+    await screen.findByLabelText(t("files.editorLabel"));
+    expect(document.querySelector(".file-layout.two-pane")).not.toBeNull();
+    expect(document.querySelector(".file-viewer")).not.toBeNull();
+
+    // Close the viewer.
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.closeViewer") }),
+    );
+    await waitFor(() =>
+      expect(document.querySelector(".file-viewer")).toBeNull(),
+    );
+    expect(document.querySelector(".file-layout.two-pane")).toBeNull();
   });
 });
 
