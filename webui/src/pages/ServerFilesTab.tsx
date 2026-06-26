@@ -638,9 +638,9 @@ function Crumbs({
       >
         {t("files.root")}
       </button>
-      {breadcrumbs(dir).map((crumb) => (
+      {breadcrumbs(dir).map((crumb, idx) => (
         <span key={crumb.path}>
-          {" / "}
+          {idx === 0 ? " " : " / "}
           <button
             type="button"
             className={`crumb${dropTarget === crumb.path ? " drop-target" : ""}`}
