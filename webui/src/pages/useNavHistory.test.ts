@@ -64,6 +64,15 @@ describe("useNavHistory", () => {
     expect(result.current.current).toEqual({ dir: "", openFile: null });
   });
 
+  it("accepts an initial state", () => {
+    const { result } = renderHook(() =>
+      useNavHistory({ dir: "world", openFile: null }),
+    );
+    expect(result.current.current).toEqual({ dir: "world", openFile: null });
+    expect(result.current.canGoBack).toBe(false);
+    expect(result.current.canGoForward).toBe(false);
+  });
+
   it("goBack is a no-op at the start", () => {
     const { result } = renderHook(() => useNavHistory());
     act(() => result.current.goBack());
