@@ -5,8 +5,8 @@
  * Left pane: a directory listing (entries + a `truncated` notice when the
  * Worker clipped the live listing) with path breadcrumbs. Right pane: a viewer.
  * A text file opens in an editor whose Save issues a versioned base64 `PUT`; a
- * binary file offers download only. Operations: upload (with an "extract ZIP"
- * toggle → `?extract=`), mkdir, rename, delete (typed confirm), download (reuses
+ * binary file offers download only. Operations: upload, mkdir, rename, delete
+ * (typed confirm), download (reuses
  * the authenticated helper in api/download.ts).
  *
  * Permission gating mirrors the API route gates (servers/api/files.py):
@@ -32,6 +32,7 @@ import { ApiError, api, postFormWithProgress } from "../api/client.ts";
 import { downloadFile } from "../api/download.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
+import { getAccessToken } from "../auth/tokenStore.ts";
 import { Modal } from "../components/Modal.tsx";
 import { SimpleConfirmDialog } from "../components/SimpleConfirmDialog.tsx";
 import { useToast } from "../components/Toast.tsx";
@@ -181,9 +182,8 @@ export function ServerFilesTab({
 
   const serverId = server.id;
 
-  // Upload state lifted from Toolbar so the drop zone can share it.
+  // Upload state lifted so the drop zone and context menu can share it.
   const MAX_UPLOAD_BYTES = 512 * 1024 * 1024;
-  const [extract, setExtract] = useState(false);
   const progress = useUploadProgress();
 
   const upload = useMutation({
@@ -195,7 +195,7 @@ export function ServerFilesTab({
         `${apiPath(
           "/api/communities/{community_id}/servers/{server_id}/files/upload",
           { community_id: communityId, server_id: serverId },
-        )}?path=${encodeURIComponent(dir)}&extract=${extract}` as never,
+        )}?path=${encodeURIComponent(dir)}&extract=false` as never,
         form,
         progress.onProgress,
       );
@@ -436,14 +436,10 @@ export function ServerFilesTab({
         onError={onError}
       />
       <Toolbar
-        dir={dir}
         communityId={communityId}
         serverId={serverId}
         canEdit={canEdit}
         running={notAtRest}
-        extract={extract}
-        setExtract={setExtract}
-        upload={upload}
         onChanged={refetchList}
         onError={onError}
         selected={selected}
@@ -513,6 +509,30 @@ export function ServerFilesTab({
               lastClickedIdx={lastClickedIdx}
               dropEnabled={dropEnabled}
               onMoveTo={moveFiles}
+              onUpload={upload}
+              onExtract={(file) => {
+                const form = new FormData();
+                form.append("file", file);
+                progress.start(file.size);
+                postFormWithProgress(
+                  `${apiPath(
+                    "/api/communities/{community_id}/servers/{server_id}/files/upload",
+                    { community_id: communityId, server_id: serverId },
+                  )}?path=${encodeURIComponent(dir)}&extract=true` as never,
+                  form,
+                  progress.onProgress,
+                ).then(
+                  () => {
+                    progress.reset();
+                    showToast(t("files.uploaded"), "success");
+                    refetchList();
+                  },
+                  (error) => {
+                    progress.reset();
+                    onError(error);
+                  },
+                );
+              }}
             />
           )}
         </div>
@@ -782,6 +802,8 @@ function Listing({
   lastClickedIdx,
   dropEnabled,
   onMoveTo,
+  onUpload,
+  onExtract,
 }: {
   listing: DirListing;
   dir: string;
@@ -798,12 +820,17 @@ function Listing({
   lastClickedIdx: React.MutableRefObject<number | null>;
   dropEnabled: boolean;
   onMoveTo: (paths: string[], destDir: string) => Promise<void>;
+  onUpload: { mutate: (file: File) => void };
+  onExtract: (file: File) => void;
 }) {
+  const MAX_UPLOAD_BYTES = 512 * 1024 * 1024;
   const { showToast } = useToast();
   const [renaming, setRenaming] = useState<DirEntry | null>(null);
   const [deleting, setDeleting] = useState<DirEntry | null>(null);
+  const [mkdirOpen, setMkdirOpen] = useState(false);
+  const uploadRef = useRef<HTMLInputElement>(null);
   const [contextMenu, setContextMenu] = useState<{
-    entry: DirEntry;
+    entry: DirEntry | null;
     x: number;
     y: number;
   } | null>(null);
@@ -885,7 +912,33 @@ function Listing({
       {listing.truncated && (
         <div className="notice warn">{t("files.truncated")}</div>
       )}
-      <ul className="file-list">
+      {/* Hidden file input for context-menu upload */}
+      <input
+        ref={uploadRef}
+        type="file"
+        hidden
+        aria-label={t("files.contextMenu.upload")}
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file !== undefined) {
+            if (file.size > MAX_UPLOAD_BYTES) {
+              showToast(t("files.error.tooLarge"), "error");
+            } else {
+              onUpload.mutate(file);
+            }
+          }
+          e.target.value = "";
+        }}
+      />
+      <ul
+        className="file-list"
+        onContextMenu={(e) => {
+          // Only fire for empty space (not bubbled from a file row).
+          if ((e.target as HTMLElement).closest(".file-row")) return;
+          e.preventDefault();
+          setContextMenu({ entry: null, x: e.clientX, y: e.clientY });
+        }}
+      >
         {listing.entries.map((entry, idx) => {
           const full = joinPath(dir, entry.name);
           const isDropTarget = entry.is_dir && folderDropTarget === entry.name;
@@ -897,6 +950,7 @@ function Listing({
               onDragStart={(e) => handleDragStart(e, full)}
               onContextMenu={(e) => {
                 e.preventDefault();
+                e.stopPropagation();
                 setContextMenu({ entry, x: e.clientX, y: e.clientY });
               }}
               {...(entry.is_dir
@@ -956,35 +1010,6 @@ function Listing({
                 <span aria-hidden="true">{entry.is_dir ? "📁 " : "📄 "}</span>
                 {entry.name}
               </button>
-              <span className="file-actions">
-                {!entry.is_dir && (
-                  <button
-                    type="button"
-                    className="btn sm ghost"
-                    onClick={() => download.mutate(entry)}
-                  >
-                    {t("files.download")}
-                  </button>
-                )}
-                {canEdit && (
-                  <button
-                    type="button"
-                    className="btn sm ghost"
-                    onClick={() => setRenaming(entry)}
-                  >
-                    {t("files.rename")}
-                  </button>
-                )}
-                {canEdit && (
-                  <button
-                    type="button"
-                    className="btn sm ghost danger"
-                    onClick={() => setDeleting(entry)}
-                  >
-                    {t("files.delete")}
-                  </button>
-                )}
-              </span>
             </li>
           );
         })}
@@ -1011,32 +1036,106 @@ function Listing({
         onConfirm={() => deleting !== null && remove.mutate(deleting)}
         onClose={() => setDeleting(null)}
       />
-      {contextMenu !== null && (
-        <FileContextMenu
-          entry={contextMenu.entry}
-          x={contextMenu.x}
-          y={contextMenu.y}
-          canEdit={canEdit}
-          running={running}
-          onClose={() => setContextMenu(null)}
-          onOpen={() => {
-            setContextMenu(null);
-            onEnter(contextMenu.entry);
+      {mkdirOpen && (
+        <MkdirDialog
+          dir={dir}
+          communityId={communityId}
+          serverId={serverId}
+          onClose={() => setMkdirOpen(false)}
+          onCreated={() => {
+            setMkdirOpen(false);
+            onChanged();
           }}
-          onDownload={() => {
-            setContextMenu(null);
-            download.mutate(contextMenu.entry);
-          }}
-          onRename={() => {
-            setContextMenu(null);
-            setRenaming(contextMenu.entry);
-          }}
-          onDelete={() => {
-            setContextMenu(null);
-            setDeleting(contextMenu.entry);
-          }}
+          onError={onError}
         />
       )}
+      {contextMenu !== null &&
+        (() => {
+          const ctxEntry = contextMenu.entry;
+          const isZip =
+            ctxEntry !== null &&
+            !ctxEntry.is_dir &&
+            ctxEntry.name.endsWith(".zip");
+          return (
+            <FileContextMenu
+              entry={ctxEntry}
+              x={contextMenu.x}
+              y={contextMenu.y}
+              canEdit={canEdit}
+              running={running}
+              onClose={() => setContextMenu(null)}
+              onOpen={
+                ctxEntry
+                  ? () => {
+                      setContextMenu(null);
+                      onEnter(ctxEntry);
+                    }
+                  : undefined
+              }
+              onDownload={
+                ctxEntry
+                  ? () => {
+                      setContextMenu(null);
+                      download.mutate(ctxEntry);
+                    }
+                  : undefined
+              }
+              onRename={
+                ctxEntry
+                  ? () => {
+                      setContextMenu(null);
+                      setRenaming(ctxEntry);
+                    }
+                  : undefined
+              }
+              onDelete={
+                ctxEntry
+                  ? () => {
+                      setContextMenu(null);
+                      setDeleting(ctxEntry);
+                    }
+                  : undefined
+              }
+              onUpload={() => {
+                setContextMenu(null);
+                uploadRef.current?.click();
+              }}
+              onNewFolder={() => {
+                setContextMenu(null);
+                setMkdirOpen(true);
+              }}
+              onExtract={
+                isZip
+                  ? () => {
+                      setContextMenu(null);
+                      void (async () => {
+                        try {
+                          const url = `${apiPath(
+                            "/api/communities/{community_id}/servers/{server_id}/files/download",
+                            { community_id: communityId, server_id: serverId },
+                          )}?path=${encodeURIComponent(joinPath(dir, ctxEntry.name))}`;
+                          const resp = await fetch(url, {
+                            headers: {
+                              Authorization: `Bearer ${getAccessToken()}`,
+                            },
+                          });
+                          if (!resp.ok)
+                            throw new Error(`Download failed: ${resp.status}`);
+                          const blob = await resp.blob();
+                          const file = new File([blob], ctxEntry.name, {
+                            type: "application/zip",
+                          });
+                          onExtract(file);
+                        } catch (error) {
+                          onError(error);
+                        }
+                      })();
+                    }
+                  : undefined
+              }
+            />
+          );
+        })()}
     </>
   );
 }
@@ -1054,17 +1153,23 @@ function FileContextMenu({
   onDownload,
   onRename,
   onDelete,
+  onUpload,
+  onNewFolder,
+  onExtract,
 }: {
-  entry: DirEntry;
+  entry: DirEntry | null;
   x: number;
   y: number;
   canEdit: boolean;
   running: boolean;
   onClose: () => void;
-  onOpen: () => void;
-  onDownload: () => void;
-  onRename: () => void;
-  onDelete: () => void;
+  onOpen?: () => void;
+  onDownload?: () => void;
+  onRename?: () => void;
+  onDelete?: () => void;
+  onUpload: () => void;
+  onNewFolder: () => void;
+  onExtract?: () => void;
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -1099,20 +1204,24 @@ function FileContextMenu({
       style={{ top: y, left: x }}
       role="menu"
     >
-      <button type="button" role="menuitem" onClick={onOpen}>
-        {t("files.contextMenu.open")}
-      </button>
-      <button type="button" role="menuitem" onClick={onDownload}>
-        {entry.is_dir
-          ? t("files.contextMenu.downloadZip")
-          : t("files.contextMenu.download")}
-      </button>
-      {canEdit && !running && (
+      {entry !== null && onOpen && (
+        <button type="button" role="menuitem" onClick={onOpen}>
+          {t("files.contextMenu.open")}
+        </button>
+      )}
+      {entry !== null && onDownload && (
+        <button type="button" role="menuitem" onClick={onDownload}>
+          {entry.is_dir
+            ? t("files.contextMenu.downloadZip")
+            : t("files.contextMenu.download")}
+        </button>
+      )}
+      {entry !== null && canEdit && !running && onRename && (
         <button type="button" role="menuitem" onClick={onRename}>
           {t("files.contextMenu.rename")}
         </button>
       )}
-      {canEdit && !running && (
+      {entry !== null && canEdit && !running && onDelete && (
         <button
           type="button"
           role="menuitem"
@@ -1120,6 +1229,21 @@ function FileContextMenu({
           onClick={onDelete}
         >
           {t("files.contextMenu.delete")}
+        </button>
+      )}
+      {canEdit && !running && onExtract && (
+        <button type="button" role="menuitem" onClick={onExtract}>
+          {t("files.contextMenu.extractHere")}
+        </button>
+      )}
+      {canEdit && !running && (
+        <button type="button" role="menuitem" onClick={onUpload}>
+          {t("files.contextMenu.upload")}
+        </button>
+      )}
+      {canEdit && !running && (
+        <button type="button" role="menuitem" onClick={onNewFolder}>
+          {t("files.contextMenu.newFolder")}
         </button>
       )}
     </div>
@@ -1383,17 +1507,13 @@ function HistoryDrawer({
   );
 }
 
-// ── Toolbar: upload + mkdir + bulk operations ───────────────────────────────
+// ── Toolbar: select all + bulk operations ───────────────────────────────────
 
 function Toolbar({
-  dir,
   communityId,
   serverId,
   canEdit,
   running,
-  extract,
-  setExtract,
-  upload,
   onChanged,
   onError,
   selected,
@@ -1402,14 +1522,10 @@ function Toolbar({
   onDeselectAll,
   onClearSelection,
 }: {
-  dir: string;
   communityId: string;
   serverId: string;
   canEdit: boolean;
   running: boolean;
-  extract: boolean;
-  setExtract: (v: boolean) => void;
-  upload: { mutate: (file: File) => void };
   onChanged: () => void;
   onError: (error: unknown) => void;
   selected: Set<string>;
@@ -1418,9 +1534,7 @@ function Toolbar({
   onDeselectAll: () => void;
   onClearSelection: () => void;
 }) {
-  const MAX_UPLOAD_BYTES = 512 * 1024 * 1024;
   const { showToast } = useToast();
-  const [mkdirOpen, setMkdirOpen] = useState(false);
   const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
   const [bulkMoveOpen, setBulkMoveOpen] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
@@ -1596,67 +1710,7 @@ function Toolbar({
             </button>
           </>
         )}
-        <label className="files-extract">
-          <input
-            type="checkbox"
-            checked={extract}
-            onChange={(e) => setExtract(e.target.checked)}
-          />
-          {t("files.extractZip")}
-        </label>
-        {running ? (
-          <button
-            type="button"
-            className="btn sm file-upload"
-            disabled
-            title={atRestTooltip}
-          >
-            {t("files.upload")}
-          </button>
-        ) : (
-          <label className="btn sm file-upload">
-            {t("files.upload")}
-            <input
-              type="file"
-              hidden
-              aria-label={t("files.upload")}
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file !== undefined) {
-                  if (file.size > MAX_UPLOAD_BYTES) {
-                    showToast(t("files.error.tooLarge"), "error");
-                  } else {
-                    upload.mutate(file);
-                  }
-                }
-                e.target.value = "";
-              }}
-            />
-          </label>
-        )}
-        <button
-          type="button"
-          className="btn sm"
-          disabled={running}
-          title={atRestTooltip}
-          onClick={() => setMkdirOpen(true)}
-        >
-          {t("files.newFolder")}
-        </button>
       </div>
-      {mkdirOpen && (
-        <MkdirDialog
-          dir={dir}
-          communityId={communityId}
-          serverId={serverId}
-          onClose={() => setMkdirOpen(false)}
-          onCreated={() => {
-            setMkdirOpen(false);
-            onChanged();
-          }}
-          onError={onError}
-        />
-      )}
       <SimpleConfirmDialog
         open={bulkDeleteOpen}
         title={t("files.bulk.delete.dialogTitle")}
