@@ -29,6 +29,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { zipSync } from "fflate";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useNavigate as useRouterNavigate } from "react-router";
 import {
   ApiError,
   api,
@@ -208,13 +209,114 @@ export function ServerFilesTab({
   // goBack/goForward calls above. Uses `jumpTo` (not `navNavigate`) so the
   // external change replaces the current entry instead of pushing, which
   // would corrupt the internal back/forward stack.
+  //
+  // When the user has unsaved edits, browser back/forward is intercepted:
+  // restore the URL (so the browser's address bar stays correct) and show
+  // the discard confirmation dialog instead of navigating immediately.
+  const [hasDraft, setHasDraft] = useState(false);
+  const [discardConfirmOpen, setDiscardConfirmOpen] = useState(false);
+  const pendingNavRef = useRef<NavState | null>(null);
+  const hasDraftRef = useRef(false);
+  hasDraftRef.current = hasDraft;
+
+  const routerNavigate = useRouterNavigate();
+
   useEffect(() => {
     if (skipUrlSync.current > 0) {
       skipUrlSync.current -= 1;
       return;
     }
-    jumpTo({ dir: urlParams.dir, openFile: urlParams.file });
-  }, [urlParams.dir, urlParams.file, jumpTo]);
+    const next: NavState = { dir: urlParams.dir, openFile: urlParams.file };
+    if (hasDraftRef.current) {
+      // Unsaved changes — block the external navigation. Restore the URL to
+      // the current internal state and show the discard confirmation instead.
+      const loc = window.location;
+      const params = new URLSearchParams(loc.search);
+      if (dir === "") {
+        params.delete("dir");
+      } else {
+        params.set("dir", dir);
+      }
+      if (openFile === null) {
+        params.delete("file");
+      } else {
+        params.set("file", openFile);
+      }
+      const search = params.toString();
+      routerNavigate(
+        `${loc.pathname}${search ? `?${search}` : ""}${loc.hash}`,
+        { replace: true },
+      );
+      skipUrlSync.current += 1;
+      pendingNavRef.current = next;
+      setDiscardConfirmOpen(true);
+      return;
+    }
+    jumpTo(next);
+  }, [urlParams.dir, urlParams.file, jumpTo, dir, openFile, routerNavigate]);
+
+  // Gate in-app navigation: check hasDraft before navigating.
+  const guardedNavigate = useCallback(
+    (next: NavState) => {
+      if (hasDraft && (next.dir !== dir || next.openFile !== openFile)) {
+        pendingNavRef.current = next;
+        setDiscardConfirmOpen(true);
+        return;
+      }
+      navigate(next);
+    },
+    [hasDraft, dir, openFile, navigate],
+  );
+
+  const guardedGoBack = useCallback(() => {
+    if (hasDraft) {
+      // goBack() mutates the history stack, so we can't peek at the target.
+      // Use null as a sentinel; confirmDiscard calls goBack on confirm.
+      pendingNavRef.current = null;
+      setDiscardConfirmOpen(true);
+      return;
+    }
+    goBack();
+  }, [hasDraft, goBack]);
+
+  const guardedGoForward = useCallback(() => {
+    if (hasDraft) {
+      pendingNavRef.current = { dir: "__forward__", openFile: null };
+      setDiscardConfirmOpen(true);
+      return;
+    }
+    goForward();
+  }, [hasDraft, goForward]);
+
+  const confirmDiscard = useCallback(() => {
+    setDiscardConfirmOpen(false);
+    setHasDraft(false);
+    const pending = pendingNavRef.current;
+    pendingNavRef.current = null;
+    if (pending === null) {
+      // Sentinel for goBack.
+      goBack();
+    } else if (pending.dir === "__forward__") {
+      goForward();
+    } else {
+      navigate(pending);
+    }
+  }, [navigate, goBack, goForward]);
+
+  const cancelDiscard = useCallback(() => {
+    setDiscardConfirmOpen(false);
+    pendingNavRef.current = null;
+  }, []);
+
+  // beforeunload: browser tab close / refresh / full-page navigation.
+  useEffect(() => {
+    if (!hasDraft) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [hasDraft]);
 
   const [contentDirNotice, setContentDirNotice] = useState(false);
 
@@ -234,9 +336,20 @@ export function ServerFilesTab({
     }
   }, [dir]);
 
+  // Reset hasDraft when the open file changes or becomes null (e.g. the
+  // Viewer unmounts after a delete/rename closes it). Without this, a
+  // stale hasDraft=true would block subsequent navigation.
+  const prevOpenFileRef = useRef(openFile);
+  useEffect(() => {
+    if (prevOpenFileRef.current !== openFile) {
+      prevOpenFileRef.current = openFile;
+      setHasDraft(false);
+    }
+  }, [openFile]);
+
   /** Navigate to a new directory, pushing it onto the history stack. */
   const navigateDir = (next: string) => {
-    navigate({ dir: next, openFile: null });
+    guardedNavigate({ dir: next, openFile: null });
   };
 
   const onError = (error: unknown) => {
@@ -487,15 +600,15 @@ export function ServerFilesTab({
   const enter = (entry: DirEntry) => {
     const next = joinPath(dir, entry.name);
     if (entry.is_dir) {
-      navigate({ dir: next, openFile: null });
+      guardedNavigate({ dir: next, openFile: null });
     } else {
-      navigate({ dir, openFile: next });
+      guardedNavigate({ dir, openFile: next });
     }
   };
 
   // Point the browser at the hit's parent directory and open it in the viewer.
   const openHit = (path: string) => {
-    navigate({ dir: parentDir(path), openFile: path });
+    guardedNavigate({ dir: parentDir(path), openFile: path });
   };
 
   return (
@@ -539,7 +652,7 @@ export function ServerFilesTab({
           type="button"
           className="btn sm ghost"
           disabled={!canGoBack}
-          onClick={goBack}
+          onClick={guardedGoBack}
           aria-label={t("files.nav.back")}
         >
           &larr;
@@ -548,7 +661,7 @@ export function ServerFilesTab({
           type="button"
           className="btn sm ghost"
           disabled={!canGoForward}
-          onClick={goForward}
+          onClick={guardedGoForward}
           aria-label={t("files.nav.forward")}
         >
           &rarr;
@@ -648,8 +761,9 @@ export function ServerFilesTab({
                   (e) => joinPath(dir, e.name) === openFile,
                 )?.size
               }
-              onClose={() => navigate({ dir, openFile: null })}
+              onClose={() => guardedNavigate({ dir, openFile: null })}
               onError={onError}
+              onDraftChange={setHasDraft}
             />
           </div>
         )}
@@ -680,6 +794,14 @@ export function ServerFilesTab({
           onError={onError}
         />
       )}
+      <SimpleConfirmDialog
+        open={discardConfirmOpen}
+        title={t("files.unsaved.title")}
+        body={t("files.unsaved.body")}
+        confirmLabel={t("files.unsaved.discard")}
+        onConfirm={confirmDiscard}
+        onClose={cancelDiscard}
+      />
     </section>
   );
 }
@@ -1380,6 +1502,7 @@ function Viewer({
   fileSize,
   onClose,
   onError,
+  onDraftChange,
 }: {
   path: string;
   communityId: string;
@@ -1390,12 +1513,16 @@ function Viewer({
   fileSize?: number;
   onClose: () => void;
   onError: (error: unknown) => void;
+  onDraftChange: (hasDraft: boolean) => void;
 }) {
   const { showToast } = useToast();
   const queryClient = useQueryClient();
   // `null` until the user edits, so an untouched view always reflects the
   // server's content even after a save invalidates and refetches it.
   const [draft, setDraft] = useState<string | null>(null);
+  useEffect(() => {
+    onDraftChange(draft !== null);
+  }, [draft, onDraftChange]);
   const [historyOpen, setHistoryOpen] = useState(false);
 
   const canHistory = can("file:history", { serverId });

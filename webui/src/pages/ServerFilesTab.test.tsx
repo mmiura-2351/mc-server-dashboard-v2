@@ -2353,3 +2353,224 @@ describe("ServerFilesTab navigation history", () => {
     expect(fwdBtn).toBeDisabled();
   });
 });
+
+// ── Unsaved changes guard (issue #1486) ────────────────────────────────────
+
+describe("ServerFilesTab unsaved changes guard", () => {
+  it("shows discard dialog when editing a file and clicking a directory", async () => {
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.includes("/files?path=") && !path.includes("list=")) {
+        return Promise.resolve({
+          path: "server.properties",
+          content_base64: encodeUtf8Base64("motd=hello\n"),
+        });
+      }
+      if (path.includes("/files?path=")) {
+        return Promise.resolve(
+          listing([
+            { name: "world", is_dir: true },
+            { name: "server.properties", is_dir: false },
+          ]),
+        );
+      }
+      return Promise.resolve(server());
+    });
+    renderPage();
+    await openFiles();
+
+    // Open the file.
+    fireEvent.click(await screen.findByText(/server\.properties/));
+    const editor = (await screen.findByLabelText(
+      t("files.editorLabel"),
+    )) as HTMLTextAreaElement;
+
+    // Edit the file (create a draft).
+    fireEvent.change(editor, { target: { value: "motd=changed\n" } });
+
+    // Click the directory to navigate away.
+    fireEvent.click(screen.getByText(/world/));
+
+    // The discard dialog should appear.
+    expect(
+      await screen.findByText(t("files.unsaved.title")),
+    ).toBeInTheDocument();
+    expect(screen.getByText(t("files.unsaved.body"))).toBeInTheDocument();
+  });
+
+  it("navigates on confirm and discards the draft", async () => {
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.includes("path=world") && path.includes("list=")) {
+        return Promise.resolve(listing([{ name: "level.dat", is_dir: false }]));
+      }
+      if (path.includes("/files?path=") && !path.includes("list=")) {
+        return Promise.resolve({
+          path: "server.properties",
+          content_base64: encodeUtf8Base64("motd=hello\n"),
+        });
+      }
+      if (path.includes("/files?path=")) {
+        return Promise.resolve(
+          listing([
+            { name: "world", is_dir: true },
+            { name: "server.properties", is_dir: false },
+          ]),
+        );
+      }
+      return Promise.resolve(server());
+    });
+    renderPage();
+    await openFiles();
+
+    fireEvent.click(await screen.findByText(/server\.properties/));
+    const editor = await screen.findByLabelText(t("files.editorLabel"));
+    fireEvent.change(editor, { target: { value: "motd=changed\n" } });
+
+    // Try to navigate to the directory.
+    fireEvent.click(screen.getByText(/world/));
+    await screen.findByText(t("files.unsaved.title"));
+
+    // Confirm discard.
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.unsaved.discard") }),
+    );
+
+    // Should navigate into "world".
+    await waitFor(() =>
+      expect(mockApi.get).toHaveBeenCalledWith(
+        `${FILES_BASE}?path=world&list=true`,
+      ),
+    );
+    // The discard dialog should be gone.
+    expect(
+      screen.queryByText(t("files.unsaved.title")),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps the file open on cancel", async () => {
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.includes("/files?path=") && !path.includes("list=")) {
+        return Promise.resolve({
+          path: "server.properties",
+          content_base64: encodeUtf8Base64("motd=hello\n"),
+        });
+      }
+      if (path.includes("/files?path=")) {
+        return Promise.resolve(
+          listing([
+            { name: "world", is_dir: true },
+            { name: "server.properties", is_dir: false },
+          ]),
+        );
+      }
+      return Promise.resolve(server());
+    });
+    renderPage();
+    await openFiles();
+
+    fireEvent.click(await screen.findByText(/server\.properties/));
+    const editor = await screen.findByLabelText(t("files.editorLabel"));
+    fireEvent.change(editor, { target: { value: "motd=changed\n" } });
+
+    fireEvent.click(screen.getByText(/world/));
+    await screen.findByText(t("files.unsaved.title"));
+
+    // Cancel — click the close/cancel button on the dialog.
+    fireEvent.click(screen.getByRole("button", { name: t("common.cancel") }));
+
+    // The dialog should close and the editor should still be visible.
+    await waitFor(() =>
+      expect(
+        screen.queryByText(t("files.unsaved.title")),
+      ).not.toBeInTheDocument(),
+    );
+    expect(screen.getByLabelText(t("files.editorLabel"))).toBeInTheDocument();
+  });
+
+  it("does not show dialog when there are no unsaved changes", async () => {
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.includes("path=world") && path.includes("list=")) {
+        return Promise.resolve(listing([{ name: "level.dat", is_dir: false }]));
+      }
+      if (path.includes("/files?path=") && !path.includes("list=")) {
+        return Promise.resolve({
+          path: "server.properties",
+          content_base64: encodeUtf8Base64("motd=hello\n"),
+        });
+      }
+      if (path.includes("/files?path=")) {
+        return Promise.resolve(
+          listing([
+            { name: "world", is_dir: true },
+            { name: "server.properties", is_dir: false },
+          ]),
+        );
+      }
+      return Promise.resolve(server());
+    });
+    renderPage();
+    await openFiles();
+
+    // Open the file but don't edit it.
+    fireEvent.click(await screen.findByText(/server\.properties/));
+    await screen.findByLabelText(t("files.editorLabel"));
+
+    // Click the directory.
+    fireEvent.click(screen.getByText(/world/));
+
+    // No discard dialog — navigates directly.
+    await waitFor(() =>
+      expect(mockApi.get).toHaveBeenCalledWith(
+        `${FILES_BASE}?path=world&list=true`,
+      ),
+    );
+    expect(
+      screen.queryByText(t("files.unsaved.title")),
+    ).not.toBeInTheDocument();
+  });
+
+  it("saving clears the guard so no dialog appears", async () => {
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.includes("path=world") && path.includes("list=")) {
+        return Promise.resolve(listing([{ name: "level.dat", is_dir: false }]));
+      }
+      if (path.includes("/files?path=") && !path.includes("list=")) {
+        return Promise.resolve({
+          path: "server.properties",
+          content_base64: encodeUtf8Base64("motd=hello\n"),
+        });
+      }
+      if (path.includes("/files?path=")) {
+        return Promise.resolve(
+          listing([
+            { name: "world", is_dir: true },
+            { name: "server.properties", is_dir: false },
+          ]),
+        );
+      }
+      return Promise.resolve(server());
+    });
+    mockApi.put.mockResolvedValue(undefined);
+    renderPage();
+    await openFiles();
+
+    // Open and edit the file.
+    fireEvent.click(await screen.findByText(/server\.properties/));
+    const editor = await screen.findByLabelText(t("files.editorLabel"));
+    fireEvent.change(editor, { target: { value: "motd=changed\n" } });
+
+    // Save the file.
+    fireEvent.click(screen.getByRole("button", { name: t("files.save") }));
+    await waitFor(() => expect(mockApi.put).toHaveBeenCalled());
+
+    // Navigate away — no dialog should appear.
+    fireEvent.click(screen.getByText(/world/));
+    await waitFor(() =>
+      expect(mockApi.get).toHaveBeenCalledWith(
+        `${FILES_BASE}?path=world&list=true`,
+      ),
+    );
+    expect(
+      screen.queryByText(t("files.unsaved.title")),
+    ).not.toBeInTheDocument();
+  });
+});

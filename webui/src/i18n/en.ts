@@ -608,6 +608,12 @@ export const en = {
   "files.nav.back": "Back",
   "files.nav.forward": "Forward",
 
+  // Unsaved changes guard (issue #1486).
+  "files.unsaved.title": "Unsaved changes",
+  "files.unsaved.body":
+    "You have unsaved changes. Do you want to discard them?",
+  "files.unsaved.discard": "Discard",
+
   // Players tab — attached op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8).
   // One contiguous block to keep merge conflicts with sibling i18n PRs minimal.
   "players.heading": "Applied groups",
