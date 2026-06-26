@@ -27,6 +27,7 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { zipSync } from "fflate";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
@@ -34,7 +35,7 @@ import {
   getRefresher,
   postFormWithProgress,
 } from "../api/client.ts";
-import { downloadFile } from "../api/download.ts";
+import { downloadFile, fetchFileBlob } from "../api/download.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
 import { getAccessToken } from "../auth/tokenStore.ts";
@@ -1632,12 +1633,12 @@ function Toolbar({
   const bulkDownload = async () => {
     const paths = Array.from(selected);
     const total = paths.length;
-    setBulkBusy(true);
-    let done = 0;
-    let failed = 0;
-    for (const path of paths) {
-      showToast(t("files.bulk.download.progress", { done, total }), "success");
+
+    // Single file — download directly, no ZIP wrapper needed.
+    if (total === 1) {
+      const path = paths[0];
       const filename = path.split("/").at(-1) ?? path;
+      setBulkBusy(true);
       try {
         await downloadFile(
           `${apiPath(
@@ -1646,12 +1647,57 @@ function Toolbar({
           )}?path=${encodeURIComponent(path)}`,
           filename,
         );
+        showToast(t("files.bulk.download.done", { done: 1 }), "success");
+      } catch (error) {
+        if (!onForbiddenCheck(error)) {
+          showToast(
+            t("files.bulk.download.partial", { done: 0, total: 1, failed: 1 }),
+            "error",
+          );
+        }
+      }
+      setBulkBusy(false);
+      return;
+    }
+
+    // Multiple files — fetch all, bundle into a single ZIP.
+    setBulkBusy(true);
+    const files: Record<string, Uint8Array> = {};
+    let done = 0;
+    let failed = 0;
+    for (const path of paths) {
+      showToast(t("files.bulk.download.progress", { done, total }), "success");
+      try {
+        const blob = await fetchFileBlob(
+          `${apiPath(
+            "/api/communities/{community_id}/servers/{server_id}/files/download",
+            { community_id: communityId, server_id: serverId },
+          )}?path=${encodeURIComponent(path)}`,
+        );
+        const buf = new Uint8Array(await blob.arrayBuffer());
+        // Use full path as ZIP key to avoid collisions between files with the
+        // same basename in different directories.
+        files[path] = buf;
         done += 1;
       } catch (error) {
         failed += 1;
         if (onForbiddenCheck(error)) break;
       }
     }
+
+    if (done > 0) {
+      const zipped = zipSync(files);
+      const zipBlob = new Blob([zipped], { type: "application/zip" });
+      const url = URL.createObjectURL(zipBlob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "files.zip";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    }
+
     setBulkBusy(false);
     if (failed === 0) {
       showToast(t("files.bulk.download.done", { done }), "success");
