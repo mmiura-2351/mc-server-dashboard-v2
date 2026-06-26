@@ -42,7 +42,10 @@ vi.mock("../api/client.ts", async () => {
   };
 });
 
-const mockDownload = vi.hoisted(() => ({ downloadFile: vi.fn() }));
+const mockDownload = vi.hoisted(() => ({
+  downloadFile: vi.fn(),
+  fetchFileBlob: vi.fn(),
+}));
 vi.mock("../api/download.ts", () => mockDownload);
 
 let mockCan: Can = () => true;
@@ -137,6 +140,15 @@ async function openFiles() {
 // Install the mock socket in every describe that renders the detail page: the
 // events client opens a WS, and a missing mock has caused CI flakes (it would
 // fire onDown -> invalidate and refetch out from under the test).
+// jsdom lacks URL.createObjectURL/revokeObjectURL; stub them so the ZIP
+// download path in bulkDownload() doesn't throw.
+if (typeof URL.createObjectURL !== "function") {
+  URL.createObjectURL = vi.fn(() => "blob:fake");
+}
+if (typeof URL.revokeObjectURL !== "function") {
+  URL.revokeObjectURL = vi.fn();
+}
+
 let restoreWs: () => void;
 beforeEach(() => {
   restoreWs = installMockWebSocket();
@@ -149,6 +161,8 @@ beforeEach(() => {
   mockPostFormWithProgress.mockReset();
   mockDownload.downloadFile.mockReset();
   mockDownload.downloadFile.mockResolvedValue(undefined);
+  mockDownload.fetchFileBlob.mockReset();
+  mockDownload.fetchFileBlob.mockResolvedValue(new Blob(["test"]));
   mockCan = () => true;
 });
 afterEach(() => {
@@ -1347,7 +1361,7 @@ describe("ServerFilesTab bulk operations", () => {
     expect(mockApi.delete).toHaveBeenCalledWith(`${FILES_BASE}?path=b.txt`);
   });
 
-  it("bulk downloads selected files sequentially", async () => {
+  it("bulk downloads selected files as a single ZIP", async () => {
     routeGet({
       detail: server(),
       list: listing([
@@ -1370,17 +1384,49 @@ describe("ServerFilesTab bulk operations", () => {
       screen.getByRole("button", { name: t("files.bulk.download") }),
     );
 
+    // Multiple files use fetchFileBlob (not downloadFile) to build a ZIP.
     await waitFor(() =>
-      expect(mockDownload.downloadFile).toHaveBeenCalledTimes(2),
+      expect(mockDownload.fetchFileBlob).toHaveBeenCalledTimes(2),
+    );
+    expect(mockDownload.fetchFileBlob).toHaveBeenCalledWith(
+      `${FILES_BASE}/download?path=a.txt`,
+    );
+    expect(mockDownload.fetchFileBlob).toHaveBeenCalledWith(
+      `${FILES_BASE}/download?path=b.txt`,
+    );
+    // downloadFile should NOT have been called (ZIP handles both files).
+    expect(mockDownload.downloadFile).not.toHaveBeenCalled();
+  });
+
+  it("bulk downloads a single file directly without ZIP", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "a.txt", is_dir: false },
+        { name: "b.txt", is_dir: false },
+      ]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    // Select only one item.
+    fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
+
+    // Click bulk download.
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.bulk.download") }),
+    );
+
+    // Single file uses downloadFile directly (no ZIP).
+    await waitFor(() =>
+      expect(mockDownload.downloadFile).toHaveBeenCalledTimes(1),
     );
     expect(mockDownload.downloadFile).toHaveBeenCalledWith(
       `${FILES_BASE}/download?path=a.txt`,
       "a.txt",
     );
-    expect(mockDownload.downloadFile).toHaveBeenCalledWith(
-      `${FILES_BASE}/download?path=b.txt`,
-      "b.txt",
-    );
+    expect(mockDownload.fetchFileBlob).not.toHaveBeenCalled();
   });
 
   it("bulk moves selected items to a destination directory", async () => {
