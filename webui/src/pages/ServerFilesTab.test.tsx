@@ -2237,3 +2237,119 @@ describe("Keyboard shortcuts", () => {
     expect(screen.getByRole("checkbox", { name: "readme.txt" })).toBeChecked();
   });
 });
+
+// ── Navigation history (issue #1475) ────────────────────────────────────────
+
+describe("ServerFilesTab navigation history", () => {
+  it("shows back and forward buttons that are initially disabled", async () => {
+    routeGet({ detail: server(), list: listing([]) });
+    renderPage();
+    await openFiles();
+    await screen.findByText(t("files.empty"));
+
+    const backBtn = screen.getByRole("button", { name: t("files.nav.back") });
+    const fwdBtn = screen.getByRole("button", {
+      name: t("files.nav.forward"),
+    });
+    expect(backBtn).toBeDisabled();
+    expect(fwdBtn).toBeDisabled();
+  });
+
+  it("enables back after navigating into a directory", async () => {
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.includes("path=world") && path.includes("list=")) {
+        return Promise.resolve(listing([{ name: "level.dat", is_dir: false }]));
+      }
+      if (path.includes("/files?path=")) {
+        return Promise.resolve(listing([{ name: "world", is_dir: true }]));
+      }
+      return Promise.resolve(server());
+    });
+    renderPage();
+    await openFiles();
+
+    // Navigate into world.
+    fireEvent.click(await screen.findByText(/world/));
+    await screen.findByText(/level\.dat/);
+
+    const backBtn = screen.getByRole("button", { name: t("files.nav.back") });
+    expect(backBtn).not.toBeDisabled();
+  });
+
+  it("goes back to root and then forward to the previous directory", async () => {
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.includes("path=world") && path.includes("list=")) {
+        return Promise.resolve(listing([{ name: "level.dat", is_dir: false }]));
+      }
+      if (path.includes("/files?path=") && path.includes("list=")) {
+        return Promise.resolve(listing([{ name: "world", is_dir: true }]));
+      }
+      return Promise.resolve(server());
+    });
+    renderPage();
+    await openFiles();
+
+    // Navigate into world.
+    fireEvent.click(await screen.findByText(/world/));
+    await screen.findByText(/level\.dat/);
+
+    // Go back.
+    fireEvent.click(screen.getByRole("button", { name: t("files.nav.back") }));
+    // Should be back at root listing.
+    await screen.findByText(/world/);
+
+    // Forward button should now be enabled.
+    const fwdBtn = screen.getByRole("button", {
+      name: t("files.nav.forward"),
+    });
+    expect(fwdBtn).not.toBeDisabled();
+
+    // Go forward.
+    fireEvent.click(fwdBtn);
+    await waitFor(() =>
+      expect(mockApi.get).toHaveBeenCalledWith(
+        `${FILES_BASE}?path=world&list=true`,
+      ),
+    );
+  });
+
+  it("clears forward stack when navigating to a new location after going back", async () => {
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.includes("path=config") && path.includes("list=")) {
+        return Promise.resolve(listing([{ name: "cfg.yml", is_dir: false }]));
+      }
+      if (path.includes("path=world") && path.includes("list=")) {
+        return Promise.resolve(listing([{ name: "level.dat", is_dir: false }]));
+      }
+      if (path.includes("/files?path=") && path.includes("list=")) {
+        return Promise.resolve(
+          listing([
+            { name: "world", is_dir: true },
+            { name: "config", is_dir: true },
+          ]),
+        );
+      }
+      return Promise.resolve(server());
+    });
+    renderPage();
+    await openFiles();
+
+    // Navigate into world.
+    fireEvent.click(await screen.findByText(/world/));
+    await screen.findByText(/level\.dat/);
+
+    // Go back to root.
+    fireEvent.click(screen.getByRole("button", { name: t("files.nav.back") }));
+    await screen.findByText(/config/);
+
+    // Navigate into config (new path, should clear forward stack).
+    fireEvent.click(screen.getByText(/config/));
+    await screen.findByText(/cfg\.yml/);
+
+    // Forward should be disabled now.
+    const fwdBtn = screen.getByRole("button", {
+      name: t("files.nav.forward"),
+    });
+    expect(fwdBtn).toBeDisabled();
+  });
+});

@@ -604,6 +604,10 @@ export const en = {
   "files.contextMenu.newFolder": "New folder",
   "files.contextMenu.extractHere": "Extract here",
 
+  // Navigation history (issue #1475).
+  "files.nav.back": "Back",
+  "files.nav.forward": "Forward",
+
   // Players tab — attached op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8).
   // One contiguous block to keep merge conflicts with sibling i18n PRs minimal.
   "players.heading": "Applied groups",
