@@ -612,6 +612,10 @@ export const ja: Record<TranslationKey, string> = {
   "files.contextMenu.newFolder": "新しいフォルダ",
   "files.contextMenu.extractHere": "ここに展開",
 
+  // Navigation history (issue #1475).
+  "files.nav.back": "戻る",
+  "files.nav.forward": "進む",
+
   // Players tab — applied op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8).
   "players.heading": "適用中のグループ",
   "players.loading": "グループを読み込んでいます…",

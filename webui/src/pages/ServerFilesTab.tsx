@@ -52,6 +52,7 @@ import {
   isProbablyText,
 } from "./fileText.ts";
 import { atRest, normalizeState } from "./serverState.ts";
+import { useNavHistory } from "./useNavHistory.ts";
 
 type DirListing = components["schemas"]["DirListingResponse"];
 type FileContent = components["schemas"]["FileContentResponse"];
@@ -147,9 +148,18 @@ export function ServerFilesTab({
     normalizeState(server.desired_state),
   );
 
-  // Current directory rel-path ("" is the working-set root) and the open file.
-  const [dir, setDir] = useState("");
-  const [openFile, setOpenFile] = useState<string | null>(null);
+  // Current directory rel-path ("" is the working-set root) and the open file,
+  // tracked through a navigation history stack (issue #1475).
+  const {
+    current: nav,
+    navigate,
+    goBack,
+    goForward,
+    canGoBack,
+    canGoForward,
+  } = useNavHistory();
+  const dir = nav.dir;
+  const openFile = nav.openFile;
   const [contentDirNotice, setContentDirNotice] = useState(false);
 
   // Multi-select: track selected file paths and the last-clicked index for
@@ -157,11 +167,20 @@ export function ServerFilesTab({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const lastClickedIdx = useRef<number | null>(null);
 
-  /** Wrapper around setDir that clears the selection state. */
+  // Track the previous dir to clear selection when it changes (including
+  // back/forward navigation).
+  const prevDirRef = useRef(dir);
+  useEffect(() => {
+    if (prevDirRef.current !== dir) {
+      prevDirRef.current = dir;
+      setSelected(new Set());
+      lastClickedIdx.current = null;
+    }
+  }, [dir]);
+
+  /** Navigate to a new directory, pushing it onto the history stack. */
   const navigateDir = (next: string) => {
-    setDir(next);
-    setSelected(new Set());
-    lastClickedIdx.current = null;
+    navigate({ dir: next, openFile: null });
   };
 
   const onError = (error: unknown) => {
@@ -340,7 +359,7 @@ export function ServerFilesTab({
       setKbDeleteOpen(false);
       setSelected(new Set());
       refetchList();
-      setOpenFile(null);
+      navigate({ dir, openFile: null });
     },
     onError: (error) => {
       setKbDeleteOpen(false);
@@ -412,17 +431,15 @@ export function ServerFilesTab({
   const enter = (entry: DirEntry) => {
     const next = joinPath(dir, entry.name);
     if (entry.is_dir) {
-      navigateDir(next);
-      setOpenFile(null);
+      navigate({ dir: next, openFile: null });
     } else {
-      setOpenFile(next);
+      navigate({ dir, openFile: next });
     }
   };
 
   // Point the browser at the hit's parent directory and open it in the viewer.
   const openHit = (path: string) => {
-    navigateDir(parentDir(path));
-    setOpenFile(path);
+    navigate({ dir: parentDir(path), openFile: path });
   };
 
   return (
@@ -461,15 +478,32 @@ export function ServerFilesTab({
         onDeselectAll={() => setSelected(new Set())}
         onClearSelection={() => setSelected(new Set())}
       />
-      <Crumbs
-        dir={dir}
-        onNavigate={(next) => {
-          navigateDir(next);
-          setOpenFile(null);
-        }}
-        dropEnabled={dropEnabled}
-        onMoveTo={moveFiles}
-      />
+      <div className="file-nav">
+        <button
+          type="button"
+          className="btn sm ghost"
+          disabled={!canGoBack}
+          onClick={goBack}
+          aria-label={t("files.nav.back")}
+        >
+          &larr;
+        </button>
+        <button
+          type="button"
+          className="btn sm ghost"
+          disabled={!canGoForward}
+          onClick={goForward}
+          aria-label={t("files.nav.forward")}
+        >
+          &rarr;
+        </button>
+        <Crumbs
+          dir={dir}
+          onNavigate={navigateDir}
+          dropEnabled={dropEnabled}
+          onMoveTo={moveFiles}
+        />
+      </div>
       {progress.active && (
         <UploadProgress
           loaded={progress.loaded}
@@ -508,7 +542,7 @@ export function ServerFilesTab({
               onEnter={enter}
               onChanged={() => {
                 refetchList();
-                setOpenFile(null);
+                navigate({ dir, openFile: null });
               }}
               onError={onError}
               selected={selected}

@@ -1509,10 +1509,15 @@ button.link:focus-visible {
   font-size: 13px;
   color: var(--text-dim);
 }
+.file-nav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 10px;
+}
 .file-crumbs {
   font-size: 13px;
   color: var(--text-dim);
-  margin-bottom: 10px;
 }
 .file-crumbs .crumb {
   background: none;
