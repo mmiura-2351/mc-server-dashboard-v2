@@ -53,6 +53,13 @@ import {
 } from "./fileText.ts";
 import { atRest, normalizeState } from "./serverState.ts";
 
+/** Convert a version ID ({ns_timestamp:020d}-{hex8}) to a Date. */
+export function versionDate(versionId: string): Date {
+  const nsStr = versionId.split("-")[0];
+  const ms = Number(BigInt(nsStr) / 1000000n);
+  return new Date(ms);
+}
+
 type DirListing = components["schemas"]["DirListingResponse"];
 type FileContent = components["schemas"]["FileContentResponse"];
 type DirEntry = components["schemas"]["DirEntryResponse"];
@@ -1475,7 +1482,9 @@ function HistoryDrawer({
         <ul className="files-history-list">
           {history.data.versions.map((versionId) => (
             <li key={versionId} className="files-history-row">
-              <span className="files-history-id">{versionId}</span>
+              <span className="files-history-date">
+                {versionDate(versionId).toLocaleString()}
+              </span>
               {canRollback && (
                 <button
                   type="button"
@@ -1515,7 +1524,9 @@ function HistoryDrawer({
           }
         >
           <p>{t("files.rollback.dialogBody")}</p>
-          <p className="files-history-id">{confirming}</p>
+          <p className="files-history-date">
+            {versionDate(confirming).toLocaleString()}
+          </p>
         </Modal>
       )}
     </Modal>
