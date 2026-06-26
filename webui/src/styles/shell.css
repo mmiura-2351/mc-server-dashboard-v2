@@ -1662,7 +1662,7 @@ button.link:focus-visible {
   border-width: 0 2px 2px 0;
   transform: rotate(45deg);
 }
-.file-row:hover .file-select {
+.file-select:hover {
   border-color: var(--accent);
   opacity: 1;
 }
