@@ -20,6 +20,7 @@ export function useNavHistory() {
   const canGoForward = index < history.length - 1;
 
   const navigate = (next: NavState) => {
+    if (next.dir === current.dir && next.openFile === current.openFile) return;
     const newHistory = [...history.slice(0, index + 1), next];
     setHistory(newHistory);
     setIndex(newHistory.length - 1);

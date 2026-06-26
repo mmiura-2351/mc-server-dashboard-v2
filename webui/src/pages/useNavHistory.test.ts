@@ -77,6 +77,19 @@ describe("useNavHistory", () => {
     expect(result.current.current).toEqual({ dir: "world", openFile: null });
   });
 
+  it("does not push duplicate when navigating to current state", () => {
+    const { result } = renderHook(() => useNavHistory());
+    act(() => result.current.navigate({ dir: "a", openFile: null }));
+    expect(result.current.canGoBack).toBe(true);
+
+    // Navigate to the same state again.
+    act(() => result.current.navigate({ dir: "a", openFile: null }));
+    // Should not have grown the history: one goBack should reach root.
+    act(() => result.current.goBack());
+    expect(result.current.current).toEqual({ dir: "", openFile: null });
+    expect(result.current.canGoBack).toBe(false);
+  });
+
   it("handles a longer navigation chain", () => {
     const { result } = renderHook(() => useNavHistory());
     act(() => result.current.navigate({ dir: "a", openFile: null }));
