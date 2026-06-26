@@ -34,10 +34,12 @@ async function fetchDownload(path: string): Promise<Response> {
   });
 }
 
-export async function downloadFile(
-  path: string,
-  filename: string,
-): Promise<void> {
+/**
+ * Fetch a file as a {@link Blob} with auth + transparent 401 refresh.
+ * Used by {@link downloadFile} for single-file saves and by the bulk-download
+ * ZIP builder in `ServerFilesTab`.
+ */
+export async function fetchFileBlob(path: string): Promise<Blob> {
   let response = await fetchDownload(path);
 
   // Transparent refresh: a 401 means the access token expired. Run the shared
@@ -54,7 +56,14 @@ export async function downloadFile(
   if (!response.ok) {
     throw new ApiError(response.status, await readProblem(response));
   }
-  const blob = await response.blob();
+  return response.blob();
+}
+
+export async function downloadFile(
+  path: string,
+  filename: string,
+): Promise<void> {
+  const blob = await fetchFileBlob(path);
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;

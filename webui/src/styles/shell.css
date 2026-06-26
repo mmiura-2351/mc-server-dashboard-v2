@@ -1529,6 +1529,11 @@ button.link:focus-visible {
 }
 .file-layout {
   display: grid;
+  gap: 14px;
+  /* Single-pane default: file tree fills the width when no viewer is open. */
+  grid-template-columns: 1fr;
+}
+.file-layout.two-pane {
   /* The name column carries a filename plus up to three action buttons, so a
    * 1:2 split left common names (server.properties, banned-players.json)
    * over-truncated next to a preview pane that is empty until a file is opened.
@@ -1536,7 +1541,6 @@ button.link:focus-visible {
    * without hover; the preview's minmax(0,…) lets it shrink instead of forcing
    * horizontal overflow at narrow widths. */
   grid-template-columns: minmax(300px, 1fr) minmax(0, 1.4fr);
-  gap: 14px;
 }
 .file-list {
   list-style: none;
@@ -1547,9 +1551,14 @@ button.link:focus-visible {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding: 4px 0;
+  gap: 12px;
+  padding: 8px 12px;
   border-bottom: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  transition: background-color 0.15s;
+}
+.file-row:hover {
+  background: var(--bg-overlay);
 }
 .file-row.active {
   color: var(--accent);
@@ -1576,7 +1585,7 @@ button.link:focus-visible {
   pointer-events: none;
 }
 .file-row.selected {
-  background: var(--bg-inset);
+  background: rgba(77, 159, 255, 0.08);
 }
 /* Drop target highlighting for internal drag-and-drop file organization
  * (issue #1464). Folders in the listing and breadcrumb buttons receive this
@@ -1621,13 +1630,41 @@ button.link:focus-visible {
   color: var(--red, #e53e3e);
 }
 .file-select {
-  flex-shrink: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
   cursor: pointer;
-  width: 16px;
-  height: 16px;
-  accent-color: var(--accent);
+  flex-shrink: 0;
   margin: 0;
-  vertical-align: middle;
+  position: relative;
+  transition:
+    border-color 0.15s,
+    background-color 0.15s;
+  opacity: 0.5;
+}
+.file-select:checked {
+  background-color: var(--accent);
+  border-color: var(--accent);
+  opacity: 1;
+}
+.file-select:checked::after {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 2px;
+  width: 5px;
+  height: 9px;
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+.file-row:hover .file-select {
+  border-color: var(--accent);
+  opacity: 1;
 }
 .files-selected-count {
   font-size: 13px;
@@ -1639,6 +1676,7 @@ button.link:focus-visible {
   color: inherit;
   cursor: pointer;
   font: inherit;
+  font-size: 14px;
   text-align: left;
   flex: 1;
   /* Without min-width:0 a flex item refuses to shrink below its content
@@ -1742,10 +1780,8 @@ button.link:focus-visible {
   padding: 6px 0;
   border-bottom: 1px solid var(--border-subtle);
 }
-.files-history-id {
-  font-family: var(--font-mono);
-  font-size: 12px;
-  word-break: break-all;
+.files-history-date {
+  font-size: 13px;
 }
 
 /* Players tab — attached op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8). */

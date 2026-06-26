@@ -16,6 +16,7 @@ import type { Can } from "../permissions/useCan.ts";
 import { installMockWebSocket } from "../test/mockWebSocket.ts";
 import { encodeUtf8Base64 } from "./fileText.ts";
 import { ServerDetailPage } from "./ServerDetailPage.tsx";
+import { versionDate } from "./ServerFilesTab.tsx";
 
 const CID = "c1";
 const SID = "s1";
@@ -42,7 +43,10 @@ vi.mock("../api/client.ts", async () => {
   };
 });
 
-const mockDownload = vi.hoisted(() => ({ downloadFile: vi.fn() }));
+const mockDownload = vi.hoisted(() => ({
+  downloadFile: vi.fn(),
+  fetchFileBlob: vi.fn(),
+}));
 vi.mock("../api/download.ts", () => mockDownload);
 
 let mockCan: Can = () => true;
@@ -137,6 +141,15 @@ async function openFiles() {
 // Install the mock socket in every describe that renders the detail page: the
 // events client opens a WS, and a missing mock has caused CI flakes (it would
 // fire onDown -> invalidate and refetch out from under the test).
+// jsdom lacks URL.createObjectURL/revokeObjectURL; stub them so the ZIP
+// download path in bulkDownload() doesn't throw.
+if (typeof URL.createObjectURL !== "function") {
+  URL.createObjectURL = vi.fn(() => "blob:fake");
+}
+if (typeof URL.revokeObjectURL !== "function") {
+  URL.revokeObjectURL = vi.fn();
+}
+
 let restoreWs: () => void;
 beforeEach(() => {
   restoreWs = installMockWebSocket();
@@ -149,6 +162,8 @@ beforeEach(() => {
   mockPostFormWithProgress.mockReset();
   mockDownload.downloadFile.mockReset();
   mockDownload.downloadFile.mockResolvedValue(undefined);
+  mockDownload.fetchFileBlob.mockReset();
+  mockDownload.fetchFileBlob.mockResolvedValue(new Blob(["test"]));
   mockCan = () => true;
 });
 afterEach(() => {
@@ -254,21 +269,67 @@ describe("ServerFilesTab viewer / editor", () => {
     expect(body.content_base64).toBe(encodeUtf8Base64(edited));
   });
 
-  it("offers download only for a binary file (no editor)", async () => {
+  it("offers download only for a binary file (no editor) and shows metadata", async () => {
     const binary = btoa(String.fromCharCode(0x50, 0x4b, 0x03, 0x04, 0x00));
     routeGet({
       detail: server(),
-      list: listing([{ name: "region.mca", is_dir: false }]),
+      list: listing([{ name: "region.mca", is_dir: false, size: 2048 }]),
       content: { path: "region.mca", content_base64: binary },
     });
     renderPage();
     await openFiles();
 
     fireEvent.click(await screen.findByText(/region\.mca/));
-    expect(await screen.findByText(t("files.binary"))).toBeInTheDocument();
+    expect(
+      await screen.findByText(t("files.cannotPreview")),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/2\.0 KB/)).toBeInTheDocument();
     expect(
       screen.queryByLabelText(t("files.editorLabel")),
     ).not.toBeInTheDocument();
+  });
+
+  it("hides the viewer pane when no file is selected", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "a.txt", is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    // The viewer pane should not be rendered.
+    expect(document.querySelector(".file-viewer")).toBeNull();
+    // The layout should be single-pane (no two-pane class).
+    expect(document.querySelector(".file-layout.two-pane")).toBeNull();
+  });
+
+  it("shows the viewer when a file is selected and closes on close button", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "readme.txt", is_dir: false }]),
+      content: {
+        path: "readme.txt",
+        content_base64: encodeUtf8Base64("hello"),
+      },
+    });
+    renderPage();
+    await openFiles();
+
+    fireEvent.click(await screen.findByText(/readme\.txt/));
+    // Wait for content to load and viewer pane to appear with two-pane layout.
+    await screen.findByLabelText(t("files.editorLabel"));
+    expect(document.querySelector(".file-layout.two-pane")).not.toBeNull();
+    expect(document.querySelector(".file-viewer")).not.toBeNull();
+
+    // Close the viewer.
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.closeViewer") }),
+    );
+    await waitFor(() =>
+      expect(document.querySelector(".file-viewer")).toBeNull(),
+    );
+    expect(document.querySelector(".file-layout.two-pane")).toBeNull();
   });
 });
 
@@ -576,11 +637,25 @@ describe("ServerFilesTab search", () => {
   });
 });
 
+// Realistic version IDs: {ns_timestamp:020d}-{random_hex8}.
+const VID1 = "01750852800000000000-a1b2c3d4"; // 2025-06-25T12:00:00Z
+const VID2 = "01750939200000000000-b2c3d4e5"; // 2025-06-26T12:00:00Z
+
+describe("versionDate helper", () => {
+  it("converts a nanosecond-timestamp version ID to the correct Date", () => {
+    const d = versionDate(VID1);
+    expect(d.toISOString()).toBe("2025-06-25T12:00:00.000Z");
+  });
+});
+
 describe("ServerFilesTab history + rollback", () => {
-  it("lists retained versions from files/history with an encoded path", async () => {
+  it("shows formatted dates instead of raw version IDs", async () => {
     mockApi.get.mockImplementation((path: string) => {
       if (path.includes("/files/history")) {
-        return Promise.resolve({ path: "a b.txt", versions: ["v1", "v2"] });
+        return Promise.resolve({
+          path: "a b.txt",
+          versions: [VID1, VID2],
+        });
       }
       if (path.includes("/files?path=") && !path.includes("list=")) {
         return Promise.resolve({
@@ -600,8 +675,16 @@ describe("ServerFilesTab history + rollback", () => {
     await screen.findByLabelText(t("files.editorLabel"));
     fireEvent.click(screen.getByRole("button", { name: t("files.history") }));
 
-    expect(await screen.findByText("v1")).toBeInTheDocument();
-    expect(screen.getByText("v2")).toBeInTheDocument();
+    // Dates are rendered via toLocaleString, not the raw version IDs.
+    const date1 = versionDate(VID1).toLocaleString();
+    const date2 = versionDate(VID2).toLocaleString();
+    expect(await screen.findByText(date1)).toBeInTheDocument();
+    expect(screen.getByText(date2)).toBeInTheDocument();
+
+    // Raw version IDs should NOT appear as visible text.
+    expect(screen.queryByText(VID1)).not.toBeInTheDocument();
+    expect(screen.queryByText(VID2)).not.toBeInTheDocument();
+
     expect(screen.getByText(t("files.history.hint"))).toBeInTheDocument();
     await waitFor(() =>
       expect(mockApi.get).toHaveBeenCalledWith(
@@ -613,7 +696,7 @@ describe("ServerFilesTab history + rollback", () => {
   it("rolls back to a version after confirm with {version_id} body and an encoded path", async () => {
     mockApi.get.mockImplementation((path: string) => {
       if (path.includes("/files/history")) {
-        return Promise.resolve({ path: "a b.txt", versions: ["v1"] });
+        return Promise.resolve({ path: "a b.txt", versions: [VID1] });
       }
       if (path.includes("/files?path=") && !path.includes("list=")) {
         return Promise.resolve({
@@ -633,7 +716,8 @@ describe("ServerFilesTab history + rollback", () => {
     fireEvent.click(await screen.findByText(/a b\.txt/));
     await screen.findByLabelText(t("files.editorLabel"));
     fireEvent.click(screen.getByRole("button", { name: t("files.history") }));
-    await screen.findByText("v1");
+    const date1 = versionDate(VID1).toLocaleString();
+    await screen.findByText(date1);
 
     fireEvent.click(
       screen.getByRole("button", { name: t("files.history.rollback") }),
@@ -645,15 +729,16 @@ describe("ServerFilesTab history + rollback", () => {
     await waitFor(() => expect(mockApi.post).toHaveBeenCalled());
     const [url, init] = mockApi.post.mock.calls[0];
     expect(url).toBe(`${FILES_BASE}/rollback?path=a%20b.txt`);
+    // The raw version ID is sent to the API, not the formatted date.
     expect(JSON.parse((init as { body: string }).body)).toEqual({
-      version_id: "v1",
+      version_id: VID1,
     });
   });
 
   it("Escape closes only the rollback confirm, leaving the history drawer open", async () => {
     mockApi.get.mockImplementation((path: string) => {
       if (path.includes("/files/history")) {
-        return Promise.resolve({ path: "a b.txt", versions: ["v1"] });
+        return Promise.resolve({ path: "a b.txt", versions: [VID1] });
       }
       if (path.includes("/files?path=") && !path.includes("list=")) {
         return Promise.resolve({
@@ -672,7 +757,7 @@ describe("ServerFilesTab history + rollback", () => {
     fireEvent.click(await screen.findByText(/a b\.txt/));
     await screen.findByLabelText(t("files.editorLabel"));
     fireEvent.click(screen.getByRole("button", { name: t("files.history") }));
-    await screen.findByText("v1");
+    await screen.findByText(versionDate(VID1).toLocaleString());
 
     // Open the stacked rollback confirm on top of the history drawer.
     fireEvent.click(
@@ -718,7 +803,7 @@ describe("ServerFilesTab history + rollback", () => {
     mockCan = (code) => code !== "file:rollback";
     mockApi.get.mockImplementation((path: string) => {
       if (path.includes("/files/history")) {
-        return Promise.resolve({ path: "a.txt", versions: ["v1"] });
+        return Promise.resolve({ path: "a.txt", versions: [VID1] });
       }
       if (path.includes("/files?path=") && !path.includes("list=")) {
         return Promise.resolve({
@@ -737,7 +822,7 @@ describe("ServerFilesTab history + rollback", () => {
     fireEvent.click(await screen.findByText(/a\.txt/));
     await screen.findByLabelText(t("files.editorLabel"));
     fireEvent.click(screen.getByRole("button", { name: t("files.history") }));
-    await screen.findByText("v1");
+    await screen.findByText(versionDate(VID1).toLocaleString());
 
     expect(
       screen.queryByRole("button", { name: t("files.history.rollback") }),
@@ -1347,7 +1432,7 @@ describe("ServerFilesTab bulk operations", () => {
     expect(mockApi.delete).toHaveBeenCalledWith(`${FILES_BASE}?path=b.txt`);
   });
 
-  it("bulk downloads selected files sequentially", async () => {
+  it("bulk downloads selected files as a single ZIP", async () => {
     routeGet({
       detail: server(),
       list: listing([
@@ -1370,17 +1455,49 @@ describe("ServerFilesTab bulk operations", () => {
       screen.getByRole("button", { name: t("files.bulk.download") }),
     );
 
+    // Multiple files use fetchFileBlob (not downloadFile) to build a ZIP.
     await waitFor(() =>
-      expect(mockDownload.downloadFile).toHaveBeenCalledTimes(2),
+      expect(mockDownload.fetchFileBlob).toHaveBeenCalledTimes(2),
+    );
+    expect(mockDownload.fetchFileBlob).toHaveBeenCalledWith(
+      `${FILES_BASE}/download?path=a.txt`,
+    );
+    expect(mockDownload.fetchFileBlob).toHaveBeenCalledWith(
+      `${FILES_BASE}/download?path=b.txt`,
+    );
+    // downloadFile should NOT have been called (ZIP handles both files).
+    expect(mockDownload.downloadFile).not.toHaveBeenCalled();
+  });
+
+  it("bulk downloads a single file directly without ZIP", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "a.txt", is_dir: false },
+        { name: "b.txt", is_dir: false },
+      ]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    // Select only one item.
+    fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
+
+    // Click bulk download.
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.bulk.download") }),
+    );
+
+    // Single file uses downloadFile directly (no ZIP).
+    await waitFor(() =>
+      expect(mockDownload.downloadFile).toHaveBeenCalledTimes(1),
     );
     expect(mockDownload.downloadFile).toHaveBeenCalledWith(
       `${FILES_BASE}/download?path=a.txt`,
       "a.txt",
     );
-    expect(mockDownload.downloadFile).toHaveBeenCalledWith(
-      `${FILES_BASE}/download?path=b.txt`,
-      "b.txt",
-    );
+    expect(mockDownload.fetchFileBlob).not.toHaveBeenCalled();
   });
 
   it("bulk moves selected items to a destination directory", async () => {

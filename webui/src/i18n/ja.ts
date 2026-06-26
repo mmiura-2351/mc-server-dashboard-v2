@@ -514,6 +514,9 @@ export const ja: Record<TranslationKey, string> = {
   "files.truncated":
     "一覧が省略されました — エントリが多すぎてすべては表示できません。",
   "files.binary": "バイナリファイル — 表示するにはダウンロードしてください。",
+  "files.cannotPreview": "このファイルはプレビューできません。",
+  "files.fileSize": "サイズ: {size}",
+  "files.closeViewer": "ビューアーを閉じる",
   "files.editorLabel": "ファイルの内容",
   "files.upload": "アップロード",
   "files.extractZip": "ZIPを展開",

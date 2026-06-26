@@ -27,6 +27,7 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { zipSync } from "fflate";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
@@ -34,7 +35,7 @@ import {
   getRefresher,
   postFormWithProgress,
 } from "../api/client.ts";
-import { downloadFile } from "../api/download.ts";
+import { downloadFile, fetchFileBlob } from "../api/download.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
 import { getAccessToken } from "../auth/tokenStore.ts";
@@ -53,6 +54,13 @@ import {
 } from "./fileText.ts";
 import { atRest, normalizeState } from "./serverState.ts";
 import { useNavHistory } from "./useNavHistory.ts";
+
+/** Convert a version ID ({ns_timestamp:020d}-{hex8}) to a Date. */
+export function versionDate(versionId: string): Date {
+  const nsStr = versionId.split("-")[0];
+  const ms = Number(BigInt(nsStr) / 1000000n);
+  return new Date(ms);
+}
 
 type DirListing = components["schemas"]["DirListingResponse"];
 type FileContent = components["schemas"]["FileContentResponse"];
@@ -512,7 +520,7 @@ export function ServerFilesTab({
           elapsedMs={progress.elapsedMs}
         />
       )}
-      <div className="file-layout">
+      <div className={`file-layout${openFile !== null ? " two-pane" : ""}`}>
         {/* biome-ignore lint/a11y/noStaticElementInteractions: drop zone uses drag events only; keyboard upload is via the toolbar button */}
         <div
           className={`card file-tree${dragOver ? " drop-zone-active" : ""}`}
@@ -577,10 +585,8 @@ export function ServerFilesTab({
             />
           )}
         </div>
-        <div className="card file-viewer">
-          {openFile === null ? (
-            <p className="sub">{t("files.noSelection")}</p>
-          ) : (
+        {openFile !== null && (
+          <div className="card file-viewer">
             <Viewer
               key={openFile}
               path={openFile}
@@ -589,10 +595,16 @@ export function ServerFilesTab({
               canEdit={canEdit}
               can={can}
               running={notAtRest}
+              fileSize={
+                listing.data?.entries.find(
+                  (e) => joinPath(dir, e.name) === openFile,
+                )?.size
+              }
+              onClose={() => setOpenFile(null)}
               onError={onError}
             />
-          )}
-        </div>
+          </div>
+        )}
       </div>
       <SimpleConfirmDialog
         open={kbDeleteOpen}
@@ -1301,6 +1313,15 @@ function FileContextMenu({
 
 // ── Viewer / editor ──────────────────────────────────────────────────────────
 
+/** Format a byte count into a human-readable string (B/KB/MB/GB). */
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024)
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
 function Viewer({
   path,
   communityId,
@@ -1308,6 +1329,8 @@ function Viewer({
   canEdit,
   can,
   running,
+  fileSize,
+  onClose,
   onError,
 }: {
   path: string;
@@ -1316,6 +1339,8 @@ function Viewer({
   canEdit: boolean;
   can: Can;
   running: boolean;
+  fileSize?: number;
+  onClose: () => void;
   onError: (error: unknown) => void;
 }) {
   const { showToast } = useToast();
@@ -1399,6 +1424,14 @@ function Viewer({
               {t("files.save")}
             </button>
           )}
+          <button
+            type="button"
+            className="btn sm ghost"
+            onClick={onClose}
+            aria-label={t("files.closeViewer")}
+          >
+            {"✕"}
+          </button>
         </span>
       </div>
       {historyOpen && (
@@ -1430,7 +1463,14 @@ function Viewer({
           />
         </>
       ) : (
-        <p className="sub">{t("files.binary")}</p>
+        <>
+          <p className="sub">{t("files.cannotPreview")}</p>
+          {fileSize !== undefined && (
+            <p className="sub">
+              {t("files.fileSize", { size: formatSize(fileSize) })}
+            </p>
+          )}
+        </>
       )}
     </>
   );
@@ -1509,7 +1549,9 @@ function HistoryDrawer({
         <ul className="files-history-list">
           {history.data.versions.map((versionId) => (
             <li key={versionId} className="files-history-row">
-              <span className="files-history-id">{versionId}</span>
+              <span className="files-history-date">
+                {versionDate(versionId).toLocaleString()}
+              </span>
               {canRollback && (
                 <button
                   type="button"
@@ -1549,7 +1591,9 @@ function HistoryDrawer({
           }
         >
           <p>{t("files.rollback.dialogBody")}</p>
-          <p className="files-history-id">{confirming}</p>
+          <p className="files-history-date">
+            {versionDate(confirming).toLocaleString()}
+          </p>
         </Modal>
       )}
     </Modal>
@@ -1623,12 +1667,12 @@ function Toolbar({
   const bulkDownload = async () => {
     const paths = Array.from(selected);
     const total = paths.length;
-    setBulkBusy(true);
-    let done = 0;
-    let failed = 0;
-    for (const path of paths) {
-      showToast(t("files.bulk.download.progress", { done, total }), "success");
+
+    // Single file — download directly, no ZIP wrapper needed.
+    if (total === 1) {
+      const path = paths[0];
       const filename = path.split("/").at(-1) ?? path;
+      setBulkBusy(true);
       try {
         await downloadFile(
           `${apiPath(
@@ -1637,12 +1681,57 @@ function Toolbar({
           )}?path=${encodeURIComponent(path)}`,
           filename,
         );
+        showToast(t("files.bulk.download.done", { done: 1 }), "success");
+      } catch (error) {
+        if (!onForbiddenCheck(error)) {
+          showToast(
+            t("files.bulk.download.partial", { done: 0, total: 1, failed: 1 }),
+            "error",
+          );
+        }
+      }
+      setBulkBusy(false);
+      return;
+    }
+
+    // Multiple files — fetch all, bundle into a single ZIP.
+    setBulkBusy(true);
+    const files: Record<string, Uint8Array> = {};
+    let done = 0;
+    let failed = 0;
+    for (const path of paths) {
+      showToast(t("files.bulk.download.progress", { done, total }), "success");
+      try {
+        const blob = await fetchFileBlob(
+          `${apiPath(
+            "/api/communities/{community_id}/servers/{server_id}/files/download",
+            { community_id: communityId, server_id: serverId },
+          )}?path=${encodeURIComponent(path)}`,
+        );
+        const buf = new Uint8Array(await blob.arrayBuffer());
+        // Use full path as ZIP key to avoid collisions between files with the
+        // same basename in different directories.
+        files[path] = buf;
         done += 1;
       } catch (error) {
         failed += 1;
         if (onForbiddenCheck(error)) break;
       }
     }
+
+    if (done > 0) {
+      const zipped = zipSync(files);
+      const zipBlob = new Blob([zipped], { type: "application/zip" });
+      const url = URL.createObjectURL(zipBlob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "files.zip";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    }
+
     setBulkBusy(false);
     if (failed === 0) {
       showToast(t("files.bulk.download.done", { done }), "success");
