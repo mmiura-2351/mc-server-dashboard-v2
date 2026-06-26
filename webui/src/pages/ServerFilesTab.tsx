@@ -485,7 +485,7 @@ export function ServerFilesTab({
           elapsedMs={progress.elapsedMs}
         />
       )}
-      <div className="file-layout">
+      <div className={`file-layout${openFile !== null ? " two-pane" : ""}`}>
         {/* biome-ignore lint/a11y/noStaticElementInteractions: drop zone uses drag events only; keyboard upload is via the toolbar button */}
         <div
           className={`card file-tree${dragOver ? " drop-zone-active" : ""}`}
@@ -550,10 +550,8 @@ export function ServerFilesTab({
             />
           )}
         </div>
-        <div className="card file-viewer">
-          {openFile === null ? (
-            <p className="sub">{t("files.noSelection")}</p>
-          ) : (
+        {openFile !== null && (
+          <div className="card file-viewer">
             <Viewer
               key={openFile}
               path={openFile}
@@ -562,10 +560,16 @@ export function ServerFilesTab({
               canEdit={canEdit}
               can={can}
               running={notAtRest}
+              fileSize={
+                listing.data?.entries.find(
+                  (e) => joinPath(dir, e.name) === openFile,
+                )?.size
+              }
+              onClose={() => setOpenFile(null)}
               onError={onError}
             />
-          )}
-        </div>
+          </div>
+        )}
       </div>
       <SimpleConfirmDialog
         open={kbDeleteOpen}
@@ -1274,6 +1278,15 @@ function FileContextMenu({
 
 // ── Viewer / editor ──────────────────────────────────────────────────────────
 
+/** Format a byte count into a human-readable string (B/KB/MB/GB). */
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024)
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
 function Viewer({
   path,
   communityId,
@@ -1281,6 +1294,8 @@ function Viewer({
   canEdit,
   can,
   running,
+  fileSize,
+  onClose,
   onError,
 }: {
   path: string;
@@ -1289,6 +1304,8 @@ function Viewer({
   canEdit: boolean;
   can: Can;
   running: boolean;
+  fileSize?: number;
+  onClose: () => void;
   onError: (error: unknown) => void;
 }) {
   const { showToast } = useToast();
@@ -1372,6 +1389,14 @@ function Viewer({
               {t("files.save")}
             </button>
           )}
+          <button
+            type="button"
+            className="btn sm ghost"
+            onClick={onClose}
+            aria-label={t("files.closeViewer")}
+          >
+            {"✕"}
+          </button>
         </span>
       </div>
       {historyOpen && (
@@ -1403,7 +1428,14 @@ function Viewer({
           />
         </>
       ) : (
-        <p className="sub">{t("files.binary")}</p>
+        <>
+          <p className="sub">{t("files.cannotPreview")}</p>
+          {fileSize !== undefined && (
+            <p className="sub">
+              {t("files.fileSize", { size: formatSize(fileSize) })}
+            </p>
+          )}
+        </>
       )}
     </>
   );
