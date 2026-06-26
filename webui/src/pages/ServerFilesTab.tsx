@@ -668,6 +668,7 @@ export function ServerFilesTab({
         </button>
         <Crumbs
           dir={dir}
+          serverName={server.name}
           onNavigate={navigateDir}
           dropEnabled={dropEnabled}
           onMoveTo={moveFiles}
@@ -810,11 +811,13 @@ export function ServerFilesTab({
 
 function Crumbs({
   dir,
+  serverName,
   onNavigate,
   dropEnabled,
   onMoveTo,
 }: {
   dir: string;
+  serverName: string;
   onNavigate: (path: string) => void;
   dropEnabled: boolean;
   onMoveTo: (paths: string[], destDir: string) => Promise<void>;
@@ -852,7 +855,7 @@ function Crumbs({
         onClick={() => onNavigate("")}
         {...crumbDrop("")}
       >
-        {t("files.root")}
+        /{serverName}
       </button>
       {breadcrumbs(dir).map((crumb, idx) => (
         <span key={crumb.path}>
