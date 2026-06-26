@@ -16,6 +16,7 @@ import type { Can } from "../permissions/useCan.ts";
 import { installMockWebSocket } from "../test/mockWebSocket.ts";
 import { encodeUtf8Base64 } from "./fileText.ts";
 import { ServerDetailPage } from "./ServerDetailPage.tsx";
+import { versionDate } from "./ServerFilesTab.tsx";
 
 const CID = "c1";
 const SID = "s1";
@@ -576,11 +577,25 @@ describe("ServerFilesTab search", () => {
   });
 });
 
+// Realistic version IDs: {ns_timestamp:020d}-{random_hex8}.
+const VID1 = "01750852800000000000-a1b2c3d4"; // 2025-06-25T12:00:00Z
+const VID2 = "01750939200000000000-b2c3d4e5"; // 2025-06-26T12:00:00Z
+
+describe("versionDate helper", () => {
+  it("converts a nanosecond-timestamp version ID to the correct Date", () => {
+    const d = versionDate(VID1);
+    expect(d.toISOString()).toBe("2025-06-25T12:00:00.000Z");
+  });
+});
+
 describe("ServerFilesTab history + rollback", () => {
-  it("lists retained versions from files/history with an encoded path", async () => {
+  it("shows formatted dates instead of raw version IDs", async () => {
     mockApi.get.mockImplementation((path: string) => {
       if (path.includes("/files/history")) {
-        return Promise.resolve({ path: "a b.txt", versions: ["v1", "v2"] });
+        return Promise.resolve({
+          path: "a b.txt",
+          versions: [VID1, VID2],
+        });
       }
       if (path.includes("/files?path=") && !path.includes("list=")) {
         return Promise.resolve({
@@ -600,8 +615,16 @@ describe("ServerFilesTab history + rollback", () => {
     await screen.findByLabelText(t("files.editorLabel"));
     fireEvent.click(screen.getByRole("button", { name: t("files.history") }));
 
-    expect(await screen.findByText("v1")).toBeInTheDocument();
-    expect(screen.getByText("v2")).toBeInTheDocument();
+    // Dates are rendered via toLocaleString, not the raw version IDs.
+    const date1 = versionDate(VID1).toLocaleString();
+    const date2 = versionDate(VID2).toLocaleString();
+    expect(await screen.findByText(date1)).toBeInTheDocument();
+    expect(screen.getByText(date2)).toBeInTheDocument();
+
+    // Raw version IDs should NOT appear as visible text.
+    expect(screen.queryByText(VID1)).not.toBeInTheDocument();
+    expect(screen.queryByText(VID2)).not.toBeInTheDocument();
+
     expect(screen.getByText(t("files.history.hint"))).toBeInTheDocument();
     await waitFor(() =>
       expect(mockApi.get).toHaveBeenCalledWith(
@@ -613,7 +636,7 @@ describe("ServerFilesTab history + rollback", () => {
   it("rolls back to a version after confirm with {version_id} body and an encoded path", async () => {
     mockApi.get.mockImplementation((path: string) => {
       if (path.includes("/files/history")) {
-        return Promise.resolve({ path: "a b.txt", versions: ["v1"] });
+        return Promise.resolve({ path: "a b.txt", versions: [VID1] });
       }
       if (path.includes("/files?path=") && !path.includes("list=")) {
         return Promise.resolve({
@@ -633,7 +656,8 @@ describe("ServerFilesTab history + rollback", () => {
     fireEvent.click(await screen.findByText(/a b\.txt/));
     await screen.findByLabelText(t("files.editorLabel"));
     fireEvent.click(screen.getByRole("button", { name: t("files.history") }));
-    await screen.findByText("v1");
+    const date1 = versionDate(VID1).toLocaleString();
+    await screen.findByText(date1);
 
     fireEvent.click(
       screen.getByRole("button", { name: t("files.history.rollback") }),
@@ -645,15 +669,16 @@ describe("ServerFilesTab history + rollback", () => {
     await waitFor(() => expect(mockApi.post).toHaveBeenCalled());
     const [url, init] = mockApi.post.mock.calls[0];
     expect(url).toBe(`${FILES_BASE}/rollback?path=a%20b.txt`);
+    // The raw version ID is sent to the API, not the formatted date.
     expect(JSON.parse((init as { body: string }).body)).toEqual({
-      version_id: "v1",
+      version_id: VID1,
     });
   });
 
   it("Escape closes only the rollback confirm, leaving the history drawer open", async () => {
     mockApi.get.mockImplementation((path: string) => {
       if (path.includes("/files/history")) {
-        return Promise.resolve({ path: "a b.txt", versions: ["v1"] });
+        return Promise.resolve({ path: "a b.txt", versions: [VID1] });
       }
       if (path.includes("/files?path=") && !path.includes("list=")) {
         return Promise.resolve({
@@ -672,7 +697,7 @@ describe("ServerFilesTab history + rollback", () => {
     fireEvent.click(await screen.findByText(/a b\.txt/));
     await screen.findByLabelText(t("files.editorLabel"));
     fireEvent.click(screen.getByRole("button", { name: t("files.history") }));
-    await screen.findByText("v1");
+    await screen.findByText(versionDate(VID1).toLocaleString());
 
     // Open the stacked rollback confirm on top of the history drawer.
     fireEvent.click(
@@ -718,7 +743,7 @@ describe("ServerFilesTab history + rollback", () => {
     mockCan = (code) => code !== "file:rollback";
     mockApi.get.mockImplementation((path: string) => {
       if (path.includes("/files/history")) {
-        return Promise.resolve({ path: "a.txt", versions: ["v1"] });
+        return Promise.resolve({ path: "a.txt", versions: [VID1] });
       }
       if (path.includes("/files?path=") && !path.includes("list=")) {
         return Promise.resolve({
@@ -737,7 +762,7 @@ describe("ServerFilesTab history + rollback", () => {
     fireEvent.click(await screen.findByText(/a\.txt/));
     await screen.findByLabelText(t("files.editorLabel"));
     fireEvent.click(screen.getByRole("button", { name: t("files.history") }));
-    await screen.findByText("v1");
+    await screen.findByText(versionDate(VID1).toLocaleString());
 
     expect(
       screen.queryByRole("button", { name: t("files.history.rollback") }),

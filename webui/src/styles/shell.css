@@ -1771,10 +1771,8 @@ button.link:focus-visible {
   padding: 6px 0;
   border-bottom: 1px solid var(--border-subtle);
 }
-.files-history-id {
-  font-family: var(--font-mono);
-  font-size: 12px;
-  word-break: break-all;
+.files-history-date {
+  font-size: 13px;
 }
 
 /* Players tab — attached op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8). */
