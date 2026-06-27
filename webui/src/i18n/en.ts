@@ -562,6 +562,19 @@ export const en = {
   "files.error.tooLarge": "That file exceeds the 512 MiB upload limit.",
   "files.error.folderNotSupported":
     "Folder upload is not supported. Please compress it as a ZIP file and use 'Extract here' from the context menu.",
+  "files.error.notFound": "File or directory not found.",
+  "files.error.fileTooLarge":
+    "The file exceeds the maximum allowed size (512 MiB for uploads, 4 MiB for edits).",
+  "files.error.invalidPath": "The file path is invalid.",
+  "files.error.isDirectory": "Cannot open a directory as a file.",
+  "files.error.notDirectory": "The path is a file, not a directory.",
+  "files.error.symlinkRefused": "Symbolic links are not allowed.",
+  "files.error.invalidInput": "The request was invalid.",
+  "files.error.workerUnavailable":
+    "The server agent is disconnected. Please try again later.",
+  "files.error.serverBusy": "Another operation is in progress. Please wait.",
+  "files.error.conflict":
+    "The operation could not be completed due to a conflict.",
   "files.error.generic": "Something went wrong. Please try again.",
   "files.dropZone": "Drop files here to upload",
   // Multi-select (issue #1462).

@@ -572,6 +572,21 @@ export const ja: Record<TranslationKey, string> = {
     "ファイルサイズが512 MiBのアップロード上限を超えています。",
   "files.error.folderNotSupported":
     "フォルダのアップロードには対応していません。ZIPファイルに圧縮し、コンテキストメニューの「ここに展開」をご利用ください。",
+  "files.error.notFound": "ファイルまたはディレクトリが見つかりません。",
+  "files.error.fileTooLarge":
+    "ファイルサイズが上限を超えています（アップロード: 512 MiB、編集: 4 MiB）。",
+  "files.error.invalidPath": "ファイルパスが無効です。",
+  "files.error.isDirectory":
+    "ディレクトリをファイルとして開くことはできません。",
+  "files.error.notDirectory":
+    "指定されたパスはディレクトリではなくファイルです。",
+  "files.error.symlinkRefused": "シンボリックリンクは許可されていません。",
+  "files.error.invalidInput": "リクエストが無効です。",
+  "files.error.workerUnavailable":
+    "サーバーエージェントが切断されています。しばらくしてから再度お試しください。",
+  "files.error.serverBusy":
+    "別の操作が進行中です。完了するまでお待ちください。",
+  "files.error.conflict": "競合が発生したため、操作を完了できませんでした。",
   "files.error.generic": "問題が発生しました。もう一度お試しください。",
   "files.dropZone": "ここにファイルをドロップしてアップロード",
   // Multi-select (issue #1462).
