@@ -1677,7 +1677,7 @@ describe("ServerFilesTab drag-and-drop file organization", () => {
     await screen.findByText(/settings\.yml/);
 
     // Drop settings.yml onto the root breadcrumb.
-    const rootCrumb = screen.getByRole("button", { name: "/survival" });
+    const rootCrumb = screen.getByRole("button", { name: "/ survival" });
     const dt = internalDataTransfer(["config/settings.yml"]);
 
     fireEvent.dragOver(rootCrumb, { dataTransfer: dt });

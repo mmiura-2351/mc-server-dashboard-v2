@@ -869,11 +869,11 @@ function Crumbs({
         onClick={() => onNavigate("")}
         {...crumbDrop("")}
       >
-        /{serverName}
+        / {serverName}
       </button>
-      {breadcrumbs(dir).map((crumb, idx) => (
+      {breadcrumbs(dir).map((crumb) => (
         <span key={crumb.path}>
-          {idx === 0 ? " " : " / "}
+          {" / "}
           <button
             type="button"
             className={`crumb${dropTarget === crumb.path ? " drop-target" : ""}`}
