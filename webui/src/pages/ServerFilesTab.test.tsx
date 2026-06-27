@@ -1172,6 +1172,76 @@ describe("ServerFilesTab drag-and-drop upload", () => {
     const [url] = mockPostFormWithProgress.mock.calls[0];
     expect(url).toBe(`${FILES_BASE}/upload?path=&extract=false`);
   });
+
+  it("shows an error toast when a folder is dropped", async () => {
+    routeGet({ detail: server(), list: listing([]) });
+    renderPage();
+    await openFiles();
+    await screen.findByText(t("files.empty"));
+
+    const tree = document.querySelector(".file-tree") as HTMLElement;
+    // Simulate a folder drop: webkitGetAsEntry returns a directory entry.
+    const folderDt = {
+      files: [] as unknown as FileList,
+      types: ["Files"],
+      items: [
+        {
+          kind: "file",
+          getAsFile: () => null,
+          webkitGetAsEntry: () => ({
+            isFile: false,
+            isDirectory: true,
+            name: "my-folder",
+          }),
+        },
+      ],
+    } as unknown as DataTransfer;
+
+    fireEvent.drop(tree, { dataTransfer: folderDt });
+
+    expect(
+      await screen.findByText(t("files.error.folderNotSupported")),
+    ).toBeInTheDocument();
+    expect(mockPostFormWithProgress).not.toHaveBeenCalled();
+  });
+
+  it("clears the overlay when dragend fires on the document", async () => {
+    routeGet({ detail: server(), list: listing([]) });
+    renderPage();
+    await openFiles();
+    await screen.findByText(t("files.empty"));
+
+    const tree = document.querySelector(".file-tree") as HTMLElement;
+    fireEvent.dragEnter(tree, { dataTransfer: dataTransfer([]) });
+    expect(screen.getByText(t("files.dropZone"))).toBeInTheDocument();
+
+    // Simulate the drag ending without a drop (e.g. Escape key during drag).
+    fireEvent(document, new Event("dragend"));
+
+    await waitFor(() =>
+      expect(screen.queryByText(t("files.dropZone"))).not.toBeInTheDocument(),
+    );
+  });
+
+  it("clears the overlay when drag leaves the browser window", async () => {
+    routeGet({ detail: server(), list: listing([]) });
+    renderPage();
+    await openFiles();
+    await screen.findByText(t("files.empty"));
+
+    const tree = document.querySelector(".file-tree") as HTMLElement;
+    fireEvent.dragEnter(tree, { dataTransfer: dataTransfer([]) });
+    expect(screen.getByText(t("files.dropZone"))).toBeInTheDocument();
+
+    // When the drag exits the browser window, relatedTarget is null.
+    const leaveEvent = new Event("dragleave", { bubbles: true });
+    Object.defineProperty(leaveEvent, "relatedTarget", { value: null });
+    document.dispatchEvent(leaveEvent);
+
+    await waitFor(() =>
+      expect(screen.queryByText(t("files.dropZone"))).not.toBeInTheDocument(),
+    );
+  });
 });
 
 describe("ServerFilesTab multi-select", () => {

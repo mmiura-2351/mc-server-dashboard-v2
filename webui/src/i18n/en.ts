@@ -560,6 +560,8 @@ export const en = {
     "This directory is managed by the {noun} tab. Use the {noun} tab to add or remove content.",
   "files.error.goToContentTab": "Go to {noun} tab",
   "files.error.tooLarge": "That file exceeds the 512 MiB upload limit.",
+  "files.error.folderNotSupported":
+    "Folder upload is not supported. Please compress it as a ZIP file and use 'Extract here' from the context menu.",
   "files.error.generic": "Something went wrong. Please try again.",
   "files.dropZone": "Drop files here to upload",
   // Multi-select (issue #1462).
