@@ -514,13 +514,46 @@ export function ServerFilesTab({
       if (!dropEnabled) return;
       // Ignore internal file-move drags — those are handled by folder/crumb targets.
       if (e.dataTransfer.types.includes("application/x-file-move")) return;
+
+      // Detect folder drops via the DataTransferItem API. Browsers expose
+      // webkitGetAsEntry() which can distinguish files from directories.
+      if (e.dataTransfer.items) {
+        for (const item of e.dataTransfer.items) {
+          if (item.kind !== "file") continue;
+          const entry = item.webkitGetAsEntry?.();
+          if (entry?.isDirectory) {
+            showToast(t("files.error.folderNotSupported"), "error");
+            return;
+          }
+        }
+      }
+
       const files = Array.from(e.dataTransfer.files);
       if (files.length > 0) {
         void uploadFiles(files);
       }
     },
-    [dropEnabled, uploadFiles],
+    [dropEnabled, uploadFiles, showToast],
   );
+
+  // Fallback: if the drag leaves the browser window or ends without a drop,
+  // reset the overlay so it doesn't stay visible indefinitely.
+  useEffect(() => {
+    const resetDrag = () => {
+      dragCounter.current = 0;
+      setDragOver(false);
+    };
+    const handleDocDragLeave = (e: DragEvent) => {
+      // relatedTarget is null when the drag exits the browser window.
+      if (e.relatedTarget === null) resetDrag();
+    };
+    document.addEventListener("dragend", resetDrag);
+    document.addEventListener("dragleave", handleDocDragLeave);
+    return () => {
+      document.removeEventListener("dragend", resetDrag);
+      document.removeEventListener("dragleave", handleDocDragLeave);
+    };
+  }, []);
 
   // Keyboard-triggered delete/rename (issue #1465). These are separate from
   // the inline button flows in Listing so the parent can drive them from

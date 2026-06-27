@@ -570,6 +570,8 @@ export const ja: Record<TranslationKey, string> = {
   "files.error.goToContentTab": "{noun}タブへ移動",
   "files.error.tooLarge":
     "ファイルサイズが512 MiBのアップロード上限を超えています。",
+  "files.error.folderNotSupported":
+    "フォルダのアップロードには対応していません。ZIPファイルに圧縮し、コンテキストメニューの「ここに展開」をご利用ください。",
   "files.error.generic": "問題が発生しました。もう一度お試しください。",
   "files.dropZone": "ここにファイルをドロップしてアップロード",
   // Multi-select (issue #1462).
