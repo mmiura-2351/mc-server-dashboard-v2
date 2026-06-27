@@ -27,7 +27,7 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { zipSync } from "fflate";
+import { zip } from "fflate";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate as useRouterNavigate } from "react-router";
 import {
@@ -187,21 +187,28 @@ export function ServerFilesTab({
 
   const navigate = useCallback(
     (next: NavState) => {
-      navNavigate(next);
+      // Only increment the skip counter if navigation will actually happen.
+      // navNavigate no-ops when the target equals the current state; an
+      // unconsumed increment would cause a later browser-Back to be skipped.
+      if (next.dir === dir && next.openFile === openFile) return;
       skipUrlSync.current += 1;
+      navNavigate(next);
       setUrlParams(next.dir, next.openFile);
     },
-    [navNavigate, setUrlParams],
+    [navNavigate, setUrlParams, dir, openFile],
   );
   const goBack = useCallback(() => {
     const target = navGoBack();
     skipUrlSync.current += 1;
-    setUrlParams(target.dir, target.openFile);
+    // In-app back: replace the URL (the browser history already has this
+    // state from the original navigation push).
+    setUrlParams(target.dir, target.openFile, { replace: true });
   }, [navGoBack, setUrlParams]);
   const goForward = useCallback(() => {
     const target = navGoForward();
     skipUrlSync.current += 1;
-    setUrlParams(target.dir, target.openFile);
+    // In-app forward: replace the URL (same reason as goBack above).
+    setUrlParams(target.dir, target.openFile, { replace: true });
   }, [navGoForward, setUrlParams]);
 
   // URL → nav state: browser back/forward changed the URL externally. The
@@ -215,7 +222,12 @@ export function ServerFilesTab({
   // the discard confirmation dialog instead of navigating immediately.
   const [hasDraft, setHasDraft] = useState(false);
   const [discardConfirmOpen, setDiscardConfirmOpen] = useState(false);
-  const pendingNavRef = useRef<NavState | null>(null);
+  type PendingAction =
+    | { type: "navigate"; state: NavState }
+    | { type: "back" }
+    | { type: "forward" }
+    | null;
+  const pendingActionRef = useRef<PendingAction>(null);
   const hasDraftRef = useRef(false);
   hasDraftRef.current = hasDraft;
 
@@ -248,7 +260,7 @@ export function ServerFilesTab({
         { replace: true },
       );
       skipUrlSync.current += 1;
-      pendingNavRef.current = next;
+      pendingActionRef.current = { type: "navigate", state: next };
       setDiscardConfirmOpen(true);
       return;
     }
@@ -259,7 +271,7 @@ export function ServerFilesTab({
   const guardedNavigate = useCallback(
     (next: NavState) => {
       if (hasDraft && (next.dir !== dir || next.openFile !== openFile)) {
-        pendingNavRef.current = next;
+        pendingActionRef.current = { type: "navigate", state: next };
         setDiscardConfirmOpen(true);
         return;
       }
@@ -270,9 +282,7 @@ export function ServerFilesTab({
 
   const guardedGoBack = useCallback(() => {
     if (hasDraft) {
-      // goBack() mutates the history stack, so we can't peek at the target.
-      // Use null as a sentinel; confirmDiscard calls goBack on confirm.
-      pendingNavRef.current = null;
+      pendingActionRef.current = { type: "back" };
       setDiscardConfirmOpen(true);
       return;
     }
@@ -281,7 +291,7 @@ export function ServerFilesTab({
 
   const guardedGoForward = useCallback(() => {
     if (hasDraft) {
-      pendingNavRef.current = { dir: "__forward__", openFile: null };
+      pendingActionRef.current = { type: "forward" };
       setDiscardConfirmOpen(true);
       return;
     }
@@ -291,21 +301,25 @@ export function ServerFilesTab({
   const confirmDiscard = useCallback(() => {
     setDiscardConfirmOpen(false);
     setHasDraft(false);
-    const pending = pendingNavRef.current;
-    pendingNavRef.current = null;
-    if (pending === null) {
-      // Sentinel for goBack.
-      goBack();
-    } else if (pending.dir === "__forward__") {
-      goForward();
-    } else {
-      navigate(pending);
+    const pending = pendingActionRef.current;
+    pendingActionRef.current = null;
+    if (!pending) return;
+    switch (pending.type) {
+      case "back":
+        goBack();
+        break;
+      case "forward":
+        goForward();
+        break;
+      case "navigate":
+        navigate(pending.state);
+        break;
     }
   }, [navigate, goBack, goForward]);
 
   const cancelDiscard = useCallback(() => {
     setDiscardConfirmOpen(false);
-    pendingNavRef.current = null;
+    pendingActionRef.current = null;
   }, []);
 
   // beforeunload: browser tab close / refresh / full-page navigation.
@@ -1898,7 +1912,14 @@ function Toolbar({
     }
 
     if (done > 0) {
-      const zipped = zipSync(files);
+      const zipped = await new Promise<Uint8Array<ArrayBuffer>>(
+        (resolve, reject) => {
+          zip(files, (err, data) => {
+            if (err) reject(err);
+            else resolve(data);
+          });
+        },
+      );
       const zipBlob = new Blob([zipped], { type: "application/zip" });
       const url = URL.createObjectURL(zipBlob);
       const a = document.createElement("a");
