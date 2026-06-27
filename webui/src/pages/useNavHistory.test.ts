@@ -99,13 +99,13 @@ describe("useNavHistory", () => {
     expect(result.current.canGoBack).toBe(false);
   });
 
-  it("jumpTo replaces the current entry and clears forward stack", () => {
+  it("jumpTo replaces the current entry without truncating forward history", () => {
     const { result } = renderHook(() => useNavHistory());
     act(() => result.current.navigate({ dir: "a", openFile: null }));
     act(() => result.current.navigate({ dir: "b", openFile: null }));
     // Stack: [root, a, b] at index 2.
     act(() => result.current.jumpTo({ dir: "x", openFile: null }));
-    // Should replace "b" with "x", no forward.
+    // Should replace "b" with "x" at the same index, no forward (nothing after index 2).
     expect(result.current.current).toEqual({ dir: "x", openFile: null });
     expect(result.current.canGoForward).toBe(false);
     // Back should reach "a", then root.
@@ -114,6 +114,20 @@ describe("useNavHistory", () => {
     act(() => result.current.goBack());
     expect(result.current.current).toEqual({ dir: "", openFile: null });
     expect(result.current.canGoBack).toBe(false);
+  });
+
+  it("jumpTo finds a matching entry and preserves forward history", () => {
+    const { result } = renderHook(() => useNavHistory());
+    act(() => result.current.navigate({ dir: "a", openFile: null }));
+    act(() => result.current.navigate({ dir: "b", openFile: null }));
+    // Stack: [root, a, b] at index 2.
+    // jumpTo "a" should move index to 1, preserving "b" in forward history.
+    act(() => result.current.jumpTo({ dir: "a", openFile: null }));
+    expect(result.current.current).toEqual({ dir: "a", openFile: null });
+    expect(result.current.canGoForward).toBe(true);
+    // Forward should reach "b".
+    act(() => result.current.goForward());
+    expect(result.current.current).toEqual({ dir: "b", openFile: null });
   });
 
   it("jumpTo is a no-op when target matches current state", () => {

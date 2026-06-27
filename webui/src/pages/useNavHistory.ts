@@ -59,16 +59,26 @@ export function useNavHistory(
   }, []);
 
   /**
-   * Replace the current position and clear forward history. Used when an
-   * external source (browser back/forward) sets the state — it must not grow
-   * the internal stack the way `navigate` does.
+   * Sync the internal stack to an externally-driven state (browser
+   * back/forward). If the target matches an existing entry, move the index
+   * there (preserving forward history). Otherwise replace the current entry
+   * without truncating — an unknown state from the browser URL should not
+   * destroy the in-app forward stack.
    */
   const jumpTo = useCallback((next: NavState) => {
     const st = stateRef.current;
     const cur = st.history[st.index];
     if (next.dir === cur.dir && next.openFile === cur.openFile) return;
-    st.history = [...st.history.slice(0, st.index), next];
-    st.index = st.history.length - 1;
+    const matchIdx = st.history.findIndex(
+      (e) => e.dir === next.dir && e.openFile === next.openFile,
+    );
+    if (matchIdx !== -1) {
+      st.index = matchIdx;
+    } else {
+      const newEntries = [...st.history];
+      newEntries[st.index] = next;
+      st.history = newEntries;
+    }
     forceRender((n) => n + 1);
   }, []);
 

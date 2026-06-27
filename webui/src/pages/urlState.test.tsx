@@ -410,6 +410,12 @@ function FileBrowserProbe() {
       <button type="button" onClick={() => setParams("", null)}>
         go-root
       </button>
+      <button
+        type="button"
+        onClick={() => setParams("config", null, { replace: true })}
+      >
+        replace-config
+      </button>
       <button type="button" onClick={() => navigate(-1)}>
         back
       </button>
@@ -501,6 +507,24 @@ describe("useFileBrowserParams", () => {
     fireEvent.click(screen.getByText("back"));
     expect(screen.getByTestId("dir").textContent).toBe("");
     expect(screen.getByTestId("file").textContent).toBe("");
+  });
+
+  it("replace option replaces the history entry instead of pushing", () => {
+    render(
+      <MemoryRouter initialEntries={["/x#files"]}>
+        <FileBrowserProbe />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByText("go-world"));
+    expect(screen.getByTestId("dir").textContent).toBe("world");
+
+    // Replace the current entry instead of pushing a new one.
+    fireEvent.click(screen.getByText("replace-config"));
+    expect(screen.getByTestId("dir").textContent).toBe("config");
+
+    // Back should skip "config" (it replaced "world") and land at root.
+    fireEvent.click(screen.getByText("back"));
+    expect(screen.getByTestId("dir").textContent).toBe("");
   });
 
   it("re-setting the same params pushes no history entry", () => {

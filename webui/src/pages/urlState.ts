@@ -150,7 +150,11 @@ export function useFilterParams<K extends string>(
  */
 export function useFileBrowserParams(): [
   { dir: string; file: string | null },
-  (nextDir: string, nextFile: string | null) => void,
+  (
+    nextDir: string,
+    nextFile: string | null,
+    options?: { replace?: boolean },
+  ) => void,
 ] {
   const location = useLocation();
   const navigate = useNavigate();
@@ -159,7 +163,11 @@ export function useFileBrowserParams(): [
   const file = params.get("file") ?? null;
 
   const setParams = useCallback(
-    (nextDir: string, nextFile: string | null) => {
+    (
+      nextDir: string,
+      nextFile: string | null,
+      options?: { replace?: boolean },
+    ) => {
       const currentDir = new URLSearchParams(location.search).get("dir") ?? "";
       const currentFile =
         new URLSearchParams(location.search).get("file") ?? null;
@@ -179,6 +187,7 @@ export function useFileBrowserParams(): [
       const search = next.toString();
       navigate(
         `${location.pathname}${search ? `?${search}` : ""}${location.hash}`,
+        { replace: options?.replace },
       );
     },
     [navigate, location.pathname, location.search, location.hash],
