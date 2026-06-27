@@ -1012,6 +1012,164 @@ describe("ServerFilesTab 409 reason toasts", () => {
     ).toBeInTheDocument();
   });
 
+  it("maps a 404 to the not-found message", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "a.txt", is_dir: false }]),
+    });
+    mockApi.delete.mockRejectedValue(
+      new ApiError(404, { reason: "not_found" }),
+    );
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    const row = screen.getByText(/a\.txt/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.delete") }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.delete.confirm") }),
+    );
+
+    expect(
+      await screen.findByText(t("files.error.notFound")),
+    ).toBeInTheDocument();
+  });
+
+  it("maps a 413 to the file-too-large message", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "a.txt", is_dir: false }]),
+    });
+    mockPostFormWithProgress.mockRejectedValue(
+      new ApiError(413, { reason: "file_too_large" }),
+    );
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    const row = screen.getByText(/a\.txt/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.upload") }),
+    );
+    const fileInput = screen.getByLabelText(t("files.contextMenu.upload"));
+    const file = new File(["x"], "big.bin");
+    fireEvent.change(fileInput, { target: { files: [file] } });
+
+    expect(
+      await screen.findByText(t("files.error.fileTooLarge")),
+    ).toBeInTheDocument();
+  });
+
+  it("maps a 422 invalid_path to the invalid-path message", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "a.txt", is_dir: false }]),
+    });
+    mockApi.post.mockRejectedValue(
+      new ApiError(422, { reason: "invalid_path" }),
+    );
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    const row = screen.getByText(/a\.txt/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.newFolder") }),
+    );
+    fireEvent.change(screen.getByLabelText(t("files.folderName")), {
+      target: { value: "../escape" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: t("files.create") }));
+
+    expect(
+      await screen.findByText(t("files.error.invalidPath")),
+    ).toBeInTheDocument();
+  });
+
+  it("maps a 422 symlink_refused to the symlink message", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "a.txt", is_dir: false }]),
+    });
+    mockApi.delete.mockRejectedValue(
+      new ApiError(422, { reason: "symlink_refused" }),
+    );
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    const row = screen.getByText(/a\.txt/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.delete") }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.delete.confirm") }),
+    );
+
+    expect(
+      await screen.findByText(t("files.error.symlinkRefused")),
+    ).toBeInTheDocument();
+  });
+
+  it("maps a 503 to the worker-unavailable message", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "a.txt", is_dir: false }]),
+    });
+    mockApi.delete.mockRejectedValue(
+      new ApiError(503, { reason: "worker_unavailable" }),
+    );
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    const row = screen.getByText(/a\.txt/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.delete") }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.delete.confirm") }),
+    );
+
+    expect(
+      await screen.findByText(t("files.error.workerUnavailable")),
+    ).toBeInTheDocument();
+  });
+
+  it("maps a 409 server_busy to the busy message", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "a.txt", is_dir: false }]),
+    });
+    mockApi.post.mockRejectedValue(
+      new ApiError(409, { reason: "server_busy" }),
+    );
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    const row = screen.getByText(/a\.txt/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.newFolder") }),
+    );
+    fireEvent.change(screen.getByLabelText(t("files.folderName")), {
+      target: { value: "test" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: t("files.create") }));
+
+    expect(
+      await screen.findByText(t("files.error.serverBusy")),
+    ).toBeInTheDocument();
+  });
+
   it("shows a redirect notice with a link to #plugins on content_dir_protected (paper)", async () => {
     routeGet({
       detail: server({ server_type: "paper" }),

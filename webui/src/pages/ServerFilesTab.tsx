@@ -72,20 +72,40 @@ type SearchResult = components["schemas"]["SearchResponse"];
 type FileVersions = components["schemas"]["FileVersionsResponse"];
 
 /**
- * Map a file-operation error to its toast message. 409 reasons
- * `server_unsettled` and `server_not_stopped` (at-rest-only precondition
- * failures) get an actionable message; `content_dir_protected` is handled
- * separately (inline notice, not a toast); everything else falls back to
- * generic.
+ * Map a file-operation error to its toast message.
+ *
+ * Handles all RFC 9457 reason codes the file API can return.
+ * `content_dir_protected` is handled separately (inline notice, not a toast).
  */
 function fileOperationErrorMessage(error: unknown): TranslationKey {
-  if (error instanceof ApiError && error.status === 409) {
-    const r = error.reason;
-    if (r === "server_unsettled" || r === "server_not_stopped") {
-      return "files.error.serverMustBeStopped";
+  if (!(error instanceof ApiError)) return "files.error.generic";
+
+  switch (error.status) {
+    case 404:
+      return "files.error.notFound";
+    case 409: {
+      const r = error.reason;
+      if (r === "server_unsettled" || r === "server_not_stopped")
+        return "files.error.serverMustBeStopped";
+      if (r === "destination_exists") return "files.error.moveConflict";
+      if (r === "server_busy") return "files.error.serverBusy";
+      return "files.error.conflict";
     }
+    case 413:
+      return "files.error.fileTooLarge";
+    case 422: {
+      const r = error.reason;
+      if (r === "invalid_path") return "files.error.invalidPath";
+      if (r === "is_a_directory") return "files.error.isDirectory";
+      if (r === "not_a_directory") return "files.error.notDirectory";
+      if (r === "symlink_refused") return "files.error.symlinkRefused";
+      return "files.error.invalidInput";
+    }
+    case 503:
+      return "files.error.workerUnavailable";
+    default:
+      return "files.error.generic";
   }
-  return "files.error.generic";
 }
 
 /** True when the error is a 409 content_dir_protected rejection. */
