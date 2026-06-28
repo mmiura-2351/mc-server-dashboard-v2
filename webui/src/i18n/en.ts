@@ -606,7 +606,7 @@ export const en = {
   "files.bulk.move.done": "Moved {done} item(s).",
   "files.bulk.move.partial": "Moved {done}/{total} item(s). {failed} failed.",
   // Drag-and-drop folder upload.
-  "files.bulk.upload.progress": "Uploading {done}/{total}...",
+  "files.bulk.upload.progress": "Uploading {done}/{total}…",
   "files.bulk.upload.done": "{done} files uploaded.",
 
   // Drag-and-drop file organization (issue #1464).

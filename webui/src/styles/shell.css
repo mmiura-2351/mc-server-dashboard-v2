@@ -1567,6 +1567,9 @@ button.link:focus-visible {
 }
 .file-row.active {
   color: var(--accent);
+  background: rgba(77, 159, 255, 0.05);
+  border-left: 3px solid var(--accent);
+  padding-left: 9px; /* 12px original - 3px border */
 }
 /* Drop zone overlay (issue #1461): visual feedback when files are dragged over
  * the file-tree pane. The overlay covers the pane with a dashed border and
@@ -1596,12 +1599,12 @@ button.link:focus-visible {
  * (issue #1464). Folders in the listing and breadcrumb buttons receive this
  * class while a dragged file hovers over them. */
 .file-row.drop-target {
-  background: var(--accent-bg, rgba(59, 130, 246, 0.15));
+  background: rgba(77, 159, 255, 0.1);
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
 .crumb.drop-target {
-  background: var(--accent-bg, rgba(59, 130, 246, 0.15));
+  background: rgba(77, 159, 255, 0.1);
   border-radius: 3px;
   outline: 2px solid var(--accent);
   outline-offset: -1px;
@@ -1609,7 +1612,7 @@ button.link:focus-visible {
 /* Context menu for file operations (issue #1465). */
 .file-context-menu {
   position: fixed;
-  z-index: 100;
+  z-index: 10;
   min-width: 160px;
   background: var(--bg-raised);
   border: 1px solid var(--border);
@@ -1632,7 +1635,7 @@ button.link:focus-visible {
   background: var(--bg-overlay);
 }
 .file-context-menu button.danger {
-  color: var(--red, #e53e3e);
+  color: var(--red);
 }
 .file-select {
   appearance: none;
@@ -1666,6 +1669,10 @@ button.link:focus-visible {
   border: solid #fff;
   border-width: 0 2px 2px 0;
   transform: rotate(45deg);
+}
+.file-select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 .file-select:hover {
   border-color: var(--accent);
