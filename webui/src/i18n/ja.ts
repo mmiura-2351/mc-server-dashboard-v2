@@ -496,6 +496,9 @@ export const ja: Record<TranslationKey, string> = {
     "現在、バックアップを取得できるサーバーホストがありません。",
   "backups.error.invalidSchedule":
     "backup_interval_hours は1以上の整数の時間数である必要があります。",
+  "backups.error.serverMustBeStopped": "この操作にはサーバーの停止が必要です。",
+  "backups.error.serverBusy":
+    "別の操作が進行中です。完了するまでお待ちください。",
   "backups.error.tooLarge":
     "ファイルサイズが512 MiBのアップロード上限を超えています。",
   "backups.error.generic": "問題が発生しました。もう一度お試しください。",
@@ -663,6 +666,13 @@ export const ja: Record<TranslationKey, string> = {
   // Inline pointer to the full Groups management surface (Phase 6).
   "players.manageHint": "グループの作成と編集はコミュニティ設定で行えます。",
   "players.manageLink": "コミュニティ設定",
+  "players.error.unsettled":
+    "サーバーが起動／停止の途中です。安定するまでお待ちください。",
+  "players.error.serverMustBeStopped": "この操作にはサーバーの停止が必要です。",
+  "players.error.serverBusy":
+    "別の操作が進行中です。完了するまでお待ちください。",
+  "players.error.workerUnavailable":
+    "サーバーエージェントが切断されています。しばらくしてから再度お試しください。",
   "players.error.generic": "問題が発生しました。もう一度お試しください。",
 
   // Sessions view — relay game session history (issue #961).
@@ -1430,6 +1440,8 @@ export const ja: Record<TranslationKey, string> = {
   "plugins.error.invalidSide": "このサーバータイプには無効なサイドです。",
   "plugins.error.notFound":
     "{Noun}が見つかりません。削除された可能性があります。",
+  "plugins.error.workerUnavailable":
+    "サーバーエージェントが切断されています。しばらくしてから再度お試しください。",
   "plugins.error.generic": "エラーが発生しました。もう一度お試しください。",
   // Dependency / compatibility validation checklist (issue #1307).
   "plugins.validation.heading": "依存関係と互換性",
