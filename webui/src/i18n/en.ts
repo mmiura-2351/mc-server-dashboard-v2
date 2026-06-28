@@ -634,6 +634,14 @@ export const en = {
     "You have unsaved changes. Do you want to discard them?",
   "files.unsaved.discard": "Discard",
 
+  // Overwrite confirmation dialog.
+  "files.overwrite.title": "File already exists",
+  "files.overwrite.body":
+    '"{name}" already exists in this directory. Do you want to overwrite it?',
+  "files.overwrite.overwrite": "Overwrite",
+  "files.overwrite.skip": "Skip",
+  "files.overwrite.applyAll": "Apply to all remaining files",
+
   // Players tab — attached op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8).
   // One contiguous block to keep merge conflicts with sibling i18n PRs minimal.
   "players.heading": "Applied groups",
