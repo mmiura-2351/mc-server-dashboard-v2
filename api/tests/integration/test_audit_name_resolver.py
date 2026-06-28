@@ -71,7 +71,6 @@ def _server(server_id: uuid.UUID, community_id: uuid.UUID, name: str) -> ServerM
         mc_edition="java",
         mc_version="1.21",
         server_type="vanilla",
-        execution_backend="container",
         config={},
         desired_state="stopped",
         observed_state="stopped",

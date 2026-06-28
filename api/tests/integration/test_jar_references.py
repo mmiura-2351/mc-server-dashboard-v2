@@ -95,7 +95,6 @@ async def _create_server(
         mc_edition="java",
         mc_version="1.21.1",
         server_type="paper",
-        execution_backend="container",
         config={},
     )
     if jar is not None:

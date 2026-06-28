@@ -108,7 +108,7 @@ def make_worker(
     worker_id: str = "worker-1",
     version: str = "1.0.0",
     at: dt.datetime,
-    drivers: frozenset[DriverKind] = frozenset({DriverKind.HOST_PROCESS}),
+    drivers: frozenset[DriverKind] = frozenset({DriverKind.CONTAINER}),
     max_servers: int = 4,
     resources: HostResources = HostResources(cpu_cores=8, memory_bytes=16_000_000_000),
 ) -> Worker:

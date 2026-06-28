@@ -150,30 +150,6 @@ func TestLoadRejectsUnknownDriver(t *testing.T) {
 	}
 }
 
-// TestLoadRejectsHostProcessDriver pins that the removed host-process driver
-// (issue #781) is no longer an accepted worker.drivers value: it is rejected as
-// an unknown driver with a clear error that names it and the valid driver.
-func TestLoadRejectsHostProcessDriver(t *testing.T) {
-	env := mapEnv(map[string]string{
-		"MCD_WORKER_API_GRPC_ENDPOINT":  "api:50051",
-		"MCD_WORKER_API_CREDENTIAL":     "secret",
-		"MCD_WORKER_API_TLS_INSECURE":   "true",
-		"MCD_WORKER_WORKER_SCRATCH_DIR": "/scratch",
-		"MCD_WORKER_WORKER_DRIVERS":     "host-process",
-	})
-
-	_, err := Load("", env)
-	if err == nil {
-		t.Fatal("Load() with host-process driver: want error, got nil")
-	}
-	if !contains(err.Error(), "host-process") {
-		t.Errorf("error %q does not name the rejected host-process driver", err.Error())
-	}
-	if !contains(err.Error(), "container") {
-		t.Errorf("error %q does not name the valid container driver", err.Error())
-	}
-}
-
 // TestLoadRejectsOmittedDrivers pins the headline breaking change (issue #781):
 // worker.drivers no longer has a zero-config default, so a config that simply
 // omits it is rejected — the path every previously-zero-config worker now hits.

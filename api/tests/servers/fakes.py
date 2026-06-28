@@ -98,7 +98,6 @@ from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     DesiredState,
-    ExecutionBackend,
     ObservedState,
     ServerId,
     ServerName,
@@ -929,7 +928,6 @@ class FakeControlPlane(ControlPlane):
         self,
         *,
         server_id: ServerId,
-        backend: ExecutionBackend,
         memory_limit_mb: int | None = None,
         committed_by_worker: dict[WorkerId, CommittedResources] | None = None,
     ) -> WorkerId | None:
@@ -988,7 +986,6 @@ class FakeControlPlane(ControlPlane):
         *,
         worker_id: WorkerId,
         server_id: ServerId,
-        backend: ExecutionBackend,
         server_type: ServerType,
         jar_relpath: str,
         minecraft_version: str,

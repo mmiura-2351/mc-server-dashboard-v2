@@ -63,7 +63,7 @@ def test_lists_registered_worker_with_liveness() -> None:
     assert worker["id"] == "worker-1"
     assert worker["status"] == "online"
     assert worker["version"] == "1.0.0"
-    assert worker["capabilities"]["drivers"] == ["host-process"]
+    assert worker["capabilities"]["drivers"] == ["container"]
     assert worker["capabilities"]["max_servers"] == 4
 
 

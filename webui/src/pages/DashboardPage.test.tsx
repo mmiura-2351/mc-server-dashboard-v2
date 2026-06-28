@@ -50,7 +50,6 @@ function server(overrides: Record<string, unknown> = {}) {
     server_type: "paper",
     mc_edition: "java",
     mc_version: "1.21.6",
-    execution_backend: "container",
     game_port: 25565,
     desired_state: "running",
     observed_state: "running",
@@ -104,7 +103,6 @@ describe("DashboardPage list", () => {
 
     expect(await screen.findByText("survival")).toBeInTheDocument();
     expect(screen.getByText("paper 1.21.6")).toBeInTheDocument();
-    expect(screen.getByText("container")).toBeInTheDocument();
     expect(screen.getByText(":25565")).toBeInTheDocument();
     // The worker chip is labelled and the id abbreviated (#644): "worker-a"
     // shortens to its leading segment.
@@ -493,12 +491,11 @@ describe("DashboardPage view toggle (#541)", () => {
     );
 
     // Both servers, plus the shared card data: state pill, type/version,
-    // backend, port, worker. The filter bar adds one more "running" chip.
+    // port, worker. The filter bar adds one more "running" chip.
     expect(screen.getByText("survival")).toBeInTheDocument();
     expect(screen.getByText("creative")).toBeInTheDocument();
     expect(screen.getAllByText(t("dashboard.state.running"))).toHaveLength(3);
     expect(screen.getAllByText("paper 1.21.6")).toHaveLength(2);
-    expect(screen.getAllByText("container")).toHaveLength(2);
     expect(screen.getAllByText("25565")).toHaveLength(2);
     // The worker id is abbreviated to its leading segment (#644).
     expect(screen.getAllByText("worker")).toHaveLength(2);

@@ -214,7 +214,6 @@ export const ja: Record<TranslationKey, string> = {
   "dashboard.col.name": "名前",
   "dashboard.col.state": "状態",
   "dashboard.col.type": "種類 / バージョン",
-  "dashboard.col.backend": "バックエンド",
   "dashboard.col.port": "ポート",
   "dashboard.col.address": "アドレス",
   "dashboard.col.worker": "ホスト",
@@ -320,8 +319,6 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.settings.general": "全般",
   "serverDetail.settings.name": "サーバー名",
   "serverDetail.settings.gamePort": "ゲームポート",
-  "serverDetail.settings.executionBackend": "実行バックエンド",
-  "serverDetail.settings.executionBackendHint": "作成後は変更できません。",
   "serverDetail.settings.config": "設定の上書き",
   "serverDetail.settings.configKey": "キー",
   "serverDetail.settings.configValue": "値",
@@ -732,8 +729,6 @@ export const ja: Record<TranslationKey, string> = {
   "serverCreate.typeSub.fabric": "軽量Mod",
   "serverCreate.typeSub.forge": "本格Mod",
   // Step 2 — runtime.
-  "serverCreate.backendLabel": "実行バックエンド",
-  "serverCreate.backend.container": "コンテナ",
   "serverCreate.portLabel": "ゲームポート",
   "serverCreate.portHint": "空いている次のポートを自動入力しました。",
   "serverCreate.portChecking": "ポートの空き状況を確認しています…",
@@ -797,7 +792,7 @@ export const ja: Record<TranslationKey, string> = {
   // Import tab.
   "serverCreate.import.heading": "ZIPエクスポートからインポート",
   "serverCreate.import.hint":
-    "別のインスタンスからエクスポートしたZIPをアップロードします。下記の名前とバックエンドが適用されます。EULAは引き継がれません。",
+    "別のインスタンスからエクスポートしたZIPをアップロードします。下記の名前が適用されます。EULAは引き継がれません。",
   "serverCreate.import.fileLabel": "エクスポートアーカイブ（.zip）",
   "serverCreate.import.submit": "サーバーをインポート",
   "serverCreate.import.importing": "インポートしています…",

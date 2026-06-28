@@ -46,9 +46,9 @@ This rebuild exists to remove those structural limits. The three drivers:
 1. **Separate the API machine from the Minecraft execution machine.** Minecraft
    processing is delegated to **Workers** running on separate machines.
 2. **Make the Minecraft execution method pluggable.** The way a server is run
-   (bare host process, container, …) is selectable and abstracted behind a
-   driver interface, so new execution methods can be added without touching
-   business logic.
+   is abstracted behind a driver interface (`ExecutionDriver`), so new
+   execution methods can be added without touching business logic. Container
+   (Docker) is the only shipped driver.
 3. **Rework authentication and authorization.** Move to a **Community**-based
    architecture (a logical multi-tenancy for small communities) with
    **per-operation permissions**.
@@ -85,8 +85,7 @@ with the API surface it consumes.
 - Community management and membership (many-to-many users ↔ Communities).
 - Authentication, and authorization via custom roles + per-resource grants.
 - Minecraft server lifecycle (create, configure, start, stop, restart, delete).
-- One execution backend behind a driver abstraction: **container (Docker)**.
-  (The host-process driver was removed in issue #781.)
+- One execution backend: **container (Docker)**.
 - Worker registration, liveness, and server assignment.
 - Pluggable authoritative storage (fs / remote-fs / object) on the API side.
 - Runtime data staging between authoritative storage and stateless Workers.
@@ -158,7 +157,7 @@ Out of scope for M2 but kept on the roadmap for a later milestone:
 | **Member** | A user who belongs to a Community. Membership is many-to-many. |
 | **Platform administrator** | An operator-level role above all Communities. Manages Workers, global monitoring, and Community provisioning. Distinct from any Community role. |
 | **Worker** | A stateless machine/agent that runs and manages Minecraft execution environments. Holds no authoritative data; replaceable at any time. |
-| **ExecutionDriver** | The abstraction inside a Worker that knows *how* to run a server (host process, container, …). The API issues logical commands; the driver realizes them. |
+| **ExecutionDriver** | The abstraction inside a Worker that knows *how* to run a server. The API issues logical commands; the driver realizes them. Container (Docker) is the only shipped driver. |
 | **Storage** | The pluggable, API-side authoritative store for world data, JARs, and backups (fs / remote-fs / object). |
 | **Control plane** | The lightweight, persistent command/event channel between API and Worker. |
 | **Data plane** | The bulk transfer path (hydrate / snapshot) of world data, API-terminated. |
@@ -348,11 +347,9 @@ Requirements:
   inside the Worker. The API sends logical commands ("start this server"); the
   driver realizes them for its backend.
 - FR-EXE-2: M1 ships one driver: **container (Docker)**. The `ExecutionDriver`
-  abstraction stays pluggable (FR-EXE-1, FR-EXE-4); the host-process driver was
-  removed in issue #781.
-- FR-EXE-3: The execution backend is selectable per server, chosen at creation.
-  Whether and how it may be changed afterward is a design-phase question (see
-  9.1); the M1 baseline assumption is that it is fixed for a server's lifetime.
+  abstraction stays pluggable (FR-EXE-1, FR-EXE-4).
+- FR-EXE-3: Container is the only backend. The M1 baseline assumption is that
+  the backend is fixed for a server's lifetime.
 - FR-EXE-4: The interface must remain shaped so a Kubernetes driver could be
   added without interface changes. Building such a driver is not committed (see
   Section 2.3); this is a compatibility constraint on the abstraction, not a

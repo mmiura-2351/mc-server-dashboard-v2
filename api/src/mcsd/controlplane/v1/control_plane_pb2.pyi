@@ -38,22 +38,12 @@ class _ExecutionDriverKind:
 class _ExecutionDriverKindEnumTypeWrapper(_enum_type_wrapper._EnumTypeWrapper[_ExecutionDriverKind.ValueType], _builtins.type):
     DESCRIPTOR: _descriptor.EnumDescriptor
     EXECUTION_DRIVER_KIND_UNSPECIFIED: _ExecutionDriverKind.ValueType  # 0
-    EXECUTION_DRIVER_KIND_HOST_PROCESS: _ExecutionDriverKind.ValueType  # 1
-    """HOST_PROCESS named the host-process driver, removed in issue #781. The
-    number stays reserved (the enum is NOT renumbered) to preserve wire
-    compatibility, but no Worker advertises it and no shipped driver maps to it.
-    """
     EXECUTION_DRIVER_KIND_CONTAINER: _ExecutionDriverKind.ValueType  # 2
 
 class ExecutionDriverKind(_ExecutionDriverKind, metaclass=_ExecutionDriverKindEnumTypeWrapper):
-    """ExecutionDriverKind enumerates the execution backends (FR-EXE-2, FR-EXE-4)."""
+    """ExecutionDriverKind enumerates the execution backends."""
 
 EXECUTION_DRIVER_KIND_UNSPECIFIED: ExecutionDriverKind.ValueType  # 0
-EXECUTION_DRIVER_KIND_HOST_PROCESS: ExecutionDriverKind.ValueType  # 1
-"""HOST_PROCESS named the host-process driver, removed in issue #781. The
-number stays reserved (the enum is NOT renumbered) to preserve wire
-compatibility, but no Worker advertises it and no shipped driver maps to it.
-"""
 EXECUTION_DRIVER_KIND_CONTAINER: ExecutionDriverKind.ValueType  # 2
 Global___ExecutionDriverKind: _TypeAlias = ExecutionDriverKind  # noqa: Y015
 

@@ -131,7 +131,7 @@ func TestReservationReleasedAfterStartFailure(t *testing.T) {
 
 	// A clean driver for the retry; the id must no longer be reserved.
 	d2 := &fakeDriver{}
-	m.drivers["host-process"] = d2
+	m.drivers["container"] = d2
 	// Wait for the failed start to finish releasing the reservation.
 	deadline := time.Now().Add(2 * time.Second)
 	var res session.CommandResult
@@ -389,7 +389,7 @@ func TestRestartUnavailableDriverLeavesInstanceTracked(t *testing.T) {
 	}
 
 	// Drop the driver the recorded StartServer used so the restart's resolution fails.
-	delete(m.drivers, "host-process")
+	delete(m.drivers, "container")
 
 	res := m.Handle(context.Background(), session.Command{CommandID: "r", ServerID: "s1", Kind: "RestartServer"})
 	if res.Success || res.ErrorCode != session.CommandErrorDriverUnavailable {
@@ -403,7 +403,7 @@ func TestRestartUnavailableDriverLeavesInstanceTracked(t *testing.T) {
 	}
 	// And the id must not be left reserved: restore the driver and confirm a stop
 	// still cleanly terminates the still-tracked instance.
-	m.drivers["host-process"] = d
+	m.drivers["container"] = d
 	if stop := m.Handle(context.Background(), session.Command{CommandID: "stop", ServerID: "s1", Kind: "StopServer"}); !stop.Success {
 		t.Fatalf("stop after failed restart = %+v, want success (instance was still tracked, id not wedged)", stop)
 	}

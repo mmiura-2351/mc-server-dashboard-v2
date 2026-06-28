@@ -42,7 +42,6 @@ from mc_server_dashboard_api.servers.domain.resource_pack import (
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     DesiredState,
-    ExecutionBackend,
     ObservedState,
     ServerId,
     ServerName,
@@ -373,7 +372,6 @@ def _at_rest_server(
         mc_edition="java",
         mc_version="1.21",
         server_type=ServerType("vanilla"),
-        execution_backend=ExecutionBackend.CONTAINER,
         config={},
         desired_state=DesiredState.STOPPED,
         observed_state=ObservedState.STOPPED,
@@ -398,7 +396,6 @@ def _running_server(
         mc_edition="java",
         mc_version="1.21",
         server_type=ServerType("vanilla"),
-        execution_backend=ExecutionBackend.CONTAINER,
         config={},
         desired_state=DesiredState.RUNNING,
         observed_state=ObservedState.RUNNING,

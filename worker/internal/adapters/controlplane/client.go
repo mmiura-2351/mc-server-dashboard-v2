@@ -474,9 +474,7 @@ func toFileListing(listing *session.FileListing) *controlplanev1.FileListing {
 }
 
 // driverName maps the wire driver enum to the configured driver name used by the
-// handler and capability config. The HOST_PROCESS enum value is reserved on the
-// wire (issue #781) but no longer shipped, so it maps to the empty (unknown)
-// name and any command carrying it fails to resolve a driver.
+// handler and capability config.
 func driverName(kind controlplanev1.ExecutionDriverKind) string {
 	switch kind {
 	case controlplanev1.ExecutionDriverKind_EXECUTION_DRIVER_KIND_CONTAINER:

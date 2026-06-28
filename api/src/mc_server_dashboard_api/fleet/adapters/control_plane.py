@@ -59,7 +59,6 @@ _LOG = logging.getLogger(__name__)
 # context's underscore spelling is mapped to ``DriverKind`` upstream; here we go
 # from ``DriverKind`` to the proto enum).
 _DRIVER_TO_PROTO: dict[DriverKind, "pb.ExecutionDriverKind.ValueType"] = {
-    DriverKind.HOST_PROCESS: pb.EXECUTION_DRIVER_KIND_HOST_PROCESS,
     DriverKind.CONTAINER: pb.EXECUTION_DRIVER_KIND_CONTAINER,
 }
 

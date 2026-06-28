@@ -55,7 +55,6 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
-    ExecutionBackend,
     ServerId,
     ServerType,
     WorkerId,
@@ -360,7 +359,6 @@ async def test_sanitized_start_failure_maps_to_status(
     outcome = await adapter.start(
         worker_id=WorkerId(uuid.uuid4()),
         server_id=ServerId(uuid.uuid4()),
-        backend=ExecutionBackend.HOST_PROCESS,
         server_type=ServerType.VANILLA,
         jar_relpath="server.jar",
         minecraft_version="1.21",
@@ -390,7 +388,6 @@ async def test_start_maps_server_type_to_launch_mode(
     await adapter.start(
         worker_id=WorkerId(uuid.uuid4()),
         server_id=ServerId(uuid.uuid4()),
-        backend=ExecutionBackend.HOST_PROCESS,
         server_type=server_type,
         jar_relpath="server.jar",
         minecraft_version="1.21",
@@ -411,7 +408,6 @@ async def test_start_threads_memory_limit_bytes_to_the_command() -> None:
     await adapter.start(
         worker_id=WorkerId(uuid.uuid4()),
         server_id=ServerId(uuid.uuid4()),
-        backend=ExecutionBackend.HOST_PROCESS,
         server_type=ServerType.VANILLA,
         jar_relpath="server.jar",
         minecraft_version="1.21",
@@ -432,7 +428,6 @@ async def test_start_threads_cpu_millis_to_the_command() -> None:
     await adapter.start(
         worker_id=WorkerId(uuid.uuid4()),
         server_id=ServerId(uuid.uuid4()),
-        backend=ExecutionBackend.HOST_PROCESS,
         server_type=ServerType.VANILLA,
         jar_relpath="server.jar",
         minecraft_version="1.21",
@@ -665,7 +660,6 @@ async def test_place_excludes_worker_over_committed_on_memory() -> None:
     # Committed 2048 + request 2048 = 4096 > 3072 usable -> excluded -> None.
     chosen = await adapter.place(
         server_id=ServerId(uuid.uuid4()),
-        backend=ExecutionBackend.HOST_PROCESS,
         memory_limit_mb=2048,
         committed_by_worker={},
     )
@@ -683,7 +677,6 @@ async def test_place_admits_worker_with_memory_room() -> None:
     # Committed 512 + request 2048 = 2560 <= 3072 usable -> fits.
     chosen = await adapter.place(
         server_id=ServerId(uuid.uuid4()),
-        backend=ExecutionBackend.HOST_PROCESS,
         memory_limit_mb=2048,
         committed_by_worker={},
     )
@@ -700,7 +693,6 @@ async def test_place_unset_request_memory_is_not_gated() -> None:
 
     chosen = await adapter.place(
         server_id=ServerId(uuid.uuid4()),
-        backend=ExecutionBackend.HOST_PROCESS,
         memory_limit_mb=None,
         committed_by_worker={},
     )
@@ -721,7 +713,6 @@ async def test_place_cpu_tie_break_still_uses_db_committed() -> None:
 
     chosen = await adapter.place(
         server_id=ServerId(uuid.uuid4()),
-        backend=ExecutionBackend.HOST_PROCESS,
         memory_limit_mb=512,
         committed_by_worker={
             WorkerId(worker_a): CommittedResources(cpu_millis=3000),
@@ -746,13 +737,11 @@ async def test_place_reserves_so_second_placement_sees_the_last_count_slot() -> 
 
     first = await adapter.place(
         server_id=ServerId(uuid.uuid4()),
-        backend=ExecutionBackend.HOST_PROCESS,
         memory_limit_mb=None,
         committed_by_worker={},
     )
     second = await adapter.place(
         server_id=ServerId(uuid.uuid4()),
-        backend=ExecutionBackend.HOST_PROCESS,
         memory_limit_mb=None,
         committed_by_worker={},
     )
@@ -773,14 +762,12 @@ async def test_place_reservation_folds_memory_into_the_gate() -> None:
 
     first = await adapter.place(
         server_id=ServerId(uuid.uuid4()),
-        backend=ExecutionBackend.HOST_PROCESS,
         memory_limit_mb=2048,
         committed_by_worker={},
     )
     # 2048 reserved + 2048 requested = 4096 > 3072 usable -> excluded.
     second = await adapter.place(
         server_id=ServerId(uuid.uuid4()),
-        backend=ExecutionBackend.HOST_PROCESS,
         memory_limit_mb=2048,
         committed_by_worker={},
     )
@@ -807,7 +794,6 @@ async def test_place_memory_gate_survives_confirm_between_snapshot_and_place() -
     a_server = ServerId(uuid.uuid4())
     chosen_a = await adapter.place(
         server_id=a_server,
-        backend=ExecutionBackend.HOST_PROCESS,
         memory_limit_mb=2048,
         committed_by_worker={},
     )
@@ -818,7 +804,6 @@ async def test_place_memory_gate_survives_confirm_between_snapshot_and_place() -
     # 2048 committed + 2048 requested = 4096 > 3072 usable -> excluded.
     chosen_b = await adapter.place(
         server_id=ServerId(uuid.uuid4()),
-        backend=ExecutionBackend.HOST_PROCESS,
         memory_limit_mb=2048,
         committed_by_worker=b_committed_snapshot,
     )

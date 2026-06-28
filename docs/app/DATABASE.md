@@ -339,7 +339,6 @@ assigned Worker.
 | `mc_edition` | text | e.g. `java` |
 | `mc_version` | text | e.g. `1.21.1` (FR-SRV-1) |
 | `server_type` | text | `vanilla` / `paper` / `fabric` / `forge` (CHECK enum). All are resolvable by the version catalog (forge resolves to the installer JAR — the worker runs `--installServer` on first start) |
-| `execution_backend` | text | `host_process` / `container` (CHECK enum). `container` is the only shipped backend; `host_process` is retained in the CHECK for historical rows only — the Worker host-process driver was removed in issue #781, so no new server uses it (the value is left in place to avoid a migration; see issue #781) |
 | `config` | jsonb | server configuration blob (properties, JVM args, plus the reserved keys catalogued below) |
 | `game_port` | integer nullable | the Minecraft game port (issue #243), assigned at create from the configured range (CONFIGURATION.md Section 5.8) and **unique deployment-wide**. Nullable: legacy/imported rows predating port tracking carry none, and Postgres treats `NULL`s as distinct so they never collide |
 | `slug` | text | the relay hostname prefix (RELAY.md Section 3, issue #955), e.g. `amber-falcon-42`. Auto-generated at create as `<word>-<word>-<NN>` and **unique deployment-wide** (the hostname namespace is global). Renameable via the server update PATCH; released slugs are immediately reusable (owner decision, RELAY.md Section 17). Validated as a lowercase DNS label (`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`) with a reserved-word list (`www`, `api`, `relay`, …). Pre-existing rows are backfilled by migration 0016. |
@@ -387,13 +386,6 @@ reports observed state). The reportable values (`starting` / `running` /
 **API-inferred** — set by the API when the owning Worker disconnects and never
 reported by a Worker, which is why the proto `ServerState` enum has no `UNKNOWN`
 value.
-
-**`execution_backend` immutability.** The backend is stored as a plain column but
-is **immutable for the server's lifetime** in M1 (FR-EXE-3,
-[`ARCHITECTURE.md`](ARCHITECTURE.md) Section 7.1). The constraint is enforced as a
-policy in the update use case, not by the schema — keeping it a normal column
-means a future milestone can lift the policy to a supported relocation operation
-without a schema change.
 
 **`assigned_worker_id` nullability and the missing FK.** A server is not
 permanently pinned to a Worker (FR-WRK-6). The column is null when stopped/unplaced,

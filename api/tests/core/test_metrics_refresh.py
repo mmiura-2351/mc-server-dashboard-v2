@@ -102,7 +102,7 @@ def _snapshot(status: WorkerStatus) -> WorkerSnapshot:
         id=WorkerId("worker-1"),
         version="1.0",
         capabilities=WorkerCapabilities(
-            drivers=frozenset({DriverKind.HOST_PROCESS}), max_servers=1
+            drivers=frozenset({DriverKind.CONTAINER}), max_servers=1
         ),
         registered_at=now,
         last_heartbeat_at=now,

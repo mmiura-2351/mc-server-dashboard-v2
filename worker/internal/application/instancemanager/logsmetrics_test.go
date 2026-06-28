@@ -109,7 +109,7 @@ func (c *fakeClock) tick() {
 
 func newRichManager(t *testing.T, d *richDriver, clk session.Clock) *Manager {
 	t.Helper()
-	return New(map[string]execution.ExecutionDriver{"host-process": d}, t.TempDir(),
+	return New(map[string]execution.ExecutionDriver{"container": d}, t.TempDir(),
 		// No RCON wired: surface a dial failure (the real openControl never yields a nil
 		// control without an error) so the #1007 stop-flush degrades gracefully instead
 		// of dereferencing a nil control.
@@ -179,7 +179,7 @@ func TestManagerEmitsMetricsOnCadence(t *testing.T) {
 func TestManagerEmitsUpOnlyMetricsWithoutStatsSource(t *testing.T) {
 	d := &fakeDriver{} // fakeInstance implements neither LogSource nor StatsSource
 	clk := &fakeClock{}
-	m := New(map[string]execution.ExecutionDriver{"host-process": d}, t.TempDir(),
+	m := New(map[string]execution.ExecutionDriver{"container": d}, t.TempDir(),
 		func(context.Context, string, string) (execution.ServerControl, error) {
 			return nil, fmt.Errorf("test: no rcon control configured")
 		}).
@@ -295,7 +295,7 @@ func (d *blockingDriver) Start(_ context.Context, spec execution.InstanceSpec) (
 func TestMetricsSampleCancelledOnTeardown(t *testing.T) {
 	d := &blockingDriver{}
 	clk := &fakeClock{}
-	m := New(map[string]execution.ExecutionDriver{"host-process": d}, t.TempDir(),
+	m := New(map[string]execution.ExecutionDriver{"container": d}, t.TempDir(),
 		func(context.Context, string, string) (execution.ServerControl, error) {
 			return nil, fmt.Errorf("test: no rcon control configured")
 		}).

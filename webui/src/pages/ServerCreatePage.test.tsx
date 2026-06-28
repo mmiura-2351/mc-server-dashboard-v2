@@ -315,10 +315,7 @@ describe("Step 2 — port control gated on relay mode (#1002)", () => {
     renderPage();
     await pickTypeAndVersion();
     fireEvent.click(screen.getByText(t("serverCreate.next")));
-    expect(
-      await screen.findByLabelText(t("serverCreate.backendLabel")),
-    ).toBeInTheDocument();
-    // Wait for the error state to settle, then confirm port is visible.
+    // Wait for step 2 to render, then confirm port is visible.
     await waitFor(() =>
       expect(
         screen.getByLabelText(t("serverCreate.portLabel")),
@@ -331,11 +328,10 @@ describe("Step 2 — port control gated on relay mode (#1002)", () => {
     renderPage();
     await pickTypeAndVersion();
     fireEvent.click(screen.getByText(t("serverCreate.next")));
-    // Advancing to runtime resolves; the backend select renders but no port field.
-    expect(
-      await screen.findByLabelText(t("serverCreate.backendLabel")),
-    ).toBeInTheDocument();
-    expect(screen.queryByLabelText(t("serverCreate.portLabel"))).toBeNull();
+    // Advancing to runtime resolves; in relay mode the port field is hidden.
+    await waitFor(() =>
+      expect(screen.queryByLabelText(t("serverCreate.portLabel"))).toBeNull(),
+    );
     expect(mockApi.get).not.toHaveBeenCalledWith("/api/ports/available");
   });
 
@@ -742,7 +738,6 @@ describe("import tab", () => {
     });
     const form = mockPostFormWithProgress.mock.calls[0][1] as FormData;
     expect(form.get("name")).toBe("restored");
-    expect(form.get("execution_backend")).toBe("container");
     expect(form.get("file")).toBeInstanceOf(File);
   });
 

@@ -93,7 +93,6 @@ def main() -> None:
             "mc_edition": "java",
             "mc_version": "1.21.1",
             "server_type": "vanilla",
-            "execution_backend": "container",
             "accept_eula": True,
         },
     )

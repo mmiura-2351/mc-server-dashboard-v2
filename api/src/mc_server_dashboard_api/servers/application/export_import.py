@@ -199,7 +199,6 @@ class ImportServer:
         *,
         community_id: CommunityId,
         name: str,
-        execution_backend: str,
         content: bytes,
     ) -> Server:
         if len(content) > self.max_bytes:
@@ -226,7 +225,6 @@ class ImportServer:
             mc_edition=metadata.mc_edition,
             mc_version=metadata.mc_version,
             server_type=metadata.server_type,
-            execution_backend=execution_backend,
             config={},
             accept_eula=False,
         )

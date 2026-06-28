@@ -125,7 +125,7 @@ Notes:
 
 - The `ExecutionDriver` Port is **pluggable** by design (FR-EXE-2): the seam
   admits future backends (e.g. a Kubernetes driver). `container` is the only
-  driver shipped today; the host-process driver was removed in issue #781.
+  driver shipped today.
 - The Worker's `ExecutionDriver` selection is a **set**, not one value: a Worker
   advertises *which* drivers it offers (Section 6), and the API's greedy
   placement filters Workers by the driver a server needs (REQUIREMENTS.md
@@ -423,7 +423,7 @@ FR-WRK-1); these feed the API's greedy placement filter (FR-WRK-3).
 
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
-| `worker.drivers` | *(required)* | | `ExecutionDriver` set this Worker offers (Section 4). `container` is the only shipped driver (the host-process driver was removed in issue #781), and it requires `driver.container.images`, so there is no zero-config default: the set must be supplied and must be non-empty. Advertised as a capability. |
+| `worker.drivers` | *(required)* | | `ExecutionDriver` set this Worker offers (Section 4). `container` is the only shipped driver and it requires `driver.container.images`, so there is no zero-config default: the set must be supplied and must be non-empty. Advertised as a capability. |
 | `worker.max_servers` | `0` | | Free-capacity hint for placement; `0` means "no advertised cap" at this scale. |
 
 The concrete capability message on the wire is defined in `proto/` (#2); this

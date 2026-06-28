@@ -75,10 +75,10 @@ async def test_check_admits_fabric_server_type() -> None:
             await conn.execute(
                 text(
                     "INSERT INTO server (id, community_id, name, mc_edition, "
-                    "mc_version, server_type, execution_backend, config, slug, "
+                    "mc_version, server_type, config, slug, "
                     "desired_state, observed_state, created_at, updated_at) VALUES "
                     "(:id, :community_id, :name, 'java', '1.21.1', 'fabric', "
-                    "'container', '{}', :slug, 'stopped', 'unknown', now(), now())"
+                    "'{}', :slug, 'stopped', 'unknown', now(), now())"
                 ),
                 {
                     "id": server_id,

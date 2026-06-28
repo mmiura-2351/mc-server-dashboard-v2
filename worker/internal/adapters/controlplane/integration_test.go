@@ -183,7 +183,7 @@ func testCaps() session.Capabilities {
 	return session.Capabilities{
 		WorkerID:      "worker-int",
 		WorkerVersion: "test",
-		Drivers:       []string{"host-process"},
+		Drivers:       []string{"container"},
 	}
 }
 
