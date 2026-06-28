@@ -466,6 +466,16 @@ export function ServerFilesTab({
   const progress = useUploadProgress();
   const [uploadPreparing, setUploadPreparing] = useState(false);
 
+  // Overwrite confirmation dialog state — promise-based so callers can await.
+  const [overwritePrompt, setOverwritePrompt] = useState<{
+    fileName: string;
+    showApplyAll: boolean;
+    resolve: (result: {
+      action: "overwrite" | "skip" | "cancel";
+      applyAll: boolean;
+    }) => void;
+  } | null>(null);
+
   const upload = useMutation({
     mutationFn: (file: File) => {
       const form = new FormData();
@@ -532,6 +542,8 @@ export function ServerFilesTab({
   onErrorRef.current = onError;
   const refetchListRef = useRef(refetchList);
   refetchListRef.current = refetchList;
+  const listingDataRef = useRef(listing.data);
+  listingDataRef.current = listing.data;
 
   // Drag-and-drop state for the file-tree drop zone.
   const dragCounter = useRef(0);
@@ -646,8 +658,68 @@ export function ServerFilesTab({
         return;
       }
 
+      // ── Overwrite check for files landing in the current directory ──
+      // Only check files targeting the currently listed directory, since we
+      // have listing data for it. Subdirectory uploads (from folder drops)
+      // are not checked — they typically create new directories.
+      const existingNames = new Set(
+        (listingDataRef.current?.entries ?? [])
+          .filter((e) => !e.is_dir)
+          .map((e) => e.name),
+      );
+      const rootConflicts = filesToUpload.filter(
+        ({ file, targetDir }) =>
+          targetDir === dir && existingNames.has(file.name),
+      );
+      const hasMultipleConflicts = rootConflicts.length > 1;
+      let overwriteAll = false;
+      let skipAll = false;
+      const skippedFiles = new Set<File>();
+
+      for (const { file, targetDir } of filesToUpload) {
+        if (targetDir === dir && existingNames.has(file.name)) {
+          if (skipAll) {
+            skippedFiles.add(file);
+            continue;
+          }
+          if (!overwriteAll) {
+            setUploadPreparing(false);
+            const { action, applyAll } = await new Promise<{
+              action: "overwrite" | "skip" | "cancel";
+              applyAll: boolean;
+            }>((resolve) => {
+              setOverwritePrompt({
+                fileName: file.name,
+                showApplyAll: hasMultipleConflicts,
+                resolve,
+              });
+            });
+            setOverwritePrompt(null);
+            // Yield so React commits the dialog dismissal.
+            await new Promise((r) => setTimeout(r, 0));
+
+            if (action === "cancel") return;
+            if (applyAll) {
+              if (action === "overwrite") overwriteAll = true;
+              else skipAll = true;
+            }
+            if (action === "skip") {
+              skippedFiles.add(file);
+            }
+          }
+        }
+      }
+
+      const approvedFiles = filesToUpload.filter(
+        ({ file }) => !skippedFiles.has(file),
+      );
+      if (approvedFiles.length === 0) {
+        setUploadPreparing(false);
+        return;
+      }
+
       // Transition from preparing indicator to progress bar.
-      const totalSize = filesToUpload.reduce(
+      const totalSize = approvedFiles.reduce(
         (sum, { file }) => sum + file.size,
         0,
       );
@@ -659,10 +731,10 @@ export function ServerFilesTab({
 
       // Upload all files, tracking aggregate progress across the batch.
       let uploaded = 0;
-      const total = filesToUpload.length;
+      const total = approvedFiles.length;
       let cumulativeLoaded = 0;
 
-      for (const { file, targetDir } of filesToUpload) {
+      for (const { file, targetDir } of approvedFiles) {
         if (file.size > MAX_UPLOAD_BYTES) {
           showToast(t("files.error.tooLarge"), "error");
           continue;
@@ -937,6 +1009,24 @@ export function ServerFilesTab({
               dropEnabled={dropEnabled}
               onMoveTo={moveFiles}
               onUpload={upload}
+              onBeforeUpload={async (fileName) => {
+                const exists = (listing.data?.entries ?? []).some(
+                  (e) => !e.is_dir && e.name === fileName,
+                );
+                if (!exists) return true;
+                const { action } = await new Promise<{
+                  action: "overwrite" | "skip" | "cancel";
+                  applyAll: boolean;
+                }>((resolve) => {
+                  setOverwritePrompt({
+                    fileName,
+                    showApplyAll: false,
+                    resolve,
+                  });
+                });
+                setOverwritePrompt(null);
+                return action === "overwrite";
+              }}
               onExtract={(file) => {
                 const form = new FormData();
                 form.append("file", file);
@@ -1019,6 +1109,21 @@ export function ServerFilesTab({
         onConfirm={confirmDiscard}
         onClose={cancelDiscard}
       />
+      {overwritePrompt !== null && (
+        <OverwriteConfirmDialog
+          fileName={overwritePrompt.fileName}
+          showApplyAll={overwritePrompt.showApplyAll}
+          onOverwrite={(applyAll) =>
+            overwritePrompt.resolve({ action: "overwrite", applyAll })
+          }
+          onSkip={(applyAll) =>
+            overwritePrompt.resolve({ action: "skip", applyAll })
+          }
+          onCancel={() =>
+            overwritePrompt.resolve({ action: "cancel", applyAll: false })
+          }
+        />
+      )}
     </section>
   );
 }
@@ -1246,6 +1351,7 @@ function Listing({
   dropEnabled,
   onMoveTo,
   onUpload,
+  onBeforeUpload,
   onExtract,
 }: {
   listing: DirListing;
@@ -1264,6 +1370,7 @@ function Listing({
   dropEnabled: boolean;
   onMoveTo: (paths: string[], destDir: string) => Promise<void>;
   onUpload: { mutate: (file: File) => void };
+  onBeforeUpload: (fileName: string) => Promise<boolean>;
   onExtract: (file: File) => void;
 }) {
   const { showToast } = useToast();
@@ -1362,7 +1469,9 @@ function Listing({
             if (file.size > MAX_UPLOAD_BYTES) {
               showToast(t("files.error.tooLarge"), "error");
             } else {
-              onUpload.mutate(file);
+              void onBeforeUpload(file.name).then((proceed) => {
+                if (proceed) onUpload.mutate(file);
+              });
             }
           }
           e.target.value = "";
@@ -2455,6 +2564,65 @@ function PromptDialog({
           onChange={(e) => onChange(e.target.value)}
         />
       </label>
+    </Modal>
+  );
+}
+
+// ── Overwrite confirmation dialog ────────────────────────────────────────────
+
+function OverwriteConfirmDialog({
+  fileName,
+  showApplyAll,
+  onOverwrite,
+  onSkip,
+  onCancel,
+}: {
+  fileName: string;
+  showApplyAll: boolean;
+  onOverwrite: (applyAll: boolean) => void;
+  onSkip: (applyAll: boolean) => void;
+  onCancel: () => void;
+}) {
+  const [applyAll, setApplyAll] = useState(false);
+
+  return (
+    <Modal
+      open
+      title={t("files.overwrite.title")}
+      onClose={onCancel}
+      footer={
+        <>
+          <button type="button" className="btn ghost" onClick={onCancel}>
+            {t("common.cancel")}
+          </button>
+          <button
+            type="button"
+            className="btn"
+            onClick={() => onSkip(applyAll)}
+          >
+            {t("files.overwrite.skip")}
+          </button>
+          <button
+            type="button"
+            className="btn primary"
+            onClick={() => onOverwrite(applyAll)}
+          >
+            {t("files.overwrite.overwrite")}
+          </button>
+        </>
+      }
+    >
+      <p>{t("files.overwrite.body", { name: fileName })}</p>
+      {showApplyAll && (
+        <label className="field">
+          <input
+            type="checkbox"
+            checked={applyAll}
+            onChange={(e) => setApplyAll(e.target.checked)}
+          />
+          {t("files.overwrite.applyAll")}
+        </label>
+      )}
     </Modal>
   );
 }

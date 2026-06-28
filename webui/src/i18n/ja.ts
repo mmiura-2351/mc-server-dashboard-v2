@@ -646,6 +646,14 @@ export const ja: Record<TranslationKey, string> = {
   "files.unsaved.body": "未保存の変更があります。破棄しますか？",
   "files.unsaved.discard": "破棄",
 
+  // Overwrite confirmation dialog.
+  "files.overwrite.title": "ファイルが既に存在します",
+  "files.overwrite.body":
+    "「{name}」はこのディレクトリに既に存在します。上書きしますか？",
+  "files.overwrite.overwrite": "上書き",
+  "files.overwrite.skip": "スキップ",
+  "files.overwrite.applyAll": "残りのすべてのファイルに適用",
+
   // Players tab — applied op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8).
   "players.heading": "適用中のグループ",
   "players.loading": "グループを読み込んでいます…",

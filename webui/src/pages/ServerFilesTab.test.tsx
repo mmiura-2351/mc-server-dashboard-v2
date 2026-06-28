@@ -2864,3 +2864,439 @@ describe("ServerFilesTab unsaved changes guard", () => {
     ).not.toBeInTheDocument();
   });
 });
+
+// ── Overwrite confirmation dialog ─────────────────────────────────────────────
+
+describe("ServerFilesTab overwrite confirmation", () => {
+  it("shows overwrite dialog when uploading a file that already exists via context menu", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "readme.txt", is_dir: false }]),
+    });
+    mockPostFormWithProgress.mockResolvedValue(undefined);
+    renderPage();
+    await openFiles();
+    await screen.findByText(/readme\.txt/);
+
+    // Right-click to open context menu and trigger upload.
+    const row = screen.getByText(/readme\.txt/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.upload") }),
+    );
+
+    // Choose a file with the same name as an existing file.
+    const file = new File(["new content"], "readme.txt");
+    fireEvent.change(screen.getByLabelText(t("files.contextMenu.upload")), {
+      target: { files: [file] },
+    });
+
+    // The overwrite dialog should appear.
+    expect(
+      await screen.findByText(t("files.overwrite.title")),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(t("files.overwrite.body", { name: "readme.txt" })),
+    ).toBeInTheDocument();
+  });
+
+  it("uploads the file when user clicks overwrite", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "readme.txt", is_dir: false }]),
+    });
+    mockPostFormWithProgress.mockResolvedValue(undefined);
+    renderPage();
+    await openFiles();
+    await screen.findByText(/readme\.txt/);
+
+    const row = screen.getByText(/readme\.txt/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.upload") }),
+    );
+
+    const file = new File(["new"], "readme.txt");
+    fireEvent.change(screen.getByLabelText(t("files.contextMenu.upload")), {
+      target: { files: [file] },
+    });
+
+    await screen.findByText(t("files.overwrite.title"));
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.overwrite.overwrite") }),
+    );
+
+    await waitFor(() => expect(mockPostFormWithProgress).toHaveBeenCalled());
+  });
+
+  it("does not upload the file when user clicks skip", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "readme.txt", is_dir: false }]),
+    });
+    mockPostFormWithProgress.mockResolvedValue(undefined);
+    renderPage();
+    await openFiles();
+    await screen.findByText(/readme\.txt/);
+
+    const row = screen.getByText(/readme\.txt/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.upload") }),
+    );
+
+    const file = new File(["new"], "readme.txt");
+    fireEvent.change(screen.getByLabelText(t("files.contextMenu.upload")), {
+      target: { files: [file] },
+    });
+
+    await screen.findByText(t("files.overwrite.title"));
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.overwrite.skip") }),
+    );
+
+    // Dialog should close and no upload should occur.
+    await waitFor(() =>
+      expect(
+        screen.queryByText(t("files.overwrite.title")),
+      ).not.toBeInTheDocument(),
+    );
+    expect(mockPostFormWithProgress).not.toHaveBeenCalled();
+  });
+
+  it("does not upload the file when user clicks cancel", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "readme.txt", is_dir: false }]),
+    });
+    mockPostFormWithProgress.mockResolvedValue(undefined);
+    renderPage();
+    await openFiles();
+    await screen.findByText(/readme\.txt/);
+
+    const row = screen.getByText(/readme\.txt/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.upload") }),
+    );
+
+    const file = new File(["new"], "readme.txt");
+    fireEvent.change(screen.getByLabelText(t("files.contextMenu.upload")), {
+      target: { files: [file] },
+    });
+
+    await screen.findByText(t("files.overwrite.title"));
+    fireEvent.click(screen.getByRole("button", { name: t("common.cancel") }));
+
+    await waitFor(() =>
+      expect(
+        screen.queryByText(t("files.overwrite.title")),
+      ).not.toBeInTheDocument(),
+    );
+    expect(mockPostFormWithProgress).not.toHaveBeenCalled();
+  });
+
+  it("does not show dialog when uploading a file with a new name via context menu", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "existing.txt", is_dir: false }]),
+    });
+    mockPostFormWithProgress.mockResolvedValue(undefined);
+    renderPage();
+    await openFiles();
+    await screen.findByText(/existing\.txt/);
+
+    const row = screen.getByText(/existing\.txt/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.upload") }),
+    );
+
+    // Upload a file with a different name — no conflict.
+    const file = new File(["content"], "brand-new.txt");
+    fireEvent.change(screen.getByLabelText(t("files.contextMenu.upload")), {
+      target: { files: [file] },
+    });
+
+    // Upload should proceed without a dialog.
+    await waitFor(() => expect(mockPostFormWithProgress).toHaveBeenCalled());
+    expect(
+      screen.queryByText(t("files.overwrite.title")),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not show dialog for directories with the same name", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "world", is_dir: true }]),
+    });
+    mockPostFormWithProgress.mockResolvedValue(undefined);
+    renderPage();
+    await openFiles();
+    await screen.findByText(/world/);
+
+    const row = screen.getByText(/world/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.upload") }),
+    );
+
+    // Upload a file named "world" — only files conflict, not directories.
+    const file = new File(["content"], "world");
+    fireEvent.change(screen.getByLabelText(t("files.contextMenu.upload")), {
+      target: { files: [file] },
+    });
+
+    await waitFor(() => expect(mockPostFormWithProgress).toHaveBeenCalled());
+    expect(
+      screen.queryByText(t("files.overwrite.title")),
+    ).not.toBeInTheDocument();
+  });
+
+  describe("drag-and-drop overwrite", () => {
+    function dataTransfer(files: File[]): DataTransfer {
+      return {
+        files,
+        types: files.length > 0 ? ["Files"] : [],
+      } as unknown as DataTransfer;
+    }
+
+    it("shows overwrite dialog when dropping a file that already exists", async () => {
+      routeGet({
+        detail: server(),
+        list: listing([{ name: "readme.txt", is_dir: false }]),
+      });
+      mockPostFormWithProgress.mockResolvedValue(undefined);
+      renderPage();
+      await openFiles();
+      await screen.findByText(/readme\.txt/);
+
+      const tree = document.querySelector(".file-tree") as HTMLElement;
+      const file = new File(["new content"], "readme.txt");
+      fireEvent.drop(tree, { dataTransfer: dataTransfer([file]) });
+
+      // The overwrite dialog should appear.
+      expect(
+        await screen.findByText(t("files.overwrite.title")),
+      ).toBeInTheDocument();
+    });
+
+    it("uploads on overwrite click in drop", async () => {
+      routeGet({
+        detail: server(),
+        list: listing([{ name: "readme.txt", is_dir: false }]),
+      });
+      mockPostFormWithProgress.mockResolvedValue(undefined);
+      renderPage();
+      await openFiles();
+      await screen.findByText(/readme\.txt/);
+
+      const tree = document.querySelector(".file-tree") as HTMLElement;
+      const file = new File(["new content"], "readme.txt");
+      fireEvent.drop(tree, { dataTransfer: dataTransfer([file]) });
+
+      await screen.findByText(t("files.overwrite.title"));
+      fireEvent.click(
+        screen.getByRole("button", { name: t("files.overwrite.overwrite") }),
+      );
+
+      await waitFor(() => expect(mockPostFormWithProgress).toHaveBeenCalled());
+    });
+
+    it("skips a conflicting file on skip click in drop", async () => {
+      routeGet({
+        detail: server(),
+        list: listing([{ name: "readme.txt", is_dir: false }]),
+      });
+      mockPostFormWithProgress.mockResolvedValue(undefined);
+      renderPage();
+      await openFiles();
+      await screen.findByText(/readme\.txt/);
+
+      const tree = document.querySelector(".file-tree") as HTMLElement;
+      const file = new File(["new content"], "readme.txt");
+      fireEvent.drop(tree, { dataTransfer: dataTransfer([file]) });
+
+      await screen.findByText(t("files.overwrite.title"));
+      fireEvent.click(
+        screen.getByRole("button", { name: t("files.overwrite.skip") }),
+      );
+
+      // No upload should occur — the only file was skipped.
+      await waitFor(() =>
+        expect(
+          screen.queryByText(t("files.overwrite.title")),
+        ).not.toBeInTheDocument(),
+      );
+      expect(mockPostFormWithProgress).not.toHaveBeenCalled();
+    });
+
+    it("shows apply-all checkbox when multiple files conflict on drop", async () => {
+      routeGet({
+        detail: server(),
+        list: listing([
+          { name: "a.txt", is_dir: false },
+          { name: "b.txt", is_dir: false },
+        ]),
+      });
+      mockPostFormWithProgress.mockResolvedValue(undefined);
+      renderPage();
+      await openFiles();
+      await screen.findByText(/a\.txt/);
+
+      const tree = document.querySelector(".file-tree") as HTMLElement;
+      const fileA = new File(["new a"], "a.txt");
+      const fileB = new File(["new b"], "b.txt");
+      fireEvent.drop(tree, { dataTransfer: dataTransfer([fileA, fileB]) });
+
+      await screen.findByText(t("files.overwrite.title"));
+      // The apply-all checkbox should be visible.
+      expect(
+        screen.getByText(t("files.overwrite.applyAll")),
+      ).toBeInTheDocument();
+    });
+
+    it("does not show apply-all checkbox for a single conflicting file on drop", async () => {
+      routeGet({
+        detail: server(),
+        list: listing([
+          { name: "a.txt", is_dir: false },
+          { name: "new.txt", is_dir: false },
+        ]),
+      });
+      mockPostFormWithProgress.mockResolvedValue(undefined);
+      renderPage();
+      await openFiles();
+      await screen.findByText(/a\.txt/);
+
+      const tree = document.querySelector(".file-tree") as HTMLElement;
+      // Only a.txt conflicts; new-file.txt does not.
+      const fileA = new File(["new a"], "a.txt");
+      const fileB = new File(["new b"], "new-file.txt");
+      fireEvent.drop(tree, { dataTransfer: dataTransfer([fileA, fileB]) });
+
+      await screen.findByText(t("files.overwrite.title"));
+      expect(
+        screen.queryByText(t("files.overwrite.applyAll")),
+      ).not.toBeInTheDocument();
+    });
+
+    it("overwrite-all skips remaining dialogs and uploads all files", async () => {
+      routeGet({
+        detail: server(),
+        list: listing([
+          { name: "a.txt", is_dir: false },
+          { name: "b.txt", is_dir: false },
+        ]),
+      });
+      mockPostFormWithProgress.mockResolvedValue(undefined);
+      renderPage();
+      await openFiles();
+      await screen.findByText(/a\.txt/);
+
+      const tree = document.querySelector(".file-tree") as HTMLElement;
+      const fileA = new File(["new a"], "a.txt");
+      const fileB = new File(["new b"], "b.txt");
+      fireEvent.drop(tree, { dataTransfer: dataTransfer([fileA, fileB]) });
+
+      // First dialog for a.txt.
+      await screen.findByText(t("files.overwrite.title"));
+      // Check the apply-all checkbox.
+      fireEvent.click(screen.getByText(t("files.overwrite.applyAll")));
+      fireEvent.click(
+        screen.getByRole("button", { name: t("files.overwrite.overwrite") }),
+      );
+
+      // Should upload both files without another dialog.
+      await waitFor(() =>
+        expect(mockPostFormWithProgress).toHaveBeenCalledTimes(2),
+      );
+    });
+
+    it("skip-all skips remaining conflicting files on drop", async () => {
+      routeGet({
+        detail: server(),
+        list: listing([
+          { name: "a.txt", is_dir: false },
+          { name: "b.txt", is_dir: false },
+        ]),
+      });
+      mockPostFormWithProgress.mockResolvedValue(undefined);
+      renderPage();
+      await openFiles();
+      await screen.findByText(/a\.txt/);
+
+      const tree = document.querySelector(".file-tree") as HTMLElement;
+      const fileA = new File(["new a"], "a.txt");
+      const fileB = new File(["new b"], "b.txt");
+      fireEvent.drop(tree, { dataTransfer: dataTransfer([fileA, fileB]) });
+
+      // First dialog for a.txt.
+      await screen.findByText(t("files.overwrite.title"));
+      // Check the apply-all checkbox and click skip.
+      fireEvent.click(screen.getByText(t("files.overwrite.applyAll")));
+      fireEvent.click(
+        screen.getByRole("button", { name: t("files.overwrite.skip") }),
+      );
+
+      // Both files should be skipped — no upload.
+      await waitFor(() =>
+        expect(
+          screen.queryByText(t("files.overwrite.title")),
+        ).not.toBeInTheDocument(),
+      );
+      expect(mockPostFormWithProgress).not.toHaveBeenCalled();
+    });
+
+    it("drops non-conflicting files without a dialog", async () => {
+      routeGet({
+        detail: server(),
+        list: listing([{ name: "existing.txt", is_dir: false }]),
+      });
+      mockPostFormWithProgress.mockResolvedValue(undefined);
+      renderPage();
+      await openFiles();
+      await screen.findByText(/existing\.txt/);
+
+      const tree = document.querySelector(".file-tree") as HTMLElement;
+      const file = new File(["content"], "brand-new.txt");
+      fireEvent.drop(tree, { dataTransfer: dataTransfer([file]) });
+
+      // No dialog — upload proceeds immediately.
+      await waitFor(() => expect(mockPostFormWithProgress).toHaveBeenCalled());
+      expect(
+        screen.queryByText(t("files.overwrite.title")),
+      ).not.toBeInTheDocument();
+    });
+
+    it("cancel stops the entire upload on drop", async () => {
+      routeGet({
+        detail: server(),
+        list: listing([
+          { name: "a.txt", is_dir: false },
+          { name: "b.txt", is_dir: false },
+        ]),
+      });
+      mockPostFormWithProgress.mockResolvedValue(undefined);
+      renderPage();
+      await openFiles();
+      await screen.findByText(/a\.txt/);
+
+      const tree = document.querySelector(".file-tree") as HTMLElement;
+      const fileA = new File(["new a"], "a.txt");
+      const fileB = new File(["new b"], "b.txt");
+      fireEvent.drop(tree, { dataTransfer: dataTransfer([fileA, fileB]) });
+
+      await screen.findByText(t("files.overwrite.title"));
+      fireEvent.click(screen.getByRole("button", { name: t("common.cancel") }));
+
+      // No upload at all.
+      await waitFor(() =>
+        expect(
+          screen.queryByText(t("files.overwrite.title")),
+        ).not.toBeInTheDocument(),
+      );
+      expect(mockPostFormWithProgress).not.toHaveBeenCalled();
+    });
+  });
+});
