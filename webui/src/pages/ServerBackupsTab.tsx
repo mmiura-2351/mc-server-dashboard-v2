@@ -47,18 +47,32 @@ function statsKey(communityId: string, serverId: string) {
   return ["backups", communityId, serverId, "statistics"] as const;
 }
 
-// Map a create/upload error reason to a specific message; otherwise generic.
+// Map a create/upload/restore error to a specific message; otherwise generic.
 function createErrorMessage(error: unknown): TranslationKey {
-  if (error instanceof ApiError) {
-    switch (error.reason) {
-      case "server_unsettled":
-        return "backups.error.unsettled";
-      case "invalid_archive":
-        return "backups.error.invalidArchive";
-      case "worker_unavailable":
-        return "backups.error.workerUnavailable";
-    }
+  if (!(error instanceof ApiError)) return "backups.error.generic";
+
+  // Check reason first (most specific).
+  switch (error.reason) {
+    case "server_unsettled":
+      return "backups.error.unsettled";
+    case "server_not_stopped":
+      return "backups.error.serverMustBeStopped";
+    case "server_busy":
+      return "backups.error.serverBusy";
+    case "invalid_archive":
+      return "backups.error.invalidArchive";
+    case "worker_unavailable":
+      return "backups.error.workerUnavailable";
   }
+
+  // Check status (less specific).
+  switch (error.status) {
+    case 413:
+      return "backups.error.tooLarge";
+    case 503:
+      return "backups.error.workerUnavailable";
+  }
+
   return "backups.error.generic";
 }
 
@@ -628,7 +642,7 @@ function RestoreDialog({
         showToast(t("backups.error.notStopped"), "error");
         return;
       }
-      showToast(t("backups.error.generic"), "error");
+      showToast(t(createErrorMessage(error)), "error");
     },
   });
 
@@ -648,7 +662,7 @@ function RestoreDialog({
       if (onForbidden(error)) {
         return;
       }
-      showToast(t("backups.error.generic"), "error");
+      showToast(t(createErrorMessage(error)), "error");
     },
   });
 

@@ -489,6 +489,9 @@ export const en = {
     "No server host is available to take the backup right now.",
   "backups.error.invalidSchedule":
     "backup_interval_hours must be a whole number of hours of at least 1.",
+  "backups.error.serverMustBeStopped":
+    "The server must be stopped for this operation.",
+  "backups.error.serverBusy": "Another operation is in progress. Please wait.",
   "backups.error.tooLarge": "That file exceeds the 512 MiB upload limit.",
   "backups.error.generic": "Something went wrong. Please try again.",
 
@@ -652,6 +655,13 @@ export const en = {
   // Inline pointer to the full Groups management surface (Phase 6).
   "players.manageHint": "Create and edit groups in community settings.",
   "players.manageLink": "Community settings",
+  "players.error.unsettled":
+    "The server is starting or stopping — try again once it has settled.",
+  "players.error.serverMustBeStopped":
+    "The server must be stopped for this operation.",
+  "players.error.serverBusy": "Another operation is in progress. Please wait.",
+  "players.error.workerUnavailable":
+    "The server agent is disconnected. Please try again later.",
   "players.error.generic": "Something went wrong. Please try again.",
 
   // Sessions view — relay game session history (issue #961).
@@ -1429,6 +1439,8 @@ export const en = {
     "This server type does not support {nouns}.",
   "plugins.error.invalidSide": "Invalid side for this server type.",
   "plugins.error.notFound": "{Noun} not found. It may have been removed.",
+  "plugins.error.workerUnavailable":
+    "The server agent is disconnected. Please try again later.",
   "plugins.error.generic": "Something went wrong. Please try again.",
   // Dependency / compatibility validation checklist (issue #1307).
   "plugins.validation.heading": "Dependencies & compatibility",
