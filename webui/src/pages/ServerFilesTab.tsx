@@ -638,6 +638,9 @@ export function ServerFilesTab({
         0,
       );
       progress.start(totalSize);
+      // Yield to the renderer so React commits the progress-bar state before
+      // the upload loop monopolises the main thread.
+      await new Promise((resolve) => setTimeout(resolve, 0));
       let cumulativeLoaded = 0;
 
       for (const { file, targetDir } of filesToUpload) {
