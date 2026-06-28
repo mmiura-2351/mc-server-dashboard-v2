@@ -630,23 +630,24 @@ export function ServerFilesTab({
         }
       }
 
-      // Upload all files.
+      // Upload all files, tracking aggregate progress across the batch.
       let uploaded = 0;
       const total = filesToUpload.length;
+      const totalSize = filesToUpload.reduce(
+        (sum, { file }) => sum + file.size,
+        0,
+      );
+      progress.start(totalSize);
+      let cumulativeLoaded = 0;
+
       for (const { file, targetDir } of filesToUpload) {
         if (file.size > MAX_UPLOAD_BYTES) {
           showToast(t("files.error.tooLarge"), "error");
           continue;
         }
-        if (total > 1) {
-          showToast(
-            t("files.bulk.upload.progress", { done: uploaded, total }),
-            "success",
-          );
-        }
+        const fileBaseLoaded = cumulativeLoaded;
         const form = new FormData();
         form.append("file", file);
-        progress.start(file.size);
         try {
           await postFormWithProgress(
             `${apiPath(
@@ -654,17 +655,21 @@ export function ServerFilesTab({
               { community_id: communityId, server_id: serverId },
             )}?path=${encodeURIComponent(targetDir)}&extract=false` as never,
             form,
-            progress.onProgress,
+            (loaded) => {
+              progress.onProgress(fileBaseLoaded + loaded, totalSize);
+            },
           );
+          cumulativeLoaded += file.size;
           uploaded++;
         } catch (error) {
           progress.reset();
           onErrorRef.current(error);
+          return;
         }
       }
 
+      progress.reset();
       if (uploaded > 0) {
-        progress.reset();
         showToast(
           total === 1
             ? t("files.uploaded")
@@ -1996,6 +2001,7 @@ function Toolbar({
   const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
   const [bulkMoveOpen, setBulkMoveOpen] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkProgress, setBulkProgress] = useState<string | null>(null);
 
   const bulkDelete = async () => {
     const paths = Array.from(selected);
@@ -2005,7 +2011,7 @@ function Toolbar({
     let done = 0;
     let failed = 0;
     for (const path of paths) {
-      showToast(t("files.bulk.delete.progress", { done, total }), "success");
+      setBulkProgress(t("files.bulk.delete.progress", { done, total }));
       try {
         await api.delete(
           `${filesBase(communityId, serverId)}?path=${encodeURIComponent(path)}` as never,
@@ -2017,6 +2023,7 @@ function Toolbar({
       }
     }
     setBulkBusy(false);
+    setBulkProgress(null);
     if (failed === 0) {
       showToast(t("files.bulk.delete.done", { done }), "success");
     } else {
@@ -2065,7 +2072,7 @@ function Toolbar({
     let done = 0;
     let failed = 0;
     for (const path of paths) {
-      showToast(t("files.bulk.download.progress", { done, total }), "success");
+      setBulkProgress(t("files.bulk.download.progress", { done, total }));
       try {
         const blob = await fetchFileBlob(
           `${apiPath(
@@ -2105,6 +2112,7 @@ function Toolbar({
     }
 
     setBulkBusy(false);
+    setBulkProgress(null);
     if (failed === 0) {
       showToast(t("files.bulk.download.done", { done }), "success");
     } else {
@@ -2123,7 +2131,7 @@ function Toolbar({
     let done = 0;
     let failed = 0;
     for (const path of paths) {
-      showToast(t("files.bulk.move.progress", { done, total }), "success");
+      setBulkProgress(t("files.bulk.move.progress", { done, total }));
       const name = path.split("/").at(-1) ?? path;
       const to = dest === "" ? name : `${dest}/${name}`;
       try {
@@ -2141,6 +2149,7 @@ function Toolbar({
       }
     }
     setBulkBusy(false);
+    setBulkProgress(null);
     if (failed === 0) {
       showToast(t("files.bulk.move.done", { done }), "success");
     } else {
@@ -2218,6 +2227,9 @@ function Toolbar({
             >
               {t("files.bulk.move")}
             </button>
+            {bulkProgress !== null && (
+              <span className="bulk-progress">{bulkProgress}</span>
+            )}
           </>
         )}
       </div>
