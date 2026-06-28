@@ -570,8 +570,6 @@ export const ja: Record<TranslationKey, string> = {
   "files.error.goToContentTab": "{noun}タブへ移動",
   "files.error.tooLarge":
     "ファイルサイズが512 MiBのアップロード上限を超えています。",
-  "files.error.folderNotSupported":
-    "フォルダのアップロードには対応していません。ZIPファイルに圧縮し、コンテキストメニューの「ここに展開」をご利用ください。",
   "files.error.notFound": "ファイルまたはディレクトリが見つかりません。",
   "files.error.fileTooLarge":
     "ファイルサイズが上限を超えています（アップロード: 512 MiB、編集: 4 MiB）。",
@@ -616,6 +614,9 @@ export const ja: Record<TranslationKey, string> = {
   "files.bulk.move.done": "{done}件を移動しました。",
   "files.bulk.move.partial":
     "{done}/{total}件を移動しました。{failed}件失敗しました。",
+  // Drag-and-drop folder upload.
+  "files.bulk.upload.progress": "アップロード中 {done}/{total}...",
+  "files.bulk.upload.done": "{done} 件のファイルをアップロードしました。",
 
   // Drag-and-drop file organization (issue #1464).
   "files.moved": "移動しました。",

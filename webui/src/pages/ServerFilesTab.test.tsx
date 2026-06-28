@@ -1331,14 +1331,18 @@ describe("ServerFilesTab drag-and-drop upload", () => {
     expect(url).toBe(`${FILES_BASE}/upload?path=&extract=false`);
   });
 
-  it("shows an error toast when a folder is dropped", async () => {
+  it("uploads files from a dropped folder", async () => {
     routeGet({ detail: server(), list: listing([]) });
+    mockApi.post.mockResolvedValue(undefined);
+    mockPostFormWithProgress.mockResolvedValue(undefined);
     renderPage();
     await openFiles();
     await screen.findByText(t("files.empty"));
 
     const tree = document.querySelector(".file-tree") as HTMLElement;
-    // Simulate a folder drop: webkitGetAsEntry returns a directory entry.
+    // Simulate a folder drop: webkitGetAsEntry returns a directory entry
+    // with a createReader() that yields one file.
+    const innerFile = new File(["hello"], "readme.txt");
     const folderDt = {
       files: [] as unknown as FileList,
       types: ["Files"],
@@ -1350,6 +1354,27 @@ describe("ServerFilesTab drag-and-drop upload", () => {
             isFile: false,
             isDirectory: true,
             name: "my-folder",
+            createReader: () => {
+              let read = false;
+              return {
+                readEntries: (cb: (entries: unknown[]) => void) => {
+                  if (!read) {
+                    read = true;
+                    cb([
+                      {
+                        isFile: true,
+                        isDirectory: false,
+                        name: "readme.txt",
+                        file: (resolve: (f: File) => void) =>
+                          resolve(innerFile),
+                      },
+                    ]);
+                  } else {
+                    cb([]);
+                  }
+                },
+              };
+            },
           }),
         },
       ],
@@ -1357,10 +1382,16 @@ describe("ServerFilesTab drag-and-drop upload", () => {
 
     fireEvent.drop(tree, { dataTransfer: folderDt });
 
-    expect(
-      await screen.findByText(t("files.error.folderNotSupported")),
-    ).toBeInTheDocument();
-    expect(mockPostFormWithProgress).not.toHaveBeenCalled();
+    // Directory creation is called first.
+    await waitFor(() =>
+      expect(mockApi.post).toHaveBeenCalledWith(
+        expect.stringContaining("directories?path=my-folder"),
+      ),
+    );
+    // Then the file is uploaded to the subdirectory.
+    await waitFor(() => expect(mockPostFormWithProgress).toHaveBeenCalled());
+    const [url] = mockPostFormWithProgress.mock.calls[0];
+    expect(url).toBe(`${FILES_BASE}/upload?path=my-folder&extract=false`);
   });
 
   it("clears the overlay when dragend fires on the document", async () => {
@@ -1381,7 +1412,7 @@ describe("ServerFilesTab drag-and-drop upload", () => {
     );
   });
 
-  it("clears the overlay when drag leaves the browser window", async () => {
+  it("clears the overlay when drop fires on the document", async () => {
     routeGet({ detail: server(), list: listing([]) });
     renderPage();
     await openFiles();
@@ -1391,10 +1422,8 @@ describe("ServerFilesTab drag-and-drop upload", () => {
     fireEvent.dragEnter(tree, { dataTransfer: dataTransfer([]) });
     expect(screen.getByText(t("files.dropZone"))).toBeInTheDocument();
 
-    // When the drag exits the browser window, relatedTarget is null.
-    const leaveEvent = new Event("dragleave", { bubbles: true });
-    Object.defineProperty(leaveEvent, "relatedTarget", { value: null });
-    document.dispatchEvent(leaveEvent);
+    // Any drop on the document resets the overlay.
+    fireEvent(document, new Event("drop"));
 
     await waitFor(() =>
       expect(screen.queryByText(t("files.dropZone"))).not.toBeInTheDocument(),
