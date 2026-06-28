@@ -2001,6 +2001,7 @@ function Toolbar({
   const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
   const [bulkMoveOpen, setBulkMoveOpen] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkProgress, setBulkProgress] = useState<string | null>(null);
 
   const bulkDelete = async () => {
     const paths = Array.from(selected);
@@ -2010,7 +2011,7 @@ function Toolbar({
     let done = 0;
     let failed = 0;
     for (const path of paths) {
-      showToast(t("files.bulk.delete.progress", { done, total }), "success");
+      setBulkProgress(t("files.bulk.delete.progress", { done, total }));
       try {
         await api.delete(
           `${filesBase(communityId, serverId)}?path=${encodeURIComponent(path)}` as never,
@@ -2022,6 +2023,7 @@ function Toolbar({
       }
     }
     setBulkBusy(false);
+    setBulkProgress(null);
     if (failed === 0) {
       showToast(t("files.bulk.delete.done", { done }), "success");
     } else {
@@ -2070,7 +2072,7 @@ function Toolbar({
     let done = 0;
     let failed = 0;
     for (const path of paths) {
-      showToast(t("files.bulk.download.progress", { done, total }), "success");
+      setBulkProgress(t("files.bulk.download.progress", { done, total }));
       try {
         const blob = await fetchFileBlob(
           `${apiPath(
@@ -2110,6 +2112,7 @@ function Toolbar({
     }
 
     setBulkBusy(false);
+    setBulkProgress(null);
     if (failed === 0) {
       showToast(t("files.bulk.download.done", { done }), "success");
     } else {
@@ -2128,7 +2131,7 @@ function Toolbar({
     let done = 0;
     let failed = 0;
     for (const path of paths) {
-      showToast(t("files.bulk.move.progress", { done, total }), "success");
+      setBulkProgress(t("files.bulk.move.progress", { done, total }));
       const name = path.split("/").at(-1) ?? path;
       const to = dest === "" ? name : `${dest}/${name}`;
       try {
@@ -2146,6 +2149,7 @@ function Toolbar({
       }
     }
     setBulkBusy(false);
+    setBulkProgress(null);
     if (failed === 0) {
       showToast(t("files.bulk.move.done", { done }), "success");
     } else {
@@ -2223,6 +2227,9 @@ function Toolbar({
             >
               {t("files.bulk.move")}
             </button>
+            {bulkProgress !== null && (
+              <span className="bulk-progress">{bulkProgress}</span>
+            )}
           </>
         )}
       </div>

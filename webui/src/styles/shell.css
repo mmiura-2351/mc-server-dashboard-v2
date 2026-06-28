@@ -1670,6 +1670,11 @@ button.link:focus-visible {
   font-size: 13px;
   color: var(--text-dim);
 }
+.bulk-progress {
+  font-size: 13px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
 .file-name {
   background: none;
   border: none;
