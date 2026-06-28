@@ -653,6 +653,7 @@ export const ja: Record<TranslationKey, string> = {
   "files.overwrite.overwrite": "上書き",
   "files.overwrite.skip": "スキップ",
   "files.overwrite.applyAll": "残りのすべてのファイルに適用",
+  "files.overwrite.multipleFolders": "{count} 個のフォルダ",
 
   // Players tab — applied op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8).
   "players.heading": "適用中のグループ",

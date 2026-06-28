@@ -641,6 +641,7 @@ export const en = {
   "files.overwrite.overwrite": "Overwrite",
   "files.overwrite.skip": "Skip",
   "files.overwrite.applyAll": "Apply to all remaining files",
+  "files.overwrite.multipleFolders": "{count} folders",
 
   // Players tab — attached op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8).
   // One contiguous block to keep merge conflicts with sibling i18n PRs minimal.

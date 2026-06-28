@@ -620,13 +620,20 @@ export function ServerFilesTab({
 
       if (droppedFiles.length === 0 && droppedDirs.length === 0) return;
 
+      // Snapshot the current listing entries BEFORE any async yield. The ref
+      // is updated on every render, so an intervening re-render (e.g. from a
+      // React Query background refetch triggered by window-focus) could clear
+      // it before the overwrite check runs.
+      const listingEntries = listingDataRef.current?.entries ?? [];
+
       // ── Phase 2: async — safe to yield now ──
       // Show immediate feedback before the potentially slow preparation phase.
       setUploadPreparing(true);
       await new Promise((resolve) => setTimeout(resolve, 0));
 
       // Collect files to upload, resolving directories recursively.
-      const filesToUpload: Array<{ file: File; targetDir: string }> = [];
+      // `let` because the folder-level overwrite check may filter entries.
+      let filesToUpload: Array<{ file: File; targetDir: string }> = [];
       const hasDirectories = droppedDirs.length > 0;
 
       try {
@@ -675,14 +682,62 @@ export function ServerFilesTab({
         return;
       }
 
+      // ── Folder-level overwrite check ──
+      // When a dropped folder name matches an existing directory in the
+      // current listing, warn the user that files inside will be merged.
+      if (droppedDirs.length > 0) {
+        const existingDirNames = new Set(
+          listingEntries.filter((e) => e.is_dir).map((e) => e.name),
+        );
+        const conflictingFolders = droppedDirs
+          .map((d) => d.name)
+          .filter((name) => existingDirNames.has(name));
+
+        if (conflictingFolders.length > 0) {
+          setUploadPreparing(false);
+          const folderName =
+            conflictingFolders.length === 1
+              ? conflictingFolders[0]
+              : t("files.overwrite.multipleFolders", {
+                  count: conflictingFolders.length,
+                });
+          const { action } = await new Promise<{
+            action: "overwrite" | "skip" | "cancel";
+            applyAll: boolean;
+          }>((resolve) => {
+            setOverwritePrompt({
+              fileName: folderName,
+              showApplyAll: false,
+              resolve,
+            });
+          });
+          setOverwritePrompt(null);
+          await new Promise((r) => setTimeout(r, 0));
+
+          if (action === "cancel") return;
+          if (action === "skip") {
+            const conflictSet = new Set(conflictingFolders);
+            filesToUpload = filesToUpload.filter(({ targetDir: td }) => {
+              const relative = dir === "" ? td : td.slice(dir.length + 1);
+              const topFolder = relative.split("/")[0];
+              return !conflictSet.has(topFolder);
+            });
+            if (filesToUpload.length === 0) {
+              setUploadPreparing(false);
+              return;
+            }
+          }
+        }
+      }
+
       // ── Overwrite check for files landing in the current directory ──
       // Only check files targeting the currently listed directory, since we
       // have listing data for it. Subdirectory uploads (from folder drops)
       // are not checked — they typically create new directories.
+      // Uses `listingEntries` (snapshotted before the first yield) instead of
+      // reading the ref here, which could be stale after intervening renders.
       const existingNames = new Set(
-        (listingDataRef.current?.entries ?? [])
-          .filter((e) => !e.is_dir)
-          .map((e) => e.name),
+        listingEntries.filter((e) => !e.is_dir).map((e) => e.name),
       );
       const rootConflicts = filesToUpload.filter(
         ({ file, targetDir }) =>
