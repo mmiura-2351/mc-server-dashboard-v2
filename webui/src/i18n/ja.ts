@@ -522,6 +522,7 @@ export const ja: Record<TranslationKey, string> = {
   "files.closeViewer": "ビューアーを閉じる",
   "files.editorLabel": "ファイルの内容",
   "files.upload": "アップロード",
+  "files.upload.preparing": "アップロードを準備中…",
   "files.extractZip": "ZIPを展開",
   "files.newFolder": "新しいフォルダ",
   "files.folderName": "フォルダ名",

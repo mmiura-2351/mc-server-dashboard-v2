@@ -1429,6 +1429,39 @@ describe("ServerFilesTab drag-and-drop upload", () => {
       expect(screen.queryByText(t("files.dropZone"))).not.toBeInTheDocument(),
     );
   });
+
+  it("shows preparing indicator immediately on drop before upload starts", async () => {
+    routeGet({ detail: server(), list: listing([]) });
+    // Delay upload resolution so we can observe the preparing state.
+    let resolveUpload: (() => void) | undefined;
+    mockPostFormWithProgress.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveUpload = resolve;
+        }),
+    );
+    renderPage();
+    await openFiles();
+    await screen.findByText(t("files.empty"));
+
+    const tree = document.querySelector(".file-tree") as HTMLElement;
+    const file = new File(["hello"], "readme.txt");
+    fireEvent.drop(tree, { dataTransfer: dataTransfer([file]) });
+
+    // The preparing indicator should appear before upload starts.
+    await waitFor(() =>
+      expect(screen.getByText(t("files.upload.preparing"))).toBeInTheDocument(),
+    );
+
+    // Wait for the upload mock to be invoked, then resolve it.
+    await waitFor(() => expect(resolveUpload).toBeDefined());
+    resolveUpload?.();
+    await waitFor(() =>
+      expect(
+        screen.queryByText(t("files.upload.preparing")),
+      ).not.toBeInTheDocument(),
+    );
+  });
 });
 
 describe("ServerFilesTab multi-select", () => {
