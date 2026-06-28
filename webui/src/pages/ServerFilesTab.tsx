@@ -158,6 +158,56 @@ function breadcrumbs(path: string): { name: string; path: string }[] {
   }));
 }
 
+/**
+ * Recursively read all files from a dropped directory entry.
+ *
+ * `readEntries()` may not return all entries in a single call (browser-imposed
+ * batch limit), so we loop until it returns an empty array.
+ */
+async function readAllFiles(
+  entry: FileSystemDirectoryEntry,
+  basePath: string,
+): Promise<Array<{ file: File; relativeDirPath: string }>> {
+  const results: Array<{ file: File; relativeDirPath: string }> = [];
+
+  const readEntries = (
+    reader: FileSystemDirectoryReader,
+  ): Promise<FileSystemEntry[]> =>
+    new Promise((resolve) => {
+      const all: FileSystemEntry[] = [];
+      const readBatch = () => {
+        reader.readEntries((entries) => {
+          if (entries.length === 0) {
+            resolve(all);
+          } else {
+            all.push(...entries);
+            readBatch();
+          }
+        });
+      };
+      readBatch();
+    });
+
+  const entries = await readEntries(entry.createReader());
+
+  for (const child of entries) {
+    if (child.isFile) {
+      const file = await new Promise<File>((resolve) =>
+        (child as FileSystemFileEntry).file(resolve),
+      );
+      results.push({ file, relativeDirPath: basePath });
+    } else if (child.isDirectory) {
+      const subResults = await readAllFiles(
+        child as FileSystemDirectoryEntry,
+        `${basePath}/${child.name}`,
+      );
+      results.push(...subResults);
+    }
+  }
+
+  return results;
+}
+
 export function ServerFilesTab({
   server,
   communityId,
@@ -440,20 +490,6 @@ export function ServerFilesTab({
     },
   });
 
-  // Sequential upload for multiple files (e.g. drag-and-drop).
-  const uploadFiles = useCallback(
-    async (files: File[]) => {
-      for (const file of files) {
-        if (file.size > MAX_UPLOAD_BYTES) {
-          showToast(t("files.error.tooLarge"), "error");
-          continue;
-        }
-        await upload.mutateAsync(file);
-      }
-    },
-    [upload, showToast],
-  );
-
   /** Move files via POST /files/rename. Handles multi-select. */
   const moveFiles = async (paths: string[], destDir: string) => {
     let movedAny = false;
@@ -488,6 +524,13 @@ export function ServerFilesTab({
       setSelected(new Set());
     }
   };
+
+  // Stable refs for callbacks used in onDrop to avoid re-creating the handler
+  // on every render (onError/refetchList are not wrapped in useCallback).
+  const onErrorRef = useRef(onError);
+  onErrorRef.current = onError;
+  const refetchListRef = useRef(refetchList);
+  refetchListRef.current = refetchList;
 
   // Drag-and-drop state for the file-tree drop zone.
   const dragCounter = useRef(0);
@@ -527,7 +570,7 @@ export function ServerFilesTab({
   }, []);
 
   const onDrop = useCallback(
-    (e: React.DragEvent) => {
+    async (e: React.DragEvent) => {
       e.preventDefault();
       dragCounter.current = 0;
       setDragOver(false);
@@ -535,43 +578,119 @@ export function ServerFilesTab({
       // Ignore internal file-move drags — those are handled by folder/crumb targets.
       if (e.dataTransfer.types.includes("application/x-file-move")) return;
 
-      // Detect folder drops via the DataTransferItem API. Browsers expose
-      // webkitGetAsEntry() which can distinguish files from directories.
+      // Collect files to upload, resolving directories recursively.
+      const filesToUpload: Array<{ file: File; targetDir: string }> = [];
+      let hasDirectories = false;
+
       if (e.dataTransfer.items) {
         for (const item of e.dataTransfer.items) {
           if (item.kind !== "file") continue;
           const entry = item.webkitGetAsEntry?.();
           if (entry?.isDirectory) {
-            showToast(t("files.error.folderNotSupported"), "error");
-            return;
+            hasDirectories = true;
+            const dirFiles = await readAllFiles(
+              entry as FileSystemDirectoryEntry,
+              entry.name,
+            );
+            for (const { file, relativeDirPath } of dirFiles) {
+              const targetDir =
+                dir === "" ? relativeDirPath : `${dir}/${relativeDirPath}`;
+              filesToUpload.push({ file, targetDir });
+            }
+          } else {
+            const file = item.getAsFile();
+            if (file) {
+              filesToUpload.push({ file, targetDir: dir });
+            }
+          }
+        }
+      } else {
+        for (const file of e.dataTransfer.files) {
+          filesToUpload.push({ file, targetDir: dir });
+        }
+      }
+
+      if (filesToUpload.length === 0) return;
+
+      // Create necessary directories first.
+      if (hasDirectories) {
+        const uniqueDirs = [...new Set(filesToUpload.map((f) => f.targetDir))];
+        uniqueDirs.sort((a, b) => a.split("/").length - b.split("/").length);
+        for (const dirPath of uniqueDirs) {
+          try {
+            await api.post(
+              `${apiPath(
+                "/api/communities/{community_id}/servers/{server_id}/files/directories",
+                { community_id: communityId, server_id: serverId },
+              )}?path=${encodeURIComponent(dirPath)}` as never,
+            );
+          } catch {
+            // Directory may already exist — ignore errors.
           }
         }
       }
 
-      const files = Array.from(e.dataTransfer.files);
-      if (files.length > 0) {
-        void uploadFiles(files);
+      // Upload all files.
+      let uploaded = 0;
+      const total = filesToUpload.length;
+      for (const { file, targetDir } of filesToUpload) {
+        if (file.size > MAX_UPLOAD_BYTES) {
+          showToast(t("files.error.tooLarge"), "error");
+          continue;
+        }
+        if (total > 1) {
+          showToast(
+            t("files.bulk.upload.progress", { done: uploaded, total }),
+            "success",
+          );
+        }
+        const form = new FormData();
+        form.append("file", file);
+        progress.start(file.size);
+        try {
+          await postFormWithProgress(
+            `${apiPath(
+              "/api/communities/{community_id}/servers/{server_id}/files/upload",
+              { community_id: communityId, server_id: serverId },
+            )}?path=${encodeURIComponent(targetDir)}&extract=false` as never,
+            form,
+            progress.onProgress,
+          );
+          uploaded++;
+        } catch (error) {
+          progress.reset();
+          onErrorRef.current(error);
+        }
+      }
+
+      if (uploaded > 0) {
+        progress.reset();
+        showToast(
+          total === 1
+            ? t("files.uploaded")
+            : t("files.bulk.upload.done", { done: uploaded }),
+          "success",
+        );
+        refetchListRef.current();
       }
     },
-    [dropEnabled, uploadFiles, showToast],
+    [dropEnabled, dir, communityId, serverId, showToast, progress],
   );
 
-  // Fallback: if the drag leaves the browser window or ends without a drop,
-  // reset the overlay so it doesn't stay visible indefinitely.
+  // Fallback: any drop anywhere on the document (including outside our zone)
+  // or a drag cancellation should reset the overlay. The `dragleave` approach
+  // with `relatedTarget === null` was unreliable and could leave the overlay
+  // stuck on repeated folder drags.
   useEffect(() => {
     const resetDrag = () => {
       dragCounter.current = 0;
       setDragOver(false);
     };
-    const handleDocDragLeave = (e: DragEvent) => {
-      // relatedTarget is null when the drag exits the browser window.
-      if (e.relatedTarget === null) resetDrag();
-    };
+    document.addEventListener("drop", resetDrag);
     document.addEventListener("dragend", resetDrag);
-    document.addEventListener("dragleave", handleDocDragLeave);
     return () => {
+      document.removeEventListener("drop", resetDrag);
       document.removeEventListener("dragend", resetDrag);
-      document.removeEventListener("dragleave", handleDocDragLeave);
     };
   }, []);
 

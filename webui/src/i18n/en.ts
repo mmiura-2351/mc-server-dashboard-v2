@@ -560,8 +560,6 @@ export const en = {
     "This directory is managed by the {noun} tab. Use the {noun} tab to add or remove content.",
   "files.error.goToContentTab": "Go to {noun} tab",
   "files.error.tooLarge": "That file exceeds the 512 MiB upload limit.",
-  "files.error.folderNotSupported":
-    "Folder upload is not supported. Please compress it as a ZIP file and use 'Extract here' from the context menu.",
   "files.error.notFound": "File or directory not found.",
   "files.error.fileTooLarge":
     "The file exceeds the maximum allowed size (512 MiB for uploads, 4 MiB for edits).",
@@ -603,6 +601,9 @@ export const en = {
   "files.bulk.move.progress": "Moving {done}/{total}…",
   "files.bulk.move.done": "Moved {done} item(s).",
   "files.bulk.move.partial": "Moved {done}/{total} item(s). {failed} failed.",
+  // Drag-and-drop folder upload.
+  "files.bulk.upload.progress": "Uploading {done}/{total}...",
+  "files.bulk.upload.done": "{done} files uploaded.",
 
   // Drag-and-drop file organization (issue #1464).
   "files.moved": "Moved.",
