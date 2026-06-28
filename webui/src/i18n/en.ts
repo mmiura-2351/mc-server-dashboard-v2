@@ -513,6 +513,7 @@ export const en = {
   "files.closeViewer": "Close viewer",
   "files.editorLabel": "File contents",
   "files.upload": "Upload",
+  "files.upload.preparing": "Preparing upload…",
   "files.extractZip": "Extract ZIP",
   "files.newFolder": "New folder",
   "files.folderName": "Folder name",
