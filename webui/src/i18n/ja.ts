@@ -599,24 +599,24 @@ export const ja: Record<TranslationKey, string> = {
     "選択した{count}件を完全に削除します。この操作は元に戻せません。",
   "files.bulk.delete.confirm": "すべて削除",
   "files.bulk.delete.progress": "削除中 {done}/{total}…",
-  "files.bulk.delete.done": "{done}件を削除しました。",
+  "files.bulk.delete.done": "{done} 件を削除しました。",
   "files.bulk.delete.partial":
-    "{done}/{total}件を削除しました。{failed}件失敗しました。",
+    "{done}/{total} 件を削除しました。{failed} 件失敗しました。",
   "files.bulk.download": "選択項目をダウンロード",
   "files.bulk.download.progress": "ダウンロード中 {done}/{total}…",
-  "files.bulk.download.done": "{done}件をダウンロードしました。",
+  "files.bulk.download.done": "{done} 件をダウンロードしました。",
   "files.bulk.download.partial":
-    "{done}/{total}件をダウンロードしました。{failed}件失敗しました。",
+    "{done}/{total} 件をダウンロードしました。{failed} 件失敗しました。",
   "files.bulk.move": "選択項目を移動",
   "files.bulk.move.dialogTitle": "選択項目の移動",
   "files.bulk.move.destLabel": "移動先ディレクトリ",
   "files.bulk.move.confirm": "移動",
   "files.bulk.move.progress": "移動中 {done}/{total}…",
-  "files.bulk.move.done": "{done}件を移動しました。",
+  "files.bulk.move.done": "{done} 件を移動しました。",
   "files.bulk.move.partial":
-    "{done}/{total}件を移動しました。{failed}件失敗しました。",
+    "{done}/{total} 件を移動しました。{failed} 件失敗しました。",
   // Drag-and-drop folder upload.
-  "files.bulk.upload.progress": "アップロード中 {done}/{total}...",
+  "files.bulk.upload.progress": "アップロード中 {done}/{total}…",
   "files.bulk.upload.done": "{done} 件のファイルをアップロードしました。",
 
   // Drag-and-drop file organization (issue #1464).

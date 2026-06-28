@@ -30,16 +30,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { zip } from "fflate";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate as useRouterNavigate } from "react-router";
-import {
-  ApiError,
-  api,
-  getRefresher,
-  postFormWithProgress,
-} from "../api/client.ts";
+import { ApiError, api, postFormWithProgress } from "../api/client.ts";
 import { downloadFile, fetchFileBlob } from "../api/download.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
-import { getAccessToken } from "../auth/tokenStore.ts";
 import { Modal } from "../components/Modal.tsx";
 import { SimpleConfirmDialog } from "../components/SimpleConfirmDialog.tsx";
 import { useToast } from "../components/Toast.tsx";
@@ -253,6 +247,12 @@ export function ServerFilesTab({
   //
   // For browser back/forward, React Router's location changes are detected via
   // a useEffect on `urlParams`. A skip-counter prevents echoing our own pushes.
+  //
+  // Invariant: every increment of skipUrlSync must be matched by exactly one
+  // URL-change effect that decrements it. If nav state and the URL diverge
+  // such that setUrlParams no-ops, a stale increment remains and the next
+  // genuine browser Back gets swallowed. The navigate/goBack/goForward
+  // wrappers guard this by early-returning when next === current.
   const skipUrlSync = useRef(0);
 
   const navigate = useCallback(
@@ -1604,21 +1604,10 @@ function Listing({
                         next.add(joinPath(dir, listing.entries[i].name));
                       }
                       onSelectionChange(next);
-                    } else if (e.ctrlKey || e.metaKey) {
-                      const next = new Set(selected);
-                      if (next.has(full)) {
-                        next.delete(full);
-                      } else {
-                        next.add(full);
-                      }
-                      onSelectionChange(next);
                     } else {
                       const next = new Set(selected);
-                      if (next.has(full)) {
-                        next.delete(full);
-                      } else {
-                        next.add(full);
-                      }
+                      if (next.has(full)) next.delete(full);
+                      else next.add(full);
                       onSelectionChange(next);
                     }
                     lastClickedIdx.current = idx;
@@ -1738,22 +1727,7 @@ function Listing({
                             "/api/communities/{community_id}/servers/{server_id}/files/download",
                             { community_id: communityId, server_id: serverId },
                           )}?path=${encodeURIComponent(joinPath(dir, ctxEntry.name))}`;
-                          const authFetch = (tok: string | null) =>
-                            fetch(url, {
-                              credentials: "same-origin",
-                              headers: tok
-                                ? { Authorization: `Bearer ${tok}` }
-                                : {},
-                            });
-                          let resp = await authFetch(getAccessToken());
-                          const refresher = getRefresher();
-                          if (resp.status === 401 && refresher) {
-                            const ok = await refresher();
-                            if (ok) resp = await authFetch(getAccessToken());
-                          }
-                          if (!resp.ok)
-                            throw new Error(`Download failed: ${resp.status}`);
-                          const blob = await resp.blob();
+                          const blob = await fetchFileBlob(url);
                           const file = new File([blob], ctxEntry.name, {
                             type: "application/zip",
                           });
