@@ -620,6 +620,12 @@ export function ServerFilesTab({
 
       if (droppedFiles.length === 0 && droppedDirs.length === 0) return;
 
+      // Snapshot the current listing entries BEFORE any async yield. The ref
+      // is updated on every render, so an intervening re-render (e.g. from a
+      // React Query background refetch triggered by window-focus) could clear
+      // it before the overwrite check runs.
+      const listingEntries = listingDataRef.current?.entries ?? [];
+
       // ── Phase 2: async — safe to yield now ──
       // Show immediate feedback before the potentially slow preparation phase.
       setUploadPreparing(true);
@@ -679,10 +685,10 @@ export function ServerFilesTab({
       // Only check files targeting the currently listed directory, since we
       // have listing data for it. Subdirectory uploads (from folder drops)
       // are not checked — they typically create new directories.
+      // Uses `listingEntries` (snapshotted before the first yield) instead of
+      // reading the ref here, which could be stale after intervening renders.
       const existingNames = new Set(
-        (listingDataRef.current?.entries ?? [])
-          .filter((e) => !e.is_dir)
-          .map((e) => e.name),
+        listingEntries.filter((e) => !e.is_dir).map((e) => e.name),
       );
       const rootConflicts = filesToUpload.filter(
         ({ file, targetDir }) =>
