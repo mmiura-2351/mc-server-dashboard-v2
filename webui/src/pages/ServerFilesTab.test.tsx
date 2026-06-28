@@ -3447,5 +3447,160 @@ describe("ServerFilesTab overwrite confirmation", () => {
       );
       expect(mockPostFormWithProgress).not.toHaveBeenCalled();
     });
+
+    it("shows overwrite dialog when dropping a folder that already exists as a directory", async () => {
+      routeGet({
+        detail: server(),
+        list: listing([{ name: "myfolder", is_dir: true }]),
+      });
+      mockApi.post.mockResolvedValue(undefined);
+      mockPostFormWithProgress.mockResolvedValue(undefined);
+      renderPage();
+      await openFiles();
+      await screen.findByText(/myfolder/);
+
+      const tree = document.querySelector(".file-tree") as HTMLElement;
+      const innerFile = new File(["hello"], "readme.txt");
+      const folderDt = new MockDataTransfer();
+      folderDt.addFile(new File([], ""), {
+        isFile: false,
+        isDirectory: true,
+        name: "myfolder",
+        createReader: () => {
+          let read = false;
+          return {
+            readEntries: (cb: (entries: unknown[]) => void) => {
+              if (!read) {
+                read = true;
+                cb([
+                  {
+                    isFile: true,
+                    isDirectory: false,
+                    name: "readme.txt",
+                    file: (resolve: (f: File) => void) => resolve(innerFile),
+                  },
+                ]);
+              } else {
+                cb([]);
+              }
+            },
+          };
+        },
+      });
+
+      fireEvent.drop(tree, { dataTransfer: folderDt });
+
+      // The folder-level overwrite dialog should appear.
+      expect(
+        await screen.findByText(t("files.overwrite.title")),
+      ).toBeInTheDocument();
+    });
+
+    it("skips folder files when user clicks skip on folder overwrite", async () => {
+      routeGet({
+        detail: server(),
+        list: listing([{ name: "myfolder", is_dir: true }]),
+      });
+      mockApi.post.mockResolvedValue(undefined);
+      mockPostFormWithProgress.mockResolvedValue(undefined);
+      renderPage();
+      await openFiles();
+      await screen.findByText(/myfolder/);
+
+      const tree = document.querySelector(".file-tree") as HTMLElement;
+      const innerFile = new File(["hello"], "readme.txt");
+      const folderDt = new MockDataTransfer();
+      folderDt.addFile(new File([], ""), {
+        isFile: false,
+        isDirectory: true,
+        name: "myfolder",
+        createReader: () => {
+          let read = false;
+          return {
+            readEntries: (cb: (entries: unknown[]) => void) => {
+              if (!read) {
+                read = true;
+                cb([
+                  {
+                    isFile: true,
+                    isDirectory: false,
+                    name: "readme.txt",
+                    file: (resolve: (f: File) => void) => resolve(innerFile),
+                  },
+                ]);
+              } else {
+                cb([]);
+              }
+            },
+          };
+        },
+      });
+
+      fireEvent.drop(tree, { dataTransfer: folderDt });
+
+      await screen.findByText(t("files.overwrite.title"));
+      fireEvent.click(
+        screen.getByRole("button", { name: t("files.overwrite.skip") }),
+      );
+
+      // All folder files skipped — no upload.
+      await waitFor(() =>
+        expect(
+          screen.queryByText(t("files.overwrite.title")),
+        ).not.toBeInTheDocument(),
+      );
+      expect(mockPostFormWithProgress).not.toHaveBeenCalled();
+    });
+
+    it("uploads folder files when user clicks overwrite on folder overwrite", async () => {
+      routeGet({
+        detail: server(),
+        list: listing([{ name: "myfolder", is_dir: true }]),
+      });
+      mockApi.post.mockResolvedValue(undefined);
+      mockPostFormWithProgress.mockResolvedValue(undefined);
+      renderPage();
+      await openFiles();
+      await screen.findByText(/myfolder/);
+
+      const tree = document.querySelector(".file-tree") as HTMLElement;
+      const innerFile = new File(["hello"], "readme.txt");
+      const folderDt = new MockDataTransfer();
+      folderDt.addFile(new File([], ""), {
+        isFile: false,
+        isDirectory: true,
+        name: "myfolder",
+        createReader: () => {
+          let read = false;
+          return {
+            readEntries: (cb: (entries: unknown[]) => void) => {
+              if (!read) {
+                read = true;
+                cb([
+                  {
+                    isFile: true,
+                    isDirectory: false,
+                    name: "readme.txt",
+                    file: (resolve: (f: File) => void) => resolve(innerFile),
+                  },
+                ]);
+              } else {
+                cb([]);
+              }
+            },
+          };
+        },
+      });
+
+      fireEvent.drop(tree, { dataTransfer: folderDt });
+
+      await screen.findByText(t("files.overwrite.title"));
+      fireEvent.click(
+        screen.getByRole("button", { name: t("files.overwrite.overwrite") }),
+      );
+
+      // File should be uploaded.
+      await waitFor(() => expect(mockPostFormWithProgress).toHaveBeenCalled());
+    });
   });
 });

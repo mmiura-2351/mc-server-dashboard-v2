@@ -632,7 +632,8 @@ export function ServerFilesTab({
       await new Promise((resolve) => setTimeout(resolve, 0));
 
       // Collect files to upload, resolving directories recursively.
-      const filesToUpload: Array<{ file: File; targetDir: string }> = [];
+      // `let` because the folder-level overwrite check may filter entries.
+      let filesToUpload: Array<{ file: File; targetDir: string }> = [];
       const hasDirectories = droppedDirs.length > 0;
 
       try {
@@ -679,6 +680,54 @@ export function ServerFilesTab({
         setUploadPreparing(false);
         onErrorRef.current(error);
         return;
+      }
+
+      // ── Folder-level overwrite check ──
+      // When a dropped folder name matches an existing directory in the
+      // current listing, warn the user that files inside will be merged.
+      if (droppedDirs.length > 0) {
+        const existingDirNames = new Set(
+          listingEntries.filter((e) => e.is_dir).map((e) => e.name),
+        );
+        const conflictingFolders = droppedDirs
+          .map((d) => d.name)
+          .filter((name) => existingDirNames.has(name));
+
+        if (conflictingFolders.length > 0) {
+          setUploadPreparing(false);
+          const folderName =
+            conflictingFolders.length === 1
+              ? conflictingFolders[0]
+              : t("files.overwrite.multipleFolders", {
+                  count: conflictingFolders.length,
+                });
+          const { action } = await new Promise<{
+            action: "overwrite" | "skip" | "cancel";
+            applyAll: boolean;
+          }>((resolve) => {
+            setOverwritePrompt({
+              fileName: folderName,
+              showApplyAll: false,
+              resolve,
+            });
+          });
+          setOverwritePrompt(null);
+          await new Promise((r) => setTimeout(r, 0));
+
+          if (action === "cancel") return;
+          if (action === "skip") {
+            const conflictSet = new Set(conflictingFolders);
+            filesToUpload = filesToUpload.filter(({ targetDir: td }) => {
+              const relative = dir === "" ? td : td.slice(dir.length + 1);
+              const topFolder = relative.split("/")[0];
+              return !conflictSet.has(topFolder);
+            });
+            if (filesToUpload.length === 0) {
+              setUploadPreparing(false);
+              return;
+            }
+          }
+        }
       }
 
       // ── Overwrite check for files landing in the current directory ──
