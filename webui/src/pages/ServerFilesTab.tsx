@@ -603,12 +603,15 @@ export function ServerFilesTab({
       if (e.dataTransfer.items) {
         for (const item of e.dataTransfer.items) {
           if (item.kind !== "file") continue;
+          // getAsFile() must be called BEFORE webkitGetAsEntry() — some
+          // browsers (Chrome) "consume" the DataTransferItem when
+          // webkitGetAsEntry() is called, causing getAsFile() to return null.
+          const file = item.getAsFile();
           const entry = item.webkitGetAsEntry?.();
           if (entry?.isDirectory) {
             droppedDirs.push(entry as FileSystemDirectoryEntry);
-          } else {
-            const file = item.getAsFile();
-            if (file) droppedFiles.push(file);
+          } else if (file) {
+            droppedFiles.push(file);
           }
         }
       } else {
