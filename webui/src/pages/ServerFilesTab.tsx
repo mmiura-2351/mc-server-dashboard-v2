@@ -591,40 +591,54 @@ export function ServerFilesTab({
       // Ignore internal file-move drags — those are handled by folder/crumb targets.
       if (e.dataTransfer.types.includes("application/x-file-move")) return;
 
+      // ── Phase 1: synchronous — collect from DataTransfer BEFORE any yield ──
+      // The browser clears DataTransfer after the synchronous event handler
+      // completes, so all access to e.dataTransfer.items / .files must happen
+      // before the first await. FileSystemDirectoryEntry objects obtained via
+      // webkitGetAsEntry() survive beyond the event — they are independent DOM
+      // objects and can be read asynchronously later.
+      const droppedFiles: File[] = [];
+      const droppedDirs: FileSystemDirectoryEntry[] = [];
+
+      if (e.dataTransfer.items) {
+        for (const item of e.dataTransfer.items) {
+          if (item.kind !== "file") continue;
+          const entry = item.webkitGetAsEntry?.();
+          if (entry?.isDirectory) {
+            droppedDirs.push(entry as FileSystemDirectoryEntry);
+          } else {
+            const file = item.getAsFile();
+            if (file) droppedFiles.push(file);
+          }
+        }
+      } else {
+        droppedFiles.push(...Array.from(e.dataTransfer.files));
+      }
+
+      if (droppedFiles.length === 0 && droppedDirs.length === 0) return;
+
+      // ── Phase 2: async — safe to yield now ──
       // Show immediate feedback before the potentially slow preparation phase.
       setUploadPreparing(true);
       await new Promise((resolve) => setTimeout(resolve, 0));
 
       // Collect files to upload, resolving directories recursively.
       const filesToUpload: Array<{ file: File; targetDir: string }> = [];
-      let hasDirectories = false;
+      const hasDirectories = droppedDirs.length > 0;
 
       try {
-        if (e.dataTransfer.items) {
-          for (const item of e.dataTransfer.items) {
-            if (item.kind !== "file") continue;
-            const entry = item.webkitGetAsEntry?.();
-            if (entry?.isDirectory) {
-              hasDirectories = true;
-              const dirFiles = await readAllFiles(
-                entry as FileSystemDirectoryEntry,
-                entry.name,
-              );
-              for (const { file, relativeDirPath } of dirFiles) {
-                const targetDir =
-                  dir === "" ? relativeDirPath : `${dir}/${relativeDirPath}`;
-                filesToUpload.push({ file, targetDir });
-              }
-            } else {
-              const file = item.getAsFile();
-              if (file) {
-                filesToUpload.push({ file, targetDir: dir });
-              }
-            }
-          }
-        } else {
-          for (const file of e.dataTransfer.files) {
-            filesToUpload.push({ file, targetDir: dir });
+        // Add regular files collected synchronously.
+        for (const file of droppedFiles) {
+          filesToUpload.push({ file, targetDir: dir });
+        }
+
+        // Recursively read directory contents from saved entries.
+        for (const dirEntry of droppedDirs) {
+          const dirFiles = await readAllFiles(dirEntry, dirEntry.name);
+          for (const { file, relativeDirPath } of dirFiles) {
+            const targetDir =
+              dir === "" ? relativeDirPath : `${dir}/${relativeDirPath}`;
+            filesToUpload.push({ file, targetDir });
           }
         }
 
