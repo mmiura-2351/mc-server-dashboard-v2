@@ -464,6 +464,7 @@ export function ServerFilesTab({
 
   // Upload state lifted so the drop zone and context menu can share it.
   const progress = useUploadProgress();
+  const [uploadPreparing, setUploadPreparing] = useState(false);
 
   const upload = useMutation({
     mutationFn: (file: File) => {
@@ -578,69 +579,87 @@ export function ServerFilesTab({
       // Ignore internal file-move drags — those are handled by folder/crumb targets.
       if (e.dataTransfer.types.includes("application/x-file-move")) return;
 
+      // Show immediate feedback before the potentially slow preparation phase.
+      setUploadPreparing(true);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
       // Collect files to upload, resolving directories recursively.
       const filesToUpload: Array<{ file: File; targetDir: string }> = [];
       let hasDirectories = false;
 
-      if (e.dataTransfer.items) {
-        for (const item of e.dataTransfer.items) {
-          if (item.kind !== "file") continue;
-          const entry = item.webkitGetAsEntry?.();
-          if (entry?.isDirectory) {
-            hasDirectories = true;
-            const dirFiles = await readAllFiles(
-              entry as FileSystemDirectoryEntry,
-              entry.name,
-            );
-            for (const { file, relativeDirPath } of dirFiles) {
-              const targetDir =
-                dir === "" ? relativeDirPath : `${dir}/${relativeDirPath}`;
-              filesToUpload.push({ file, targetDir });
+      try {
+        if (e.dataTransfer.items) {
+          for (const item of e.dataTransfer.items) {
+            if (item.kind !== "file") continue;
+            const entry = item.webkitGetAsEntry?.();
+            if (entry?.isDirectory) {
+              hasDirectories = true;
+              const dirFiles = await readAllFiles(
+                entry as FileSystemDirectoryEntry,
+                entry.name,
+              );
+              for (const { file, relativeDirPath } of dirFiles) {
+                const targetDir =
+                  dir === "" ? relativeDirPath : `${dir}/${relativeDirPath}`;
+                filesToUpload.push({ file, targetDir });
+              }
+            } else {
+              const file = item.getAsFile();
+              if (file) {
+                filesToUpload.push({ file, targetDir: dir });
+              }
             }
-          } else {
-            const file = item.getAsFile();
-            if (file) {
-              filesToUpload.push({ file, targetDir: dir });
+          }
+        } else {
+          for (const file of e.dataTransfer.files) {
+            filesToUpload.push({ file, targetDir: dir });
+          }
+        }
+
+        if (filesToUpload.length === 0) {
+          setUploadPreparing(false);
+          return;
+        }
+
+        // Create necessary directories first.
+        if (hasDirectories) {
+          const uniqueDirs = [
+            ...new Set(filesToUpload.map((f) => f.targetDir)),
+          ];
+          uniqueDirs.sort((a, b) => a.split("/").length - b.split("/").length);
+          for (const dirPath of uniqueDirs) {
+            try {
+              await api.post(
+                `${apiPath(
+                  "/api/communities/{community_id}/servers/{server_id}/files/directories",
+                  { community_id: communityId, server_id: serverId },
+                )}?path=${encodeURIComponent(dirPath)}` as never,
+              );
+            } catch {
+              // Directory may already exist — ignore errors.
             }
           }
         }
-      } else {
-        for (const file of e.dataTransfer.files) {
-          filesToUpload.push({ file, targetDir: dir });
-        }
+      } catch (error) {
+        setUploadPreparing(false);
+        onErrorRef.current(error);
+        return;
       }
 
-      if (filesToUpload.length === 0) return;
-
-      // Create necessary directories first.
-      if (hasDirectories) {
-        const uniqueDirs = [...new Set(filesToUpload.map((f) => f.targetDir))];
-        uniqueDirs.sort((a, b) => a.split("/").length - b.split("/").length);
-        for (const dirPath of uniqueDirs) {
-          try {
-            await api.post(
-              `${apiPath(
-                "/api/communities/{community_id}/servers/{server_id}/files/directories",
-                { community_id: communityId, server_id: serverId },
-              )}?path=${encodeURIComponent(dirPath)}` as never,
-            );
-          } catch {
-            // Directory may already exist — ignore errors.
-          }
-        }
-      }
-
-      // Upload all files, tracking aggregate progress across the batch.
-      let uploaded = 0;
-      const total = filesToUpload.length;
+      // Transition from preparing indicator to progress bar.
       const totalSize = filesToUpload.reduce(
         (sum, { file }) => sum + file.size,
         0,
       );
+      setUploadPreparing(false);
       progress.start(totalSize);
       // Yield to the renderer so React commits the progress-bar state before
       // the upload loop monopolises the main thread.
       await new Promise((resolve) => setTimeout(resolve, 0));
+
+      // Upload all files, tracking aggregate progress across the batch.
+      let uploaded = 0;
+      const total = filesToUpload.length;
       let cumulativeLoaded = 0;
 
       for (const { file, targetDir } of filesToUpload) {
@@ -868,6 +887,9 @@ export function ServerFilesTab({
           onMoveTo={moveFiles}
         />
       </div>
+      {uploadPreparing && !progress.active && (
+        <div className="upload-preparing">{t("files.upload.preparing")}</div>
+      )}
       {progress.active && (
         <UploadProgress
           loaded={progress.loaded}

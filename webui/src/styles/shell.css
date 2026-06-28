@@ -1509,6 +1509,11 @@ button.link:focus-visible {
   font-size: 13px;
   color: var(--text-dim);
 }
+.upload-preparing {
+  font-size: 13px;
+  color: var(--text-dim);
+  padding: 6px 0;
+}
 .file-nav {
   display: flex;
   align-items: center;
