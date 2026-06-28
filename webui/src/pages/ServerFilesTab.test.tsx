@@ -1227,12 +1227,82 @@ describe("ServerFilesTab 409 reason toasts", () => {
   });
 });
 
+// Realistic mock that replicates browser DataTransfer quirks:
+// 1. items/files are cleared after the synchronous event handler (seal()).
+// 2. getAsFile() returns null after webkitGetAsEntry() on the same item.
+class MockDataTransfer {
+  private _items: Array<{
+    kind: string;
+    type: string;
+    file: File;
+    entryConsumed: boolean;
+    entry: {
+      isDirectory: boolean;
+      isFile: boolean;
+      name: string;
+      createReader?: () => {
+        readEntries: (cb: (entries: unknown[]) => void) => void;
+      };
+    } | null;
+  }> = [];
+  private _sealed = false;
+  types: string[] = ["Files"];
+
+  addFile(
+    file: File,
+    entry?: {
+      isDirectory: boolean;
+      isFile: boolean;
+      name: string;
+      createReader?: () => {
+        readEntries: (cb: (entries: unknown[]) => void) => void;
+      };
+    },
+  ) {
+    this._items.push({
+      kind: "file",
+      type: file.type,
+      file,
+      entryConsumed: false,
+      entry: entry ?? null,
+    });
+  }
+
+  get items() {
+    if (this._sealed) return [];
+    return this._items.map((item) => ({
+      kind: item.kind,
+      type: item.type,
+      getAsFile: () => {
+        if (item.entryConsumed) return null;
+        return this._sealed ? null : item.file;
+      },
+      webkitGetAsEntry: () => {
+        item.entryConsumed = true;
+        return item.entry;
+      },
+    }));
+  }
+
+  get files() {
+    if (this._sealed) return [];
+    return this._items.map((i) => i.file);
+  }
+
+  /** Simulate browser clearing DataTransfer after sync handler completes. */
+  seal() {
+    this._sealed = true;
+  }
+}
+
 describe("ServerFilesTab drag-and-drop upload", () => {
-  function dataTransfer(files: File[]): DataTransfer {
-    return {
-      files,
-      types: files.length > 0 ? ["Files"] : [],
-    } as unknown as DataTransfer;
+  function dataTransfer(files: File[]): MockDataTransfer {
+    const dt = new MockDataTransfer();
+    for (const f of files) {
+      dt.addFile(f, { isDirectory: false, isFile: true, name: f.name });
+    }
+    if (files.length === 0) dt.types = [];
+    return dt;
   }
 
   it("shows a drop zone overlay when files are dragged over the listing", async () => {
@@ -1343,42 +1413,32 @@ describe("ServerFilesTab drag-and-drop upload", () => {
     // Simulate a folder drop: webkitGetAsEntry returns a directory entry
     // with a createReader() that yields one file.
     const innerFile = new File(["hello"], "readme.txt");
-    const folderDt = {
-      files: [] as unknown as FileList,
-      types: ["Files"],
-      items: [
-        {
-          kind: "file",
-          getAsFile: () => null,
-          webkitGetAsEntry: () => ({
-            isFile: false,
-            isDirectory: true,
-            name: "my-folder",
-            createReader: () => {
-              let read = false;
-              return {
-                readEntries: (cb: (entries: unknown[]) => void) => {
-                  if (!read) {
-                    read = true;
-                    cb([
-                      {
-                        isFile: true,
-                        isDirectory: false,
-                        name: "readme.txt",
-                        file: (resolve: (f: File) => void) =>
-                          resolve(innerFile),
-                      },
-                    ]);
-                  } else {
-                    cb([]);
-                  }
+    const folderDt = new MockDataTransfer();
+    folderDt.addFile(new File([], ""), {
+      isFile: false,
+      isDirectory: true,
+      name: "my-folder",
+      createReader: () => {
+        let read = false;
+        return {
+          readEntries: (cb: (entries: unknown[]) => void) => {
+            if (!read) {
+              read = true;
+              cb([
+                {
+                  isFile: true,
+                  isDirectory: false,
+                  name: "readme.txt",
+                  file: (resolve: (f: File) => void) => resolve(innerFile),
                 },
-              };
-            },
-          }),
-        },
-      ],
-    } as unknown as DataTransfer;
+              ]);
+            } else {
+              cb([]);
+            }
+          },
+        };
+      },
+    });
 
     fireEvent.drop(tree, { dataTransfer: folderDt });
 
@@ -1461,6 +1521,58 @@ describe("ServerFilesTab drag-and-drop upload", () => {
         screen.queryByText(t("files.upload.preparing")),
       ).not.toBeInTheDocument(),
     );
+  });
+
+  it("collects files synchronously before DataTransfer is cleared", async () => {
+    routeGet({ detail: server(), list: listing([]) });
+    mockPostFormWithProgress.mockResolvedValue(undefined);
+    renderPage();
+    await openFiles();
+    await screen.findByText(t("files.empty"));
+
+    const tree = document.querySelector(".file-tree") as HTMLElement;
+    const dt = new MockDataTransfer();
+    dt.addFile(new File(["content"], "test.txt", { type: "text/plain" }), {
+      isDirectory: false,
+      isFile: true,
+      name: "test.txt",
+    });
+
+    // Seal the DataTransfer after the synchronous event handler completes,
+    // replicating browser behavior where items/files are cleared post-tick.
+    fireEvent.drop(tree, { dataTransfer: dt });
+    dt.seal();
+
+    await waitFor(() => expect(mockPostFormWithProgress).toHaveBeenCalled());
+    const [url, form] = mockPostFormWithProgress.mock.calls[0];
+    expect(url).toBe(`${FILES_BASE}/upload?path=&extract=false`);
+    expect((form as FormData).get("file")).toBeTruthy();
+  });
+
+  it("calls getAsFile before webkitGetAsEntry (item consumption)", async () => {
+    routeGet({ detail: server(), list: listing([]) });
+    mockPostFormWithProgress.mockResolvedValue(undefined);
+    renderPage();
+    await openFiles();
+    await screen.findByText(t("files.empty"));
+
+    const tree = document.querySelector(".file-tree") as HTMLElement;
+    const file = new File(["zip content"], "test.zip", {
+      type: "application/zip",
+    });
+    const dt = new MockDataTransfer();
+    dt.addFile(file, {
+      isDirectory: false,
+      isFile: true,
+      name: "test.zip",
+    });
+
+    fireEvent.drop(tree, { dataTransfer: dt });
+
+    // The upload should succeed even though webkitGetAsEntry consumes the item.
+    await waitFor(() => expect(mockPostFormWithProgress).toHaveBeenCalled());
+    const [, form] = mockPostFormWithProgress.mock.calls[0];
+    expect((form as FormData).get("file")).toBeTruthy();
   });
 });
 
