@@ -1612,7 +1612,7 @@ button.link:focus-visible {
 /* Context menu for file operations (issue #1465). */
 .file-context-menu {
   position: fixed;
-  z-index: 10;
+  z-index: 25;
   min-width: 160px;
   background: var(--bg-raised);
   border: 1px solid var(--border);
