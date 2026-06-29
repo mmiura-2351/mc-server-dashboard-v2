@@ -92,13 +92,26 @@ const pluginErrorKeys: Record<string, TranslationKey> = {
   unsupported_server_type: "plugins.error.unsupportedServerType",
   invalid_side: "plugins.error.invalidSide",
   not_found: "plugins.error.notFound",
+  worker_unavailable: "plugins.error.workerUnavailable",
 };
 
 function pluginErrorMessage(error: unknown, noun: ContentNoun): string {
-  if (error instanceof ApiError && error.reason !== undefined) {
+  if (!(error instanceof ApiError)) return t("plugins.error.generic");
+
+  // Check reason first (most specific).
+  if (error.reason !== undefined) {
     const key = pluginErrorKeys[error.reason];
     if (key !== undefined) return applyNoun(t(key), noun);
   }
+
+  // Check status (less specific).
+  switch (error.status) {
+    case 413:
+      return applyNoun(t("plugins.error.tooLarge"), noun);
+    case 503:
+      return t("plugins.error.workerUnavailable");
+  }
+
   return t("plugins.error.generic");
 }
 

@@ -11,6 +11,7 @@ import {
   handleTabKeyDown,
   panelId,
   tabId,
+  useFileBrowserParams,
   useFilterParams,
   useOffsetParam,
   useTabHash,
@@ -382,6 +383,163 @@ describe("useFilterParams", () => {
     fireEvent.click(screen.getByText("back"));
     expect(screen.getByTestId("operation").textContent).toBe("");
     expect(screen.getByTestId("actor").textContent).toBe("");
+  });
+});
+
+// ── File browser params (#1484) ───────────────────────────────────────────────
+
+function FileBrowserProbe() {
+  const [{ dir, file }, setParams] = useFileBrowserParams();
+  const loc = useLocation();
+  const navigate = useNavigate();
+  return (
+    <div>
+      <span data-testid="dir">{dir}</span>
+      <span data-testid="file">{file ?? ""}</span>
+      <span data-testid="search">{loc.search}</span>
+      <span data-testid="hash">{loc.hash}</span>
+      <button type="button" onClick={() => setParams("world", null)}>
+        go-world
+      </button>
+      <button
+        type="button"
+        onClick={() => setParams("world", "world/level.dat")}
+      >
+        open-file
+      </button>
+      <button type="button" onClick={() => setParams("", null)}>
+        go-root
+      </button>
+      <button
+        type="button"
+        onClick={() => setParams("config", null, { replace: true })}
+      >
+        replace-config
+      </button>
+      <button type="button" onClick={() => navigate(-1)}>
+        back
+      </button>
+    </div>
+  );
+}
+
+describe("useFileBrowserParams", () => {
+  it("defaults to root dir with no file when no query params", () => {
+    render(
+      <MemoryRouter initialEntries={["/x#files"]}>
+        <FileBrowserProbe />
+      </MemoryRouter>,
+    );
+    expect(screen.getByTestId("dir").textContent).toBe("");
+    expect(screen.getByTestId("file").textContent).toBe("");
+    expect(screen.getByTestId("search").textContent).toBe("");
+  });
+
+  it("reads dir and file from query params (deep link)", () => {
+    render(
+      <MemoryRouter
+        initialEntries={["/x?dir=world&file=world%2Flevel.dat#files"]}
+      >
+        <FileBrowserProbe />
+      </MemoryRouter>,
+    );
+    expect(screen.getByTestId("dir").textContent).toBe("world");
+    expect(screen.getByTestId("file").textContent).toBe("world/level.dat");
+  });
+
+  it("navigating to a dir writes the dir param; root clears it", () => {
+    render(
+      <MemoryRouter initialEntries={["/x#files"]}>
+        <FileBrowserProbe />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByText("go-world"));
+    expect(screen.getByTestId("dir").textContent).toBe("world");
+    const params = new URLSearchParams(
+      screen.getByTestId("search").textContent ?? "",
+    );
+    expect(params.get("dir")).toBe("world");
+
+    fireEvent.click(screen.getByText("go-root"));
+    expect(screen.getByTestId("dir").textContent).toBe("");
+    expect(screen.getByTestId("search").textContent).toBe("");
+  });
+
+  it("opening a file writes the file param", () => {
+    render(
+      <MemoryRouter initialEntries={["/x#files"]}>
+        <FileBrowserProbe />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByText("open-file"));
+    expect(screen.getByTestId("file").textContent).toBe("world/level.dat");
+    const params = new URLSearchParams(
+      screen.getByTestId("search").textContent ?? "",
+    );
+    expect(params.get("file")).toBe("world/level.dat");
+  });
+
+  it("preserves the hash when changing params", () => {
+    render(
+      <MemoryRouter initialEntries={["/x#files"]}>
+        <FileBrowserProbe />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByText("go-world"));
+    expect(screen.getByTestId("hash").textContent).toBe("#files");
+  });
+
+  it("Back restores the previous dir/file state", () => {
+    render(
+      <MemoryRouter initialEntries={["/x#files"]}>
+        <FileBrowserProbe />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByText("go-world"));
+    fireEvent.click(screen.getByText("open-file"));
+    expect(screen.getByTestId("dir").textContent).toBe("world");
+    expect(screen.getByTestId("file").textContent).toBe("world/level.dat");
+
+    fireEvent.click(screen.getByText("back"));
+    expect(screen.getByTestId("dir").textContent).toBe("world");
+    expect(screen.getByTestId("file").textContent).toBe("");
+
+    fireEvent.click(screen.getByText("back"));
+    expect(screen.getByTestId("dir").textContent).toBe("");
+    expect(screen.getByTestId("file").textContent).toBe("");
+  });
+
+  it("replace option replaces the history entry instead of pushing", () => {
+    render(
+      <MemoryRouter initialEntries={["/x#files"]}>
+        <FileBrowserProbe />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByText("go-world"));
+    expect(screen.getByTestId("dir").textContent).toBe("world");
+
+    // Replace the current entry instead of pushing a new one.
+    fireEvent.click(screen.getByText("replace-config"));
+    expect(screen.getByTestId("dir").textContent).toBe("config");
+
+    // Back should skip "config" (it replaced "world") and land at root.
+    fireEvent.click(screen.getByText("back"));
+    expect(screen.getByTestId("dir").textContent).toBe("");
+  });
+
+  it("re-setting the same params pushes no history entry", () => {
+    render(
+      <MemoryRouter initialEntries={["/x#files"]}>
+        <FileBrowserProbe />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByText("go-world"));
+    expect(screen.getByTestId("dir").textContent).toBe("world");
+
+    // Re-clicking must not grow history: one Back lands at root.
+    fireEvent.click(screen.getByText("go-world"));
+    fireEvent.click(screen.getByText("back"));
+    expect(screen.getByTestId("dir").textContent).toBe("");
   });
 });
 

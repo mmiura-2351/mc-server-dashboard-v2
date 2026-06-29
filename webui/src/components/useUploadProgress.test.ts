@@ -1,9 +1,10 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useUploadProgress } from "./useUploadProgress.ts";
+import { _resetForTesting, useUploadProgress } from "./useUploadProgress.ts";
 
 describe("useUploadProgress", () => {
   beforeEach(() => {
+    _resetForTesting();
     vi.useFakeTimers();
     vi.setSystemTime(0);
   });

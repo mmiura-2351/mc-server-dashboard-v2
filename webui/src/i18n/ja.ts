@@ -493,6 +493,9 @@ export const ja: Record<TranslationKey, string> = {
     "現在、バックアップを取得できるサーバーホストがありません。",
   "backups.error.invalidSchedule":
     "backup_interval_hours は1以上の整数の時間数である必要があります。",
+  "backups.error.serverMustBeStopped": "この操作にはサーバーの停止が必要です。",
+  "backups.error.serverBusy":
+    "別の操作が進行中です。完了するまでお待ちください。",
   "backups.error.tooLarge":
     "ファイルサイズが512 MiBのアップロード上限を超えています。",
   "backups.error.generic": "問題が発生しました。もう一度お試しください。",
@@ -501,7 +504,7 @@ export const ja: Record<TranslationKey, string> = {
   "files.denied": "このサーバーのファイルを表示する権限がありません。",
   "files.runningNotice":
     "サーバーは稼働中です — ファイルの編集は稼働中のサーバーに即座に反映されます。アップロードとフォルダの作成にはサーバーを停止する必要があります。",
-  "files.root": "ルート",
+  "files.root": "/",
   "files.loading": "読み込み中…",
   "files.listError":
     "このディレクトリを一覧表示できませんでした。更新してみてください。",
@@ -511,8 +514,12 @@ export const ja: Record<TranslationKey, string> = {
   "files.truncated":
     "一覧が省略されました — エントリが多すぎてすべては表示できません。",
   "files.binary": "バイナリファイル — 表示するにはダウンロードしてください。",
+  "files.cannotPreview": "このファイルはプレビューできません。",
+  "files.fileSize": "サイズ: {size}",
+  "files.closeViewer": "ビューアーを閉じる",
   "files.editorLabel": "ファイルの内容",
   "files.upload": "アップロード",
+  "files.upload.preparing": "アップロードを準備中…",
   "files.extractZip": "ZIPを展開",
   "files.newFolder": "新しいフォルダ",
   "files.folderName": "フォルダ名",
@@ -564,7 +571,86 @@ export const ja: Record<TranslationKey, string> = {
   "files.error.goToContentTab": "{noun}タブへ移動",
   "files.error.tooLarge":
     "ファイルサイズが512 MiBのアップロード上限を超えています。",
+  "files.error.notFound": "ファイルまたはディレクトリが見つかりません。",
+  "files.error.fileTooLarge":
+    "ファイルサイズが上限を超えています（アップロード: 512 MiB、編集: 4 MiB）。",
+  "files.error.invalidPath": "ファイルパスが無効です。",
+  "files.error.isDirectory":
+    "ディレクトリをファイルとして開くことはできません。",
+  "files.error.notDirectory":
+    "指定されたパスはディレクトリではなくファイルです。",
+  "files.error.symlinkRefused": "シンボリックリンクは許可されていません。",
+  "files.error.invalidInput": "リクエストが無効です。",
+  "files.error.workerUnavailable":
+    "サーバーエージェントが切断されています。しばらくしてから再度お試しください。",
+  "files.error.serverBusy":
+    "別の操作が進行中です。完了するまでお待ちください。",
+  "files.error.conflict": "競合が発生したため、操作を完了できませんでした。",
   "files.error.generic": "問題が発生しました。もう一度お試しください。",
+  "files.dropZone": "ここにファイルをドロップしてアップロード",
+  // Multi-select (issue #1462).
+  "files.selectAll": "すべて選択",
+  "files.deselectAll": "すべて解除",
+  "files.selectedCount": "{count}件選択中",
+  // Bulk operations (issue #1463).
+  "files.bulk.delete": "選択項目を削除",
+  "files.bulk.delete.dialogTitle": "選択項目の削除",
+  "files.bulk.delete.dialogBody":
+    "選択した{count}件を完全に削除します。この操作は元に戻せません。",
+  "files.bulk.delete.confirm": "すべて削除",
+  "files.bulk.delete.progress": "削除中 {done}/{total}…",
+  "files.bulk.delete.done": "{done} 件を削除しました。",
+  "files.bulk.delete.partial":
+    "{done}/{total} 件を削除しました。{failed} 件失敗しました。",
+  "files.bulk.download": "選択項目をダウンロード",
+  "files.bulk.download.progress": "ダウンロード中 {done}/{total}…",
+  "files.bulk.download.done": "{done} 件をダウンロードしました。",
+  "files.bulk.download.partial":
+    "{done}/{total} 件をダウンロードしました。{failed} 件失敗しました。",
+  "files.bulk.move": "選択項目を移動",
+  "files.bulk.move.dialogTitle": "選択項目の移動",
+  "files.bulk.move.destLabel": "移動先ディレクトリ",
+  "files.bulk.move.confirm": "移動",
+  "files.bulk.move.progress": "移動中 {done}/{total}…",
+  "files.bulk.move.done": "{done} 件を移動しました。",
+  "files.bulk.move.partial":
+    "{done}/{total} 件を移動しました。{failed} 件失敗しました。",
+  // Drag-and-drop folder upload.
+  "files.bulk.upload.progress": "アップロード中 {done}/{total}…",
+  "files.bulk.upload.done": "{done} 件のファイルをアップロードしました。",
+
+  // Drag-and-drop file organization (issue #1464).
+  "files.moved": "移動しました。",
+  "files.error.moveConflict":
+    "{name} を移動できません：移動先に同名のファイルが既に存在します。",
+
+  // Context menu (issue #1465).
+  "files.contextMenu.open": "開く",
+  "files.contextMenu.download": "ダウンロード",
+  "files.contextMenu.downloadZip": "ZIPとしてダウンロード",
+  "files.contextMenu.rename": "名前を変更",
+  "files.contextMenu.delete": "削除",
+  "files.contextMenu.upload": "ファイルをアップロード",
+  "files.contextMenu.newFolder": "新しいフォルダ",
+  "files.contextMenu.extractHere": "ここに展開",
+
+  // Navigation history (issue #1475).
+  "files.nav.back": "戻る",
+  "files.nav.forward": "進む",
+
+  // Unsaved changes guard (issue #1486).
+  "files.unsaved.title": "未保存の変更",
+  "files.unsaved.body": "未保存の変更があります。破棄しますか？",
+  "files.unsaved.discard": "破棄",
+
+  // Overwrite confirmation dialog.
+  "files.overwrite.title": "ファイルが既に存在します",
+  "files.overwrite.body":
+    "「{name}」はこのディレクトリに既に存在します。上書きしますか？",
+  "files.overwrite.overwrite": "上書き",
+  "files.overwrite.skip": "スキップ",
+  "files.overwrite.applyAll": "残りのすべてのファイルに適用",
+  "files.overwrite.multipleFolders": "{count} 個のフォルダ",
 
   // Players tab — applied op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8).
   "players.heading": "適用中のグループ",
@@ -587,6 +673,13 @@ export const ja: Record<TranslationKey, string> = {
   // Inline pointer to the full Groups management surface (Phase 6).
   "players.manageHint": "グループの作成と編集はコミュニティ設定で行えます。",
   "players.manageLink": "コミュニティ設定",
+  "players.error.unsettled":
+    "サーバーが起動／停止の途中です。安定するまでお待ちください。",
+  "players.error.serverMustBeStopped": "この操作にはサーバーの停止が必要です。",
+  "players.error.serverBusy":
+    "別の操作が進行中です。完了するまでお待ちください。",
+  "players.error.workerUnavailable":
+    "サーバーエージェントが切断されています。しばらくしてから再度お試しください。",
   "players.error.generic": "問題が発生しました。もう一度お試しください。",
 
   // Sessions view — relay game session history (issue #961).
@@ -1352,6 +1445,8 @@ export const ja: Record<TranslationKey, string> = {
   "plugins.error.invalidSide": "このサーバータイプには無効なサイドです。",
   "plugins.error.notFound":
     "{Noun}が見つかりません。削除された可能性があります。",
+  "plugins.error.workerUnavailable":
+    "サーバーエージェントが切断されています。しばらくしてから再度お試しください。",
   "plugins.error.generic": "エラーが発生しました。もう一度お試しください。",
   // Dependency / compatibility validation checklist (issue #1307).
   "plugins.validation.heading": "依存関係と互換性",

@@ -5,8 +5,8 @@
  * Left pane: a directory listing (entries + a `truncated` notice when the
  * Worker clipped the live listing) with path breadcrumbs. Right pane: a viewer.
  * A text file opens in an editor whose Save issues a versioned base64 `PUT`; a
- * binary file offers download only. Operations: upload (with an "extract ZIP"
- * toggle → `?extract=`), mkdir, rename, delete (typed confirm), download (reuses
+ * binary file offers download only. Operations: upload, mkdir, rename, delete
+ * (typed confirm), download (reuses
  * the authenticated helper in api/download.ts).
  *
  * Permission gating mirrors the API route gates (servers/api/files.py):
@@ -27,9 +27,11 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { zip } from "fflate";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useNavigate as useRouterNavigate } from "react-router";
 import { ApiError, api, postFormWithProgress } from "../api/client.ts";
-import { downloadFile } from "../api/download.ts";
+import { downloadFile, fetchFileBlob } from "../api/download.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
 import { Modal } from "../components/Modal.tsx";
@@ -46,6 +48,15 @@ import {
   isProbablyText,
 } from "./fileText.ts";
 import { atRest, normalizeState } from "./serverState.ts";
+import { useFileBrowserParams } from "./urlState.ts";
+import { type NavState, useNavHistory } from "./useNavHistory.ts";
+
+/** Convert a version ID ({ns_timestamp:020d}-{hex8}) to a Date. */
+export function versionDate(versionId: string): Date {
+  const nsStr = versionId.split("-")[0];
+  const ms = Number(BigInt(nsStr) / 1000000n);
+  return new Date(ms);
+}
 
 type DirListing = components["schemas"]["DirListingResponse"];
 type FileContent = components["schemas"]["FileContentResponse"];
@@ -55,20 +66,39 @@ type SearchResult = components["schemas"]["SearchResponse"];
 type FileVersions = components["schemas"]["FileVersionsResponse"];
 
 /**
- * Map a file-operation error to its toast message. 409 reasons
- * `server_unsettled` and `server_not_stopped` (at-rest-only precondition
- * failures) get an actionable message; `content_dir_protected` is handled
- * separately (inline notice, not a toast); everything else falls back to
- * generic.
+ * Map a file-operation error to its toast message.
+ *
+ * Handles all RFC 9457 reason codes the file API can return.
+ * `content_dir_protected` is handled separately (inline notice, not a toast).
  */
 function fileOperationErrorMessage(error: unknown): TranslationKey {
-  if (error instanceof ApiError && error.status === 409) {
-    const r = error.reason;
-    if (r === "server_unsettled" || r === "server_not_stopped") {
-      return "files.error.serverMustBeStopped";
+  if (!(error instanceof ApiError)) return "files.error.generic";
+
+  switch (error.status) {
+    case 404:
+      return "files.error.notFound";
+    case 409: {
+      const r = error.reason;
+      if (r === "server_unsettled" || r === "server_not_stopped")
+        return "files.error.serverMustBeStopped";
+      if (r === "server_busy") return "files.error.serverBusy";
+      return "files.error.conflict";
     }
+    case 413:
+      return "files.error.fileTooLarge";
+    case 422: {
+      const r = error.reason;
+      if (r === "invalid_path") return "files.error.invalidPath";
+      if (r === "is_a_directory") return "files.error.isDirectory";
+      if (r === "not_a_directory") return "files.error.notDirectory";
+      if (r === "symlink_refused") return "files.error.symlinkRefused";
+      return "files.error.invalidInput";
+    }
+    case 503:
+      return "files.error.workerUnavailable";
+    default:
+      return "files.error.generic";
   }
-  return "files.error.generic";
 }
 
 /** True when the error is a 409 content_dir_protected rejection. */
@@ -95,6 +125,9 @@ function filesBase(communityId: string, serverId: string): string {
   });
 }
 
+/** Maximum file upload size (512 MiB). */
+const MAX_UPLOAD_BYTES = 512 * 1024 * 1024;
+
 /** Join a directory rel-path and a child name into a POSIX rel-path. */
 function joinPath(dir: string, name: string): string {
   return dir === "" ? name : `${dir}/${name}`;
@@ -118,6 +151,56 @@ function breadcrumbs(path: string): { name: string; path: string }[] {
   }));
 }
 
+/**
+ * Recursively read all files from a dropped directory entry.
+ *
+ * `readEntries()` may not return all entries in a single call (browser-imposed
+ * batch limit), so we loop until it returns an empty array.
+ */
+async function readAllFiles(
+  entry: FileSystemDirectoryEntry,
+  basePath: string,
+): Promise<Array<{ file: File; relativeDirPath: string }>> {
+  const results: Array<{ file: File; relativeDirPath: string }> = [];
+
+  const readEntries = (
+    reader: FileSystemDirectoryReader,
+  ): Promise<FileSystemEntry[]> =>
+    new Promise((resolve) => {
+      const all: FileSystemEntry[] = [];
+      const readBatch = () => {
+        reader.readEntries((entries) => {
+          if (entries.length === 0) {
+            resolve(all);
+          } else {
+            all.push(...entries);
+            readBatch();
+          }
+        });
+      };
+      readBatch();
+    });
+
+  const entries = await readEntries(entry.createReader());
+
+  for (const child of entries) {
+    if (child.isFile) {
+      const file = await new Promise<File>((resolve) =>
+        (child as FileSystemFileEntry).file(resolve),
+      );
+      results.push({ file, relativeDirPath: basePath });
+    } else if (child.isDirectory) {
+      const subResults = await readAllFiles(
+        child as FileSystemDirectoryEntry,
+        `${basePath}/${child.name}`,
+      );
+      results.push(...subResults);
+    }
+  }
+
+  return results;
+}
+
 export function ServerFilesTab({
   server,
   communityId,
@@ -138,10 +221,221 @@ export function ServerFilesTab({
     normalizeState(server.desired_state),
   );
 
-  // Current directory rel-path ("" is the working-set root) and the open file.
-  const [dir, setDir] = useState("");
-  const [openFile, setOpenFile] = useState<string | null>(null);
+  // URL-driven file browser state: `?dir=` and `?file=` query params sync with
+  // the browser history so back/forward restore the prior view (#1484).
+  const [urlParams, setUrlParams] = useFileBrowserParams();
+
+  // Current directory rel-path ("" is the working-set root) and the open file,
+  // tracked through a navigation history stack (issue #1475). The initial state
+  // is seeded from the URL so refreshing / deep-linking restores the view.
+  const {
+    current: nav,
+    navigate: navNavigate,
+    goBack: navGoBack,
+    goForward: navGoForward,
+    jumpTo,
+    canGoBack,
+    canGoForward,
+  } = useNavHistory({ dir: urlParams.dir, openFile: urlParams.file });
+  const dir = nav.dir;
+  const openFile = nav.openFile;
+
+  // Sync between the internal nav stack and URL query params (#1484). All
+  // internal navigation goes through the wrapped helpers below, which push the
+  // URL synchronously — no effect-based nav→URL sync needed.
+  //
+  // For browser back/forward, React Router's location changes are detected via
+  // a useEffect on `urlParams`. A skip-counter prevents echoing our own pushes.
+  //
+  // Invariant: every increment of skipUrlSync must be matched by exactly one
+  // URL-change effect that decrements it. If nav state and the URL diverge
+  // such that setUrlParams no-ops, a stale increment remains and the next
+  // genuine browser Back gets swallowed. The navigate/goBack/goForward
+  // wrappers guard this by early-returning when next === current.
+  const skipUrlSync = useRef(0);
+
+  const navigate = useCallback(
+    (next: NavState) => {
+      // Only increment the skip counter if navigation will actually happen.
+      // navNavigate no-ops when the target equals the current state; an
+      // unconsumed increment would cause a later browser-Back to be skipped.
+      if (next.dir === dir && next.openFile === openFile) return;
+      skipUrlSync.current += 1;
+      navNavigate(next);
+      setUrlParams(next.dir, next.openFile);
+    },
+    [navNavigate, setUrlParams, dir, openFile],
+  );
+  const goBack = useCallback(() => {
+    if (!canGoBack) return;
+    skipUrlSync.current += 1;
+    const target = navGoBack();
+    // In-app back: replace the URL (the browser history already has this
+    // state from the original navigation push).
+    setUrlParams(target.dir, target.openFile, { replace: true });
+  }, [canGoBack, navGoBack, setUrlParams]);
+  const goForward = useCallback(() => {
+    if (!canGoForward) return;
+    skipUrlSync.current += 1;
+    const target = navGoForward();
+    // In-app forward: replace the URL (same reason as goBack above).
+    setUrlParams(target.dir, target.openFile, { replace: true });
+  }, [canGoForward, navGoForward, setUrlParams]);
+
+  // URL → nav state: browser back/forward changed the URL externally. The
+  // skip counter filters out URL changes triggered by our own navigate/
+  // goBack/goForward calls above. Uses `jumpTo` (not `navNavigate`) so the
+  // external change replaces the current entry instead of pushing, which
+  // would corrupt the internal back/forward stack.
+  //
+  // When the user has unsaved edits, browser back/forward is intercepted:
+  // restore the URL (so the browser's address bar stays correct) and show
+  // the discard confirmation dialog instead of navigating immediately.
+  const [hasDraft, setHasDraft] = useState(false);
+  const [discardConfirmOpen, setDiscardConfirmOpen] = useState(false);
+  type PendingAction =
+    | { type: "navigate"; state: NavState }
+    | { type: "back" }
+    | { type: "forward" }
+    | null;
+  const pendingActionRef = useRef<PendingAction>(null);
+  const hasDraftRef = useRef(false);
+  hasDraftRef.current = hasDraft;
+
+  const routerNavigate = useRouterNavigate();
+
+  useEffect(() => {
+    if (skipUrlSync.current > 0) {
+      skipUrlSync.current -= 1;
+      return;
+    }
+    const next: NavState = { dir: urlParams.dir, openFile: urlParams.file };
+    if (hasDraftRef.current) {
+      // Unsaved changes — block the external navigation. Restore the URL to
+      // the current internal state and show the discard confirmation instead.
+      const loc = window.location;
+      const params = new URLSearchParams(loc.search);
+      if (dir === "") {
+        params.delete("dir");
+      } else {
+        params.set("dir", dir);
+      }
+      if (openFile === null) {
+        params.delete("file");
+      } else {
+        params.set("file", openFile);
+      }
+      const search = params.toString();
+      routerNavigate(
+        `${loc.pathname}${search ? `?${search}` : ""}${loc.hash}`,
+        { replace: true },
+      );
+      skipUrlSync.current += 1;
+      pendingActionRef.current = { type: "navigate", state: next };
+      setDiscardConfirmOpen(true);
+      return;
+    }
+    jumpTo(next);
+  }, [urlParams.dir, urlParams.file, jumpTo, dir, openFile, routerNavigate]);
+
+  // Gate in-app navigation: check hasDraft before navigating.
+  const guardedNavigate = useCallback(
+    (next: NavState) => {
+      if (hasDraft && (next.dir !== dir || next.openFile !== openFile)) {
+        pendingActionRef.current = { type: "navigate", state: next };
+        setDiscardConfirmOpen(true);
+        return;
+      }
+      navigate(next);
+    },
+    [hasDraft, dir, openFile, navigate],
+  );
+
+  const guardedGoBack = useCallback(() => {
+    if (hasDraft) {
+      pendingActionRef.current = { type: "back" };
+      setDiscardConfirmOpen(true);
+      return;
+    }
+    goBack();
+  }, [hasDraft, goBack]);
+
+  const guardedGoForward = useCallback(() => {
+    if (hasDraft) {
+      pendingActionRef.current = { type: "forward" };
+      setDiscardConfirmOpen(true);
+      return;
+    }
+    goForward();
+  }, [hasDraft, goForward]);
+
+  const confirmDiscard = useCallback(() => {
+    setDiscardConfirmOpen(false);
+    setHasDraft(false);
+    const pending = pendingActionRef.current;
+    pendingActionRef.current = null;
+    if (!pending) return;
+    switch (pending.type) {
+      case "back":
+        goBack();
+        break;
+      case "forward":
+        goForward();
+        break;
+      case "navigate":
+        navigate(pending.state);
+        break;
+    }
+  }, [navigate, goBack, goForward]);
+
+  const cancelDiscard = useCallback(() => {
+    setDiscardConfirmOpen(false);
+    pendingActionRef.current = null;
+  }, []);
+
+  // beforeunload: browser tab close / refresh / full-page navigation.
+  useEffect(() => {
+    if (!hasDraft) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [hasDraft]);
+
   const [contentDirNotice, setContentDirNotice] = useState(false);
+
+  // Multi-select: track selected file paths and the last-clicked index for
+  // shift-click range selection. Selection clears on directory change.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const lastClickedIdx = useRef<number | null>(null);
+
+  // Track the previous dir to clear selection when it changes (including
+  // back/forward navigation).
+  const prevDirRef = useRef(dir);
+  useEffect(() => {
+    if (prevDirRef.current !== dir) {
+      prevDirRef.current = dir;
+      setSelected(new Set());
+      lastClickedIdx.current = null;
+    }
+  }, [dir]);
+
+  // Reset hasDraft when the open file changes or becomes null (e.g. the
+  // Viewer unmounts after a delete/rename closes it). Without this, a
+  // stale hasDraft=true would block subsequent navigation.
+  const prevOpenFileRef = useRef(openFile);
+  useEffect(() => {
+    if (prevOpenFileRef.current !== openFile) {
+      prevOpenFileRef.current = openFile;
+      setHasDraft(false);
+    }
+  }, [openFile]);
+
+  /** Navigate to a new directory, pushing it onto the history stack. */
+  const navigateDir = (next: string) => {
+    guardedNavigate({ dir: next, openFile: null });
+  };
 
   const onError = (error: unknown) => {
     if (onForbidden(error)) {
@@ -167,6 +461,496 @@ export function ServerFilesTab({
   const refetchList = () =>
     queryClient.invalidateQueries({ queryKey: listKey });
 
+  const serverId = server.id;
+
+  // Upload state lifted so the drop zone and context menu can share it.
+  const progress = useUploadProgress();
+  const [uploadPreparing, setUploadPreparing] = useState(false);
+
+  // Overwrite confirmation dialog state — promise-based so callers can await.
+  const [overwritePrompt, setOverwritePrompt] = useState<{
+    fileName: string;
+    showApplyAll: boolean;
+    resolve: (result: {
+      action: "overwrite" | "skip" | "cancel";
+      applyAll: boolean;
+    }) => void;
+  } | null>(null);
+
+  const upload = useMutation({
+    mutationFn: (file: File) => {
+      const form = new FormData();
+      form.append("file", file);
+      progress.start(file.size);
+      return postFormWithProgress(
+        `${apiPath(
+          "/api/communities/{community_id}/servers/{server_id}/files/upload",
+          { community_id: communityId, server_id: serverId },
+        )}?path=${encodeURIComponent(dir)}&extract=false` as never,
+        form,
+        progress.onProgress,
+      );
+    },
+    onSuccess: () => {
+      progress.reset();
+      showToast(t("files.uploaded"), "success");
+      refetchList();
+    },
+    onError: (error) => {
+      progress.reset();
+      onError(error);
+    },
+  });
+
+  /** Move files via POST /files/rename. Handles multi-select. */
+  const moveFiles = async (paths: string[], destDir: string) => {
+    let movedAny = false;
+    for (const from of paths) {
+      const name = from.split("/").at(-1) ?? from;
+      const to = destDir === "" ? name : `${destDir}/${name}`;
+      if (from === to) continue;
+      try {
+        await api.post(
+          apiPath(
+            "/api/communities/{community_id}/servers/{server_id}/files/rename",
+            { community_id: communityId, server_id: serverId },
+          ),
+          { body: JSON.stringify({ from, to }) },
+        );
+        movedAny = true;
+      } catch (error) {
+        if (
+          error instanceof ApiError &&
+          error.status === 409 &&
+          error.reason === "destination_exists"
+        ) {
+          showToast(t("files.error.moveConflict", { name }), "error");
+        } else {
+          onError(error);
+        }
+      }
+    }
+    if (movedAny) {
+      showToast(t("files.moved"), "success");
+      refetchList();
+      setSelected(new Set());
+    }
+  };
+
+  // Stable refs for callbacks used in onDrop to avoid re-creating the handler
+  // on every render (onError/refetchList are not wrapped in useCallback).
+  const onErrorRef = useRef(onError);
+  onErrorRef.current = onError;
+  const refetchListRef = useRef(refetchList);
+  refetchListRef.current = refetchList;
+  const listingDataRef = useRef(listing.data);
+  listingDataRef.current = listing.data;
+
+  // Drag-and-drop state for the file-tree drop zone.
+  const dragCounter = useRef(0);
+  const [dragOver, setDragOver] = useState(false);
+  const dropEnabled = canEdit && !notAtRest;
+
+  const onDragEnter = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      if (
+        !dropEnabled ||
+        e.dataTransfer.types.includes("application/x-file-move")
+      )
+        return;
+      dragCounter.current += 1;
+      if (dragCounter.current === 1) setDragOver(true);
+    },
+    [dropEnabled],
+  );
+
+  const onDragLeave = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      if (
+        !dropEnabled ||
+        e.dataTransfer.types.includes("application/x-file-move")
+      )
+        return;
+      dragCounter.current -= 1;
+      if (dragCounter.current === 0) setDragOver(false);
+    },
+    [dropEnabled],
+  );
+
+  const onDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+  }, []);
+
+  const onDrop = useCallback(
+    async (e: React.DragEvent) => {
+      e.preventDefault();
+      dragCounter.current = 0;
+      setDragOver(false);
+      if (!dropEnabled) return;
+      // Ignore internal file-move drags — those are handled by folder/crumb targets.
+      if (e.dataTransfer.types.includes("application/x-file-move")) return;
+
+      // ── Phase 1: synchronous — collect from DataTransfer BEFORE any yield ──
+      // The browser clears DataTransfer after the synchronous event handler
+      // completes, so all access to e.dataTransfer.items / .files must happen
+      // before the first await. FileSystemDirectoryEntry objects obtained via
+      // webkitGetAsEntry() survive beyond the event — they are independent DOM
+      // objects and can be read asynchronously later.
+      const droppedFiles: File[] = [];
+      const droppedDirs: FileSystemDirectoryEntry[] = [];
+
+      if (e.dataTransfer.items) {
+        for (const item of e.dataTransfer.items) {
+          if (item.kind !== "file") continue;
+          // getAsFile() must be called BEFORE webkitGetAsEntry() — some
+          // browsers (Chrome) "consume" the DataTransferItem when
+          // webkitGetAsEntry() is called, causing getAsFile() to return null.
+          const file = item.getAsFile();
+          const entry = item.webkitGetAsEntry?.();
+          if (entry?.isDirectory) {
+            droppedDirs.push(entry as FileSystemDirectoryEntry);
+          } else if (file) {
+            droppedFiles.push(file);
+          }
+        }
+      } else {
+        droppedFiles.push(...Array.from(e.dataTransfer.files));
+      }
+
+      if (droppedFiles.length === 0 && droppedDirs.length === 0) return;
+
+      // Snapshot the current listing entries BEFORE any async yield. The ref
+      // is updated on every render, so an intervening re-render (e.g. from a
+      // React Query background refetch triggered by window-focus) could clear
+      // it before the overwrite check runs.
+      const listingEntries = listingDataRef.current?.entries ?? [];
+
+      // ── Phase 2: async — safe to yield now ──
+      // Show immediate feedback before the potentially slow preparation phase.
+      setUploadPreparing(true);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      // Collect files to upload, resolving directories recursively.
+      // `let` because the folder-level overwrite check may filter entries.
+      let filesToUpload: Array<{ file: File; targetDir: string }> = [];
+      const hasDirectories = droppedDirs.length > 0;
+
+      try {
+        // Add regular files collected synchronously.
+        for (const file of droppedFiles) {
+          filesToUpload.push({ file, targetDir: dir });
+        }
+
+        // Recursively read directory contents from saved entries.
+        for (const dirEntry of droppedDirs) {
+          const dirFiles = await readAllFiles(dirEntry, dirEntry.name);
+          for (const { file, relativeDirPath } of dirFiles) {
+            const targetDir =
+              dir === "" ? relativeDirPath : `${dir}/${relativeDirPath}`;
+            filesToUpload.push({ file, targetDir });
+          }
+        }
+
+        if (filesToUpload.length === 0) {
+          setUploadPreparing(false);
+          return;
+        }
+
+        // Create necessary directories first.
+        if (hasDirectories) {
+          const uniqueDirs = [
+            ...new Set(filesToUpload.map((f) => f.targetDir)),
+          ];
+          uniqueDirs.sort((a, b) => a.split("/").length - b.split("/").length);
+          for (const dirPath of uniqueDirs) {
+            try {
+              await api.post(
+                `${apiPath(
+                  "/api/communities/{community_id}/servers/{server_id}/files/directories",
+                  { community_id: communityId, server_id: serverId },
+                )}?path=${encodeURIComponent(dirPath)}` as never,
+              );
+            } catch {
+              // Directory may already exist — ignore errors.
+            }
+          }
+        }
+      } catch (error) {
+        setUploadPreparing(false);
+        onErrorRef.current(error);
+        return;
+      }
+
+      // ── Folder-level overwrite check ──
+      // When a dropped folder name matches an existing directory in the
+      // current listing, warn the user that files inside will be merged.
+      if (droppedDirs.length > 0) {
+        const existingDirNames = new Set(
+          listingEntries.filter((e) => e.is_dir).map((e) => e.name),
+        );
+        const conflictingFolders = droppedDirs
+          .map((d) => d.name)
+          .filter((name) => existingDirNames.has(name));
+
+        if (conflictingFolders.length > 0) {
+          setUploadPreparing(false);
+          const folderName =
+            conflictingFolders.length === 1
+              ? conflictingFolders[0]
+              : t("files.overwrite.multipleFolders", {
+                  count: conflictingFolders.length,
+                });
+          const { action } = await new Promise<{
+            action: "overwrite" | "skip" | "cancel";
+            applyAll: boolean;
+          }>((resolve) => {
+            setOverwritePrompt({
+              fileName: folderName,
+              showApplyAll: false,
+              resolve,
+            });
+          });
+          setOverwritePrompt(null);
+          await new Promise((r) => setTimeout(r, 0));
+
+          if (action === "cancel") return;
+          if (action === "skip") {
+            const conflictSet = new Set(conflictingFolders);
+            filesToUpload = filesToUpload.filter(({ targetDir: td }) => {
+              const relative = dir === "" ? td : td.slice(dir.length + 1);
+              const topFolder = relative.split("/")[0];
+              return !conflictSet.has(topFolder);
+            });
+            if (filesToUpload.length === 0) {
+              setUploadPreparing(false);
+              return;
+            }
+          }
+        }
+      }
+
+      // ── Overwrite check for files landing in the current directory ──
+      // Only check files targeting the currently listed directory, since we
+      // have listing data for it. Subdirectory uploads (from folder drops)
+      // are not checked — they typically create new directories.
+      // Uses `listingEntries` (snapshotted before the first yield) instead of
+      // reading the ref here, which could be stale after intervening renders.
+      const existingNames = new Set(
+        listingEntries.filter((e) => !e.is_dir).map((e) => e.name),
+      );
+      const rootConflicts = filesToUpload.filter(
+        ({ file, targetDir }) =>
+          targetDir === dir && existingNames.has(file.name),
+      );
+      const hasMultipleConflicts = rootConflicts.length > 1;
+      let overwriteAll = false;
+      let skipAll = false;
+      const skippedFiles = new Set<File>();
+
+      for (const { file, targetDir } of filesToUpload) {
+        if (targetDir === dir && existingNames.has(file.name)) {
+          if (skipAll) {
+            skippedFiles.add(file);
+            continue;
+          }
+          if (!overwriteAll) {
+            setUploadPreparing(false);
+            const { action, applyAll } = await new Promise<{
+              action: "overwrite" | "skip" | "cancel";
+              applyAll: boolean;
+            }>((resolve) => {
+              setOverwritePrompt({
+                fileName: file.name,
+                showApplyAll: hasMultipleConflicts,
+                resolve,
+              });
+            });
+            setOverwritePrompt(null);
+            // Yield so React commits the dialog dismissal.
+            await new Promise((r) => setTimeout(r, 0));
+
+            if (action === "cancel") return;
+            if (applyAll) {
+              if (action === "overwrite") overwriteAll = true;
+              else skipAll = true;
+            }
+            if (action === "skip") {
+              skippedFiles.add(file);
+            }
+          }
+        }
+      }
+
+      const approvedFiles = filesToUpload.filter(
+        ({ file }) => !skippedFiles.has(file),
+      );
+      if (approvedFiles.length === 0) {
+        setUploadPreparing(false);
+        return;
+      }
+
+      // Transition from preparing indicator to progress bar.
+      const totalSize = approvedFiles.reduce(
+        (sum, { file }) => sum + file.size,
+        0,
+      );
+      setUploadPreparing(false);
+      progress.start(totalSize);
+      // Yield to the renderer so React commits the progress-bar state before
+      // the upload loop monopolises the main thread.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      // Upload all files, tracking aggregate progress across the batch.
+      let uploaded = 0;
+      const total = approvedFiles.length;
+      let cumulativeLoaded = 0;
+
+      for (const { file, targetDir } of approvedFiles) {
+        if (file.size > MAX_UPLOAD_BYTES) {
+          showToast(t("files.error.tooLarge"), "error");
+          continue;
+        }
+        const fileBaseLoaded = cumulativeLoaded;
+        const form = new FormData();
+        form.append("file", file);
+        try {
+          await postFormWithProgress(
+            `${apiPath(
+              "/api/communities/{community_id}/servers/{server_id}/files/upload",
+              { community_id: communityId, server_id: serverId },
+            )}?path=${encodeURIComponent(targetDir)}&extract=false` as never,
+            form,
+            (loaded) => {
+              progress.onProgress(fileBaseLoaded + loaded, totalSize);
+            },
+          );
+          cumulativeLoaded += file.size;
+          uploaded++;
+        } catch (error) {
+          progress.reset();
+          onErrorRef.current(error);
+          return;
+        }
+      }
+
+      progress.reset();
+      if (uploaded > 0) {
+        showToast(
+          total === 1
+            ? t("files.uploaded")
+            : t("files.bulk.upload.done", { done: uploaded }),
+          "success",
+        );
+        refetchListRef.current();
+      }
+    },
+    [dropEnabled, dir, communityId, serverId, showToast, progress],
+  );
+
+  // Fallback: any drop anywhere on the document (including outside our zone)
+  // or a drag cancellation should reset the overlay. The `dragleave` approach
+  // with `relatedTarget === null` was unreliable and could leave the overlay
+  // stuck on repeated folder drags.
+  useEffect(() => {
+    const resetDrag = () => {
+      dragCounter.current = 0;
+      setDragOver(false);
+    };
+    document.addEventListener("drop", resetDrag);
+    document.addEventListener("dragend", resetDrag);
+    return () => {
+      document.removeEventListener("drop", resetDrag);
+      document.removeEventListener("dragend", resetDrag);
+    };
+  }, []);
+
+  // Keyboard-triggered delete/rename (issue #1465). These are separate from
+  // the inline button flows in Listing so the parent can drive them from
+  // keydown without refactoring Listing's internal state.
+  const [kbDeleteOpen, setKbDeleteOpen] = useState(false);
+  const [kbRenameEntry, setKbRenameEntry] = useState<DirEntry | null>(null);
+
+  const kbDelete = useMutation({
+    mutationFn: async () => {
+      const paths = Array.from(selected);
+      for (const path of paths) {
+        await api.delete(
+          `${filesBase(communityId, serverId)}?path=${encodeURIComponent(path)}` as never,
+        );
+      }
+    },
+    onSuccess: () => {
+      showToast(t("files.deleted"), "success");
+      setKbDeleteOpen(false);
+      setSelected(new Set());
+      refetchList();
+      navigate({ dir, openFile: null });
+    },
+    onError: (error) => {
+      setKbDeleteOpen(false);
+      onError(error);
+      refetchList();
+    },
+  });
+
+  // Keyboard shortcuts: Delete/Backspace, F2, Ctrl+A, Escape.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      // Skip when a text input / textarea / contenteditable is focused — the
+      // user is typing, not issuing a file command.
+      const tag = (e.target as HTMLElement).tagName;
+      if (
+        tag === "INPUT" ||
+        tag === "TEXTAREA" ||
+        (e.target as HTMLElement).isContentEditable
+      ) {
+        return;
+      }
+
+      if (e.key === "Delete" || e.key === "Backspace") {
+        if (selected.size > 0 && canEdit && !notAtRest) {
+          e.preventDefault();
+          setKbDeleteOpen(true);
+        }
+        return;
+      }
+
+      if (e.key === "F2") {
+        if (selected.size === 1 && canEdit && !notAtRest && listing.data) {
+          e.preventDefault();
+          const selectedPath = Array.from(selected)[0];
+          const name = selectedPath.split("/").at(-1) ?? selectedPath;
+          const entry = listing.data.entries.find((en) => en.name === name);
+          if (entry) {
+            setKbRenameEntry(entry);
+          }
+        }
+        return;
+      }
+
+      if (e.key === "a" && (e.ctrlKey || e.metaKey)) {
+        if (listing.data) {
+          e.preventDefault();
+          setSelected(
+            new Set(listing.data.entries.map((en) => joinPath(dir, en.name))),
+          );
+        }
+        return;
+      }
+
+      if (e.key === "Escape") {
+        if (selected.size > 0) {
+          setSelected(new Set());
+        }
+      }
+    };
+
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [selected, canEdit, notAtRest, listing.data, dir]);
+
   if (!canRead) {
     return <p className="field-error">{t("files.denied")}</p>;
   }
@@ -174,17 +958,15 @@ export function ServerFilesTab({
   const enter = (entry: DirEntry) => {
     const next = joinPath(dir, entry.name);
     if (entry.is_dir) {
-      setDir(next);
-      setOpenFile(null);
+      guardedNavigate({ dir: next, openFile: null });
     } else {
-      setOpenFile(next);
+      guardedNavigate({ dir, openFile: next });
     }
   };
 
   // Point the browser at the hit's parent directory and open it in the viewer.
   const openHit = (path: string) => {
-    setDir(parentDir(path));
-    setOpenFile(path);
+    guardedNavigate({ dir: parentDir(path), openFile: path });
   };
 
   return (
@@ -205,23 +987,76 @@ export function ServerFilesTab({
         onError={onError}
       />
       <Toolbar
-        dir={dir}
         communityId={communityId}
-        serverId={server.id}
+        serverId={serverId}
         canEdit={canEdit}
         running={notAtRest}
         onChanged={refetchList}
         onError={onError}
-      />
-      <Crumbs
-        dir={dir}
-        onNavigate={(next) => {
-          setDir(next);
-          setOpenFile(null);
+        selected={selected}
+        totalCount={listing.data?.entries.length ?? 0}
+        onSelectAll={() => {
+          if (listing.data) {
+            setSelected(
+              new Set(listing.data.entries.map((e) => joinPath(dir, e.name))),
+            );
+          }
         }}
+        onDeselectAll={() => setSelected(new Set())}
+        onClearSelection={() => setSelected(new Set())}
       />
-      <div className="file-layout">
-        <div className="card file-tree">
+      <div className="file-nav">
+        <button
+          type="button"
+          className="btn sm ghost"
+          disabled={!canGoBack}
+          onClick={guardedGoBack}
+          aria-label={t("files.nav.back")}
+        >
+          &larr;
+        </button>
+        <button
+          type="button"
+          className="btn sm ghost"
+          disabled={!canGoForward}
+          onClick={guardedGoForward}
+          aria-label={t("files.nav.forward")}
+        >
+          &rarr;
+        </button>
+        <Crumbs
+          dir={dir}
+          serverName={server.name}
+          onNavigate={navigateDir}
+          dropEnabled={dropEnabled}
+          onMoveTo={moveFiles}
+        />
+      </div>
+      {uploadPreparing && !progress.active && (
+        <div className="upload-preparing">{t("files.upload.preparing")}</div>
+      )}
+      {progress.active && (
+        <UploadProgress
+          loaded={progress.loaded}
+          total={progress.total}
+          percent={progress.percent}
+          elapsedMs={progress.elapsedMs}
+        />
+      )}
+      <div className={`file-layout${openFile !== null ? " two-pane" : ""}`}>
+        {/* biome-ignore lint/a11y/noStaticElementInteractions: drop zone uses drag events only; keyboard upload is via the toolbar button */}
+        <div
+          className={`card file-tree${dragOver ? " drop-zone-active" : ""}`}
+          onDragEnter={onDragEnter}
+          onDragLeave={onDragLeave}
+          onDragOver={onDragOver}
+          onDrop={onDrop}
+        >
+          {dragOver && (
+            <div className="drop-zone-overlay">
+              <span>{t("files.dropZone")}</span>
+            </div>
+          )}
           {listing.isPending ? (
             <p className="sub">{t("files.loading")}</p>
           ) : listing.isError ? (
@@ -231,22 +1066,68 @@ export function ServerFilesTab({
               listing={listing.data}
               dir={dir}
               communityId={communityId}
-              serverId={server.id}
+              serverId={serverId}
               canEdit={canEdit}
+              running={notAtRest}
               openFile={openFile}
               onEnter={enter}
               onChanged={() => {
                 refetchList();
-                setOpenFile(null);
+                navigate({ dir, openFile: null });
               }}
               onError={onError}
+              selected={selected}
+              onSelectionChange={setSelected}
+              lastClickedIdx={lastClickedIdx}
+              dropEnabled={dropEnabled}
+              onMoveTo={moveFiles}
+              onUpload={upload}
+              onBeforeUpload={async (fileName) => {
+                const exists = (listing.data?.entries ?? []).some(
+                  (e) => !e.is_dir && e.name === fileName,
+                );
+                if (!exists) return true;
+                const { action } = await new Promise<{
+                  action: "overwrite" | "skip" | "cancel";
+                  applyAll: boolean;
+                }>((resolve) => {
+                  setOverwritePrompt({
+                    fileName,
+                    showApplyAll: false,
+                    resolve,
+                  });
+                });
+                setOverwritePrompt(null);
+                return action === "overwrite";
+              }}
+              onExtract={(file) => {
+                const form = new FormData();
+                form.append("file", file);
+                progress.start(file.size);
+                postFormWithProgress(
+                  `${apiPath(
+                    "/api/communities/{community_id}/servers/{server_id}/files/upload",
+                    { community_id: communityId, server_id: serverId },
+                  )}?path=${encodeURIComponent(dir)}&extract=true` as never,
+                  form,
+                  progress.onProgress,
+                ).then(
+                  () => {
+                    progress.reset();
+                    showToast(t("files.uploaded"), "success");
+                    refetchList();
+                  },
+                  (error) => {
+                    progress.reset();
+                    onError(error);
+                  },
+                );
+              }}
             />
           )}
         </div>
-        <div className="card file-viewer">
-          {openFile === null ? (
-            <p className="sub">{t("files.noSelection")}</p>
-          ) : (
+        {openFile !== null && (
+          <div className="card file-viewer">
             <Viewer
               key={openFile}
               path={openFile}
@@ -255,11 +1136,67 @@ export function ServerFilesTab({
               canEdit={canEdit}
               can={can}
               running={notAtRest}
+              fileSize={
+                listing.data?.entries.find(
+                  (e) => joinPath(dir, e.name) === openFile,
+                )?.size
+              }
+              onClose={() => guardedNavigate({ dir, openFile: null })}
               onError={onError}
+              onDraftChange={setHasDraft}
             />
-          )}
-        </div>
+          </div>
+        )}
       </div>
+      <SimpleConfirmDialog
+        open={kbDeleteOpen}
+        title={t("files.delete.dialogTitle")}
+        body={
+          selected.size > 1
+            ? t("files.bulk.delete.dialogBody", { count: selected.size })
+            : t("files.delete.dialogBody")
+        }
+        confirmLabel={t("files.delete.confirm")}
+        onConfirm={() => kbDelete.mutate()}
+        onClose={() => setKbDeleteOpen(false)}
+      />
+      {kbRenameEntry !== null && (
+        <RenameDialog
+          entry={kbRenameEntry}
+          dir={dir}
+          communityId={communityId}
+          serverId={serverId}
+          onClose={() => setKbRenameEntry(null)}
+          onRenamed={() => {
+            setKbRenameEntry(null);
+            refetchList();
+          }}
+          onError={onError}
+        />
+      )}
+      <SimpleConfirmDialog
+        open={discardConfirmOpen}
+        title={t("files.unsaved.title")}
+        body={t("files.unsaved.body")}
+        confirmLabel={t("files.unsaved.discard")}
+        onConfirm={confirmDiscard}
+        onClose={cancelDiscard}
+      />
+      {overwritePrompt !== null && (
+        <OverwriteConfirmDialog
+          fileName={overwritePrompt.fileName}
+          showApplyAll={overwritePrompt.showApplyAll}
+          onOverwrite={(applyAll) =>
+            overwritePrompt.resolve({ action: "overwrite", applyAll })
+          }
+          onSkip={(applyAll) =>
+            overwritePrompt.resolve({ action: "skip", applyAll })
+          }
+          onCancel={() =>
+            overwritePrompt.resolve({ action: "cancel", applyAll: false })
+          }
+        />
+      )}
     </section>
   );
 }
@@ -268,23 +1205,61 @@ export function ServerFilesTab({
 
 function Crumbs({
   dir,
+  serverName,
   onNavigate,
+  dropEnabled,
+  onMoveTo,
 }: {
   dir: string;
+  serverName: string;
   onNavigate: (path: string) => void;
+  dropEnabled: boolean;
+  onMoveTo: (paths: string[], destDir: string) => Promise<void>;
 }) {
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
+
+  const crumbDrop = (targetDir: string) => ({
+    onDragOver: (e: React.DragEvent) => {
+      if (
+        !dropEnabled ||
+        !e.dataTransfer.types.includes("application/x-file-move")
+      )
+        return;
+      e.preventDefault();
+      setDropTarget(targetDir);
+    },
+    onDragLeave: () => setDropTarget(null),
+    onDrop: (e: React.DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setDropTarget(null);
+      if (!dropEnabled) return;
+      const raw = e.dataTransfer.getData("application/x-file-move");
+      if (!raw) return;
+      const paths = JSON.parse(raw) as string[];
+      void onMoveTo(paths, targetDir);
+    },
+  });
+
   return (
     <div className="file-crumbs">
-      <button type="button" className="crumb" onClick={() => onNavigate("")}>
-        {t("files.root")}
+      {"/ "}
+      <button
+        type="button"
+        className={`crumb${dropTarget === "" ? " drop-target" : ""}`}
+        onClick={() => onNavigate("")}
+        {...crumbDrop("")}
+      >
+        {serverName}
       </button>
       {breadcrumbs(dir).map((crumb) => (
         <span key={crumb.path}>
           {" / "}
           <button
             type="button"
-            className="crumb"
+            className={`crumb${dropTarget === crumb.path ? " drop-target" : ""}`}
             onClick={() => onNavigate(crumb.path)}
+            {...crumbDrop(crumb.path)}
           >
             {crumb.name}
           </button>
@@ -438,24 +1413,49 @@ function Listing({
   communityId,
   serverId,
   canEdit,
+  running,
   openFile,
   onEnter,
   onChanged,
   onError,
+  selected,
+  onSelectionChange,
+  lastClickedIdx,
+  dropEnabled,
+  onMoveTo,
+  onUpload,
+  onBeforeUpload,
+  onExtract,
 }: {
   listing: DirListing;
   dir: string;
   communityId: string;
   serverId: string;
   canEdit: boolean;
+  running: boolean;
   openFile: string | null;
   onEnter: (entry: DirEntry) => void;
   onChanged: () => void;
   onError: (error: unknown) => void;
+  selected: Set<string>;
+  onSelectionChange: (next: Set<string>) => void;
+  lastClickedIdx: React.MutableRefObject<number | null>;
+  dropEnabled: boolean;
+  onMoveTo: (paths: string[], destDir: string) => Promise<void>;
+  onUpload: { mutate: (file: File) => void };
+  onBeforeUpload: (fileName: string) => Promise<boolean>;
+  onExtract: (file: File) => void;
 }) {
   const { showToast } = useToast();
   const [renaming, setRenaming] = useState<DirEntry | null>(null);
   const [deleting, setDeleting] = useState<DirEntry | null>(null);
+  const [mkdirOpen, setMkdirOpen] = useState(false);
+  const uploadRef = useRef<HTMLInputElement>(null);
+  const [contextMenu, setContextMenu] = useState<{
+    entry: DirEntry | null;
+    x: number;
+    y: number;
+  } | null>(null);
 
   const remove = useMutation({
     mutationFn: (entry: DirEntry) =>
@@ -485,23 +1485,136 @@ function Listing({
     onError,
   });
 
-  if (listing.entries.length === 0) {
-    return <p className="sub">{t("files.empty")}</p>;
-  }
+  // Drop-target state: which folder name is currently highlighted.
+  const [folderDropTarget, setFolderDropTarget] = useState<string | null>(null);
+
+  const handleDragStart = (e: React.DragEvent, full: string) => {
+    if (!dropEnabled) {
+      e.preventDefault();
+      return;
+    }
+    // If the dragged item is part of the selection, move all selected items.
+    // Otherwise move just the dragged item.
+    const paths = selected.has(full) ? Array.from(selected) : [full];
+    e.dataTransfer.setData("application/x-file-move", JSON.stringify(paths));
+    e.dataTransfer.effectAllowed = "move";
+  };
+
+  const handleFolderDragOver = (e: React.DragEvent, entryName: string) => {
+    if (
+      !dropEnabled ||
+      !e.dataTransfer.types.includes("application/x-file-move")
+    )
+      return;
+    e.preventDefault();
+    e.stopPropagation();
+    setFolderDropTarget(entryName);
+  };
+
+  const handleFolderDragLeave = () => setFolderDropTarget(null);
+
+  const handleFolderDrop = (e: React.DragEvent, entry: DirEntry) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setFolderDropTarget(null);
+    if (!dropEnabled) return;
+    const raw = e.dataTransfer.getData("application/x-file-move");
+    if (!raw) return;
+    const paths = JSON.parse(raw) as string[];
+    const destDir = joinPath(dir, entry.name);
+    void onMoveTo(paths, destDir);
+  };
 
   return (
     <>
       {listing.truncated && (
         <div className="notice warn">{t("files.truncated")}</div>
       )}
-      <ul className="file-list">
-        {listing.entries.map((entry) => {
+      {/* Hidden file input for context-menu upload */}
+      <input
+        ref={uploadRef}
+        type="file"
+        hidden
+        aria-label={t("files.contextMenu.upload")}
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file !== undefined) {
+            if (file.size > MAX_UPLOAD_BYTES) {
+              showToast(t("files.error.tooLarge"), "error");
+            } else {
+              void onBeforeUpload(file.name).then((proceed) => {
+                if (proceed) onUpload.mutate(file);
+              });
+            }
+          }
+          e.target.value = "";
+        }}
+      />
+      <ul
+        className="file-list"
+        onContextMenu={(e) => {
+          // Only fire for empty space (not bubbled from a file row).
+          if ((e.target as HTMLElement).closest(".file-row")) return;
+          e.preventDefault();
+          setContextMenu({ entry: null, x: e.clientX, y: e.clientY });
+        }}
+      >
+        {listing.entries.length === 0 && (
+          <li>
+            <p className="sub">{t("files.empty")}</p>
+          </li>
+        )}
+        {listing.entries.map((entry, idx) => {
           const full = joinPath(dir, entry.name);
+          const isDropTarget = entry.is_dir && folderDropTarget === entry.name;
           return (
             <li
               key={entry.name}
-              className={`file-row${openFile === full ? " active" : ""}`}
+              className={`file-row${openFile === full ? " active" : ""}${selected.has(full) ? " selected" : ""}${isDropTarget ? " drop-target" : ""}`}
+              draggable={dropEnabled}
+              onDragStart={(e) => handleDragStart(e, full)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setContextMenu({ entry, x: e.clientX, y: e.clientY });
+              }}
+              {...(entry.is_dir
+                ? {
+                    onDragOver: (e: React.DragEvent) =>
+                      handleFolderDragOver(e, entry.name),
+                    onDragLeave: handleFolderDragLeave,
+                    onDrop: (e: React.DragEvent) => handleFolderDrop(e, entry),
+                  }
+                : {})}
             >
+              {canEdit && (
+                <input
+                  type="checkbox"
+                  className="file-select"
+                  aria-label={entry.name}
+                  checked={selected.has(full)}
+                  onChange={() => {
+                    /* handled by onClick for modifier-key support */
+                  }}
+                  onClick={(e) => {
+                    if (e.shiftKey && lastClickedIdx.current !== null) {
+                      const lo = Math.min(lastClickedIdx.current, idx);
+                      const hi = Math.max(lastClickedIdx.current, idx);
+                      const next = new Set(selected);
+                      for (let i = lo; i <= hi; i++) {
+                        next.add(joinPath(dir, listing.entries[i].name));
+                      }
+                      onSelectionChange(next);
+                    } else {
+                      const next = new Set(selected);
+                      if (next.has(full)) next.delete(full);
+                      else next.add(full);
+                      onSelectionChange(next);
+                    }
+                    lastClickedIdx.current = idx;
+                  }}
+                />
+              )}
               <button
                 type="button"
                 className="file-name"
@@ -511,35 +1624,6 @@ function Listing({
                 <span aria-hidden="true">{entry.is_dir ? "📁 " : "📄 "}</span>
                 {entry.name}
               </button>
-              <span className="file-actions">
-                {!entry.is_dir && (
-                  <button
-                    type="button"
-                    className="btn sm ghost"
-                    onClick={() => download.mutate(entry)}
-                  >
-                    {t("files.download")}
-                  </button>
-                )}
-                {canEdit && (
-                  <button
-                    type="button"
-                    className="btn sm ghost"
-                    onClick={() => setRenaming(entry)}
-                  >
-                    {t("files.rename")}
-                  </button>
-                )}
-                {canEdit && (
-                  <button
-                    type="button"
-                    className="btn sm ghost danger"
-                    onClick={() => setDeleting(entry)}
-                  >
-                    {t("files.delete")}
-                  </button>
-                )}
-              </span>
             </li>
           );
         })}
@@ -566,11 +1650,223 @@ function Listing({
         onConfirm={() => deleting !== null && remove.mutate(deleting)}
         onClose={() => setDeleting(null)}
       />
+      {mkdirOpen && (
+        <MkdirDialog
+          dir={dir}
+          communityId={communityId}
+          serverId={serverId}
+          onClose={() => setMkdirOpen(false)}
+          onCreated={() => {
+            setMkdirOpen(false);
+            onChanged();
+          }}
+          onError={onError}
+        />
+      )}
+      {contextMenu !== null &&
+        (() => {
+          const ctxEntry = contextMenu.entry;
+          const isZip =
+            ctxEntry !== null &&
+            !ctxEntry.is_dir &&
+            ctxEntry.name.endsWith(".zip");
+          return (
+            <FileContextMenu
+              entry={ctxEntry}
+              x={contextMenu.x}
+              y={contextMenu.y}
+              canEdit={canEdit}
+              running={running}
+              onClose={() => setContextMenu(null)}
+              onOpen={
+                ctxEntry
+                  ? () => {
+                      setContextMenu(null);
+                      onEnter(ctxEntry);
+                    }
+                  : undefined
+              }
+              onDownload={
+                ctxEntry
+                  ? () => {
+                      setContextMenu(null);
+                      download.mutate(ctxEntry);
+                    }
+                  : undefined
+              }
+              onRename={
+                ctxEntry
+                  ? () => {
+                      setContextMenu(null);
+                      setRenaming(ctxEntry);
+                    }
+                  : undefined
+              }
+              onDelete={
+                ctxEntry
+                  ? () => {
+                      setContextMenu(null);
+                      setDeleting(ctxEntry);
+                    }
+                  : undefined
+              }
+              onUpload={() => {
+                setContextMenu(null);
+                uploadRef.current?.click();
+              }}
+              onNewFolder={() => {
+                setContextMenu(null);
+                setMkdirOpen(true);
+              }}
+              onExtract={
+                isZip
+                  ? () => {
+                      setContextMenu(null);
+                      void (async () => {
+                        try {
+                          const url = `${apiPath(
+                            "/api/communities/{community_id}/servers/{server_id}/files/download",
+                            { community_id: communityId, server_id: serverId },
+                          )}?path=${encodeURIComponent(joinPath(dir, ctxEntry.name))}`;
+                          const blob = await fetchFileBlob(url);
+                          const file = new File([blob], ctxEntry.name, {
+                            type: "application/zip",
+                          });
+                          onExtract(file);
+                        } catch (error) {
+                          onError(error);
+                        }
+                      })();
+                    }
+                  : undefined
+              }
+            />
+          );
+        })()}
     </>
   );
 }
 
+// ── Context menu ────────────────────────────────────────────────────────────
+
+function FileContextMenu({
+  entry,
+  x,
+  y,
+  canEdit,
+  running,
+  onClose,
+  onOpen,
+  onDownload,
+  onRename,
+  onDelete,
+  onUpload,
+  onNewFolder,
+  onExtract,
+}: {
+  entry: DirEntry | null;
+  x: number;
+  y: number;
+  canEdit: boolean;
+  running: boolean;
+  onClose: () => void;
+  onOpen?: () => void;
+  onDownload?: () => void;
+  onRename?: () => void;
+  onDelete?: () => void;
+  onUpload: () => void;
+  onNewFolder: () => void;
+  onExtract?: () => void;
+}) {
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClick = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        onClose();
+      }
+    };
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopImmediatePropagation();
+        onClose();
+      }
+    };
+    document.addEventListener("mousedown", handleClick);
+    // Use capture phase so this fires before the parent's bubble-phase
+    // keydown handler (registered earlier on document). Without this,
+    // the parent's Escape handler clears selection before
+    // stopImmediatePropagation can prevent it.
+    document.addEventListener("keydown", handleKey, true);
+    return () => {
+      document.removeEventListener("mousedown", handleClick);
+      document.removeEventListener("keydown", handleKey, true);
+    };
+  }, [onClose]);
+
+  return (
+    <div
+      ref={menuRef}
+      className="file-context-menu"
+      style={{ top: y, left: x }}
+      role="menu"
+    >
+      {entry !== null && onOpen && (
+        <button type="button" role="menuitem" onClick={onOpen}>
+          {t("files.contextMenu.open")}
+        </button>
+      )}
+      {entry !== null && onDownload && (
+        <button type="button" role="menuitem" onClick={onDownload}>
+          {entry.is_dir
+            ? t("files.contextMenu.downloadZip")
+            : t("files.contextMenu.download")}
+        </button>
+      )}
+      {entry !== null && canEdit && !running && onRename && (
+        <button type="button" role="menuitem" onClick={onRename}>
+          {t("files.contextMenu.rename")}
+        </button>
+      )}
+      {entry !== null && canEdit && !running && onDelete && (
+        <button
+          type="button"
+          role="menuitem"
+          className="danger"
+          onClick={onDelete}
+        >
+          {t("files.contextMenu.delete")}
+        </button>
+      )}
+      {canEdit && !running && onExtract && (
+        <button type="button" role="menuitem" onClick={onExtract}>
+          {t("files.contextMenu.extractHere")}
+        </button>
+      )}
+      {canEdit && !running && (
+        <button type="button" role="menuitem" onClick={onUpload}>
+          {t("files.contextMenu.upload")}
+        </button>
+      )}
+      {canEdit && !running && (
+        <button type="button" role="menuitem" onClick={onNewFolder}>
+          {t("files.contextMenu.newFolder")}
+        </button>
+      )}
+    </div>
+  );
+}
+
 // ── Viewer / editor ──────────────────────────────────────────────────────────
+
+/** Format a byte count into a human-readable string (B/KB/MB/GB). */
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024)
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
 
 function Viewer({
   path,
@@ -579,7 +1875,10 @@ function Viewer({
   canEdit,
   can,
   running,
+  fileSize,
+  onClose,
   onError,
+  onDraftChange,
 }: {
   path: string;
   communityId: string;
@@ -587,13 +1886,19 @@ function Viewer({
   canEdit: boolean;
   can: Can;
   running: boolean;
+  fileSize?: number;
+  onClose: () => void;
   onError: (error: unknown) => void;
+  onDraftChange: (hasDraft: boolean) => void;
 }) {
   const { showToast } = useToast();
   const queryClient = useQueryClient();
   // `null` until the user edits, so an untouched view always reflects the
   // server's content even after a save invalidates and refetches it.
   const [draft, setDraft] = useState<string | null>(null);
+  useEffect(() => {
+    onDraftChange(draft !== null);
+  }, [draft, onDraftChange]);
   const [historyOpen, setHistoryOpen] = useState(false);
 
   const canHistory = can("file:history", { serverId });
@@ -670,6 +1975,14 @@ function Viewer({
               {t("files.save")}
             </button>
           )}
+          <button
+            type="button"
+            className="btn sm ghost"
+            onClick={onClose}
+            aria-label={t("files.closeViewer")}
+          >
+            {"✕"}
+          </button>
         </span>
       </div>
       {historyOpen && (
@@ -701,7 +2014,14 @@ function Viewer({
           />
         </>
       ) : (
-        <p className="sub">{t("files.binary")}</p>
+        <>
+          <p className="sub">{t("files.cannotPreview")}</p>
+          {fileSize !== undefined && (
+            <p className="sub">
+              {t("files.fileSize", { size: formatSize(fileSize) })}
+            </p>
+          )}
+        </>
       )}
     </>
   );
@@ -780,7 +2100,9 @@ function HistoryDrawer({
         <ul className="files-history-list">
           {history.data.versions.map((versionId) => (
             <li key={versionId} className="files-history-row">
-              <span className="files-history-id">{versionId}</span>
+              <span className="files-history-date">
+                {versionDate(versionId).toLocaleString()}
+              </span>
               {canRollback && (
                 <button
                   type="button"
@@ -820,62 +2142,212 @@ function HistoryDrawer({
           }
         >
           <p>{t("files.rollback.dialogBody")}</p>
-          <p className="files-history-id">{confirming}</p>
+          <p className="files-history-date">
+            {versionDate(confirming).toLocaleString()}
+          </p>
         </Modal>
       )}
     </Modal>
   );
 }
 
-// ── Toolbar: upload + mkdir ──────────────────────────────────────────────────
+// ── Toolbar: select all + bulk operations ───────────────────────────────────
 
 function Toolbar({
-  dir,
   communityId,
   serverId,
   canEdit,
   running,
   onChanged,
   onError,
+  selected,
+  totalCount,
+  onSelectAll,
+  onDeselectAll,
+  onClearSelection,
 }: {
-  dir: string;
   communityId: string;
   serverId: string;
   canEdit: boolean;
   running: boolean;
   onChanged: () => void;
   onError: (error: unknown) => void;
+  selected: Set<string>;
+  totalCount: number;
+  onSelectAll: () => void;
+  onDeselectAll: () => void;
+  onClearSelection: () => void;
 }) {
-  const MAX_UPLOAD_BYTES = 512 * 1024 * 1024;
   const { showToast } = useToast();
-  const [mkdirOpen, setMkdirOpen] = useState(false);
-  const [extract, setExtract] = useState(false);
-  const progress = useUploadProgress();
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+  const [bulkMoveOpen, setBulkMoveOpen] = useState(false);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkProgress, setBulkProgress] = useState<string | null>(null);
 
-  const upload = useMutation({
-    mutationFn: (file: File) => {
-      const form = new FormData();
-      form.append("file", file);
-      progress.start(file.size);
-      return postFormWithProgress(
-        `${apiPath(
-          "/api/communities/{community_id}/servers/{server_id}/files/upload",
-          { community_id: communityId, server_id: serverId },
-        )}?path=${encodeURIComponent(dir)}&extract=${extract}` as never,
-        form,
-        progress.onProgress,
+  const bulkDelete = async () => {
+    const paths = Array.from(selected);
+    const total = paths.length;
+    setBulkDeleteOpen(false);
+    setBulkBusy(true);
+    let done = 0;
+    let failed = 0;
+    for (const path of paths) {
+      setBulkProgress(t("files.bulk.delete.progress", { done, total }));
+      try {
+        await api.delete(
+          `${filesBase(communityId, serverId)}?path=${encodeURIComponent(path)}` as never,
+        );
+        done += 1;
+      } catch (error) {
+        failed += 1;
+        if (onForbiddenCheck(error)) break;
+      }
+    }
+    setBulkBusy(false);
+    setBulkProgress(null);
+    if (failed === 0) {
+      showToast(t("files.bulk.delete.done", { done }), "success");
+    } else {
+      showToast(
+        t("files.bulk.delete.partial", { done, total, failed }),
+        "error",
       );
-    },
-    onSuccess: () => {
-      progress.reset();
-      showToast(t("files.uploaded"), "success");
-      onChanged();
-    },
-    onError: (error) => {
-      progress.reset();
+    }
+    onClearSelection();
+    onChanged();
+  };
+
+  const bulkDownload = async () => {
+    const paths = Array.from(selected);
+    const total = paths.length;
+
+    // Single file — download directly, no ZIP wrapper needed.
+    if (total === 1) {
+      const path = paths[0];
+      const filename = path.split("/").at(-1) ?? path;
+      setBulkBusy(true);
+      try {
+        await downloadFile(
+          `${apiPath(
+            "/api/communities/{community_id}/servers/{server_id}/files/download",
+            { community_id: communityId, server_id: serverId },
+          )}?path=${encodeURIComponent(path)}`,
+          filename,
+        );
+        showToast(t("files.bulk.download.done", { done: 1 }), "success");
+      } catch (error) {
+        if (!onForbiddenCheck(error)) {
+          showToast(
+            t("files.bulk.download.partial", { done: 0, total: 1, failed: 1 }),
+            "error",
+          );
+        }
+      }
+      setBulkBusy(false);
+      return;
+    }
+
+    // Multiple files — fetch all, bundle into a single ZIP.
+    setBulkBusy(true);
+    const files: Record<string, Uint8Array> = {};
+    let done = 0;
+    let failed = 0;
+    for (const path of paths) {
+      setBulkProgress(t("files.bulk.download.progress", { done, total }));
+      try {
+        const blob = await fetchFileBlob(
+          `${apiPath(
+            "/api/communities/{community_id}/servers/{server_id}/files/download",
+            { community_id: communityId, server_id: serverId },
+          )}?path=${encodeURIComponent(path)}`,
+        );
+        const buf = new Uint8Array(await blob.arrayBuffer());
+        // Use full path as ZIP key to avoid collisions between files with the
+        // same basename in different directories.
+        files[path] = buf;
+        done += 1;
+      } catch (error) {
+        failed += 1;
+        if (onForbiddenCheck(error)) break;
+      }
+    }
+
+    if (done > 0) {
+      const zipped = await new Promise<Uint8Array<ArrayBuffer>>(
+        (resolve, reject) => {
+          zip(files, (err, data) => {
+            if (err) reject(err);
+            else resolve(data);
+          });
+        },
+      );
+      const zipBlob = new Blob([zipped], { type: "application/zip" });
+      const url = URL.createObjectURL(zipBlob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "files.zip";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    }
+
+    setBulkBusy(false);
+    setBulkProgress(null);
+    if (failed === 0) {
+      showToast(t("files.bulk.download.done", { done }), "success");
+    } else {
+      showToast(
+        t("files.bulk.download.partial", { done, total, failed }),
+        "error",
+      );
+    }
+  };
+
+  const bulkMove = async (dest: string) => {
+    const paths = Array.from(selected);
+    const total = paths.length;
+    setBulkMoveOpen(false);
+    setBulkBusy(true);
+    let done = 0;
+    let failed = 0;
+    for (const path of paths) {
+      setBulkProgress(t("files.bulk.move.progress", { done, total }));
+      const name = path.split("/").at(-1) ?? path;
+      const to = dest === "" ? name : `${dest}/${name}`;
+      try {
+        await api.post(
+          apiPath(
+            "/api/communities/{community_id}/servers/{server_id}/files/rename",
+            { community_id: communityId, server_id: serverId },
+          ),
+          { body: JSON.stringify({ from: path, to }) },
+        );
+        done += 1;
+      } catch (error) {
+        failed += 1;
+        if (onForbiddenCheck(error)) break;
+      }
+    }
+    setBulkBusy(false);
+    setBulkProgress(null);
+    if (failed === 0) {
+      showToast(t("files.bulk.move.done", { done }), "success");
+    } else {
+      showToast(t("files.bulk.move.partial", { done, total, failed }), "error");
+    }
+    onClearSelection();
+    onChanged();
+  };
+
+  /** Check if error is a 403 and route through onForbidden; returns true if so. */
+  const onForbiddenCheck = (error: unknown): boolean => {
+    if (error instanceof ApiError && error.status === 403) {
       onError(error);
-    },
-  });
+      return true;
+    }
+    return false;
+  };
 
   if (!canEdit) {
     return null;
@@ -888,76 +2360,99 @@ function Toolbar({
   return (
     <>
       <div className="toolbar-row files-toolbar">
-        <label className="files-extract">
-          <input
-            type="checkbox"
-            checked={extract}
-            onChange={(e) => setExtract(e.target.checked)}
-          />
-          {t("files.extractZip")}
-        </label>
-        {running ? (
-          <button
-            type="button"
-            className="btn sm file-upload"
-            disabled
-            title={atRestTooltip}
-          >
-            {t("files.upload")}
-          </button>
-        ) : (
-          <label className="btn sm file-upload">
-            {t("files.upload")}
-            <input
-              type="file"
-              hidden
-              aria-label={t("files.upload")}
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file !== undefined) {
-                  if (file.size > MAX_UPLOAD_BYTES) {
-                    showToast(t("files.error.tooLarge"), "error");
-                  } else {
-                    upload.mutate(file);
-                  }
-                }
-                e.target.value = "";
-              }}
-            />
-          </label>
+        {totalCount > 0 && (
+          <>
+            <button
+              type="button"
+              className="btn sm ghost"
+              onClick={
+                selected.size === totalCount ? onDeselectAll : onSelectAll
+              }
+            >
+              {selected.size === totalCount
+                ? t("files.deselectAll")
+                : t("files.selectAll")}
+            </button>
+            {selected.size > 0 && (
+              <span className="files-selected-count">
+                {t("files.selectedCount", { count: selected.size })}
+              </span>
+            )}
+          </>
         )}
-        <button
-          type="button"
-          className="btn sm"
-          disabled={running}
-          title={atRestTooltip}
-          onClick={() => setMkdirOpen(true)}
-        >
-          {t("files.newFolder")}
-        </button>
+        {selected.size > 0 && (
+          <>
+            <button
+              type="button"
+              className="btn sm danger"
+              disabled={running || bulkBusy}
+              title={atRestTooltip}
+              onClick={() => setBulkDeleteOpen(true)}
+            >
+              {t("files.bulk.delete")}
+            </button>
+            <button
+              type="button"
+              className="btn sm"
+              disabled={bulkBusy}
+              onClick={() => void bulkDownload()}
+            >
+              {t("files.bulk.download")}
+            </button>
+            <button
+              type="button"
+              className="btn sm"
+              disabled={running || bulkBusy}
+              title={atRestTooltip}
+              onClick={() => setBulkMoveOpen(true)}
+            >
+              {t("files.bulk.move")}
+            </button>
+            {bulkProgress !== null && (
+              <span className="bulk-progress">{bulkProgress}</span>
+            )}
+          </>
+        )}
       </div>
-      {progress.active && (
-        <UploadProgress
-          loaded={progress.loaded}
-          total={progress.total}
-          percent={progress.percent}
-          elapsedMs={progress.elapsedMs}
-        />
-      )}
-      {mkdirOpen && (
-        <MkdirDialog
-          dir={dir}
-          communityId={communityId}
-          serverId={serverId}
-          onClose={() => setMkdirOpen(false)}
-          onCreated={() => {
-            setMkdirOpen(false);
-            onChanged();
-          }}
-          onError={onError}
+      <SimpleConfirmDialog
+        open={bulkDeleteOpen}
+        title={t("files.bulk.delete.dialogTitle")}
+        body={t("files.bulk.delete.dialogBody", { count: selected.size })}
+        confirmLabel={t("files.bulk.delete.confirm")}
+        onConfirm={() => void bulkDelete()}
+        onClose={() => setBulkDeleteOpen(false)}
+      />
+      {bulkMoveOpen && (
+        <BulkMoveDialog
+          onClose={() => setBulkMoveOpen(false)}
+          onMove={(dest) => void bulkMove(dest)}
         />
       )}
     </>
+  );
+}
+
+// ── Bulk move dialog ────────────────────────────────────────────────────────
+
+function BulkMoveDialog({
+  onClose,
+  onMove,
+}: {
+  onClose: () => void;
+  onMove: (dest: string) => void;
+}) {
+  const [dest, setDest] = useState("");
+
+  return (
+    <PromptDialog
+      title={t("files.bulk.move.dialogTitle")}
+      label={t("files.bulk.move.destLabel")}
+      value={dest}
+      onChange={setDest}
+      confirmLabel={t("files.bulk.move.confirm")}
+      onConfirm={() => onMove(dest.trim())}
+      onClose={onClose}
+    />
   );
 }
 
@@ -1116,6 +2611,65 @@ function PromptDialog({
           onChange={(e) => onChange(e.target.value)}
         />
       </label>
+    </Modal>
+  );
+}
+
+// ── Overwrite confirmation dialog ────────────────────────────────────────────
+
+function OverwriteConfirmDialog({
+  fileName,
+  showApplyAll,
+  onOverwrite,
+  onSkip,
+  onCancel,
+}: {
+  fileName: string;
+  showApplyAll: boolean;
+  onOverwrite: (applyAll: boolean) => void;
+  onSkip: (applyAll: boolean) => void;
+  onCancel: () => void;
+}) {
+  const [applyAll, setApplyAll] = useState(false);
+
+  return (
+    <Modal
+      open
+      title={t("files.overwrite.title")}
+      onClose={onCancel}
+      footer={
+        <>
+          <button type="button" className="btn ghost" onClick={onCancel}>
+            {t("common.cancel")}
+          </button>
+          <button
+            type="button"
+            className="btn"
+            onClick={() => onSkip(applyAll)}
+          >
+            {t("files.overwrite.skip")}
+          </button>
+          <button
+            type="button"
+            className="btn primary"
+            onClick={() => onOverwrite(applyAll)}
+          >
+            {t("files.overwrite.overwrite")}
+          </button>
+        </>
+      }
+    >
+      <p>{t("files.overwrite.body", { name: fileName })}</p>
+      {showApplyAll && (
+        <label className="field">
+          <input
+            type="checkbox"
+            checked={applyAll}
+            onChange={(e) => setApplyAll(e.target.checked)}
+          />
+          {t("files.overwrite.applyAll")}
+        </label>
+      )}
     </Modal>
   );
 }

@@ -486,6 +486,9 @@ export const en = {
     "No server host is available to take the backup right now.",
   "backups.error.invalidSchedule":
     "backup_interval_hours must be a whole number of hours of at least 1.",
+  "backups.error.serverMustBeStopped":
+    "The server must be stopped for this operation.",
+  "backups.error.serverBusy": "Another operation is in progress. Please wait.",
   "backups.error.tooLarge": "That file exceeds the 512 MiB upload limit.",
   "backups.error.generic": "Something went wrong. Please try again.",
 
@@ -494,7 +497,7 @@ export const en = {
   "files.denied": "You do not have permission to view this server's files.",
   "files.runningNotice":
     "Server is running — file edits apply to the running server immediately. Upload and folder creation require stopping the server first.",
-  "files.root": "root",
+  "files.root": "/",
   "files.loading": "Loading…",
   "files.listError": "Could not list this directory. Try refreshing.",
   "files.openError": "Could not open this file.",
@@ -502,8 +505,12 @@ export const en = {
   "files.noSelection": "Select a file to view or edit.",
   "files.truncated": "Listing truncated — too many entries to show them all.",
   "files.binary": "Binary file — download to view.",
+  "files.cannotPreview": "This file cannot be previewed.",
+  "files.fileSize": "Size: {size}",
+  "files.closeViewer": "Close viewer",
   "files.editorLabel": "File contents",
   "files.upload": "Upload",
+  "files.upload.preparing": "Preparing upload…",
   "files.extractZip": "Extract ZIP",
   "files.newFolder": "New folder",
   "files.folderName": "Folder name",
@@ -554,7 +561,84 @@ export const en = {
     "This directory is managed by the {noun} tab. Use the {noun} tab to add or remove content.",
   "files.error.goToContentTab": "Go to {noun} tab",
   "files.error.tooLarge": "That file exceeds the 512 MiB upload limit.",
+  "files.error.notFound": "File or directory not found.",
+  "files.error.fileTooLarge":
+    "The file exceeds the maximum allowed size (512 MiB for uploads, 4 MiB for edits).",
+  "files.error.invalidPath": "The file path is invalid.",
+  "files.error.isDirectory": "Cannot open a directory as a file.",
+  "files.error.notDirectory": "The path is a file, not a directory.",
+  "files.error.symlinkRefused": "Symbolic links are not allowed.",
+  "files.error.invalidInput": "The request was invalid.",
+  "files.error.workerUnavailable":
+    "The server agent is disconnected. Please try again later.",
+  "files.error.serverBusy": "Another operation is in progress. Please wait.",
+  "files.error.conflict":
+    "The operation could not be completed due to a conflict.",
   "files.error.generic": "Something went wrong. Please try again.",
+  "files.dropZone": "Drop files here to upload",
+  // Multi-select (issue #1462).
+  "files.selectAll": "Select all",
+  "files.deselectAll": "Deselect all",
+  "files.selectedCount": "{count} selected",
+  // Bulk operations (issue #1463).
+  "files.bulk.delete": "Delete selected",
+  "files.bulk.delete.dialogTitle": "Delete selected items",
+  "files.bulk.delete.dialogBody":
+    "This permanently deletes {count} selected item(s). This action cannot be undone.",
+  "files.bulk.delete.confirm": "Delete all",
+  "files.bulk.delete.progress": "Deleting {done}/{total}…",
+  "files.bulk.delete.done": "Deleted {done} item(s).",
+  "files.bulk.delete.partial":
+    "Deleted {done}/{total} item(s). {failed} failed.",
+  "files.bulk.download": "Download selected",
+  "files.bulk.download.progress": "Downloading {done}/{total}…",
+  "files.bulk.download.done": "Downloaded {done} file(s).",
+  "files.bulk.download.partial":
+    "Downloaded {done}/{total} file(s). {failed} failed.",
+  "files.bulk.move": "Move selected",
+  "files.bulk.move.dialogTitle": "Move selected items",
+  "files.bulk.move.destLabel": "Destination directory",
+  "files.bulk.move.confirm": "Move",
+  "files.bulk.move.progress": "Moving {done}/{total}…",
+  "files.bulk.move.done": "Moved {done} item(s).",
+  "files.bulk.move.partial": "Moved {done}/{total} item(s). {failed} failed.",
+  // Drag-and-drop folder upload.
+  "files.bulk.upload.progress": "Uploading {done}/{total}…",
+  "files.bulk.upload.done": "{done} files uploaded.",
+
+  // Drag-and-drop file organization (issue #1464).
+  "files.moved": "Moved.",
+  "files.error.moveConflict":
+    "Cannot move {name}: a file with that name already exists in the destination.",
+
+  // Context menu (issue #1465).
+  "files.contextMenu.open": "Open",
+  "files.contextMenu.download": "Download",
+  "files.contextMenu.downloadZip": "Download as ZIP",
+  "files.contextMenu.rename": "Rename",
+  "files.contextMenu.delete": "Delete",
+  "files.contextMenu.upload": "Upload file",
+  "files.contextMenu.newFolder": "New folder",
+  "files.contextMenu.extractHere": "Extract here",
+
+  // Navigation history (issue #1475).
+  "files.nav.back": "Back",
+  "files.nav.forward": "Forward",
+
+  // Unsaved changes guard (issue #1486).
+  "files.unsaved.title": "Unsaved changes",
+  "files.unsaved.body":
+    "You have unsaved changes. Do you want to discard them?",
+  "files.unsaved.discard": "Discard",
+
+  // Overwrite confirmation dialog.
+  "files.overwrite.title": "File already exists",
+  "files.overwrite.body":
+    '"{name}" already exists in this directory. Do you want to overwrite it?',
+  "files.overwrite.overwrite": "Overwrite",
+  "files.overwrite.skip": "Skip",
+  "files.overwrite.applyAll": "Apply to all remaining files",
+  "files.overwrite.multipleFolders": "{count} folders",
 
   // Players tab — attached op/whitelist groups (issue #453, WEBUI_SPEC.md 6.8).
   // One contiguous block to keep merge conflicts with sibling i18n PRs minimal.
@@ -578,6 +662,13 @@ export const en = {
   // Inline pointer to the full Groups management surface (Phase 6).
   "players.manageHint": "Create and edit groups in community settings.",
   "players.manageLink": "Community settings",
+  "players.error.unsettled":
+    "The server is starting or stopping — try again once it has settled.",
+  "players.error.serverMustBeStopped":
+    "The server must be stopped for this operation.",
+  "players.error.serverBusy": "Another operation is in progress. Please wait.",
+  "players.error.workerUnavailable":
+    "The server agent is disconnected. Please try again later.",
   "players.error.generic": "Something went wrong. Please try again.",
 
   // Sessions view — relay game session history (issue #961).
@@ -1353,6 +1444,8 @@ export const en = {
     "This server type does not support {nouns}.",
   "plugins.error.invalidSide": "Invalid side for this server type.",
   "plugins.error.notFound": "{Noun} not found. It may have been removed.",
+  "plugins.error.workerUnavailable":
+    "The server agent is disconnected. Please try again later.",
   "plugins.error.generic": "Something went wrong. Please try again.",
   // Dependency / compatibility validation checklist (issue #1307).
   "plugins.validation.heading": "Dependencies & compatibility",

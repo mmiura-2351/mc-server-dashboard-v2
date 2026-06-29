@@ -2,13 +2,13 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { useState } from "react";
 import { Link } from "react-router";
-import { api } from "../api/client.ts";
+import { ApiError, api } from "../api/client.ts";
 import { attachmentsKeys, groupsKeys } from "../api/communityQueryKeys.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
 import { useToast } from "../components/Toast.tsx";
 import { formatDateTime } from "../format.ts";
-import { t } from "../i18n/index.ts";
+import { type TranslationKey, t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
 
@@ -27,6 +27,27 @@ function kindLabel(kind: string): string {
     return t("players.kind.whitelist");
   }
   return kind;
+}
+
+// Map an attach/detach error to a specific message; otherwise generic.
+function playerErrorMessage(error: unknown): TranslationKey {
+  if (!(error instanceof ApiError)) return "players.error.generic";
+
+  switch (error.reason) {
+    case "server_unsettled":
+      return "players.error.unsettled";
+    case "server_not_stopped":
+      return "players.error.serverMustBeStopped";
+    case "server_busy":
+      return "players.error.serverBusy";
+  }
+
+  switch (error.status) {
+    case 503:
+      return "players.error.workerUnavailable";
+  }
+
+  return "players.error.generic";
 }
 
 export function ServerPlayersTab({
@@ -78,7 +99,7 @@ export function ServerPlayersTab({
     if (onForbidden(error)) {
       return;
     }
-    showToast(t("players.error.generic"), "error");
+    showToast(t(playerErrorMessage(error)), "error");
   };
 
   const attach = useMutation({
