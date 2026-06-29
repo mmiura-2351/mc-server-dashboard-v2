@@ -81,7 +81,6 @@ function fileOperationErrorMessage(error: unknown): TranslationKey {
       const r = error.reason;
       if (r === "server_unsettled" || r === "server_not_stopped")
         return "files.error.serverMustBeStopped";
-      if (r === "destination_exists") return "files.error.moveConflict";
       if (r === "server_busy") return "files.error.serverBusy";
       return "files.error.conflict";
     }
@@ -268,18 +267,20 @@ export function ServerFilesTab({
     [navNavigate, setUrlParams, dir, openFile],
   );
   const goBack = useCallback(() => {
-    const target = navGoBack();
+    if (!canGoBack) return;
     skipUrlSync.current += 1;
+    const target = navGoBack();
     // In-app back: replace the URL (the browser history already has this
     // state from the original navigation push).
     setUrlParams(target.dir, target.openFile, { replace: true });
-  }, [navGoBack, setUrlParams]);
+  }, [canGoBack, navGoBack, setUrlParams]);
   const goForward = useCallback(() => {
-    const target = navGoForward();
+    if (!canGoForward) return;
     skipUrlSync.current += 1;
+    const target = navGoForward();
     // In-app forward: replace the URL (same reason as goBack above).
     setUrlParams(target.dir, target.openFile, { replace: true });
-  }, [navGoForward, setUrlParams]);
+  }, [canGoForward, navGoForward, setUrlParams]);
 
   // URL → nav state: browser back/forward changed the URL externally. The
   // skip counter filters out URL changes triggered by our own navigate/
