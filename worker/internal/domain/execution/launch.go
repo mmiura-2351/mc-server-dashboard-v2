@@ -63,7 +63,7 @@ type LaunchPlan struct {
 
 // PathResolver maps a working-dir-relative path to the path a driver passes on
 // the launch command line: a host-absolute path for the now-removed host-process driver, the
-// in-container path for the container driver. relExists reports whether the
+// in-container path for the container driver. Exists reports whether the
 // relative path exists in the working set (the driver checks the host path).
 type PathResolver struct {
 	// Resolve maps a slash-separated working-dir-relative path to the driver's
