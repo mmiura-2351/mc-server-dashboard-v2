@@ -508,7 +508,10 @@ export function ServerFilesTab({
     for (const from of paths) {
       const name = from.split("/").at(-1) ?? from;
       const to = destDir === "" ? name : `${destDir}/${name}`;
-      if (from === to) continue;
+      // Skip no-op moves: dropping onto the item's current parent (from === to)
+      // or dropping a folder onto itself, where the drop target IS the dragged
+      // folder (from === destDir). Both avoid a doomed API call and toast (#1470).
+      if (from === to || from === destDir) continue;
       try {
         await api.post(
           apiPath(
