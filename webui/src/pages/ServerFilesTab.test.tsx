@@ -2134,6 +2134,67 @@ describe("ServerFilesTab drag-and-drop file organization", () => {
     });
   });
 
+  it("makes no rename call when a folder is dropped onto itself", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "world", is_dir: true },
+        { name: "readme.txt", is_dir: false },
+      ]),
+    });
+    mockApi.post.mockResolvedValue(undefined);
+    renderPage();
+    await openFiles();
+    await screen.findByText(/world/);
+
+    // Drag the "world" folder onto the "world" folder (self-drop). This would
+    // otherwise compute a move of "world" to "world/world".
+    const folderRow = screen.getByText(/world/).closest("li") as HTMLElement;
+    const dt = internalDataTransfer(["world"]);
+
+    fireEvent.dragOver(folderRow, { dataTransfer: dt });
+    fireEvent.drop(folderRow, { dataTransfer: dt });
+
+    // Let any async move work settle, then assert nothing happened: no rename
+    // API call and no toast (neither the moved success nor a conflict error).
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(mockApi.post).not.toHaveBeenCalled();
+    expect(screen.queryByText(t("files.moved"))).not.toBeInTheDocument();
+  });
+
+  it("skips the drop-target folder but moves the other selected items", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "world", is_dir: true },
+        { name: "a.txt", is_dir: false },
+      ]),
+    });
+    mockApi.post.mockResolvedValue(undefined);
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    // Select the drop-target folder and a file, then drop the selection onto
+    // the folder: only the file should move, the folder's self-drop is skipped.
+    fireEvent.click(screen.getByRole("checkbox", { name: "world" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }), {
+      ctrlKey: true,
+    });
+
+    const folderRow = screen.getByText(/world/).closest("li") as HTMLElement;
+    const dt = internalDataTransfer(["world", "a.txt"]);
+    fireEvent.drop(folderRow, { dataTransfer: dt });
+
+    await waitFor(() => expect(mockApi.post).toHaveBeenCalledTimes(1));
+    expect(JSON.parse(mockApi.post.mock.calls[0][1].body)).toEqual({
+      from: "a.txt",
+      to: "world/a.txt",
+    });
+  });
+
   it("shows a conflict error on 409", async () => {
     routeGet({
       detail: server(),
