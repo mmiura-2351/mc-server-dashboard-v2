@@ -295,12 +295,18 @@ bootstrap: $(GOLANGCI)
 # ---------------------------------------------------------------------------
 
 # Point git at the checked-in hooks. One command, no external dependency.
+# The .git/hooks/* symlinks are a backup safety net (see hooks-check) for the
+# primary checkout. Only create them when .git is a real directory; in a
+# worktree .git is a gitdir-pointer file, the `ln` would fail, and
+# core.hooksPath alone already keeps the hooks active.
 hooks-install:
 	git config core.hooksPath .githooks
-	@for h in post-checkout pre-commit pre-push; do \
-		ln -sf "../../.githooks/$$h" ".git/hooks/$$h"; \
-	done
-	@echo "git hooks installed (core.hooksPath -> .githooks, symlinks in .git/hooks/)"
+	@if [ -d .git ]; then \
+		for h in post-checkout pre-commit pre-push; do \
+			ln -sf "../../.githooks/$$h" ".git/hooks/$$h"; \
+		done; \
+	fi
+	@echo "git hooks installed (core.hooksPath -> .githooks)"
 
 # Preflight for `make check`: assert core.hooksPath and git identity on the
 # PRIMARY checkout; skip silently on CI runners and on agent worktrees (which
