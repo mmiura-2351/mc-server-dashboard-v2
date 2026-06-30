@@ -140,6 +140,73 @@ async def test_edit_history_rollback_round_trip(tmp_path: Path) -> None:
     assert rolled == b"motd=original"
 
 
+async def test_read_version_returns_retained_bytes(tmp_path: Path) -> None:
+    """read_version serves a retained version's exact bytes (preview pre-rollback)."""
+
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await _seed(storage, community, server)
+    adapter = StorageFileStoreAdapter(storage=storage)
+    cid, sid = CommunityId(community), ServerId(server)
+
+    # Edit once so the original content (b"motd=original") is retained as a version.
+    await adapter.write_file(
+        community_id=cid,
+        server_id=sid,
+        rel_path="server.properties",
+        content=b"motd=v1",
+    )
+    versions = await adapter.list_versions(
+        community_id=cid, server_id=sid, rel_path="server.properties"
+    )
+    assert len(versions) == 1
+
+    out = await adapter.read_version(
+        community_id=cid,
+        server_id=sid,
+        rel_path="server.properties",
+        version_id=versions[0],
+    )
+    assert out == b"motd=original"
+    # current/ is untouched by the preview read.
+    assert (
+        await adapter.read_file(
+            community_id=cid, server_id=sid, rel_path="server.properties"
+        )
+        == b"motd=v1"
+    )
+
+
+async def test_read_version_unknown_version_is_file_not_found(tmp_path: Path) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await _seed(storage, community, server)
+    adapter = StorageFileStoreAdapter(storage=storage)
+
+    with pytest.raises(ServerFileNotFoundError):
+        await adapter.read_version(
+            community_id=CommunityId(community),
+            server_id=ServerId(server),
+            rel_path="server.properties",
+            version_id="00000000000000000000-deadbeef",
+        )
+
+
+async def test_read_version_traversal_is_invalid_path(tmp_path: Path) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await _seed(storage, community, server)
+    adapter = StorageFileStoreAdapter(storage=storage)
+
+    with pytest.raises(InvalidFilePathError):
+        await adapter.read_version(
+            community_id=CommunityId(community),
+            server_id=ServerId(server),
+            rel_path="../escape",
+            version_id="v1",
+        )
+
+
 async def test_edit_round_trips_against_populated_snapshot(tmp_path: Path) -> None:
     """An at-rest edit on a populated snapshot persists and reads back (issue #542).
 

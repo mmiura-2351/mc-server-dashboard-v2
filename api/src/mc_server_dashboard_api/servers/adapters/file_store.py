@@ -330,6 +330,24 @@ class StorageFileStoreAdapter(FileStore):
             raise ServerFileNotFoundError(str(server_id.value)) from exc
         return [version.value for version in versions]
 
+    async def read_version(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        rel_path: str,
+        version_id: str,
+    ) -> bytes:
+        community, server = _scope(community_id, server_id)
+        try:
+            return await self._storage.read_file_version(
+                community, server, _rel_path(rel_path), VersionId(version_id)
+            )
+        except PathTraversalError as exc:
+            raise InvalidFilePathError(rel_path) from exc
+        except NotFoundError as exc:
+            raise ServerFileNotFoundError(str(server_id.value)) from exc
+
     async def rollback(
         self,
         *,

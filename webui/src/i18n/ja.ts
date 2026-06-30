@@ -553,6 +553,11 @@ export const ja: Record<TranslationKey, string> = {
     "最新のバージョンのみが保持され（既定で10件）、古いものは破棄されます。",
   "files.history.rollback": "ロールバック",
   "files.history.close": "閉じる",
+  "files.history.preview.title": "バージョンのプレビュー",
+  "files.history.preview.close": "プレビューを閉じる",
+  "files.history.preview.loading": "バージョンを読み込んでいます…",
+  "files.history.preview.error": "このバージョンを読み込めませんでした。",
+  "files.history.preview.binary": "このバージョンはプレビューできません。",
   "files.rollback.dialogTitle": "ファイルをロールバック",
   "files.rollback.dialogBody":
     "現在のファイルを選択したバージョンで置き換えます。サーバーを停止する必要があります。",

@@ -7647,6 +7647,80 @@
         "summary": "Upload File"
       }
     },
+    "/api/communities/{community_id}/servers/{server_id}/files/version": {
+      "get": {
+        "description": "Read a specific retained version's content (file:read, preview).\n\nReached from the history drawer (``file:history``-gated to list versions),\nthis previews a prior version's bytes read-only before a rollback. It returns\nfile content, so it is gated by ``file:read`` like the current-file read\nroute \u2014 ``file:history`` enumerates versions but does not grant content\naccess. Authoritative-only like ``/history``; an unknown path/version is 404\nand a traversal-unsafe path is 422. The bytes are base64-encoded for JSON\ntransport, matching the read route.",
+        "operationId": "read_file_version_api_communities__community_id__servers__server_id__files_version_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "version_id",
+            "required": true,
+            "schema": {
+              "title": "Version Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileContentResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Read File Version"
+      }
+    },
     "/api/communities/{community_id}/servers/{server_id}/groups": {
       "get": {
         "operationId": "list_server_groups_api_communities__community_id__servers__server_id__groups_get",

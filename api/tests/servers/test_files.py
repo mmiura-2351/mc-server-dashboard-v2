@@ -36,6 +36,7 @@ from mc_server_dashboard_api.servers.application.files import (
     ListFileVersions,
     MakeDir,
     ReadFile,
+    ReadFileVersion,
     RenameFile,
     RollbackFile,
     SearchFiles,
@@ -285,6 +286,20 @@ class FakeFileStore(FileStore):
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> list[str]:
         return self.versions.get(rel_path, [])
+
+    async def read_version(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        rel_path: str,
+        version_id: str,
+    ) -> bytes:
+        # Mirror Storage.read_file_version: serve the retained bytes; an unknown
+        # (rel_path, version_id) is a missing version (404).
+        if (rel_path, version_id) not in self.version_bytes:
+            raise ServerFileNotFoundError(str(server_id.value))
+        return self.version_bytes[(rel_path, version_id)]
 
     async def rollback(
         self,
@@ -1362,6 +1377,69 @@ async def test_history_lists_versions() -> None:
         server_id=ServerId(server_id),
         rel_path="f",
     ) == ["v2", "v1"]
+
+
+async def test_read_version_returns_retained_bytes() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    uow = FakeUnitOfWork()
+    _seed(
+        uow,
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.STOPPED,
+        ),
+    )
+    store = FakeFileStore()
+    store.version_bytes[("f", "v1")] = b"old-content"
+    use_case = ReadFileVersion(uow=uow, file_store=store)
+    assert (
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="f",
+            version_id="v1",
+        )
+        == b"old-content"
+    )
+
+
+async def test_read_version_unknown_version_is_not_found() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    uow = FakeUnitOfWork()
+    _seed(
+        uow,
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.STOPPED,
+        ),
+    )
+    store = FakeFileStore()
+    use_case = ReadFileVersion(uow=uow, file_store=store)
+    with pytest.raises(ServerFileNotFoundError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="f",
+            version_id="missing",
+        )
+
+
+async def test_read_version_missing_server_is_not_found() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    uow = FakeUnitOfWork()  # no server seeded
+    store = FakeFileStore()
+    use_case = ReadFileVersion(uow=uow, file_store=store)
+    with pytest.raises(ServerNotFoundError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="f",
+            version_id="v1",
+        )
 
 
 async def test_rollback_at_rest_calls_store() -> None:

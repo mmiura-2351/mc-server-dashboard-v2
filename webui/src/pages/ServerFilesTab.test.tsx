@@ -734,6 +734,91 @@ describe("ServerFilesTab history + rollback", () => {
     });
   });
 
+  it("previews a version's content read-only when its date is clicked", async () => {
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.includes("/files/version")) {
+        return Promise.resolve({
+          path: "a b.txt",
+          content_base64: encodeUtf8Base64("OLD VERSION"),
+        });
+      }
+      if (path.includes("/files/history")) {
+        return Promise.resolve({ path: "a b.txt", versions: [VID1] });
+      }
+      if (path.includes("/files?path=") && !path.includes("list=")) {
+        return Promise.resolve({
+          path: "a b.txt",
+          content_base64: encodeUtf8Base64("current"),
+        });
+      }
+      if (path.includes("/files?path=")) {
+        return Promise.resolve(listing([{ name: "a b.txt", is_dir: false }]));
+      }
+      return Promise.resolve(server());
+    });
+    renderPage();
+    await openFiles();
+
+    fireEvent.click(await screen.findByText(/a b\.txt/));
+    await screen.findByLabelText(t("files.editorLabel"));
+    fireEvent.click(screen.getByRole("button", { name: t("files.history") }));
+
+    const date1 = versionDate(VID1).toLocaleString();
+    fireEvent.click(await screen.findByText(date1));
+
+    expect(
+      await screen.findByText(t("files.history.preview.title")),
+    ).toBeInTheDocument();
+    // The version's bytes render read-only (not the current file's content).
+    const previewArea = await screen.findByDisplayValue("OLD VERSION");
+    expect(previewArea).toHaveAttribute("readonly");
+
+    await waitFor(() =>
+      expect(mockApi.get).toHaveBeenCalledWith(
+        `${FILES_BASE}/version?path=a%20b.txt&version_id=${VID1}`,
+      ),
+    );
+  });
+
+  it("shows a not-previewable message for a binary version", async () => {
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.includes("/files/version")) {
+        return Promise.resolve({
+          path: "a b.txt",
+          // A leading NUL byte makes isProbablyText() classify it as binary.
+          content_base64: encodeUtf8Base64("\u0000binary"),
+        });
+      }
+      if (path.includes("/files/history")) {
+        return Promise.resolve({ path: "a b.txt", versions: [VID1] });
+      }
+      if (path.includes("/files?path=") && !path.includes("list=")) {
+        return Promise.resolve({
+          path: "a b.txt",
+          content_base64: encodeUtf8Base64("current\n"),
+        });
+      }
+      if (path.includes("/files?path=")) {
+        return Promise.resolve(listing([{ name: "a b.txt", is_dir: false }]));
+      }
+      return Promise.resolve(server());
+    });
+    renderPage();
+    await openFiles();
+
+    fireEvent.click(await screen.findByText(/a b\.txt/));
+    await screen.findByLabelText(t("files.editorLabel"));
+    fireEvent.click(screen.getByRole("button", { name: t("files.history") }));
+
+    fireEvent.click(
+      await screen.findByText(versionDate(VID1).toLocaleString()),
+    );
+
+    expect(
+      await screen.findByText(t("files.history.preview.binary")),
+    ).toBeInTheDocument();
+  });
+
   it("Escape closes only the rollback confirm, leaving the history drawer open", async () => {
     mockApi.get.mockImplementation((path: string) => {
       if (path.includes("/files/history")) {

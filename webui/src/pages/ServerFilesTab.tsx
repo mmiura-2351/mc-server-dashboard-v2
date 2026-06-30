@@ -2052,6 +2052,9 @@ function HistoryDrawer({
   const { showToast } = useToast();
   const queryClient = useQueryClient();
   const [confirming, setConfirming] = useState<string | null>(null);
+  // The version selected for a read-only content preview, or `null` when the
+  // preview is closed. Keyed query fetches only while a version is selected.
+  const [previewing, setPreviewing] = useState<string | null>(null);
 
   const historyKey = ["files", "history", communityId, serverId, path];
   const history = useQuery({
@@ -2060,6 +2063,15 @@ function HistoryDrawer({
       api.get(
         `${filesBase(communityId, serverId)}/history?path=${encodeURIComponent(path)}` as never,
       ) as Promise<FileVersions>,
+  });
+
+  const preview = useQuery({
+    queryKey: ["files", "version", communityId, serverId, path, previewing],
+    enabled: previewing !== null,
+    queryFn: () =>
+      api.get(
+        `${filesBase(communityId, serverId)}/version?path=${encodeURIComponent(path)}&version_id=${encodeURIComponent(previewing ?? "")}` as never,
+      ) as Promise<FileContent>,
   });
 
   const rollback = useMutation({
@@ -2103,9 +2115,13 @@ function HistoryDrawer({
         <ul className="files-history-list">
           {history.data.versions.map((versionId) => (
             <li key={versionId} className="files-history-row">
-              <span className="files-history-date">
+              <button
+                type="button"
+                className="link files-history-date"
+                onClick={() => setPreviewing(versionId)}
+              >
                 {versionDate(versionId).toLocaleString()}
-              </span>
+              </button>
               {canRollback && (
                 <button
                   type="button"
@@ -2148,6 +2164,41 @@ function HistoryDrawer({
           <p className="files-history-date">
             {versionDate(confirming).toLocaleString()}
           </p>
+        </Modal>
+      )}
+      {previewing !== null && (
+        <Modal
+          open
+          title={t("files.history.preview.title")}
+          onClose={() => setPreviewing(null)}
+          footer={
+            <button
+              type="button"
+              className="btn ghost"
+              onClick={() => setPreviewing(null)}
+            >
+              {t("files.history.preview.close")}
+            </button>
+          }
+        >
+          <p className="files-history-date">
+            {versionDate(previewing).toLocaleString()}
+          </p>
+          {preview.isPending ? (
+            <p className="sub">{t("files.history.preview.loading")}</p>
+          ) : preview.isError ? (
+            <p className="field-error">{t("files.history.preview.error")}</p>
+          ) : isProbablyText(preview.data.content_base64) ? (
+            <textarea
+              className="file-editor"
+              spellCheck={false}
+              readOnly
+              aria-label={t("files.editorLabel")}
+              value={decodeBase64Utf8(preview.data.content_base64)}
+            />
+          ) : (
+            <p className="sub">{t("files.history.preview.binary")}</p>
+          )}
         </Modal>
       )}
     </Modal>

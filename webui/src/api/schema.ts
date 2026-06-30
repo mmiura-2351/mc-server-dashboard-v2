@@ -1130,6 +1130,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/communities/{community_id}/servers/{server_id}/files/version": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read File Version
+         * @description Read a specific retained version's content (file:read, preview).
+         *
+         *     Reached from the history drawer (``file:history``-gated to list versions),
+         *     this previews a prior version's bytes read-only before a rollback. It returns
+         *     file content, so it is gated by ``file:read`` like the current-file read
+         *     route — ``file:history`` enumerates versions but does not grant content
+         *     access. Authoritative-only like ``/history``; an unknown path/version is 404
+         *     and a traversal-unsafe path is 422. The bytes are base64-encoded for JSON
+         *     transport, matching the read route.
+         */
+        get: operations["read_file_version_api_communities__community_id__servers__server_id__files_version_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/communities/{community_id}/servers/{server_id}/groups": {
         parameters: {
             query?: never;
@@ -5770,6 +5798,41 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_file_version_api_communities__community_id__servers__server_id__files_version_get: {
+        parameters: {
+            query: {
+                path: string;
+                version_id: string;
+            };
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FileContentResponse"];
+                };
             };
             /** @description Validation Error */
             422: {
