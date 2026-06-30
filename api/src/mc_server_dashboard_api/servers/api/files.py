@@ -28,6 +28,8 @@ every denial into ``invalid_path``. The file-API problem-reason catalog is:
 - ``not_a_directory`` (422) — a directory listing whose path is a regular file.
 - ``symlink_refused`` (422) — the Worker refused to follow a path-component
   symlink (the FR-FILE-4 escape-vector defence).
+- ``invalid_version_id`` (422) — a malformed ``version_id`` (outside the
+  ``VersionId`` charset) on the rollback / version-preview routes.
 - ``file_too_large`` (413) — a read result or an edit payload past the
   control-plane file cap (the edge ``MAX_EDIT_BYTES`` cap shares this reason).
 
@@ -106,6 +108,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     FileAlreadyExistsError,
     FileTooLargeError,
     InvalidFilePathError,
+    InvalidVersionIdError,
     ServerBusyError,
     ServerFileNotFoundError,
     ServerFilesUnsettledError,
@@ -398,9 +401,10 @@ async def read_file_version(
     this previews a prior version's bytes read-only before a rollback. It returns
     file content, so it is gated by ``file:read`` like the current-file read
     route — ``file:history`` enumerates versions but does not grant content
-    access. Authoritative-only like ``/history``; an unknown path/version is 404
-    and a traversal-unsafe path is 422. The bytes are base64-encoded for JSON
-    transport, matching the read route.
+    access. Authoritative-only like ``/history``; an unknown path/version is 404,
+    a traversal-unsafe path is 422 ``invalid_path``, and a malformed version id is
+    422 ``invalid_version_id``. The bytes are base64-encoded for JSON transport,
+    matching the read route.
     """
 
     try:
@@ -416,6 +420,8 @@ async def read_file_version(
         raise _not_found() from exc
     except InvalidFilePathError as exc:
         raise _unprocessable("invalid_path") from exc
+    except InvalidVersionIdError as exc:
+        raise _unprocessable("invalid_version_id") from exc
     return FileContentResponse(
         path=path, content_base64=base64.b64encode(content).decode("ascii")
     )
@@ -464,6 +470,8 @@ async def rollback_file(
         raise _not_found() from exc
     except InvalidFilePathError as exc:
         raise _unprocessable("invalid_path") from exc
+    except InvalidVersionIdError as exc:
+        raise _unprocessable("invalid_version_id") from exc
     except ServerNotStoppedError as exc:
         await _record_file_failure(
             recorder, ops.FILE_ROLLBACK, authorized, community_id, server_id

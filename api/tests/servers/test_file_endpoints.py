@@ -70,6 +70,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     FileAlreadyExistsError,
     FileTooLargeError,
     InvalidFilePathError,
+    InvalidVersionIdError,
     ServerBusyError,
     ServerFileNotFoundError,
     ServerFilesUnsettledError,
@@ -647,6 +648,23 @@ def test_version_traversal_is_422() -> None:
     assert resp.json()["reason"] == "invalid_path"
 
 
+def test_version_malformed_version_id_is_422() -> None:
+    # A version_id outside the retained-version charset is bad client input, not an
+    # internal fault: 422 invalid_version_id, never a 500 (issue #1527).
+    app = _app(
+        member=True,
+        allow=True,
+        version=_FakeUseCase(error=InvalidVersionIdError("bad.id")),
+    )
+    client = next(_client(app))
+    resp = client.get(
+        _url(uuid.uuid4(), uuid.uuid4(), "/version"),
+        params={"path": "f", "version_id": "bad.id"},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_version_id"
+
+
 def test_rollback_success_is_204() -> None:
     use_case = _FakeUseCase()
     app = _app(member=True, allow=True, rollback=use_case)
@@ -674,6 +692,24 @@ def test_rollback_while_running_is_409() -> None:
     )
     assert resp.status_code == 409
     assert resp.json()["reason"] == "server_not_stopped"
+
+
+def test_rollback_malformed_version_id_is_422() -> None:
+    # Same posture as the preview route: a malformed version_id is 422
+    # invalid_version_id, never a 500 (issue #1527).
+    app = _app(
+        member=True,
+        allow=True,
+        rollback=_FakeUseCase(error=InvalidVersionIdError("bad.id")),
+    )
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/rollback"),
+        params={"path": "f"},
+        json={"version_id": "bad.id"},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_version_id"
 
 
 # --- upload ----------------------------------------------------------------

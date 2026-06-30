@@ -7,10 +7,11 @@ servers *domain* and *application* never import the storage context (import-lint
 contract).
 
 The seam translates the storage value objects (``RelPath`` rejects traversal at
-construction; ``VersionId`` names a retained version) and the storage errors
-(``NotFoundError`` -> :class:`ServerFileNotFoundError`, ``PathTraversalError`` ->
-:class:`InvalidFilePathError`) so no storage type crosses back into the servers
-layer.
+construction; ``VersionId`` names a retained version, rejecting a malformed id)
+and the storage errors (``NotFoundError`` -> :class:`ServerFileNotFoundError`,
+``PathTraversalError`` -> :class:`InvalidFilePathError`, a ``VersionId``
+``ValueError`` -> :class:`InvalidVersionIdError`) so no storage type crosses back
+into the servers layer.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from collections.abc import AsyncIterator
 
 from mc_server_dashboard_api.servers.domain.errors import (
     InvalidFilePathError,
+    InvalidVersionIdError,
     ServerFileNotFoundError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileEntry, FileStore
@@ -57,6 +59,16 @@ def _rel_path(raw: str) -> RelPath:
         return RelPath(raw)
     except PathTraversalError as exc:
         raise InvalidFilePathError(raw) from exc
+
+
+def _version_id(raw: str) -> VersionId:
+    # VersionId construction enforces the retained-version id charset
+    # ([a-zA-Z0-9_-]); a malformed id raises a plain ValueError, surfaced as the
+    # servers file error so a bad client-supplied version id is a 422, not a 500.
+    try:
+        return VersionId(raw)
+    except ValueError as exc:
+        raise InvalidVersionIdError(raw) from exc
 
 
 class StorageFileStoreAdapter(FileStore):
@@ -341,7 +353,7 @@ class StorageFileStoreAdapter(FileStore):
         community, server = _scope(community_id, server_id)
         try:
             return await self._storage.read_file_version(
-                community, server, _rel_path(rel_path), VersionId(version_id)
+                community, server, _rel_path(rel_path), _version_id(version_id)
             )
         except PathTraversalError as exc:
             raise InvalidFilePathError(rel_path) from exc
@@ -359,7 +371,7 @@ class StorageFileStoreAdapter(FileStore):
         community, server = _scope(community_id, server_id)
         try:
             await self._storage.rollback_file(
-                community, server, _rel_path(rel_path), VersionId(version_id)
+                community, server, _rel_path(rel_path), _version_id(version_id)
             )
         except PathTraversalError as exc:
             raise InvalidFilePathError(rel_path) from exc
