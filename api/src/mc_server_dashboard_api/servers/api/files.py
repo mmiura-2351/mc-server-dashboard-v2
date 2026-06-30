@@ -106,6 +106,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     FileAlreadyExistsError,
     FileTooLargeError,
     InvalidFilePathError,
+    InvalidVersionIdError,
     ServerBusyError,
     ServerFileNotFoundError,
     ServerFilesUnsettledError,
@@ -398,9 +399,10 @@ async def read_file_version(
     this previews a prior version's bytes read-only before a rollback. It returns
     file content, so it is gated by ``file:read`` like the current-file read
     route — ``file:history`` enumerates versions but does not grant content
-    access. Authoritative-only like ``/history``; an unknown path/version is 404
-    and a traversal-unsafe path is 422. The bytes are base64-encoded for JSON
-    transport, matching the read route.
+    access. Authoritative-only like ``/history``; an unknown path/version is 404,
+    a traversal-unsafe path is 422 ``invalid_path``, and a malformed version id is
+    422 ``invalid_version_id``. The bytes are base64-encoded for JSON transport,
+    matching the read route.
     """
 
     try:
@@ -416,6 +418,8 @@ async def read_file_version(
         raise _not_found() from exc
     except InvalidFilePathError as exc:
         raise _unprocessable("invalid_path") from exc
+    except InvalidVersionIdError as exc:
+        raise _unprocessable("invalid_version_id") from exc
     return FileContentResponse(
         path=path, content_base64=base64.b64encode(content).decode("ascii")
     )
@@ -464,6 +468,8 @@ async def rollback_file(
         raise _not_found() from exc
     except InvalidFilePathError as exc:
         raise _unprocessable("invalid_path") from exc
+    except InvalidVersionIdError as exc:
+        raise _unprocessable("invalid_version_id") from exc
     except ServerNotStoppedError as exc:
         await _record_file_failure(
             recorder, ops.FILE_ROLLBACK, authorized, community_id, server_id

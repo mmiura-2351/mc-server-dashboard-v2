@@ -224,8 +224,9 @@ class FileStore(abc.ABC):
     ) -> bytes:
         """Read a specific retained version's bytes (preview before rollback).
 
-        Raises :class:`ServerFileNotFoundError` for an unknown path/version and
-        :class:`InvalidFilePathError` for a traversal-unsafe path.
+        Raises :class:`ServerFileNotFoundError` for an unknown path/version,
+        :class:`InvalidFilePathError` for a traversal-unsafe path, and
+        :class:`InvalidVersionIdError` for a malformed ``version_id``.
         """
 
     @abc.abstractmethod
@@ -239,5 +240,6 @@ class FileStore(abc.ABC):
     ) -> None:
         """Restore a file to a retained version (file:rollback, FR-FILE-3).
 
-        Raises :class:`ServerFileNotFoundError` for an unknown path/version.
+        Raises :class:`ServerFileNotFoundError` for an unknown path/version and
+        :class:`InvalidVersionIdError` for a malformed ``version_id``.
         """

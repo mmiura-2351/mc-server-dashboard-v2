@@ -249,6 +249,17 @@ class InvalidFilePathError(ServerError):
         self.reason = reason
 
 
+class InvalidVersionIdError(ServerError):
+    """A version id was malformed (outside the retained-version id charset).
+
+    Raised at the at-rest seam when a client-supplied ``version_id`` does not
+    match the storage ``VersionId`` charset (``[a-zA-Z0-9_-]``): the rollback and
+    version-preview routes carry the raw id straight to the seam, so a bad id is a
+    client error, not an internal fault. The edge maps this to 422
+    ``invalid_version_id`` (distinct from the path-syntax ``invalid_path``).
+    """
+
+
 class FileTooLargeError(ServerError):
     """An edit exceeded the file-size cap (Section 6.10 bounds).
 

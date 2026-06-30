@@ -19,6 +19,7 @@ import pytest
 from mc_server_dashboard_api.servers.adapters.file_store import StorageFileStoreAdapter
 from mc_server_dashboard_api.servers.domain.errors import (
     InvalidFilePathError,
+    InvalidVersionIdError,
     ServerFileNotFoundError,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
@@ -204,6 +205,54 @@ async def test_read_version_traversal_is_invalid_path(tmp_path: Path) -> None:
             server_id=ServerId(server),
             rel_path="../escape",
             version_id="v1",
+        )
+
+
+async def test_read_version_malformed_version_id_is_invalid_version_id(
+    tmp_path: Path,
+) -> None:
+    """A malformed version_id is a mapped InvalidVersionIdError, not a bare ValueError.
+
+    ``VersionId('bad.id')`` raises a plain ``ValueError`` (a char outside
+    ``[a-zA-Z0-9_-]``); the seam translates it so the preview route returns 422
+    rather than an unhandled 500 (issue #1527).
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await _seed(storage, community, server)
+    adapter = StorageFileStoreAdapter(storage=storage)
+
+    with pytest.raises(InvalidVersionIdError):
+        await adapter.read_version(
+            community_id=CommunityId(community),
+            server_id=ServerId(server),
+            rel_path="server.properties",
+            version_id="bad.id",
+        )
+
+
+async def test_rollback_malformed_version_id_is_invalid_version_id(
+    tmp_path: Path,
+) -> None:
+    """A malformed version_id is a mapped InvalidVersionIdError on rollback too.
+
+    Same seam translation as the preview read: the rollback route carries the raw
+    ``version_id`` to the seam, so a bad id must surface as the mapped domain error
+    (422), never an unhandled ValueError (500, issue #1527).
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await _seed(storage, community, server)
+    adapter = StorageFileStoreAdapter(storage=storage)
+
+    with pytest.raises(InvalidVersionIdError):
+        await adapter.rollback(
+            community_id=CommunityId(community),
+            server_id=ServerId(server),
+            rel_path="server.properties",
+            version_id="bad.id",
         )
 
 

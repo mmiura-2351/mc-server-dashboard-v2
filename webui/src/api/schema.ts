@@ -1145,9 +1145,10 @@ export interface paths {
          *     this previews a prior version's bytes read-only before a rollback. It returns
          *     file content, so it is gated by ``file:read`` like the current-file read
          *     route — ``file:history`` enumerates versions but does not grant content
-         *     access. Authoritative-only like ``/history``; an unknown path/version is 404
-         *     and a traversal-unsafe path is 422. The bytes are base64-encoded for JSON
-         *     transport, matching the read route.
+         *     access. Authoritative-only like ``/history``; an unknown path/version is 404,
+         *     a traversal-unsafe path is 422 ``invalid_path``, and a malformed version id is
+         *     422 ``invalid_version_id``. The bytes are base64-encoded for JSON transport,
+         *     matching the read route.
          */
         get: operations["read_file_version_api_communities__community_id__servers__server_id__files_version_get"];
         put?: never;
