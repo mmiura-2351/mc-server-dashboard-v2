@@ -70,7 +70,7 @@ const (
 )
 
 // InstanceSpec is everything a driver needs to launch one server instance. It is
-// backend-neutral: a host-process, container, or future k8s driver all consume
+// backend-neutral: a now-removed host-process, container, or future k8s driver all consume
 // the same spec (FR-EXE-4). The working set under WorkingDir is prepared by the
 // hydrate path (epic #8); this milestone runs against an empty/pre-seeded dir.
 type InstanceSpec struct {

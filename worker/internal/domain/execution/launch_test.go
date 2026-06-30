@@ -9,7 +9,7 @@ import (
 )
 
 // hostPaths is a PathResolver that maps relpaths onto the host working dir,
-// mirroring the host-process driver, and checks existence against it.
+// mirroring the now-removed host-process driver, and checks existence against it.
 func hostPaths(workingDir string) PathResolver {
 	return PathResolver{
 		Resolve: func(rel string) string { return filepath.Join(workingDir, filepath.FromSlash(rel)) },

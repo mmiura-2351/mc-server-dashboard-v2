@@ -12,7 +12,7 @@ import (
 )
 
 // gatedDriver blocks inside Start until release is closed, so a test can hold the
-// first StartServer mid-driver.Start (modeling the host-process RealSpawn / Forge
+// first StartServer mid-driver.Start (modeling the now-removed host-process RealSpawn / Forge
 // create window from issue #780) and issue the re-issued duplicate while the
 // original is still in flight. startErr, when set, fails every Start.
 type gatedDriver struct {

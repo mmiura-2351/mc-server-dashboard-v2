@@ -5,7 +5,7 @@
 // hand-rolled HTTP-over-unix-socket adapter (dockerclient.go), keeping the
 // dependency tree empty as the RCON client did (docs/dev/DEPENDENCIES.md).
 //
-// Lifecycle parity with the host-process driver: a successful create+start
+// Lifecycle: a successful create+start
 // enters StateStarting and is held there until the server logs its startup-
 // complete "Done (X.XXXs)! For help" line (by which point RCON is listening),
 // then transitions to running; a bounded fallback timeout reports running anyway
@@ -357,7 +357,7 @@ func (d *Driver) launchContainer(ctx context.Context, spec execution.InstanceSpe
 		{ContainerPort: gamePort, HostIP: d.gameBindIP, HostPort: gamePort},
 	}
 	// RCON publication depends on the topology. With no network configured (bare-
-	// metal / host-process parity) RCON is published on the host loopback and
+	// metal parity) RCON is published on the host loopback and
 	// dialed there. With a user-defined network configured, the host RCON
 	// publication is DROPPED — RCON never leaves the docker network — and the
 	// driver dials RCON at the container name over that network instead (issue
@@ -588,7 +588,7 @@ func (d *Driver) createContainer(ctx context.Context, create CreateSpec) (string
 }
 
 // logBufferLines bounds the per-instance captured-log buffer; matches the
-// host-process driver's posture (drop-oldest + dropped-count marker, issue #96).
+// now-removed host-process driver's posture (drop-oldest + dropped-count marker, issue #96).
 const logBufferLines = 256
 
 // containerStateRunning is the Engine's container-state string for a running
@@ -991,7 +991,7 @@ func (i *instance) superviseInstall(installID string) {
 
 	// The latch re-check, the publish, and the start are one critical section
 	// (issue #306). Holding the lock across the single docker start (not the
-	// expensive create above) is the container analogue of the host-process driver
+	// expensive create above) is the container analogue of the now-removed host-process driver
 	// holding the lock across cmd.Start: a Stop racing this window either wins the
 	// lock first — observed below, aborting and removing the unstarted launch
 	// container — or blocks for the one start call and then acts on the
