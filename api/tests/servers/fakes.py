@@ -329,6 +329,16 @@ class FakeFileStore(FileStore):
     ) -> list[str]:
         return []
 
+    async def read_version(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        rel_path: str,
+        version_id: str,
+    ) -> bytes:
+        raise ServerFileNotFoundError(str(server_id.value))
+
     async def rollback(
         self,
         *,

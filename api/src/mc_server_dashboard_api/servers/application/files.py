@@ -441,6 +441,37 @@ class ListFileVersions:
 
 
 @dataclass(frozen=True)
+class ReadFileVersion:
+    """Read a specific retained version's bytes (file:history, FR-FILE-3).
+
+    The history drawer's preview-before-rollback read. Like
+    :class:`ListFileVersions`, versions live only on the authoritative copy, so
+    this has no running/at-rest branch: it loads the server (to 404 on a missing
+    one) and reads the version directly from Storage regardless of run state.
+    """
+
+    uow: UnitOfWork
+    file_store: FileStore
+
+    async def __call__(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        rel_path: str,
+        version_id: str,
+    ) -> bytes:
+        async with self.uow:
+            await _load(self.uow, community_id, server_id)
+        return await self.file_store.read_version(
+            community_id=community_id,
+            server_id=server_id,
+            rel_path=rel_path,
+            version_id=version_id,
+        )
+
+
+@dataclass(frozen=True)
 class RollbackFile:
     """Roll a file back to a retained version (file:rollback, FR-FILE-3).
 

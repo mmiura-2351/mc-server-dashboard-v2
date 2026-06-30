@@ -544,6 +544,11 @@ export const en = {
     "Only the most recent versions are kept (10 by default); older ones are discarded.",
   "files.history.rollback": "Roll back",
   "files.history.close": "Close",
+  "files.history.preview.title": "Version preview",
+  "files.history.preview.close": "Close preview",
+  "files.history.preview.loading": "Loading version…",
+  "files.history.preview.error": "Could not load this version.",
+  "files.history.preview.binary": "This version cannot be previewed.",
   "files.rollback.dialogTitle": "Roll back file",
   "files.rollback.dialogBody":
     "This replaces the current file with the selected version. The server must be stopped.",

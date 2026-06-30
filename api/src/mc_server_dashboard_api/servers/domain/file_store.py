@@ -214,6 +214,21 @@ class FileStore(abc.ABC):
         """List retained prior version ids of a file, newest-first (file:history)."""
 
     @abc.abstractmethod
+    async def read_version(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        rel_path: str,
+        version_id: str,
+    ) -> bytes:
+        """Read a specific retained version's bytes (preview before rollback).
+
+        Raises :class:`ServerFileNotFoundError` for an unknown path/version and
+        :class:`InvalidFilePathError` for a traversal-unsafe path.
+        """
+
+    @abc.abstractmethod
     async def rollback(
         self,
         *,
