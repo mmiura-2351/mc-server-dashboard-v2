@@ -28,6 +28,8 @@ every denial into ``invalid_path``. The file-API problem-reason catalog is:
 - ``not_a_directory`` (422) — a directory listing whose path is a regular file.
 - ``symlink_refused`` (422) — the Worker refused to follow a path-component
   symlink (the FR-FILE-4 escape-vector defence).
+- ``invalid_version_id`` (422) — a malformed ``version_id`` (outside the
+  ``VersionId`` charset) on the rollback / version-preview routes.
 - ``file_too_large`` (413) — a read result or an edit payload past the
   control-plane file cap (the edge ``MAX_EDIT_BYTES`` cap shares this reason).
 
