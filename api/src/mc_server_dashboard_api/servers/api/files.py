@@ -382,7 +382,7 @@ async def read_file_version(
         object,
         Depends(
             require_permission(
-                Permission("file:history"),
+                Permission("file:read"),
                 resource_type=_SERVER_RESOURCE_TYPE,
                 resource_id_param="server_id",
             )
@@ -392,12 +392,15 @@ async def read_file_version(
     path: Annotated[str, Query()],
     version_id: Annotated[str, Query()],
 ) -> FileContentResponse:
-    """Read a specific retained version's content (file:history, preview).
+    """Read a specific retained version's content (file:read, preview).
 
-    Reached from the history drawer (already ``file:history``-gated): previews a
-    prior version's bytes read-only before a rollback. Authoritative-only like
-    ``/history``; an unknown path/version is 404 and a traversal-unsafe path is
-    422. The bytes are base64-encoded for JSON transport, matching the read route.
+    Reached from the history drawer (``file:history``-gated to list versions),
+    this previews a prior version's bytes read-only before a rollback. It returns
+    file content, so it is gated by ``file:read`` like the current-file read
+    route — ``file:history`` enumerates versions but does not grant content
+    access. Authoritative-only like ``/history``; an unknown path/version is 404
+    and a traversal-unsafe path is 422. The bytes are base64-encoded for JSON
+    transport, matching the read route.
     """
 
     try:

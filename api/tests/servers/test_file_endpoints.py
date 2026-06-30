@@ -116,6 +116,18 @@ class _FakeChecker(PermissionChecker):
         return self._allow
 
 
+class _SetChecker(PermissionChecker):
+    """Grants only the listed permission codes (per-permission gate tests)."""
+
+    def __init__(self, *, allowed: set[str]) -> None:
+        self._allowed = allowed
+
+    async def can(
+        self, *, user: AuthUser, operation: Permission, resource: ResourceRef
+    ) -> bool:
+        return operation.value in self._allowed
+
+
 class _FakeUseCase:
     def __init__(self, *, result: object = None, error: Exception | None = None):
         self._result = result
@@ -202,6 +214,7 @@ def _app(
     *,
     member: bool,
     allow: bool,
+    permissions: set[str] | None = None,
     read: _FakeUseCase | None = None,
     list_: _FakeUseCase | None = None,
     write: _FakeUseCase | None = None,
@@ -221,7 +234,14 @@ def _app(
     app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(
         member=member
     )
-    app.dependency_overrides[get_permission_checker] = lambda: _FakeChecker(allow=allow)
+    if permissions is not None:
+        app.dependency_overrides[get_permission_checker] = lambda: _SetChecker(
+            allowed=permissions
+        )
+    else:
+        app.dependency_overrides[get_permission_checker] = lambda: _FakeChecker(
+            allow=allow
+        )
     if read is not None:
         app.dependency_overrides[get_read_file] = lambda: read
     if list_ is not None:
@@ -567,8 +587,31 @@ def test_version_passes_path_and_version_id() -> None:
     assert use_case.calls[0]["version_id"] == "v2"
 
 
-def test_version_requires_file_history_permission() -> None:
-    app = _app(member=True, allow=False, version=_FakeUseCase(result=b"old"))
+def test_version_allowed_with_file_read() -> None:
+    # The preview returns file content, so file:read (not file:history) gates it.
+    app = _app(
+        member=True,
+        allow=False,
+        permissions={"file:read"},
+        version=_FakeUseCase(result=b"old"),
+    )
+    client = next(_client(app))
+    resp = client.get(
+        _url(uuid.uuid4(), uuid.uuid4(), "/version"),
+        params={"path": "f", "version_id": "v1"},
+    )
+    assert resp.status_code == 200
+
+
+def test_version_forbidden_with_file_history_only() -> None:
+    # file:history lists versions but does not grant content access; reading a
+    # historical version's bytes still requires file:read (else 403).
+    app = _app(
+        member=True,
+        allow=False,
+        permissions={"file:history"},
+        version=_FakeUseCase(result=b"old"),
+    )
     client = next(_client(app))
     resp = client.get(
         _url(uuid.uuid4(), uuid.uuid4(), "/version"),
