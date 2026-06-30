@@ -1993,7 +1993,6 @@ function Viewer({
           path={path}
           communityId={communityId}
           serverId={serverId}
-          canPreview={can("file:read", { serverId })}
           canRollback={can("file:rollback", { serverId })}
           onClose={() => setHistoryOpen(false)}
           onRolledBack={() => {
@@ -2033,11 +2032,10 @@ function Viewer({
 
 // ── History drawer + rollback ────────────────────────────────────────────────
 
-export function HistoryDrawer({
+function HistoryDrawer({
   path,
   communityId,
   serverId,
-  canPreview,
   canRollback,
   onClose,
   onRolledBack,
@@ -2046,7 +2044,6 @@ export function HistoryDrawer({
   path: string;
   communityId: string;
   serverId: string;
-  canPreview: boolean;
   canRollback: boolean;
   onClose: () => void;
   onRolledBack: () => void;
@@ -2118,19 +2115,13 @@ export function HistoryDrawer({
         <ul className="files-history-list">
           {history.data.versions.map((versionId) => (
             <li key={versionId} className="files-history-row">
-              {canPreview ? (
-                <button
-                  type="button"
-                  className="link files-history-date"
-                  onClick={() => setPreviewing(versionId)}
-                >
-                  {versionDate(versionId).toLocaleString()}
-                </button>
-              ) : (
-                <span className="files-history-date">
-                  {versionDate(versionId).toLocaleString()}
-                </span>
-              )}
+              <button
+                type="button"
+                className="link files-history-date"
+                onClick={() => setPreviewing(versionId)}
+              >
+                {versionDate(versionId).toLocaleString()}
+              </button>
               {canRollback && (
                 <button
                   type="button"

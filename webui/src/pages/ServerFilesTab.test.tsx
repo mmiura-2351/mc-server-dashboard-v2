@@ -16,7 +16,7 @@ import type { Can } from "../permissions/useCan.ts";
 import { installMockWebSocket } from "../test/mockWebSocket.ts";
 import { encodeUtf8Base64 } from "./fileText.ts";
 import { ServerDetailPage } from "./ServerDetailPage.tsx";
-import { HistoryDrawer, versionDate } from "./ServerFilesTab.tsx";
+import { versionDate } from "./ServerFilesTab.tsx";
 
 const CID = "c1";
 const SID = "s1";
@@ -911,47 +911,6 @@ describe("ServerFilesTab history + rollback", () => {
     expect(
       screen.queryByRole("button", { name: t("files.history.rollback") }),
     ).not.toBeInTheDocument();
-  });
-
-  // The drawer opens on file:history, but the per-version preview returns file
-  // content, so it is gated on file:read (the tab itself also requires
-  // file:read). Rendered in isolation to exercise the canPreview=false branch.
-  it("renders version dates as plain text (no preview) when canPreview is false", async () => {
-    mockApi.get.mockResolvedValue({ path: "a.txt", versions: [VID1] });
-    const qc = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
-    render(
-      <QueryClientProvider client={qc}>
-        <ToastProvider>
-          <HistoryDrawer
-            path="a.txt"
-            communityId={CID}
-            serverId={SID}
-            canPreview={false}
-            canRollback={false}
-            onClose={() => undefined}
-            onRolledBack={() => undefined}
-            onError={() => undefined}
-          />
-        </ToastProvider>
-      </QueryClientProvider>,
-    );
-
-    const date1 = versionDate(VID1).toLocaleString();
-    const dateEl = await screen.findByText(date1);
-    // The date is plain text, not an interactive button.
-    expect(dateEl.tagName).toBe("SPAN");
-    expect(dateEl.closest("button")).toBeNull();
-
-    // Clicking it neither opens the preview nor calls the version endpoint.
-    fireEvent.click(dateEl);
-    expect(
-      screen.queryByText(t("files.history.preview.title")),
-    ).not.toBeInTheDocument();
-    expect(mockApi.get).not.toHaveBeenCalledWith(
-      expect.stringContaining("/files/version"),
-    );
   });
 });
 
