@@ -442,7 +442,7 @@ class ListFileVersions:
 
 @dataclass(frozen=True)
 class ReadFileVersion:
-    """Read a specific retained version's bytes (file:history, FR-FILE-3).
+    """Read a specific retained version's bytes (file:read, FR-FILE-3).
 
     The history drawer's preview-before-rollback read. Like
     :class:`ListFileVersions`, versions live only on the authoritative copy, so

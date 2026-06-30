@@ -1651,7 +1651,7 @@ def get_read_file_version(
     request: Request,
     file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
 ) -> ReadFileVersion:
-    """Assemble the :class:`ReadFileVersion` use case (file:history)."""
+    """Assemble the :class:`ReadFileVersion` use case (file:read)."""
 
     session_factory = create_session_factory(get_engine(request))
     return ReadFileVersion(
