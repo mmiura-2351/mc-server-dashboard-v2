@@ -15,7 +15,7 @@ import (
 const defaultRCONPort = "25575"
 
 // defaultRCONHost is the dial host when the caller passes an empty host: the host
-// loopback, preserving the historical bare-metal / host-process behavior.
+// loopback, preserving the historical bare-metal behavior.
 const defaultRCONHost = "127.0.0.1"
 
 // OpenFromWorkingDir dials RCON for a server using the rcon.port and
