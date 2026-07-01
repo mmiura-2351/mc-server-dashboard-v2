@@ -502,6 +502,20 @@ To enable:
 The browser now reaches the UI over HTTPS at the public hostname, the `Secure`
 cookie is stored, and silent refresh works.
 
+**Edge body-size caps and the data-plane URL (issue #1549):** if
+`MCD_API_SERVER__PUBLIC_BASE_URL` is overridden to the tunnel's public
+hostname (e.g. so a public-facing link is externally reachable), do not let
+that also become the URL the Worker uses for hydrate/snapshot transfers.
+Cloudflare Tunnel caps request bodies at ~100 MB and rejects larger ones; a
+co-located Worker's working-set upload routinely exceeds that (a booted Paper
+server alone is ~200+ MB), so every snapshot would 413 and world progression
+would be silently lost on every stop. `compose.yaml` pins
+`MCD_API_SERVER__DATA_PLANE_BASE_URL` to the internal compose-network address
+(`http://api:8000`) independently of `PUBLIC_BASE_URL` for exactly this
+reason; any other topology with a co-located Worker behind a body-size-capped
+edge must set `server.data_plane_base_url` to an internal address the Worker
+can reach directly (CONFIGURATION.md Section 5.1).
+
 #### Reverse proxy + Let's Encrypt (alternative)
 
 For deployments that do not use Cloudflare, any TLS-terminating reverse proxy
