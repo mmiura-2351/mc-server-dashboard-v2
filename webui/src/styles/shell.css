@@ -979,9 +979,14 @@ button.link:focus-visible {
 }
 .type-cards {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  /* auto-fit (not auto-fill) collapses the empty trailing track so the four
+   * remaining catalog types fill the row after the spigot card was removed
+   * (#1534); the 160px minimum makes each card comfortably larger, and the
+   * max-width keeps four cards from ballooning to ~300px on wide desktops. */
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 10px;
   margin-bottom: 14px;
+  max-width: 960px;
 }
 .type-card {
   font: inherit;
