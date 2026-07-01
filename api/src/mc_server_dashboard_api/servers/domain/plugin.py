@@ -139,6 +139,35 @@ class ServerPlugin:
     catalog_dependencies: list[dict[str, object]] = field(default_factory=list)
 
 
+# Geyser detection (issue #1541): installing Geyser as a normal plugin IS the
+# Bedrock enablement switch, so ingest recognizes it by the identity the jar
+# declares. The manifest name parsed at ingest (``plugin.yml`` ``name`` for
+# Paper) is the primary signal, compared case-insensitively. Paper-only in v1;
+# add the Fabric/Forge Geyser mod ids here when those loaders gain Bedrock
+# support (epic #1540).
+_GEYSER_MOD_IDENTIFIERS = frozenset({"geyser-spigot"})
+# Secondary signal for catalog installs whose jar carried no readable manifest:
+# the Modrinth Geyser project (https://modrinth.com/plugin/geyser). Installs may
+# reference the project by its immutable id or its slug, and the plugin row
+# stores whichever was used.
+_GEYSER_MODRINTH_PROJECT_IDS = frozenset({"wKkoqHrH", "geyser"})
+
+
+def is_geyser_plugin(plugin: ServerPlugin) -> bool:
+    """Whether ``plugin`` is the Geyser Bedrock translator (issue #1541).
+
+    Geyser presence drives the server's ``bedrock_port`` lifecycle: detected on
+    install (allocate) and on uninstall (release). Floodgate is the expected
+    companion but is NOT the detection key -- the network path hangs off Geyser,
+    which owns the UDP listener.
+    """
+
+    identifier = (plugin.mod_identifier or "").lower()
+    if identifier in _GEYSER_MOD_IDENTIFIERS:
+        return True
+    return plugin.source_project_id in _GEYSER_MODRINTH_PROJECT_IDS
+
+
 def working_set_present(*, enabled: bool, side: PluginSide) -> bool:
     """Whether a plugin's jar belongs in the running server's working set.
 

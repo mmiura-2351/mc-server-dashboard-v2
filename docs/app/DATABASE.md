@@ -341,6 +341,7 @@ assigned Worker.
 | `server_type` | text | `vanilla` / `paper` / `fabric` / `forge` (CHECK enum). All are resolvable by the version catalog (forge resolves to the installer JAR — the worker runs `--installServer` on first start) |
 | `config` | jsonb | server configuration blob (properties, JVM args, plus the reserved keys catalogued below) |
 | `game_port` | integer nullable | the Minecraft game port (issue #243), assigned at create from the configured range (CONFIGURATION.md Section 5.8) and **unique deployment-wide**. Nullable: legacy/imported rows predating port tracking carry none, and Postgres treats `NULL`s as distinct so they never collide |
+| `bedrock_port` | integer nullable | the server's public Bedrock **UDP** port (issue #1541), allocated from the dedicated UDP window (CONFIGURATION.md Section 5.8) when Geyser is detected among the server's plugins and released (`NULL`) on Geyser uninstall; a server delete drops the row and with it the port. **Unique deployment-wide.** Non-`NULL` *is* the Bedrock-enabled state — there is no separate boolean |
 | `slug` | text | the relay hostname prefix (RELAY.md Section 3, issue #955), e.g. `amber-falcon-42`. Auto-generated at create as `<word>-<word>-<NN>` and **unique deployment-wide** (the hostname namespace is global). Renameable via the server update PATCH; released slugs are immediately reusable (owner decision, RELAY.md Section 17). Validated as a lowercase DNS label (`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`) with a reserved-word list (`www`, `api`, `relay`, …). Pre-existing rows are backfilled by migration 0016. |
 | `desired_state` | text | what the operator wants: `running` / `stopped` (CHECK enum) |
 | `observed_state` | text | last state reported by the Worker: `starting` / `running` / `stopping` / `stopped` / `restarting` / `crashed` / `unknown` (CHECK enum) |
@@ -349,9 +350,10 @@ assigned Worker.
 | `created_at` / `updated_at` | timestamptz | |
 
 Constraints: `UNIQUE(community_id, name)`, `UNIQUE(game_port)` (deployment-wide,
-`NULL`s allowed and non-colliding; issue #243), `UNIQUE(slug)` (deployment-wide,
-NOT NULL; issue #955). Index on `(assigned_worker_id)` for "all servers on Worker
-X" (used on Worker disconnect, FR-WRK-4).
+`NULL`s allowed and non-colliding; issue #243), `UNIQUE(bedrock_port)`
+(deployment-wide, `NULL`s allowed and non-colliding; issue #1541), `UNIQUE(slug)`
+(deployment-wide, NOT NULL; issue #955). Index on `(assigned_worker_id)` for "all
+servers on Worker X" (used on Worker disconnect, FR-WRK-4).
 
 **Reserved `config` keys.** Alongside the free-form server properties and JVM
 args, the `config` blob carries a small set of **reserved keys** with fixed

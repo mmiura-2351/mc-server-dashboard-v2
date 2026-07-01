@@ -17,6 +17,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from mc_server_dashboard_api.community.adapters.unit_of_work import (
@@ -424,3 +425,104 @@ async def test_update_game_port_rejects_taken_against_real_db(
         loaded = await uow.servers.get_by_id(server.id)
     assert loaded is not None
     assert loaded.game_port == server.game_port
+
+
+# --- bedrock_port (issue #1541) ----------------------------------------------
+
+
+def _creator(factory: object) -> CreateServer:
+    return CreateServer(
+        uow=ServersUnitOfWork(factory),  # type: ignore[arg-type]
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=FakeFileStore(),
+        port_range=PortRange(start=25565, end=25664),
+    )
+
+
+async def test_bedrock_port_persists_lists_and_releases(engine: AsyncEngine) -> None:
+    # The Geyser-detection write path: stage bedrock_port through the repository
+    # update, read it back, see it in the deployment-wide taken set, and release
+    # it (NULL) the way a Geyser uninstall does.
+    community_id = await _seed_community(engine)
+    factory = create_session_factory(engine)
+    server = await _creator(factory)(
+        community_id=CommunityId(community_id),
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        config={},
+    )
+
+    async with ServersUnitOfWork(factory) as uow:
+        loaded = await uow.servers.get_by_id(server.id)
+        assert loaded is not None
+        loaded.bedrock_port = 19132
+        await uow.servers.update(loaded)
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        reloaded = await uow.servers.get_by_id(server.id)
+        taken = await uow.servers.list_bedrock_ports()
+    assert reloaded is not None
+    assert reloaded.bedrock_port == 19132
+    assert taken == {19132}
+
+    async with ServersUnitOfWork(factory) as uow:
+        reloaded.bedrock_port = None
+        await uow.servers.update(reloaded)
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        assert await uow.servers.list_bedrock_ports() == set()
+
+
+async def test_bedrock_port_unique_backstop_and_delete_release(
+    engine: AsyncEngine,
+) -> None:
+    # UNIQUE(bedrock_port) rejects a duplicate allocation (the concurrent-racer
+    # backstop). The violating write is the repository UPDATE executed inside
+    # the transaction, so it surfaces as the driver IntegrityError (same shape
+    # as a racing game-port re-port or slug rename), not a translated domain
+    # error. Deleting the holder's row releases the port for reuse.
+    community_id = await _seed_community(engine)
+    factory = create_session_factory(engine)
+    creator = _creator(factory)
+    first = await creator(
+        community_id=CommunityId(community_id),
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        config={},
+    )
+    second = await creator(
+        community_id=CommunityId(community_id),
+        name="creative",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        config={},
+    )
+
+    async def _set_port(server_id: object, port: int) -> None:
+        async with ServersUnitOfWork(factory) as uow:
+            loaded = await uow.servers.get_by_id(server_id)  # type: ignore[arg-type]
+            assert loaded is not None
+            loaded.bedrock_port = port
+            await uow.servers.update(loaded)
+            await uow.commit()
+
+    await _set_port(first.id, 19132)
+    with pytest.raises(IntegrityError):
+        await _set_port(second.id, 19132)
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.servers.delete(first.id)
+        await uow.commit()
+
+    # The row delete released the port: the same value is assignable again.
+    await _set_port(second.id, 19132)
+    async with ServersUnitOfWork(factory) as uow:
+        assert await uow.servers.list_bedrock_ports() == {19132}

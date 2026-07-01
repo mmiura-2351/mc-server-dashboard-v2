@@ -51,6 +51,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     InvalidFilePathError,
     PluginAlreadyExistsError,
+    PortRangeExhaustedError,
     ServerBusyError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
@@ -332,6 +333,10 @@ async def install_from_catalog(
         raise _too_large() from exc
     except PluginAlreadyExistsError as exc:
         raise _conflict("plugin_already_exists") from exc
+    except PortRangeExhaustedError as exc:
+        # A Geyser install found no free port in the Bedrock UDP window (issue
+        # #1541): transient capacity, like game-port exhaustion at create.
+        raise _service_unavailable("bedrock_port_range_exhausted") from exc
     except ServerFilesUnsettledError as exc:
         await _record_failure(
             recorder,
@@ -400,6 +405,10 @@ def _bad_gateway(reason: str) -> ProblemException:
 
 def _conflict(reason: str) -> ProblemException:
     return problem(status.HTTP_409_CONFLICT, reason)
+
+
+def _service_unavailable(reason: str) -> ProblemException:
+    return problem(status.HTTP_503_SERVICE_UNAVAILABLE, reason)
 
 
 def _too_large() -> ProblemException:

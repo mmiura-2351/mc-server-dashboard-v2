@@ -20,6 +20,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidFilePathError,
     PluginAlreadyExistsError,
     PluginNotFoundError,
+    PortRangeExhaustedError,
     ServerFileNotFoundError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
@@ -31,6 +32,7 @@ from mc_server_dashboard_api.servers.domain.plugin import (
     PluginSource,
     ServerPlugin,
 )
+from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     DesiredState,
@@ -446,7 +448,7 @@ async def test_remove_plugin_deletes_file_and_record() -> None:
     fs.files["mods/test.jar"] = b"jar"
     p = _plugin(server_id=server.id)
     uow.plugins.seed(p)
-    uc = RemovePlugin(uow=uow, file_store=fs)
+    uc = RemovePlugin(uow=uow, file_store=fs, clock=FakeClock(_NOW))
     await uc(community_id=_COMMUNITY, server_id=server.id, plugin_id=p.id)
     assert p.id not in uow.plugins.by_id
     assert "mods/test.jar" not in fs.files
@@ -456,7 +458,7 @@ async def test_remove_plugin_not_found() -> None:
     uow = FakeUnitOfWork()
     server = _server()
     uow.servers.seed(server)
-    uc = RemovePlugin(uow=uow, file_store=FakeFileStore())
+    uc = RemovePlugin(uow=uow, file_store=FakeFileStore(), clock=FakeClock(_NOW))
     with pytest.raises(PluginNotFoundError):
         await uc(
             community_id=_COMMUNITY,
@@ -667,7 +669,7 @@ async def test_remove_plugin_succeeds_when_jar_already_gone() -> None:
     uow.servers.seed(server)
     p = _plugin(server_id=server.id)
     uow.plugins.seed(p)
-    uc = RemovePlugin(uow=uow, file_store=_RaisingFileStore())
+    uc = RemovePlugin(uow=uow, file_store=_RaisingFileStore(), clock=FakeClock(_NOW))
     await uc(community_id=_COMMUNITY, server_id=server.id, plugin_id=p.id)
     assert p.id not in uow.plugins.by_id
 
@@ -739,3 +741,180 @@ async def test_install_identical_content_dedups_blob() -> None:
     # put was attempted both times, but only one blob is stored (deduped).
     assert cache.puts == [sha256, sha256]
     assert list(cache.blobs) == [sha256]
+
+
+# -- Bedrock port on Geyser detection (issue #1541) --
+
+_BEDROCK_RANGE = PortRange(start=19132, end=19141)
+
+
+def _geyser_jar() -> bytes:
+    """A minimal Paper jar whose plugin.yml declares the Geyser-Spigot name."""
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(
+            "plugin.yml",
+            "name: Geyser-Spigot\n"
+            "version: 2.4.2\n"
+            "main: org.geysermc.geyser.platform.spigot.GeyserSpigotPlugin\n",
+        )
+    return buf.getvalue()
+
+
+def _geyser_row(*, server_id: ServerId, rel_path: str) -> ServerPlugin:
+    """An installed-Geyser plugin row (manifest name recorded at ingest)."""
+    p = _plugin(server_id=server_id, rel_path=rel_path)
+    p.mod_identifier = "Geyser-Spigot"
+    return p
+
+
+async def _install_geyser(
+    uow: FakeUnitOfWork,
+    server: Server,
+    *,
+    port_range: PortRange | None,
+    filename: str = "Geyser-Spigot.jar",
+) -> ServerPlugin:
+    uc = InstallPlugin(
+        uow=uow,
+        file_store=FakeFileStore(),
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+        bedrock_port_range=port_range,
+    )
+    return await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        filename=filename,
+        display_name="Geyser",
+        content=_geyser_jar(),
+    )
+
+
+async def test_install_geyser_allocates_bedrock_port() -> None:
+    uow = FakeUnitOfWork()
+    server = _server(server_type=ServerType.PAPER)
+    uow.servers.seed(server)
+    await _install_geyser(uow, server, port_range=_BEDROCK_RANGE)
+    assert uow.servers.by_id[server.id].bedrock_port == 19132
+
+
+async def test_install_geyser_without_gate_leaves_port_unset() -> None:
+    # bedrock_port_range None = the deployment gate is off (relay disabled or
+    # no Bedrock capability): a Geyser install must not allocate.
+    uow = FakeUnitOfWork()
+    server = _server(server_type=ServerType.PAPER)
+    uow.servers.seed(server)
+    await _install_geyser(uow, server, port_range=None)
+    assert uow.servers.by_id[server.id].bedrock_port is None
+
+
+async def test_install_non_geyser_does_not_allocate() -> None:
+    uow = FakeUnitOfWork()
+    server = _server(server_type=ServerType.PAPER)
+    uow.servers.seed(server)
+    uc = InstallPlugin(
+        uow=uow,
+        file_store=FakeFileStore(),
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+        bedrock_port_range=_BEDROCK_RANGE,
+    )
+    await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        filename="worldguard.jar",
+        display_name="WorldGuard",
+        content=b"jar",
+    )
+    assert uow.servers.by_id[server.id].bedrock_port is None
+
+
+async def test_install_geyser_picks_lowest_free_port() -> None:
+    uow = FakeUnitOfWork()
+    other = _server(server_type=ServerType.PAPER)
+    other.bedrock_port = 19132
+    uow.servers.seed(other)
+    server = _server(server_type=ServerType.PAPER)
+    uow.servers.seed(server)
+    await _install_geyser(uow, server, port_range=_BEDROCK_RANGE)
+    assert uow.servers.by_id[server.id].bedrock_port == 19133
+
+
+async def test_install_geyser_skips_reserved_tunnel_port() -> None:
+    # The relay's Bedrock tunnel UDP port inside the window is never handed out.
+    uow = FakeUnitOfWork()
+    server = _server(server_type=ServerType.PAPER)
+    uow.servers.seed(server)
+    reserved = PortRange(start=19132, end=19141, reserved=frozenset({19132}))
+    await _install_geyser(uow, server, port_range=reserved)
+    assert uow.servers.by_id[server.id].bedrock_port == 19133
+
+
+async def test_install_geyser_keeps_existing_port() -> None:
+    # A second Geyser jar on an already Bedrock-enabled server re-allocates
+    # nothing: the server keeps its port.
+    uow = FakeUnitOfWork()
+    server = _server(server_type=ServerType.PAPER)
+    server.bedrock_port = 19140
+    uow.servers.seed(server)
+    await _install_geyser(uow, server, port_range=_BEDROCK_RANGE)
+    assert uow.servers.by_id[server.id].bedrock_port == 19140
+
+
+async def test_install_geyser_exhausted_window_aborts_install() -> None:
+    uow = FakeUnitOfWork()
+    other = _server(server_type=ServerType.PAPER)
+    other.bedrock_port = 19132
+    uow.servers.seed(other)
+    server = _server(server_type=ServerType.PAPER)
+    uow.servers.seed(server)
+    with pytest.raises(PortRangeExhaustedError):
+        await _install_geyser(uow, server, port_range=PortRange(start=19132, end=19132))
+    # Nothing committed (the real UoW rolls the transaction back): the abort
+    # signal is zero commits; the fake's staged plugin add is not transactional.
+    assert uow.commits == 0
+    assert uow.servers.by_id[server.id].bedrock_port is None
+
+
+async def test_remove_geyser_releases_bedrock_port() -> None:
+    uow = FakeUnitOfWork()
+    server = _server(server_type=ServerType.PAPER)
+    server.bedrock_port = 19132
+    uow.servers.seed(server)
+    p = _geyser_row(server_id=server.id, rel_path="plugins/Geyser-Spigot.jar")
+    uow.plugins.seed(p)
+    uc = RemovePlugin(uow=uow, file_store=FakeFileStore(), clock=FakeClock(_NOW))
+    await uc(community_id=_COMMUNITY, server_id=server.id, plugin_id=p.id)
+    assert uow.servers.by_id[server.id].bedrock_port is None
+
+
+async def test_remove_non_geyser_keeps_bedrock_port() -> None:
+    uow = FakeUnitOfWork()
+    server = _server(server_type=ServerType.PAPER)
+    server.bedrock_port = 19132
+    uow.servers.seed(server)
+    p = _plugin(server_id=server.id, rel_path="plugins/worldguard.jar")
+    uow.plugins.seed(p)
+    uc = RemovePlugin(uow=uow, file_store=FakeFileStore(), clock=FakeClock(_NOW))
+    await uc(community_id=_COMMUNITY, server_id=server.id, plugin_id=p.id)
+    assert uow.servers.by_id[server.id].bedrock_port == 19132
+
+
+async def test_remove_geyser_keeps_port_while_another_geyser_remains() -> None:
+    # Two Geyser jars (e.g. a catalog install plus a local upload): the port is
+    # released only when the last one leaves.
+    uow = FakeUnitOfWork()
+    server = _server(server_type=ServerType.PAPER)
+    server.bedrock_port = 19132
+    uow.servers.seed(server)
+    first = _geyser_row(server_id=server.id, rel_path="plugins/Geyser-Spigot.jar")
+    second = _geyser_row(server_id=server.id, rel_path="plugins/geyser-copy.jar")
+    uow.plugins.seed(first)
+    uow.plugins.seed(second)
+    uc = RemovePlugin(uow=uow, file_store=FakeFileStore(), clock=FakeClock(_NOW))
+    await uc(community_id=_COMMUNITY, server_id=server.id, plugin_id=first.id)
+    assert uow.servers.by_id[server.id].bedrock_port == 19132

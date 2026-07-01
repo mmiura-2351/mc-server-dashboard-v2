@@ -42,6 +42,7 @@ from mc_server_dashboard_api.servers.domain.plugin import (
     PluginSource,
     ServerPlugin,
 )
+from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     DesiredState,
@@ -1864,3 +1865,130 @@ async def test_cache_hit_does_not_reupload_blob() -> None:
     assert plugin.sha256 == sha256
     # No put call on the cache-hit path (the blob already exists).
     assert cache.puts == []
+
+
+# -- Bedrock port on Geyser detection via catalog install (issue #1541) --
+
+
+def _geyser_manifest_jar() -> bytes:
+    """A minimal Paper jar whose plugin.yml declares the Geyser-Spigot name."""
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("plugin.yml", "name: Geyser-Spigot\nversion: 2.4.2\n")
+    return buf.getvalue()
+
+
+def _geyser_install_uc(
+    uow: FakeUnitOfWork,
+    *,
+    project_id: str,
+    slug: str,
+    file_content: bytes,
+    bedrock_port_range: PortRange | None,
+) -> InstallFromCatalog:
+    project = _project(project_id=project_id, slug=slug, title="Geyser")
+    version, content = _version(filename="Geyser-Spigot.jar", file_content=file_content)
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(project, [version])
+    catalog.seed_file(version.files[0].url, content)
+    return InstallFromCatalog(
+        uow=uow,
+        catalog=catalog,
+        file_store=FakeFileStore(),
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+        bedrock_port_range=bedrock_port_range,
+    )
+
+
+async def test_install_from_catalog_geyser_by_project_id_allocates_port() -> None:
+    # Secondary signal: the jar carries no readable manifest, but the Modrinth
+    # project identifies Geyser.
+    uow = FakeUnitOfWork()
+    server = _server(server_type=ServerType.PAPER)
+    uow.servers.seed(server)
+    uc = _geyser_install_uc(
+        uow,
+        project_id="wKkoqHrH",
+        slug="geyser",
+        file_content=b"not-a-zip",
+        bedrock_port_range=PortRange(start=19132, end=19141),
+    )
+    await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        project_id="wKkoqHrH",
+        version_id="ver-1",
+    )
+    assert uow.servers.by_id[server.id].bedrock_port == 19132
+
+
+async def test_install_from_catalog_geyser_by_manifest_name_allocates_port() -> None:
+    # Primary signal: the manifest name identifies Geyser even under an
+    # unrecognized catalog project id (e.g. a re-hosted build).
+    uow = FakeUnitOfWork()
+    server = _server(server_type=ServerType.PAPER)
+    uow.servers.seed(server)
+    uc = _geyser_install_uc(
+        uow,
+        project_id="other-project",
+        slug="other-geyser",
+        file_content=_geyser_manifest_jar(),
+        bedrock_port_range=PortRange(start=19132, end=19141),
+    )
+    await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        project_id="other-project",
+        version_id="ver-1",
+    )
+    assert uow.servers.by_id[server.id].bedrock_port == 19132
+
+
+async def test_install_from_catalog_geyser_without_gate_leaves_port_unset() -> None:
+    uow = FakeUnitOfWork()
+    server = _server(server_type=ServerType.PAPER)
+    uow.servers.seed(server)
+    uc = _geyser_install_uc(
+        uow,
+        project_id="wKkoqHrH",
+        slug="geyser",
+        file_content=b"not-a-zip",
+        bedrock_port_range=None,
+    )
+    await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        project_id="wKkoqHrH",
+        version_id="ver-1",
+    )
+    assert uow.servers.by_id[server.id].bedrock_port is None
+
+
+async def test_install_from_catalog_non_geyser_does_not_allocate() -> None:
+    uow = FakeUnitOfWork()
+    server = _server(server_type=ServerType.PAPER)
+    uow.servers.seed(server)
+    project = _project(project_id="proj-1", slug="worldguard", title="WorldGuard")
+    version, content = _version(filename="worldguard.jar")
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(project, [version])
+    catalog.seed_file(version.files[0].url, content)
+    uc = InstallFromCatalog(
+        uow=uow,
+        catalog=catalog,
+        file_store=FakeFileStore(),
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+        bedrock_port_range=PortRange(start=19132, end=19141),
+    )
+    await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        project_id="proj-1",
+        version_id="ver-1",
+    )
+    assert uow.servers.by_id[server.id].bedrock_port is None

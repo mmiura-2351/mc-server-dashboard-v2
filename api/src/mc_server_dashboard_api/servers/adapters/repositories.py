@@ -39,6 +39,7 @@ def _to_server(row: ServerModel) -> Server:
         server_type=ServerType(row.server_type),
         config=dict(row.config),
         game_port=row.game_port,
+        bedrock_port=row.bedrock_port,
         slug=row.slug,
         desired_state=DesiredState(row.desired_state),
         observed_state=ObservedState(row.observed_state),
@@ -68,6 +69,7 @@ class SqlAlchemyServerRepository(ServerRepository):
                 server_type=server.server_type.value,
                 config=server.config,
                 game_port=server.game_port,
+                bedrock_port=server.bedrock_port,
                 slug=server.slug,
                 desired_state=server.desired_state.value,
                 observed_state=server.observed_state.value,
@@ -106,6 +108,13 @@ class SqlAlchemyServerRepository(ServerRepository):
         rows = (await self._session.execute(stmt)).scalars().all()
         return {port for port in rows if port is not None}
 
+    async def list_bedrock_ports(self) -> set[int]:
+        stmt = select(ServerModel.bedrock_port).where(
+            ServerModel.bedrock_port.is_not(None)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return {port for port in rows if port is not None}
+
     async def list_ids_missing_game_port(self) -> list[ServerId]:
         stmt = select(ServerModel.id).where(ServerModel.game_port.is_(None))
         rows = (await self._session.execute(stmt)).scalars().all()
@@ -122,6 +131,10 @@ class SqlAlchemyServerRepository(ServerRepository):
                 # write for name/config-only edits that leave it unchanged. The
                 # deployment-wide UNIQUE(game_port) backstops a concurrent racer.
                 game_port=server.game_port,
+                # Persist the (possibly allocated/released) Bedrock port (issue
+                # #1541); a no-op write when unchanged. UNIQUE(bedrock_port)
+                # backstops a concurrent racer.
+                bedrock_port=server.bedrock_port,
                 # Persist the (possibly renamed) slug (issue #955); a no-op write
                 # for non-slug edits. The deployment-wide UNIQUE(slug) backstops.
                 slug=server.slug,

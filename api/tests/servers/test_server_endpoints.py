@@ -1084,3 +1084,92 @@ def test_read_server_join_hostname_null_when_relay_disabled() -> None:
     resp = client.get(f"/api/communities/{community}/servers/{uuid.uuid4()}")
     assert resp.status_code == 200
     assert resp.json()["join_hostname"] is None
+
+
+# --- bedrock_address / bedrock_port (issue #1541) ---------------------------
+
+
+def _bedrock_server(community: uuid.UUID, *, bedrock_port: int | None) -> Server:
+    server = _server_entity(community_id=community)
+    server.bedrock_port = bedrock_port
+    return server
+
+
+def test_read_server_bedrock_fields_when_gate_on_and_port_allocated() -> None:
+    community = uuid.uuid4()
+    server = _bedrock_server(community, bedrock_port=19132)
+    app = _app(
+        member=True,
+        allow=True,
+        read=_FakeUseCase(result=server),
+        join_config=JoinHostnameConfig(
+            enabled=True, base_domain="mc.example.com", bedrock_enabled=True
+        ),
+    )
+    client = next(_client(app))
+    resp = client.get(f"/api/communities/{community}/servers/{uuid.uuid4()}")
+    assert resp.status_code == 200
+    body = resp.json()
+    # The Bedrock address is the bare base domain (no slug): Bedrock routes by
+    # destination UDP port, not hostname.
+    assert body["bedrock_address"] == "mc.example.com"
+    assert body["bedrock_port"] == 19132
+
+
+def test_read_server_bedrock_fields_null_without_port() -> None:
+    community = uuid.uuid4()
+    server = _bedrock_server(community, bedrock_port=None)
+    app = _app(
+        member=True,
+        allow=True,
+        read=_FakeUseCase(result=server),
+        join_config=JoinHostnameConfig(
+            enabled=True, base_domain="mc.example.com", bedrock_enabled=True
+        ),
+    )
+    client = next(_client(app))
+    resp = client.get(f"/api/communities/{community}/servers/{uuid.uuid4()}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["bedrock_address"] is None
+    assert body["bedrock_port"] is None
+
+
+def test_read_server_bedrock_fields_null_when_capability_off() -> None:
+    # A port allocated while the gate was on is not surfaced once the Bedrock
+    # capability is off: non-None fields are the UI's joinable switch.
+    community = uuid.uuid4()
+    server = _bedrock_server(community, bedrock_port=19132)
+    app = _app(
+        member=True,
+        allow=True,
+        read=_FakeUseCase(result=server),
+        join_config=JoinHostnameConfig(
+            enabled=True, base_domain="mc.example.com", bedrock_enabled=False
+        ),
+    )
+    client = next(_client(app))
+    resp = client.get(f"/api/communities/{community}/servers/{uuid.uuid4()}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["bedrock_address"] is None
+    assert body["bedrock_port"] is None
+
+
+def test_read_server_bedrock_fields_null_when_relay_disabled() -> None:
+    community = uuid.uuid4()
+    server = _bedrock_server(community, bedrock_port=19132)
+    app = _app(
+        member=True,
+        allow=True,
+        read=_FakeUseCase(result=server),
+        join_config=JoinHostnameConfig(
+            enabled=False, base_domain=None, bedrock_enabled=True
+        ),
+    )
+    client = next(_client(app))
+    resp = client.get(f"/api/communities/{community}/servers/{uuid.uuid4()}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["bedrock_address"] is None
+    assert body["bedrock_port"] is None

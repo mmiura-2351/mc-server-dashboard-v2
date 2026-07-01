@@ -326,10 +326,20 @@ in-range port, unique deployment-wide — so two servers never collide on a port
 create request; it is rejected with 422 when out of range and 409 when already
 taken. A delete frees the server's port for reuse.
 
+The API also tracks each server's public Bedrock **UDP** port
+(`server.bedrock_port`, issue #1541), allocated from a dedicated window — an
+independent namespace from the TCP game-port range (TCP and UDP ports do not
+collide) — when Geyser is detected among the server's plugins and the Bedrock
+deployment gate is on (`relay.enabled` + `relay.bedrock_enabled`, Section 5.13).
+The default window starts at Bedrock's conventional port 19132 so the first
+allocation lands there. Geyser uninstall and server delete free the port.
+
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
 | `ports.range_start` | `25565` | | Lowest assignable game port (inclusive). Must be `1..65535`. |
 | `ports.range_end` | `25664` | | Highest assignable game port (inclusive). Must be `1..65535` and `>=` `range_start`. |
+| `ports.bedrock_range_start` | `19132` | | Lowest assignable Bedrock UDP port (inclusive). Must be `1..65535`. |
+| `ports.bedrock_range_end` | `19231` | | Highest assignable Bedrock UDP port (inclusive). Must be `1..65535` and `>=` `bedrock_range_start`. |
 
 ### 5.9 Server memory limits
 
@@ -390,6 +400,8 @@ missing, per the secret-blank rule above).
 | `relay.base_domain` | *required when enabled* | | Routing domain (e.g. `mc.example.com`); used to build `join_hostname` (`<slug>.<base_domain>`) and returned to the relay on `Register` (RELAY.md Sections 3, 6). |
 | `relay.game_port` | `25565` | | The relay container's published game-listener host port (RELAY.md Section 13): the port players join on (fixed at 25565 to keep joins port-less). When the relay is enabled the allocator excludes any of these relay ports that fall inside the assignable game-port range so a server is never assigned a port the relay already holds on the host (issue #1002). Must be 1..65535. |
 | `relay.tunnel_port` | `25665` | | The relay container's published tunnel-listener host port (RELAY.md Section 13): the Worker dial-back tunnel endpoint. When the relay is enabled the allocator excludes it like `relay.game_port`. Must be 1..65535. |
+| `relay.bedrock_enabled` | `false` | | Bedrock ingress capability (issue #1541). With `relay.enabled`, installing Geyser on a server allocates its `bedrock_port` from the dedicated UDP window (Section 5.8) and server responses surface `bedrock_address` / `bedrock_port`; `GET /api/meta` reports the combined gate as `bedrock_enabled`. Off: Geyser installs allocate nothing and the fields stay null. |
+| `relay.bedrock_tunnel_port` | `25675` | | The relay container's published Bedrock tunnel (QUIC) **UDP** listener host port (epic #1540). When the Bedrock gate is on, the allocator excludes it from the assignable Bedrock window like `relay.game_port` / `relay.tunnel_port`. Must be 1..65535. |
 | `relay.session_retention_days` | `90` | | `game_session` prune window in days (RELAY.md Section 8; consumed by issue #957). Must be positive. |
 
 ---

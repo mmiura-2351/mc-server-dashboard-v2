@@ -1445,6 +1445,29 @@ def _port_range(request: Request) -> PortRange:
     return PortRange(start=ports.range_start, end=ports.range_end, reserved=reserved)
 
 
+def _bedrock_port_range(request: Request) -> PortRange | None:
+    """The assignable Bedrock UDP window, or ``None`` when the gate is off (#1541).
+
+    The deployment gate is ``relay.enabled`` AND ``relay.bedrock_enabled``: a
+    public Bedrock UDP port only exists on the relay's ingress, so without that
+    path a Geyser install must not allocate one. When on, the relay's Bedrock
+    tunnel UDP listener port is excluded from the window like the relay's TCP
+    binds in :func:`_port_range` (issue #1002 pattern); ``PortRange`` ignores it
+    when it falls outside the window.
+    """
+
+    settings = get_settings(request)
+    relay = settings.relay
+    if not (relay.enabled and relay.bedrock_enabled):
+        return None
+    ports = settings.ports
+    return PortRange(
+        start=ports.bedrock_range_start,
+        end=ports.bedrock_range_end,
+        reserved=frozenset({relay.bedrock_tunnel_port}),
+    )
+
+
 def get_check_port(request: Request) -> CheckPort:
     """Assemble the :class:`CheckPort` read use case (issue #243)."""
 
@@ -1982,6 +2005,7 @@ def get_install_plugin(
         cache=cache,
         clock=ServersSystemClock(),
         lifecycle_lock=get_lifecycle_lock(request),
+        bedrock_port_range=_bedrock_port_range(request),
     )
 
 
@@ -1995,6 +2019,7 @@ def get_remove_plugin(
     return RemovePlugin(
         uow=ServersUnitOfWork(session_factory),
         file_store=file_store,
+        clock=ServersSystemClock(),
         lifecycle_lock=get_lifecycle_lock(request),
     )
 
@@ -2110,6 +2135,7 @@ def get_install_from_catalog(
         cache=cache,
         clock=ServersSystemClock(),
         lifecycle_lock=get_lifecycle_lock(request),
+        bedrock_port_range=_bedrock_port_range(request),
     )
 
 

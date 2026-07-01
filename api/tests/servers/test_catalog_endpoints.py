@@ -48,6 +48,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     CatalogChecksumMismatchError,
     CatalogProjectNotFoundError,
     CatalogUnavailableError,
+    PortRangeExhaustedError,
     ServerFilesUnsettledError,
     UnsupportedPluginServerTypeError,
 )
@@ -316,6 +317,22 @@ def test_install_from_catalog_unsettled_is_409() -> None:
     )
     assert resp.status_code == 409
     assert resp.json()["reason"] == "server_unsettled"
+
+
+def test_install_from_catalog_bedrock_window_exhausted_is_503() -> None:
+    # A Geyser install that found no free Bedrock UDP port (issue #1541).
+    app = _app(
+        member=True,
+        allow=True,
+        install=_FakeUseCase(error=PortRangeExhaustedError("19132-19231")),
+    )
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/install"),
+        json={"project_id": "geyser", "version_id": "ver-1"},
+    )
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "bedrock_port_range_exhausted"
 
 
 def test_install_from_catalog_unavailable_is_502() -> None:

@@ -392,10 +392,19 @@ class PortsSettings(_Section):
     range (inclusive); the default ``25565..25664`` is a hundred-port window from
     the conventional Minecraft port. Both must be a valid TCP port (1..65535) and
     ``range_start <= range_end`` (an inverted range admits no assignable port).
+
+    ``bedrock_range_start`` / ``bedrock_range_end`` bound the dedicated **UDP**
+    window for per-server public Bedrock ports (``server.bedrock_port``, issue
+    #1541), allocated when Geyser is detected among a server's plugins. An
+    independent namespace from the TCP game-port range above (TCP and UDP ports
+    do not collide); the default ``19132..19231`` starts at Bedrock's
+    conventional port so the first allocation lands there.
     """
 
     range_start: int = Field(default=25565, gt=0, le=65535)
     range_end: int = Field(default=25664, gt=0, le=65535)
+    bedrock_range_start: int = Field(default=19132, gt=0, le=65535)
+    bedrock_range_end: int = Field(default=19231, gt=0, le=65535)
 
     @model_validator(mode="after")
     def _enforce_start_below_end(self) -> PortsSettings:
@@ -403,6 +412,10 @@ class PortsSettings(_Section):
         # load (fail-fast). Equal is fine (a single assignable port).
         if self.range_start > self.range_end:
             raise ValueError("ports.range_start must be <= ports.range_end")
+        if self.bedrock_range_start > self.bedrock_range_end:
+            raise ValueError(
+                "ports.bedrock_range_start must be <= ports.bedrock_range_end"
+            )
         return self
 
 
@@ -476,6 +489,15 @@ class RelaySettings(_Section):
     base_domain: str | None = None
     game_port: int = Field(default=25565, gt=0, le=65535)
     tunnel_port: int = Field(default=25665, gt=0, le=65535)
+    # Bedrock ingress capability (issue #1541). ``bedrock_enabled`` gates
+    # ``bedrock_port`` allocation on Geyser detection and the Bedrock response
+    # surface; the deployment gate is ``enabled`` AND ``bedrock_enabled`` (a
+    # Bedrock port has no meaning without the relay's UDP ingress path).
+    # ``bedrock_tunnel_port`` is the relay container's published Bedrock tunnel
+    # (QUIC) UDP listener host port; when the gate is on, the allocator excludes
+    # it from the assignable Bedrock window like the TCP binds above.
+    bedrock_enabled: bool = False
+    bedrock_tunnel_port: int = Field(default=25675, gt=0, le=65535)
     # The prune window for game_session rows (RELAY.md Section 8); consumed by
     # issue #957. A zero/negative window is meaningless (it would prune every row
     # or none); require a positive number of days.
