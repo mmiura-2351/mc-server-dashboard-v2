@@ -38,6 +38,10 @@ live-deployment build source (`docker compose` builds it from `compose.yaml` +
 `git switch` it as part of branch setup; a stray checkout silently changes what
 the next rebuild deploys.
 
+A freshly created worktree has no installed dependencies; run `make bootstrap`
+in it once (Section 4) before pushing, otherwise the pre-push `make check`
+cannot run.
+
 ## 4. Commits
 
 Install the git hooks once per clone:
@@ -71,6 +75,18 @@ worktrees. Edge cases:
   restoring to `main` mid-operation would corrupt them. The auto-restore
   adversary (an agent accidentally running `git checkout` or `gh pr checkout`)
   does not create those in-progress state files.
+
+A fresh worktree also needs its dependencies installed once — each worktree
+keeps its own `webui/node_modules` and `api/.venv`, so a newly created one
+starts empty:
+
+```sh
+make bootstrap
+```
+
+Without it the **pre-push** `make check` fails before it can run: `webui-lint`
+reports `biome: not found`, and `api`'s first `uv run` pays a cold sync. The
+target runs `npm ci` (webui) and `uv sync` (api).
 
 - Don't bypass failing pre-commit / pre-push hooks; fix the cause. If a hook
   fails, the commit did not happen — make a **new** commit rather than
