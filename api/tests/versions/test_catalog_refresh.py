@@ -27,7 +27,7 @@ class _RecordingInvalidator(CacheInvalidator):
         # the test can assert *which* type's entries would be dropped.
         sample = {
             ServerType.VANILLA: "https://launchermeta.mojang.com/x",
-            ServerType.PAPER: "https://api.papermc.io/v2/x",
+            ServerType.PAPER: "https://fill.papermc.io/v3/x",
             ServerType.FABRIC: "https://meta.fabricmc.net/v2/x",
             ServerType.FORGE: "https://maven.minecraftforge.net/x",
         }
@@ -38,7 +38,7 @@ class _RecordingInvalidator(CacheInvalidator):
 
 _PREFIXES = {
     ServerType.VANILLA: "https://launchermeta.mojang.com",
-    ServerType.PAPER: "https://api.papermc.io",
+    ServerType.PAPER: "https://fill.papermc.io",
     ServerType.FABRIC: "https://meta.fabricmc.net",
     ServerType.FORGE: "https://maven.minecraftforge.net",
 }
@@ -59,7 +59,7 @@ async def test_refresh_one_type_invalidates_only_that_type() -> None:
     refresh = CatalogRefresh(invalidator=inv, prefixes=_PREFIXES)
     invalidated = await refresh(server_type=ServerType.PAPER)
     assert invalidated == [ServerType.PAPER]
-    assert inv.cleared_for == ["https://api.papermc.io/v2/x"]
+    assert inv.cleared_for == ["https://fill.papermc.io/v3/x"]
 
 
 @pytest.mark.asyncio

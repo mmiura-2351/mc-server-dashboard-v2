@@ -322,7 +322,7 @@ def _build_plugin_cache_store(
 # an all-types refresh (issue #307).
 _CATALOG_SOURCE_PREFIXES: dict[CatalogServerType, str] = {
     CatalogServerType.VANILLA: "https://launchermeta.mojang.com",
-    CatalogServerType.PAPER: "https://api.papermc.io",
+    CatalogServerType.PAPER: "https://fill.papermc.io",
     CatalogServerType.FABRIC: "https://meta.fabricmc.net",
     CatalogServerType.FORGE: "https://maven.minecraftforge.net",
 }
