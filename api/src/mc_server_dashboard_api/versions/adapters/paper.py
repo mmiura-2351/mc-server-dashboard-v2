@@ -1,13 +1,13 @@
-"""Paper catalog adapter: the PaperMC v2 API (FR-VER-1/2).
+"""Paper catalog adapter: the PaperMC v3 "Fill" API (FR-VER-1/2).
 
-Resolution walks the PaperMC v2 API through the injected :class:`JsonFetcher`:
+Resolution walks the PaperMC Fill API through the injected :class:`JsonFetcher`
+(the v2 API was sunset, returning HTTP 410 Gone):
 
-1. ``/projects/paper`` lists every supported MC version.
-2. ``/projects/paper/versions/{version}`` lists the builds for a version; the
-   newest build is chosen.
-3. ``/projects/paper/versions/{version}/builds/{build}`` carries
-   ``downloads.application`` — the JAR file name and its SHA-256; the download URL
-   is the conventional ``.../builds/{build}/downloads/{name}``.
+1. ``/projects/paper/versions`` lists every supported MC version, newest-first,
+   each as ``{"version": {"id": ...}}``.
+2. ``/projects/paper/versions/{version}/builds/latest`` carries the newest build
+   directly; ``downloads["server:default"]`` holds the JAR name, its SHA-256, and
+   the ready-to-use download URL (served from ``fill-data.papermc.io``).
 """
 
 from __future__ import annotations
@@ -26,46 +26,39 @@ from mc_server_dashboard_api.versions.domain.value_objects import (
     VersionRef,
 )
 
-_BASE = "https://api.papermc.io/v2/projects/paper"
+_BASE = "https://fill.papermc.io/v3/projects/paper"
 
 
 @dataclass(frozen=True)
 class PaperCatalog(VersionCatalog):
-    """Resolve Paper server JARs from the PaperMC v2 API."""
+    """Resolve Paper server JARs from the PaperMC v3 Fill API."""
 
     fetcher: JsonFetcher
 
     async def list_versions(self, server_type: ServerType) -> list[VersionRef]:
         _require_paper(server_type)
-        project = await self.fetcher.get_json(_BASE)
-        versions = _string_list(project, "versions")
-        # The PaperMC project lists versions oldest-first; present newest-first to
-        # match the vanilla catalog's ordering.
+        project = await self.fetcher.get_json(f"{_BASE}/versions")
+        # The Fill /versions array is newest-first already, matching the vanilla
+        # catalog's ordering, so it is presented as-is.
         return [
-            VersionRef(server_type=ServerType.PAPER, version=v)
-            for v in reversed(versions)
+            VersionRef(server_type=ServerType.PAPER, version=version_id)
+            for version_id in _version_ids(project)
         ]
 
     async def resolve(self, server_type: ServerType, version: str) -> JarSource:
         _require_paper(server_type)
         version_q = quote(version, safe="")
-        version_detail = await self.fetcher.get_json(f"{_BASE}/versions/{version_q}")
-        builds = _int_list(version_detail, "builds")
-        if not builds:
-            raise UnknownVersionError(f"paper {version}")
-        build = max(builds)
         build_detail = await self.fetcher.get_json(
-            f"{_BASE}/versions/{version_q}/builds/{build}"
+            f"{_BASE}/versions/{version_q}/builds/latest"
         )
-        application = _application(build_detail)
-        if application is None:
-            raise UnknownVersionError(f"paper {version} build {build} has no download")
-        name = str(application["name"])
+        download = _server_default(build_detail)
+        if download is None:
+            raise UnknownVersionError(f"paper {version} has no download")
         return JarSource(
             server_type=ServerType.PAPER,
             version=version,
-            url=f"{_BASE}/versions/{version_q}/builds/{build}/downloads/{name}",
-            expected_hash=str(application["sha256"]),
+            url=str(download["url"]),
+            expected_hash=str(download["checksums"]["sha256"]),
             hash_algorithm=HashAlgorithm.SHA256,
         )
 
@@ -75,35 +68,32 @@ def _require_paper(server_type: ServerType) -> None:
         raise UnknownVersionError(f"paper catalog cannot serve {server_type.value}")
 
 
-def _string_list(payload: object, key: str) -> list[str]:
+def _version_ids(payload: object) -> list[str]:
     if not isinstance(payload, dict):
         raise UnknownVersionError("malformed paper response")
-    values = payload.get(key, [])
-    if not isinstance(values, list):
+    versions = payload.get("versions", [])
+    if not isinstance(versions, list):
         raise UnknownVersionError("malformed paper response")
-    return [str(v) for v in values]
+    ids: list[str] = []
+    for entry in versions:
+        if not isinstance(entry, dict):
+            continue
+        version = entry.get("version")
+        if isinstance(version, dict) and "id" in version:
+            ids.append(str(version["id"]))
+    return ids
 
 
-def _int_list(payload: object, key: str) -> list[int]:
-    if not isinstance(payload, dict):
-        raise UnknownVersionError(f"unknown paper version: {payload!r}")
-    values = payload.get(key, [])
-    if not isinstance(values, list):
-        raise UnknownVersionError("malformed paper response")
-    return [int(v) for v in values]
-
-
-def _application(build_detail: object) -> dict[str, Any] | None:
+def _server_default(build_detail: object) -> dict[str, Any] | None:
     if not isinstance(build_detail, dict):
         return None
     downloads = build_detail.get("downloads")
     if not isinstance(downloads, dict):
         return None
-    application = downloads.get("application")
-    if (
-        not isinstance(application, dict)
-        or "name" not in application
-        or "sha256" not in application
-    ):
+    download = downloads.get("server:default")
+    if not isinstance(download, dict) or "url" not in download:
         return None
-    return application
+    checksums = download.get("checksums")
+    if not isinstance(checksums, dict) or "sha256" not in checksums:
+        return None
+    return download
