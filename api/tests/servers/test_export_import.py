@@ -15,7 +15,8 @@ DB, no real Storage), per TESTING.md Section 4. Verifies:
 - import Bedrock enablement (issue #1551): a re-created Geyser plugin allocates
   the imported server's ``bedrock_port`` when the deployment gate is on, leaves it
   unset when the gate is off, a non-Geyser plugin never allocates, and a Bedrock
-  window exhaustion surfaces the same seed-failure 503 posture.
+  window exhaustion or the UNIQUE(bedrock_port) racer backstop surfaces the same
+  seed-failure 503 posture (never an unmapped 500).
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     InvalidExportMetadataError,
     InvalidFilePathError,
+    PortAlreadyTakenError,
     ServerFilesUnsettledError,
     WorkingSetSeedFailedError,
 )
@@ -62,6 +64,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 from tests.servers.fakes import (
     FakeClock,
     FakeFileStore,
+    FakeServerRepository,
     FakeUnitOfWork,
     FakeVersionValidator,
 )
@@ -737,4 +740,40 @@ async def test_import_geyser_exhausted_bedrock_window_is_seed_failed() -> None:
     # exhaustion test's same caveat).
     [server] = [s for s in dst_uow.servers.by_id.values() if s.name.value == "imported"]
     assert server.bedrock_port is None
+    assert dst_uow.commits == 1
+
+
+async def test_import_geyser_port_racer_is_seed_failed() -> None:
+    # A concurrent allocation racer hitting the UNIQUE(bedrock_port) backstop
+    # (issue #1550: the adapter translates the constraint violation to
+    # PortAlreadyTakenError at the UPDATE execute site) maps to the same
+    # post-commit seed-failure posture as exhaustion -- 503 ``seed_failed``,
+    # never an unmapped 500 -- since the server row is already committed here,
+    # unlike the install paths' pre-commit 409 ``bedrock_port_taken``.
+    class _RacerServerRepository(FakeServerRepository):
+        # On this path ``update`` is called only by the Bedrock allocation write
+        # (CreateServer uses ``add``), so raising here models the backstop firing.
+        async def update(self, server: Server) -> None:
+            raise PortAlreadyTakenError(str(server.bedrock_port))
+
+    community = uuid.uuid4()
+    archive = await _export_archive(community=community, mod_identifier="Geyser-Spigot")
+
+    dst_uow = FakeUnitOfWork(servers=_RacerServerRepository())
+    dst_store = FakeFileStore()
+    imp = ImportServer(
+        create_server=_create_server(dst_uow, dst_store),
+        file_store=dst_store,
+        bedrock_port_range=_BEDROCK_RANGE,
+    )
+    with pytest.raises(WorkingSetSeedFailedError):
+        await imp(
+            community_id=CommunityId(community),
+            name="imported",
+            content=archive,
+        )
+    # Same abort signal as the exhaustion test: the plugin-import transaction
+    # never reaches its own commit (count stays at 1, from create_server); the
+    # real UoW rolls back the staged plugin rows and the failed port UPDATE
+    # together (the fake's staged in-memory state is not transactional).
     assert dst_uow.commits == 1

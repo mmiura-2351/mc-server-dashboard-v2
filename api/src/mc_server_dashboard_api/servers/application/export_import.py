@@ -24,9 +24,10 @@ Both reuse the C1 machinery rather than re-implementing it:
 Failure posture (import): the archive is fully validated (metadata shape AND the
 hardened entry checks — zip-slip, size, entry-count) BEFORE the row commits, so a
 hostile archive is rejected (413/422) with NO server row created (issue #277).
-Only a genuine storage failure during the post-commit write pass, or a
-Bedrock-port-window exhaustion while re-creating the plugin set (issue #1551),
-can leave a committed row behind; both reuse the #243/#252 seed-failure posture
+Only a genuine storage failure during the post-commit write pass, or a Bedrock
+port-allocation failure (window exhaustion or the concurrent-racer backstop)
+while re-creating the plugin set (issue #1551), can leave a committed row
+behind; all reuse the #243/#252 seed-failure posture
 -- :class:`WorkingSetSeedFailedError` (503 ``seed_failed``) -- leaving a
 committed but degraded row that is repairable via the files API, rather than an
 unmapped 500. It is now the ONLY post-commit failure class.
@@ -63,6 +64,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     InvalidExportMetadataError,
     InvalidFilePathError,
+    PortAlreadyTakenError,
     PortRangeExhaustedError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
@@ -321,11 +323,13 @@ class ImportServer:
         (``allocate_bedrock_port_if_geyser``), inside this same transaction so the
         plugin rows and the port commit atomically. By this point the server row
         and its working set are already committed (issue #274), so a Bedrock
-        window exhaustion here is a post-commit failure, not a clean abort with no
-        row created; it reuses the #243/#252 seed-failure posture --
-        :class:`WorkingSetSeedFailedError` (503 ``seed_failed``) -- rather than the
-        install paths' distinct ``bedrock_port_range_exhausted`` (which implies
-        nothing was created yet).
+        window exhaustion -- or the ``UNIQUE(bedrock_port)`` backstop firing on a
+        concurrent allocation racer (:class:`PortAlreadyTakenError`, the #1550
+        race) -- is a post-commit failure here, not a clean abort with no row
+        created; both reuse the #243/#252 seed-failure posture --
+        :class:`WorkingSetSeedFailedError` (503 ``seed_failed``) -- rather than
+        the install paths' distinct ``bedrock_port_range_exhausted`` / 409
+        ``bedrock_port_taken`` (which imply nothing was created yet).
         """
 
         if not plugin_dicts:
@@ -344,11 +348,12 @@ class ImportServer:
                         now=now,
                     )
                 await uow.commit()
-        except PortRangeExhaustedError as exc:
+        except (PortAlreadyTakenError, PortRangeExhaustedError) as exc:
             _logger.warning(
-                "import plugin metadata failed (Bedrock port window exhausted); "
+                "import plugin metadata failed (Bedrock port allocation: %s); "
                 "server row committed but plugin rows are unpublished (repairable "
                 "via the plugins API)",
+                type(exc).__name__,
                 extra={"server_id": str(server.id.value)},
             )
             raise WorkingSetSeedFailedError(str(server.id.value)) from exc
