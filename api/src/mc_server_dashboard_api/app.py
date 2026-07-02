@@ -620,6 +620,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # construction order relative to the relay.enabled block.
         relay_registration = RelayRegistration()
         bedrock_tunnel_table = BedrockTunnelTable()
+        # Exposed on app state so the request-scoped DeleteServer use case can
+        # evict a deleted server's tunnel credential (issue #1544).
+        app.state.bedrock_tunnel_table = bedrock_tunnel_table
         # The control-plane event path writes back observed server state through
         # this sink (its own session per call; the servicer has no request UoW).
         state_sink = ServersServerStateSink(

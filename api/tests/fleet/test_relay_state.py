@@ -118,3 +118,18 @@ def test_bedrock_tunnel_open_after_close_mints_fresh_token() -> None:
     assert first != second
     assert table.validate(server_id="s1", bedrock_port=19132, token=first) is False
     assert table.validate(server_id="s1", bedrock_port=19132, token=second) is True
+
+
+def test_bedrock_tunnel_open_with_changed_port_mints_fresh_token() -> None:
+    # A lost terminal report can leave the server at observed=unknown (at-rest),
+    # so a Geyser uninstall+reinstall may re-allocate a DIFFERENT bedrock_port
+    # WITHOUT an intervening close. The get-or-create hit path is keyed on the
+    # port, so a changed port mints a fresh token bound to the new pair rather
+    # than returning the stale one (which would pin the old port and fail every
+    # ValidateBedrockTunnel).
+    table = BedrockTunnelTable()
+    first = table.open(server_id="s1", bedrock_port=19132)
+    second = table.open(server_id="s1", bedrock_port=19200)
+    assert first != second
+    assert table.validate(server_id="s1", bedrock_port=19132, token=first) is False
+    assert table.validate(server_id="s1", bedrock_port=19200, token=second) is True
