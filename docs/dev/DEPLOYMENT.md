@@ -88,6 +88,15 @@ storage backend**; they are required only while `COMPOSE_PROFILES=object` (the
 default) and unused after the fs opt-out — see
 [Section 5](#5-storage-backend-object-on-seaweedfs-default).
 
+`MCD_API_SERVER__PUBLIC_BASE_URL` is not in the table above — compose
+defaults it to `http://api:8000`, reachable only on the compose network — but
+it is mandatory to set in `.env` for any real deployment: player-facing links
+(e.g. resource-pack download URLs) are rendered from this value, so leaving
+the compose default renders those links unreachable outside the compose
+network. Set it to this deployment's externally reachable origin (see
+[Cloudflare Tunnel](#cloudflare-tunnel-recommended) below for a worked
+example).
+
 The scratch directory must exist on the host before the first `up` so the bind
 mount resolves; create it as the user the worker runs as:
 

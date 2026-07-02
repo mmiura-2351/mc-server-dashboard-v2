@@ -141,9 +141,10 @@ services:
       # Plaintext gRPC control listener on the private compose network. Cross-host
       # workers require real TLS instead (see docs/dev/DEPLOYMENT.md).
       MCD_API_CONTROL__TLS__INSECURE: "true"
-      # The HTTP data-plane base URL advertised to workers for hydrate/snapshot
-      # transfers. On the compose network the worker reaches the api by service
-      # name.
+      # MUST be overridden to the externally reachable origin on any real
+      # deployment: client-facing URLs (e.g. resource-pack download links)
+      # are rendered from this value. Contrast with DATA_PLANE_BASE_URL
+      # below, which is intentionally internal-only (worker-facing).
       MCD_API_SERVER__PUBLIC_BASE_URL: ${MCD_API_SERVER__PUBLIC_BASE_URL:-http://api:8000}
       # Worker-facing data-plane base URL, kept pinned to the internal
       # compose-network address regardless of what PUBLIC_BASE_URL above is set
