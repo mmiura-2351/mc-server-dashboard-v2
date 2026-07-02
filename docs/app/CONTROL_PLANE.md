@@ -233,6 +233,8 @@ running-server file access.
 | `EditFile` | Write a path in a running server's live working set. | none | Section 6.9, Section 7.2 |
 | `ListFiles` | List a directory in a running server's live working set (read-only). | `file_listing` | Section 6.9, Section 7.2 |
 | `TunnelDial` | Dial back the relay's tunnel listener for one player session and splice it to the running server's loopback game port. Carries `endpoint`, single-use `token`, and optional `tls_ca_pem` (everything in-band — no new Worker config). | none | RELAY.md Section 5 |
+| `OpenBedrockTunnel` | Open a Bedrock relay tunnel for a server that reached running state. Carries `relay_endpoint`, `bedrock_port`, a `token` valid for the tunnel's whole lifetime (relay-validated against the API, not matched locally), and optional `tls_ca_pem`. Dispatched once per running transition, not per player. Not yet implemented by the Worker (issue #1546) — answered `internal` until then. | none | epic #1540, issue #1544 |
+| `CloseBedrockTunnel` | Close a server's Bedrock relay tunnel; dispatched when its observed state leaves running. Not yet implemented by the Worker (issue #1546) — answered `internal` until then. | none | epic #1540, issue #1544 |
 
 Notes:
 

@@ -185,6 +185,9 @@ from mc_server_dashboard_api.servers.adapters.backup_author_directory import (
 from mc_server_dashboard_api.servers.adapters.backup_store import (
     StorageBackupStoreAdapter,
 )
+from mc_server_dashboard_api.servers.adapters.bedrock_tunnel_credentials import (
+    FleetBedrockTunnelCredentials,
+)
 from mc_server_dashboard_api.servers.adapters.clock import (
     SystemClock as ServersSystemClock,
 )
@@ -309,6 +312,10 @@ from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
 )
 from mc_server_dashboard_api.servers.domain.backup_store import (
     BackupArchiveStore,
+)
+from mc_server_dashboard_api.servers.domain.bedrock_tunnel import (
+    BedrockTunnelCredentials,
+    NullBedrockTunnelCredentials,
 )
 from mc_server_dashboard_api.servers.domain.catalog_provider import (
     CatalogProvider,
@@ -1828,6 +1835,20 @@ def get_servers_backup_store(
     return StorageBackupStoreAdapter(storage=storage)
 
 
+def get_bedrock_tunnel_credentials(request: Request) -> BedrockTunnelCredentials:
+    """Bind the delete-time tunnel-credential eviction to the fleet table (#1544).
+
+    Reads the process-local ``BedrockTunnelTable`` the app factory stored on app
+    state. Falls back to a no-op if it is absent (a minimal test app that never
+    built the relay state), so the delete path never fails on a missing table.
+    """
+
+    table = getattr(request.app.state, "bedrock_tunnel_table", None)
+    if table is None:
+        return NullBedrockTunnelCredentials()
+    return FleetBedrockTunnelCredentials(table)
+
+
 def get_delete_server(
     request: Request,
     backup_store: Annotated[BackupArchiveStore, Depends(get_servers_backup_store)],
@@ -1835,7 +1856,9 @@ def get_delete_server(
     """Assemble the :class:`DeleteServer` use case (server:delete).
 
     Binds the Storage backup seam so the delete can prune the server's archives and
-    pack its working set into the retained final tar.gz (issue #777).
+    pack its working set into the retained final tar.gz (issue #777), and the
+    fleet tunnel-credential table so the delete forgets the server's Bedrock
+    tunnel credential (issue #1544).
     """
 
     session_factory = create_session_factory(get_engine(request))
@@ -1843,6 +1866,7 @@ def get_delete_server(
         uow=ServersUnitOfWork(session_factory),
         backup_store=backup_store,
         lifecycle_lock=get_lifecycle_lock(request),
+        bedrock_tunnel=get_bedrock_tunnel_credentials(request),
     )
 
 

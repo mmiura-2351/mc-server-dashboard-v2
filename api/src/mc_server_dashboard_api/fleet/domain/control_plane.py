@@ -254,9 +254,43 @@ class TunnelDialCommand:
     tls_ca_pem: str
 
 
+@dataclass(frozen=True)
+class OpenBedrockTunnelCommand:
+    """Tell the Worker to open a Bedrock relay tunnel for one server (issue #1544).
+
+    Dispatched fire-and-forget, like ``TunnelDialCommand``, but from a different
+    trigger: not a relay-initiated ``ResolveJoin``, but the API's own observation
+    that a Bedrock-enabled server (non-null ``server.bedrock_port``) reached
+    running state. ``token`` is the credential the Worker presents on its future
+    QUIC dial-out (issue #1546); unlike ``TunnelDialCommand.token`` (single-use,
+    10 s TTL, matched locally by the relay because it minted the waiter itself),
+    this token is valid for the tunnel's whole lifetime -- until a matching
+    ``CloseBedrockTunnelCommand`` -- and the relay validates it against the API
+    (``RelayService.ValidateBedrockTunnel``) rather than matching it locally,
+    since the relay has no prior waiter to match an API-initiated open against.
+    """
+
+    relay_endpoint: str
+    bedrock_port: int
+    token: str
+    tls_ca_pem: str
+
+
+@dataclass(frozen=True)
+class CloseBedrockTunnelCommand:
+    """Tell the Worker to close a server's Bedrock relay tunnel (issue #1544).
+
+    Dispatched fire-and-forget when the server's observed state leaves running
+    (stop, crash, or restart) -- the mirror image of
+    :class:`OpenBedrockTunnelCommand`.
+    """
+
+
 # The union of commands the lifecycle layer dispatches. File access (ReadFile /
 # EditFile / ListFiles) rides this stream for running servers (ARCHITECTURE.md
 # Section 7.2). TunnelDial rides it for a relay join (RELAY.md Section 5).
+# OpenBedrockTunnel/CloseBedrockTunnel ride it for the Bedrock relay tunnel
+# lifecycle (issue #1544).
 Command = (
     StartServerCommand
     | StopServerCommand
@@ -268,6 +302,8 @@ Command = (
     | EditFileCommand
     | ListFilesCommand
     | TunnelDialCommand
+    | OpenBedrockTunnelCommand
+    | CloseBedrockTunnelCommand
 )
 
 

@@ -30,6 +30,10 @@ from mc_server_dashboard_api.servers.domain.backup_schedule import (
     schedule_from_config,
 )
 from mc_server_dashboard_api.servers.domain.backup_store import BackupArchiveStore
+from mc_server_dashboard_api.servers.domain.bedrock_tunnel import (
+    BedrockTunnelCredentials,
+    NullBedrockTunnelCredentials,
+)
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.cpu_allocation import (
     CPU_ALLOCATION_CONFIG_KEY,
@@ -797,6 +801,10 @@ class DeleteServer:
     uow: UnitOfWork
     backup_store: BackupArchiveStore
     lifecycle_lock: LifecycleLock = NullLifecycleLock()
+    # Forget the server's in-memory Bedrock tunnel credential on delete (issue
+    # #1544), or a stale entry lingers and keeps validating for a gone server.
+    # Defaults to a no-op so non-relay construction sites need not wire it.
+    bedrock_tunnel: BedrockTunnelCredentials = NullBedrockTunnelCredentials()
 
     async def __call__(self, *, community_id: CommunityId, server_id: ServerId) -> None:
         # Hold the per-server lifecycle lock across the at-rest check, the
@@ -852,3 +860,9 @@ class DeleteServer:
                     _SERVER_RESOURCE_TYPE, server_id.value
                 )
                 await self.uow.commit()
+        # Forget the deleted server's Bedrock tunnel credential (issue #1544).
+        # After the commit and outside the lock: the row is gone, so an at-rest
+        # server that had a lingering entry (e.g. left at observed=unknown) can
+        # never re-mint it, and evicting before a failed commit would drop a
+        # still-live server's credential. Idempotent when none is held.
+        self.bedrock_tunnel.close(server_id)

@@ -36,6 +36,17 @@ service RelayService {
   // SessionEnd). The API persists them as game_session rows; upsert-on-id
   // makes retries after transient errors safe. RELAY.md Sections 6 and 8.
   rpc ReportSessions(ReportSessionsRequest) returns (ReportSessionsResponse);
+
+  // ValidateBedrockTunnel is called by the relay when it accepts a Worker's
+  // QUIC dial-out for a Bedrock tunnel (epic #1540, issue #1544). Unlike the
+  // per-player join token -- which the relay matches locally because it
+  // minted the waiter itself via its own ResolveJoin call -- the Bedrock
+  // tunnel is opened API-initiated at server-running time, so the relay has
+  // no prior waiter to match against and asks the API to confirm the token
+  // instead. This keeps the relay itself free of a persistent server list;
+  // its own state stays limited to in-flight tunnel connections.
+  rpc ValidateBedrockTunnel(ValidateBedrockTunnelRequest)
+      returns (ValidateBedrockTunnelResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -211,4 +222,31 @@ message SessionEnd {
 
   // ended_at is when the relay observed the session close (relay clock).
   google.protobuf.Timestamp ended_at = 2;
+}
+
+// ---------------------------------------------------------------------------
+// ValidateBedrockTunnel (epic #1540, issue #1544)
+// ---------------------------------------------------------------------------
+
+// ValidateBedrockTunnelRequest carries the credential a Worker presented on
+// its Bedrock QUIC dial-out, for the relay to confirm against the API
+// (mcsd.controlplane.v1.OpenBedrockTunnel carries the same three values to
+// the Worker).
+message ValidateBedrockTunnelRequest {
+  // server_id identifies the local server the dial claims to be for.
+  string server_id = 1;
+
+  // bedrock_port is the public UDP port the dial claims to serve.
+  uint32 bedrock_port = 2;
+
+  // token is the credential the Worker presented on the QUIC dial-out.
+  string token = 3;
+}
+
+// ValidateBedrockTunnelResponse reports whether the presented credential
+// matches the tunnel the API currently has open for that server.
+message ValidateBedrockTunnelResponse {
+  // valid is true when (server_id, bedrock_port, token) matches the API's
+  // current record for an open Bedrock tunnel on that server.
+  bool valid = 1;
 }

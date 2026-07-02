@@ -29,6 +29,9 @@ from mc_server_dashboard_api.servers.domain.backup import (
     BackupId,
     BackupSource,
 )
+from mc_server_dashboard_api.servers.domain.bedrock_tunnel import (
+    BedrockTunnelCredentials,
+)
 from mc_server_dashboard_api.servers.domain.cpu_allocation import (
     CPU_ALLOCATION_CONFIG_KEY,
 )
@@ -1884,6 +1887,53 @@ async def test_delete_removes_server_and_sweeps_grants() -> None:
     assert uow.commits == 1
     # The working set is always packed into the retained final tar.gz (#777).
     assert store.pruned == [server.id]
+
+
+class _RecordingBedrockTunnel(BedrockTunnelCredentials):
+    """Records the server ids whose tunnel credential was evicted (issue #1544)."""
+
+    def __init__(self) -> None:
+        self.closed: list[ServerId] = []
+
+    def close(self, server_id: ServerId) -> None:
+        self.closed.append(server_id)
+
+
+async def test_delete_evicts_bedrock_tunnel_credential_even_at_observed_unknown() -> (
+    None
+):
+    # Deleting a server forgets its in-memory Bedrock tunnel credential (issue
+    # #1544), or a stale entry lingers and keeps ValidateBedrockTunnel answering
+    # valid for a gone server. observed=unknown (a lost terminal report) still
+    # counts as at-rest, so the delete proceeds and must evict there too.
+    uow = FakeUnitOfWork()
+    store = FakeBackupArchiveStore()
+    tunnel = _RecordingBedrockTunnel()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community, observed=ObservedState.UNKNOWN)
+    uow.servers.seed(server)
+    await DeleteServer(uow=uow, backup_store=store, bedrock_tunnel=tunnel)(
+        community_id=community, server_id=server.id
+    )
+    assert server.id not in uow.servers.by_id
+    assert tunnel.closed == [server.id]
+
+
+async def test_delete_does_not_evict_when_pack_fails() -> None:
+    # The eviction runs only after a successful delete: a fail-closed pack (#777)
+    # aborts before the row is gone, so the still-live server keeps its credential.
+    uow = FakeUnitOfWork()
+    store = FakeBackupArchiveStore(pack_fails=True)
+    tunnel = _RecordingBedrockTunnel()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    with pytest.raises(RuntimeError):
+        await DeleteServer(uow=uow, backup_store=store, bedrock_tunnel=tunnel)(
+            community_id=community, server_id=server.id
+        )
+    assert server.id in uow.servers.by_id
+    assert tunnel.closed == []
 
 
 async def test_delete_with_backups_keeps_newest_archive_and_prunes_the_rest() -> None:

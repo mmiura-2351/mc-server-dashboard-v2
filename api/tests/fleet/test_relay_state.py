@@ -1,14 +1,19 @@
-"""Unit tests for the relay in-memory state (issue #956).
+"""Unit tests for the relay in-memory state (issue #956, #1544).
 
 The relay registration is last-writer-wins (one relay per deployment); the join
 token table mints single-use 128-bit tokens. Single-use/TTL enforcement lives
 relay-side (tokens.go) — the API only mints a fresh, unguessable value to carry
 into ``TunnelDial`` and never validates it back (RELAY.md Sections 5, 6).
+
+The Bedrock tunnel table (issue #1544) is the opposite shape: the API mints
+*and keeps* the per-server credential, because the relay asks it to confirm the
+token rather than matching it locally (RelayService.ValidateBedrockTunnel).
 """
 
 from __future__ import annotations
 
 from mc_server_dashboard_api.fleet.adapters.relay_state import (
+    BedrockTunnelTable,
     JoinTokenTable,
     RelayRegistration,
 )
@@ -49,3 +54,82 @@ def test_mint_tokens_are_unique() -> None:
     table = JoinTokenTable()
     tokens = {table.mint() for _ in range(100)}
     assert len(tokens) == 100
+
+
+def test_bedrock_tunnel_open_token_is_128_bit_hex() -> None:
+    token = BedrockTunnelTable().open(server_id="s1", bedrock_port=19132)
+    assert len(token) == 32
+    int(token, 16)  # parses as hex
+
+
+def test_bedrock_tunnel_validate_matches_open_credential() -> None:
+    table = BedrockTunnelTable()
+    token = table.open(server_id="s1", bedrock_port=19132)
+    assert table.validate(server_id="s1", bedrock_port=19132, token=token) is True
+
+
+def test_bedrock_tunnel_validate_rejects_wrong_port() -> None:
+    table = BedrockTunnelTable()
+    token = table.open(server_id="s1", bedrock_port=19132)
+    assert table.validate(server_id="s1", bedrock_port=19133, token=token) is False
+
+
+def test_bedrock_tunnel_validate_rejects_wrong_token() -> None:
+    table = BedrockTunnelTable()
+    table.open(server_id="s1", bedrock_port=19132)
+    assert table.validate(server_id="s1", bedrock_port=19132, token="wrong") is False
+
+
+def test_bedrock_tunnel_validate_rejects_unknown_server() -> None:
+    table = BedrockTunnelTable()
+    assert table.validate(server_id="s1", bedrock_port=19132, token="anything") is False
+
+
+def test_bedrock_tunnel_close_invalidates_token() -> None:
+    table = BedrockTunnelTable()
+    token = table.open(server_id="s1", bedrock_port=19132)
+    table.close(server_id="s1")
+    assert table.validate(server_id="s1", bedrock_port=19132, token=token) is False
+
+
+def test_bedrock_tunnel_close_is_idempotent() -> None:
+    table = BedrockTunnelTable()
+    table.close(server_id="never-opened")  # must not raise
+
+
+def test_bedrock_tunnel_open_is_idempotent_returns_same_token() -> None:
+    # Get-or-create (issue #1544): a repeat open for a still-open tunnel re-sends
+    # the SAME token rather than rotating it, so a resync-driven re-Open cannot
+    # silently invalidate a live credential the Worker's QUIC redial (#1546) holds.
+    table = BedrockTunnelTable()
+    first = table.open(server_id="s1", bedrock_port=19132)
+    second = table.open(server_id="s1", bedrock_port=19132)
+    assert first == second
+    assert table.validate(server_id="s1", bedrock_port=19132, token=first) is True
+
+
+def test_bedrock_tunnel_open_after_close_mints_fresh_token() -> None:
+    # Rotation happens only through close (stop / crash): the next open then mints
+    # a fresh token, and the pre-close token no longer validates.
+    table = BedrockTunnelTable()
+    first = table.open(server_id="s1", bedrock_port=19132)
+    table.close(server_id="s1")
+    second = table.open(server_id="s1", bedrock_port=19132)
+    assert first != second
+    assert table.validate(server_id="s1", bedrock_port=19132, token=first) is False
+    assert table.validate(server_id="s1", bedrock_port=19132, token=second) is True
+
+
+def test_bedrock_tunnel_open_with_changed_port_mints_fresh_token() -> None:
+    # A lost terminal report can leave the server at observed=unknown (at-rest),
+    # so a Geyser uninstall+reinstall may re-allocate a DIFFERENT bedrock_port
+    # WITHOUT an intervening close. The get-or-create hit path is keyed on the
+    # port, so a changed port mints a fresh token bound to the new pair rather
+    # than returning the stale one (which would pin the old port and fail every
+    # ValidateBedrockTunnel).
+    table = BedrockTunnelTable()
+    first = table.open(server_id="s1", bedrock_port=19132)
+    second = table.open(server_id="s1", bedrock_port=19200)
+    assert first != second
+    assert table.validate(server_id="s1", bedrock_port=19132, token=first) is False
+    assert table.validate(server_id="s1", bedrock_port=19200, token=second) is True

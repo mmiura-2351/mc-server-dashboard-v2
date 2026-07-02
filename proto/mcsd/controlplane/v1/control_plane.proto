@@ -218,6 +218,14 @@ message ApiCommand {
     // concurrency cap (like ServerCommand) so a join does not queue behind a
     // hydrate.
     TunnelDial tunnel_dial = 12;
+    // OpenBedrockTunnel instructs the Worker to open a Bedrock relay tunnel
+    // for a server that just reached running state (epic #1540, issue
+    // #1544). Unlike TunnelDial (dispatched per player session), this is
+    // per-server and dispatched once, at server-running time.
+    OpenBedrockTunnel open_bedrock_tunnel = 13;
+    // CloseBedrockTunnel instructs the Worker to close a server's Bedrock
+    // relay tunnel, dispatched when the server stops (issue #1544).
+    CloseBedrockTunnel close_bedrock_tunnel = 14;
   }
 }
 
@@ -367,6 +375,52 @@ message TunnelDial {
   // CA). Delivered in-band so the Worker needs zero new configuration.
   // RELAY.md Section 5.
   string tls_ca_pem = 4;
+}
+
+// OpenBedrockTunnel instructs the Worker to open a Bedrock relay tunnel for
+// one server (epic #1540, issue #1544). Unlike TunnelDial, which is
+// dispatched per player session in response to a relay-initiated
+// ResolveJoin, this is dispatched by the API itself once, when a
+// Bedrock-enabled server (non-null server.bedrock_port) reaches running
+// state. The Worker's future QUIC dial-out to the relay (issue #1546)
+// carries (server_id, bedrock_port, token); because the relay has no prior
+// waiter to match the dial against (unlike the per-player TunnelDial flow),
+// it validates the token against the API instead
+// (mcsd.relay.v1.RelayService.ValidateBedrockTunnel) rather than matching it
+// locally, keeping the relay itself free of a persistent server list.
+message OpenBedrockTunnel {
+  // server_id identifies the local server whose Bedrock (Geyser/RakNet) port
+  // the Worker forwards over the tunnel.
+  string server_id = 1;
+
+  // relay_endpoint is the relay's Bedrock tunnel endpoint to dial, host:port
+  // form, analogous to TunnelDial.endpoint.
+  string relay_endpoint = 2;
+
+  // bedrock_port is the public UDP port the relay binds for this server
+  // (server.bedrock_port), declared so the relay can bind/route to it.
+  uint32 bedrock_port = 3;
+
+  // token is the credential the Worker presents on its QUIC dial-out; the
+  // relay validates it against the API rather than matching it locally
+  // (see the message comment). Unlike TunnelDial.token (single-use, 10 s
+  // TTL), this token is valid for the tunnel's whole lifetime -- until a
+  // matching CloseBedrockTunnel -- since the Worker may need to redial after
+  // a transient QUIC disconnect.
+  string token = 4;
+
+  // tls_ca_pem is the optional PEM-encoded CA bundle the Worker uses to
+  // verify the relay's QUIC certificate. Empty means system roots. Same
+  // delivery rationale as TunnelDial.tls_ca_pem.
+  string tls_ca_pem = 5;
+}
+
+// CloseBedrockTunnel instructs the Worker to close a previously opened
+// Bedrock relay tunnel for one server (issue #1544). Dispatched when the
+// server's observed state leaves running (stop, crash, or restart).
+message CloseBedrockTunnel {
+  // server_id identifies the local server whose Bedrock tunnel to close.
+  string server_id = 1;
 }
 
 // ---------------------------------------------------------------------------

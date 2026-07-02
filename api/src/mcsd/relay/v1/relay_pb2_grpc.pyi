@@ -65,6 +65,16 @@ class RelayServiceStub:
     SessionEnd). The API persists them as game_session rows; upsert-on-id
     makes retries after transient errors safe. RELAY.md Sections 6 and 8.
     """
+    ValidateBedrockTunnel: _grpc.UnaryUnaryMultiCallable[_relay_pb2.ValidateBedrockTunnelRequest, _relay_pb2.ValidateBedrockTunnelResponse]
+    """ValidateBedrockTunnel is called by the relay when it accepts a Worker's
+    QUIC dial-out for a Bedrock tunnel (epic #1540, issue #1544). Unlike the
+    per-player join token -- which the relay matches locally because it
+    minted the waiter itself via its own ResolveJoin call -- the Bedrock
+    tunnel is opened API-initiated at server-running time, so the relay has
+    no prior waiter to match against and asks the API to confirm the token
+    instead. This keeps the relay itself free of a persistent server list;
+    its own state stays limited to in-flight tunnel connections.
+    """
 
 @_typing.type_check_only
 class RelayServiceAsyncStub(RelayServiceStub):
@@ -91,6 +101,16 @@ class RelayServiceAsyncStub(RelayServiceStub):
     """ReportSessions delivers batched session lifecycle events (SessionStart and
     SessionEnd). The API persists them as game_session rows; upsert-on-id
     makes retries after transient errors safe. RELAY.md Sections 6 and 8.
+    """
+    ValidateBedrockTunnel: _aio.UnaryUnaryMultiCallable[_relay_pb2.ValidateBedrockTunnelRequest, _relay_pb2.ValidateBedrockTunnelResponse]  # type: ignore[assignment]
+    """ValidateBedrockTunnel is called by the relay when it accepts a Worker's
+    QUIC dial-out for a Bedrock tunnel (epic #1540, issue #1544). Unlike the
+    per-player join token -- which the relay matches locally because it
+    minted the waiter itself via its own ResolveJoin call -- the Bedrock
+    tunnel is opened API-initiated at server-running time, so the relay has
+    no prior waiter to match against and asks the API to confirm the token
+    instead. This keeps the relay itself free of a persistent server list;
+    its own state stays limited to in-flight tunnel connections.
     """
 
 class RelayServiceServicer(metaclass=_abc_1.ABCMeta):
@@ -133,6 +153,22 @@ class RelayServiceServicer(metaclass=_abc_1.ABCMeta):
         """ReportSessions delivers batched session lifecycle events (SessionStart and
         SessionEnd). The API persists them as game_session rows; upsert-on-id
         makes retries after transient errors safe. RELAY.md Sections 6 and 8.
+        """
+
+    @_abc_1.abstractmethod
+    def ValidateBedrockTunnel(
+        self,
+        request: _relay_pb2.ValidateBedrockTunnelRequest,
+        context: _ServicerContext,
+    ) -> _typing.Union[_relay_pb2.ValidateBedrockTunnelResponse, _abc.Awaitable[_relay_pb2.ValidateBedrockTunnelResponse]]:
+        """ValidateBedrockTunnel is called by the relay when it accepts a Worker's
+        QUIC dial-out for a Bedrock tunnel (epic #1540, issue #1544). Unlike the
+        per-player join token -- which the relay matches locally because it
+        minted the waiter itself via its own ResolveJoin call -- the Bedrock
+        tunnel is opened API-initiated at server-running time, so the relay has
+        no prior waiter to match against and asks the API to confirm the token
+        instead. This keeps the relay itself free of a persistent server list;
+        its own state stays limited to in-flight tunnel connections.
         """
 
 def add_RelayServiceServicer_to_server(servicer: RelayServiceServicer, server: _typing.Union[_grpc.Server, _aio.Server]) -> None: ...
