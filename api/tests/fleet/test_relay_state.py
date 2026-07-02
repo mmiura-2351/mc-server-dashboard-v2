@@ -97,10 +97,24 @@ def test_bedrock_tunnel_close_is_idempotent() -> None:
     table.close(server_id="never-opened")  # must not raise
 
 
-def test_bedrock_tunnel_open_replaces_prior_token() -> None:
+def test_bedrock_tunnel_open_is_idempotent_returns_same_token() -> None:
+    # Get-or-create (issue #1544): a repeat open for a still-open tunnel re-sends
+    # the SAME token rather than rotating it, so a resync-driven re-Open cannot
+    # silently invalidate a live credential the Worker's QUIC redial (#1546) holds.
     table = BedrockTunnelTable()
     first = table.open(server_id="s1", bedrock_port=19132)
-    second = table.open(server_id="s1", bedrock_port=19133)
+    second = table.open(server_id="s1", bedrock_port=19132)
+    assert first == second
+    assert table.validate(server_id="s1", bedrock_port=19132, token=first) is True
+
+
+def test_bedrock_tunnel_open_after_close_mints_fresh_token() -> None:
+    # Rotation happens only through close (stop / crash): the next open then mints
+    # a fresh token, and the pre-close token no longer validates.
+    table = BedrockTunnelTable()
+    first = table.open(server_id="s1", bedrock_port=19132)
+    table.close(server_id="s1")
+    second = table.open(server_id="s1", bedrock_port=19132)
     assert first != second
     assert table.validate(server_id="s1", bedrock_port=19132, token=first) is False
-    assert table.validate(server_id="s1", bedrock_port=19133, token=second) is True
+    assert table.validate(server_id="s1", bedrock_port=19132, token=second) is True

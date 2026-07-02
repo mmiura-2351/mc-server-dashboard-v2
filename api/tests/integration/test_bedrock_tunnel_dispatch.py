@@ -347,3 +347,102 @@ async def test_open_skipped_when_no_relay_registered(engine: AsyncEngine) -> Non
     await harness.record(server_id=server_id, state="running")
 
     assert harness.queue_empty()
+
+
+async def test_repeated_running_resync_redispatches_same_token(
+    engine: AsyncEngine,
+) -> None:
+    # The Worker re-emits running on any control-plane reconnect (ResyncStatus),
+    # so the open is re-dispatched -- but it must carry the SAME token: minting
+    # a fresh one on a benign blip would silently rotate the live tunnel's
+    # credential and break the whole-lifetime validity #1546's redial relies on.
+    # Covers acceptance items (a) same token across repeated Opens and (c)
+    # re-dispatch on resync carries the same token.
+    worker_id = uuid.uuid4()
+    server_id = await _create_running_server(
+        engine, bedrock_port=_BEDROCK_PORT, worker_id=worker_id
+    )
+    await _add_plugin(engine, _geyser_plugin(server_id, enabled=True))
+    harness = _Harness(engine, worker_id=worker_id)
+
+    await harness.record(server_id=server_id, state="running")
+    first = await harness.queue.get()
+    await harness.record(server_id=server_id, state="running")
+    second = await harness.queue.get()
+
+    assert first.api_command.WhichOneof("command") == "open_bedrock_tunnel"
+    assert second.api_command.WhichOneof("command") == "open_bedrock_tunnel"
+    token = first.api_command.open_bedrock_tunnel.token
+    assert second.api_command.open_bedrock_tunnel.token == token
+    assert harness.bedrock_tunnel_table.validate(
+        server_id=str(server_id.value), bedrock_port=_BEDROCK_PORT, token=token
+    )
+
+
+async def test_stop_then_start_rotates_token(engine: AsyncEngine) -> None:
+    # Rotation is intended across a genuine stop->start: the close invalidates the
+    # first credential and the next running mints a fresh one (acceptance item b).
+    worker_id = uuid.uuid4()
+    server_id = await _create_running_server(
+        engine, bedrock_port=_BEDROCK_PORT, worker_id=worker_id
+    )
+    await _add_plugin(engine, _geyser_plugin(server_id, enabled=True))
+    harness = _Harness(engine, worker_id=worker_id)
+
+    await harness.record(server_id=server_id, state="running")
+    first_token = (await harness.queue.get()).api_command.open_bedrock_tunnel.token
+    await harness.record(server_id=server_id, state="stopped")
+    await harness.queue.get()  # the CloseBedrockTunnel
+    await harness.record(server_id=server_id, state="running")
+    second_token = (await harness.queue.get()).api_command.open_bedrock_tunnel.token
+
+    assert second_token != first_token
+    assert not harness.bedrock_tunnel_table.validate(
+        server_id=str(server_id.value), bedrock_port=_BEDROCK_PORT, token=first_token
+    )
+    assert harness.bedrock_tunnel_table.validate(
+        server_id=str(server_id.value), bedrock_port=_BEDROCK_PORT, token=second_token
+    )
+
+
+async def test_api_restart_convergence_mints_fresh_and_redispatches(
+    engine: AsyncEngine,
+) -> None:
+    # After an API restart the in-memory BedrockTunnelTable is empty, but the
+    # reconnecting Worker re-emits running (ResyncStatus), which re-drives the
+    # open: the fresh process mints a new token and re-dispatches, so the tunnel
+    # reconverges without any separate catch-up path (acceptance item d).
+    worker_id = uuid.uuid4()
+    server_id = await _create_running_server(
+        engine, bedrock_port=_BEDROCK_PORT, worker_id=worker_id
+    )
+    await _add_plugin(engine, _geyser_plugin(server_id, enabled=True))
+    harness = _Harness(engine, worker_id=worker_id)
+
+    await harness.record(server_id=server_id, state="running")
+    first_token = (await harness.queue.get()).api_command.open_bedrock_tunnel.token
+
+    # A fresh process: same relay registration + control-plane stream, but a
+    # brand-new (empty) token table -- the API forgot what it had minted. Its
+    # clock starts after the harness's write so the resync report is fresher than
+    # the cached observed_at (the #216 monotonic guard) and thus applies.
+    restarted_table = BedrockTunnelTable()
+    restarted_sink = ServersServerStateSink(
+        create_session_factory(engine),
+        clock=_AdvancingClock(_NOW + dt.timedelta(minutes=1)),
+        control_plane=harness.control_plane,
+        relay_registration=harness.registration,
+        bedrock_tunnel_table=restarted_table,
+        bedrock_tunnel_port=_BEDROCK_TUNNEL_PORT,
+    )
+    await restarted_sink.record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker_id), state="running"
+    )
+
+    message = await harness.queue.get()
+    assert message.api_command.WhichOneof("command") == "open_bedrock_tunnel"
+    fresh_token = message.api_command.open_bedrock_tunnel.token
+    assert fresh_token != first_token
+    assert restarted_table.validate(
+        server_id=str(server_id.value), bedrock_port=_BEDROCK_PORT, token=fresh_token
+    )

@@ -101,8 +101,25 @@ class BedrockTunnelTable:
         self._by_server: dict[str, _OpenBedrockTunnel] = {}
 
     def open(self, *, server_id: str, bedrock_port: int) -> str:
-        """Mint a fresh token for ``server_id``'s tunnel, replacing any prior one."""
+        """Return ``server_id``'s live tunnel token, minting one only if absent.
 
+        Get-or-create (idempotent). The open is re-dispatched on every accepted
+        ``running`` report, and the Worker re-emits ``running`` on any
+        control-plane reconnect (ResyncStatus), so a benign API<->Worker blip
+        drives a repeat ``open`` for an already-open tunnel. Minting a fresh
+        token each time would silently rotate a live tunnel's credential and
+        break the whole-lifetime validity the Worker's QUIC redial (#1546)
+        relies on. So a repeat open re-sends the SAME token; the credential
+        rotates only through :meth:`close` (stop / crash), after which the next
+        ``running`` mints fresh. A repeat open keeps the existing ``bedrock_port``
+        because the port cannot change while a tunnel is live (a Geyser
+        reinstall that would re-allocate it is an at-rest op that stops the
+        server first, closing the tunnel).
+        """
+
+        current = self._by_server.get(server_id)
+        if current is not None:
+            return current.token
         token = secrets.token_hex(_TOKEN_BYTES)
         self._by_server[server_id] = _OpenBedrockTunnel(
             bedrock_port=bedrock_port, token=token

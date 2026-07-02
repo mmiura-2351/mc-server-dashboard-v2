@@ -162,6 +162,14 @@ class ServersServerStateSink(ServerStateSink):
         parsed = _parse_id(worker_id, kind="worker_id")
         if parsed is None:
             return
+        # A worker disconnect deliberately does NOT invalidate any Bedrock tunnel
+        # credential (issue #1544). The tunnel is a worker-initiated QUIC
+        # connection independent of the control-plane stream: a control-plane blip
+        # (the trigger for this call) must not tear down a still-healthy tunnel,
+        # and the worker redials with the SAME token on reconnect (#1546), which
+        # the whole-lifetime token validity in BedrockTunnelTable is built for. A
+        # credential rotates only on a genuine stop/crash (an observed-state leave
+        # of running -> CloseBedrockTunnel), never on a mere disconnect.
         async with self._session_factory() as session:
             repo = SqlAlchemyServerRepository(session)
             await repo.mark_worker_servers_unknown(WorkerId(parsed), self._clock.now())
@@ -195,9 +203,22 @@ class ServersServerStateSink(ServerStateSink):
         control_plane = self._control_plane
         bedrock_tunnel_table = self._bedrock_tunnel_table
         if control_plane is None or bedrock_tunnel_table is None:
+            # The sink was built without the Bedrock dependencies (relay disabled).
+            # Reached only for a server that still carries a bedrock_port from when
+            # the gate was on, so it is rare, not per-report — logged at debug.
+            _LOG.debug(
+                "bedrock tunnel sync skipped: relay dependencies not configured",
+                extra={"server_id": str(server_id.value)},
+            )
             return
         plugins = await SqlAlchemyPluginRepository(session).list_for_server(server_id)
         if not any(p.enabled and is_geyser_plugin(p) for p in plugins):
+            # Every Geyser copy on the server is disabled, so nothing is listening
+            # on the RakNet port and a tunnel would sit idle (PM note, issue #1544).
+            _LOG.debug(
+                "bedrock tunnel sync skipped: no enabled Geyser plugin",
+                extra={"server_id": str(server_id.value)},
+            )
             return
         fleet_worker_id = FleetWorkerId(str(worker_id.value))
         fleet_server_id = str(server_id.value)
@@ -247,6 +268,11 @@ class ServersServerStateSink(ServerStateSink):
         # API sides (relay.bedrock_tunnel_port), exactly like game_port/tunnel_port
         # already are (RELAY.md Section 13) -- so it needs no separate self-report
         # over Register.
+        #
+        # NOTE (issue #1545): if the relay's QUIC listener implementation decides to
+        # advertise its own Bedrock endpoint over Register instead, switch this to
+        # read that registered value rather than reconstructing host + configured
+        # port here -- the two must not drift.
         relay_host = registered.endpoint.rsplit(":", 1)[0]
         token = bedrock_tunnel_table.open(
             server_id=server_id, bedrock_port=bedrock_port
