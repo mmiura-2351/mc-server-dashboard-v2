@@ -201,15 +201,34 @@ class JoinHostnameConfig:
     ``<slug>.<base_domain>`` when the relay is enabled, else ``None`` — the UI's
     display switch (RELAY.md Section 15). Resolved from the ``[relay]`` settings at
     the edge so the response builder stays free of the config loader.
+
+    ``bedrock_enabled`` (issue #1541) carries the deployment's Bedrock capability
+    flag; with the relay on it switches the ``bedrock_address`` / ``bedrock_port``
+    response fields.
     """
 
     enabled: bool
     base_domain: str | None
+    bedrock_enabled: bool = False
 
     def for_slug(self, slug: str) -> str | None:
         if not self.enabled or not self.base_domain:
             return None
         return f"{slug}.{self.base_domain}"
+
+    def bedrock_address(self) -> str | None:
+        """The Bedrock join address: the bare base domain, or ``None`` (#1541).
+
+        No slug prefix — RakNet carries no hostname on the wire, so the relay
+        routes Bedrock by destination UDP port, not hostname (epic #1540): every
+        Bedrock-enabled server shares the base domain and differs only in
+        ``bedrock_port``. ``None`` when the deployment gate (relay enabled AND
+        Bedrock capability) is off.
+        """
+
+        if not self.enabled or not self.bedrock_enabled or not self.base_domain:
+            return None
+        return self.base_domain
 
 
 def get_join_hostname_config(
@@ -220,6 +239,7 @@ def get_join_hostname_config(
     return JoinHostnameConfig(
         enabled=settings.relay.enabled,
         base_domain=settings.relay.base_domain,
+        bedrock_enabled=settings.relay.bedrock_enabled,
     )
 
 
@@ -250,6 +270,13 @@ class ServerResponse(BaseModel):
     # The player join hostname ``<slug>.<base_domain>`` when the relay is enabled,
     # else ``None`` — the UI's display switch (issue #956, RELAY.md Section 15).
     join_hostname: str | None
+    # The Bedrock join surface (issue #1541): the relay base domain (no slug —
+    # Bedrock routes by port, not hostname) and the server's public UDP port.
+    # Both are set only when the deployment's Bedrock gate is on (relay enabled +
+    # Bedrock capability) AND the server holds a port (Geyser installed); both
+    # ``None`` otherwise, so non-None is the UI's "Bedrock joinable" switch.
+    bedrock_address: str | None
+    bedrock_port: int | None
     desired_state: str
     observed_state: str
     observed_at: UtcDatetime | None
@@ -259,6 +286,11 @@ class ServerResponse(BaseModel):
     def from_entity(
         cls, server: Server, join_hostname_config: JoinHostnameConfig
     ) -> "ServerResponse":
+        bedrock_address = (
+            join_hostname_config.bedrock_address()
+            if server.bedrock_port is not None
+            else None
+        )
         return cls(
             id=str(server.id.value),
             community_id=str(server.community_id.value),
@@ -272,6 +304,8 @@ class ServerResponse(BaseModel):
             game_port=server.game_port,
             slug=server.slug,
             join_hostname=join_hostname_config.for_slug(server.slug),
+            bedrock_address=bedrock_address,
+            bedrock_port=server.bedrock_port if bedrock_address is not None else None,
             desired_state=server.desired_state.value,
             observed_state=server.observed_state.value,
             observed_at=server.observed_at,

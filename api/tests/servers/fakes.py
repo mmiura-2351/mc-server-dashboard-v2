@@ -393,6 +393,11 @@ class FakeServerRepository(ServerRepository):
     async def list_game_ports(self) -> set[int]:
         return {s.game_port for s in self.by_id.values() if s.game_port is not None}
 
+    async def list_bedrock_ports(self) -> set[int]:
+        return {
+            s.bedrock_port for s in self.by_id.values() if s.bedrock_port is not None
+        }
+
     async def list_slugs(self) -> set[str]:
         return {s.slug for s in self.by_id.values() if s.slug}
 

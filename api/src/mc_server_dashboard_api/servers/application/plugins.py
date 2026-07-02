@@ -6,6 +6,7 @@ The at-rest gate and lock pattern mirrors the file and backup use cases.
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import uuid
 from dataclasses import dataclass
@@ -43,6 +44,7 @@ from mc_server_dashboard_api.servers.domain.plugin import (
     PluginSource,
     ServerPlugin,
     content_dir_for_server_type,
+    is_geyser_plugin,
     loader_type_for_server_type,
     modrinth_loader_for_server_type,
     sanitize_plugin_filename,
@@ -50,6 +52,10 @@ from mc_server_dashboard_api.servers.domain.plugin import (
     working_set_present,
 )
 from mc_server_dashboard_api.servers.domain.plugin_cache_store import PluginCacheStore
+from mc_server_dashboard_api.servers.domain.ports import (
+    PortRange,
+    pick_lowest_free_port,
+)
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -151,6 +157,36 @@ async def _reconcile_working_set(
         )
 
 
+async def allocate_bedrock_port_if_geyser(
+    uow: UnitOfWork,
+    *,
+    server: Server,
+    plugin: ServerPlugin,
+    port_range: PortRange | None,
+    now: dt.datetime,
+) -> None:
+    """Allocate the server's public Bedrock UDP port when Geyser arrives (#1541).
+
+    Installing Geyser as a normal plugin is the Bedrock enablement switch: when
+    the freshly ingested ``plugin`` is Geyser, the deployment gate is on
+    (``port_range`` is non-None -- relay enabled + Bedrock capability), and the
+    server holds no port yet, the lowest free port in the dedicated UDP window is
+    staged onto the server row. Runs inside the install transaction so the plugin
+    row and the port commit atomically; ``UNIQUE(bedrock_port)`` backstops a
+    concurrent racer. Raises :class:`PortRangeExhaustedError` (aborting the
+    install) when the window has no free port.
+    """
+
+    if port_range is None or server.bedrock_port is not None:
+        return
+    if not is_geyser_plugin(plugin):
+        return
+    taken = await uow.servers.list_bedrock_ports()
+    server.bedrock_port = pick_lowest_free_port(port_range, taken=taken)
+    server.updated_at = now
+    await uow.servers.update(server)
+
+
 @dataclass(frozen=True)
 class ListPlugins:
     """List installed plugins for a server (plugin:read)."""
@@ -213,13 +249,19 @@ class GetPlugin:
 
 @dataclass(frozen=True)
 class InstallPlugin:
-    """Install a local plugin jar into the server's content directory."""
+    """Install a local plugin jar into the server's content directory.
+
+    ``bedrock_port_range`` is the deployment's assignable Bedrock UDP window
+    (issue #1541), or ``None`` when the Bedrock deployment gate is off; a Geyser
+    jar detected at ingest allocates the server's ``bedrock_port`` from it.
+    """
 
     uow: UnitOfWork
     file_store: FileStore
     cache: PluginCacheStore
     clock: Clock
     lifecycle_lock: LifecycleLock = NullLifecycleLock()
+    bedrock_port_range: PortRange | None = None
 
     async def __call__(
         self,
@@ -270,17 +312,6 @@ class InstallPlugin:
                 else:
                     side = manifest.side
 
-                # Side-aware deploy (issue #1308): only a server-relevant, enabled
-                # jar goes into the working set; a client-only jar is tracked +
-                # cached but never written there.
-                if working_set_present(enabled=True, side=side):
-                    await self.file_store.write_file(
-                        community_id=community_id,
-                        server_id=server_id,
-                        rel_path=rel_path,
-                        content=content,
-                    )
-
                 checksum = hashlib.sha512(content).hexdigest()
                 now = self.clock.now()
 
@@ -310,16 +341,46 @@ class InstallPlugin:
                     side=side,
                 )
                 await self.uow.plugins.add(plugin)
+                # Geyser detection (issue #1541): a Geyser jar switches the
+                # server Bedrock-on, allocating its public UDP port in the same
+                # transaction as the plugin row.
+                await allocate_bedrock_port_if_geyser(
+                    self.uow,
+                    server=server,
+                    plugin=plugin,
+                    port_range=self.bedrock_port_range,
+                    now=now,
+                )
+                # Side-aware deploy (issue #1308): only a server-relevant, enabled
+                # jar goes into the working set; a client-only jar is tracked +
+                # cached but never written there. The write is the LAST step
+                # before commit: the file store is outside the SQL transaction,
+                # so any failure above (e.g. Bedrock-window exhaustion, #1541)
+                # must abort before the jar lands on disk — a write-then-fail
+                # would orphan a working-set jar with no DB row.
+                if working_set_present(enabled=True, side=side):
+                    await self.file_store.write_file(
+                        community_id=community_id,
+                        server_id=server_id,
+                        rel_path=rel_path,
+                        content=content,
+                    )
                 await self.uow.commit()
                 return plugin
 
 
 @dataclass(frozen=True)
 class RemovePlugin:
-    """Remove an installed plugin (delete jar + DB record)."""
+    """Remove an installed plugin (delete jar + DB record).
+
+    Removing Geyser switches the server Bedrock-off (issue #1541): the server's
+    ``bedrock_port`` is released (set back to NULL) in the same transaction,
+    unless another installed Geyser jar remains.
+    """
 
     uow: UnitOfWork
     file_store: FileStore
+    clock: Clock
     lifecycle_lock: LifecycleLock = NullLifecycleLock()
 
     async def __call__(
@@ -348,6 +409,15 @@ class RemovePlugin:
                 except ServerFileNotFoundError:
                     pass  # jar already gone; proceed with DB cleanup
                 await self.uow.plugins.delete(plugin_id)
+                # Release the Bedrock port when the last Geyser leaves (issue
+                # #1541). Unconditional on the deployment gate: a port allocated
+                # while the gate was on must not leak if the gate is off now.
+                if server.bedrock_port is not None and is_geyser_plugin(plugin):
+                    remaining = await self.uow.plugins.list_for_server(server_id)
+                    if not any(is_geyser_plugin(p) for p in remaining):
+                        server.bedrock_port = None
+                        server.updated_at = self.clock.now()
+                        await self.uow.servers.update(server)
                 await self.uow.commit()
 
 

@@ -31,6 +31,11 @@ class MetaResponse(BaseModel):
     """Deployment facts the Web UI reads before a server exists (issue #1002)."""
 
     relay_enabled: bool
+    # Whether the deployment supports the Bedrock relay path (issue #1541):
+    # relay enabled AND the Bedrock capability flag. When true, installing
+    # Geyser on a server allocates its ``bedrock_port`` and surfaces the
+    # Bedrock join address on server responses.
+    bedrock_enabled: bool
     # Operator-configurable memory-limit knobs (issue #1069). ``None`` means the
     # operator has not set them and the hardcoded defaults apply.
     default_memory_limit_mb: int | None
@@ -46,6 +51,7 @@ async def meta(
 
     return MetaResponse(
         relay_enabled=settings.relay.enabled,
+        bedrock_enabled=settings.relay.enabled and settings.relay.bedrock_enabled,
         default_memory_limit_mb=settings.memory_limit.default_mb,
         max_memory_limit_mb=settings.memory_limit.max_mb,
     )

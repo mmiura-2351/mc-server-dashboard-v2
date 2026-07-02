@@ -23,7 +23,12 @@ def _client(app: object) -> Iterator[TestClient]:
         yield client
 
 
-def _app(*, authenticated: bool = True, relay_enabled: bool = False) -> object:
+def _app(
+    *,
+    authenticated: bool = True,
+    relay_enabled: bool = False,
+    bedrock_enabled: bool = False,
+) -> object:
     app = create_app()
     if authenticated:
         app.dependency_overrides[get_current_user] = lambda: make_user()
@@ -34,9 +39,10 @@ def _app(*, authenticated: bool = True, relay_enabled: bool = False) -> object:
                     "enabled": True,
                     "credential": "secret",
                     "base_domain": "mc.example.com",
+                    "bedrock_enabled": bedrock_enabled,
                 }
                 if relay_enabled
-                else {"enabled": False}
+                else {"enabled": False, "bedrock_enabled": bedrock_enabled}
             )
         }
     )
@@ -96,3 +102,31 @@ def test_meta_reports_configured_memory_limits() -> None:
     body = resp.json()
     assert body["default_memory_limit_mb"] == 2048
     assert body["max_memory_limit_mb"] == 8192
+
+
+# --- Bedrock capability in /meta (issue #1541) ---
+
+
+def test_meta_reports_bedrock_enabled_with_relay_and_capability() -> None:
+    app = _app(relay_enabled=True, bedrock_enabled=True)
+    client = next(_client(app))
+    resp = client.get("/api/meta")
+    assert resp.status_code == 200
+    assert resp.json()["bedrock_enabled"] is True
+
+
+def test_meta_reports_bedrock_disabled_by_default() -> None:
+    app = _app(relay_enabled=True)
+    client = next(_client(app))
+    resp = client.get("/api/meta")
+    assert resp.status_code == 200
+    assert resp.json()["bedrock_enabled"] is False
+
+
+def test_meta_reports_bedrock_disabled_without_relay() -> None:
+    # The capability flag alone is not enough: the Bedrock path rides the relay.
+    app = _app(relay_enabled=False, bedrock_enabled=True)
+    client = next(_client(app))
+    resp = client.get("/api/meta")
+    assert resp.status_code == 200
+    assert resp.json()["bedrock_enabled"] is False

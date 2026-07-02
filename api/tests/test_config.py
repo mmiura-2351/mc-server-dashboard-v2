@@ -769,6 +769,65 @@ def test_ports_start_equal_to_end_is_accepted(
     assert settings.ports.range_end == 25565
 
 
+# --- Bedrock UDP port window (issue #1541) -----------------------------------
+
+
+def test_bedrock_ports_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The default window starts at Bedrock's conventional port 19132 so the
+    # first allocation lands there.
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    settings = load_settings(config_file=None)
+    assert settings.ports.bedrock_range_start == 19132
+    assert settings.ports.bedrock_range_end == 19231
+
+
+def test_bedrock_ports_from_toml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(
+        tmp_path,
+        "[ports]\nbedrock_range_start = 20000\nbedrock_range_end = 20010\n",
+    )
+    settings = load_settings(config_file=cfg)
+    assert settings.ports.bedrock_range_start == 20000
+    assert settings.ports.bedrock_range_end == 20010
+
+
+def test_bedrock_ports_start_above_end_fails_fast(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(
+        tmp_path,
+        "[ports]\nbedrock_range_start = 20000\nbedrock_range_end = 19999\n",
+    )
+    with pytest.raises(ValidationError, match="bedrock_range_start"):
+        load_settings(config_file=cfg)
+
+
+def test_relay_bedrock_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The Bedrock capability defaults off; the relay's Bedrock tunnel UDP
+    # listener port defaults outside the default Bedrock window.
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    settings = load_settings(config_file=None)
+    assert settings.relay.bedrock_enabled is False
+    assert settings.relay.bedrock_tunnel_port == 25675
+
+
+def test_relay_bedrock_from_toml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(
+        tmp_path,
+        "[relay]\nbedrock_enabled = true\nbedrock_tunnel_port = 19200\n",
+    )
+    settings = load_settings(config_file=cfg)
+    assert settings.relay.bedrock_enabled is True
+    assert settings.relay.bedrock_tunnel_port == 19200
+
+
 # --- database pool sizing (issue #884) --------------------------------------
 
 

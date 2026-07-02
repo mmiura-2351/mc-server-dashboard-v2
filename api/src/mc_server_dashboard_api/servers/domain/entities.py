@@ -52,6 +52,11 @@ class Server:
     # rows that predate port tracking. Defaulted so existing constructions (tests,
     # other use cases) need not pass it; the create flow sets it explicitly.
     game_port: int | None = None
+    # The public Bedrock UDP port (issue #1541), allocated from the dedicated UDP
+    # window when Geyser is detected among the server's plugins and released on
+    # Geyser uninstall. ``None`` is the not-Bedrock-enabled state -- non-None *is*
+    # Bedrock-enabled, there is no separate boolean. Unique deployment-wide.
+    bedrock_port: int | None = None
     # The relay slug (issue #955): a DNS-label string unique deployment-wide,
     # auto-generated at create and renameable via the server update PATCH.
     # Defaults to empty string here so existing test constructions that predate

@@ -2833,6 +2833,8 @@ export interface components {
          * @description Deployment facts the Web UI reads before a server exists (issue #1002).
          */
         MetaResponse: {
+            /** Bedrock Enabled */
+            bedrock_enabled: boolean;
             /** Default Memory Limit Mb */
             default_memory_limit_mb: number | null;
             /** Max Memory Limit Mb */
@@ -3211,6 +3213,10 @@ export interface components {
         ServerResponse: {
             /** Assigned Worker Id */
             assigned_worker_id: string | null;
+            /** Bedrock Address */
+            bedrock_address: string | null;
+            /** Bedrock Port */
+            bedrock_port: number | null;
             /** Community Id */
             community_id: string;
             /** Config */

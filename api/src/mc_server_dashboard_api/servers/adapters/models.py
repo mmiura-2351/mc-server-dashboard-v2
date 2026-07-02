@@ -56,6 +56,9 @@ class ServerModel(Base):
         # The tracked game port is unique deployment-wide (issue #243); NULLs are
         # allowed (legacy/imported rows carry none) and never collide under Postgres.
         UniqueConstraint("game_port", name="uq_server_game_port"),
+        # The public Bedrock UDP port is unique deployment-wide (issue #1541);
+        # NULL (no Geyser detected) never collides under Postgres.
+        UniqueConstraint("bedrock_port", name="uq_server_bedrock_port"),
         # The relay slug is unique deployment-wide (issue #955): a DNS label that
         # becomes the hostname prefix ``<slug>.<base_domain>`` on the relay path.
         UniqueConstraint("slug", name="uq_server_slug"),
@@ -88,6 +91,10 @@ class ServerModel(Base):
     # The Minecraft game port (issue #243), assigned at create from the configured
     # range and unique deployment-wide. Nullable: legacy/imported rows carry none.
     game_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # The public Bedrock UDP port (issue #1541), allocated from the dedicated UDP
+    # window when Geyser is detected among the server's plugins and released on
+    # Geyser uninstall. Nullable: NULL is the not-Bedrock-enabled state.
+    bedrock_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
     desired_state: Mapped[str] = mapped_column(String, nullable=False)
     observed_state: Mapped[str] = mapped_column(String, nullable=False)
     observed_at: Mapped[dt.datetime | None] = mapped_column(

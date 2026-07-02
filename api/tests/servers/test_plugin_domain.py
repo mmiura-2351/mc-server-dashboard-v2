@@ -16,6 +16,7 @@ from mc_server_dashboard_api.servers.domain.plugin import (
     PluginSource,
     ServerPlugin,
     content_dir_for_server_type,
+    is_geyser_plugin,
     loader_type_for_server_type,
     sanitize_plugin_filename,
     working_set_present,
@@ -171,3 +172,60 @@ class TestSanitizePluginFilename:
     def test_dotdot_raises(self) -> None:
         with pytest.raises(ValueError):
             sanitize_plugin_filename("..")
+
+
+class TestIsGeyserPlugin:
+    """Geyser detection drives the bedrock_port lifecycle (issue #1541)."""
+
+    @staticmethod
+    def _plugin(
+        *,
+        mod_identifier: str | None = None,
+        source_project_id: str | None = None,
+    ) -> ServerPlugin:
+        now = dt.datetime.now(tz=dt.timezone.utc)
+        return ServerPlugin(
+            id=PluginId.new(),
+            server_id=ServerId.new(),
+            rel_path="plugins/test.jar",
+            filename="test.jar",
+            display_name="Test Plugin",
+            description=None,
+            loader_type=LoaderType.PLUGIN,
+            source=PluginSource.LOCAL,
+            source_project_id=source_project_id,
+            source_version_id=None,
+            version_number=None,
+            checksum_sha512="abc123",
+            sha256="def456",
+            size_bytes=1024,
+            enabled=True,
+            installed_by=None,
+            created_at=now,
+            updated_at=now,
+            mod_identifier=mod_identifier,
+        )
+
+    def test_manifest_name_matches(self) -> None:
+        assert is_geyser_plugin(self._plugin(mod_identifier="Geyser-Spigot"))
+
+    def test_manifest_name_matches_case_insensitively(self) -> None:
+        assert is_geyser_plugin(self._plugin(mod_identifier="geyser-spigot"))
+
+    def test_modrinth_project_id_matches(self) -> None:
+        assert is_geyser_plugin(self._plugin(source_project_id="wKkoqHrH"))
+
+    def test_modrinth_slug_matches(self) -> None:
+        assert is_geyser_plugin(self._plugin(source_project_id="geyser"))
+
+    def test_other_plugin_does_not_match(self) -> None:
+        assert not is_geyser_plugin(
+            self._plugin(mod_identifier="WorldGuard", source_project_id="proj-1")
+        )
+
+    def test_floodgate_is_not_the_detection_key(self) -> None:
+        # Floodgate is the expected companion but does not own the UDP listener.
+        assert not is_geyser_plugin(self._plugin(mod_identifier="floodgate"))
+
+    def test_no_identity_does_not_match(self) -> None:
+        assert not is_geyser_plugin(self._plugin())
