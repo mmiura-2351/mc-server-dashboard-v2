@@ -11,7 +11,11 @@ DB, no real Storage), per TESTING.md Section 4. Verifies:
   from the request (uniqueness 409); the row gets an auto-assigned game port;
 - import caps: an oversized body / over-cap extraction -> 413;
 - import failure posture: a storage write failure mid-publish -> the seed-failure
-  503 posture, with the row already created.
+  503 posture, with the row already created;
+- import Bedrock enablement (issue #1551): a re-created Geyser plugin allocates
+  the imported server's ``bedrock_port`` when the deployment gate is on, leaves it
+  unset when the gate is off, a non-Geyser plugin never allocates, and a Bedrock
+  window exhaustion surfaces the same seed-failure 503 posture.
 """
 
 from __future__ import annotations
@@ -64,6 +68,7 @@ from tests.servers.fakes import (
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 _PORT_RANGE = PortRange(start=25565, end=25600)
+_BEDROCK_RANGE = PortRange(start=19132, end=19141)
 
 
 def _server(*, community_id: uuid.UUID, server_id: uuid.UUID) -> Server:
@@ -616,3 +621,120 @@ async def test_import_old_archive_without_plugins_succeeds() -> None:
     )
     imported_plugins = await dst_uow.plugins.list_for_server(server.id)
     assert imported_plugins == []
+
+
+# --- import: Bedrock port allocation on Geyser detection (issue #1551) -------
+
+
+async def _export_archive(
+    *, community: uuid.UUID, mod_identifier: str | None = None
+) -> bytes:
+    """Build an export archive from a fresh source server.
+
+    ``mod_identifier`` seeds a single plugin row on the source server (e.g.
+    ``"Geyser-Spigot"``); ``None`` (the default) exports with no plugins.
+    """
+
+    src_id = uuid.uuid4()
+    src_uow = FakeUnitOfWork()
+    src_uow.servers.seed(_server(community_id=community, server_id=src_id))
+    if mod_identifier is not None:
+        src_uow.plugins.seed(_plugin(server_id=src_id, mod_identifier=mod_identifier))
+    export = ExportServer(
+        uow=src_uow, clock=FakeClock(_NOW), file_store=FakeFileStore()
+    )
+    return await _drain(
+        await export(community_id=CommunityId(community), server_id=ServerId(src_id))
+    )
+
+
+async def test_import_with_geyser_allocates_bedrock_port() -> None:
+    community = uuid.uuid4()
+    archive = await _export_archive(community=community, mod_identifier="Geyser-Spigot")
+
+    dst_uow, dst_store = FakeUnitOfWork(), FakeFileStore()
+    imp = ImportServer(
+        create_server=_create_server(dst_uow, dst_store),
+        file_store=dst_store,
+        bedrock_port_range=_BEDROCK_RANGE,
+    )
+    server = await imp(
+        community_id=CommunityId(community),
+        name="imported",
+        content=archive,
+    )
+    assert dst_uow.servers.by_id[server.id].bedrock_port == 19132
+
+
+async def test_import_without_geyser_does_not_allocate_bedrock_port() -> None:
+    community = uuid.uuid4()
+    archive = await _export_archive(community=community, mod_identifier="fabric-api")
+
+    dst_uow, dst_store = FakeUnitOfWork(), FakeFileStore()
+    imp = ImportServer(
+        create_server=_create_server(dst_uow, dst_store),
+        file_store=dst_store,
+        bedrock_port_range=_BEDROCK_RANGE,
+    )
+    server = await imp(
+        community_id=CommunityId(community),
+        name="imported",
+        content=archive,
+    )
+    assert dst_uow.servers.by_id[server.id].bedrock_port is None
+
+
+async def test_import_geyser_without_gate_leaves_port_unset() -> None:
+    # bedrock_port_range None = the deployment gate is off (relay disabled or no
+    # Bedrock capability): a re-created Geyser plugin must not allocate, but the
+    # import itself still succeeds.
+    community = uuid.uuid4()
+    archive = await _export_archive(community=community, mod_identifier="Geyser-Spigot")
+
+    dst_uow, dst_store = FakeUnitOfWork(), FakeFileStore()
+    imp = ImportServer(
+        create_server=_create_server(dst_uow, dst_store), file_store=dst_store
+    )
+    server = await imp(
+        community_id=CommunityId(community),
+        name="imported",
+        content=archive,
+    )
+    assert dst_uow.servers.by_id[server.id].bedrock_port is None
+    imported_plugins = await dst_uow.plugins.list_for_server(server.id)
+    assert len(imported_plugins) == 1
+
+
+async def test_import_geyser_exhausted_bedrock_window_is_seed_failed() -> None:
+    # Window exhaustion during the plugin-metadata import is a post-commit
+    # failure (the server row and its working set already committed): it reuses
+    # the #243/#252 seed-failure posture rather than the install paths' distinct
+    # ``bedrock_port_range_exhausted``, since -- unlike an install-time abort --
+    # a row already exists here.
+    community = uuid.uuid4()
+    archive = await _export_archive(community=community, mod_identifier="Geyser-Spigot")
+
+    dst_uow, dst_store = FakeUnitOfWork(), FakeFileStore()
+    other = _server(community_id=community, server_id=uuid.uuid4())
+    other.bedrock_port = 19132
+    dst_uow.servers.seed(other)
+    imp = ImportServer(
+        create_server=_create_server(dst_uow, dst_store),
+        file_store=dst_store,
+        bedrock_port_range=PortRange(start=19132, end=19132),
+    )
+    with pytest.raises(WorkingSetSeedFailedError):
+        await imp(
+            community_id=CommunityId(community),
+            name="imported",
+            content=archive,
+        )
+    # The row and its working set are already committed by the time the plugin
+    # import runs (one commit, from create_server); the plugin-import transaction
+    # itself never reaches its own commit -- the abort signal is that the commit
+    # count stops at 1 (the real UoW rolls the failed transaction back; the fake's
+    # staged plugin add is not transactional, mirroring the install-path
+    # exhaustion test's same caveat).
+    [server] = [s for s in dst_uow.servers.by_id.values() if s.name.value == "imported"]
+    assert server.bedrock_port is None
+    assert dst_uow.commits == 1
