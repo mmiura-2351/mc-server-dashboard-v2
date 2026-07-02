@@ -386,9 +386,13 @@ proto-breaking:
 proto-gen: $(PROTOC_GEN_GO) $(PROTOC_GEN_GO_GRPC)
 	cd proto && buf generate
 	# The relay is a sibling Go module and cannot import the worker module's
-	# internal/ stubs, so generate it its own copy of the mcsd.relay.v1 package
-	# (buf.gen.relay.yaml, scoped to the relay proto). See proto/README.md.
-	cd proto && buf generate --template buf.gen.relay.yaml --path mcsd/relay/v1/relay.proto
+	# internal/ stubs, so generate it its own copy of the mcsd.relay.v1 and
+	# mcsd.bedrocktunnel.v1 packages (buf.gen.relay.yaml, scoped to those two
+	# proto files -- the relay is also the only consumer of the Worker<->relay
+	# Bedrock tunnel handshake on this side, issue #1545). See proto/README.md.
+	cd proto && buf generate --template buf.gen.relay.yaml \
+		--path mcsd/relay/v1/relay.proto \
+		--path mcsd/bedrocktunnel/v1/bedrock_tunnel.proto
 	cd api && uv run python -m grpc_tools.protoc \
 		-I ../proto \
 		--python_out=src \
