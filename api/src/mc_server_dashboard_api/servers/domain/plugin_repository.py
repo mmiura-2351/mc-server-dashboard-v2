@@ -9,6 +9,7 @@ return ``None`` when absent rather than raising, so callers decide policy
 from __future__ import annotations
 
 import abc
+from collections.abc import Iterable
 
 from mc_server_dashboard_api.servers.domain.plugin import PluginId, ServerPlugin
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
@@ -30,6 +31,20 @@ class PluginRepository(abc.ABC):
     @abc.abstractmethod
     async def list_for_server(self, server_id: ServerId) -> list[ServerPlugin]:
         """Return a server's plugins ordered by display_name."""
+
+    @abc.abstractmethod
+    async def enabled_geyser_server_ids(
+        self, server_ids: Iterable[ServerId]
+    ) -> set[ServerId]:
+        """Return the subset of ``server_ids`` with at least one enabled Geyser copy.
+
+        The batched counterpart to ``list_for_server`` (issue #1555): a caller that
+        must classify many servers' Bedrock-joinable state at once (the servers list
+        response gate) uses this instead of one ``list_for_server`` call per server,
+        so listing a community's servers stays a fixed number of queries regardless
+        of how many servers it has. Applies the same enabled-Geyser predicate as the
+        single-server callers (``has_enabled_geyser``).
+        """
 
     @abc.abstractmethod
     async def delete(self, plugin_id: PluginId) -> None:

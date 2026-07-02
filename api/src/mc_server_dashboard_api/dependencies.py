@@ -274,6 +274,7 @@ from mc_server_dashboard_api.servers.application.lifecycle import (
     StopServer,
 )
 from mc_server_dashboard_api.servers.application.manage_server import (
+    BedrockJoinability,
     CreateServer,
     DeleteServer,
     ListServers,
@@ -1292,6 +1293,18 @@ def get_list_servers(request: Request) -> ListServers:
 
     session_factory = create_session_factory(get_engine(request))
     return ListServers(uow=ServersUnitOfWork(session_factory))
+
+
+def get_bedrock_joinability(request: Request) -> BedrockJoinability:
+    """Assemble the :class:`BedrockJoinability` gate (issue #1555).
+
+    Used by the servers response builders to decide whether
+    ``bedrock_address``/``bedrock_port`` should be surfaced: only when the server
+    also carries an enabled Geyser copy, not merely an allocated port.
+    """
+
+    session_factory = create_session_factory(get_engine(request))
+    return BedrockJoinability(uow=ServersUnitOfWork(session_factory))
 
 
 def get_update_server(

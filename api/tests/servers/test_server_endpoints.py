@@ -37,6 +37,7 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     UserId,
 )
 from mc_server_dashboard_api.dependencies import (
+    get_bedrock_joinability,
     get_create_server,
     get_current_user,
     get_delete_server,
@@ -51,6 +52,7 @@ from mc_server_dashboard_api.servers.api.servers import (
     get_join_hostname_config,
 )
 from mc_server_dashboard_api.servers.application.manage_server import (
+    BedrockJoinability,
     ReadServer,
     UpdateServer,
 )
@@ -80,6 +82,12 @@ from mc_server_dashboard_api.servers.domain.errors import (
 from mc_server_dashboard_api.servers.domain.memory_limit import (
     MEMORY_LIMIT_CONFIG_KEY,
 )
+from mc_server_dashboard_api.servers.domain.plugin import (
+    LoaderType,
+    PluginId,
+    PluginSource,
+    ServerPlugin,
+)
 from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId as ServersCommunityId,
@@ -100,7 +108,12 @@ from mc_server_dashboard_api.servers.domain.version_validator import (
 )
 from tests.community.fakes import FakeAuthzUnitOfWork
 from tests.identity.fakes import make_user
-from tests.servers.fakes import FakeClock, FakeFileStore, FakeUnitOfWork
+from tests.servers.fakes import (
+    FakeClock,
+    FakeFileStore,
+    FakePluginRepository,
+    FakeUnitOfWork,
+)
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 
@@ -168,6 +181,50 @@ def _server_entity(
     )
 
 
+def _geyser_plugin(
+    server_id: ServerId, *, enabled: bool = True, rel_path: str = "plugins/Geyser.jar"
+) -> ServerPlugin:
+    # A minimal plugin row detected as Geyser by is_geyser_plugin() via
+    # mod_identifier (issue #1555 tests need real plugin rows, not a stubbed
+    # bool, so the response gate exercises the actual has_enabled_geyser()
+    # predicate end to end).
+    return ServerPlugin(
+        id=PluginId.new(),
+        server_id=server_id,
+        rel_path=rel_path,
+        filename=rel_path.rsplit("/", 1)[-1],
+        display_name="Geyser-Spigot",
+        description=None,
+        loader_type=LoaderType.PLUGIN,
+        source=PluginSource.LOCAL,
+        source_project_id=None,
+        source_version_id=None,
+        version_number=None,
+        checksum_sha512="abc",
+        sha256=None,
+        size_bytes=100,
+        enabled=enabled,
+        installed_by=None,
+        created_at=_NOW,
+        updated_at=_NOW,
+        mod_identifier="Geyser-Spigot",
+    )
+
+
+def _bedrock_joinability(*plugins: ServerPlugin) -> BedrockJoinability:
+    """A real :class:`BedrockJoinability` backed by in-memory plugin rows.
+
+    Exercises the actual has_enabled_geyser() predicate (issue #1555) rather
+    than a stubbed boolean, so these HTTP-level tests catch a drift in the
+    predicate itself, not just in the response-gating wiring.
+    """
+
+    repo = FakePluginRepository()
+    for plugin in plugins:
+        repo.seed(plugin)
+    return BedrockJoinability(uow=FakeUnitOfWork(plugins=repo))
+
+
 def _app(
     *,
     member: bool,
@@ -178,6 +235,7 @@ def _app(
     update: _FakeUseCase | UpdateServer | None = None,
     delete: _FakeUseCase | None = None,
     join_config: JoinHostnameConfig | None = None,
+    bedrock: BedrockJoinability | None = None,
 ) -> object:
     app = create_app()
     app.dependency_overrides[get_current_user] = lambda: make_user()
@@ -197,6 +255,11 @@ def _app(
         app.dependency_overrides[get_delete_server] = lambda: delete
     if join_config is not None:
         app.dependency_overrides[get_join_hostname_config] = lambda: join_config
+    # Always overridden (never a live DB in this fake-only suite): no plugins by
+    # default, i.e. no server is Geyser-enabled unless a test seeds one.
+    app.dependency_overrides[get_bedrock_joinability] = lambda: (
+        bedrock if bedrock is not None else _bedrock_joinability()
+    )
     return app
 
 
@@ -1105,6 +1168,7 @@ def test_read_server_bedrock_fields_when_gate_on_and_port_allocated() -> None:
         join_config=JoinHostnameConfig(
             enabled=True, base_domain="mc.example.com", bedrock_enabled=True
         ),
+        bedrock=_bedrock_joinability(_geyser_plugin(server.id, enabled=True)),
     )
     client = next(_client(app))
     resp = client.get(f"/api/communities/{community}/servers/{uuid.uuid4()}")
@@ -1173,3 +1237,103 @@ def test_read_server_bedrock_fields_null_when_relay_disabled() -> None:
     body = resp.json()
     assert body["bedrock_address"] is None
     assert body["bedrock_port"] is None
+
+
+# --- bedrock_address / bedrock_port gated on an ENABLED Geyser (issue #1555) -
+
+
+def _bedrock_join_config() -> JoinHostnameConfig:
+    return JoinHostnameConfig(
+        enabled=True, base_domain="mc.example.com", bedrock_enabled=True
+    )
+
+
+def test_read_server_bedrock_fields_null_when_sole_geyser_disabled() -> None:
+    # bedrock_port stays allocated (TogglePlugin never releases it), but the
+    # response must not advertise an address nothing is listening on.
+    community = uuid.uuid4()
+    server = _bedrock_server(community, bedrock_port=19132)
+    app = _app(
+        member=True,
+        allow=True,
+        read=_FakeUseCase(result=server),
+        join_config=_bedrock_join_config(),
+        bedrock=_bedrock_joinability(_geyser_plugin(server.id, enabled=False)),
+    )
+    client = next(_client(app))
+    resp = client.get(f"/api/communities/{community}/servers/{uuid.uuid4()}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["bedrock_address"] is None
+    assert body["bedrock_port"] is None
+
+
+def test_read_server_bedrock_fields_restored_when_geyser_reenabled() -> None:
+    community = uuid.uuid4()
+    server = _bedrock_server(community, bedrock_port=19132)
+    app = _app(
+        member=True,
+        allow=True,
+        read=_FakeUseCase(result=server),
+        join_config=_bedrock_join_config(),
+        bedrock=_bedrock_joinability(_geyser_plugin(server.id, enabled=True)),
+    )
+    client = next(_client(app))
+    resp = client.get(f"/api/communities/{community}/servers/{uuid.uuid4()}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["bedrock_address"] == "mc.example.com"
+    assert body["bedrock_port"] == 19132
+
+
+def test_read_server_bedrock_fields_unaffected_when_one_of_two_geyser_copies() -> None:
+    # A stray second Geyser jar (e.g. installed then re-uploaded) disabled, next
+    # to the enabled copy actually serving Bedrock: the server is still
+    # Bedrock-joinable as long as at least one copy is enabled.
+    community = uuid.uuid4()
+    server = _bedrock_server(community, bedrock_port=19132)
+    app = _app(
+        member=True,
+        allow=True,
+        read=_FakeUseCase(result=server),
+        join_config=_bedrock_join_config(),
+        bedrock=_bedrock_joinability(
+            _geyser_plugin(server.id, enabled=True, rel_path="plugins/Geyser.jar"),
+            _geyser_plugin(
+                server.id, enabled=False, rel_path="plugins/Geyser.jar.old.disabled"
+            ),
+        ),
+    )
+    client = next(_client(app))
+    resp = client.get(f"/api/communities/{community}/servers/{uuid.uuid4()}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["bedrock_address"] == "mc.example.com"
+    assert body["bedrock_port"] == 19132
+
+
+def test_list_servers_bedrock_fields_reflect_per_server_geyser_state() -> None:
+    # The batched list-endpoint gate (issue #1555): one server's Geyser is
+    # enabled, the other's is disabled, both retain a bedrock_port -- the
+    # response must classify each independently from a single batched lookup.
+    community = uuid.uuid4()
+    enabled_server = _bedrock_server(community, bedrock_port=19132)
+    disabled_server = _bedrock_server(community, bedrock_port=19133)
+    repo = FakePluginRepository()
+    repo.seed(_geyser_plugin(enabled_server.id, enabled=True))
+    repo.seed(_geyser_plugin(disabled_server.id, enabled=False))
+    app = _app(
+        member=True,
+        allow=True,
+        list_=_FakeUseCase(result=[enabled_server, disabled_server]),
+        join_config=_bedrock_join_config(),
+        bedrock=BedrockJoinability(uow=FakeUnitOfWork(plugins=repo)),
+    )
+    client = next(_client(app))
+    resp = client.get(f"/api/communities/{community}/servers")
+    assert resp.status_code == 200
+    by_id = {row["id"]: row for row in resp.json()}
+    assert by_id[str(enabled_server.id.value)]["bedrock_address"] == "mc.example.com"
+    assert by_id[str(enabled_server.id.value)]["bedrock_port"] == 19132
+    assert by_id[str(disabled_server.id.value)]["bedrock_address"] is None
+    assert by_id[str(disabled_server.id.value)]["bedrock_port"] is None
