@@ -44,10 +44,17 @@ func (f *fakeValidator) lastCall() validateCall {
 	return f.calls[len(f.calls)-1]
 }
 
+// newTestListener runs a Listener with unlimited pre-auth handshake caps; use
+// newTestListenerWithCaps to exercise the cap itself.
 func newTestListener(t *testing.T, validator Validator) (*Listener, func()) {
 	t.Helper()
+	return newTestListenerWithCaps(t, validator, ipcaps.NewIPCaps(0, 0, 0, nil))
+}
+
+func newTestListenerWithCaps(t *testing.T, validator Validator, preAuthCaps *ipcaps.IPCaps) (*Listener, func()) {
+	t.Helper()
 	newCaps := func() *ipcaps.IPCaps { return ipcaps.NewIPCaps(0, 0, 0, nil) }
-	ln, err := NewListener("127.0.0.1:0", selfSignedTLS(t), validator, newCaps, testLogger())
+	ln, err := NewListener("127.0.0.1:0", selfSignedTLS(t), validator, preAuthCaps, newCaps, testLogger())
 	if err != nil {
 		t.Fatalf("NewListener: %v", err)
 	}
@@ -112,7 +119,9 @@ func TestListenerHandshakeAccept(t *testing.T) {
 	ln, stop := newTestListener(t, validator)
 	defer stop()
 
-	hello := &bedrocktunnelv1.TunnelHello{ServerId: "srv-1", BedrockPort: 25701, Token: "tok"}
+	// BedrockPort 0 makes the accepted handshake's bind OS-assigned, so the
+	// test cannot collide with a busy port on a shared CI host.
+	hello := &bedrocktunnelv1.TunnelHello{ServerId: "srv-1", BedrockPort: 0, Token: "tok"}
 	_, ack := doHandshake(t, ln, hello)
 
 	if !ack.GetAccepted() {
@@ -120,8 +129,8 @@ func TestListenerHandshakeAccept(t *testing.T) {
 	}
 
 	call := validator.lastCall()
-	if call.serverID != "srv-1" || call.bedrockPort != 25701 || call.token != "tok" {
-		t.Errorf("ValidateBedrockTunnel called with %+v, want {srv-1 25701 tok}", call)
+	if call.serverID != "srv-1" || call.bedrockPort != 0 || call.token != "tok" {
+		t.Errorf("ValidateBedrockTunnel called with %+v, want {srv-1 0 tok}", call)
 	}
 }
 
@@ -204,5 +213,91 @@ func TestListenerHandshakeRejectOnBindConflict(t *testing.T) {
 
 	if ack.GetAccepted() {
 		t.Fatal("accepted = true, want false when the declared port is already bound")
+	}
+}
+
+// gatedValidator blocks each ValidateBedrockTunnel call until gate is closed,
+// signalling entry on started, so a test can hold a pre-auth handshake window
+// open deliberately.
+type gatedValidator struct {
+	started chan struct{} // buffered; receives one signal per call entry
+	gate    chan struct{} // close to release all blocked (and future) calls
+}
+
+func (g *gatedValidator) ValidateBedrockTunnel(ctx context.Context, _ string, _ uint32, _ string) (bool, error) {
+	select {
+	case g.started <- struct{}{}:
+	default:
+	}
+	select {
+	case <-g.gate:
+		return true, nil
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
+}
+
+func TestListenerPreAuthCapEnforcedAndReleased(t *testing.T) {
+	validator := &gatedValidator{started: make(chan struct{}, 1), gate: make(chan struct{})}
+	// One concurrent pre-auth handshake window per source IP.
+	preAuthCaps := ipcaps.NewIPCaps(1, 0, 0, nil)
+	ln, stop := newTestListenerWithCaps(t, validator, preAuthCaps)
+	defer stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// First dial-out: occupies the single slot, held open by the blocked
+	// validator.
+	conn1 := dialQUIC(ctx, t, ln.Addr().String())
+	stream1, err := conn1.OpenStreamSync(ctx)
+	if err != nil {
+		t.Fatalf("OpenStreamSync: %v", err)
+	}
+	data, err := proto.Marshal(&bedrocktunnelv1.TunnelHello{ServerId: "srv-1", BedrockPort: 0, Token: "tok"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := writeFramed(stream1, data); err != nil {
+		t.Fatalf("writeFramed: %v", err)
+	}
+	// Wait until the relay is inside validation, so the slot is definitely
+	// held before the second dial.
+	select {
+	case <-validator.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("validator was never entered")
+	}
+
+	// Second dial-out from the same IP: over the cap, closed silently before
+	// any handshake processing.
+	conn2 := dialQUIC(ctx, t, ln.Addr().String())
+	select {
+	case <-conn2.Context().Done():
+	case <-time.After(4 * time.Second):
+		t.Fatal("expected the over-cap connection to be closed")
+	}
+
+	// Release the validator; the first handshake resolves (accepted).
+	close(validator.gate)
+	ackData, err := readFramed(stream1)
+	if err != nil {
+		t.Fatalf("readFramed ack: %v", err)
+	}
+	_ = stream1.Close()
+	var ack1 bedrocktunnelv1.TunnelHelloAck
+	if err := proto.Unmarshal(ackData, &ack1); err != nil {
+		t.Fatalf("unmarshal ack: %v", err)
+	}
+	if !ack1.GetAccepted() {
+		t.Fatalf("first handshake rejected: %q", ack1.GetRejectReason())
+	}
+
+	// The slot must be released once the handshake resolved -- NOT held for
+	// the (still running) first tunnel's lifetime: a third dial-out from the
+	// same IP succeeds while conn1's tunnel is live.
+	_, ack3 := doHandshake(t, ln, &bedrocktunnelv1.TunnelHello{ServerId: "srv-2", BedrockPort: 0, Token: "tok"})
+	if !ack3.GetAccepted() {
+		t.Fatalf("third handshake rejected (%q); pre-auth slot not released after resolution", ack3.GetRejectReason())
 	}
 }

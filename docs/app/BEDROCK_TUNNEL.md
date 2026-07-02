@@ -115,18 +115,44 @@ talking to that server, multiplexed by flow id).
    accepts a repeated presentation for as long as the tunnel is open
    API-side.
 
+Two obligations on the Worker's side of the connection (binding for the
+Worker implementation, issue #1546):
+
+- **Keepalives.** The relay applies an explicit 15 s QUIC idle timeout to
+  every tunnel connection (`maxIdleTimeout`,
+  `relay/internal/bedrock/listener.go`; the effective timeout is the minimum
+  of both peers' values). A tunnel with zero connected Bedrock players -- the
+  common case -- carries no datagrams, so the Worker MUST enable QUIC
+  keepalives with a period well under that timeout (e.g. quic-go
+  `KeepAlivePeriod` of 5 s, a third of it). This is also what holds the
+  Worker's NAT mapping open (an epic #1540 locked decision). Without
+  keepalives, every idle tunnel collapses at the idle timeout and the Worker
+  redials in a loop forever.
+- **Graceful close.** On its own shutdown and on `CloseBedrockTunnel`, the
+  Worker MUST close the QUIC connection (CONNECTION_CLOSE, e.g. quic-go
+  `CloseWithError`) rather than just dropping it. An unclosed connection is
+  what arms the Section 3.1 bind-conflict window: the relay unbinds the UDP
+  port only when it notices the connection is gone, which for a silent drop
+  takes until the idle timeout -- and a Worker restart is the common way a
+  connection ends, not an exotic failure.
+
 ### 3.1 Redial and the bind-conflict window
 
 Because there is no separate server table, a redial while the relay has not
 yet noticed the *old* QUIC connection is dead cannot replace it: `bind` will
 fail with the port already in use, and the relay answers the new dial with a
-rejection. The old connection's own QUIC idle timeout (quic-go default, 30 s
-absent any activity) is the backstop that eventually frees the port so a
-subsequent redial succeeds. This is a deliberate simplification for this
-initial implementation -- an explicit "supersede the old connection" mechanism
-would need exactly the kind of persistent per-server registry the epic's
-design avoids -- and is noted here as a known, small window rather than a
-silent gap.
+rejection. With a gracefully-closing Worker (Section 3) the window does not
+arise in normal operation -- the CONNECTION_CLOSE frees the port before or
+with the redial. It remains for ungraceful ends (Worker crash, network
+partition), where the relay's explicit 15 s idle timeout (`maxIdleTimeout`,
+`relay/internal/bedrock/listener.go`) is the backstop that frees the port so
+a subsequent redial succeeds.
+
+Accepted for this initial implementation as a small, bounded window. Takeover
+semantics -- a validated hello for an already-bound port displacing the stale
+connection, which needs only a live port-to-Tunnel map (live-tunnel-tied
+state the design already permits) -- are tracked as a follow-up in issue
+[#1565](https://github.com/mmiura-2351/mc-server-dashboard-v2/issues/1565).
 
 ## 4. Handshake: TunnelHello / TunnelHelloAck
 
@@ -178,6 +204,10 @@ on the connection, in either direction, is:
 - A flow id the relay does not recognize (e.g. the flow was evicted for
   inactivity between the datagram going out and the reply coming back) is
   dropped, not an error.
+- Flow ids are **connection-scoped**: every new QUIC connection starts a
+  fresh flow table and ids restart from zero, so the Worker MUST discard any
+  flow-id state it holds when it redials -- an id carried across a reconnect
+  would misroute.
 - Neither the relay nor this framing has any awareness of RakNet's own packet
   structure -- the payload is carried byte-for-byte.
 
@@ -204,23 +234,31 @@ fragmented at all, so "conservative" is the only lever available.
   size in for the rest of the session. 1200 is one of RakNet's own common
   candidates, so this converges cleanly rather than forcing an arbitrary,
   off-menu size.
-- 1200 bytes (plus the 4-byte flow id, 1204 total) sits comfortably under
-  `quic-go`'s pre-path-MTU-discovery initial packet size estimate (~1252
-  bytes), so `SendDatagram` never returns `DatagramTooLargeError` even before
-  Path MTU Discovery (RFC 8899, enabled by default) has run its course on a
-  fresh connection. It is also under the ~1400-1480 byte usable MTU commonly
-  left by VPNs, PPPoE, and mobile carriers on the relay<->Worker leg -- the
-  leg most likely to be constrained, since a home-NAT Worker is the target
-  deployment.
+- 1200 bytes (plus the 4-byte flow id, 1204 total) fits within `quic-go`'s
+  pre-path-MTU-discovery per-datagram limit (~1225 bytes measured on an IPv4
+  loopback connection), so `SendDatagram` does not return
+  `DatagramTooLargeError` even before Path MTU Discovery (RFC 8899, enabled
+  by default) has run its course on a fresh connection. On an IPv6
+  minimum-MTU (1280) path the margin is only a few bytes -- not comfortable
+  -- but a datagram that does not fit is refused at the sender and RakNet's
+  probe-based discovery simply steps down to the next candidate, so the
+  budget degrades gracefully rather than breaking. It is also under the
+  ~1400-1480 byte usable MTU commonly left by VPNs, PPPoE, and mobile
+  carriers on the relay<->Worker leg -- the leg most likely to be
+  constrained, since a home-NAT Worker is the target deployment.
 - Once RakNet has settled on an MTU at or under this budget, it caps its own
   packet sizes to that value for the rest of the session (fragmenting larger
   reliable messages itself), so the cap is enforced once at connection time in
   practice, not per-packet in steady state -- the drop path in
   `pumpUDPToQUIC` is a safety net, not the common case.
 
-Changing this value affects both directions equally (the flow table's idle
-window and the pump's drop gate use the same constant); update this section if
-it changes.
+The gate is enforced on the client-to-Worker direction only (`pumpUDPToQUIC`
+drops an oversized client datagram); the Worker-to-client direction is not
+size-checked at the relay -- an oversized Worker frame is refused at the
+Worker's own QUIC datagram-size limit when sending, and post-convergence the
+server side does not produce datagrams above the session's negotiated RakNet
+MTU anyway. The flow table's idle window (`flowIdleTimeout`, Section 7) is an
+unrelated constant. Update this section if the value changes.
 
 ## 7. Flow table
 
@@ -263,6 +301,16 @@ treats the Java listeners, and both are configurable (Section 9). This is
 hygiene, not volumetric DDoS protection, matching the posture RELAY.md already
 documents for the Java listeners (Section 16 there).
 
+The **QUIC tunnel listener itself** carries a separate per-IP cap on
+concurrent unauthenticated handshake windows
+(`bedrock.tunnel_max_conns_per_ip`, default 64) -- the same #968 posture as
+the TCP tunnel listener's `tunnel.max_conns_per_ip`. Each pre-auth connection
+holds relay resources for up to ~15 s and a parseable `TunnelHello` drives a
+`ValidateBedrockTunnel` RPC to the API, so an uncapped listener would let one
+source IP burn relay TLS work and amplify RPCs against the API indefinitely.
+The slot covers only the pre-auth window: it is released once the handshake
+resolves either way, so long-lived accepted tunnels do not count against it.
+
 ## 9. Configuration
 
 Relay binary (`relay.toml`, `MCD_RELAY_` env prefix -- see
@@ -272,12 +320,15 @@ rules and RELAY.md Section 13 for the sibling Java-path keys):
 | Key | Default | Meaning |
 |---|---|---|
 | `bedrock.tunnel_listen` | `:25675` | The public QUIC/UDP address Workers dial to open a Bedrock tunnel. Reuses `tunnel.tls.{cert_file,key_file}` (Section 4); no separate cert/key configuration. |
+| `bedrock.tunnel_max_conns_per_ip` | `64` | Per-IP concurrent cap on unauthenticated handshake windows on the QUIC listener (Section 8), mirroring `tunnel.max_conns_per_ip` on the TCP tunnel listener (issue #968). |
 | `bedrock.max_flows_per_ip` | `32` | Per-IP concurrent-flow cap on a bound `bedrock_port` (Section 8). |
 | `bedrock.new_flows_per_ip_per_second` | `10` | Per-IP new-flow rate cap on a bound `bedrock_port` (Section 8). |
 
 `bedrock.tunnel_listen`'s default (`:25675`) intentionally matches the
 API-side `relay.bedrock_tunnel_port` default (`25675`, `CONFIGURATION.md`
-Section 5.13, landed with issue #1550) -- see Section 10.
+Section 5.13, landed with issue #1550) -- see Section 10. The QUIC idle
+timeout (15 s, Section 3) is a code constant (`maxIdleTimeout`), not a config
+key.
 
 ## 10. Config-drift decision
 
@@ -324,8 +375,11 @@ redesign.
   handshake as the client, and pumping datagrams to/from the container's
   Geyser port.
 - **End-to-end deployment + docs** (issue #1547) -- `compose.yaml` profile
-  wiring beyond the port publish, firewall guidance, and a full join-flow
+  wiring beyond the port publish (including publishing the client-facing
+  `bedrock_port` UDP window), firewall guidance, and a full join-flow
   walkthrough; needs both #1545 and #1546 to exist first.
+- **Stale-connection takeover on redial** (issue #1565) -- a validated hello
+  for an already-bound port displacing the old connection; see Section 3.1.
 - **Real-client-IP passthrough** -- deferred beyond this initial scope per
   epic #1540; Geyser and the server see the Worker's forwarder IP.
 - **Bedrock session reporting** -- the Java tunnel batches `SessionStart` /

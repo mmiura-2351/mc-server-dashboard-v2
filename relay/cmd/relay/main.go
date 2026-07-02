@@ -106,10 +106,14 @@ func run(ctx context.Context) error {
 	// listeners are distinguishable on the wire despite sharing a cert.
 	bedrockTLS := tunnelTLS.Clone()
 	bedrockTLS.NextProtos = []string{bedrock.ALPN}
+	// Pre-auth handshake-window caps on the QUIC listener itself (the #968
+	// posture, mirroring tunnelCaps above) -- distinct from the per-tunnel
+	// caps below, which govern the public UDP ingress of each bound tunnel.
+	bedrockTunnelCaps := ipcaps.NewIPCaps(cfg.Bedrock.TunnelMaxConnsPerIP, 0, 0, time.Now)
 	newBedrockIPCaps := func() *ipcaps.IPCaps {
 		return ipcaps.NewIPCaps(cfg.Bedrock.MaxFlowsPerIP, cfg.Bedrock.NewFlowsPerIPPerSecond, 0, time.Now)
 	}
-	bedrockLn, err := bedrock.NewListener(cfg.Bedrock.TunnelListen, bedrockTLS, apiClient, newBedrockIPCaps, logger)
+	bedrockLn, err := bedrock.NewListener(cfg.Bedrock.TunnelListen, bedrockTLS, apiClient, bedrockTunnelCaps, newBedrockIPCaps, logger)
 	if err != nil {
 		return fmt.Errorf("bind bedrock tunnel listener %q: %w", cfg.Bedrock.TunnelListen, err)
 	}

@@ -68,6 +68,9 @@ func (t *FlowTable) Lookup(addr *net.UDPAddr) (id uint32, ok bool) {
 func (t *FlowTable) Create(addr *net.UDPAddr) uint32 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	// nextID wraps at 2^32 without a liveness check; unreachable in practice
+	// (the per-tunnel ipcaps global ceiling bounds live flows to ~10k, and a
+	// collision needs a >4-billion-flow-old entry still alive).
 	id := t.nextID
 	t.nextID++
 	e := &flowEntry{id: id, addr: addr, lastSeen: t.now()}

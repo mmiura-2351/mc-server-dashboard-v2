@@ -42,6 +42,7 @@ func (c Config) LogValue() slog.Value {
 		),
 		slog.Group("bedrock",
 			slog.String("tunnel_listen", c.Bedrock.TunnelListen),
+			slog.Uint64("tunnel_max_conns_per_ip", uint64(c.Bedrock.TunnelMaxConnsPerIP)),
 			slog.Uint64("max_flows_per_ip", uint64(c.Bedrock.MaxFlowsPerIP)),
 			slog.Uint64("new_flows_per_ip_per_second", uint64(c.Bedrock.NewFlowsPerIPPerSecond)),
 		),

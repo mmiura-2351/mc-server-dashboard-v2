@@ -25,8 +25,11 @@
 // idle window; the Worker does not mint flow ids, it only echoes back the flow
 // id it received on inbound datagrams when it sends the corresponding reply.
 // An unrecognized flow id from the Worker (e.g. after the relay evicted an
-// idle client) is dropped. See docs/app/BEDROCK_TUNNEL.md for the full design:
-// topology, ALPN, TLS material reuse, and the chosen datagram MTU.
+// idle client) is dropped. Flow ids are CONNECTION-scoped: they restart from
+// zero on every new QUIC connection, so the Worker MUST discard any flow-id
+// state it holds when it redials -- an id carried across a reconnect would
+// misroute. See docs/app/BEDROCK_TUNNEL.md for the full design: topology,
+// ALPN, TLS material reuse, and the chosen datagram MTU.
 syntax = "proto3";
 
 package mcsd.bedrocktunnel.v1;

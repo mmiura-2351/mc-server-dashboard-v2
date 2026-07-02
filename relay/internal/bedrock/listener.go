@@ -18,7 +18,9 @@ import (
 
 	"github.com/quic-go/quic-go"
 
+	bedrocktunnelv1 "github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/genproto/mcsd/bedrocktunnel/v1"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/ipcaps"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/netutil"
 )
 
 // ALPN is the QUIC application-layer protocol the Bedrock tunnel listener
@@ -36,6 +38,15 @@ const ALPN = "mcsd-bedrock/1"
 // doc.
 const maxDatagramPayload = 1200
 
+// maxIdleTimeout is the explicit QUIC idle timeout the listener applies to
+// every tunnel connection (quic.Config.MaxIdleTimeout; the effective timeout
+// is the minimum of both peers' values). Pinning it -- rather than inheriting
+// quic-go's default, which can drift across upgrades -- bounds the
+// bind-conflict window after an ungraceful Worker disconnect
+// (docs/app/BEDROCK_TUNNEL.md Section 3.1) and is the value the Worker's
+// mandated keepalive period must stay well under (Section 3).
+const maxIdleTimeout = 15 * time.Second
+
 // Validator confirms a Worker's declared Bedrock tunnel credential against the
 // API (mcsd.relay.v1.RelayService.ValidateBedrockTunnel) -- the relay has no
 // local waiter to match against for this API-initiated tunnel, unlike the
@@ -50,6 +61,7 @@ type Validator interface {
 type Listener struct {
 	ln        *quic.Listener
 	validator Validator
+	caps      *ipcaps.IPCaps
 	newIPCaps func() *ipcaps.IPCaps
 	logger    *slog.Logger
 }
@@ -58,15 +70,18 @@ type Listener struct {
 // reuse the relay's existing tunnel certificate with ALPN overridden to
 // bedrock.ALPN (docs/app/BEDROCK_TUNNEL.md); RFC 9221 datagram support is
 // enabled unconditionally here via quic.Config (a TLS-level setting would not
-// apply). newIPCaps builds a fresh per-server IPCaps for each accepted Tunnel
-// (the public UDP ingress hygiene caps); its lifetime matches the Tunnel's.
-func NewListener(addr string, tlsConf *tls.Config, validator Validator, newIPCaps func() *ipcaps.IPCaps, logger *slog.Logger) (*Listener, error) {
-	quicConf := &quic.Config{EnableDatagrams: true}
+// apply). caps bounds concurrent unauthenticated handshake windows per source
+// IP (the #968 posture the TCP tunnel listener already has; only its
+// connection cap is used). newIPCaps builds a fresh per-server IPCaps for each
+// accepted Tunnel (the public UDP ingress hygiene caps); its lifetime matches
+// the Tunnel's.
+func NewListener(addr string, tlsConf *tls.Config, validator Validator, caps *ipcaps.IPCaps, newIPCaps func() *ipcaps.IPCaps, logger *slog.Logger) (*Listener, error) {
+	quicConf := &quic.Config{EnableDatagrams: true, MaxIdleTimeout: maxIdleTimeout}
 	ln, err := quic.ListenAddr(addr, tlsConf, quicConf)
 	if err != nil {
 		return nil, err
 	}
-	return &Listener{ln: ln, validator: validator, newIPCaps: newIPCaps, logger: logger}, nil
+	return &Listener{ln: ln, validator: validator, caps: caps, newIPCaps: newIPCaps, logger: logger}, nil
 }
 
 // Addr returns the listener's bound address.
@@ -95,24 +110,55 @@ func (l *Listener) Serve(ctx context.Context) error {
 // and, on acceptance, runs its Tunnel until the QUIC connection closes
 // (docs/app/BEDROCK_TUNNEL.md). Any rejection closes the QUIC connection.
 func (l *Listener) handle(ctx context.Context, conn *quic.Conn) {
+	ip := netutil.HostOf(conn.RemoteAddr())
+
+	// Per-IP concurrent cap on unauthenticated handshake windows (the #968
+	// posture shared with the TCP tunnel listener): each pre-auth connection
+	// holds relay resources for up to ~15 s (AcceptStream + readHello +
+	// reject's bounded wait) and a parseable TunnelHello drives a
+	// ValidateBedrockTunnel RPC to the API, so bound how many windows one
+	// source IP can hold. Over the cap is a silent close. The slot covers
+	// only the pre-auth window -- released once the handshake resolves either
+	// way; an accepted tunnel's lifetime is governed by its authenticated
+	// QUIC connection, not this cap.
+	if !l.caps.Acquire(ip) {
+		_ = conn.CloseWithError(0, "")
+		return
+	}
+	tun, hello := l.handshake(ctx, conn)
+	l.caps.Release(ip)
+	if tun == nil {
+		return
+	}
+
+	l.logger.Info("bedrock tunnel bound", "server_id", hello.GetServerId(), "bedrock_port", hello.GetBedrockPort())
+	tun.run(ctx) // blocks until the connection closes or ctx is cancelled; unbinds on return
+}
+
+// handshake runs the pre-auth phase of one dial-out: accept the first
+// bidirectional stream, read the TunnelHello, validate it against the API,
+// bind the declared UDP port, and ack. On any failure it closes the QUIC
+// connection and returns a nil Tunnel; on success the tunnel is bound, the
+// accepting ack is sent, and the handshake stream is closed.
+func (l *Listener) handshake(ctx context.Context, conn *quic.Conn) (*Tunnel, *bedrocktunnelv1.TunnelHello) {
 	// Bound how long a connection can hold resources before opening the
 	// handshake stream -- otherwise a peer that completes the QUIC/TLS
-	// handshake and then never opens a stream is reclaimed only by quic-go's
-	// own (much longer) idle timeout.
+	// handshake and then never opens a stream is reclaimed only by the (much
+	// longer) idle timeout.
 	acceptCtx, acceptCancel := context.WithTimeout(ctx, handshakeDeadline)
 	stream, err := conn.AcceptStream(acceptCtx)
 	acceptCancel()
 	if err != nil {
 		l.logger.Debug("bedrock: no handshake stream", "remote", conn.RemoteAddr(), "error", err)
 		_ = conn.CloseWithError(0, "handshake failed")
-		return
+		return nil, nil
 	}
 
 	hello, err := readHello(stream)
 	if err != nil {
 		l.logger.Debug("bedrock: handshake read failed", "remote", conn.RemoteAddr(), "error", err)
 		_ = conn.CloseWithError(0, "handshake failed")
-		return
+		return nil, nil
 	}
 
 	validateCtx, validateCancel := context.WithTimeout(ctx, handshakeDeadline)
@@ -121,19 +167,19 @@ func (l *Listener) handle(ctx context.Context, conn *quic.Conn) {
 	if err != nil {
 		l.logger.Warn("bedrock: ValidateBedrockTunnel RPC failed", "server_id", hello.GetServerId(), "error", err)
 		l.reject(conn, stream, "validation unavailable")
-		return
+		return nil, nil
 	}
 	if !valid {
 		l.logger.Debug("bedrock: rejected", "server_id", hello.GetServerId(), "bedrock_port", hello.GetBedrockPort())
 		l.reject(conn, stream, "invalid credential")
-		return
+		return nil, nil
 	}
 
 	tun, err := bind(hello.GetBedrockPort(), conn, l.newIPCaps(), l.logger)
 	if err != nil {
 		l.logger.Warn("bedrock: bind failed", "bedrock_port", hello.GetBedrockPort(), "error", err)
 		l.reject(conn, stream, "bind failed")
-		return
+		return nil, nil
 	}
 
 	if err := writeAck(stream, true, ""); err != nil {
@@ -141,12 +187,10 @@ func (l *Listener) handle(ctx context.Context, conn *quic.Conn) {
 		_ = stream.Close()
 		tun.unbind()
 		_ = conn.CloseWithError(0, "ack failed")
-		return
+		return nil, nil
 	}
 	_ = stream.Close()
-
-	l.logger.Info("bedrock tunnel bound", "server_id", hello.GetServerId(), "bedrock_port", hello.GetBedrockPort())
-	tun.run(ctx) // blocks until the connection closes or ctx is cancelled; unbinds on return
+	return tun, hello
 }
 
 // reject answers the handshake stream with a rejecting ack (best-effort),

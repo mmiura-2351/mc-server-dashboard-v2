@@ -7,12 +7,14 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/quic-go/quic-go"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/ipcaps"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/netutil"
 )
 
 func testLogger() *slog.Logger {
@@ -261,5 +263,90 @@ func TestPumpNewFlowRateCapEnforced(t *testing.T) {
 	defer rcancel2()
 	if _, err := client.ReceiveDatagram(rctx2); err == nil {
 		t.Error("expected the second new flow within the same second to be rate-limited")
+	}
+}
+
+// TestFlowEvictionRacesPumps drives flow eviction concurrently with the
+// datagram pumps so the race detector actually covers Evict against
+// Lookup/Create/AddrByID -- the production sweep fires only every
+// flowSweepInterval (15 s), which no other test waits out.
+func TestFlowEvictionRacesPumps(t *testing.T) {
+	server, client := quicConnPair(t)
+	caps := ipcaps.NewIPCaps(100, 0, -1, nil)
+	tun, err := bind(0, server, caps, testLogger())
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	// Shrink the idle TTL (the production table uses flowIdleTimeout, 60 s)
+	// so eviction genuinely removes entries mid-traffic; swapped before
+	// run() starts any goroutine, so no pump ever sees the original table.
+	tun.flows = NewFlowTable(time.Millisecond, nil)
+
+	bound, ok := tun.Addr().(*net.UDPAddr)
+	if !ok {
+		t.Fatalf("Addr() = %T, want *net.UDPAddr", tun.Addr())
+	}
+	dialAddr := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: bound.Port}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan struct{})
+	go func() {
+		tun.run(ctx)
+		close(runDone)
+	}()
+
+	// Evictor: hammer Evict + Release exactly as the production sweep does.
+	evictCtx, evictCancel := context.WithCancel(context.Background())
+	var evictDone sync.WaitGroup
+	evictDone.Add(1)
+	go func() {
+		defer evictDone.Done()
+		for evictCtx.Err() == nil {
+			for _, addr := range tun.flows.Evict() {
+				caps.Release(netutil.HostOf(addr))
+			}
+		}
+	}()
+
+	// Echo peer: bounce every forwarded frame straight back so the
+	// QUIC-to-UDP pump's AddrByID races the eviction too.
+	echoCtx, echoCancel := context.WithCancel(context.Background())
+	var echoDone sync.WaitGroup
+	echoDone.Add(1)
+	go func() {
+		defer echoDone.Done()
+		for {
+			frame, err := client.ReceiveDatagram(echoCtx)
+			if err != nil {
+				return
+			}
+			_ = client.SendDatagram(frame)
+		}
+	}()
+
+	fakeClient, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenPacket: %v", err)
+	}
+	defer func() { _ = fakeClient.Close() }()
+
+	// Spaced-out datagrams so flows go idle (1 ms TTL) and are evicted and
+	// re-created repeatedly while the pumps run.
+	for i := 0; i < 100; i++ {
+		if _, err := fakeClient.WriteTo([]byte("ping"), dialAddr); err != nil {
+			t.Fatalf("WriteTo: %v", err)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	echoCancel()
+	echoDone.Wait()
+	evictCancel()
+	evictDone.Wait()
+	cancel()
+	select {
+	case <-runDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("tun.run did not return after ctx cancel")
 	}
 }

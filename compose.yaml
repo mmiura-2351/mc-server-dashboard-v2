@@ -293,7 +293,12 @@ services:
     ports:
       - "25565:25565"    # game listener (players join here)
       - "25665:25665"    # tunnel listener (Workers dial back here)
-      - "25675:25675/udp"    # Bedrock QUIC tunnel listener (docs/app/BEDROCK_TUNNEL.md)
+      # Bedrock QUIC tunnel listener (docs/app/BEDROCK_TUNNEL.md). Carries
+      # only the Worker's QUIC tunnel; the client-facing per-server Bedrock
+      # UDP window (ports.bedrock_range_start..end, default 19132..19231/udp)
+      # is published with the end-to-end wiring in issue #1547 — do not add
+      # it here ad hoc.
+      - "25675:25675/udp"
     depends_on:
       - api
 

@@ -163,8 +163,9 @@ func (t *Tunnel) pumpUDPToQUIC() {
 			ip := netutil.HostOf(udpAddr)
 			// New-flow rate cap, then the concurrent-flow cap -- both per
 			// source IP (RakNet unconnected-ping amplification hygiene,
-			// docs/app/BEDROCK_TUNNEL.md). Neither slot is taken if the other
-			// check fails.
+			// docs/app/BEDROCK_TUNNEL.md). When AllowJoin passes but Acquire
+			// fails, the rate-window count was already consumed -- strictly
+			// conservative (the flow was not admitted), so acceptable.
 			if !t.caps.AllowJoin(ip) || !t.caps.Acquire(ip) {
 				continue
 			}
