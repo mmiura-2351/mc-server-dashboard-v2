@@ -32,6 +32,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidFilePathError,
     PluginAlreadyExistsError,
     PluginNotFoundError,
+    PortRangeExhaustedError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
     UnsupportedPluginServerTypeError,
@@ -1888,6 +1889,7 @@ def _geyser_install_uc(
     slug: str,
     file_content: bytes,
     bedrock_port_range: PortRange | None,
+    file_store: FakeFileStore | None = None,
 ) -> InstallFromCatalog:
     project = _project(project_id=project_id, slug=slug, title="Geyser")
     version, content = _version(filename="Geyser-Spigot.jar", file_content=file_content)
@@ -1897,7 +1899,7 @@ def _geyser_install_uc(
     return InstallFromCatalog(
         uow=uow,
         catalog=catalog,
-        file_store=FakeFileStore(),
+        file_store=file_store or FakeFileStore(),
         cache=FakePluginCacheStore(),
         clock=FakeClock(_NOW),
         bedrock_port_range=bedrock_port_range,
@@ -1992,3 +1994,33 @@ async def test_install_from_catalog_non_geyser_does_not_allocate() -> None:
         version_id="ver-1",
     )
     assert uow.servers.by_id[server.id].bedrock_port is None
+
+
+async def test_install_from_catalog_geyser_exhausted_window_aborts_install() -> None:
+    uow = FakeUnitOfWork()
+    other = _server(server_type=ServerType.PAPER)
+    other.bedrock_port = 19132
+    uow.servers.seed(other)
+    server = _server(server_type=ServerType.PAPER)
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+    uc = _geyser_install_uc(
+        uow,
+        project_id="wKkoqHrH",
+        slug="geyser",
+        file_content=b"not-a-zip",
+        bedrock_port_range=PortRange(start=19132, end=19132),
+        file_store=fs,
+    )
+    with pytest.raises(PortRangeExhaustedError):
+        await uc(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            project_id="wKkoqHrH",
+            version_id="ver-1",
+        )
+    assert uow.commits == 0
+    assert uow.servers.by_id[server.id].bedrock_port is None
+    # The file store is outside the SQL transaction: the failed install must not
+    # leave an orphaned working-set jar behind (allocation runs before the write).
+    assert fs.files == {}

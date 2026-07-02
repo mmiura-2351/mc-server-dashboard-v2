@@ -777,10 +777,11 @@ async def _install_geyser(
     *,
     port_range: PortRange | None,
     filename: str = "Geyser-Spigot.jar",
+    file_store: FakeFileStore | None = None,
 ) -> ServerPlugin:
     uc = InstallPlugin(
         uow=uow,
-        file_store=FakeFileStore(),
+        file_store=file_store or FakeFileStore(),
         cache=FakePluginCacheStore(),
         clock=FakeClock(_NOW),
         bedrock_port_range=port_range,
@@ -872,12 +873,18 @@ async def test_install_geyser_exhausted_window_aborts_install() -> None:
     uow.servers.seed(other)
     server = _server(server_type=ServerType.PAPER)
     uow.servers.seed(server)
+    fs = FakeFileStore()
     with pytest.raises(PortRangeExhaustedError):
-        await _install_geyser(uow, server, port_range=PortRange(start=19132, end=19132))
+        await _install_geyser(
+            uow, server, port_range=PortRange(start=19132, end=19132), file_store=fs
+        )
     # Nothing committed (the real UoW rolls the transaction back): the abort
     # signal is zero commits; the fake's staged plugin add is not transactional.
     assert uow.commits == 0
     assert uow.servers.by_id[server.id].bedrock_port is None
+    # The file store is outside the SQL transaction: the failed install must not
+    # leave an orphaned working-set jar behind (allocation runs before the write).
+    assert fs.files == {}
 
 
 async def test_remove_geyser_releases_bedrock_port() -> None:

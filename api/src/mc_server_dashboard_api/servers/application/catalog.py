@@ -355,16 +355,6 @@ class InstallFromCatalog:
                 if by_project is not None:
                     raise PluginAlreadyExistsError(project_id)
 
-                # Side-aware deploy: a client-only mod is cached + recorded but
-                # never placed in the running working set (issue #1308).
-                if working_set_present(enabled=True, side=side):
-                    await self.file_store.write_file(
-                        community_id=community_id,
-                        server_id=server_id,
-                        rel_path=rel_path,
-                        content=content,
-                    )
-
                 now = self.clock.now()
                 plugin = ServerPlugin(
                     id=PluginId.new(),
@@ -403,6 +393,20 @@ class InstallFromCatalog:
                     port_range=self.bedrock_port_range,
                     now=now,
                 )
+                # Side-aware deploy: a client-only mod is cached + recorded but
+                # never placed in the running working set (issue #1308). The
+                # write is the LAST step before commit: the file store is
+                # outside the SQL transaction, so any failure above (e.g.
+                # Bedrock-window exhaustion, #1541) must abort before the jar
+                # lands on disk — a write-then-fail would orphan a working-set
+                # jar with no DB row.
+                if working_set_present(enabled=True, side=side):
+                    await self.file_store.write_file(
+                        community_id=community_id,
+                        server_id=server_id,
+                        rel_path=rel_path,
+                        content=content,
+                    )
                 await self.uow.commit()
                 return plugin
 

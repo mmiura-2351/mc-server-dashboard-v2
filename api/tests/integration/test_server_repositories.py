@@ -17,7 +17,6 @@ from collections.abc import AsyncIterator
 
 import pytest
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from mc_server_dashboard_api.community.adapters.unit_of_work import (
@@ -483,9 +482,10 @@ async def test_bedrock_port_unique_backstop_and_delete_release(
 ) -> None:
     # UNIQUE(bedrock_port) rejects a duplicate allocation (the concurrent-racer
     # backstop). The violating write is the repository UPDATE executed inside
-    # the transaction, so it surfaces as the driver IntegrityError (same shape
-    # as a racing game-port re-port or slug rename), not a translated domain
-    # error. Deleting the holder's row releases the port for reuse.
+    # the transaction, where the adapter translates the driver IntegrityError
+    # into the typed PortAlreadyTakenError (issue #1541) so the install
+    # endpoints return a retryable 409, not a raw 500. Deleting the holder's
+    # row releases the port for reuse.
     community_id = await _seed_community(engine)
     factory = create_session_factory(engine)
     creator = _creator(factory)
@@ -515,7 +515,7 @@ async def test_bedrock_port_unique_backstop_and_delete_release(
             await uow.commit()
 
     await _set_port(first.id, 19132)
-    with pytest.raises(IntegrityError):
+    with pytest.raises(PortAlreadyTakenError):
         await _set_port(second.id, 19132)
 
     async with ServersUnitOfWork(factory) as uow:

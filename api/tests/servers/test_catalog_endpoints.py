@@ -48,6 +48,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     CatalogChecksumMismatchError,
     CatalogProjectNotFoundError,
     CatalogUnavailableError,
+    PortAlreadyTakenError,
     PortRangeExhaustedError,
     ServerFilesUnsettledError,
     UnsupportedPluginServerTypeError,
@@ -333,6 +334,23 @@ def test_install_from_catalog_bedrock_window_exhausted_is_503() -> None:
     )
     assert resp.status_code == 503
     assert resp.json()["reason"] == "bedrock_port_range_exhausted"
+
+
+def test_install_from_catalog_bedrock_port_race_is_409() -> None:
+    # The UNIQUE(bedrock_port) backstop on a concurrent allocation, translated
+    # by the adapter to the typed domain error (issue #1541).
+    app = _app(
+        member=True,
+        allow=True,
+        install=_FakeUseCase(error=PortAlreadyTakenError("uq_server_bedrock_port")),
+    )
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/install"),
+        json={"project_id": "geyser", "version_id": "ver-1"},
+    )
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "bedrock_port_taken"
 
 
 def test_install_from_catalog_unavailable_is_502() -> None:

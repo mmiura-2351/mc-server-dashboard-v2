@@ -312,17 +312,6 @@ class InstallPlugin:
                 else:
                     side = manifest.side
 
-                # Side-aware deploy (issue #1308): only a server-relevant, enabled
-                # jar goes into the working set; a client-only jar is tracked +
-                # cached but never written there.
-                if working_set_present(enabled=True, side=side):
-                    await self.file_store.write_file(
-                        community_id=community_id,
-                        server_id=server_id,
-                        rel_path=rel_path,
-                        content=content,
-                    )
-
                 checksum = hashlib.sha512(content).hexdigest()
                 now = self.clock.now()
 
@@ -362,6 +351,20 @@ class InstallPlugin:
                     port_range=self.bedrock_port_range,
                     now=now,
                 )
+                # Side-aware deploy (issue #1308): only a server-relevant, enabled
+                # jar goes into the working set; a client-only jar is tracked +
+                # cached but never written there. The write is the LAST step
+                # before commit: the file store is outside the SQL transaction,
+                # so any failure above (e.g. Bedrock-window exhaustion, #1541)
+                # must abort before the jar lands on disk — a write-then-fail
+                # would orphan a working-set jar with no DB row.
+                if working_set_present(enabled=True, side=side):
+                    await self.file_store.write_file(
+                        community_id=community_id,
+                        server_id=server_id,
+                        rel_path=rel_path,
+                        content=content,
+                    )
                 await self.uow.commit()
                 return plugin
 

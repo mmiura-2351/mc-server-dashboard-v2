@@ -12,8 +12,12 @@ import datetime as dt
 from typing import Any, cast
 
 from sqlalchemy import CursorResult, and_, delete, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from mc_server_dashboard_api.servers.adapters.integrity import (
+    translate_integrity_error,
+)
 from mc_server_dashboard_api.servers.adapters.models import ServerModel
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.memory_limit import memory_limit_from_config
@@ -141,7 +145,16 @@ class SqlAlchemyServerRepository(ServerRepository):
                 updated_at=server.updated_at,
             )
         )
-        await self._session.execute(stmt)
+        try:
+            await self._session.execute(stmt)
+        except IntegrityError as exc:
+            # An UPDATE violates its unique backstop at execute time, inside the
+            # transaction (unlike a staged INSERT, which flushes at commit), so
+            # the constraint -> domain-error translation must run here for a
+            # concurrent racer to surface typed (409) rather than as a raw 500.
+            # The enclosing UnitOfWork rolls the transaction back on exit.
+            translate_integrity_error(exc)
+            raise
 
     async def list_slugs(self) -> set[str]:
         stmt = select(ServerModel.slug).where(ServerModel.slug != "")

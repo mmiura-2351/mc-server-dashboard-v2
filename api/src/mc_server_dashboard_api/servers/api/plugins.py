@@ -86,6 +86,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidPluginSideError,
     PluginAlreadyExistsError,
     PluginNotFoundError,
+    PortAlreadyTakenError,
     PortRangeExhaustedError,
     ServerBusyError,
     ServerFilesUnsettledError,
@@ -505,6 +506,11 @@ async def install_plugin(
         # A Geyser install found no free port in the Bedrock UDP window (issue
         # #1541): transient capacity, like game-port exhaustion at create.
         raise _service_unavailable("bedrock_port_range_exhausted") from exc
+    except PortAlreadyTakenError as exc:
+        # The UNIQUE(bedrock_port) backstop fired on a concurrent allocation
+        # racer (issue #1541), translated by the adapter; a retry re-picks a
+        # free port.
+        raise _conflict("bedrock_port_taken") from exc
     except ServerFilesUnsettledError as exc:
         await _record_plugin_failure(
             recorder,
