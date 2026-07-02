@@ -513,6 +513,8 @@ config, wiring at the edge.
 | `tunnel.public_endpoint` | — (required) | `host:port` advertised to Workers via `Register` → `TunnelDial`. |
 | `tunnel.tls.cert_file` / `tunnel.tls.key_file` | — (required) | Tunnel listener TLS material. Self-signed is fine: the matching CA PEM travels `Register` → API → `TunnelDial` → Worker verification. |
 | `tunnel.tls.advertised_ca_file` | — (derive from `cert_file`) | CA bundle advertised to Workers for verifying the tunnel cert. Unset → derive from `cert_file` (self-signed). `system` → advertise empty (Workers use system roots; for a publicly-issued cert). A path → advertise that PEM. |
+| `bedrock.tunnel_listen` | `:25675` | Bedrock QUIC tunnel listener (RFC 9221 DATAGRAM) — see [`BEDROCK_TUNNEL.md`](BEDROCK_TUNNEL.md). Reuses `tunnel.tls.{cert_file,key_file}` with a distinct ALPN; no separate cert/key config. |
+| `bedrock.max_flows_per_ip` / `bedrock.new_flows_per_ip_per_second` | `32` / `10` | Hygiene caps on a bound Bedrock `bedrock_port`, same posture as `game.max_conns_per_ip` / `game.joins_per_ip_per_second` — see `BEDROCK_TUNNEL.md` Section 8. |
 | `log.level` / `log.format` | as Worker | Standard logging keys. |
 
 **Worker: no new configuration.** Everything a `TunnelDial` needs arrives in
@@ -607,7 +609,11 @@ for *new* joins); relay-mediated status pings with a 5 s cache (Section 7).
   metering point; not designed here.
 - **PROXY protocol to Paper-family servers** — would restore native IP bans
   on servers that support it; revisit on demand.
-- **Bedrock** (UDP/RakNet) — the application targets Java (epic scope).
+- ~~**Bedrock** (UDP/RakNet) — the application targets Java (epic scope).~~
+  **In scope as of epic [#1540](https://github.com/mmiura-2351/mc-server-dashboard-v2/issues/1540).**
+  Bedrock rides a separate QUIC/DATAGRAM tunnel and public UDP ingress, not
+  this document's TCP tunnel contract — see
+  [`BEDROCK_TUNNEL.md`](BEDROCK_TUNNEL.md).
 - **SRV-based custom domains** (player-owned domains pointing at the relay)
   — possible later; routing already keys on the full hostname.
 - **Observability / metrics** — the relay exposes no Prometheus metrics or

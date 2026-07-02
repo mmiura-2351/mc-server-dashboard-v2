@@ -2,6 +2,7 @@ package apiclient
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -153,5 +154,68 @@ func TestReportSessionsEmptyNoOp(t *testing.T) {
 	}
 	if fake.lastReq != nil {
 		t.Error("ReportSessions should not call the RPC when both lists are empty")
+	}
+}
+
+// --- ValidateBedrockTunnel ---
+
+// fakeValidateClient captures the last ValidateBedrockTunnel request and
+// returns a canned response.
+type fakeValidateClient struct {
+	relayv1.RelayServiceClient
+	lastReq *relayv1.ValidateBedrockTunnelRequest
+	valid   bool
+	err     error
+}
+
+func (f *fakeValidateClient) ValidateBedrockTunnel(_ context.Context, req *relayv1.ValidateBedrockTunnelRequest, _ ...grpc.CallOption) (*relayv1.ValidateBedrockTunnelResponse, error) {
+	f.lastReq = req
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &relayv1.ValidateBedrockTunnelResponse{Valid: f.valid}, nil
+}
+
+func TestValidateBedrockTunnelProtoConstruction(t *testing.T) {
+	fake := &fakeValidateClient{valid: true}
+	c := &Client{rpc: fake, credential: "test-cred"}
+
+	valid, err := c.ValidateBedrockTunnel(context.Background(), "srv-1", 25701, "tok")
+	if err != nil {
+		t.Fatalf("ValidateBedrockTunnel: %v", err)
+	}
+	if !valid {
+		t.Error("valid = false, want true")
+	}
+	if fake.lastReq.GetServerId() != "srv-1" {
+		t.Errorf("server_id = %q, want srv-1", fake.lastReq.GetServerId())
+	}
+	if fake.lastReq.GetBedrockPort() != 25701 {
+		t.Errorf("bedrock_port = %d, want 25701", fake.lastReq.GetBedrockPort())
+	}
+	if fake.lastReq.GetToken() != "tok" {
+		t.Errorf("token = %q, want tok", fake.lastReq.GetToken())
+	}
+}
+
+func TestValidateBedrockTunnelInvalid(t *testing.T) {
+	fake := &fakeValidateClient{valid: false}
+	c := &Client{rpc: fake, credential: "test-cred"}
+
+	valid, err := c.ValidateBedrockTunnel(context.Background(), "srv-1", 25701, "wrong")
+	if err != nil {
+		t.Fatalf("ValidateBedrockTunnel: %v", err)
+	}
+	if valid {
+		t.Error("valid = true, want false")
+	}
+}
+
+func TestValidateBedrockTunnelRPCError(t *testing.T) {
+	fake := &fakeValidateClient{err: errors.New("unavailable")}
+	c := &Client{rpc: fake, credential: "test-cred"}
+
+	if _, err := c.ValidateBedrockTunnel(context.Background(), "srv-1", 25701, "tok"); err == nil {
+		t.Error("expected an error when the RPC fails")
 	}
 }

@@ -56,6 +56,12 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Tunnel.MaxConnsPerIP != 64 {
 		t.Errorf("tunnel.max_conns_per_ip default = %d", cfg.Tunnel.MaxConnsPerIP)
 	}
+	if cfg.Bedrock.TunnelListen != ":25675" {
+		t.Errorf("bedrock.tunnel_listen default = %q", cfg.Bedrock.TunnelListen)
+	}
+	if cfg.Bedrock.MaxFlowsPerIP != 32 || cfg.Bedrock.NewFlowsPerIPPerSecond != 10 {
+		t.Errorf("bedrock ip caps defaults = %d/%d", cfg.Bedrock.MaxFlowsPerIP, cfg.Bedrock.NewFlowsPerIPPerSecond)
+	}
 	if cfg.Log.Level != "info" || cfg.Log.Format != "json" {
 		t.Errorf("log defaults = %q/%q", cfg.Log.Level, cfg.Log.Format)
 	}
@@ -69,6 +75,8 @@ func TestLoadEnvOverride(t *testing.T) {
 		"MCD_RELAY_API_CREDENTIAL":            "envsecret",
 		"MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT":    "other:25665",
 		"MCD_RELAY_TUNNEL_MAX_CONNS_PER_IP":   "128",
+		"MCD_RELAY_BEDROCK_TUNNEL_LISTEN":     ":30675",
+		"MCD_RELAY_BEDROCK_MAX_FLOWS_PER_IP":  "16",
 	})
 	cfg, err := Load(writeTOML(t, minimalTOML), env)
 	if err != nil {
@@ -91,6 +99,12 @@ func TestLoadEnvOverride(t *testing.T) {
 	}
 	if cfg.Tunnel.MaxConnsPerIP != 128 {
 		t.Errorf("env override tunnel.max_conns_per_ip = %d", cfg.Tunnel.MaxConnsPerIP)
+	}
+	if cfg.Bedrock.TunnelListen != ":30675" {
+		t.Errorf("env override bedrock.tunnel_listen = %q", cfg.Bedrock.TunnelListen)
+	}
+	if cfg.Bedrock.MaxFlowsPerIP != 16 {
+		t.Errorf("env override bedrock.max_flows_per_ip = %d", cfg.Bedrock.MaxFlowsPerIP)
 	}
 }
 

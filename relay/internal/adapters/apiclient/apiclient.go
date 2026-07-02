@@ -163,6 +163,24 @@ func (c *Client) ReportSessions(ctx context.Context, starts []SessionStart, ends
 	return nil
 }
 
+// ValidateBedrockTunnel confirms a Worker's Bedrock QUIC dial-out credential
+// against the API (epic #1540, issue #1545): the API is the only party that
+// remembers what it minted for OpenBedrockTunnel, so the relay asks it to
+// confirm (server_id, bedrock_port, token) rather than matching locally, the
+// way it does for the per-player Java tunnel token. RELAY.md-analogue:
+// docs/app/BEDROCK_TUNNEL.md.
+func (c *Client) ValidateBedrockTunnel(ctx context.Context, serverID string, bedrockPort uint32, token string) (bool, error) {
+	resp, err := c.rpc.ValidateBedrockTunnel(c.authCtx(ctx), &relayv1.ValidateBedrockTunnelRequest{
+		ServerId:    serverID,
+		BedrockPort: bedrockPort,
+		Token:       token,
+	})
+	if err != nil {
+		return false, fmt.Errorf("apiclient: validate bedrock tunnel: %w", err)
+	}
+	return resp.GetValid(), nil
+}
+
 func toProtoIntent(intent Intent) relayv1.JoinIntent {
 	if intent == IntentLogin {
 		return relayv1.JoinIntent_JOIN_INTENT_LOGIN
