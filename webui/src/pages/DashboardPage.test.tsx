@@ -782,6 +782,61 @@ describe("DashboardPage Bedrock address badge (issue #1543)", () => {
       }),
     ).toBeInTheDocument();
   });
+
+  it("Java and Bedrock copy states are independent (cards view)", async () => {
+    mockApi.get.mockResolvedValue([
+      server({
+        join_hostname: "survival.relay.example.com",
+        bedrock_address: "play.example.com",
+        bedrock_port: 19132,
+      }),
+    ]);
+    renderPage();
+    const bedrockBadge = await screen.findByRole("button", {
+      name: `${t("dashboard.bedrockLabel")}: play.example.com:19132`,
+    });
+
+    if (!("execCommand" in document)) {
+      Object.defineProperty(document, "execCommand", {
+        value: () => true,
+        writable: true,
+        configurable: true,
+      });
+    }
+    const execSpy = vi.spyOn(document, "execCommand").mockReturnValue(true);
+
+    // Copying the Bedrock address must not flip the Java badge to "Copied!".
+    fireEvent.click(bedrockBadge);
+    expect(
+      await screen.findByText(t("dashboard.copiedBedrockAddress")),
+    ).toBeInTheDocument();
+    expect(screen.getByText("survival.relay.example.com")).toBeInTheDocument();
+    // Both copied labels are the same literal, so pin exactly one is showing.
+    expect(screen.getAllByText(t("dashboard.copiedJoinHostname"))).toHaveLength(
+      1,
+    );
+
+    // And vice versa once the Bedrock badge has reverted (real 1500ms timer).
+    await screen.findByRole(
+      "button",
+      { name: `${t("dashboard.bedrockLabel")}: play.example.com:19132` },
+      { timeout: 3000 },
+    );
+    fireEvent.click(screen.getByText("survival.relay.example.com"));
+    expect(
+      await screen.findByText(t("dashboard.copiedJoinHostname")),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: `${t("dashboard.bedrockLabel")}: play.example.com:19132`,
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText(t("dashboard.copiedJoinHostname"))).toHaveLength(
+      1,
+    );
+
+    execSpy.mockRestore();
+  });
 });
 
 describe("DashboardPage filter and sort (#1123)", () => {

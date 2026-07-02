@@ -942,32 +942,29 @@ function ServerRow({ server, communityId, can }: ServerRowProps) {
           (server.game_port ?? "—")
         )}
         {bedrockAddress !== null && (
-          <>
-            <br />
-            <button
-              type="button"
-              className="copyable"
-              title={bedrockAddress}
-              style={{
-                cursor: "pointer",
-                background: "none",
-                border: "none",
-                padding: 0,
-                font: "inherit",
-                color: "inherit",
-              }}
-              onClick={handleCopyBedrock}
-            >
-              {bedrockCopied ? (
-                t("dashboard.copiedBedrockAddress")
-              ) : (
-                <>
-                  {t("dashboard.bedrockLabel")}: {server.bedrock_address}:
-                  <strong>{server.bedrock_port}</strong>
-                </>
-              )}
-            </button>
-          </>
+          <button
+            type="button"
+            className="copyable"
+            title={bedrockAddress}
+            style={{
+              cursor: "pointer",
+              background: "none",
+              border: "none",
+              padding: 0,
+              font: "inherit",
+              color: "inherit",
+            }}
+            onClick={handleCopyBedrock}
+          >
+            {bedrockCopied ? (
+              t("dashboard.copiedBedrockAddress")
+            ) : (
+              <>
+                {t("dashboard.bedrockLabel")}: {server.bedrock_address}:
+                <strong>{server.bedrock_port}</strong>
+              </>
+            )}
+          </button>
         )}
       </td>
       <td className="dim" title={server.assigned_worker_id ?? undefined}>
