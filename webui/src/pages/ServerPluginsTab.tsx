@@ -188,6 +188,13 @@ export function ServerPluginsTab({
       ),
   });
 
+  // Deployment's Bedrock discovery flag (issue #1543). The meta query is
+  // shared with the create/detail pages via react-query's cache.
+  const metaQuery = useQuery({
+    queryKey: ["meta"],
+    queryFn: () => api.get("/api/meta"),
+  });
+
   const updatesQuery = useQuery({
     queryKey: pluginUpdatesKey(communityId, serverId),
     enabled: canRead,
@@ -396,6 +403,20 @@ export function ServerPluginsTab({
           {tn("plugins.serverNotStopped")}
         </p>
       )}
+
+      {server.server_type === "paper" &&
+        metaQuery.data?.bedrock_enabled === true && (
+          <p className="field-hint plugins-notice">
+            {t("plugins.bedrockHint.text")}{" "}
+            <a
+              href="https://geysermc.org/download#floodgate"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              {t("plugins.bedrockHint.link")}
+            </a>
+          </p>
+        )}
 
       {(canManage || (hasClientMods && showSide)) && (
         <div className="plugins-toolbar">
