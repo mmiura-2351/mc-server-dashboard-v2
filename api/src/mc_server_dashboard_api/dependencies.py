@@ -1753,12 +1753,15 @@ def get_import_server(
     Composes :class:`CreateServer` so import reuses the SAME validation (version
     validator, edition, name uniqueness) and the #243 port auto-assign, and binds
     the file seam so the archive contents publish as the new working set through
-    the hardened extraction.
+    the hardened extraction. ``bedrock_port_range`` wires the same Bedrock
+    deployment gate as the two install paths (issue #1551), so a re-created
+    Geyser plugin allocates the imported server's ``bedrock_port``.
     """
 
     return ImportServer(
         create_server=create_server,
         file_store=file_store,
+        bedrock_port_range=_bedrock_port_range(request),
     )
 
 
