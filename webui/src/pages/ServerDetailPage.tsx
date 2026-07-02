@@ -266,10 +266,19 @@ function Header({
   // Clickable-copy state for the join-hostname badge.
   const [copied, setCopied] = useState(false);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Bedrock address:port badge (issue #1543): its own copy state, mirroring
+  // the Java join-hostname badge above.
+  const [bedrockCopied, setBedrockCopied] = useState(false);
+  const bedrockCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
 
   useEffect(() => {
     return () => {
       if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current);
+      if (bedrockCopyTimerRef.current !== null) {
+        clearTimeout(bedrockCopyTimerRef.current);
+      }
     };
   }, []);
 
@@ -286,6 +295,30 @@ function Header({
       },
     );
   }, [server.join_hostname]);
+
+  const bedrockAddress =
+    server.bedrock_address !== null && server.bedrock_port !== null
+      ? `${server.bedrock_address}:${server.bedrock_port}`
+      : null;
+
+  const handleCopyBedrock = useCallback(() => {
+    if (bedrockAddress === null) return;
+    if (bedrockCopyTimerRef.current !== null) {
+      clearTimeout(bedrockCopyTimerRef.current);
+    }
+    copyToClipboard(bedrockAddress).then(
+      () => {
+        setBedrockCopied(true);
+        bedrockCopyTimerRef.current = setTimeout(
+          () => setBedrockCopied(false),
+          1500,
+        );
+      },
+      () => {
+        setBedrockCopied(false);
+      },
+    );
+  }, [bedrockAddress]);
 
   return (
     <div className="page-head">
@@ -361,6 +394,23 @@ function Header({
                 ? `:${server.game_port}`
                 : t("serverDetail.noPort")}
             </span>
+          )}
+          {bedrockAddress !== null && (
+            <button
+              type="button"
+              className="badge copyable"
+              title={bedrockAddress}
+              onClick={handleCopyBedrock}
+            >
+              {bedrockCopied ? (
+                t("serverDetail.copiedBedrockAddress")
+              ) : (
+                <>
+                  {t("serverDetail.bedrockLabel")}: {server.bedrock_address}:
+                  <strong>{server.bedrock_port}</strong>
+                </>
+              )}
+            </button>
           )}
           <span
             className="badge"

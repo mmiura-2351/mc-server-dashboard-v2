@@ -247,6 +247,9 @@ export const ja: Record<TranslationKey, string> = {
   "dashboard.liveDegraded": "再接続中 — 表示の更新が遅れることがあります",
   // Clickable join-hostname copy feedback.
   "dashboard.copiedJoinHostname": "コピーしました！",
+  // Bedrock address:port badge (issue #1543).
+  "dashboard.bedrockLabel": "Bedrock",
+  "dashboard.copiedBedrockAddress": "コピーしました！",
   // Filter and sort controls (#1123).
   "dashboard.filter.search": "名前で検索…",
   "dashboard.filter.state": "状態でフィルター",
@@ -272,6 +275,9 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.noPort": "ポートなし",
   // Relay join hostname (issue #961).
   "serverDetail.copiedJoinHostname": "コピーしました！",
+  // Bedrock address:port badge (issue #1543).
+  "serverDetail.bedrockLabel": "Bedrock",
+  "serverDetail.copiedBedrockAddress": "コピーしました！",
   // Tabs (WEBUI_SPEC.md 6.4–6.9).
   "serverDetail.tab.overview": "概要",
   "serverDetail.tab.console": "コンソール",
@@ -1377,6 +1383,10 @@ export const ja: Record<TranslationKey, string> = {
     "このサーバータイプはプラグインやModに対応していません。",
   "plugins.serverNotStopped":
     "{nouns}を管理するにはサーバーを停止してください。",
+  // Bedrock discovery hint (issue #1543).
+  "plugins.bedrockHint.text":
+    "プラグインカタログから Geyser をインストールすると Bedrock 版のプレイヤーが参加できます。Floodgate は Modrinth に Spigot 版がないため、jar は以下からアップロードしてください:",
+  "plugins.bedrockHint.link": "GeyserMC ダウンロードページ",
   "plugins.col.name": "名前",
   "plugins.col.version": "バージョン",
   "plugins.col.source": "ソース",

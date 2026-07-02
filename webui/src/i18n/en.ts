@@ -240,6 +240,10 @@ export const en = {
   "dashboard.liveDegraded": "Reconnecting — updates may lag",
   // Clickable join-hostname copy feedback.
   "dashboard.copiedJoinHostname": "Copied!",
+  // Bedrock address:port badge (issue #1543): shown alongside the Java
+  // join-hostname badge when the server holds a bedrock_port.
+  "dashboard.bedrockLabel": "Bedrock",
+  "dashboard.copiedBedrockAddress": "Copied!",
   // Filter and sort controls (#1123).
   "dashboard.filter.search": "Search by name…",
   "dashboard.filter.state": "Filter by state",
@@ -265,6 +269,10 @@ export const en = {
   "serverDetail.noPort": "no port",
   // Relay join hostname (issue #961): shown in the header when the relay is enabled.
   "serverDetail.copiedJoinHostname": "Copied!",
+  // Bedrock address:port badge (issue #1543): shown alongside the Java
+  // join-hostname badge when the server holds a bedrock_port.
+  "serverDetail.bedrockLabel": "Bedrock",
+  "serverDetail.copiedBedrockAddress": "Copied!",
   // Tabs (WEBUI_SPEC.md 6.4–6.9). Built tabs: Overview, Settings; the rest are
   // placeholders pending later phases.
   "serverDetail.tab.overview": "Overview",
@@ -1368,6 +1376,12 @@ export const en = {
   "plugins.empty": "No {nouns} installed.",
   "plugins.unsupported": "This server type does not support plugins or mods.",
   "plugins.serverNotStopped": "Stop the server to manage {nouns}.",
+  // Bedrock discovery hint (issue #1543): shown on Paper servers when the
+  // deployment's Bedrock gate (/meta bedrock_enabled) is on. Floodgate has no
+  // Spigot build on Modrinth (issue #1548), so it must be jar-uploaded.
+  "plugins.bedrockHint.text":
+    "Install Geyser from the plugin catalog to let Bedrock players join. Floodgate has no Spigot build on Modrinth — upload its jar instead:",
+  "plugins.bedrockHint.link": "GeyserMC download page",
   // Table columns.
   "plugins.col.name": "Name",
   "plugins.col.version": "Version",

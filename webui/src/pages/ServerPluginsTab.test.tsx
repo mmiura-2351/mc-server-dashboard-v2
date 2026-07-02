@@ -1375,3 +1375,76 @@ describe("ServerPluginsTab upload progress (issue #1419)", () => {
     });
   });
 });
+
+describe("ServerPluginsTab Bedrock discovery hint (issue #1543)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  const HINT_TEXT =
+    "Install Geyser from the plugin catalog to let Bedrock players join. Floodgate has no Spigot build on Modrinth — upload its jar instead:";
+  const HINT_LINK = "GeyserMC download page";
+
+  function renderTabFor(serverType: string, bedrockEnabled: boolean) {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    mockApi.get.mockImplementation((url: string) => {
+      if (url.endsWith("/plugins/validate")) {
+        return Promise.resolve(EMPTY_VALIDATION);
+      }
+      if (url.endsWith("/plugins/updates")) {
+        return Promise.resolve({ updates: [] });
+      }
+      if (url.endsWith("/plugins")) {
+        return Promise.resolve({ plugins: [] });
+      }
+      if (url === "/api/meta") {
+        return Promise.resolve({ bedrock_enabled: bedrockEnabled });
+      }
+      return Promise.resolve({});
+    });
+    return render(
+      <MemoryRouter>
+        <QueryClientProvider client={client}>
+          <ToastProvider>
+            <ServerPluginsTab
+              server={server({ server_type: serverType })}
+              communityId={CID}
+              can={allow}
+            />
+          </ToastProvider>
+        </QueryClientProvider>
+      </MemoryRouter>,
+    );
+  }
+
+  it("shows the hint for a paper server when the deployment flag is on", async () => {
+    renderTabFor("paper", true);
+
+    expect(await screen.findByText(HINT_TEXT)).toBeInTheDocument();
+    const link = screen.getByRole("link", { name: HINT_LINK });
+    expect(link).toHaveAttribute(
+      "href",
+      "https://geysermc.org/download#floodgate",
+    );
+  });
+
+  it("hides the hint when the deployment flag is off", async () => {
+    renderTabFor("paper", false);
+
+    await waitFor(() => {
+      expect(screen.getByText("No plugins installed.")).toBeInTheDocument();
+    });
+    expect(screen.queryByText(HINT_TEXT)).not.toBeInTheDocument();
+  });
+
+  it("hides the hint for a non-paper server even when the flag is on", async () => {
+    renderTabFor("fabric", true);
+
+    await waitFor(() => {
+      expect(screen.getByText("No mods installed.")).toBeInTheDocument();
+    });
+    expect(screen.queryByText(HINT_TEXT)).not.toBeInTheDocument();
+  });
+});
