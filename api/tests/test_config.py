@@ -976,3 +976,47 @@ def test_memory_limit_default_equal_to_max_is_accepted(
     settings = load_settings(config_file=cfg)
     assert settings.memory_limit.default_mb == 4096
     assert settings.memory_limit.max_mb == 4096
+
+
+# --- server.data_plane_base_url (issue #1549) ---
+
+
+def test_data_plane_base_url_defaults_to_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    settings = load_settings(config_file=None)
+    assert settings.server.data_plane_base_url is None
+
+
+def test_effective_data_plane_base_url_falls_back_to_public_base_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A split deployment with no edge proxy sets only public_base_url and never
+    # sets data_plane_base_url; the effective data-plane URL must still resolve
+    # so behavior is unchanged (issue #1549 fix direction).
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    monkeypatch.setenv("MCD_API_SERVER__PUBLIC_BASE_URL", "https://api.example.com")
+    settings = load_settings(config_file=None)
+    assert settings.server.effective_data_plane_base_url == "https://api.example.com"
+
+
+def test_effective_data_plane_base_url_overrides_public_base_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A single-host deployment behind a body-size-capped edge proxy (e.g.
+    # Cloudflare Tunnel, ~100 MB) sets data_plane_base_url to an internal
+    # address so worker-facing snapshot/hydrate transfers bypass the edge
+    # (issue #1549).
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    monkeypatch.setenv("MCD_API_SERVER__PUBLIC_BASE_URL", "https://api.example.com")
+    monkeypatch.setenv("MCD_API_SERVER__DATA_PLANE_BASE_URL", "http://api:8000")
+    settings = load_settings(config_file=None)
+    assert settings.server.data_plane_base_url == "http://api:8000"
+    assert settings.server.effective_data_plane_base_url == "http://api:8000"
+
+
+def test_effective_data_plane_base_url_none_when_both_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    settings = load_settings(config_file=None)
+    assert settings.server.effective_data_plane_base_url is None
