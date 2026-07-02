@@ -48,7 +48,7 @@ from mc_server_dashboard_api.servers.adapters.repositories import (
     SqlAlchemyServerRepository,
 )
 from mc_server_dashboard_api.servers.domain.clock import Clock
-from mc_server_dashboard_api.servers.domain.plugin import is_geyser_plugin
+from mc_server_dashboard_api.servers.domain.plugin import has_enabled_geyser
 from mc_server_dashboard_api.servers.domain.value_objects import (
     ObservedState,
     ServerId,
@@ -212,7 +212,7 @@ class ServersServerStateSink(ServerStateSink):
             )
             return
         plugins = await SqlAlchemyPluginRepository(session).list_for_server(server_id)
-        if not any(p.enabled and is_geyser_plugin(p) for p in plugins):
+        if not has_enabled_geyser(plugins):
             # Every Geyser copy on the server is disabled, so nothing is listening
             # on the RakNet port and a tunnel would sit idle (PM note, issue #1544).
             _LOG.debug(

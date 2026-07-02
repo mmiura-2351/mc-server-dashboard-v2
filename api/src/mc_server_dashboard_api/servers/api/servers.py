@@ -41,6 +41,7 @@ from mc_server_dashboard_api.config import Settings
 from mc_server_dashboard_api.dependencies import (
     ServerUpdateAuthz,
     get_audit_recorder,
+    get_bedrock_joinability,
     get_create_server,
     get_delete_server,
     get_export_server,
@@ -72,6 +73,7 @@ from mc_server_dashboard_api.servers.application.lifecycle import (
     StopServer,
 )
 from mc_server_dashboard_api.servers.application.manage_server import (
+    BedrockJoinability,
     CreateServer,
     DeleteServer,
     ListServers,
@@ -273,8 +275,10 @@ class ServerResponse(BaseModel):
     # The Bedrock join surface (issue #1541): the relay base domain (no slug —
     # Bedrock routes by port, not hostname) and the server's public UDP port.
     # Both are set only when the deployment's Bedrock gate is on (relay enabled +
-    # Bedrock capability) AND the server holds a port (Geyser installed); both
-    # ``None`` otherwise, so non-None is the UI's "Bedrock joinable" switch.
+    # Bedrock capability) AND the server holds a port (Geyser installed) AND at
+    # least one Geyser copy on the server is enabled (issue #1555 — a disabled
+    # Geyser keeps the port allocated but is not listening); both ``None``
+    # otherwise, so non-None is the UI's "Bedrock joinable" switch.
     bedrock_address: str | None
     bedrock_port: int | None
     desired_state: str
@@ -284,11 +288,15 @@ class ServerResponse(BaseModel):
 
     @classmethod
     def from_entity(
-        cls, server: Server, join_hostname_config: JoinHostnameConfig
+        cls,
+        server: Server,
+        join_hostname_config: JoinHostnameConfig,
+        *,
+        has_enabled_geyser: bool,
     ) -> "ServerResponse":
         bedrock_address = (
             join_hostname_config.bedrock_address()
-            if server.bedrock_port is not None
+            if server.bedrock_port is not None and has_enabled_geyser
             else None
         )
         return cls(
@@ -317,6 +325,25 @@ class ServerResponse(BaseModel):
         )
 
 
+async def _has_enabled_geyser(
+    server: Server,
+    join_hostname_config: JoinHostnameConfig,
+    bedrock: BedrockJoinability,
+) -> bool:
+    """Resolve the Geyser gate for a single server's response (issue #1555).
+
+    Skips the plugin query entirely when the response's Bedrock fields would
+    already be ``None`` for a reason unrelated to Geyser -- no port ever
+    allocated, or the deployment's Bedrock gate (relay + capability) is off. The
+    plugin lookup only runs for a server that could otherwise show non-null
+    fields.
+    """
+
+    if server.bedrock_port is None or join_hostname_config.bedrock_address() is None:
+        return False
+    return await bedrock.for_server(server.id)
+
+
 @router.post(
     "/communities/{community_id}/servers",
     status_code=status.HTTP_201_CREATED,
@@ -330,6 +357,7 @@ async def create_server(
     use_case: Annotated[CreateServer, Depends(get_create_server)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
     join_config: Annotated[JoinHostnameConfig, Depends(get_join_hostname_config)],
+    bedrock: Annotated[BedrockJoinability, Depends(get_bedrock_joinability)],
 ) -> ServerResponse:
     config = _validated_config(body.config)
     try:
@@ -402,7 +430,11 @@ async def create_server(
     await _record(
         recorder, ops.SERVER_CREATE, authorized, community_id, server.id.value
     )
-    return ServerResponse.from_entity(server, join_config)
+    return ServerResponse.from_entity(
+        server,
+        join_config,
+        has_enabled_geyser=await _has_enabled_geyser(server, join_config, bedrock),
+    )
 
 
 @router.post(
@@ -419,6 +451,7 @@ async def import_server(
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
     name: Annotated[str, Form(min_length=1)],
     join_config: Annotated[JoinHostnameConfig, Depends(get_join_hostname_config)],
+    bedrock: Annotated[BedrockJoinability, Depends(get_bedrock_joinability)],
 ) -> ServerResponse:
     """Import a whole server from a ZIP export (server:create, issue #274).
 
@@ -470,7 +503,11 @@ async def import_server(
     await _record(
         recorder, ops.SERVER_IMPORT, authorized, community_id, server.id.value
     )
-    return ServerResponse.from_entity(server, join_config)
+    return ServerResponse.from_entity(
+        server,
+        join_config,
+        has_enabled_geyser=await _has_enabled_geyser(server, join_config, bedrock),
+    )
 
 
 @router.get("/communities/{community_id}/servers")
@@ -481,9 +518,25 @@ async def list_servers(
     ],
     use_case: Annotated[ListServers, Depends(get_list_servers)],
     join_config: Annotated[JoinHostnameConfig, Depends(get_join_hostname_config)],
+    bedrock: Annotated[BedrockJoinability, Depends(get_bedrock_joinability)],
 ) -> list[ServerResponse]:
     servers = await use_case(community_id=CommunityId(community_id))
-    return [ServerResponse.from_entity(server, join_config) for server in servers]
+    # Batched Geyser-enabled check (issue #1555): one query for the whole list,
+    # not one per server. Skipped outright when the deployment's Bedrock gate is
+    # off (every response would show null fields regardless of Geyser state).
+    bedrock_ids = (
+        await bedrock.for_servers(
+            [server.id for server in servers if server.bedrock_port is not None]
+        )
+        if join_config.bedrock_address() is not None
+        else frozenset[ServerId]()
+    )
+    return [
+        ServerResponse.from_entity(
+            server, join_config, has_enabled_geyser=server.id in bedrock_ids
+        )
+        for server in servers
+    ]
 
 
 @router.get("/communities/{community_id}/servers/{server_id}")
@@ -502,6 +555,7 @@ async def read_server(
     ],
     use_case: Annotated[ReadServer, Depends(get_read_server)],
     join_config: Annotated[JoinHostnameConfig, Depends(get_join_hostname_config)],
+    bedrock: Annotated[BedrockJoinability, Depends(get_bedrock_joinability)],
 ) -> ServerResponse:
     try:
         server = await use_case(
@@ -510,7 +564,11 @@ async def read_server(
         )
     except ServerNotFoundError as exc:
         raise _not_found() from exc
-    return ServerResponse.from_entity(server, join_config)
+    return ServerResponse.from_entity(
+        server,
+        join_config,
+        has_enabled_geyser=await _has_enabled_geyser(server, join_config, bedrock),
+    )
 
 
 class GameSessionResponse(BaseModel):
@@ -644,6 +702,7 @@ async def update_server(
     use_case: Annotated[UpdateServer, Depends(get_update_server)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
     join_config: Annotated[JoinHostnameConfig, Depends(get_join_hostname_config)],
+    bedrock: Annotated[BedrockJoinability, Depends(get_bedrock_joinability)],
 ) -> ServerResponse:
     """Edit a server's name/config/game port.
 
@@ -738,7 +797,11 @@ async def update_server(
     await _record(
         recorder, ops.SERVER_UPDATE, authorized, community_id, server.id.value
     )
-    return ServerResponse.from_entity(server, join_config)
+    return ServerResponse.from_entity(
+        server,
+        join_config,
+        has_enabled_geyser=await _has_enabled_geyser(server, join_config, bedrock),
+    )
 
 
 @router.delete(
@@ -794,6 +857,7 @@ async def start_server(
     use_case: Annotated[StartServer, Depends(get_start_server)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
     join_config: Annotated[JoinHostnameConfig, Depends(get_join_hostname_config)],
+    bedrock: Annotated[BedrockJoinability, Depends(get_bedrock_joinability)],
     accept_eula: Annotated[bool, Query()] = False,
 ) -> ServerResponse:
     try:
@@ -810,7 +874,11 @@ async def start_server(
         )
         raise _lifecycle_http_error(exc) from exc
     await _record(recorder, ops.SERVER_START, authorized, community_id, server.id.value)
-    return ServerResponse.from_entity(server, join_config)
+    return ServerResponse.from_entity(
+        server,
+        join_config,
+        has_enabled_geyser=await _has_enabled_geyser(server, join_config, bedrock),
+    )
 
 
 @router.post("/communities/{community_id}/servers/{server_id}/stop")
@@ -830,6 +898,7 @@ async def stop_server(
     use_case: Annotated[StopServer, Depends(get_stop_server)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
     join_config: Annotated[JoinHostnameConfig, Depends(get_join_hostname_config)],
+    bedrock: Annotated[BedrockJoinability, Depends(get_bedrock_joinability)],
     # Default false = today's graceful stop; ?force=true skips the Worker's
     # graceful path and kills the process immediately (issue #270).
     force: Annotated[bool, Query()] = False,
@@ -848,7 +917,11 @@ async def stop_server(
         )
         raise _lifecycle_http_error(exc) from exc
     await _record(recorder, ops.SERVER_STOP, authorized, community_id, server.id.value)
-    return ServerResponse.from_entity(server, join_config)
+    return ServerResponse.from_entity(
+        server,
+        join_config,
+        has_enabled_geyser=await _has_enabled_geyser(server, join_config, bedrock),
+    )
 
 
 @router.post("/communities/{community_id}/servers/{server_id}/restart")
@@ -868,6 +941,7 @@ async def restart_server(
     use_case: Annotated[RestartServer, Depends(get_restart_server)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
     join_config: Annotated[JoinHostnameConfig, Depends(get_join_hostname_config)],
+    bedrock: Annotated[BedrockJoinability, Depends(get_bedrock_joinability)],
 ) -> ServerResponse:
     try:
         server = await use_case(
@@ -884,7 +958,11 @@ async def restart_server(
     await _record(
         recorder, ops.SERVER_RESTART, authorized, community_id, server.id.value
     )
-    return ServerResponse.from_entity(server, join_config)
+    return ServerResponse.from_entity(
+        server,
+        join_config,
+        has_enabled_geyser=await _has_enabled_geyser(server, join_config, bedrock),
+    )
 
 
 @router.post("/communities/{community_id}/servers/{server_id}/command")
