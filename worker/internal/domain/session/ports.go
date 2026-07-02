@@ -114,6 +114,20 @@ type Command struct {
 	// TunnelCAPEM is the optional PEM CA bundle to verify the relay's tunnel
 	// certificate for a TunnelDial; empty means system roots (RELAY.md Section 5).
 	TunnelCAPEM string
+	// BedrockRelayEndpoint is the relay's Bedrock tunnel endpoint to dial for an
+	// OpenBedrockTunnel, host:port (docs/app/BEDROCK_TUNNEL.md Section 3).
+	BedrockRelayEndpoint string
+	// BedrockPort is the public UDP port the relay binds for this server for an
+	// OpenBedrockTunnel (docs/app/BEDROCK_TUNNEL.md Section 3).
+	BedrockPort uint32
+	// BedrockToken is the credential presented on the Worker's QUIC dial-out for
+	// an OpenBedrockTunnel; unlike TunnelToken it is valid for the whole tunnel
+	// lifetime, not single-use (docs/app/BEDROCK_TUNNEL.md Section 3).
+	BedrockToken string
+	// BedrockCAPEM is the optional PEM CA bundle to verify the relay's Bedrock
+	// tunnel QUIC certificate for an OpenBedrockTunnel; empty means system roots
+	// (docs/app/BEDROCK_TUNNEL.md Section 4).
+	BedrockCAPEM string
 }
 
 // CommandResult answers a Command. A failure carries an ErrorCode and message;
