@@ -13,9 +13,9 @@
 > and issue
 > [#1545](https://github.com/mmiura-2351/mc-server-dashboard-v2/issues/1545).
 > Once the proto messages exist, the buf module under
-> [`../../proto/mcsd/bedrocktunnel/v1/`](../../proto/mcsd/bedrocktunnel/v1/) is
-> the binding contract and this document explains it; where they disagree, the
-> `.proto` file wins.
+> [`../../proto/`](../../proto/) (`mcsd.bedrocktunnel.v1`) is the binding
+> contract and this document explains it; where they disagree, the `.proto`
+> file wins.
 >
 > The Worker-side QUIC client (issue #1546) and end-to-end deployment docs
 > (issue #1547) are separate, later sub-issues; this document specifies the
@@ -122,17 +122,18 @@ yet noticed the *old* QUIC connection is dead cannot replace it: `bind` will
 fail with the port already in use, and the relay answers the new dial with a
 rejection. The old connection's own QUIC idle timeout (quic-go default, 30 s
 absent any activity) is the backstop that eventually frees the port so a
-subsequent redial succeeds. This is a deliberate simplification for v1 -- an
-explicit "supersede the old connection" mechanism would need exactly the kind
-of persistent per-server registry the epic's design avoids -- and is noted here
-as a known, small window rather than a silent gap.
+subsequent redial succeeds. This is a deliberate simplification for this
+initial implementation -- an explicit "supersede the old connection" mechanism
+would need exactly the kind of persistent per-server registry the epic's
+design avoids -- and is noted here as a known, small window rather than a
+silent gap.
 
 ## 4. Handshake: TunnelHello / TunnelHelloAck
 
-Defined in
-[`proto/mcsd/bedrocktunnel/v1/bedrock_tunnel.proto`](../../proto/mcsd/bedrocktunnel/v1/bedrock_tunnel.proto)
-(Go only -- generated for both `worker/` and `relay/`, since this is a
-Worker<->relay wire contract the API never sees; see `proto/README.md`).
+Defined in [`../../proto/`](../../proto/) as `mcsd.bedrocktunnel.v1`
+(`bedrock_tunnel.proto`) -- Go only, generated for both `worker/` and
+`relay/`, since this is a Worker<->relay wire contract the API never sees;
+see `proto/README.md`.
 
 - **ALPN**: `mcsd-bedrock/1` -- distinguishes the Bedrock tunnel listener from
   any other QUIC/TLS service that might share the relay's certificate. The
@@ -325,8 +326,8 @@ redesign.
 - **End-to-end deployment + docs** (issue #1547) -- `compose.yaml` profile
   wiring beyond the port publish, firewall guidance, and a full join-flow
   walkthrough; needs both #1545 and #1546 to exist first.
-- **Real-client-IP passthrough** -- deferred post-v1 per epic #1540; Geyser
-  and the server see the Worker's forwarder IP.
+- **Real-client-IP passthrough** -- deferred beyond this initial scope per
+  epic #1540; Geyser and the server see the Worker's forwarder IP.
 - **Bedrock session reporting** -- the Java tunnel batches `SessionStart` /
   `SessionEnd` to the API (RELAY.md Section 8); no analogous reporting exists
   for Bedrock flows yet.
