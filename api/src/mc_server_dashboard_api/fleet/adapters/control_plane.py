@@ -25,6 +25,7 @@ import logging
 import uuid
 
 from mc_server_dashboard_api.fleet.domain.control_plane import (
+    CloseBedrockTunnelCommand,
     Command,
     CommandResult,
     CommandResultCode,
@@ -37,6 +38,7 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     HydrateCommand,
     LaunchMode,
     ListFilesCommand,
+    OpenBedrockTunnelCommand,
     ReadFileCommand,
     RestartServerCommand,
     ServerCommandCommand,
@@ -397,6 +399,18 @@ def _to_api_command(command_id: str, server_id: str, command: Command) -> pb.Api
                 tls_ca_pem=command.tls_ca_pem,
             )
         )
+    elif isinstance(command, OpenBedrockTunnelCommand):
+        api.open_bedrock_tunnel.CopyFrom(
+            pb.OpenBedrockTunnel(
+                server_id=server_id,
+                relay_endpoint=command.relay_endpoint,
+                bedrock_port=command.bedrock_port,
+                token=command.token,
+                tls_ca_pem=command.tls_ca_pem,
+            )
+        )
+    elif isinstance(command, CloseBedrockTunnelCommand):
+        api.close_bedrock_tunnel.CopyFrom(pb.CloseBedrockTunnel(server_id=server_id))
     else:  # pragma: no cover - exhaustive over the Command union
         raise TypeError(f"unsupported command type: {type(command)!r}")
     return api

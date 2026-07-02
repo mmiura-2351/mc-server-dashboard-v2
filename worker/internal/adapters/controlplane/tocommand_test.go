@@ -216,6 +216,44 @@ func TestToCommandMapsTunnelDial(t *testing.T) {
 	}
 }
 
+// OpenBedrockTunnel / CloseBedrockTunnel (issue #1544) are not yet handled by
+// this Worker (the QUIC client lands in issue #1546); toCommand must still map
+// the Kind so the session layer's canned "unsupported" rejection (see
+// session.IsHandledKind) names the real command instead of falling into the
+// generic "unknown" bucket, keeping the control stream working and the reply
+// diagnostic.
+func TestToCommandMapsOpenBedrockTunnelKind(t *testing.T) {
+	cmd := toCommand(&controlplanev1.ApiCommand{
+		CommandId: "c7",
+		ServerId:  "s1",
+		Command: &controlplanev1.ApiCommand_OpenBedrockTunnel{
+			OpenBedrockTunnel: &controlplanev1.OpenBedrockTunnel{
+				ServerId:      "s1",
+				RelayEndpoint: "relay.example:25675",
+				BedrockPort:   19132,
+				Token:         "tok-abc",
+				TlsCaPem:      "ca-pem",
+			},
+		},
+	})
+	if cmd.Kind != "OpenBedrockTunnel" {
+		t.Fatalf("Kind = %q, want OpenBedrockTunnel", cmd.Kind)
+	}
+}
+
+func TestToCommandMapsCloseBedrockTunnelKind(t *testing.T) {
+	cmd := toCommand(&controlplanev1.ApiCommand{
+		CommandId: "c8",
+		ServerId:  "s1",
+		Command: &controlplanev1.ApiCommand_CloseBedrockTunnel{
+			CloseBedrockTunnel: &controlplanev1.CloseBedrockTunnel{ServerId: "s1"},
+		},
+	})
+	if cmd.Kind != "CloseBedrockTunnel" {
+		t.Fatalf("Kind = %q, want CloseBedrockTunnel", cmd.Kind)
+	}
+}
+
 func TestToFileListingMapsEntries(t *testing.T) {
 	wire := toFileListing(&session.FileListing{
 		Entries: []session.FileEntry{

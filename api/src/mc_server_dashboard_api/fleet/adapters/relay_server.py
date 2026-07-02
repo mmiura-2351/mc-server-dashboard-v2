@@ -34,6 +34,7 @@ from grpc import aio
 
 from mc_server_dashboard_api.fleet.adapters.control_plane import GrpcControlPlane
 from mc_server_dashboard_api.fleet.adapters.relay_state import (
+    BedrockTunnelTable,
     JoinTokenTable,
     RelayRegistration,
 )
@@ -79,6 +80,7 @@ class RelayServicer(RelayServiceServicer):
         base_domain: str,
         registration: RelayRegistration,
         token_table: JoinTokenTable,
+        bedrock_tunnel_table: BedrockTunnelTable,
         resolver: ServerRouteResolver,
         registry: WorkerRegistry,
         control_plane: GrpcControlPlane,
@@ -89,6 +91,7 @@ class RelayServicer(RelayServiceServicer):
         self._base_domain = base_domain
         self._registration = registration
         self._token_table = token_table
+        self._bedrock_tunnel_table = bedrock_tunnel_table
         self._resolver = resolver
         self._registry = registry
         self._control_plane = control_plane
@@ -164,6 +167,30 @@ class RelayServicer(RelayServiceServicer):
                     ended_at=_to_datetime(event.end.ended_at),
                 )
         return pb.ReportSessionsResponse()
+
+    async def ValidateBedrockTunnel(  # noqa: N802 (gRPC-generated method name)
+        self,
+        request: pb.ValidateBedrockTunnelRequest,
+        context: aio.ServicerContext,
+    ) -> pb.ValidateBedrockTunnelResponse:
+        """Confirm a Worker's Bedrock QUIC dial-out credential (issue #1544).
+
+        Called by the relay when it accepts a Worker's QUIC dial-out, carrying
+        the ``(server_id, bedrock_port, token)`` the Worker presented. Unlike
+        the per-player join token (matched relay-side because the relay minted
+        its own waiter via ``ResolveJoin``), the Bedrock tunnel is opened
+        API-initiated, so the API is the only party that can confirm it —
+        against the record :class:`BedrockTunnelTable` kept when the lifecycle
+        layer dispatched ``OpenBedrockTunnel``.
+        """
+
+        await self._authenticate(context)
+        valid = self._bedrock_tunnel_table.validate(
+            server_id=request.server_id,
+            bedrock_port=request.bedrock_port,
+            token=request.token,
+        )
+        return pb.ValidateBedrockTunnelResponse(valid=valid)
 
     def _is_tunnelable(self, route: ServerRoute) -> bool:
         """Whether ``route`` is running on a live worker (TUNNEL vs STOPPED).
@@ -278,6 +305,7 @@ def register_relay_service(
     base_domain: str,
     registration: RelayRegistration,
     token_table: JoinTokenTable,
+    bedrock_tunnel_table: BedrockTunnelTable,
     resolver: ServerRouteResolver,
     registry: WorkerRegistry,
     control_plane: GrpcControlPlane,
@@ -295,6 +323,7 @@ def register_relay_service(
         base_domain=base_domain,
         registration=registration,
         token_table=token_table,
+        bedrock_tunnel_table=bedrock_tunnel_table,
         resolver=resolver,
         registry=registry,
         control_plane=control_plane,

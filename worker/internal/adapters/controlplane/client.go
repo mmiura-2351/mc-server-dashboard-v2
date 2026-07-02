@@ -523,6 +523,10 @@ func commandKind(cmd *controlplanev1.ApiCommand) string {
 		return "ListFiles"
 	case *controlplanev1.ApiCommand_TunnelDial:
 		return "TunnelDial"
+	case *controlplanev1.ApiCommand_OpenBedrockTunnel:
+		return "OpenBedrockTunnel"
+	case *controlplanev1.ApiCommand_CloseBedrockTunnel:
+		return "CloseBedrockTunnel"
 	default:
 		return "unknown"
 	}

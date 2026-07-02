@@ -52,6 +52,11 @@ class RelayServiceStub(object):
                 request_serializer=mcsd_dot_relay_dot_v1_dot_relay__pb2.ReportSessionsRequest.SerializeToString,
                 response_deserializer=mcsd_dot_relay_dot_v1_dot_relay__pb2.ReportSessionsResponse.FromString,
                 _registered_method=True)
+        self.ValidateBedrockTunnel = channel.unary_unary(
+                '/mcsd.relay.v1.RelayService/ValidateBedrockTunnel',
+                request_serializer=mcsd_dot_relay_dot_v1_dot_relay__pb2.ValidateBedrockTunnelRequest.SerializeToString,
+                response_deserializer=mcsd_dot_relay_dot_v1_dot_relay__pb2.ValidateBedrockTunnelResponse.FromString,
+                _registered_method=True)
 
 
 class RelayServiceServicer(object):
@@ -90,6 +95,20 @@ class RelayServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ValidateBedrockTunnel(self, request, context):
+        """ValidateBedrockTunnel is called by the relay when it accepts a Worker's
+        QUIC dial-out for a Bedrock tunnel (epic #1540, issue #1544). Unlike the
+        per-player join token -- which the relay matches locally because it
+        minted the waiter itself via its own ResolveJoin call -- the Bedrock
+        tunnel is opened API-initiated at server-running time, so the relay has
+        no prior waiter to match against and asks the API to confirm the token
+        instead. This keeps the relay itself free of a persistent server list;
+        its own state stays limited to in-flight tunnel connections.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_RelayServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -107,6 +126,11 @@ def add_RelayServiceServicer_to_server(servicer, server):
                     servicer.ReportSessions,
                     request_deserializer=mcsd_dot_relay_dot_v1_dot_relay__pb2.ReportSessionsRequest.FromString,
                     response_serializer=mcsd_dot_relay_dot_v1_dot_relay__pb2.ReportSessionsResponse.SerializeToString,
+            ),
+            'ValidateBedrockTunnel': grpc.unary_unary_rpc_method_handler(
+                    servicer.ValidateBedrockTunnel,
+                    request_deserializer=mcsd_dot_relay_dot_v1_dot_relay__pb2.ValidateBedrockTunnelRequest.FromString,
+                    response_serializer=mcsd_dot_relay_dot_v1_dot_relay__pb2.ValidateBedrockTunnelResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -193,6 +217,33 @@ class RelayService(object):
             '/mcsd.relay.v1.RelayService/ReportSessions',
             mcsd_dot_relay_dot_v1_dot_relay__pb2.ReportSessionsRequest.SerializeToString,
             mcsd_dot_relay_dot_v1_dot_relay__pb2.ReportSessionsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ValidateBedrockTunnel(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/mcsd.relay.v1.RelayService/ValidateBedrockTunnel',
+            mcsd_dot_relay_dot_v1_dot_relay__pb2.ValidateBedrockTunnelRequest.SerializeToString,
+            mcsd_dot_relay_dot_v1_dot_relay__pb2.ValidateBedrockTunnelResponse.FromString,
             options,
             channel_credentials,
             insecure,

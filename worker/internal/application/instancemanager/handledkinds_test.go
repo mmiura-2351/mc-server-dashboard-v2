@@ -63,3 +63,24 @@ func TestUnknownKindIsUnhandled(t *testing.T) {
 		t.Errorf("Manager.Handle(%q) = %+v, want unhandled-command failure", unknown, res)
 	}
 }
+
+// TestBedrockTunnelKindsAreUnhandled guards the "no-op/unimplemented handler"
+// requirement for OpenBedrockTunnel/CloseBedrockTunnel (issue #1544): the QUIC
+// client that will actually act on these lands in issue #1546, so until then
+// both kinds must fall through the same unhandled-command path as any other
+// unrecognized kind (session.IsHandledKind false, Manager.Handle's default
+// arm) rather than panicking or being silently dropped -- the control stream
+// keeps working and the API sees a clear rejection.
+func TestBedrockTunnelKindsAreUnhandled(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+
+	for _, kind := range []string{"OpenBedrockTunnel", "CloseBedrockTunnel"} {
+		if session.IsHandledKind(kind) {
+			t.Errorf("session.IsHandledKind(%q) = true, want false (issue #1546 not landed yet)", kind)
+		}
+		res := m.Handle(context.Background(), session.Command{CommandID: "c", ServerID: "s", Kind: kind})
+		if res.Success || !strings.HasPrefix(res.ErrorMessage, unhandledPrefix) {
+			t.Errorf("Manager.Handle(%q) = %+v, want unhandled-command failure", kind, res)
+		}
+	}
+}

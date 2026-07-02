@@ -620,6 +620,8 @@ class ApiCommand(_message.Message):
     EDIT_FILE_FIELD_NUMBER: _builtins.int
     LIST_FILES_FIELD_NUMBER: _builtins.int
     TUNNEL_DIAL_FIELD_NUMBER: _builtins.int
+    OPEN_BEDROCK_TUNNEL_FIELD_NUMBER: _builtins.int
+    CLOSE_BEDROCK_TUNNEL_FIELD_NUMBER: _builtins.int
     command_id: _builtins.str
     """command_id correlates this command with its CommandResult
     (REQUIREMENTS.md NFR-OBS-1).
@@ -673,6 +675,20 @@ class ApiCommand(_message.Message):
         hydrate.
         """
 
+    @_builtins.property
+    def open_bedrock_tunnel(self) -> Global___OpenBedrockTunnel:
+        """OpenBedrockTunnel instructs the Worker to open a Bedrock relay tunnel
+        for a server that just reached running state (epic #1540, issue
+        #1544). Unlike TunnelDial (dispatched per player session), this is
+        per-server and dispatched once, at server-running time.
+        """
+
+    @_builtins.property
+    def close_bedrock_tunnel(self) -> Global___CloseBedrockTunnel:
+        """CloseBedrockTunnel instructs the Worker to close a server's Bedrock
+        relay tunnel, dispatched when the server stops (issue #1544).
+        """
+
     def __init__(
         self,
         *,
@@ -688,12 +704,14 @@ class ApiCommand(_message.Message):
         edit_file: Global___EditFile | None = ...,
         list_files: Global___ListFiles | None = ...,
         tunnel_dial: Global___TunnelDial | None = ...,
+        open_bedrock_tunnel: Global___OpenBedrockTunnel | None = ...,
+        close_bedrock_tunnel: Global___CloseBedrockTunnel | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _typing.Literal["command", b"command", "edit_file", b"edit_file", "hydrate", b"hydrate", "list_files", b"list_files", "read_file", b"read_file", "restart", b"restart", "server_command", b"server_command", "snapshot", b"snapshot", "start", b"start", "stop", b"stop", "tunnel_dial", b"tunnel_dial"]  # noqa: Y015
+    _HasFieldArgType: _TypeAlias = _typing.Literal["close_bedrock_tunnel", b"close_bedrock_tunnel", "command", b"command", "edit_file", b"edit_file", "hydrate", b"hydrate", "list_files", b"list_files", "open_bedrock_tunnel", b"open_bedrock_tunnel", "read_file", b"read_file", "restart", b"restart", "server_command", b"server_command", "snapshot", b"snapshot", "start", b"start", "stop", b"stop", "tunnel_dial", b"tunnel_dial"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["command", b"command", "command_id", b"command_id", "edit_file", b"edit_file", "hydrate", b"hydrate", "list_files", b"list_files", "read_file", b"read_file", "restart", b"restart", "server_command", b"server_command", "server_id", b"server_id", "snapshot", b"snapshot", "start", b"start", "stop", b"stop", "tunnel_dial", b"tunnel_dial"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["close_bedrock_tunnel", b"close_bedrock_tunnel", "command", b"command", "command_id", b"command_id", "edit_file", b"edit_file", "hydrate", b"hydrate", "list_files", b"list_files", "open_bedrock_tunnel", b"open_bedrock_tunnel", "read_file", b"read_file", "restart", b"restart", "server_command", b"server_command", "server_id", b"server_id", "snapshot", b"snapshot", "start", b"start", "stop", b"stop", "tunnel_dial", b"tunnel_dial"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    _WhichOneofReturnType_command: _TypeAlias = _typing.Literal["start", "stop", "restart", "server_command", "hydrate", "snapshot", "read_file", "edit_file", "list_files", "tunnel_dial"]  # noqa: Y015
+    _WhichOneofReturnType_command: _TypeAlias = _typing.Literal["start", "stop", "restart", "server_command", "hydrate", "snapshot", "read_file", "edit_file", "list_files", "tunnel_dial", "open_bedrock_tunnel", "close_bedrock_tunnel"]  # noqa: Y015
     _WhichOneofArgType_command: _TypeAlias = _typing.Literal["command", b"command"]  # noqa: Y015
     def WhichOneof(self, oneof_group: _WhichOneofArgType_command) -> _WhichOneofReturnType_command | None: ...
 
@@ -1022,6 +1040,95 @@ class TunnelDial(_message.Message):
     def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___TunnelDial: _TypeAlias = TunnelDial  # noqa: Y015
+
+@_typing.final
+class OpenBedrockTunnel(_message.Message):
+    """OpenBedrockTunnel instructs the Worker to open a Bedrock relay tunnel for
+    one server (epic #1540, issue #1544). Unlike TunnelDial, which is
+    dispatched per player session in response to a relay-initiated
+    ResolveJoin, this is dispatched by the API itself once, when a
+    Bedrock-enabled server (non-null server.bedrock_port) reaches running
+    state. The Worker's future QUIC dial-out to the relay (issue #1546)
+    carries (server_id, bedrock_port, token); because the relay has no prior
+    waiter to match the dial against (unlike the per-player TunnelDial flow),
+    it validates the token against the API instead
+    (mcsd.relay.v1.RelayService.ValidateBedrockTunnel) rather than matching it
+    locally, keeping the relay itself free of a persistent server list.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SERVER_ID_FIELD_NUMBER: _builtins.int
+    RELAY_ENDPOINT_FIELD_NUMBER: _builtins.int
+    BEDROCK_PORT_FIELD_NUMBER: _builtins.int
+    TOKEN_FIELD_NUMBER: _builtins.int
+    TLS_CA_PEM_FIELD_NUMBER: _builtins.int
+    server_id: _builtins.str
+    """server_id identifies the local server whose Bedrock (Geyser/RakNet) port
+    the Worker forwards over the tunnel.
+    """
+    relay_endpoint: _builtins.str
+    """relay_endpoint is the relay's Bedrock tunnel endpoint to dial, host:port
+    form, analogous to TunnelDial.endpoint.
+    """
+    bedrock_port: _builtins.int
+    """bedrock_port is the public UDP port the relay binds for this server
+    (server.bedrock_port), declared so the relay can bind/route to it.
+    """
+    token: _builtins.str
+    """token is the credential the Worker presents on its QUIC dial-out; the
+    relay validates it against the API rather than matching it locally
+    (see the message comment). Unlike TunnelDial.token (single-use, 10 s
+    TTL), this token is valid for the tunnel's whole lifetime -- until a
+    matching CloseBedrockTunnel -- since the Worker may need to redial after
+    a transient QUIC disconnect.
+    """
+    tls_ca_pem: _builtins.str
+    """tls_ca_pem is the optional PEM-encoded CA bundle the Worker uses to
+    verify the relay's QUIC certificate. Empty means system roots. Same
+    delivery rationale as TunnelDial.tls_ca_pem.
+    """
+    def __init__(
+        self,
+        *,
+        server_id: _builtins.str = ...,
+        relay_endpoint: _builtins.str = ...,
+        bedrock_port: _builtins.int = ...,
+        token: _builtins.str = ...,
+        tls_ca_pem: _builtins.str = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["bedrock_port", b"bedrock_port", "relay_endpoint", b"relay_endpoint", "server_id", b"server_id", "tls_ca_pem", b"tls_ca_pem", "token", b"token"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+    def WhichOneof(self, oneof_group: _Never) -> None: ...
+
+Global___OpenBedrockTunnel: _TypeAlias = OpenBedrockTunnel  # noqa: Y015
+
+@_typing.final
+class CloseBedrockTunnel(_message.Message):
+    """CloseBedrockTunnel instructs the Worker to close a previously opened
+    Bedrock relay tunnel for one server (issue #1544). Dispatched when the
+    server's observed state leaves running (stop, crash, or restart).
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SERVER_ID_FIELD_NUMBER: _builtins.int
+    server_id: _builtins.str
+    """server_id identifies the local server whose Bedrock tunnel to close."""
+    def __init__(
+        self,
+        *,
+        server_id: _builtins.str = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["server_id", b"server_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+    def WhichOneof(self, oneof_group: _Never) -> None: ...
+
+Global___CloseBedrockTunnel: _TypeAlias = CloseBedrockTunnel  # noqa: Y015
 
 @_typing.final
 class CommandResult(_message.Message):

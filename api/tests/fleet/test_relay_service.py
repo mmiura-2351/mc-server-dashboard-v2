@@ -31,6 +31,7 @@ from mc_server_dashboard_api.fleet.adapters.control_plane import (
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
 from mc_server_dashboard_api.fleet.adapters.relay_server import register_relay_service
 from mc_server_dashboard_api.fleet.adapters.relay_state import (
+    BedrockTunnelTable,
     JoinTokenTable,
     RelayRegistration,
 )
@@ -102,6 +103,7 @@ class _Harness:
         control_plane: ControlPlaneState,
         registration: RelayRegistration | None = None,
         token_table: JoinTokenTable | None = None,
+        bedrock_tunnel_table: BedrockTunnelTable | None = None,
         session_sink: SessionSink | None = None,
     ) -> None:
         self.resolver = resolver
@@ -109,6 +111,7 @@ class _Harness:
         self.control_plane = control_plane
         self.registration = registration or RelayRegistration()
         self.token_table = token_table or JoinTokenTable()
+        self.bedrock_tunnel_table = bedrock_tunnel_table or BedrockTunnelTable()
         self.session_sink = session_sink or _RecordingSessionSink()
         self.clock = FakeClock(_T0)
         self._server: aio.Server | None = None
@@ -122,6 +125,7 @@ class _Harness:
             base_domain=_BASE_DOMAIN,
             registration=self.registration,
             token_table=self.token_table,
+            bedrock_tunnel_table=self.bedrock_tunnel_table,
             resolver=self.resolver,
             registry=self.registry,
             control_plane=GrpcControlPlane(
@@ -168,6 +172,7 @@ async def _make_harness(
     control_plane: ControlPlaneState | None = None,
     registration: RelayRegistration | None = None,
     token_table: JoinTokenTable | None = None,
+    bedrock_tunnel_table: BedrockTunnelTable | None = None,
     session_sink: SessionSink | None = None,
 ) -> tuple[_Harness, RelayServiceStub]:
     harness = _Harness(
@@ -176,6 +181,7 @@ async def _make_harness(
         control_plane=control_plane or ControlPlaneState(),
         registration=registration,
         token_table=token_table,
+        bedrock_tunnel_table=bedrock_tunnel_table,
         session_sink=session_sink,
     )
     stub = await harness.start()
@@ -555,6 +561,83 @@ async def test_report_sessions_omits_blank_claimed_identity(
         )
         assert sink.starts[0].username is None
         assert sink.starts[0].player_uuid is None
+    finally:
+        await harness.stop()
+
+
+async def test_validate_bedrock_tunnel_rejects_missing_credential(
+    registry: InMemoryWorkerRegistry,
+) -> None:
+    harness, stub = await _make_harness(resolver=FakeResolver(), registry=registry)
+    try:
+        with pytest.raises(aio.AioRpcError) as exc:
+            await stub.ValidateBedrockTunnel(
+                pb.ValidateBedrockTunnelRequest(
+                    server_id=_SERVER_ID, bedrock_port=19132, token="tok"
+                )
+            )
+        assert exc.value.code() == grpc.StatusCode.UNAUTHENTICATED
+    finally:
+        await harness.stop()
+
+
+async def test_validate_bedrock_tunnel_matches_open_credential(
+    registry: InMemoryWorkerRegistry,
+) -> None:
+    table = BedrockTunnelTable()
+    token = table.open(server_id=_SERVER_ID, bedrock_port=19132)
+    harness, stub = await _make_harness(
+        resolver=FakeResolver(), registry=registry, bedrock_tunnel_table=table
+    )
+    try:
+        resp = await stub.ValidateBedrockTunnel(
+            pb.ValidateBedrockTunnelRequest(
+                server_id=_SERVER_ID, bedrock_port=19132, token=token
+            ),
+            metadata=_auth(),
+        )
+        assert resp.valid is True
+    finally:
+        await harness.stop()
+
+
+async def test_validate_bedrock_tunnel_rejects_wrong_token(
+    registry: InMemoryWorkerRegistry,
+) -> None:
+    table = BedrockTunnelTable()
+    table.open(server_id=_SERVER_ID, bedrock_port=19132)
+    harness, stub = await _make_harness(
+        resolver=FakeResolver(), registry=registry, bedrock_tunnel_table=table
+    )
+    try:
+        resp = await stub.ValidateBedrockTunnel(
+            pb.ValidateBedrockTunnelRequest(
+                server_id=_SERVER_ID, bedrock_port=19132, token="wrong"
+            ),
+            metadata=_auth(),
+        )
+        assert resp.valid is False
+    finally:
+        await harness.stop()
+
+
+async def test_validate_bedrock_tunnel_rejects_after_close(
+    registry: InMemoryWorkerRegistry,
+) -> None:
+    table = BedrockTunnelTable()
+    token = table.open(server_id=_SERVER_ID, bedrock_port=19132)
+    table.close(server_id=_SERVER_ID)
+    harness, stub = await _make_harness(
+        resolver=FakeResolver(), registry=registry, bedrock_tunnel_table=table
+    )
+    try:
+        resp = await stub.ValidateBedrockTunnel(
+            pb.ValidateBedrockTunnelRequest(
+                server_id=_SERVER_ID, bedrock_port=19132, token=token
+            ),
+            metadata=_auth(),
+        )
+        assert resp.valid is False
     finally:
         await harness.stop()
 
