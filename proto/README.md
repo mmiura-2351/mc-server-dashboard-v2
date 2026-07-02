@@ -11,10 +11,13 @@ message flow, and the requirement mapping) see
 
 ```
 proto/
-├── buf.yaml                                  # buf module: lint + breaking config
-├── buf.gen.yaml                              # code generation (Go via buf)
-├── mcsd/controlplane/v1/control_plane.proto  # the WorkerService bidi-stream contract
-└── mcsd/relay/v1/relay.proto                 # the RelayService relay-to-API contract
+├── buf.yaml                                    # buf module: lint + breaking config
+├── buf.gen.yaml                                # code generation (Go via buf)
+├── mcsd/controlplane/v1/control_plane.proto    # the WorkerService bidi-stream contract
+├── mcsd/relay/v1/relay.proto                   # the RelayService relay-to-API contract
+└── mcsd/bedrocktunnel/v1/bedrock_tunnel.proto   # Worker<->relay Bedrock tunnel handshake
+                                                  # (Go only, no gRPC service -- see the file
+                                                  # header and docs/app/BEDROCK_TUNNEL.md)
 ```
 
 Generated stubs (do not edit by hand; regenerate with `make proto-gen`):
@@ -129,7 +132,13 @@ Generated Go and Python are excluded from the strict lint/type gates
 
 ## Conventions
 
-- proto3, packages `mcsd.controlplane.v1` and `mcsd.relay.v1`.
+- proto3, packages `mcsd.controlplane.v1`, `mcsd.relay.v1`, and
+  `mcsd.bedrocktunnel.v1`. The last is Worker<->relay only (not served over
+  gRPC, and not consumed by `api/`), so `make proto-gen` generates it for Go
+  only -- both the primary template (into `worker/`) and the relay-scoped
+  template (into `relay/internal/genproto/`, see below); the Python leg's
+  `grpc_tools.protoc` invocation names its two files explicitly and does not
+  include it.
 - Lint uses the buf `STANDARD` rule set. The single exception is the
   request/response naming rules for the `Session` RPC, whose request and
   response are the multiplexing `WorkerMessage` / `ApiMessage` envelopes rather

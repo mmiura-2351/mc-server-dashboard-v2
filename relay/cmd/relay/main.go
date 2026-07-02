@@ -23,6 +23,7 @@ import (
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/adapters/apiclient"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/adapters/config"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/bedrock"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/game"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/ipcaps"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/relaysvc"
@@ -99,6 +100,24 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("bind game listener %q: %w", cfg.Game.Listen, err)
 	}
 
+	// The Bedrock tunnel listener reuses the TCP tunnel's TLS certificate (same
+	// CA the Worker already gets via Register -> OpenBedrockTunnel.tls_ca_pem,
+	// docs/app/BEDROCK_TUNNEL.md); only the negotiated ALPN differs, so the two
+	// listeners are distinguishable on the wire despite sharing a cert.
+	bedrockTLS := tunnelTLS.Clone()
+	bedrockTLS.NextProtos = []string{bedrock.ALPN}
+	// Pre-auth handshake-window caps on the QUIC listener itself (the #968
+	// posture, mirroring tunnelCaps above) -- distinct from the per-tunnel
+	// caps below, which govern the public UDP ingress of each bound tunnel.
+	bedrockTunnelCaps := ipcaps.NewIPCaps(cfg.Bedrock.TunnelMaxConnsPerIP, 0, 0, time.Now)
+	newBedrockIPCaps := func() *ipcaps.IPCaps {
+		return ipcaps.NewIPCaps(cfg.Bedrock.MaxFlowsPerIP, cfg.Bedrock.NewFlowsPerIPPerSecond, 0, time.Now)
+	}
+	bedrockLn, err := bedrock.NewListener(cfg.Bedrock.TunnelListen, bedrockTLS, apiClient, bedrockTunnelCaps, newBedrockIPCaps, logger)
+	if err != nil {
+		return fmt.Errorf("bind bedrock tunnel listener %q: %w", cfg.Bedrock.TunnelListen, err)
+	}
+
 	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -112,16 +131,23 @@ func run(ctx context.Context) error {
 	svcCtx, svcStop := context.WithCancel(ctx)
 	defer svcStop()
 
-	logger.Info("relay starting", "game_listen", cfg.Game.Listen, "tunnel_listen", cfg.Tunnel.Listen)
+	logger.Info("relay starting", "game_listen", cfg.Game.Listen, "tunnel_listen", cfg.Tunnel.Listen, "bedrock_tunnel_listen", cfg.Bedrock.TunnelListen)
 
 	var wg sync.WaitGroup
-	wg.Add(4)
+	wg.Add(5)
 	go func() { defer wg.Done(); svc.Run(svcCtx) }()
 	go func() { defer wg.Done(); reporter.Run(svcCtx) }()
 	go func() {
 		defer wg.Done()
 		if err := tunnelLn.Serve(sigCtx); err != nil {
 			logger.Error("tunnel listener stopped", "error", err)
+			stop()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if err := bedrockLn.Serve(sigCtx); err != nil {
+			logger.Error("bedrock tunnel listener stopped", "error", err)
 			stop()
 		}
 	}()
