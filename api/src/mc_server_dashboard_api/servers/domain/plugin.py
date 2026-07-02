@@ -16,6 +16,7 @@ from __future__ import annotations
 import datetime as dt
 import enum
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Literal
@@ -166,6 +167,20 @@ def is_geyser_plugin(plugin: ServerPlugin) -> bool:
     if identifier in _GEYSER_MOD_IDENTIFIERS:
         return True
     return plugin.source_project_id in _GEYSER_MODRINTH_PROJECT_IDS
+
+
+def has_enabled_geyser(plugins: Iterable[ServerPlugin]) -> bool:
+    """Whether ``plugins`` contains at least one *enabled* Geyser copy.
+
+    The single predicate behind two independent "is this server actually
+    Bedrock-reachable" checks that must not drift apart (issue #1555): the
+    Bedrock tunnel dispatch skip (``ServersServerStateSink._sync_bedrock_tunnel``,
+    issue #1544) and the ``ServerResponse`` ``bedrock_address``/``bedrock_port``
+    surfacing gate. A disabled Geyser is not listening on its RakNet port, so
+    neither the tunnel nor the response should treat the server as joinable.
+    """
+
+    return any(p.enabled and is_geyser_plugin(p) for p in plugins)
 
 
 def working_set_present(*, enabled: bool, side: PluginSide) -> bool:

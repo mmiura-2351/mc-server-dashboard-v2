@@ -12,7 +12,7 @@ import datetime as dt
 import io
 import uuid
 import zipfile
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import replace
 
@@ -70,6 +70,7 @@ from mc_server_dashboard_api.servers.domain.plugin import (
     PluginId,
     PluginSource,
     ServerPlugin,
+    has_enabled_geyser,
 )
 from mc_server_dashboard_api.servers.domain.plugin_cache_store import (
     CacheEntry,
@@ -733,6 +734,15 @@ class FakePluginRepository(PluginRepository):
             (p for p in self.by_id.values() if p.server_id == server_id),
             key=lambda p: (p.display_name, str(p.id.value)),
         )
+
+    async def enabled_geyser_server_ids(
+        self, server_ids: Iterable[ServerId]
+    ) -> set[ServerId]:
+        return {
+            server_id
+            for server_id in server_ids
+            if has_enabled_geyser(await self.list_for_server(server_id))
+        }
 
     async def delete(self, plugin_id: PluginId) -> None:
         self.by_id.pop(plugin_id, None)
