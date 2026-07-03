@@ -23,6 +23,24 @@ const flowSweepInterval = 15 * time.Second
 // Section 6).
 const udpReadBufferSize = 2048
 
+// maxFlowsPerTunnel bounds how many concurrent local UDP sockets one tunnel's
+// flowRegistry will open. Today the relay's own per-tunnel admission (ipcaps
+// + flow table, relay/internal/bedrock/tunnel.go) is what actually limits how
+// many flow ids a Worker ever sees -- this is a second, independent ceiling
+// against a misbehaving or compromised relay minting flow ids without bound,
+// which would otherwise exhaust the Worker's sockets/goroutines one per flow
+// id. The value is set well above any realistic concurrent-player count for a
+// single Bedrock server (production servers rarely approach even a few
+// hundred concurrent connections) while staying well below the relay's own
+// default global admission ceiling (ipcaps.DefaultGlobalMax = 10_000,
+// relay/internal/ipcaps/ipcaps.go), since a compromised relay cannot be
+// trusted to honor that ceiling either. A new flow id past this bound is
+// dropped -- no socket or goroutine opened -- and logged at most once per
+// tunnel connection (see capLogged) rather than per datagram, so it cannot
+// become its own log-spam vector; idle eviction (evictIdle) frees capacity
+// for later flows the same way it always has.
+const maxFlowsPerTunnel = 4096
+
 // datagramSender is the subset of *quic.Conn a flow's reply pump needs.
 type datagramSender interface {
 	SendDatagram(p []byte) error
@@ -42,9 +60,10 @@ type flowRegistry struct {
 	logger   *slog.Logger
 	serverID string
 
-	mu    sync.Mutex
-	byID  map[uint32]*flowSocket
-	sweep chan struct{} // closed by closeAll to stop the sweep goroutine
+	mu        sync.Mutex
+	byID      map[uint32]*flowSocket
+	sweep     chan struct{} // closed by closeAll to stop the sweep goroutine
+	capLogged bool          // set once maxFlowsPerTunnel has been logged (logCapOnce)
 }
 
 // flowSocket is one flow's local UDP socket to the container's Geyser port,
@@ -76,13 +95,20 @@ func newFlowRegistry(dialUDP func(context.Context, string) (net.Conn, error), ta
 // forward writes payload for flow id to its local UDP socket, dialing a fresh
 // one on first sight of id — the relay assigns flow ids, the Worker only ever
 // mints a *local* socket for one, never a flow id of its own
-// (docs/app/BEDROCK_TUNNEL.md Section 5). It is called serially from the
-// connection's single receive loop, so the check-then-create below never races
-// itself.
+// (docs/app/BEDROCK_TUNNEL.md Section 5). A new id seen once the registry
+// already holds maxFlowsPerTunnel flows is dropped instead: no socket or
+// goroutine is opened, and the drop is logged at most once per registry (see
+// logCapOnce). It is called serially from the connection's single receive
+// loop, so the check-then-create below never races itself.
 func (r *flowRegistry) forward(ctx context.Context, id uint32, payload []byte) error {
 	r.mu.Lock()
 	fs, ok := r.byID[id]
+	atCeiling := !ok && len(r.byID) >= maxFlowsPerTunnel
 	r.mu.Unlock()
+	if atCeiling {
+		r.logCapOnce()
+		return nil
+	}
 	if !ok {
 		conn, err := r.dialUDP(ctx, r.target)
 		if err != nil {
@@ -99,6 +125,22 @@ func (r *flowRegistry) forward(ctx context.Context, id uint32, payload []byte) e
 	r.mu.Unlock()
 	_, err := fs.conn.Write(payload)
 	return err
+}
+
+// logCapOnce logs the maxFlowsPerTunnel ceiling being hit, but only the first
+// time for this registry (i.e. once per tunnel connection) — a relay that
+// keeps minting new flow ids past the ceiling must not turn this into a
+// per-datagram log-spam vector.
+func (r *flowRegistry) logCapOnce() {
+	r.mu.Lock()
+	already := r.capLogged
+	r.capLogged = true
+	r.mu.Unlock()
+	if already {
+		return
+	}
+	r.logger.Warn("bedrock tunnel: max flows per tunnel reached; dropping new flow",
+		"server_id", r.serverID, "max_flows_per_tunnel", maxFlowsPerTunnel)
 }
 
 // readPump reads Geyser's replies for one flow and forwards them back over the
