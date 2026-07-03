@@ -244,6 +244,10 @@ export const en = {
   // join-hostname badge when the server holds a bedrock_port.
   "dashboard.bedrockLabel": "Bedrock",
   "dashboard.copiedBedrockAddress": "Copied!",
+  // Badge tooltip: the copy action yields the host only; Bedrock's "Add Server"
+  // screen has a separate Port field, so the port is not part of the copied value.
+  "dashboard.bedrockAddressCopyTitle":
+    "Copy address — enter port {port} in the separate Port field",
   // Filter and sort controls (#1123).
   "dashboard.filter.search": "Search by name…",
   "dashboard.filter.state": "Filter by state",
@@ -273,6 +277,10 @@ export const en = {
   // join-hostname badge when the server holds a bedrock_port.
   "serverDetail.bedrockLabel": "Bedrock",
   "serverDetail.copiedBedrockAddress": "Copied!",
+  // Badge tooltip: the copy action yields the host only; Bedrock's "Add Server"
+  // screen has a separate Port field, so the port is not part of the copied value.
+  "serverDetail.bedrockAddressCopyTitle":
+    "Copy address — enter port {port} in the separate Port field",
   // Tabs (WEBUI_SPEC.md 6.4–6.9). Built tabs: Overview, Settings; the rest are
   // placeholders pending later phases.
   "serverDetail.tab.overview": "Overview",

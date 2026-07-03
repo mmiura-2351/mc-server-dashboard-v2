@@ -1760,7 +1760,11 @@ describe("ServerDetailPage header Bedrock address badge (issue #1543)", () => {
       name: `${t("serverDetail.bedrockLabel")}: play.example.com:19132`,
     });
     expect(badge).toBeInTheDocument();
-    expect(badge).toHaveAttribute("title", "play.example.com:19132");
+    // Tooltip copies the host only and points the port at Bedrock's Port field.
+    expect(badge).toHaveAttribute(
+      "title",
+      t("serverDetail.bedrockAddressCopyTitle", { port: 19132 }),
+    );
   });
 
   it("hides the Bedrock badge when bedrock_port is null", async () => {
@@ -1794,7 +1798,7 @@ describe("ServerDetailPage header Bedrock address badge (issue #1543)", () => {
     ).toBeInTheDocument();
   });
 
-  it("clicking the Bedrock badge copies address:port and shows Copied!", async () => {
+  it("clicking the Bedrock badge copies the host only and shows Copied!", async () => {
     mockApi.get.mockResolvedValue(
       server({ bedrock_address: "play.example.com", bedrock_port: 19132 }),
     );
@@ -1810,11 +1814,23 @@ describe("ServerDetailPage header Bedrock address badge (issue #1543)", () => {
         configurable: true,
       });
     }
-    const execSpy = vi.spyOn(document, "execCommand").mockReturnValue(true);
+    // Capture the value handed to the clipboard fallback textarea: it must be
+    // the bare host with no `:port` (Bedrock's Port field is separate).
+    let copiedText: string | null = null;
+    const execSpy = vi
+      .spyOn(document, "execCommand")
+      .mockImplementation((command) => {
+        if (command === "copy") {
+          const areas = document.querySelectorAll("textarea");
+          copiedText = areas[areas.length - 1]?.value ?? null;
+        }
+        return true;
+      });
 
     fireEvent.click(badge);
 
     expect(execSpy).toHaveBeenCalledWith("copy");
+    expect(copiedText).toBe("play.example.com");
     expect(
       await screen.findByText(t("serverDetail.copiedBedrockAddress")),
     ).toBeInTheDocument();

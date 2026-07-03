@@ -302,11 +302,13 @@ function Header({
       : null;
 
   const handleCopyBedrock = useCallback(() => {
-    if (bedrockAddress === null) return;
+    if (server.bedrock_address === null) return;
     if (bedrockCopyTimerRef.current !== null) {
       clearTimeout(bedrockCopyTimerRef.current);
     }
-    copyToClipboard(bedrockAddress).then(
+    // Copy the host only: Bedrock's "Add Server" screen has a separate Port
+    // field, and pasting `host:port` into the address field fails validation.
+    copyToClipboard(server.bedrock_address).then(
       () => {
         setBedrockCopied(true);
         bedrockCopyTimerRef.current = setTimeout(
@@ -318,7 +320,7 @@ function Header({
         setBedrockCopied(false);
       },
     );
-  }, [bedrockAddress]);
+  }, [server.bedrock_address]);
 
   return (
     <div className="page-head">
@@ -399,7 +401,9 @@ function Header({
             <button
               type="button"
               className="badge copyable"
-              title={bedrockAddress}
+              title={t("serverDetail.bedrockAddressCopyTitle", {
+                port: server.bedrock_port ?? "",
+              })}
               onClick={handleCopyBedrock}
             >
               {bedrockCopied ? (
