@@ -861,4 +861,58 @@ relay control surface is active.
 |---|---|---|---|
 | 25565 | TCP | inbound | player game connections |
 | 25665 | TCP | inbound | Worker dial-back (TLS tunnel) |
+| 25675 | UDP | inbound | Worker's Bedrock QUIC tunnel dial-back (epic #1540, `bedrock.tunnel_listen`) — only when the Bedrock gate is on |
+| 19132-19231 | UDP | inbound | Bedrock player connections (`ports.bedrock_range_start..end` default window) — only when the Bedrock gate is on |
 | 50051 | TCP | internal (compose network only) | gRPC control plane (not published) |
+
+### Bedrock (Geyser)
+
+Bedrock-edition players can join through the same relay, over a separate QUIC
+tunnel and per-server UDP ingress (see `docs/app/BEDROCK.md` for the feature
+overview and `docs/app/BEDROCK_TUNNEL.md` for the wire-level design). It builds
+on the relay setup above (same wildcard DNS record, same tunnel TLS material)
+and needs one additional step:
+
+1. Set `MCD_API_RELAY__BEDROCK_ENABLED=true` in `.env` (see `.env.example`).
+2. Open the two additional firewall rows above on the relay host: the Bedrock
+   QUIC tunnel port (25675/udp) and the client-facing UDP window
+   (19132-19231/udp, `compose.yaml`'s relay service already publishes both).
+3. Rebuild and bring the stack up (`docker compose up -d --build`), same as
+   [Enabling the relay profile](#enabling-the-relay-profile).
+
+No other configuration is required: installing Geyser (Modrinth catalog) and
+Floodgate (jar upload — no Spigot build on Modrinth, issue #1548) on a Paper
+server through the normal plugin flow is what allocates its `bedrock_port` and
+opens the tunnel on start (`docs/app/BEDROCK.md` "Activation").
+
+#### Manual verification (real Bedrock client)
+
+The e2e suite (`make bedrock-e2e`, `.github/workflows/bedrock-e2e.yml`) covers
+the tunnel's data path against a fake Geyser responder — CI does not boot real
+Geyser (a Modrinth/GeyserMC download would make it flaky) or join a real
+Bedrock client. Verify those manually against a live deployment:
+
+1. Enable the Bedrock gate (above) and confirm `GET /api/meta` reports
+   `bedrock_enabled: true`.
+2. Create a Paper server, install Geyser from the plugin catalog and Floodgate
+   via jar upload (see `docs/app/BEDROCK.md`), and start the server.
+3. Confirm the server response carries `bedrock_address` / `bedrock_port` (also
+   shown as a badge in the Web UI, `docs/ui/WEBUI_SPEC.md`).
+4. From a machine that can reach the relay host, smoke-test the RakNet
+   listener is actually answering before trying a real client — an Unconnected
+   Ping/Pong round trip, printed as hex (replace `<host>`/`<port>` with the
+   reported `bedrock_address`/`bedrock_port`):
+
+   ```sh
+   printf '\x01\x00\x00\x00\x00\x00\x00\x00\x01\x00\xff\xff\x00\xfe\xfe\xfe\xfe\xfd\xfd\xfd\xfd\x12\x34\x56\x78\x00\x00\x00\x00\x00\x00\x00\x01' \
+     | timeout 3 nc -u -w2 <host> <port> | xxd | head -3
+   ```
+
+   A reply starting with byte `1c` is an Unconnected Pong — Geyser is up and
+   reachable through the relay.
+5. Join from a real Bedrock client: add a server at `<host>:<port>` (the
+   reported `bedrock_address`/`bedrock_port`; no SRV record, the port must be
+   typed). Expect Floodgate auth (no Java account) and, on an older Java
+   server version, degraded compatibility unless ViaVersion is installed (see
+   `docs/app/BEDROCK.md` "Limitations" — observed live on Paper 1.21.1, issue
+   #1542).

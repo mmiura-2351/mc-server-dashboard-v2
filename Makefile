@@ -29,6 +29,7 @@
 	api-env-check api-lint api-format api-test \
 	worker-lint worker-format worker-test worker-test-race worker-e2e-compile \
 	relay-lint relay-format relay-test relay-test-race relay-e2e relay-e2e-compile \
+	bedrock-e2e \
 	webui-lint webui-format webui-test webui-build webui-e2e \
 	bench bench-api bench-worker bench-webui \
 	openapi-gen openapi-check \
@@ -197,6 +198,14 @@ relay-e2e-compile:
 # down. See scripts/run_relay_e2e.sh and docs/dev/DEPLOYMENT.md "Relay".
 relay-e2e:
 	scripts/run_relay_e2e.sh
+
+# The Bedrock relay tunnel protocol-level e2e suite (epic #1540, issue #1547):
+# relay/internal/bedrock.Listener <-> worker/internal/adapters/bedrocktunnel.Manager
+# <-> a real Docker container running a fake-Geyser RakNet responder.
+# Deliberately NOT part of `make check` — see scripts/run_bedrock_e2e.sh and
+# docs/app/BEDROCK.md. Needs neither Postgres nor the API, only Go and Docker.
+bedrock-e2e:
+	scripts/run_bedrock_e2e.sh
 
 # Relay test suite under the race detector (the relay is concurrency-heavy:
 # splice goroutines, the token rendezvous, the batched reporter). Mirrors
