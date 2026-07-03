@@ -397,7 +397,7 @@ func TestHandleLoginStoppedDecision(t *testing.T) {
 	}
 	tokens := tunnel.NewTokenTable(10*time.Second, time.Now)
 	cache := NewStatusCache(5*time.Second, 1024, time.Now)
-	caps := ipcaps.NewIPCaps(32, 10, 0, time.Now)
+	caps := ipcaps.NewIPCaps(32, 10, 0, time.Now, nil)
 	sessions := &fakeSessionRecorder{}
 	l := &Listener{
 		resolver: resolver,

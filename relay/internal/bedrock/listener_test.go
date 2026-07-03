@@ -48,12 +48,12 @@ func (f *fakeValidator) lastCall() validateCall {
 // newTestListenerWithCaps to exercise the cap itself.
 func newTestListener(t *testing.T, validator Validator) (*Listener, func()) {
 	t.Helper()
-	return newTestListenerWithCaps(t, validator, ipcaps.NewIPCaps(0, 0, 0, nil))
+	return newTestListenerWithCaps(t, validator, ipcaps.NewIPCaps(0, 0, 0, nil, nil))
 }
 
 func newTestListenerWithCaps(t *testing.T, validator Validator, preAuthCaps *ipcaps.IPCaps) (*Listener, func()) {
 	t.Helper()
-	newCaps := func() *ipcaps.IPCaps { return ipcaps.NewIPCaps(0, 0, 0, nil) }
+	newCaps := func() *ipcaps.IPCaps { return ipcaps.NewIPCaps(0, 0, 0, nil, nil) }
 	ln, err := NewListener("127.0.0.1:0", selfSignedTLS(t), validator, preAuthCaps, newCaps, testLogger())
 	if err != nil {
 		t.Fatalf("NewListener: %v", err)
@@ -240,7 +240,7 @@ func (g *gatedValidator) ValidateBedrockTunnel(ctx context.Context, _ string, _ 
 func TestListenerPreAuthCapEnforcedAndReleased(t *testing.T) {
 	validator := &gatedValidator{started: make(chan struct{}, 1), gate: make(chan struct{})}
 	// One concurrent pre-auth handshake window per source IP.
-	preAuthCaps := ipcaps.NewIPCaps(1, 0, 0, nil)
+	preAuthCaps := ipcaps.NewIPCaps(1, 0, 0, nil, nil)
 	ln, stop := newTestListenerWithCaps(t, validator, preAuthCaps)
 	defer stop()
 

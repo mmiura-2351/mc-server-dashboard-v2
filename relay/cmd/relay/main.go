@@ -84,8 +84,8 @@ func run(ctx context.Context) error {
 
 	tokens := tunnel.NewTokenTable(tokenTTL, time.Now)
 	cache := game.NewStatusCache(time.Duration(cfg.Game.StatusCacheSeconds)*time.Second, int(cfg.Game.StatusCacheMaxEntries), time.Now)
-	caps := ipcaps.NewIPCaps(cfg.Game.MaxConnsPerIP, cfg.Game.JoinsPerIPPerSecond, 0, time.Now)
-	tunnelCaps := ipcaps.NewIPCaps(cfg.Tunnel.MaxConnsPerIP, 0, 0, time.Now)
+	caps := ipcaps.NewIPCaps(cfg.Game.MaxConnsPerIP, cfg.Game.JoinsPerIPPerSecond, 0, time.Now, logger)
+	tunnelCaps := ipcaps.NewIPCaps(cfg.Tunnel.MaxConnsPerIP, 0, 0, time.Now, logger)
 
 	tunnelTLS, err := buildTunnelTLS(cfg.Tunnel.TLS)
 	if err != nil {
@@ -109,9 +109,9 @@ func run(ctx context.Context) error {
 	// Pre-auth handshake-window caps on the QUIC listener itself (the #968
 	// posture, mirroring tunnelCaps above) -- distinct from the per-tunnel
 	// caps below, which govern the public UDP ingress of each bound tunnel.
-	bedrockTunnelCaps := ipcaps.NewIPCaps(cfg.Bedrock.TunnelMaxConnsPerIP, 0, 0, time.Now)
+	bedrockTunnelCaps := ipcaps.NewIPCaps(cfg.Bedrock.TunnelMaxConnsPerIP, 0, 0, time.Now, logger)
 	newBedrockIPCaps := func() *ipcaps.IPCaps {
-		return ipcaps.NewIPCaps(cfg.Bedrock.MaxFlowsPerIP, cfg.Bedrock.NewFlowsPerIPPerSecond, 0, time.Now)
+		return ipcaps.NewIPCaps(cfg.Bedrock.MaxFlowsPerIP, cfg.Bedrock.NewFlowsPerIPPerSecond, 0, time.Now, logger)
 	}
 	bedrockLn, err := bedrock.NewListener(cfg.Bedrock.TunnelListen, bedrockTLS, apiClient, bedrockTunnelCaps, newBedrockIPCaps, logger)
 	if err != nil {

@@ -121,8 +121,8 @@ func TestServeBedrockTunnelForE2E(t *testing.T) {
 		t.Fatalf("write CA file: %v", err)
 	}
 
-	preAuthCaps := ipcaps.NewIPCaps(0, 0, 0, nil)
-	newIPCaps := func() *ipcaps.IPCaps { return ipcaps.NewIPCaps(0, 0, 0, nil) }
+	preAuthCaps := ipcaps.NewIPCaps(0, 0, 0, nil, logger)
+	newIPCaps := func() *ipcaps.IPCaps { return ipcaps.NewIPCaps(0, 0, 0, nil, logger) }
 
 	ln, err := bedrock.NewListener(addr, tlsConf, stubValidator{bedrockPort: bedrockE2EPort(t)}, preAuthCaps, newIPCaps, logger)
 	if err != nil {
