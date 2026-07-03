@@ -250,6 +250,8 @@ export const ja: Record<TranslationKey, string> = {
   // Bedrock address:port badge (issue #1543).
   "dashboard.bedrockLabel": "Bedrock",
   "dashboard.copiedBedrockAddress": "コピーしました！",
+  "dashboard.bedrockAddressCopyTitle":
+    "アドレスをコピー（ポート {port} は別のポート欄に入力）",
   // Filter and sort controls (#1123).
   "dashboard.filter.search": "名前で検索…",
   "dashboard.filter.state": "状態でフィルター",
@@ -278,6 +280,8 @@ export const ja: Record<TranslationKey, string> = {
   // Bedrock address:port badge (issue #1543).
   "serverDetail.bedrockLabel": "Bedrock",
   "serverDetail.copiedBedrockAddress": "コピーしました！",
+  "serverDetail.bedrockAddressCopyTitle":
+    "アドレスをコピー（ポート {port} は別のポート欄に入力）",
   // Tabs (WEBUI_SPEC.md 6.4–6.9).
   "serverDetail.tab.overview": "概要",
   "serverDetail.tab.console": "コンソール",

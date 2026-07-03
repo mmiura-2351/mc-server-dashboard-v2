@@ -68,13 +68,15 @@ dedicated window (`ports.bedrock_range_start..end`, default `19132..19231`,
 `CONFIGURATION.md` Section 5.8).
 
 A server's Bedrock address is therefore **`<base_domain>:<bedrock_port>`** —
-the same wildcard-DNS base domain the Java path uses, but with a per-server
-**port** instead of a per-server **subdomain**, and the player must type that
-port (a Bedrock client's "Add Server" screen has separate host and port
-fields). Server responses carry `bedrock_address` / `bedrock_port` (null when
-Geyser is not installed/enabled or the deployment gate is off); the Web UI
-surfaces them as a copyable badge next to the Java `join_hostname` badge (see
-`../ui/WEBUI_SPEC.md`).
+the same base domain the Java path uses, but as the **bare apex** (which the
+relay's `*.<base_domain>` wildcard does not cover — see
+[`../dev/DEPLOYMENT.md`](../dev/DEPLOYMENT.md) "Bedrock (Geyser)" for the apex
+`A`/`AAAA` record) with a per-server **port** instead of a per-server
+**subdomain**, and the player must type that port (a Bedrock client's "Add
+Server" screen has separate host and port fields). Server responses carry
+`bedrock_address` / `bedrock_port` (null when Geyser is not installed/enabled
+or the deployment gate is off); the Web UI surfaces them as a copyable badge
+next to the Java `join_hostname` badge (see `../ui/WEBUI_SPEC.md`).
 
 ## 4. Known limitations
 

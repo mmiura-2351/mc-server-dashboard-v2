@@ -702,11 +702,13 @@ function ServerCard({ server, communityId, can }: ServerRowProps) {
       : null;
 
   const handleCopyBedrock = useCallback(() => {
-    if (bedrockAddress === null) return;
+    if (server.bedrock_address === null) return;
     if (bedrockCopyTimerRef.current !== null) {
       clearTimeout(bedrockCopyTimerRef.current);
     }
-    copyToClipboard(bedrockAddress).then(
+    // Copy the host only: Bedrock's "Add Server" screen has a separate Port
+    // field, and pasting `host:port` into the address field fails validation.
+    copyToClipboard(server.bedrock_address).then(
       () => {
         setBedrockCopied(true);
         bedrockCopyTimerRef.current = setTimeout(
@@ -718,7 +720,7 @@ function ServerCard({ server, communityId, can }: ServerRowProps) {
         setBedrockCopied(false);
       },
     );
-  }, [bedrockAddress]);
+  }, [server.bedrock_address]);
 
   return (
     <div className="card server-card">
@@ -752,7 +754,9 @@ function ServerCard({ server, communityId, can }: ServerRowProps) {
           <button
             type="button"
             className="badge copyable"
-            title={bedrockAddress}
+            title={t("dashboard.bedrockAddressCopyTitle", {
+              port: server.bedrock_port ?? "",
+            })}
             onClick={handleCopyBedrock}
           >
             {bedrockCopied ? (
@@ -889,11 +893,13 @@ function ServerRow({ server, communityId, can }: ServerRowProps) {
       : null;
 
   const handleCopyBedrock = useCallback(() => {
-    if (bedrockAddress === null) return;
+    if (server.bedrock_address === null) return;
     if (bedrockCopyTimerRef.current !== null) {
       clearTimeout(bedrockCopyTimerRef.current);
     }
-    copyToClipboard(bedrockAddress).then(
+    // Copy the host only: Bedrock's "Add Server" screen has a separate Port
+    // field, and pasting `host:port` into the address field fails validation.
+    copyToClipboard(server.bedrock_address).then(
       () => {
         setBedrockCopied(true);
         bedrockCopyTimerRef.current = setTimeout(
@@ -905,7 +911,7 @@ function ServerRow({ server, communityId, can }: ServerRowProps) {
         setBedrockCopied(false);
       },
     );
-  }, [bedrockAddress]);
+  }, [server.bedrock_address]);
 
   return (
     <tr>
@@ -945,7 +951,9 @@ function ServerRow({ server, communityId, can }: ServerRowProps) {
           <button
             type="button"
             className="copyable"
-            title={bedrockAddress}
+            title={t("dashboard.bedrockAddressCopyTitle", {
+              port: server.bedrock_port ?? "",
+            })}
             style={{
               cursor: "pointer",
               background: "none",
