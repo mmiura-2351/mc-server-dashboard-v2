@@ -30,6 +30,13 @@ cd "$REPO_ROOT"
 
 RELAY_LISTEN="${MCD_BEDROCK_E2E_LISTEN:-127.0.0.1:29675}"
 STUB_GEYSER_IMAGE="${MCD_BEDROCK_E2E_STUB_GEYSER_IMAGE:-mcsd-bedrock-e2e-stub-geyser:latest}"
+# The public bedrock_port the relay side binds and the scripted client pings.
+# Overridable so the harness can run alongside a live bedrock-enabled
+# relay-profile deployment already holding the default in the compose-published
+# 19132-19231/udp window (mirrors scripts/run_relay_e2e.sh's port overrides).
+# Both coordinating test files resolve it via their bedrockE2EPort helper, so
+# it is forwarded to both go test invocations below.
+BEDROCK_PORT="${MCD_BEDROCK_E2E_BEDROCK_PORT:-19140}"
 
 WORK_DIR="$(mktemp -d)"
 CA_FILE="$WORK_DIR/tunnel-ca.pem"
@@ -60,6 +67,7 @@ echo "==> starting the relay-side Bedrock tunnel listener ($RELAY_LISTEN)"
 (
   cd relay
   MCD_BEDROCK_E2E_LISTEN="$RELAY_LISTEN" \
+  MCD_BEDROCK_E2E_BEDROCK_PORT="$BEDROCK_PORT" \
   MCD_BEDROCK_E2E_CA_FILE="$CA_FILE" \
   MCD_BEDROCK_E2E_STOP_FILE="$STOP_FILE" \
     go test -tags e2e -v -timeout 120s -run TestServeBedrockTunnelForE2E ./test/e2e/...
@@ -92,6 +100,7 @@ worker_status=0
 MCD_E2E_DOCKER=1 \
 MCD_E2E_STUB_GEYSER_IMAGE="$STUB_GEYSER_IMAGE" \
 MCD_BEDROCK_E2E_RELAY_ADDR="$RELAY_LISTEN" \
+MCD_BEDROCK_E2E_BEDROCK_PORT="$BEDROCK_PORT" \
 MCD_BEDROCK_E2E_CA_FILE="$CA_FILE" \
   go test -tags e2e -v -timeout 120s -run TestBedrockTunnelEndToEnd ./test/e2e/... || worker_status=$?
 

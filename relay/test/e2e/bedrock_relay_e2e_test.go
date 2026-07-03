@@ -40,6 +40,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -48,12 +49,13 @@ import (
 )
 
 // Shared test fixture. Kept in sync with worker/test/e2e/bedrock_e2e_test.go's
-// matching constants of the same name -- both files are maintained together in
-// the same PR; change one, change both.
+// matching declarations of the same name (bedrockE2EServerID, bedrockE2EToken,
+// bedrockE2EDefaultBedrockPort, bedrockE2EPort) -- both files are maintained
+// together in the same PR; change one, change both.
 const (
-	bedrockE2EServerID    = "bedrock-e2e-server"
-	bedrockE2EToken       = "bedrock-e2e-token"
-	bedrockE2EBedrockPort = 19140
+	bedrockE2EServerID           = "bedrock-e2e-server"
+	bedrockE2EToken              = "bedrock-e2e-token"
+	bedrockE2EDefaultBedrockPort = 19140
 
 	// bedrockE2EMaxServe bounds how long this side keeps the listener up if the
 	// orchestrator never creates the stop file (e.g. it crashed) -- a safety net,
@@ -61,13 +63,34 @@ const (
 	bedrockE2EMaxServe = 90 * time.Second
 )
 
+// bedrockE2EPort returns the public bedrock_port fixture:
+// MCD_BEDROCK_E2E_BEDROCK_PORT when set (scripts/run_bedrock_e2e.sh forwards
+// it so the harness can run alongside a live bedrock-enabled relay-profile
+// deployment already holding the default -- the same posture as
+// scripts/run_relay_e2e.sh's port overrides), else the default. The default
+// sits inside the compose-published client window (19132-19231/udp).
+func bedrockE2EPort(t *testing.T) uint32 {
+	t.Helper()
+	v := os.Getenv("MCD_BEDROCK_E2E_BEDROCK_PORT")
+	if v == "" {
+		return bedrockE2EDefaultBedrockPort
+	}
+	port, err := strconv.ParseUint(v, 10, 16)
+	if err != nil || port == 0 {
+		t.Fatalf("MCD_BEDROCK_E2E_BEDROCK_PORT %q is not a valid port", v)
+	}
+	return uint32(port)
+}
+
 // stubValidator accepts exactly the one (server_id, bedrock_port, token)
 // triple the worker-side test dials with, standing in for the API's
 // ValidateBedrockTunnel RPC (out of scope here; see the package doc comment).
-type stubValidator struct{}
+type stubValidator struct {
+	bedrockPort uint32
+}
 
-func (stubValidator) ValidateBedrockTunnel(_ context.Context, serverID string, bedrockPort uint32, token string) (bool, error) {
-	valid := serverID == bedrockE2EServerID && bedrockPort == uint32(bedrockE2EBedrockPort) && token == bedrockE2EToken
+func (v stubValidator) ValidateBedrockTunnel(_ context.Context, serverID string, bedrockPort uint32, token string) (bool, error) {
+	valid := serverID == bedrockE2EServerID && bedrockPort == v.bedrockPort && token == bedrockE2EToken
 	return valid, nil
 }
 
@@ -101,7 +124,7 @@ func TestServeBedrockTunnelForE2E(t *testing.T) {
 	preAuthCaps := ipcaps.NewIPCaps(0, 0, 0, nil)
 	newIPCaps := func() *ipcaps.IPCaps { return ipcaps.NewIPCaps(0, 0, 0, nil) }
 
-	ln, err := bedrock.NewListener(addr, tlsConf, stubValidator{}, preAuthCaps, newIPCaps, logger)
+	ln, err := bedrock.NewListener(addr, tlsConf, stubValidator{bedrockPort: bedrockE2EPort(t)}, preAuthCaps, newIPCaps, logger)
 	if err != nil {
 		t.Fatalf("bedrock.NewListener(%q): %v", addr, err)
 	}

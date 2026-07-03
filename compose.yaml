@@ -14,8 +14,10 @@
 #               `relay` compose profile (opt-in). Accepts player TCP on :25565,
 #               and the Worker dial-back on :25665 (TLS). Requires a wildcard DNS
 #               record and TLS material — see docs/dev/DEPLOYMENT.md "Relay".
-#               Also carries Bedrock (RakNet/UDP) via a QUIC tunnel on
-#               :25675/udp (epic #1540) — see docs/app/BEDROCK_TUNNEL.md.
+#               Also carries Bedrock (RakNet/UDP): the Worker's QUIC tunnel on
+#               :25675/udp plus the client-facing per-server UDP window
+#               19132-19231/udp (epic #1540) — see docs/app/BEDROCK.md and
+#               docs/app/BEDROCK_TUNNEL.md.
 #   cloudflared — Cloudflare Tunnel for HTTPS access without opening inbound ports
 #               (issue #1090); gated behind the `tunnel` compose profile (opt-in).
 #               The tunnel is configured in the Cloudflare Zero Trust dashboard;

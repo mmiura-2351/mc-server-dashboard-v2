@@ -23,25 +23,23 @@ name: bedrock-e2e
 # image, starts the relay-side listener in the background, waits for it to be
 # ready, then runs the worker-side assertions in the foreground.
 
+# Whole-module path filters (mirroring relay-e2e.yml): the tunnel code under
+# test imports packages across both modules (e.g. relay/internal/bedrock pulls
+# in relay/internal/ipcaps and relay/internal/netutil), so narrower per-package
+# filters would silently skip this suite on a change to a transitive dependency.
 on:
   pull_request:
     paths:
-      - "relay/internal/bedrock/**"
-      - "relay/test/e2e/**"
-      - "worker/internal/adapters/bedrocktunnel/**"
-      - "worker/internal/adapters/containerdriver/**"
-      - "worker/test/e2e/**"
+      - "relay/**"
+      - "worker/**"
       - "proto/mcsd/bedrocktunnel/**"
       - "scripts/run_bedrock_e2e.sh"
       - ".github/workflows/bedrock-e2e.yml"
   push:
     branches: [main]
     paths:
-      - "relay/internal/bedrock/**"
-      - "relay/test/e2e/**"
-      - "worker/internal/adapters/bedrocktunnel/**"
-      - "worker/internal/adapters/containerdriver/**"
-      - "worker/test/e2e/**"
+      - "relay/**"
+      - "worker/**"
       - "proto/mcsd/bedrocktunnel/**"
       - "scripts/run_bedrock_e2e.sh"
       - ".github/workflows/bedrock-e2e.yml"

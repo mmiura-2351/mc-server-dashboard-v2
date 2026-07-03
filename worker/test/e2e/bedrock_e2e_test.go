@@ -41,6 +41,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -51,14 +52,34 @@ import (
 )
 
 // Shared test fixture. Kept in sync with
-// relay/test/e2e/bedrock_relay_e2e_test.go's matching constants of the same
-// name -- both files are maintained together in the same PR; change one,
-// change both.
+// relay/test/e2e/bedrock_relay_e2e_test.go's matching declarations of the same
+// name (bedrockE2EServerID, bedrockE2EToken, bedrockE2EDefaultBedrockPort,
+// bedrockE2EPort) -- both files are maintained together in the same PR; change
+// one, change both.
 const (
-	bedrockE2EServerID    = "bedrock-e2e-server"
-	bedrockE2EToken       = "bedrock-e2e-token"
-	bedrockE2EBedrockPort = 19140
+	bedrockE2EServerID           = "bedrock-e2e-server"
+	bedrockE2EToken              = "bedrock-e2e-token"
+	bedrockE2EDefaultBedrockPort = 19140
 )
+
+// bedrockE2EPort returns the public bedrock_port fixture:
+// MCD_BEDROCK_E2E_BEDROCK_PORT when set (scripts/run_bedrock_e2e.sh forwards
+// it so the harness can run alongside a live bedrock-enabled relay-profile
+// deployment already holding the default -- the same posture as
+// scripts/run_relay_e2e.sh's port overrides), else the default. The default
+// sits inside the compose-published client window (19132-19231/udp).
+func bedrockE2EPort(t *testing.T) uint32 {
+	t.Helper()
+	v := os.Getenv("MCD_BEDROCK_E2E_BEDROCK_PORT")
+	if v == "" {
+		return bedrockE2EDefaultBedrockPort
+	}
+	port, err := strconv.ParseUint(v, 10, 16)
+	if err != nil || port == 0 {
+		t.Fatalf("MCD_BEDROCK_E2E_BEDROCK_PORT %q is not a valid port", v)
+	}
+	return uint32(port)
+}
 
 // --- minimal RakNet client (mirrors worker/test/e2e/stub-geyser/main.go's
 // server-side framing) ---
@@ -221,10 +242,11 @@ func TestBedrockTunnelEndToEnd(t *testing.T) {
 	// server id: this harness opens exactly one tunnel.
 	m := bedrocktunnel.New(mgrCtx, "0.0.0.0", func(string) string { return containerIP }, logger)
 
+	bedrockPort := bedrockE2EPort(t)
 	spec := bedrocktunnel.Spec{
 		ServerID:      bedrockE2EServerID,
 		RelayEndpoint: relayAddr,
-		BedrockPort:   bedrockE2EBedrockPort,
+		BedrockPort:   bedrockPort,
 		Token:         bedrockE2EToken,
 		CAPEM:         string(caPEM),
 	}
@@ -232,7 +254,7 @@ func TestBedrockTunnelEndToEnd(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 
-	relayPublicAddr := fmt.Sprintf("127.0.0.1:%d", bedrockE2EBedrockPort)
+	relayPublicAddr := fmt.Sprintf("127.0.0.1:%d", bedrockPort)
 
 	// 1. A scripted client's datagram reaches the container and the reply
 	// returns through the same flow. The tunnel dial/handshake/bind chain is
