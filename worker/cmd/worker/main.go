@@ -22,6 +22,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/bedrocktunnel"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/clock"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/config"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/containerdriver"
@@ -209,10 +210,16 @@ func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.L
 	// to the adapter's own Spec, keeping the adapter free of an application-layer
 	// import (ARCHITECTURE.md Section 2).
 	tunnelDialer := tunnel.New(ctx, cfg.Driver.Container.GameBindIP, containerGameHost, logger)
+	// The Bedrock relay QUIC tunnel manager (docs/app/BEDROCK_TUNNEL.md, issue
+	// #1546) resolves its Geyser dial target the same way (containerGameHost /
+	// GameBindIP), so it shares ctx with the TCP tunnel dialer: cancelling it on
+	// SIGINT/SIGTERM gracefully closes every open Bedrock tunnel too.
+	bedrockTunnel := bedrocktunnel.New(ctx, cfg.Driver.Container.GameBindIP, containerGameHost, logger)
 	return instancemanager.New(drivers, wc.ScratchDir, openControl).
 		WithLogger(logger).
 		WithWorkerID(wc.ID).
-		WithTunnelDialer(tunnelDialerAdapter{tunnelDialer}), nil
+		WithTunnelDialer(tunnelDialerAdapter{tunnelDialer}).
+		WithBedrockTunneler(bedrockTunnelerAdapter{bedrockTunnel}), nil
 }
 
 // tunnelDialerAdapter adapts a tunnel.Dialer to instancemanager.TunnelDialer,
@@ -229,6 +236,24 @@ func (a tunnelDialerAdapter) Dial(ctx context.Context, spec instancemanager.Tunn
 		CAPEM:      spec.CAPEM,
 	})
 }
+
+// bedrockTunnelerAdapter adapts a bedrocktunnel.Manager to
+// instancemanager.BedrockTunneler, translating the application-layer
+// BedrockTunnelSpec into the adapter's Spec at the wiring edge so neither
+// layer imports the other's value type (mirrors tunnelDialerAdapter).
+type bedrockTunnelerAdapter struct{ m *bedrocktunnel.Manager }
+
+func (a bedrockTunnelerAdapter) Open(spec instancemanager.BedrockTunnelSpec) error {
+	return a.m.Open(bedrocktunnel.Spec{
+		ServerID:      spec.ServerID,
+		RelayEndpoint: spec.RelayEndpoint,
+		BedrockPort:   spec.BedrockPort,
+		Token:         spec.Token,
+		CAPEM:         spec.CAPEM,
+	})
+}
+
+func (a bedrockTunnelerAdapter) Close(serverID string) { a.m.Close(serverID) }
 
 // resolveRconHost picks the RCON dial host for a server. It is empty (the host
 // loopback) for every server except a container-driven one, which is dialed at

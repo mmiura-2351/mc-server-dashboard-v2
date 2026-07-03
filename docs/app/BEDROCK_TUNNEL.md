@@ -17,9 +17,9 @@
 > contract and this document explains it; where they disagree, the `.proto`
 > file wins.
 >
-> The Worker-side QUIC client (issue #1546) and end-to-end deployment docs
-> (issue #1547) are separate, later sub-issues; this document specifies the
-> wire contract they build against.
+> The Worker-side QUIC client (issue #1546, `worker/internal/adapters/bedrocktunnel/`)
+> implements this document's wire contract as the client. End-to-end deployment
+> docs (issue #1547) are a separate, later sub-issue.
 
 ## Table of Contents
 
@@ -371,13 +371,10 @@ redesign.
 
 ## 11. Out of scope / future work
 
-- **Worker-side QUIC client** (issue #1546) -- dialing the relay, running this
-  handshake as the client, and pumping datagrams to/from the container's
-  Geyser port.
 - **End-to-end deployment + docs** (issue #1547) -- `compose.yaml` profile
   wiring beyond the port publish (including publishing the client-facing
   `bedrock_port` UDP window), firewall guidance, and a full join-flow
-  walkthrough; needs both #1545 and #1546 to exist first.
+  walkthrough; needs both #1545 and #1546 (now landed) to exist first.
 - **Stale-connection takeover on redial** (issue #1565) -- a validated hello
   for an already-bound port displacing the old connection; see Section 3.1.
 - **Real-client-IP passthrough** -- deferred beyond this initial scope per

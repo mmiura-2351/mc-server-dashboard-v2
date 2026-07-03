@@ -345,7 +345,7 @@ func IsHandledKind(kind string) bool {
 	switch kind {
 	case "StartServer", "StopServer", "RestartServer", "ServerCommand",
 		"HydrateTrigger", "SnapshotTrigger", "ReadFile", "EditFile", "ListFiles",
-		"TunnelDial":
+		"TunnelDial", "OpenBedrockTunnel", "CloseBedrockTunnel":
 		return true
 	default:
 		return false
@@ -444,13 +444,22 @@ func (d *dispatcher) runLane(serverID string, l *lane) {
 // (RELAY.md Section 5): it dials the relay, completes the token handshake, and
 // returns once the splice is established — the long-lived splice runs on its own
 // goroutines off the lane, so the command itself is instant and a join must not
-// queue behind a hydrate (issue #958). Every other server-scoped kind
+// queue behind a hydrate (issue #958). OpenBedrockTunnel/CloseBedrockTunnel
+// qualify for the same reason (docs/app/BEDROCK_TUNNEL.md, issue #1546): Open
+// returns once the tunnel is registered, and its dial/handshake/reconnect-with-
+// backoff run off the lane on the tunnel's own long-lived context, so neither
+// command should queue behind a hydrate. Every other server-scoped kind
 // (StartServer/StopServer/RestartServer, HydrateTrigger/SnapshotTrigger, and the
 // file ops) can run long and stays bounded by the cap (issue #169). The bypass
 // keeps per-server FIFO: it changes only whether a lane acquires a cap slot for a
 // command, never the order in which a server's commands run.
 func isQuickCommand(kind string) bool {
-	return kind == "ServerCommand" || kind == "TunnelDial"
+	switch kind {
+	case "ServerCommand", "TunnelDial", "OpenBedrockTunnel", "CloseBedrockTunnel":
+		return true
+	default:
+		return false
+	}
 }
 
 // removeLane drops a lane that never started draining (ctx already cancelled).

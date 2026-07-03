@@ -114,6 +114,31 @@ type TunnelSpec struct {
 	CAPEM      string
 }
 
+// BedrockTunneler is the Bedrock relay QUIC tunnel Port
+// (docs/app/BEDROCK_TUNNEL.md, issue #1546): Open starts — or, for a repeated
+// spec, idempotently confirms — the per-server QUIC tunnel that forwards
+// RakNet datagrams to the container's Geyser port, reconnecting with backoff
+// while it drops; Close tears it down gracefully (CONNECTION_CLOSE plus every
+// per-flow socket). Both run off the caller: Open returns once the tunnel is
+// registered, not once the handshake completes, and Close only signals
+// teardown, so neither blocks the calling command.
+type BedrockTunneler interface {
+	Open(spec BedrockTunnelSpec) error
+	Close(serverID string)
+}
+
+// BedrockTunnelSpec carries everything one OpenBedrockTunnel needs
+// (docs/app/BEDROCK_TUNNEL.md Section 3): the relay's Bedrock tunnel endpoint,
+// the public port it binds for this server, the tunnel-lifetime credential,
+// and the optional CA bundle to verify the relay's QUIC certificate.
+type BedrockTunnelSpec struct {
+	ServerID      string
+	RelayEndpoint string
+	BedrockPort   uint32
+	Token         string
+	CAPEM         string
+}
+
 // systemClock is the default wall-clock used for the metrics ticker when
 // WithMetrics injects no other clock. It satisfies session.Clock with stdlib
 // time so the application layer stays adapter-free (ARCHITECTURE.md Section 2).
@@ -142,6 +167,7 @@ type Manager struct {
 	openControl controlFunc
 	transfer    Transfer
 	tunnel      TunnelDialer
+	bedrock     BedrockTunneler
 	logger      *slog.Logger
 	// workerID is this Worker's own id, stamped on a snapshot publish so the API's
 	// publish-time generation guard can tell a same-Worker re-publish from a
@@ -301,6 +327,15 @@ func (m *Manager) WithTunnelDialer(t TunnelDialer) *Manager {
 	return m
 }
 
+// WithBedrockTunneler wires the Bedrock relay QUIC tunnel used by
+// OpenBedrockTunnel/CloseBedrockTunnel (docs/app/BEDROCK_TUNNEL.md, issue
+// #1546). Without it, an OpenBedrockTunnel fails with an internal error and a
+// CloseBedrockTunnel is a no-op success.
+func (m *Manager) WithBedrockTunneler(t BedrockTunneler) *Manager {
+	m.bedrock = t
+	return m
+}
+
 // SetTransferDeadline records the per-transfer bound the API advertised in
 // RegisterAck (session.TransferDeadlineSetter, issue #874). The hydrate/snapshot
 // handlers apply it as a context deadline so an upload/download cannot outlive
@@ -380,6 +415,10 @@ func (m *Manager) Handle(ctx context.Context, cmd session.Command) session.Comma
 		return m.handleListFiles(cmd)
 	case "TunnelDial":
 		return m.handleTunnelDial(ctx, cmd)
+	case "OpenBedrockTunnel":
+		return m.handleOpenBedrockTunnel(cmd)
+	case "CloseBedrockTunnel":
+		return m.handleCloseBedrockTunnel(cmd)
 	default:
 		return fail(cmd.CommandID, session.CommandErrorInternal,
 			fmt.Sprintf("instancemanager: unhandled command %q", cmd.Kind))
@@ -1222,7 +1261,15 @@ func (m *Manager) takeStoppableReserve(serverID string) (execution.Instance, tak
 // attemptStop runs the driver Stop for serverID's instance. On failure it
 // records the instance as a failed-stop orphan so a retry can re-attempt
 // termination against the same handle rather than returning SERVER_NOT_FOUND; on
-// success it forgets any orphan record for the id (issue #251).
+// success it forgets any orphan record for the id (issue #251) and closes the
+// server's Bedrock relay tunnel, if any (docs/app/BEDROCK_TUNNEL.md, issue
+// #1546) — a Worker-local safety net so the tunnel comes down as soon as this
+// Worker confirms the stop, without waiting on the API's own CloseBedrockTunnel
+// dispatch to arrive. Close is idempotent, so this is a no-op for a non-Bedrock
+// server or one with no tunnel open. attemptStop is shared by StopServer and
+// the stop phase of RestartServer, so a restart also closes and later reopens
+// the tunnel — matching the API's own "any transition away from running closes
+// it" semantics (PR #1558).
 //
 // driverName is the driver that runs this server (captured BEFORE
 // takeStoppableReserve / takeRunningReserve evicts the instance and deletes
@@ -1246,6 +1293,9 @@ func (m *Manager) attemptStop(ctx context.Context, serverID string, inst executi
 	m.mu.Lock()
 	delete(m.orphans, serverID)
 	m.mu.Unlock()
+	if m.bedrock != nil {
+		m.bedrock.Close(serverID)
+	}
 	return nil
 }
 
@@ -1415,6 +1465,54 @@ func (m *Manager) handleTunnelDial(ctx context.Context, cmd session.Command) ses
 	}); err != nil {
 		return fail(cmd.CommandID, session.CommandErrorInternal,
 			fmt.Sprintf("instancemanager: tunnel dial: %v", err))
+	}
+	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
+}
+
+// handleOpenBedrockTunnel starts (or, for a repeated command with the same
+// credential, idempotently confirms) this server's Bedrock relay QUIC tunnel
+// (docs/app/BEDROCK_TUNNEL.md, issue #1546). Like TunnelDial, the server must
+// be running locally. Unlike TunnelDial, Open does not itself dial/handshake
+// synchronously: it registers the tunnel and returns, while the QUIC dial,
+// handshake, datagram pump, and any reconnect-with-backoff run off this
+// command on the tunneler's own long-lived context — a slow or rejected relay
+// dial must not hold up the command result.
+func (m *Manager) handleOpenBedrockTunnel(cmd session.Command) session.CommandResult {
+	m.mu.Lock()
+	_, running := m.instances[cmd.ServerID]
+	m.mu.Unlock()
+	if !running {
+		return fail(cmd.CommandID, session.CommandErrorServerNotFound,
+			"instancemanager: server not running")
+	}
+	if m.bedrock == nil {
+		return fail(cmd.CommandID, session.CommandErrorInternal,
+			"instancemanager: bedrock tunneler not configured")
+	}
+
+	if err := m.bedrock.Open(BedrockTunnelSpec{
+		ServerID:      cmd.ServerID,
+		RelayEndpoint: cmd.BedrockRelayEndpoint,
+		BedrockPort:   cmd.BedrockPort,
+		Token:         cmd.BedrockToken,
+		CAPEM:         cmd.BedrockCAPEM,
+	}); err != nil {
+		return fail(cmd.CommandID, session.CommandErrorInternal,
+			fmt.Sprintf("instancemanager: bedrock tunnel open: %v", err))
+	}
+	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
+}
+
+// handleCloseBedrockTunnel tears down this server's Bedrock relay tunnel, if
+// any (docs/app/BEDROCK_TUNNEL.md Section 3, issue #1546). Unlike Open it does
+// not require the server to still be tracked as running: it is also the
+// Worker-local safety net a successful StopServer triggers on its own
+// (attemptStop), so a Close arriving after the instance is already evicted —
+// or for a server this Worker never opened a tunnel for — must still succeed,
+// not SERVER_NOT_FOUND.
+func (m *Manager) handleCloseBedrockTunnel(cmd session.Command) session.CommandResult {
+	if m.bedrock != nil {
+		m.bedrock.Close(cmd.ServerID)
 	}
 	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
 }

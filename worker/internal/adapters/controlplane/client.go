@@ -456,6 +456,11 @@ func toCommand(cmd *controlplanev1.ApiCommand) session.Command {
 		out.TunnelEndpoint = c.TunnelDial.GetEndpoint()
 		out.TunnelToken = c.TunnelDial.GetToken()
 		out.TunnelCAPEM = c.TunnelDial.GetTlsCaPem()
+	case *controlplanev1.ApiCommand_OpenBedrockTunnel:
+		out.BedrockRelayEndpoint = c.OpenBedrockTunnel.GetRelayEndpoint()
+		out.BedrockPort = c.OpenBedrockTunnel.GetBedrockPort()
+		out.BedrockToken = c.OpenBedrockTunnel.GetToken()
+		out.BedrockCAPEM = c.OpenBedrockTunnel.GetTlsCaPem()
 	}
 	return out
 }

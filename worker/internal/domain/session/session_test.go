@@ -818,6 +818,54 @@ func TestTunnelDialBypassesSaturatedCap(t *testing.T) {
 	<-done
 }
 
+// OpenBedrockTunnel must also bypass the saturated cap (issue #1546,
+// docs/app/BEDROCK_TUNNEL.md): Open returns once the tunnel is registered, not
+// once the handshake completes, so it must not queue behind a hydrate either.
+// This mirrors TestTunnelDialBypassesSaturatedCap with OpenBedrockTunnel as the
+// quick command.
+func TestOpenBedrockTunnelBypassesSaturatedCap(t *testing.T) {
+	transport := newFakeTransport(acceptedAck())
+	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
+	clock := newFakeClock()
+	handler := newGateHandler("HydrateTrigger")
+	r := NewRunner(dialer, testCaps(), clock, discardLogger(), WithCommandHandler(handler))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+
+	// Saturate the cap with one slow hydrate per distinct server.
+	for i := 0; i < maxConcurrentLanes; i++ {
+		id := fmt.Sprintf("slow-%d", i)
+		transport.commands <- Command{CommandID: id, ServerID: id, Kind: "HydrateTrigger"}
+	}
+	waitFor(t, func() bool { return handler.inflightCount() == maxConcurrentLanes })
+
+	// An OpenBedrockTunnel for a different, idle server must still complete while
+	// all slow lanes hold the cap.
+	transport.commands <- Command{CommandID: "open", ServerID: "bedrock-server", Kind: "OpenBedrockTunnel"}
+
+	waitFor(t, func() bool {
+		for _, res := range transport.resultsCopy() {
+			if res.CommandID == "open" && res.Success {
+				return true
+			}
+		}
+		return false
+	})
+
+	for _, res := range transport.resultsCopy() {
+		if res.CommandID != "open" {
+			t.Fatalf("slow op %q answered before release; cap was not actually saturated", res.CommandID)
+		}
+	}
+
+	close(handler.release)
+	cancel()
+	<-done
+}
+
 // The bypass must not break per-server FIFO/safety: a ServerCommand queued behind
 // a same-server long-running op must still wait for that op, never racing ahead
 // of it (issue #169). A command must not run against a server mid-hydrate.
