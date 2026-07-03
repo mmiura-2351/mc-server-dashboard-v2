@@ -59,7 +59,7 @@ func runTunnel(t *testing.T, server *quic.Conn, caps *ipcaps.IPCaps) (*net.UDPAd
 
 func TestBindUnbindLifecycle(t *testing.T) {
 	server, _ := quicConnPair(t)
-	caps := ipcaps.NewIPCaps(0, 0, 0, nil)
+	caps := ipcaps.NewIPCaps(0, 0, 0, nil, nil)
 
 	udpAddr, stop := runTunnel(t, server, caps)
 
@@ -82,7 +82,7 @@ func TestBindUnbindLifecycle(t *testing.T) {
 
 func TestPumpFramingRoundTrip(t *testing.T) {
 	server, client := quicConnPair(t)
-	caps := ipcaps.NewIPCaps(0, 0, 0, nil)
+	caps := ipcaps.NewIPCaps(0, 0, 0, nil, nil)
 	udpAddr, stop := runTunnel(t, server, caps)
 	defer stop()
 
@@ -133,7 +133,7 @@ func TestPumpFramingRoundTrip(t *testing.T) {
 
 func TestPumpDropsOversizedDatagram(t *testing.T) {
 	server, client := quicConnPair(t)
-	caps := ipcaps.NewIPCaps(0, 0, 0, nil)
+	caps := ipcaps.NewIPCaps(0, 0, 0, nil, nil)
 	udpAddr, stop := runTunnel(t, server, caps)
 	defer stop()
 
@@ -157,7 +157,7 @@ func TestPumpDropsOversizedDatagram(t *testing.T) {
 
 func TestPumpSurvivesMalformedReplyFrame(t *testing.T) {
 	server, client := quicConnPair(t)
-	caps := ipcaps.NewIPCaps(0, 0, 0, nil)
+	caps := ipcaps.NewIPCaps(0, 0, 0, nil, nil)
 	udpAddr, stop := runTunnel(t, server, caps)
 	defer stop()
 
@@ -193,7 +193,7 @@ func TestPumpConcurrentFlowCapEnforced(t *testing.T) {
 	server, client := quicConnPair(t)
 	// Only one concurrent flow per source IP; generous join rate so the flow
 	// cap alone is under test.
-	caps := ipcaps.NewIPCaps(1, 100, -1, nil)
+	caps := ipcaps.NewIPCaps(1, 100, -1, nil, nil)
 	udpAddr, stop := runTunnel(t, server, caps)
 	defer stop()
 
@@ -232,7 +232,7 @@ func TestPumpConcurrentFlowCapEnforced(t *testing.T) {
 func TestPumpNewFlowRateCapEnforced(t *testing.T) {
 	server, client := quicConnPair(t)
 	// Generous concurrent-flow cap, but only one new flow per second per IP.
-	caps := ipcaps.NewIPCaps(100, 1, -1, nil)
+	caps := ipcaps.NewIPCaps(100, 1, -1, nil, nil)
 	udpAddr, stop := runTunnel(t, server, caps)
 	defer stop()
 
@@ -272,7 +272,7 @@ func TestPumpNewFlowRateCapEnforced(t *testing.T) {
 // flowSweepInterval (15 s), which no other test waits out.
 func TestFlowEvictionRacesPumps(t *testing.T) {
 	server, client := quicConnPair(t)
-	caps := ipcaps.NewIPCaps(100, 0, -1, nil)
+	caps := ipcaps.NewIPCaps(100, 0, -1, nil, nil)
 	tun, err := bind(0, server, caps, testLogger())
 	if err != nil {
 		t.Fatalf("bind: %v", err)
