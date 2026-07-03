@@ -106,9 +106,9 @@ talking to that server, multiplexed by flow id).
    here, datagrams pump both directions (Section 5) until the connection
    closes.
 5. **Rejected** (bad credential, validation RPC failure, or the declared port
-   could not be bound -- e.g. a still-live prior connection for the same
-   server, Section 3.1): the relay closes the QUIC connection. No UDP port is
-   bound.
+   could not be bound for a reason other than a same-server stale connection,
+   which is displaced instead -- Section 3.1): the relay closes the QUIC
+   connection. No UDP port is bound.
 6. On server stop (`CloseBedrockTunnel` invalidates the credential API-side)
    or a QUIC disconnect, the relay unbinds the UDP port. The token is **not**
    single-use (unlike the Java per-player token): the Worker may redial with
@@ -131,29 +131,38 @@ Worker implementation, issue #1546):
   redials in a loop forever.
 - **Graceful close.** On its own shutdown and on `CloseBedrockTunnel`, the
   Worker MUST close the QUIC connection (CONNECTION_CLOSE, e.g. quic-go
-  `CloseWithError`) rather than just dropping it. An unclosed connection is
-  what arms the Section 3.1 bind-conflict window: the relay unbinds the UDP
-  port only when it notices the connection is gone, which for a silent drop
-  takes until the idle timeout -- and a Worker restart is the common way a
-  connection ends, not an exotic failure.
+  `CloseWithError`) rather than just dropping it. A redial takes the port over
+  from a stale connection regardless (Section 3.1), so this no longer gates
+  reconnection -- but an unclosed connection still holds its UDP port and
+  goroutines until either that redial displaces it or the relay notices the
+  connection is gone (for a silent drop, the idle timeout), so closing
+  promptly is still the contract.
 
-### 3.1 Redial and the bind-conflict window
+### 3.1 Redial and takeover
 
-Because there is no separate server table, a redial while the relay has not
-yet noticed the *old* QUIC connection is dead cannot replace it: `bind` will
-fail with the port already in use, and the relay answers the new dial with a
-rejection. With a gracefully-closing Worker (Section 3) the window does not
-arise in normal operation -- the CONNECTION_CLOSE frees the port before or
-with the redial. It remains for ungraceful ends (Worker crash, network
-partition), where the relay's explicit 15 s idle timeout (`maxIdleTimeout`,
-`relay/internal/bedrock/listener.go`) is the backstop that frees the port so
-a subsequent redial succeeds.
+A redial while the relay has not yet noticed the *old* QUIC connection is dead
+**displaces** it: a hello that passes `ValidateBedrockTunnel` for a port
+already bound to another connection closes the old connection and adopts the
+new one, instead of being rejected (takeover semantics, issue #1565). With a
+gracefully-closing Worker (Section 3) no stale connection is present at all --
+the CONNECTION_CLOSE frees the port before or with the redial. Takeover is what
+removes the outage for ungraceful ends (Worker crash, network partition),
+where the old connection would otherwise linger until the relay's explicit
+15 s idle timeout (`maxIdleTimeout`, `relay/internal/bedrock/listener.go`);
+that idle timeout remains the backstop for a stale connection whose server is
+*not* being redialed.
 
-Accepted for this initial implementation as a small, bounded window. Takeover
-semantics -- a validated hello for an already-bound port displacing the stale
-connection, which needs only a live port-to-Tunnel map (live-tunnel-tied
-state the design already permits) -- are tracked as a follow-up in issue
-[#1565](https://github.com/mmiura-2351/mc-server-dashboard-v2/issues/1565).
+Takeover needs only the live port-to-Tunnel index (`Listener.tunnels`,
+`relay/internal/bedrock/listener.go`), never a server table -- it holds only
+ports with a currently bound tunnel and is cleared when a tunnel's `run`
+returns. It is not a new auth surface: the displacing hello passes the same
+`ValidateBedrockTunnel` check as any bind, so a token holder that could claim
+the port after the idle timeout can now claim it immediately, and nothing
+weaker can. The displace-then-bind-then-register sequence runs under one mutex
+(`Listener.mu`), so concurrent redials for the same port cannot both adopt it;
+the displaced tunnel's teardown is idempotent (`Tunnel.close`, `sync.Once`) and
+its stale run's `unregister` is a compare-and-delete, so it never removes the
+new occupant.
 
 ## 4. Handshake: TunnelHello / TunnelHelloAck
 
@@ -377,8 +386,9 @@ redesign.
   compose UDP exposure / firewall guidance / manual-verification checklist in
   `../dev/DEPLOYMENT.md` "Bedrock (Geyser)", and the protocol-level e2e in
   `scripts/run_bedrock_e2e.sh` (`.github/workflows/bedrock-e2e.yml`).
-- **Stale-connection takeover on redial** (issue #1565) -- a validated hello
-  for an already-bound port displacing the old connection; see Section 3.1.
+- ~~**Stale-connection takeover on redial** (issue #1565)~~ **Landed**: a
+  validated hello for an already-bound port displaces the old connection; see
+  Section 3.1.
 - **Real-client-IP passthrough** -- deferred beyond this initial scope per
   epic #1540; Geyser and the server see the Worker's forwarder IP.
 - **Bedrock session reporting** -- the Java tunnel batches `SessionStart` /

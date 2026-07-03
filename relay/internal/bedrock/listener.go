@@ -14,6 +14,7 @@ import (
 	"crypto/tls"
 	"log/slog"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -64,6 +65,15 @@ type Listener struct {
 	caps      *ipcaps.IPCaps
 	newIPCaps func() *ipcaps.IPCaps
 	logger    *slog.Logger
+
+	// mu guards tunnels, the live port->Tunnel index used for takeover
+	// (#1565). This is NOT a server table: it holds only ports with a
+	// currently bound Tunnel -- populated by bindOrTakeover on a successful
+	// bind and cleared by unregister once that Tunnel's run() returns -- so a
+	// Worker that never dials leaves no trace, matching the invariant that
+	// the authenticated dial-out IS the registration.
+	mu      sync.Mutex
+	tunnels map[uint32]*Tunnel
 }
 
 // NewListener binds the Bedrock tunnel QUIC listener on addr. tlsConf should
@@ -81,7 +91,7 @@ func NewListener(addr string, tlsConf *tls.Config, validator Validator, caps *ip
 	if err != nil {
 		return nil, err
 	}
-	return &Listener{ln: ln, validator: validator, caps: caps, newIPCaps: newIPCaps, logger: logger}, nil
+	return &Listener{ln: ln, validator: validator, caps: caps, newIPCaps: newIPCaps, logger: logger, tunnels: make(map[uint32]*Tunnel)}, nil
 }
 
 // Addr returns the listener's bound address.
@@ -133,6 +143,7 @@ func (l *Listener) handle(ctx context.Context, conn *quic.Conn) {
 
 	l.logger.Info("bedrock tunnel bound", "server_id", hello.GetServerId(), "bedrock_port", hello.GetBedrockPort())
 	tun.run(ctx) // blocks until the connection closes or ctx is cancelled; unbinds on return
+	l.unregister(hello.GetBedrockPort(), tun)
 }
 
 // handshake runs the pre-auth phase of one dial-out: accept the first
@@ -175,7 +186,7 @@ func (l *Listener) handshake(ctx context.Context, conn *quic.Conn) (*Tunnel, *be
 		return nil, nil
 	}
 
-	tun, err := bind(hello.GetBedrockPort(), conn, l.newIPCaps(), l.logger)
+	tun, err := l.bindOrTakeover(hello.GetBedrockPort(), conn, l.newIPCaps())
 	if err != nil {
 		l.logger.Warn("bedrock: bind failed", "bedrock_port", hello.GetBedrockPort(), "error", err)
 		l.reject(conn, stream, "bind failed")
@@ -185,12 +196,63 @@ func (l *Listener) handshake(ctx context.Context, conn *quic.Conn) (*Tunnel, *be
 	if err := writeAck(stream, true, ""); err != nil {
 		l.logger.Debug("bedrock: ack write failed", "error", err)
 		_ = stream.Close()
-		tun.unbind()
-		_ = conn.CloseWithError(0, "ack failed")
+		tun.close("ack failed")
+		l.unregister(hello.GetBedrockPort(), tun)
 		return nil, nil
 	}
 	_ = stream.Close()
 	return tun, hello
+}
+
+// bindOrTakeover binds bedrockPort to conn, displacing any tunnel already
+// bound to that port instead of rejecting the dial (takeover semantics,
+// issue #1565): a hello reaches here only after passing
+// ValidateBedrockTunnel, so displacing a stale connection is not a new auth
+// surface, and only the live tunnels index is consulted -- no server table.
+// The whole displace-then-bind-then-register sequence runs under l.mu, so it
+// is atomic with respect to any other concurrent bind/takeover of the same
+// port: a second concurrent hello for this port either finds the new
+// occupant already registered (and loses the OS-level bind race, rejected as
+// a normal bind conflict) or displaces it in turn -- never both at once.
+func (l *Listener) bindOrTakeover(bedrockPort uint32, conn *quic.Conn, caps *ipcaps.IPCaps) (*Tunnel, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if old, ok := l.tunnels[bedrockPort]; ok {
+		// close is idempotent (sync.Once), so this races harmlessly with
+		// old's own natural teardown (idle timeout, graceful Worker close)
+		// if that happens to fire concurrently -- whichever runs first does
+		// the actual work. It also unblocks old's pumps (closed UDP socket,
+		// closed QUIC connection), so no datagram is delivered to old after
+		// this point, and its run() goroutine is guaranteed to return
+		// (no leak) once its caller observes that.
+		old.close("displaced by new connection")
+		l.logger.Info("bedrock: tunnel displaced by redial", "bedrock_port", bedrockPort)
+	}
+
+	tun, err := bind(bedrockPort, conn, caps, l.logger)
+	if err != nil {
+		delete(l.tunnels, bedrockPort)
+		return nil, err
+	}
+	l.tunnels[bedrockPort] = tun
+	return tun, nil
+}
+
+// unregister removes tun from the port index if it is still the current
+// occupant of bedrockPort -- a no-op if a later takeover has already
+// replaced it. This compare-and-delete, combined with bindOrTakeover holding
+// l.mu across its whole displace-then-bind-then-register sequence, guards
+// the race between a tunnel's own natural teardown (calling this after
+// run() returns) and a concurrent takeover of the same port: whichever of
+// the two reaches l.mu second either finds its own entry already displaced
+// (no-op here) or displaces the other first (old.close() above).
+func (l *Listener) unregister(bedrockPort uint32, tun *Tunnel) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.tunnels[bedrockPort] == tun {
+		delete(l.tunnels, bedrockPort)
+	}
 }
 
 // reject answers the handshake stream with a rejecting ack (best-effort),

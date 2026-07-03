@@ -39,6 +39,8 @@ type Tunnel struct {
 	flows    *FlowTable
 	caps     *ipcaps.IPCaps
 	logger   *slog.Logger
+
+	closeOnce sync.Once
 }
 
 // bind opens the public UDP port for bedrockPort and wires it to quicConn. A
@@ -90,18 +92,31 @@ func (t *Tunnel) run(ctx context.Context) {
 		t.pumpUDPToQUIC()
 	}()
 
-	// Blocks until runCtx is cancelled or ReceiveDatagram reports the
-	// connection is gone.
+	// Blocks until runCtx is cancelled, ReceiveDatagram reports the
+	// connection is gone, or an external takeover (close, below) force-closes
+	// the QUIC connection.
 	t.pumpQUICToUDP(runCtx)
 
-	// Force-close the QUIC connection (harmless no-op if the peer already
-	// closed it) so a relay-initiated shutdown is visible to the Worker
-	// immediately rather than waiting out its idle timeout.
-	_ = t.quicConn.CloseWithError(0, "tunnel closing")
-
-	// Closing the UDP socket unblocks pumpUDPToQUIC's blocking ReadFrom.
-	t.unbind()
+	// close is idempotent: if a takeover (#1565) already force-closed this
+	// tunnel concurrently, this is a no-op; otherwise it is this tunnel's own
+	// natural teardown, closing the QUIC connection (visible to the Worker
+	// immediately rather than waiting out its idle timeout) and the UDP
+	// socket (which unblocks pumpUDPToQUIC's blocking ReadFrom).
+	t.close("tunnel closing")
 	udpDone.Wait()
+}
+
+// close force-closes the QUIC connection and unbinds the UDP port. It is
+// idempotent (sync.Once) and safe to call concurrently, so both this
+// Tunnel's own natural teardown (run, above) and an external takeover of its
+// port by a new connection (Listener.bindOrTakeover, #1565) can call it
+// without risking a double-close or a use-after-close: only the first caller
+// does any work.
+func (t *Tunnel) close(reason string) {
+	t.closeOnce.Do(func() {
+		_ = t.quicConn.CloseWithError(0, reason)
+		t.unbind()
+	})
 }
 
 // unbind closes the bound UDP port.

@@ -80,6 +80,57 @@ func TestBindUnbindLifecycle(t *testing.T) {
 	_ = ln.Close()
 }
 
+// TestTunnelCloseUnblocksRunAndFreesPort exercises the mechanism takeover
+// (#1565) relies on: an external close() call -- exactly what
+// Listener.bindOrTakeover does to a stale tunnel it is displacing -- must
+// force-close the QUIC connection, unblock run()'s pumps so the goroutine it
+// runs in actually returns (no leak), and release the UDP port so a new bind
+// on the same port succeeds immediately after. It also exercises close's
+// idempotency: run()'s own teardown calls close() again once pumpQUICToUDP
+// unblocks, which must be a harmless no-op (no double-close panic/error).
+func TestTunnelCloseUnblocksRunAndFreesPort(t *testing.T) {
+	server, client := quicConnPair(t)
+	caps := ipcaps.NewIPCaps(0, 0, 0, nil, nil)
+
+	tun, err := bind(0, server, caps, testLogger())
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	udpAddr, ok := tun.Addr().(*net.UDPAddr)
+	if !ok {
+		t.Fatalf("Addr() = %T, want *net.UDPAddr", tun.Addr())
+	}
+
+	runDone := make(chan struct{})
+	go func() {
+		tun.run(context.Background())
+		close(runDone)
+	}()
+
+	// Simulate an external takeover displacing this tunnel while it is live.
+	tun.close("displaced by new connection")
+
+	select {
+	case <-runDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("run() did not return after close() -- goroutine leak")
+	}
+
+	select {
+	case <-client.Context().Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("expected the QUIC connection to be closed after close()")
+	}
+
+	// The UDP socket must be released, not just the QUIC connection.
+	ln, err := net.ListenPacket("udp", udpAddr.String())
+	if err != nil {
+		t.Errorf("expected the port to be free after close(): %v", err)
+		return
+	}
+	_ = ln.Close()
+}
+
 func TestPumpFramingRoundTrip(t *testing.T) {
 	server, client := quicConnPair(t)
 	caps := ipcaps.NewIPCaps(0, 0, 0, nil, nil)
