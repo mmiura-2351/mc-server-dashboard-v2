@@ -1385,7 +1385,7 @@ export const ja: Record<TranslationKey, string> = {
     "{nouns}を管理するにはサーバーを停止してください。",
   // Bedrock discovery hint (issue #1543).
   "plugins.bedrockHint.text":
-    "プラグインカタログから Geyser をインストールすると Bedrock 版のプレイヤーが参加できます。Floodgate は Modrinth に Spigot 版がないため、jar は以下からアップロードしてください:",
+    "Bedrock 版のプレイヤーを参加させるには Floodgate も必要です。Modrinth に Spigot 版がないため、jar は以下からアップロードしてください:",
   "plugins.bedrockHint.link": "GeyserMC ダウンロードページ",
   "plugins.col.name": "名前",
   "plugins.col.version": "バージョン",

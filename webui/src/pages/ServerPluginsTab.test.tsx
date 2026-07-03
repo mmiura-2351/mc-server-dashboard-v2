@@ -1382,10 +1382,22 @@ describe("ServerPluginsTab Bedrock discovery hint (issue #1543)", () => {
   });
 
   const HINT_TEXT =
-    "Install Geyser from the plugin catalog to let Bedrock players join. Floodgate has no Spigot build on Modrinth — upload its jar instead:";
+    "Bedrock players also need Floodgate. It has no Spigot build on Modrinth — upload its jar:";
   const HINT_LINK = "GeyserMC download page";
 
-  function renderTabFor(serverType: string, bedrockEnabled: boolean) {
+  // A real Geyser-Spigot install: mixed-case manifest identifier and a null
+  // Modrinth project id. The gate must normalize case to detect it.
+  const geyserByManifest = plugin({
+    display_name: "Geyser-Spigot",
+    mod_identifier: "Geyser-Spigot",
+    source_project_id: null,
+  });
+
+  function renderTabFor(
+    serverType: string,
+    bedrockEnabled: boolean,
+    plugins: unknown[] = [],
+  ) {
     const client = new QueryClient({
       defaultOptions: { queries: { retry: false } },
     });
@@ -1397,7 +1409,7 @@ describe("ServerPluginsTab Bedrock discovery hint (issue #1543)", () => {
         return Promise.resolve({ updates: [] });
       }
       if (url.endsWith("/plugins")) {
-        return Promise.resolve({ plugins: [] });
+        return Promise.resolve({ plugins });
       }
       if (url === "/api/meta") {
         return Promise.resolve({ bedrock_enabled: bedrockEnabled });
@@ -1419,8 +1431,8 @@ describe("ServerPluginsTab Bedrock discovery hint (issue #1543)", () => {
     );
   }
 
-  it("shows the hint for a paper server when the deployment flag is on", async () => {
-    renderTabFor("paper", true);
+  it("shows the hint when Geyser is detected by its mixed-case manifest", async () => {
+    renderTabFor("paper", true, [geyserByManifest]);
 
     expect(await screen.findByText(HINT_TEXT)).toBeInTheDocument();
     const link = screen.getByRole("link", { name: HINT_LINK });
@@ -1430,20 +1442,44 @@ describe("ServerPluginsTab Bedrock discovery hint (issue #1543)", () => {
     );
   });
 
-  it("hides the hint when the deployment flag is off", async () => {
-    renderTabFor("paper", false);
+  it.each([
+    "wKkoqHrH",
+    "geyser",
+  ])("shows the hint when Geyser is a Modrinth catalog install (%s)", async (projectId) => {
+    renderTabFor("paper", true, [
+      plugin({
+        display_name: "Geyser",
+        mod_identifier: null,
+        source_project_id: projectId,
+      }),
+    ]);
+
+    expect(await screen.findByText(HINT_TEXT)).toBeInTheDocument();
+  });
+
+  it("hides the hint when paper + flag on but no Geyser plugin is installed", async () => {
+    renderTabFor("paper", true, [plugin()]);
 
     await waitFor(() => {
-      expect(screen.getByText("No plugins installed.")).toBeInTheDocument();
+      expect(screen.getByText("Sodium")).toBeInTheDocument();
+    });
+    expect(screen.queryByText(HINT_TEXT)).not.toBeInTheDocument();
+  });
+
+  it("hides the hint when the deployment flag is off, even with Geyser", async () => {
+    renderTabFor("paper", false, [geyserByManifest]);
+
+    await waitFor(() => {
+      expect(screen.getByText("Geyser-Spigot")).toBeInTheDocument();
     });
     expect(screen.queryByText(HINT_TEXT)).not.toBeInTheDocument();
   });
 
   it("hides the hint for a non-paper server even when the flag is on", async () => {
-    renderTabFor("fabric", true);
+    renderTabFor("fabric", true, [geyserByManifest]);
 
     await waitFor(() => {
-      expect(screen.getByText("No mods installed.")).toBeInTheDocument();
+      expect(screen.getByText("Geyser-Spigot")).toBeInTheDocument();
     });
     expect(screen.queryByText(HINT_TEXT)).not.toBeInTheDocument();
   });

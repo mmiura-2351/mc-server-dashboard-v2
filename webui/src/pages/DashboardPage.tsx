@@ -760,7 +760,7 @@ function ServerCard({ server, communityId, can }: ServerRowProps) {
             ) : (
               <>
                 {t("dashboard.bedrockLabel")}: {server.bedrock_address}:
-                <strong>{server.bedrock_port}</strong>
+                {server.bedrock_port}
               </>
             )}
           </button>
@@ -961,7 +961,7 @@ function ServerRow({ server, communityId, can }: ServerRowProps) {
             ) : (
               <>
                 {t("dashboard.bedrockLabel")}: {server.bedrock_address}:
-                <strong>{server.bedrock_port}</strong>
+                {server.bedrock_port}
               </>
             )}
           </button>

@@ -1376,11 +1376,12 @@ export const en = {
   "plugins.empty": "No {nouns} installed.",
   "plugins.unsupported": "This server type does not support plugins or mods.",
   "plugins.serverNotStopped": "Stop the server to manage {nouns}.",
-  // Bedrock discovery hint (issue #1543): shown on Paper servers when the
-  // deployment's Bedrock gate (/meta bedrock_enabled) is on. Floodgate has no
-  // Spigot build on Modrinth (issue #1548), so it must be jar-uploaded.
+  // Bedrock companion hint (issue #1543): shown on Paper servers only when the
+  // deployment's Bedrock gate (/meta bedrock_enabled) is on AND Geyser is already
+  // installed. Floodgate has no Spigot build on Modrinth (issue #1548), so it
+  // must be jar-uploaded.
   "plugins.bedrockHint.text":
-    "Install Geyser from the plugin catalog to let Bedrock players join. Floodgate has no Spigot build on Modrinth — upload its jar instead:",
+    "Bedrock players also need Floodgate. It has no Spigot build on Modrinth — upload its jar:",
   "plugins.bedrockHint.link": "GeyserMC download page",
   // Table columns.
   "plugins.col.name": "Name",

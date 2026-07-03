@@ -54,6 +54,19 @@ function isModLoader(serverType: string): boolean {
   return serverType === "fabric" || serverType === "forge";
 }
 
+// Geyser detection mirrors the backend is_geyser_plugin (issue #1541): the
+// case-insensitive manifest identifier, OR the Modrinth Geyser project id/slug.
+const GEYSER_MOD_IDENTIFIERS = new Set(["geyser-spigot"]);
+const GEYSER_MODRINTH_PROJECT_IDS = new Set(["wKkoqHrH", "geyser"]);
+
+/** Whether a plugin is the Geyser Bedrock translator (mirrors backend). */
+function isGeyserPlugin(p: PluginResponse): boolean {
+  return (
+    GEYSER_MOD_IDENTIFIERS.has((p.mod_identifier ?? "").toLowerCase()) ||
+    GEYSER_MODRINTH_PROJECT_IDS.has(p.source_project_id ?? "")
+  );
+}
+
 /** The loader-aware content noun in its three grammatical forms (#1320). */
 interface ContentNoun {
   plural: string;
@@ -405,7 +418,8 @@ export function ServerPluginsTab({
       )}
 
       {server.server_type === "paper" &&
-        metaQuery.data?.bedrock_enabled === true && (
+        metaQuery.data?.bedrock_enabled === true &&
+        plugins.some(isGeyserPlugin) && (
           <p className="field-hint plugins-notice">
             {t("plugins.bedrockHint.text")}{" "}
             <a
