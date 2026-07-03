@@ -59,6 +59,7 @@ make relay-lint         # gofmt check + go vet + golangci-lint
 make relay-test         # go test ./...
 make relay-test-race    # go test -race ./... (CI gate)
 make relay-e2e          # protocol-level E2E vs the real compose stack (issue #962)
+make bedrock-e2e        # Bedrock tunnel protocol-level E2E (epic #1540, issue #1547)
 ```
 
 `make relay-e2e` runs the protocol-level acceptance suite (issue #962): it brings
@@ -83,6 +84,15 @@ time. The API container therefore needs outbound HTTPS access to Mojang's
 version manifest host.
 This is fine on GitHub-hosted runners but will fail on network-isolated CI
 environments.
+
+`make bedrock-e2e` runs the Bedrock relay tunnel protocol-level suite (epic
+#1540, issue #1547): the real `internal/bedrock.Listener` against the real
+worker's `bedrocktunnel.Manager` and a real Docker container running a
+fake-Geyser RakNet responder. It needs neither Postgres nor the API — see
+[`test/e2e/bedrock_relay_e2e_test.go`](test/e2e/bedrock_relay_e2e_test.go)'s
+package doc comment and [`../worker/README.md`](../worker/README.md#bedrock-relay-tunnel-e2e)
+for the full picture; orchestration lives in
+[`../scripts/run_bedrock_e2e.sh`](../scripts/run_bedrock_e2e.sh).
 
 ## Configuration
 

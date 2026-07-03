@@ -150,6 +150,29 @@ On a host where Docker needs a group wrapper, prefix the commands with it
 (e.g. `sg docker -c "..."`). The test talks to the daemon over the default
 `unix:///var/run/docker.sock`.
 
+## Bedrock relay tunnel e2e
+
+`test/e2e/bedrock_e2e_test.go` drives the **real**
+`internal/adapters/bedrocktunnel.Manager` against the real relay's
+`bedrock.Listener` (a sibling Go module, so it runs as a separate coordinating
+`go test` process — see the file's package doc comment) and a real Docker
+container running a fake-Geyser RakNet responder
+(`test/e2e/stub-geyser/`), proving the relay-UDP-ingress → QUIC-tunnel →
+Worker → container-port data path, flow demultiplexing across concurrent
+clients, and relay-port unbind on tunnel teardown (epic #1540, issue #1547).
+Real Geyser is deliberately not booted (a Modrinth/GeyserMC download would make
+CI flaky; real Geyser+Floodgate behavior was already validated live, issue
+#1542).
+
+Run it (from the repo root) the same way CI does:
+
+```sh
+make bedrock-e2e   # scripts/run_bedrock_e2e.sh
+```
+
+See [`docs/app/BEDROCK.md`](../docs/app/BEDROCK.md) for the feature overview and
+[`docs/app/BEDROCK_TUNNEL.md`](../docs/app/BEDROCK_TUNNEL.md) for the wire design.
+
 ## Configuration
 
 The Worker reads its configuration from an optional TOML file plus
