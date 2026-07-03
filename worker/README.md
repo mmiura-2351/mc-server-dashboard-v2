@@ -69,9 +69,13 @@ The default `go test ./...` deliberately excludes the cross-language harnesses
 under `test/e2e/`: they are behind the `e2e` build tag and each skips unless its
 environment is set —
 [Cross-language data-plane e2e](#cross-language-data-plane-e2e) needs
-`MCD_E2E_API_URL` + `MCD_E2E_CREDENTIAL`, and
+`MCD_E2E_API_URL` + `MCD_E2E_CREDENTIAL`,
 [Container-driver restart e2e](#container-driver-restart-e2e) needs
-`MCD_E2E_DOCKER` + `MCD_E2E_STUB_IMAGE` (and a reachable Docker daemon).
+`MCD_E2E_DOCKER` + `MCD_E2E_STUB_IMAGE` (and a reachable Docker daemon), and
+[Bedrock relay tunnel e2e](#bedrock-relay-tunnel-e2e) needs
+`MCD_E2E_DOCKER` + `MCD_BEDROCK_E2E_RELAY_ADDR` + `MCD_BEDROCK_E2E_CA_FILE` +
+`MCD_E2E_STUB_GEYSER_IMAGE` (run via `make bedrock-e2e` rather than by hand —
+see that section).
 
 ## Cross-language data-plane e2e
 
