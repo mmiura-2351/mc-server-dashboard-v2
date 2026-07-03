@@ -209,15 +209,17 @@ func (l *Listener) handshake(ctx context.Context, conn *quic.Conn) (*Tunnel, *be
 // issue #1565): a hello reaches here only after passing
 // ValidateBedrockTunnel, so displacing a stale connection is not a new auth
 // surface, and only the live tunnels index is consulted -- no server table.
-// The whole displace-then-bind-then-register sequence runs under l.mu, so it
-// is atomic with respect to any other concurrent bind/takeover of the same
-// port: a second concurrent hello for this port either finds the new
-// occupant already registered (and loses the OS-level bind race, rejected as
-// a normal bind conflict) or displaces it in turn -- never both at once.
+// The whole displace-then-bind-then-register sequence (including bind's
+// OS-level ListenPacket) runs under l.mu, so l.mu serializes any two
+// concurrent hellos for the same port: they never reach the OS-level bind at
+// once. The second blocks on l.mu, then when it proceeds it sees the first's
+// tunnel as the current occupant and displaces it in turn -- one takeover
+// after another, never both binding the port simultaneously.
 func (l *Listener) bindOrTakeover(bedrockPort uint32, conn *quic.Conn, caps *ipcaps.IPCaps) (*Tunnel, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	displaced := false
 	if old, ok := l.tunnels[bedrockPort]; ok {
 		// close is idempotent (sync.Once), so this races harmlessly with
 		// old's own natural teardown (idle timeout, graceful Worker close)
@@ -225,15 +227,22 @@ func (l *Listener) bindOrTakeover(bedrockPort uint32, conn *quic.Conn, caps *ipc
 		// the actual work. It also unblocks old's pumps (closed UDP socket,
 		// closed QUIC connection), so no datagram is delivered to old after
 		// this point, and its run() goroutine is guaranteed to return
-		// (no leak) once its caller observes that.
+		// (no leak) once its caller observes that. It must run before bind
+		// below so the UDP port is free to rebind.
 		old.close("displaced by new connection")
-		l.logger.Info("bedrock: tunnel displaced by redial", "bedrock_port", bedrockPort)
+		displaced = true
 	}
 
 	tun, err := bind(bedrockPort, conn, caps, l.logger)
 	if err != nil {
 		delete(l.tunnels, bedrockPort)
 		return nil, err
+	}
+	if displaced {
+		// Log only after bind succeeds: on the error path above the caller
+		// logs "bind failed", so claiming a successful takeover here would be
+		// misleading (and doubly logged).
+		l.logger.Info("bedrock: tunnel displaced by redial", "bedrock_port", bedrockPort)
 	}
 	l.tunnels[bedrockPort] = tun
 	return tun, nil
