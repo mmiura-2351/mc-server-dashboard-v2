@@ -407,7 +407,7 @@ function Header({
               ) : (
                 <>
                   {t("serverDetail.bedrockLabel")}: {server.bedrock_address}:
-                  <strong>{server.bedrock_port}</strong>
+                  {server.bedrock_port}
                 </>
               )}
             </button>
