@@ -1,6 +1,7 @@
 package bedrock
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net"
@@ -16,12 +17,15 @@ import (
 )
 
 // fakeValidator is a Validator test double that records every call and
-// returns a canned (valid, err) pair.
+// returns a canned (valid, err) pair. mu also guards valid/err (not just
+// calls) so a test can flip the outcome mid-run via setValid while the
+// listener's accept loop is concurrently calling ValidateBedrockTunnel in the
+// background (#1565: a redial's hello must be rejected once the credential
+// is no longer valid).
 type fakeValidator struct {
+	mu    sync.Mutex
 	valid bool
 	err   error
-
-	mu    sync.Mutex
 	calls []validateCall
 }
 
@@ -33,8 +37,8 @@ type validateCall struct {
 
 func (f *fakeValidator) ValidateBedrockTunnel(_ context.Context, serverID string, bedrockPort uint32, token string) (bool, error) {
 	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls = append(f.calls, validateCall{serverID, bedrockPort, token})
-	f.mu.Unlock()
 	return f.valid, f.err
 }
 
@@ -42,6 +46,14 @@ func (f *fakeValidator) lastCall() validateCall {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.calls[len(f.calls)-1]
+}
+
+// setValid updates valid under the same lock ValidateBedrockTunnel reads it
+// with.
+func (f *fakeValidator) setValid(valid bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.valid = valid
 }
 
 // newTestListener runs a Listener with unlimited pre-auth handshake caps; use
@@ -214,6 +226,137 @@ func TestListenerHandshakeRejectOnBindConflict(t *testing.T) {
 	if ack.GetAccepted() {
 		t.Fatal("accepted = true, want false when the declared port is already bound")
 	}
+}
+
+// freeUDPPort grabs an OS-assigned loopback UDP port and releases it
+// immediately so a test can declare a concrete bedrock_port for two
+// successive hellos (needed for takeover: BedrockPort 0 would give each
+// hello its own OS-assigned port, never colliding). Carries the same small
+// TOCTOU risk as any "bind to :0, close, reuse" idiom.
+func freeUDPPort(t *testing.T) uint32 {
+	t.Helper()
+	probe, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenPacket: %v", err)
+	}
+	port := uint32(probe.LocalAddr().(*net.UDPAddr).Port)
+	if err := probe.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	return port
+}
+
+// sendAndExpectDatagram writes payload from a fresh UDP socket to udpAddr and
+// asserts it is forwarded, unmodified, as a QUIC DATAGRAM on conn within
+// timeout.
+func sendAndExpectDatagram(t *testing.T, udpAddr *net.UDPAddr, conn *quic.Conn, payload []byte, timeout time.Duration) {
+	t.Helper()
+	client, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenPacket: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+	if _, err := client.WriteTo(payload, udpAddr); err != nil {
+		t.Fatalf("WriteTo: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	frame, err := conn.ReceiveDatagram(ctx)
+	if err != nil {
+		t.Fatalf("ReceiveDatagram: %v", err)
+	}
+	if got := frame[FlowIDSize:]; !bytes.Equal(got, payload) {
+		t.Errorf("forwarded payload = %q, want %q", got, payload)
+	}
+}
+
+// TestListenerTakeoverDisplacesStaleConnection covers #1565's core
+// acceptance criteria: a validated hello for a port already bound to
+// another (here, still fully live -- the worse case, since an undetected-dead
+// connection is strictly easier to displace) connection displaces it rather
+// than being rejected, the displaced connection's QUIC connection is closed
+// (no leaked goroutine, per TestTunnelCloseUnblocksRunAndFreesPort's proof of
+// the underlying mechanism), and the port ends up serving traffic through the
+// new connection.
+func TestListenerTakeoverDisplacesStaleConnection(t *testing.T) {
+	validator := &fakeValidator{valid: true}
+	ln, stop := newTestListener(t, validator)
+	defer stop()
+
+	port := freeUDPPort(t)
+	hello := &bedrocktunnelv1.TunnelHello{ServerId: "srv-1", BedrockPort: port, Token: "tok"}
+
+	oldConn, oldAck := doHandshake(t, ln, hello)
+	if !oldAck.GetAccepted() {
+		t.Fatalf("first handshake rejected: %q", oldAck.GetRejectReason())
+	}
+	udpAddr := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: int(port)}
+
+	// Confirm the old connection is actually serving traffic before it is
+	// displaced.
+	sendAndExpectDatagram(t, udpAddr, oldConn, []byte("pre-takeover"), 5*time.Second)
+
+	// A second validated hello for the same port -- the redial -- must be
+	// accepted (takeover), not rejected as a bind conflict.
+	newConn, newAck := doHandshake(t, ln, hello)
+	if !newAck.GetAccepted() {
+		t.Fatalf("redial rejected: %q, want takeover to accept it", newAck.GetRejectReason())
+	}
+
+	// The old connection must be closed -- displaced, not left running
+	// alongside the new one.
+	select {
+	case <-oldConn.Context().Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("expected the displaced connection to be closed")
+	}
+
+	// No datagram reaches the displaced connection post-takeover.
+	staleCtx, staleCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer staleCancel()
+	if _, err := oldConn.ReceiveDatagram(staleCtx); err == nil {
+		t.Error("expected the displaced connection to receive nothing after takeover")
+	}
+
+	// The port now serves traffic through the new connection.
+	sendAndExpectDatagram(t, udpAddr, newConn, []byte("post-takeover"), 5*time.Second)
+}
+
+// TestListenerInvalidHelloDoesNotDisplace covers #1565's non-hijack
+// requirement: an invalid hello for a bound port must be rejected exactly as
+// today, without touching the existing tunnel -- takeover is gated by the
+// same ValidateBedrockTunnel call as any other bind, not a new auth surface.
+func TestListenerInvalidHelloDoesNotDisplace(t *testing.T) {
+	validator := &fakeValidator{valid: true}
+	ln, stop := newTestListener(t, validator)
+	defer stop()
+
+	port := freeUDPPort(t)
+	goodHello := &bedrocktunnelv1.TunnelHello{ServerId: "srv-1", BedrockPort: port, Token: "tok"}
+	oldConn, oldAck := doHandshake(t, ln, goodHello)
+	if !oldAck.GetAccepted() {
+		t.Fatalf("first handshake rejected: %q", oldAck.GetRejectReason())
+	}
+	udpAddr := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: int(port)}
+
+	// Now the validator rejects: an attacker (or a misconfigured Worker)
+	// without a valid credential for this port must not be able to displace
+	// the live tunnel.
+	validator.setValid(false)
+	badHello := &bedrocktunnelv1.TunnelHello{ServerId: "srv-1", BedrockPort: port, Token: "wrong"}
+	_, badAck := doHandshake(t, ln, badHello)
+	if badAck.GetAccepted() {
+		t.Fatal("accepted = true, want false for an invalid token on a bound port")
+	}
+
+	// The original connection must still be alive and still serving traffic.
+	select {
+	case <-oldConn.Context().Done():
+		t.Fatal("the original connection was closed by a rejected hello")
+	default:
+	}
+	sendAndExpectDatagram(t, udpAddr, oldConn, []byte("still-alive"), 5*time.Second)
 }
 
 // gatedValidator blocks each ValidateBedrockTunnel call until gate is closed,
