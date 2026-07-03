@@ -133,7 +133,10 @@ Server response fields: `id`, `community_id`, `name`, `mc_edition`,
 `cpu_millis` (derived from `config['cpu_millis']`, null when unset),
 `game_port`, `slug` (relay hostname prefix, auto-generated at create,
 renameable via PATCH), `join_hostname` (`<slug>.<base_domain>` when relay
-enabled, else null), `desired_state`, `observed_state`, `observed_at`,
+enabled, else null), `bedrock_address` / `bedrock_port` (Bedrock join address,
+epic #1540: non-null only while the deployment's Bedrock gate is on AND the
+server carries at least one *enabled* Geyser plugin copy — see `BEDROCK.md`;
+Paper only today), `desired_state`, `observed_state`, `observed_at`,
 `assigned_worker_id`.
 
 Server state model: `desired_state` ∈ {running, stopped};
@@ -157,7 +160,7 @@ Execution backend: `container` (the only shipped backend).
 | GET | `/communities/{cid}/audit` | Community-scoped audit (same filters minus `community`). |
 | GET | `/backups/statistics` `[A]` | Global backup statistics. |
 | GET | `/healthz` · `/readyz` · `/metrics` | Liveness / readiness / Prometheus (ops-facing, not UI-core). |
-| GET | `/meta` | Deployment facts the Web UI reads before a server exists (issue #1002): `{relay_enabled, default_memory_limit_mb, max_memory_limit_mb}`. Requires authentication. Used by the create wizard to decide whether to surface the game-port control (relay mode auto-allocates). |
+| GET | `/meta` | Deployment facts the Web UI reads before a server exists (issue #1002): `{relay_enabled, bedrock_enabled, default_memory_limit_mb, max_memory_limit_mb}`. Requires authentication. Used by the create wizard to decide whether to surface the game-port control (relay mode auto-allocates), and by the plugins tab to decide whether to show the Bedrock/Geyser discovery hint (epic #1540, `bedrock_enabled` = `relay_enabled` AND the deployment's Bedrock capability flag). |
 
 ### 2.5 Resource packs (issues #1176, #1177)
 

@@ -1,6 +1,6 @@
 # Bedrock Relay Tunnel
 
-> Status: **Design** · Audience: contributors to `relay/`, `worker/`, `proto/`
+> Status: **Implemented** (e2e-verified, issue #1547) · Audience: contributors to `relay/`, `worker/`, `proto/`
 >
 > This document is the reference for the **relay-side Bedrock (RakNet/UDP)
 > tunnel**: the QUIC listener that authenticates a Worker's outbound dial-out,
@@ -18,8 +18,9 @@
 > file wins.
 >
 > The Worker-side QUIC client (issue #1546, `worker/internal/adapters/bedrocktunnel/`)
-> implements this document's wire contract as the client. End-to-end deployment
-> docs (issue #1547) are a separate, later sub-issue.
+> implements this document's wire contract as the client. The feature-level
+> overview and deployment docs landed with issue #1547 -- see
+> [`BEDROCK.md`](BEDROCK.md) and `../dev/DEPLOYMENT.md` "Bedrock (Geyser)".
 
 ## Table of Contents
 
@@ -371,10 +372,11 @@ redesign.
 
 ## 11. Out of scope / future work
 
-- **End-to-end deployment + docs** (issue #1547) -- `compose.yaml` profile
-  wiring beyond the port publish (including publishing the client-facing
-  `bedrock_port` UDP window), firewall guidance, and a full join-flow
-  walkthrough; needs both #1545 and #1546 (now landed) to exist first.
+- ~~**End-to-end deployment + docs** (issue #1547)~~ **Landed with #1547**:
+  the feature-level overview lives in [`BEDROCK.md`](BEDROCK.md), the
+  compose UDP exposure / firewall guidance / manual-verification checklist in
+  `../dev/DEPLOYMENT.md` "Bedrock (Geyser)", and the protocol-level e2e in
+  `scripts/run_bedrock_e2e.sh` (`.github/workflows/bedrock-e2e.yml`).
 - **Stale-connection takeover on redial** (issue #1565) -- a validated hello
   for an already-bound port displacing the old connection; see Section 3.1.
 - **Real-client-IP passthrough** -- deferred beyond this initial scope per

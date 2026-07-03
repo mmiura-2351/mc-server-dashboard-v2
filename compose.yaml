@@ -14,8 +14,10 @@
 #               `relay` compose profile (opt-in). Accepts player TCP on :25565,
 #               and the Worker dial-back on :25665 (TLS). Requires a wildcard DNS
 #               record and TLS material — see docs/dev/DEPLOYMENT.md "Relay".
-#               Also carries Bedrock (RakNet/UDP) via a QUIC tunnel on
-#               :25675/udp (epic #1540) — see docs/app/BEDROCK_TUNNEL.md.
+#               Also carries Bedrock (RakNet/UDP): the Worker's QUIC tunnel on
+#               :25675/udp plus the client-facing per-server UDP window
+#               19132-19231/udp (epic #1540) — see docs/app/BEDROCK.md and
+#               docs/app/BEDROCK_TUNNEL.md.
 #   cloudflared — Cloudflare Tunnel for HTTPS access without opening inbound ports
 #               (issue #1090); gated behind the `tunnel` compose profile (opt-in).
 #               The tunnel is configured in the Cloudflare Zero Trust dashboard;
@@ -172,6 +174,11 @@ services:
       MCD_API_RELAY__ENABLED: "${MCD_API_RELAY__ENABLED:-false}"
       MCD_API_RELAY__CREDENTIAL: "${MCD_API_RELAY__CREDENTIAL:-}"
       MCD_API_RELAY__BASE_DOMAIN: "${MCD_API_RELAY__BASE_DOMAIN:-}"
+      # Bedrock ingress capability gate (epic #1540, issue #1541): `:-` default
+      # so default bring-up is unchanged (Geyser detection allocates nothing and
+      # server responses carry no bedrock_address/bedrock_port until this is set
+      # true). See docs/app/BEDROCK.md and docs/dev/DEPLOYMENT.md "Relay".
+      MCD_API_RELAY__BEDROCK_ENABLED: "${MCD_API_RELAY__BEDROCK_ENABLED:-false}"
       # Reconciler tuning (issue #985). Defaults preserve existing behavior.
       # To speed self-heal after an API restart, lower HELD_START_GRACE_SECONDS
       # (default 90 s) rather than GRACE_SECONDS (which has a ~630 s safety floor).
@@ -293,12 +300,15 @@ services:
     ports:
       - "25565:25565"    # game listener (players join here)
       - "25665:25665"    # tunnel listener (Workers dial back here)
-      # Bedrock QUIC tunnel listener (docs/app/BEDROCK_TUNNEL.md). Carries
-      # only the Worker's QUIC tunnel; the client-facing per-server Bedrock
-      # UDP window (ports.bedrock_range_start..end, default 19132..19231/udp)
-      # is published with the end-to-end wiring in issue #1547 — do not add
-      # it here ad hoc.
+      # Bedrock QUIC tunnel listener (docs/app/BEDROCK_TUNNEL.md): carries only
+      # the Worker's outbound tunnel dial, not player traffic.
       - "25675:25675/udp"
+      # Client-facing per-server Bedrock UDP window (docs/app/BEDROCK.md):
+      # matches the API's ports.bedrock_range_start..end default
+      # (CONFIGURATION.md Section 5.8). Bedrock players connect directly to a
+      # port in this window; the relay binds one port from it per live
+      # Bedrock tunnel (BEDROCK_TUNNEL.md Section 3).
+      - "19132-19231:19132-19231/udp"
     depends_on:
       - api
 

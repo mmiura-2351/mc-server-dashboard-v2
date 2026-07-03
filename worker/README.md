@@ -69,9 +69,13 @@ The default `go test ./...` deliberately excludes the cross-language harnesses
 under `test/e2e/`: they are behind the `e2e` build tag and each skips unless its
 environment is set —
 [Cross-language data-plane e2e](#cross-language-data-plane-e2e) needs
-`MCD_E2E_API_URL` + `MCD_E2E_CREDENTIAL`, and
+`MCD_E2E_API_URL` + `MCD_E2E_CREDENTIAL`,
 [Container-driver restart e2e](#container-driver-restart-e2e) needs
-`MCD_E2E_DOCKER` + `MCD_E2E_STUB_IMAGE` (and a reachable Docker daemon).
+`MCD_E2E_DOCKER` + `MCD_E2E_STUB_IMAGE` (and a reachable Docker daemon), and
+[Bedrock relay tunnel e2e](#bedrock-relay-tunnel-e2e) needs
+`MCD_E2E_DOCKER` + `MCD_BEDROCK_E2E_RELAY_ADDR` + `MCD_BEDROCK_E2E_CA_FILE` +
+`MCD_E2E_STUB_GEYSER_IMAGE` (run via `make bedrock-e2e` rather than by hand —
+see that section).
 
 ## Cross-language data-plane e2e
 
@@ -149,6 +153,29 @@ MCD_E2E_STUB_IMAGE=mcsd-e2e-stub:latest \
 On a host where Docker needs a group wrapper, prefix the commands with it
 (e.g. `sg docker -c "..."`). The test talks to the daemon over the default
 `unix:///var/run/docker.sock`.
+
+## Bedrock relay tunnel e2e
+
+`test/e2e/bedrock_e2e_test.go` drives the **real**
+`internal/adapters/bedrocktunnel.Manager` against the real relay's
+`bedrock.Listener` (a sibling Go module, so it runs as a separate coordinating
+`go test` process — see the file's package doc comment) and a real Docker
+container running a fake-Geyser RakNet responder
+(`test/e2e/stub-geyser/`), proving the relay-UDP-ingress → QUIC-tunnel →
+Worker → container-port data path, flow demultiplexing across concurrent
+clients, and relay-port unbind on tunnel teardown (epic #1540, issue #1547).
+Real Geyser is deliberately not booted (a Modrinth/GeyserMC download would make
+CI flaky; real Geyser+Floodgate behavior was already validated live, issue
+#1542).
+
+Run it (from the repo root) the same way CI does:
+
+```sh
+make bedrock-e2e   # scripts/run_bedrock_e2e.sh
+```
+
+See [`docs/app/BEDROCK.md`](../docs/app/BEDROCK.md) for the feature overview and
+[`docs/app/BEDROCK_TUNNEL.md`](../docs/app/BEDROCK_TUNNEL.md) for the wire design.
 
 ## Configuration
 
