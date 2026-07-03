@@ -23,7 +23,8 @@ from __future__ import annotations
 import datetime as dt
 import os
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
+from contextlib import AbstractContextManager
 from dataclasses import replace as dc_replace
 
 import pytest
@@ -355,9 +356,11 @@ def _geyser_plugin(
 
 async def test_enabled_geyser_server_ids_classifies_each_server(
     engine: AsyncEngine,
+    assert_max_queries: Callable[[int], AbstractContextManager[None]],
 ) -> None:
     # One query batched across three servers (issue #1555): enabled Geyser,
-    # disabled Geyser, and no plugins at all.
+    # disabled Geyser, and no plugins at all. Pinned directly by query count
+    # (issue #1563), not just by the single-call shape below.
     enabled_server = await _seed_server(engine)
     disabled_server = await _seed_server(engine)
     bare_server = await _seed_server(engine)
@@ -369,9 +372,10 @@ async def test_enabled_geyser_server_ids_classifies_each_server(
         await uow.commit()
 
     async with ServersUnitOfWork(factory) as uow:
-        joinable = await uow.plugins.enabled_geyser_server_ids(
-            [enabled_server, disabled_server, bare_server]
-        )
+        with assert_max_queries(1):
+            joinable = await uow.plugins.enabled_geyser_server_ids(
+                [enabled_server, disabled_server, bare_server]
+            )
     assert joinable == {enabled_server}
 
 
