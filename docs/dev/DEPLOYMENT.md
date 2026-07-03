@@ -893,14 +893,29 @@ relay control surface is active.
 Bedrock-edition players can join through the same relay, over a separate QUIC
 tunnel and per-server UDP ingress (see `docs/app/BEDROCK.md` for the feature
 overview and `docs/app/BEDROCK_TUNNEL.md` for the wire-level design). It builds
-on the relay setup above (same wildcard DNS record, same tunnel TLS material)
-and needs one additional step:
+on the relay setup above (same tunnel TLS material; DNS needs one extra
+record — see below) and needs these additional steps:
 
-1. Set `MCD_API_RELAY__BEDROCK_ENABLED=true` in `.env` (see `.env.example`).
-2. Open the two additional firewall rows above on the relay host: the Bedrock
+1. Add an **apex** `A`/`AAAA` record for the *bare* base domain, pointing at
+   the relay host's public IP — **DNS-only (not proxied)**:
+
+   ```
+   <base_domain>      A    <relay public IP>
+   ```
+
+   The relay's wildcard `*.<base_domain>` covers Java's `<slug>.<base_domain>`
+   join hostnames, but Bedrock's join address is the bare `<base_domain>`
+   (routed by UDP port, no slug), and a wildcard does not match the apex. An
+   HTTP(S) proxy (e.g. Cloudflare orange-cloud) must NOT be enabled on either
+   record — it won't pass Minecraft's TCP or Bedrock's UDP. Without the apex
+   record, Bedrock clients must connect by raw IP; the hostname fails with
+   Bedrock's "Server address is not correctly formatted" (its message for a
+   hostname it can't resolve).
+2. Set `MCD_API_RELAY__BEDROCK_ENABLED=true` in `.env` (see `.env.example`).
+3. Open the two additional firewall rows above on the relay host: the Bedrock
    QUIC tunnel port (25675/udp) and the client-facing UDP window
    (19132-19231/udp, `compose.yaml`'s relay service already publishes both).
-3. Rebuild and bring the stack up (`docker compose up -d --build`), same as
+4. Rebuild and bring the stack up (`docker compose up -d --build`), same as
    [Enabling the relay profile](#enabling-the-relay-profile).
 
 No other configuration is required: installing Geyser (Modrinth catalog) and

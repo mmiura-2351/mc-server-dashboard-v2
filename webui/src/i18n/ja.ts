@@ -1383,7 +1383,7 @@ export const ja: Record<TranslationKey, string> = {
     "このサーバータイプはプラグインやModに対応していません。",
   "plugins.serverNotStopped":
     "{nouns}を管理するにはサーバーを停止してください。",
-  // Bedrock discovery hint (issue #1543).
+  // Bedrock companion hint (issue #1543).
   "plugins.bedrockHint.text":
     "Bedrock 版のプレイヤーを参加させるには Floodgate も必要です。Modrinth に Spigot 版がないため、jar は以下からアップロードしてください:",
   "plugins.bedrockHint.link": "GeyserMC ダウンロードページ",
