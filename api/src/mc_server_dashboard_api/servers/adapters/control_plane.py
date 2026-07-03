@@ -380,7 +380,8 @@ class FleetControlPlaneAdapter(ControlPlane):
     def _base(self) -> str:
         if not self._data_plane_base_url:
             raise WorkerUnavailableError(
-                "data-plane transfer requested but server.public_base_url is unset"
+                "data-plane transfer requested but neither server.data_plane_base_url "
+                "nor server.public_base_url is set"
             )
         return self._data_plane_base_url.rstrip("/")
 

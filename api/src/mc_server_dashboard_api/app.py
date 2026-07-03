@@ -781,7 +781,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 control_plane=FleetControlPlaneAdapter(
                     registry=registry,
                     control_plane=app.state.control_plane,
-                    data_plane_base_url=settings.server.public_base_url,
+                    data_plane_base_url=settings.server.effective_data_plane_base_url,
                     worker_credential=settings.control.worker_credential,
                 ),
                 clock=ServersSystemClock(),
@@ -805,7 +805,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             backup_control_plane = FleetControlPlaneAdapter(
                 registry=registry,
                 control_plane=app.state.control_plane,
-                data_plane_base_url=settings.server.public_base_url,
+                data_plane_base_url=settings.server.effective_data_plane_base_url,
                 worker_credential=settings.control.worker_credential,
             )
             backup_scheduler = RunBackupScheduleTick(
@@ -839,7 +839,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             reconciler_control_plane = FleetControlPlaneAdapter(
                 registry=registry,
                 control_plane=app.state.control_plane,
-                data_plane_base_url=settings.server.public_base_url,
+                data_plane_base_url=settings.server.effective_data_plane_base_url,
                 worker_credential=settings.control.worker_credential,
                 hydrate_timeout_seconds=settings.control.hydrate_timeout_seconds,
                 snapshot_timeout_seconds=settings.control.snapshot_timeout_seconds,

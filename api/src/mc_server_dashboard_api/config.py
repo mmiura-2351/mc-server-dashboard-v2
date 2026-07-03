@@ -97,6 +97,24 @@ class ServerSettings(_Section):
     # that never dispatches a transfer (no lifecycle commands) need not supply
     # it; the lifecycle layer requires it when it builds a transfer URL.
     public_base_url: str | None = None
+    # Base URL Workers use for hydrate/snapshot transfers instead of
+    # ``public_base_url`` (issue #1549). ``None`` (the default) falls back to
+    # ``public_base_url`` via ``effective_data_plane_base_url`` below, so a split
+    # deployment with no edge proxy sees no change. A single-host deployment
+    # whose public URL routes through a body-size-capped edge (e.g. Cloudflare
+    # Tunnel, ~100 MB) sets this to an internal address instead, so a co-located
+    # Worker's working-set upload bypasses the edge rather than hairpinning
+    # through it and 413ing on every booted server.
+    data_plane_base_url: str | None = None
+
+    @property
+    def effective_data_plane_base_url(self) -> str | None:
+        """The base URL to hand Workers for hydrate/snapshot transfers.
+
+        ``data_plane_base_url`` when set, else ``public_base_url`` (issue #1549).
+        """
+
+        return self.data_plane_base_url or self.public_base_url
 
 
 class ControlTlsSettings(_Section):

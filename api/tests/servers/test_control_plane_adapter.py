@@ -506,7 +506,11 @@ async def test_hydrate_without_base_url_is_worker_unavailable() -> None:
         data_plane_base_url=None,
         worker_credential="shhh",
     )
-    with pytest.raises(WorkerUnavailableError):
+    # The diagnostic names BOTH settings that can supply the URL (#1549).
+    with pytest.raises(
+        WorkerUnavailableError,
+        match=r"neither server\.data_plane_base_url nor server\.public_base_url",
+    ):
         await adapter.hydrate(
             worker_id=WorkerId(uuid.uuid4()),
             community_id=CommunityId(uuid.uuid4()),

@@ -1532,7 +1532,7 @@ def get_servers_control_plane(
     return FleetControlPlaneAdapter(
         registry=registry,
         control_plane=fleet_control_plane,
-        data_plane_base_url=settings.server.public_base_url,
+        data_plane_base_url=settings.server.effective_data_plane_base_url,
         worker_credential=settings.control.worker_credential,
         hydrate_timeout_seconds=settings.control.hydrate_timeout_seconds,
         snapshot_timeout_seconds=settings.control.snapshot_timeout_seconds,

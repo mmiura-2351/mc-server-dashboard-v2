@@ -88,6 +88,15 @@ storage backend**; they are required only while `COMPOSE_PROFILES=object` (the
 default) and unused after the fs opt-out — see
 [Section 5](#5-storage-backend-object-on-seaweedfs-default).
 
+`MCD_API_SERVER__PUBLIC_BASE_URL` is not in the table above — compose
+defaults it to `http://api:8000`, reachable only on the compose network — but
+it is mandatory to set in `.env` for any real deployment: player-facing links
+(e.g. resource-pack download URLs) are rendered from this value, so leaving
+the compose default renders those links unreachable outside the compose
+network. Set it to this deployment's externally reachable origin (see
+[Cloudflare Tunnel](#cloudflare-tunnel-recommended) below for a worked
+example).
+
 The scratch directory must exist on the host before the first `up` so the bind
 mount resolves; create it as the user the worker runs as:
 
@@ -501,6 +510,20 @@ To enable:
 
 The browser now reaches the UI over HTTPS at the public hostname, the `Secure`
 cookie is stored, and silent refresh works.
+
+**Edge body-size caps and the data-plane URL (issue #1549):** if
+`MCD_API_SERVER__PUBLIC_BASE_URL` is overridden to the tunnel's public
+hostname (e.g. so a public-facing link is externally reachable), do not let
+that also become the URL the Worker uses for hydrate/snapshot transfers.
+Cloudflare Tunnel caps request bodies at ~100 MB and rejects larger ones; a
+co-located Worker's working-set upload routinely exceeds that (a booted Paper
+server alone is ~200+ MB), so every snapshot would 413 and world progression
+would be silently lost on every stop. `compose.yaml` pins
+`MCD_API_SERVER__DATA_PLANE_BASE_URL` to the internal compose-network address
+(`http://api:8000`) independently of `PUBLIC_BASE_URL` for exactly this
+reason; any other topology with a co-located Worker behind a body-size-capped
+edge must set `server.data_plane_base_url` to an internal address the Worker
+can reach directly (CONFIGURATION.md Section 5.1).
 
 #### Reverse proxy + Let's Encrypt (alternative)
 
