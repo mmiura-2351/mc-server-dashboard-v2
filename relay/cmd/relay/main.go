@@ -140,7 +140,14 @@ func run(ctx context.Context) error {
 	svcCtx, svcStop := context.WithCancel(ctx)
 	defer svcStop()
 
-	logger.Info("relay starting", "game_listen", cfg.Game.Listen, "tunnel_listen", cfg.Tunnel.Listen, "bedrock_tunnel_listen", cfg.Bedrock.TunnelListen)
+	// bedrock_tunnel_listen is only logged when the Bedrock listener is bound
+	// (issue #1590): advertising the port while Bedrock is disabled is
+	// misleading because nothing is listening on it.
+	startArgs := []any{"game_listen", cfg.Game.Listen, "tunnel_listen", cfg.Tunnel.Listen}
+	if cfg.Bedrock.Enabled {
+		startArgs = append(startArgs, "bedrock_tunnel_listen", cfg.Bedrock.TunnelListen)
+	}
+	logger.Info("relay starting", startArgs...)
 
 	var wg sync.WaitGroup
 	wg.Add(4)
