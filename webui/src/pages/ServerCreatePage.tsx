@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router";
 import { ApiError, api, postFormWithProgress } from "../api/client.ts";
 import { apiPath } from "../api/path.ts";
@@ -731,17 +731,24 @@ type PortState =
 
 function usePortCheck(port: string) {
   const [state, setState] = useState<PortState>({ kind: "idle" });
+  // Only the latest issued check may apply its result: blurs on different ports
+  // can resolve out of order and a stale response must not clobber the current
+  // verdict (#1592).
+  const latestRequest = useRef(0);
 
   async function check() {
     if (port === "") {
+      latestRequest.current += 1;
       setState({ kind: "idle" });
       return;
     }
+    const requestId = ++latestRequest.current;
     setState({ kind: "checking" });
     try {
       const result = await api.get(
         apiPath("/api/ports/check/{port}", { port }),
       );
+      if (latestRequest.current !== requestId) return;
       if (result.in_range === false) {
         setState({ kind: "out_of_range" });
       } else if (result.available === true) {
@@ -750,6 +757,7 @@ function usePortCheck(port: string) {
         setState({ kind: "taken" });
       }
     } catch {
+      if (latestRequest.current !== requestId) return;
       setState({ kind: "error" });
     }
   }

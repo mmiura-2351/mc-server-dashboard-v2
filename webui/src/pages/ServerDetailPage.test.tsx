@@ -911,6 +911,64 @@ describe("ServerDetailPage settings", () => {
     ).toBeInTheDocument();
   });
 
+  it("ignores a stale out-of-order port-check response (#1592)", async () => {
+    // Two blurs in quick succession on different ports: the first port's check
+    // resolves *after* the second's. Without a request guard the stale "taken"
+    // verdict for 25570 would clobber the current "available" verdict for 25571.
+    const srv = server({ observed_state: "stopped" });
+    let resolveFirst: (v: unknown) => void = () => {};
+    let resolveSecond: (v: unknown) => void = () => {};
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.endsWith("/resource-pack")) {
+        return Promise.reject(new ApiError(404, { reason: "not_found" }));
+      }
+      if (path === "/api/meta") {
+        return Promise.resolve({
+          relay_enabled: false,
+          default_memory_limit_mb: null,
+          max_memory_limit_mb: null,
+        });
+      }
+      if (path === "/api/ports/check/25570") {
+        return new Promise((resolve) => {
+          resolveFirst = resolve;
+        });
+      }
+      if (path === "/api/ports/check/25571") {
+        return new Promise((resolve) => {
+          resolveSecond = resolve;
+        });
+      }
+      return Promise.resolve(srv);
+    });
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    const portInput = screen.getByDisplayValue("25565");
+    // First blur on 25570 leaves its check pending.
+    fireEvent.change(portInput, { target: { value: "25570" } });
+    fireEvent.blur(portInput);
+    // Second blur on 25571 supersedes it.
+    fireEvent.change(portInput, { target: { value: "25571" } });
+    fireEvent.blur(portInput);
+
+    // The current (second) request resolves first: available.
+    resolveSecond({ port: 25571, in_range: true, available: true });
+    expect(
+      await screen.findByText(t("serverDetail.port.available")),
+    ).toBeInTheDocument();
+
+    // The stale (first) request resolves later as taken — it must be ignored.
+    resolveFirst({ port: 25570, in_range: true, available: false });
+    await waitFor(() =>
+      expect(
+        screen.getByText(t("serverDetail.port.available")),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(t("serverDetail.port.taken"))).toBeNull();
+  });
+
   it("saves name + port + config round-trip via PATCH", async () => {
     mockApi.get.mockResolvedValue(
       server({ observed_state: "stopped", config: { motd: "hi" } }),
