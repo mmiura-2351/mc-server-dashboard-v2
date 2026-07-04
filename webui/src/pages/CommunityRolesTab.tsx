@@ -155,6 +155,7 @@ export function CommunityRolesTab({
         title={t("communitySettings.roles.deleteDialogTitle")}
         body={t("communitySettings.roles.deleteDialogBody")}
         confirmLabel={t("communitySettings.roles.deleteConfirm")}
+        busy={remove.isPending}
         onConfirm={() => {
           if (deleting !== null) {
             remove.mutate(deleting);

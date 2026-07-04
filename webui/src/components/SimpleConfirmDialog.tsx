@@ -10,6 +10,10 @@ interface SimpleConfirmDialogProps {
   title: string;
   body: string;
   confirmLabel: string;
+  // Disables the confirm button while the triggered action is in flight, so a
+  // double-click can't fire the mutation twice (#1591). Call sites that close
+  // the dialog synchronously before mutating pass nothing.
+  busy?: boolean;
   onConfirm: () => void;
   onClose: () => void;
 }
@@ -19,6 +23,7 @@ export function SimpleConfirmDialog({
   title,
   body,
   confirmLabel,
+  busy,
   onConfirm,
   onClose,
 }: SimpleConfirmDialogProps) {
@@ -32,7 +37,12 @@ export function SimpleConfirmDialog({
           <button type="button" className="btn ghost" onClick={onClose}>
             {t("common.cancel")}
           </button>
-          <button type="button" className="btn danger" onClick={onConfirm}>
+          <button
+            type="button"
+            className="btn danger"
+            disabled={busy}
+            onClick={onConfirm}
+          >
             {confirmLabel}
           </button>
         </>
