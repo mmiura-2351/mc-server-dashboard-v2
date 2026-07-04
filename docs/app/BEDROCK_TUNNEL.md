@@ -329,7 +329,8 @@ rules and RELAY.md Section 13 for the sibling Java-path keys):
 
 | Key | Default | Meaning |
 |---|---|---|
-| `bedrock.tunnel_listen` | `:25675` | The public QUIC/UDP address Workers dial to open a Bedrock tunnel. Reuses `tunnel.tls.{cert_file,key_file}` (Section 4); no separate cert/key configuration. |
+| `bedrock.enabled` | `false` | Master switch for this listener (issue #1584). Off by default so a Java-only relay neither binds nor requires the Bedrock UDP ports (this listener and the per-tunnel `bedrock_port` window) on upgrade -- a host-port conflict on either must not take Java joins down. Wired from the same operator setting as the API's `relay.bedrock_enabled`, via `MCD_RELAY_BEDROCK_ENABLED` (compose sets it from `MCD_API_RELAY__BEDROCK_ENABLED`; see `docs/dev/DEPLOYMENT.md` "Relay" for the upgrade note). |
+| `bedrock.tunnel_listen` | `:25675` | The public QUIC/UDP address Workers dial to open a Bedrock tunnel. Reuses `tunnel.tls.{cert_file,key_file}` (Section 4); no separate cert/key configuration. Bound only when `bedrock.enabled` is true. |
 | `bedrock.tunnel_max_conns_per_ip` | `64` | Per-IP concurrent cap on unauthenticated handshake windows on the QUIC listener (Section 8), mirroring `tunnel.max_conns_per_ip` on the TCP tunnel listener (issue #968). |
 | `bedrock.max_flows_per_ip` | `32` | Per-IP concurrent-flow cap on a bound `bedrock_port` (Section 8). |
 | `bedrock.new_flows_per_ip_per_second` | `10` | Per-IP new-flow rate cap on a bound `bedrock_port` (Section 8). |
