@@ -149,6 +149,7 @@ export function CommunityMembersTab({
         title={t("communitySettings.members.removeDialogTitle")}
         body={t("communitySettings.members.removeDialogBody")}
         confirmLabel={t("communitySettings.members.removeConfirm")}
+        busy={remove.isPending}
         onConfirm={() => {
           if (removing !== null) {
             remove.mutate(removing);

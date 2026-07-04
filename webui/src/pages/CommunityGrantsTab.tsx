@@ -235,6 +235,7 @@ export function CommunityGrantsTab({
         title={t("communitySettings.grants.revokeDialogTitle")}
         body={t("communitySettings.grants.revokeDialogBody")}
         confirmLabel={t("communitySettings.grants.revokeConfirm")}
+        busy={revoke.isPending}
         onConfirm={() => {
           if (revoking !== null) {
             revoke.mutate(revoking);
