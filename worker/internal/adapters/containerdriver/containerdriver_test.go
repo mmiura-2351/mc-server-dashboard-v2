@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/rcon"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 )
 
@@ -399,6 +400,160 @@ func TestContainerSampleNoRCON(t *testing.T) {
 	}
 }
 
+// queryPlayerCount dials RCON once and reuses that connection across samples, so
+// the server no longer logs a "Thread RCON Client started/shutting down" pair on
+// every metrics tick (issue #1622).
+func TestQueryPlayerCountReusesConnection(t *testing.T) {
+	ctrl := &fakeMetricsControl{listReply: "There are 4 of a max of 20 players online: a, b, c, d"}
+	var dials int
+	inst := &instance{
+		spec: execution.InstanceSpec{ServerID: "s1"},
+		openControl: func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
+			dials++
+			return ctrl, nil
+		},
+	}
+
+	for tick := 0; tick < 3; tick++ {
+		if got := inst.queryPlayerCount(context.Background()); got != 4 {
+			t.Fatalf("tick %d: player count = %d, want 4", tick, got)
+		}
+	}
+	if dials != 1 {
+		t.Fatalf("dials = %d, want 1 (the connection must be reused across samples)", dials)
+	}
+	if ctrl.closeCount != 0 {
+		t.Fatalf("close count = %d, want 0 (a healthy connection must not be closed between samples)", ctrl.closeCount)
+	}
+}
+
+// A metrics connection poisoned by an Execute error (rcon.ErrConnBroken) is
+// discarded and redialed on the next sample — exactly once, not in a hot loop
+// (issue #1622).
+func TestQueryPlayerCountRedialsAfterPoison(t *testing.T) {
+	broken := &fakeMetricsControl{execErr: rcon.ErrConnBroken}
+	fresh := &fakeMetricsControl{listReply: "There are 2 of a max of 20 players online: a, b"}
+	controls := []execution.ServerControl{broken, fresh}
+	var dials int
+	inst := &instance{
+		spec: execution.InstanceSpec{ServerID: "s1"},
+		openControl: func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
+			// Indexing panics on a third dial, so a hot-loop redial fails the test.
+			ctrl := controls[dials]
+			dials++
+			return ctrl, nil
+		},
+	}
+
+	// The first sample breaks: degrade to 0 and discard the poisoned connection.
+	if got := inst.queryPlayerCount(context.Background()); got != 0 {
+		t.Fatalf("broken sample = %d, want 0", got)
+	}
+	if broken.closeCount != 1 {
+		t.Fatalf("poisoned connection close count = %d, want 1 (it must be discarded)", broken.closeCount)
+	}
+	// The next sample redials once and reads the real count off the fresh connection.
+	if got := inst.queryPlayerCount(context.Background()); got != 2 {
+		t.Fatalf("redial sample = %d, want 2", got)
+	}
+	if dials != 2 {
+		t.Fatalf("dials = %d, want 2 (exactly one redial after a poison)", dials)
+	}
+}
+
+// A dial failure degrades the sample to 0 without caching a connection, so the
+// next tick retries the dial rather than the whole sample failing (issue #1622).
+func TestQueryPlayerCountDegradesToZeroOnDialFailure(t *testing.T) {
+	var dials int
+	inst := &instance{
+		spec: execution.InstanceSpec{ServerID: "s1"},
+		openControl: func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
+			dials++
+			return nil, errors.New("rcon not ready")
+		},
+	}
+
+	for tick := 0; tick < 2; tick++ {
+		if got := inst.queryPlayerCount(context.Background()); got != 0 {
+			t.Fatalf("tick %d: player count = %d, want 0 on dial failure", tick, got)
+		}
+	}
+	if dials != 2 {
+		t.Fatalf("dials = %d, want 2 (a failed dial is retried next tick, not cached)", dials)
+	}
+}
+
+// closeMetricsControl releases the cached connection and latches so a later sample
+// does not redial a connection nobody would close (issue #1622).
+func TestCloseMetricsControlReleasesAndLatches(t *testing.T) {
+	ctrl := &fakeMetricsControl{listReply: "There are 1 of a max of 20 players online: a"}
+	var dials int
+	inst := &instance{
+		spec: execution.InstanceSpec{ServerID: "s1"},
+		openControl: func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
+			dials++
+			return ctrl, nil
+		},
+	}
+
+	if got := inst.queryPlayerCount(context.Background()); got != 1 {
+		t.Fatalf("player count = %d, want 1", got)
+	}
+	inst.closeMetricsControl()
+	if ctrl.closeCount != 1 {
+		t.Fatalf("close count = %d, want 1 (terminal close must release the cached connection)", ctrl.closeCount)
+	}
+	// A late sample after the terminal close must not redial.
+	if got := inst.queryPlayerCount(context.Background()); got != 0 {
+		t.Fatalf("post-close sample = %d, want 0", got)
+	}
+	if dials != 1 {
+		t.Fatalf("dials = %d, want 1 (must not redial after the instance terminated)", dials)
+	}
+}
+
+// supervise closes the cached metrics connection when the container exits, so a
+// persistent RCON connection never leaks past the instance (issue #1622).
+func TestSuperviseClosesMetricsConnection(t *testing.T) {
+	docker := newFakeDocker()
+	docker.stats = ContainerStats{CPUMillis: 10, MemoryBytes: 4096}
+	ctrl := &fakeMetricsControl{
+		listReply: "There are 1 of a max of 20 players online: a",
+		closedCh:  make(chan struct{}),
+	}
+	d := New(docker, images(), func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
+		return ctrl, nil
+	}, Options{
+		WorkerID:         "w1",
+		StopTimeout:      50 * time.Millisecond,
+		GameBindIP:       "0.0.0.0",
+		ReadinessTimeout: 20 * time.Millisecond,
+	})
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	stats, ok := inst.(execution.StatsSource)
+	if !ok {
+		t.Fatal("container instance should be a StatsSource")
+	}
+	if _, err := stats.Sample(context.Background()); err != nil {
+		t.Fatalf("Sample: %v", err)
+	}
+
+	// The container exits; supervise must close the cached metrics connection.
+	docker.exit(0, nil)
+	go drainClosed(inst.Events())
+	select {
+	case <-ctrl.closedCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cached metrics connection was not closed on instance exit")
+	}
+}
+
 func TestParsePlayerCount(t *testing.T) {
 	cases := []struct {
 		reply string
@@ -450,6 +605,38 @@ func (c *fakeControl) Execute(ctx context.Context, line string) (string, error) 
 }
 
 func (c *fakeControl) Close() error { return nil }
+
+// fakeMetricsControl is a ServerControl double for the player-count metrics tests
+// (issue #1622). listReply is returned for "list"; execErr, when set, fails every
+// Execute so a test can drive the poison-and-redial path. Close records the call
+// and, when closedCh is non-nil, signals it once so a lifecycle test can await the
+// terminal release without racing. It is used single-goroutine in the direct unit
+// tests; the lifecycle test only reads closedCh, never closeCount.
+type fakeMetricsControl struct {
+	listReply  string
+	execErr    error
+	closeCount int
+	closeOnce  sync.Once
+	closedCh   chan struct{}
+}
+
+func (c *fakeMetricsControl) Execute(_ context.Context, line string) (string, error) {
+	if c.execErr != nil {
+		return "", c.execErr
+	}
+	if line == "list" {
+		return c.listReply, nil
+	}
+	return "", nil
+}
+
+func (c *fakeMetricsControl) Close() error {
+	c.closeCount++
+	if c.closedCh != nil {
+		c.closeOnce.Do(func() { close(c.closedCh) })
+	}
+	return nil
+}
 
 func images() *ImageSelector {
 	return NewImageSelector(map[int]string{21: "eclipse-temurin:21-jre"})
