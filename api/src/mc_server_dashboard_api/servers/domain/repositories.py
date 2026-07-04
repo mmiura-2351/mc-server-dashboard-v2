@@ -62,6 +62,16 @@ class ServerRepository(abc.ABC):
         """
 
     @abc.abstractmethod
+    async def list_bedrock_ports(self) -> set[int]:
+        """Return the Bedrock UDP ports currently taken across all servers (#1541).
+
+        Deployment-wide, like :meth:`list_game_ports`: a Bedrock port is a
+        deployment resource (one public UDP port per Bedrock-enabled server on
+        the relay). Used on Geyser detection to pick the lowest free in-window
+        port. NULL ports (servers without Geyser) hold no port and are excluded.
+        """
+
+    @abc.abstractmethod
     async def list_slugs(self) -> set[str]:
         """Return all slugs currently taken across all servers (issue #955).
 

@@ -16,6 +16,8 @@ from mc_server_dashboard_api.servers.domain.plugin import (
     PluginSource,
     ServerPlugin,
     content_dir_for_server_type,
+    has_enabled_geyser,
+    is_geyser_plugin,
     loader_type_for_server_type,
     sanitize_plugin_filename,
     working_set_present,
@@ -171,3 +173,122 @@ class TestSanitizePluginFilename:
     def test_dotdot_raises(self) -> None:
         with pytest.raises(ValueError):
             sanitize_plugin_filename("..")
+
+
+class TestIsGeyserPlugin:
+    """Geyser detection drives the bedrock_port lifecycle (issue #1541)."""
+
+    @staticmethod
+    def _plugin(
+        *,
+        mod_identifier: str | None = None,
+        source_project_id: str | None = None,
+    ) -> ServerPlugin:
+        now = dt.datetime.now(tz=dt.timezone.utc)
+        return ServerPlugin(
+            id=PluginId.new(),
+            server_id=ServerId.new(),
+            rel_path="plugins/test.jar",
+            filename="test.jar",
+            display_name="Test Plugin",
+            description=None,
+            loader_type=LoaderType.PLUGIN,
+            source=PluginSource.LOCAL,
+            source_project_id=source_project_id,
+            source_version_id=None,
+            version_number=None,
+            checksum_sha512="abc123",
+            sha256="def456",
+            size_bytes=1024,
+            enabled=True,
+            installed_by=None,
+            created_at=now,
+            updated_at=now,
+            mod_identifier=mod_identifier,
+        )
+
+    def test_manifest_name_matches(self) -> None:
+        assert is_geyser_plugin(self._plugin(mod_identifier="Geyser-Spigot"))
+
+    def test_manifest_name_matches_case_insensitively(self) -> None:
+        assert is_geyser_plugin(self._plugin(mod_identifier="geyser-spigot"))
+
+    def test_modrinth_project_id_matches(self) -> None:
+        assert is_geyser_plugin(self._plugin(source_project_id="wKkoqHrH"))
+
+    def test_modrinth_slug_matches(self) -> None:
+        assert is_geyser_plugin(self._plugin(source_project_id="geyser"))
+
+    def test_other_plugin_does_not_match(self) -> None:
+        assert not is_geyser_plugin(
+            self._plugin(mod_identifier="WorldGuard", source_project_id="proj-1")
+        )
+
+    def test_floodgate_is_not_the_detection_key(self) -> None:
+        # Floodgate is the expected companion but does not own the UDP listener.
+        assert not is_geyser_plugin(self._plugin(mod_identifier="floodgate"))
+
+    def test_no_identity_does_not_match(self) -> None:
+        assert not is_geyser_plugin(self._plugin())
+
+
+class TestHasEnabledGeyser:
+    """The shared tunnel-dispatch / response-gate predicate (issues #1544, #1555)."""
+
+    @staticmethod
+    def _plugin(
+        *,
+        mod_identifier: str | None = None,
+        enabled: bool = True,
+        rel_path: str = "plugins/test.jar",
+    ) -> ServerPlugin:
+        now = dt.datetime.now(tz=dt.timezone.utc)
+        return ServerPlugin(
+            id=PluginId.new(),
+            server_id=ServerId.new(),
+            rel_path=rel_path,
+            filename=rel_path.rsplit("/", 1)[-1],
+            display_name="Test Plugin",
+            description=None,
+            loader_type=LoaderType.PLUGIN,
+            source=PluginSource.LOCAL,
+            source_project_id=None,
+            source_version_id=None,
+            version_number=None,
+            checksum_sha512="abc123",
+            sha256="def456",
+            size_bytes=1024,
+            enabled=enabled,
+            installed_by=None,
+            created_at=now,
+            updated_at=now,
+            mod_identifier=mod_identifier,
+        )
+
+    def test_false_for_no_plugins(self) -> None:
+        assert has_enabled_geyser([]) is False
+
+    def test_false_when_sole_geyser_disabled(self) -> None:
+        plugins = [self._plugin(mod_identifier="Geyser-Spigot", enabled=False)]
+        assert has_enabled_geyser(plugins) is False
+
+    def test_true_when_geyser_enabled(self) -> None:
+        plugins = [self._plugin(mod_identifier="Geyser-Spigot", enabled=True)]
+        assert has_enabled_geyser(plugins) is True
+
+    def test_true_when_one_of_two_geyser_copies_enabled(self) -> None:
+        plugins = [
+            self._plugin(
+                mod_identifier="Geyser-Spigot", enabled=True, rel_path="plugins/a.jar"
+            ),
+            self._plugin(
+                mod_identifier="Geyser-Spigot",
+                enabled=False,
+                rel_path="plugins/b.jar.disabled",
+            ),
+        ]
+        assert has_enabled_geyser(plugins) is True
+
+    def test_false_when_only_non_geyser_plugins_enabled(self) -> None:
+        plugins = [self._plugin(mod_identifier="WorldGuard", enabled=True)]
+        assert has_enabled_geyser(plugins) is False

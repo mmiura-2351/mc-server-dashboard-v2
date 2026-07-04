@@ -23,7 +23,8 @@ from __future__ import annotations
 import datetime as dt
 import os
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
+from contextlib import AbstractContextManager
 from dataclasses import replace as dc_replace
 
 import pytest
@@ -339,6 +340,78 @@ async def test_list_for_server_orders_by_display_name(engine: AsyncEngine) -> No
     async with ServersUnitOfWork(factory) as uow:
         listed = await uow.plugins.list_for_server(server_id)
     assert [p.id for p in listed] == [a.id, z.id]
+
+
+# --- enabled_geyser_server_ids (the batched Bedrock-joinable gate, #1555) ---
+
+
+def _geyser_plugin(
+    server_id: ServerId, *, enabled: bool = True, rel_path: str = "plugins/Geyser.jar"
+) -> ServerPlugin:
+    return dc_replace(
+        _plugin(server_id, rel_path=rel_path, enabled=enabled),
+        mod_identifier="Geyser-Spigot",
+    )
+
+
+async def test_enabled_geyser_server_ids_classifies_each_server(
+    engine: AsyncEngine,
+    assert_max_queries: Callable[[int], AbstractContextManager[None]],
+) -> None:
+    # One query batched across three servers (issue #1555): enabled Geyser,
+    # disabled Geyser, and no plugins at all. Pinned directly by query count
+    # (issue #1563), not just by the single-call shape below.
+    enabled_server = await _seed_server(engine)
+    disabled_server = await _seed_server(engine)
+    bare_server = await _seed_server(engine)
+    factory = create_session_factory(engine)
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.plugins.add(_geyser_plugin(enabled_server, enabled=True))
+        await uow.plugins.add(_geyser_plugin(disabled_server, enabled=False))
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        with assert_max_queries(1):
+            joinable = await uow.plugins.enabled_geyser_server_ids(
+                [enabled_server, disabled_server, bare_server]
+            )
+    assert joinable == {enabled_server}
+
+
+async def test_enabled_geyser_server_ids_true_for_one_of_two_copies_enabled(
+    engine: AsyncEngine,
+) -> None:
+    server_id = await _seed_server(engine)
+    factory = create_session_factory(engine)
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.plugins.add(
+            _geyser_plugin(server_id, enabled=True, rel_path="plugins/a.jar")
+        )
+        await uow.plugins.add(
+            _geyser_plugin(server_id, enabled=False, rel_path="plugins/b.jar.disabled")
+        )
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        joinable = await uow.plugins.enabled_geyser_server_ids([server_id])
+    assert joinable == {server_id}
+
+
+async def test_enabled_geyser_server_ids_empty_for_empty_input(
+    engine: AsyncEngine,
+) -> None:
+    server_id = await _seed_server(engine)
+    factory = create_session_factory(engine)
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.plugins.add(_geyser_plugin(server_id, enabled=True))
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        joinable = await uow.plugins.enabled_geyser_server_ids([])
+    assert joinable == set()
 
 
 async def test_update_rewrites_columns(engine: AsyncEngine) -> None:

@@ -18,6 +18,9 @@ from mc_server_dashboard_api.servers.application.plugin_cache import (
 from mc_server_dashboard_api.servers.application.plugin_manifest import (
     parse_manifest_at_ingest,
 )
+from mc_server_dashboard_api.servers.application.plugins import (
+    allocate_bedrock_port_if_geyser,
+)
 from mc_server_dashboard_api.servers.domain.catalog_provider import (
     CatalogDependency,
     CatalogFile,
@@ -57,6 +60,7 @@ from mc_server_dashboard_api.servers.domain.plugin import (
     working_set_present,
 )
 from mc_server_dashboard_api.servers.domain.plugin_cache_store import PluginCacheStore
+from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -248,7 +252,8 @@ class InstallFromCatalog:
     """Download a catalog version and install it into the server's content dir.
 
     Follows the same at-rest gate, lifecycle-lock, entity-creation, and
-    UoW-commit pattern as :class:`InstallPlugin`.
+    UoW-commit pattern as :class:`InstallPlugin`, including Geyser detection
+    against ``bedrock_port_range`` (issue #1541, ``None`` = gate off).
     """
 
     uow: UnitOfWork
@@ -257,6 +262,7 @@ class InstallFromCatalog:
     cache: PluginCacheStore
     clock: Clock
     lifecycle_lock: LifecycleLock = NullLifecycleLock()
+    bedrock_port_range: PortRange | None = None
 
     async def __call__(
         self,
@@ -349,16 +355,6 @@ class InstallFromCatalog:
                 if by_project is not None:
                     raise PluginAlreadyExistsError(project_id)
 
-                # Side-aware deploy: a client-only mod is cached + recorded but
-                # never placed in the running working set (issue #1308).
-                if working_set_present(enabled=True, side=side):
-                    await self.file_store.write_file(
-                        community_id=community_id,
-                        server_id=server_id,
-                        rel_path=rel_path,
-                        content=content,
-                    )
-
                 now = self.clock.now()
                 plugin = ServerPlugin(
                     id=PluginId.new(),
@@ -387,6 +383,30 @@ class InstallFromCatalog:
                     catalog_dependencies=catalog_dependencies,
                 )
                 await self.uow.plugins.add(plugin)
+                # Geyser detection (issue #1541): a Geyser install switches the
+                # server Bedrock-on, allocating its public UDP port in the same
+                # transaction as the plugin row.
+                await allocate_bedrock_port_if_geyser(
+                    self.uow,
+                    server=server,
+                    plugin=plugin,
+                    port_range=self.bedrock_port_range,
+                    now=now,
+                )
+                # Side-aware deploy: a client-only mod is cached + recorded but
+                # never placed in the running working set (issue #1308). The
+                # write is the LAST step before commit: the file store is
+                # outside the SQL transaction, so any failure above (e.g.
+                # Bedrock-window exhaustion, #1541) must abort before the jar
+                # lands on disk — a write-then-fail would orphan a working-set
+                # jar with no DB row.
+                if working_set_present(enabled=True, side=side):
+                    await self.file_store.write_file(
+                        community_id=community_id,
+                        server_id=server_id,
+                        rel_path=rel_path,
+                        content=content,
+                    )
                 await self.uow.commit()
                 return plugin
 

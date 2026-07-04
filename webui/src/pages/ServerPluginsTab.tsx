@@ -54,6 +54,19 @@ function isModLoader(serverType: string): boolean {
   return serverType === "fabric" || serverType === "forge";
 }
 
+// Geyser detection mirrors the backend is_geyser_plugin (issue #1541): the
+// case-insensitive manifest identifier, OR the Modrinth Geyser project id/slug.
+const GEYSER_MOD_IDENTIFIERS = new Set(["geyser-spigot"]);
+const GEYSER_MODRINTH_PROJECT_IDS = new Set(["wKkoqHrH", "geyser"]);
+
+/** Whether a plugin is the Geyser Bedrock translator (mirrors backend). */
+function isGeyserPlugin(p: PluginResponse): boolean {
+  return (
+    GEYSER_MOD_IDENTIFIERS.has((p.mod_identifier ?? "").toLowerCase()) ||
+    GEYSER_MODRINTH_PROJECT_IDS.has(p.source_project_id ?? "")
+  );
+}
+
 /** The loader-aware content noun in its three grammatical forms (#1320). */
 interface ContentNoun {
   plural: string;
@@ -186,6 +199,13 @@ export function ServerPluginsTab({
           server_id: serverId,
         }),
       ),
+  });
+
+  // Deployment's Bedrock discovery flag (issue #1543). The meta query is
+  // shared with the create/detail pages via react-query's cache.
+  const metaQuery = useQuery({
+    queryKey: ["meta"],
+    queryFn: () => api.get("/api/meta"),
   });
 
   const updatesQuery = useQuery({
@@ -396,6 +416,21 @@ export function ServerPluginsTab({
           {tn("plugins.serverNotStopped")}
         </p>
       )}
+
+      {server.server_type === "paper" &&
+        metaQuery.data?.bedrock_enabled === true &&
+        plugins.some(isGeyserPlugin) && (
+          <p className="field-hint plugins-notice">
+            {t("plugins.bedrockHint.text")}{" "}
+            <a
+              href="https://geysermc.org/download#floodgate"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              {t("plugins.bedrockHint.link")}
+            </a>
+          </p>
+        )}
 
       {(canManage || (hasClientMods && showSide)) && (
         <div className="plugins-toolbar">

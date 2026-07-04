@@ -444,3 +444,67 @@ class SessionEnd(_message.Message):
     def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___SessionEnd: _TypeAlias = SessionEnd  # noqa: Y015
+
+@_typing.final
+class ValidateBedrockTunnelRequest(_message.Message):
+    """---------------------------------------------------------------------------
+    ValidateBedrockTunnel (epic #1540, issue #1544)
+    ---------------------------------------------------------------------------
+
+    ValidateBedrockTunnelRequest carries the credential a Worker presented on
+    its Bedrock QUIC dial-out, for the relay to confirm against the API
+    (mcsd.controlplane.v1.OpenBedrockTunnel carries the same three values to
+    the Worker).
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SERVER_ID_FIELD_NUMBER: _builtins.int
+    BEDROCK_PORT_FIELD_NUMBER: _builtins.int
+    TOKEN_FIELD_NUMBER: _builtins.int
+    server_id: _builtins.str
+    """server_id identifies the local server the dial claims to be for."""
+    bedrock_port: _builtins.int
+    """bedrock_port is the public UDP port the dial claims to serve."""
+    token: _builtins.str
+    """token is the credential the Worker presented on the QUIC dial-out."""
+    def __init__(
+        self,
+        *,
+        server_id: _builtins.str = ...,
+        bedrock_port: _builtins.int = ...,
+        token: _builtins.str = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["bedrock_port", b"bedrock_port", "server_id", b"server_id", "token", b"token"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+    def WhichOneof(self, oneof_group: _Never) -> None: ...
+
+Global___ValidateBedrockTunnelRequest: _TypeAlias = ValidateBedrockTunnelRequest  # noqa: Y015
+
+@_typing.final
+class ValidateBedrockTunnelResponse(_message.Message):
+    """ValidateBedrockTunnelResponse reports whether the presented credential
+    matches the tunnel the API currently has open for that server.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    VALID_FIELD_NUMBER: _builtins.int
+    valid: _builtins.bool
+    """valid is true when (server_id, bedrock_port, token) matches the API's
+    current record for an open Bedrock tunnel on that server.
+    """
+    def __init__(
+        self,
+        *,
+        valid: _builtins.bool = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["valid", b"valid"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+    def WhichOneof(self, oneof_group: _Never) -> None: ...
+
+Global___ValidateBedrockTunnelResponse: _TypeAlias = ValidateBedrockTunnelResponse  # noqa: Y015

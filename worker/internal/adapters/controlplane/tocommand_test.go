@@ -216,6 +216,53 @@ func TestToCommandMapsTunnelDial(t *testing.T) {
 	}
 }
 
+// OpenBedrockTunnel / CloseBedrockTunnel (issue #1544) carry the credential the
+// bedrocktunnel QUIC client (issue #1546) dials the relay with; toCommand must
+// map both the Kind and the payload fields the instancemanager handler needs.
+func TestToCommandMapsOpenBedrockTunnel(t *testing.T) {
+	cmd := toCommand(&controlplanev1.ApiCommand{
+		CommandId: "c7",
+		ServerId:  "s1",
+		Command: &controlplanev1.ApiCommand_OpenBedrockTunnel{
+			OpenBedrockTunnel: &controlplanev1.OpenBedrockTunnel{
+				ServerId:      "s1",
+				RelayEndpoint: "relay.example:25675",
+				BedrockPort:   19132,
+				Token:         "tok-abc",
+				TlsCaPem:      "ca-pem",
+			},
+		},
+	})
+	if cmd.Kind != "OpenBedrockTunnel" {
+		t.Fatalf("Kind = %q, want OpenBedrockTunnel", cmd.Kind)
+	}
+	if cmd.BedrockRelayEndpoint != "relay.example:25675" {
+		t.Fatalf("BedrockRelayEndpoint = %q, want relay.example:25675", cmd.BedrockRelayEndpoint)
+	}
+	if cmd.BedrockPort != 19132 {
+		t.Fatalf("BedrockPort = %d, want 19132", cmd.BedrockPort)
+	}
+	if cmd.BedrockToken != "tok-abc" {
+		t.Fatalf("BedrockToken = %q, want tok-abc", cmd.BedrockToken)
+	}
+	if cmd.BedrockCAPEM != "ca-pem" {
+		t.Fatalf("BedrockCAPEM = %q, want ca-pem", cmd.BedrockCAPEM)
+	}
+}
+
+func TestToCommandMapsCloseBedrockTunnelKind(t *testing.T) {
+	cmd := toCommand(&controlplanev1.ApiCommand{
+		CommandId: "c8",
+		ServerId:  "s1",
+		Command: &controlplanev1.ApiCommand_CloseBedrockTunnel{
+			CloseBedrockTunnel: &controlplanev1.CloseBedrockTunnel{ServerId: "s1"},
+		},
+	})
+	if cmd.Kind != "CloseBedrockTunnel" {
+		t.Fatalf("Kind = %q, want CloseBedrockTunnel", cmd.Kind)
+	}
+}
+
 func TestToFileListingMapsEntries(t *testing.T) {
 	wire := toFileListing(&session.FileListing{
 		Entries: []session.FileEntry{

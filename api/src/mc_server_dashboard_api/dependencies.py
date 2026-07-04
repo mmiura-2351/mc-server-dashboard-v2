@@ -185,6 +185,9 @@ from mc_server_dashboard_api.servers.adapters.backup_author_directory import (
 from mc_server_dashboard_api.servers.adapters.backup_store import (
     StorageBackupStoreAdapter,
 )
+from mc_server_dashboard_api.servers.adapters.bedrock_tunnel_credentials import (
+    FleetBedrockTunnelCredentials,
+)
 from mc_server_dashboard_api.servers.adapters.clock import (
     SystemClock as ServersSystemClock,
 )
@@ -271,6 +274,7 @@ from mc_server_dashboard_api.servers.application.lifecycle import (
     StopServer,
 )
 from mc_server_dashboard_api.servers.application.manage_server import (
+    BedrockJoinability,
     CreateServer,
     DeleteServer,
     ListServers,
@@ -309,6 +313,10 @@ from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
 )
 from mc_server_dashboard_api.servers.domain.backup_store import (
     BackupArchiveStore,
+)
+from mc_server_dashboard_api.servers.domain.bedrock_tunnel import (
+    BedrockTunnelCredentials,
+    NullBedrockTunnelCredentials,
 )
 from mc_server_dashboard_api.servers.domain.catalog_provider import (
     CatalogProvider,
@@ -1287,6 +1295,18 @@ def get_list_servers(request: Request) -> ListServers:
     return ListServers(uow=ServersUnitOfWork(session_factory))
 
 
+def get_bedrock_joinability(request: Request) -> BedrockJoinability:
+    """Assemble the :class:`BedrockJoinability` gate (issue #1555).
+
+    Used by the servers response builders to decide whether
+    ``bedrock_address``/``bedrock_port`` should be surfaced: only when the server
+    also carries an enabled Geyser copy, not merely an allocated port.
+    """
+
+    session_factory = create_session_factory(get_engine(request))
+    return BedrockJoinability(uow=ServersUnitOfWork(session_factory))
+
+
 def get_update_server(
     request: Request,
     file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
@@ -1443,6 +1463,29 @@ def _port_range(request: Request) -> PortRange:
         else frozenset()
     )
     return PortRange(start=ports.range_start, end=ports.range_end, reserved=reserved)
+
+
+def _bedrock_port_range(request: Request) -> PortRange | None:
+    """The assignable Bedrock UDP window, or ``None`` when the gate is off (#1541).
+
+    The deployment gate is ``relay.enabled`` AND ``relay.bedrock_enabled``: a
+    public Bedrock UDP port only exists on the relay's ingress, so without that
+    path a Geyser install must not allocate one. When on, the relay's Bedrock
+    tunnel UDP listener port is excluded from the window like the relay's TCP
+    binds in :func:`_port_range` (issue #1002 pattern); ``PortRange`` ignores it
+    when it falls outside the window.
+    """
+
+    settings = get_settings(request)
+    relay = settings.relay
+    if not (relay.enabled and relay.bedrock_enabled):
+        return None
+    ports = settings.ports
+    return PortRange(
+        start=ports.bedrock_range_start,
+        end=ports.bedrock_range_end,
+        reserved=frozenset({relay.bedrock_tunnel_port}),
+    )
 
 
 def get_check_port(request: Request) -> CheckPort:
@@ -1730,12 +1773,15 @@ def get_import_server(
     Composes :class:`CreateServer` so import reuses the SAME validation (version
     validator, edition, name uniqueness) and the #243 port auto-assign, and binds
     the file seam so the archive contents publish as the new working set through
-    the hardened extraction.
+    the hardened extraction. ``bedrock_port_range`` wires the same Bedrock
+    deployment gate as the two install paths (issue #1551), so a re-created
+    Geyser plugin allocates the imported server's ``bedrock_port``.
     """
 
     return ImportServer(
         create_server=create_server,
         file_store=file_store,
+        bedrock_port_range=_bedrock_port_range(request),
     )
 
 
@@ -1802,6 +1848,20 @@ def get_servers_backup_store(
     return StorageBackupStoreAdapter(storage=storage)
 
 
+def get_bedrock_tunnel_credentials(request: Request) -> BedrockTunnelCredentials:
+    """Bind the delete-time tunnel-credential eviction to the fleet table (#1544).
+
+    Reads the process-local ``BedrockTunnelTable`` the app factory stored on app
+    state. Falls back to a no-op if it is absent (a minimal test app that never
+    built the relay state), so the delete path never fails on a missing table.
+    """
+
+    table = getattr(request.app.state, "bedrock_tunnel_table", None)
+    if table is None:
+        return NullBedrockTunnelCredentials()
+    return FleetBedrockTunnelCredentials(table)
+
+
 def get_delete_server(
     request: Request,
     backup_store: Annotated[BackupArchiveStore, Depends(get_servers_backup_store)],
@@ -1809,7 +1869,9 @@ def get_delete_server(
     """Assemble the :class:`DeleteServer` use case (server:delete).
 
     Binds the Storage backup seam so the delete can prune the server's archives and
-    pack its working set into the retained final tar.gz (issue #777).
+    pack its working set into the retained final tar.gz (issue #777), and the
+    fleet tunnel-credential table so the delete forgets the server's Bedrock
+    tunnel credential (issue #1544).
     """
 
     session_factory = create_session_factory(get_engine(request))
@@ -1817,6 +1879,7 @@ def get_delete_server(
         uow=ServersUnitOfWork(session_factory),
         backup_store=backup_store,
         lifecycle_lock=get_lifecycle_lock(request),
+        bedrock_tunnel=get_bedrock_tunnel_credentials(request),
     )
 
 
@@ -1982,6 +2045,7 @@ def get_install_plugin(
         cache=cache,
         clock=ServersSystemClock(),
         lifecycle_lock=get_lifecycle_lock(request),
+        bedrock_port_range=_bedrock_port_range(request),
     )
 
 
@@ -1995,6 +2059,7 @@ def get_remove_plugin(
     return RemovePlugin(
         uow=ServersUnitOfWork(session_factory),
         file_store=file_store,
+        clock=ServersSystemClock(),
         lifecycle_lock=get_lifecycle_lock(request),
     )
 
@@ -2110,6 +2175,7 @@ def get_install_from_catalog(
         cache=cache,
         clock=ServersSystemClock(),
         lifecycle_lock=get_lifecycle_lock(request),
+        bedrock_port_range=_bedrock_port_range(request),
     )
 
 

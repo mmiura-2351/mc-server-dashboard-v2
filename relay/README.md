@@ -7,6 +7,10 @@ outbound TLS dial-back, and splices the two TCP connections. It holds no
 persistent state. See [`docs/app/RELAY.md`](../docs/app/RELAY.md) for the full
 design (epic #659); this README covers build, test, lint, configure, and run.
 
+The relay also carries **Bedrock** (RakNet/UDP) traffic over a separate QUIC
+tunnel + per-server public UDP ingress (epic #1540); see
+[`docs/app/BEDROCK_TUNNEL.md`](../docs/app/BEDROCK_TUNNEL.md).
+
 ## Layout
 
 Hexagonal layering (ARCHITECTURE.md Section 2) applied to Go, mirroring
@@ -19,22 +23,26 @@ relay/
     ├── mc/                # the tiny plaintext Minecraft protocol slice
     ├── game/              # public player listener, hostname routing, status cache, IP caps
     ├── tunnel/            # TLS dial-back listener + single-use token rendezvous
+    ├── bedrock/           # Bedrock QUIC tunnel listener + UDP ingress + flow table (docs/app/BEDROCK_TUNNEL.md)
     ├── splice/            # bidirectional byte splice with half-close propagation
     ├── session/           # session id minting + batched ReportSessions
     ├── relaysvc/          # Register-with-backoff loop + learned base_domain
-    ├── genproto/          # generated mcsd.relay.v1 stubs (see below)
+    ├── ipcaps/            # per-IP hygiene caps shared by the internet-exposed listeners
+    ├── genproto/          # generated mcsd.relay.v1 / mcsd.bedrocktunnel.v1 stubs (see below)
     └── adapters/
         ├── apiclient/     # gRPC client for the API's RelayService
         └── config/        # TOML + MCD_RELAY_ env config loader
 ```
 
 The generated relay gRPC stubs are checked in under `internal/genproto/`
-(package `relayv1`). The relay is a separate Go module, so it cannot import the
-worker module's `internal/controlplane/` copy of the same package — Go's
-`internal/` rule bars cross-module imports. The relay therefore generates its
-own copy from the same `proto/mcsd/relay/v1/relay.proto`, via a dedicated buf
-template (`proto/buf.gen.relay.yaml`). Do not edit the stubs by hand;
-regenerate with `make proto-gen` from the repo root.
+(package `relayv1`, plus `bedrocktunnelv1` for the Worker<->relay handshake
+messages -- not a gRPC service, see the proto file's package doc comment). The
+relay is a separate Go module, so it cannot import the worker module's
+`internal/controlplane/` copy of the same packages — Go's `internal/` rule
+bars cross-module imports. The relay therefore generates its own copies from
+`proto/mcsd/relay/v1/relay.proto` and `proto/mcsd/bedrocktunnel/v1/bedrock_tunnel.proto`,
+via a dedicated buf template (`proto/buf.gen.relay.yaml`). Do not edit the
+stubs by hand; regenerate with `make proto-gen` from the repo root.
 
 ## Toolchain
 
@@ -51,6 +59,7 @@ make relay-lint         # gofmt check + go vet + golangci-lint
 make relay-test         # go test ./...
 make relay-test-race    # go test -race ./... (CI gate)
 make relay-e2e          # protocol-level E2E vs the real compose stack (issue #962)
+make bedrock-e2e        # Bedrock tunnel protocol-level E2E (epic #1540, issue #1547)
 ```
 
 `make relay-e2e` runs the protocol-level acceptance suite (issue #962): it brings
@@ -75,6 +84,15 @@ time. The API container therefore needs outbound HTTPS access to Mojang's
 version manifest host.
 This is fine on GitHub-hosted runners but will fail on network-isolated CI
 environments.
+
+`make bedrock-e2e` runs the Bedrock relay tunnel protocol-level suite (epic
+#1540, issue #1547): the real `internal/bedrock.Listener` against the real
+worker's `bedrocktunnel.Manager` and a real Docker container running a
+fake-Geyser RakNet responder. It needs neither Postgres nor the API — see
+[`test/e2e/bedrock_relay_e2e_test.go`](test/e2e/bedrock_relay_e2e_test.go)'s
+package doc comment and [`../worker/README.md`](../worker/README.md#bedrock-relay-tunnel-e2e)
+for the full picture; orchestration lives in
+[`../scripts/run_bedrock_e2e.sh`](../scripts/run_bedrock_e2e.sh).
 
 ## Configuration
 

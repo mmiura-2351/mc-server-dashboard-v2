@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 import secrets
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from typing import Any
@@ -30,6 +30,10 @@ from mc_server_dashboard_api.servers.domain.backup_schedule import (
     schedule_from_config,
 )
 from mc_server_dashboard_api.servers.domain.backup_store import BackupArchiveStore
+from mc_server_dashboard_api.servers.domain.bedrock_tunnel import (
+    BedrockTunnelCredentials,
+    NullBedrockTunnelCredentials,
+)
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.cpu_allocation import (
     CPU_ALLOCATION_CONFIG_KEY,
@@ -58,6 +62,7 @@ from mc_server_dashboard_api.servers.domain.memory_limit import (
     MEMORY_LIMIT_CONFIG_KEY,
     memory_limit_from_config,
 )
+from mc_server_dashboard_api.servers.domain.plugin import has_enabled_geyser
 from mc_server_dashboard_api.servers.domain.ports import (
     PortRange,
     pick_lowest_free_port,
@@ -458,6 +463,37 @@ class ListServers:
 
 
 @dataclass(frozen=True)
+class BedrockJoinability:
+    """Whether a server's Bedrock response fields should be surfaced (issue #1555).
+
+    ``ServerResponse.bedrock_address``/``bedrock_port`` are non-null only when the
+    server ALSO carries at least one *enabled* Geyser copy -- a disabled Geyser is
+    not listening on its RakNet port, so surfacing the address would advertise a
+    join target nothing answers. This uses the same ``has_enabled_geyser``
+    predicate as the Bedrock tunnel dispatch skip
+    (``ServersServerStateSink._sync_bedrock_tunnel``, issue #1544), so the two
+    never drift on what counts as "Bedrock enabled".
+
+    Two entry points: :meth:`for_server` for the single-server response
+    endpoints, :meth:`for_servers` batched for the servers list endpoint (so
+    listing does not add one plugin query per server).
+    """
+
+    uow: UnitOfWork
+
+    async def for_server(self, server_id: ServerId) -> bool:
+        async with self.uow:
+            plugins = await self.uow.plugins.list_for_server(server_id)
+        return has_enabled_geyser(plugins)
+
+    async def for_servers(
+        self, server_ids: Sequence[ServerId]
+    ) -> AbstractSet[ServerId]:
+        async with self.uow:
+            return await self.uow.plugins.enabled_geyser_server_ids(server_ids)
+
+
+@dataclass(frozen=True)
 class UpdateServer:
     """Edit a server's name/config/game port (server:update).
 
@@ -797,6 +833,10 @@ class DeleteServer:
     uow: UnitOfWork
     backup_store: BackupArchiveStore
     lifecycle_lock: LifecycleLock = NullLifecycleLock()
+    # Forget the server's in-memory Bedrock tunnel credential on delete (issue
+    # #1544), or a stale entry lingers and keeps validating for a gone server.
+    # Defaults to a no-op so non-relay construction sites need not wire it.
+    bedrock_tunnel: BedrockTunnelCredentials = NullBedrockTunnelCredentials()
 
     async def __call__(self, *, community_id: CommunityId, server_id: ServerId) -> None:
         # Hold the per-server lifecycle lock across the at-rest check, the
@@ -852,3 +892,9 @@ class DeleteServer:
                     _SERVER_RESOURCE_TYPE, server_id.value
                 )
                 await self.uow.commit()
+        # Forget the deleted server's Bedrock tunnel credential (issue #1544).
+        # After the commit and outside the lock: the row is gone, so an at-rest
+        # server that had a lingering entry (e.g. left at observed=unknown) can
+        # never re-mint it, and evicting before a failed commit would drop a
+        # still-live server's credential. Idempotent when none is held.
+        self.bedrock_tunnel.close(server_id)

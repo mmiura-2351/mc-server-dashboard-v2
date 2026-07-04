@@ -12,8 +12,12 @@ import datetime as dt
 from typing import Any, cast
 
 from sqlalchemy import CursorResult, and_, delete, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from mc_server_dashboard_api.servers.adapters.integrity import (
+    translate_integrity_error,
+)
 from mc_server_dashboard_api.servers.adapters.models import ServerModel
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.memory_limit import memory_limit_from_config
@@ -39,6 +43,7 @@ def _to_server(row: ServerModel) -> Server:
         server_type=ServerType(row.server_type),
         config=dict(row.config),
         game_port=row.game_port,
+        bedrock_port=row.bedrock_port,
         slug=row.slug,
         desired_state=DesiredState(row.desired_state),
         observed_state=ObservedState(row.observed_state),
@@ -68,6 +73,7 @@ class SqlAlchemyServerRepository(ServerRepository):
                 server_type=server.server_type.value,
                 config=server.config,
                 game_port=server.game_port,
+                bedrock_port=server.bedrock_port,
                 slug=server.slug,
                 desired_state=server.desired_state.value,
                 observed_state=server.observed_state.value,
@@ -106,6 +112,13 @@ class SqlAlchemyServerRepository(ServerRepository):
         rows = (await self._session.execute(stmt)).scalars().all()
         return {port for port in rows if port is not None}
 
+    async def list_bedrock_ports(self) -> set[int]:
+        stmt = select(ServerModel.bedrock_port).where(
+            ServerModel.bedrock_port.is_not(None)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return {port for port in rows if port is not None}
+
     async def list_ids_missing_game_port(self) -> list[ServerId]:
         stmt = select(ServerModel.id).where(ServerModel.game_port.is_(None))
         rows = (await self._session.execute(stmt)).scalars().all()
@@ -122,13 +135,26 @@ class SqlAlchemyServerRepository(ServerRepository):
                 # write for name/config-only edits that leave it unchanged. The
                 # deployment-wide UNIQUE(game_port) backstops a concurrent racer.
                 game_port=server.game_port,
+                # Persist the (possibly allocated/released) Bedrock port (issue
+                # #1541); a no-op write when unchanged. UNIQUE(bedrock_port)
+                # backstops a concurrent racer.
+                bedrock_port=server.bedrock_port,
                 # Persist the (possibly renamed) slug (issue #955); a no-op write
                 # for non-slug edits. The deployment-wide UNIQUE(slug) backstops.
                 slug=server.slug,
                 updated_at=server.updated_at,
             )
         )
-        await self._session.execute(stmt)
+        try:
+            await self._session.execute(stmt)
+        except IntegrityError as exc:
+            # An UPDATE violates its unique backstop at execute time, inside the
+            # transaction (unlike a staged INSERT, which flushes at commit), so
+            # the constraint -> domain-error translation must run here for a
+            # concurrent racer to surface typed (409) rather than as a raw 500.
+            # The enclosing UnitOfWork rolls the transaction back on exit.
+            translate_integrity_error(exc)
+            raise
 
     async def list_slugs(self) -> set[str]:
         stmt = select(ServerModel.slug).where(ServerModel.slug != "")

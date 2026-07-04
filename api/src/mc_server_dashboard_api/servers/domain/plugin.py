@@ -16,6 +16,7 @@ from __future__ import annotations
 import datetime as dt
 import enum
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Literal
@@ -137,6 +138,49 @@ class ServerPlugin:
     mc_versions: list[str] = field(default_factory=list)
     side: PluginSide = "both"
     catalog_dependencies: list[dict[str, object]] = field(default_factory=list)
+
+
+# Geyser detection (issue #1541): installing Geyser as a normal plugin IS the
+# Bedrock enablement switch, so ingest recognizes it by the identity the jar
+# declares. The manifest name parsed at ingest (``plugin.yml`` ``name`` for
+# Paper) is the primary signal, compared case-insensitively. Paper-only in v1;
+# add the Fabric/Forge Geyser mod ids here when those loaders gain Bedrock
+# support (epic #1540).
+_GEYSER_MOD_IDENTIFIERS = frozenset({"geyser-spigot"})
+# Secondary signal for catalog installs whose jar carried no readable manifest:
+# the Modrinth Geyser project (https://modrinth.com/plugin/geyser). Installs may
+# reference the project by its immutable id or its slug, and the plugin row
+# stores whichever was used.
+_GEYSER_MODRINTH_PROJECT_IDS = frozenset({"wKkoqHrH", "geyser"})
+
+
+def is_geyser_plugin(plugin: ServerPlugin) -> bool:
+    """Whether ``plugin`` is the Geyser Bedrock translator (issue #1541).
+
+    Geyser presence drives the server's ``bedrock_port`` lifecycle: detected on
+    install (allocate) and on uninstall (release). Floodgate is the expected
+    companion but is NOT the detection key -- the network path hangs off Geyser,
+    which owns the UDP listener.
+    """
+
+    identifier = (plugin.mod_identifier or "").lower()
+    if identifier in _GEYSER_MOD_IDENTIFIERS:
+        return True
+    return plugin.source_project_id in _GEYSER_MODRINTH_PROJECT_IDS
+
+
+def has_enabled_geyser(plugins: Iterable[ServerPlugin]) -> bool:
+    """Whether ``plugins`` contains at least one *enabled* Geyser copy.
+
+    The single predicate behind two independent "is this server actually
+    Bedrock-reachable" checks that must not drift apart (issue #1555): the
+    Bedrock tunnel dispatch skip (``ServersServerStateSink._sync_bedrock_tunnel``,
+    issue #1544) and the ``ServerResponse`` ``bedrock_address``/``bedrock_port``
+    surfacing gate. A disabled Geyser is not listening on its RakNet port, so
+    neither the tunnel nor the response should treat the server as joinable.
+    """
+
+    return any(p.enabled and is_geyser_plugin(p) for p in plugins)
 
 
 def working_set_present(*, enabled: bool, side: PluginSide) -> bool:

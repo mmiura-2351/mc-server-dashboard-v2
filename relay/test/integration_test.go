@@ -138,8 +138,8 @@ func newHarness(t *testing.T) *harness {
 
 	tokens := tunnel.NewTokenTable(10*time.Second, time.Now)
 	cache := game.NewStatusCache(5*time.Second, 1024, time.Now)
-	caps := ipcaps.NewIPCaps(32, 10, 0, time.Now)
-	tunnelCaps := ipcaps.NewIPCaps(64, 0, 0, time.Now)
+	caps := ipcaps.NewIPCaps(32, 10, 0, time.Now, logger)
+	tunnelCaps := ipcaps.NewIPCaps(64, 0, 0, time.Now, logger)
 
 	tunnelLn, err := tunnel.NewListener("127.0.0.1:0", selfSignedTLS(t), tokens, tunnelCaps, logger)
 	if err != nil {

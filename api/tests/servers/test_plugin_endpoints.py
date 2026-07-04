@@ -71,6 +71,8 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidPluginSideError,
     PluginAlreadyExistsError,
     PluginNotFoundError,
+    PortAlreadyTakenError,
+    PortRangeExhaustedError,
     ServerBusyError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
@@ -370,6 +372,41 @@ def test_install_plugin_already_exists_is_409() -> None:
     )
     assert resp.status_code == 409
     assert resp.json()["reason"] == "plugin_already_exists"
+
+
+def test_install_plugin_bedrock_window_exhausted_is_503() -> None:
+    # A Geyser install that found no free Bedrock UDP port (issue #1541).
+    app = _app(
+        member=True,
+        allow=True,
+        install=_FakeInstall(error=PortRangeExhaustedError("19132-19231")),
+    )
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4()),
+        data={"display_name": "Geyser"},
+        files={"file": ("geyser.jar", b"jar-bytes", "application/java-archive")},
+    )
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "bedrock_port_range_exhausted"
+
+
+def test_install_plugin_bedrock_port_race_is_409() -> None:
+    # The UNIQUE(bedrock_port) backstop on a concurrent allocation, translated
+    # by the adapter to the typed domain error (issue #1541).
+    app = _app(
+        member=True,
+        allow=True,
+        install=_FakeInstall(error=PortAlreadyTakenError("uq_server_bedrock_port")),
+    )
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4()),
+        data={"display_name": "Geyser"},
+        files={"file": ("geyser.jar", b"jar-bytes", "application/java-archive")},
+    )
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "bedrock_port_taken"
 
 
 def test_install_plugin_empty_display_name_is_422() -> None:

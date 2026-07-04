@@ -17,7 +17,7 @@ import (
 var handledKinds = []string{
 	"StartServer", "StopServer", "RestartServer", "ServerCommand",
 	"HydrateTrigger", "SnapshotTrigger", "ReadFile", "EditFile", "ListFiles",
-	"TunnelDial",
+	"TunnelDial", "OpenBedrockTunnel", "CloseBedrockTunnel",
 }
 
 // unhandledPrefix is the message Manager.Handle returns for a kind its switch

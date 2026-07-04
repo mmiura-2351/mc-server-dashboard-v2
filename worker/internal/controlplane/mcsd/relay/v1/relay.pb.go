@@ -758,6 +758,121 @@ func (x *SessionEnd) GetEndedAt() *timestamppb.Timestamp {
 	return nil
 }
 
+// ValidateBedrockTunnelRequest carries the credential a Worker presented on
+// its Bedrock QUIC dial-out, for the relay to confirm against the API
+// (mcsd.controlplane.v1.OpenBedrockTunnel carries the same three values to
+// the Worker).
+type ValidateBedrockTunnelRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// server_id identifies the local server the dial claims to be for.
+	ServerId string `protobuf:"bytes,1,opt,name=server_id,json=serverId,proto3" json:"server_id,omitempty"`
+	// bedrock_port is the public UDP port the dial claims to serve.
+	BedrockPort uint32 `protobuf:"varint,2,opt,name=bedrock_port,json=bedrockPort,proto3" json:"bedrock_port,omitempty"`
+	// token is the credential the Worker presented on the QUIC dial-out.
+	Token         string `protobuf:"bytes,3,opt,name=token,proto3" json:"token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ValidateBedrockTunnelRequest) Reset() {
+	*x = ValidateBedrockTunnelRequest{}
+	mi := &file_mcsd_relay_v1_relay_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ValidateBedrockTunnelRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ValidateBedrockTunnelRequest) ProtoMessage() {}
+
+func (x *ValidateBedrockTunnelRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_mcsd_relay_v1_relay_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ValidateBedrockTunnelRequest.ProtoReflect.Descriptor instead.
+func (*ValidateBedrockTunnelRequest) Descriptor() ([]byte, []int) {
+	return file_mcsd_relay_v1_relay_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *ValidateBedrockTunnelRequest) GetServerId() string {
+	if x != nil {
+		return x.ServerId
+	}
+	return ""
+}
+
+func (x *ValidateBedrockTunnelRequest) GetBedrockPort() uint32 {
+	if x != nil {
+		return x.BedrockPort
+	}
+	return 0
+}
+
+func (x *ValidateBedrockTunnelRequest) GetToken() string {
+	if x != nil {
+		return x.Token
+	}
+	return ""
+}
+
+// ValidateBedrockTunnelResponse reports whether the presented credential
+// matches the tunnel the API currently has open for that server.
+type ValidateBedrockTunnelResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// valid is true when (server_id, bedrock_port, token) matches the API's
+	// current record for an open Bedrock tunnel on that server.
+	Valid         bool `protobuf:"varint,1,opt,name=valid,proto3" json:"valid,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ValidateBedrockTunnelResponse) Reset() {
+	*x = ValidateBedrockTunnelResponse{}
+	mi := &file_mcsd_relay_v1_relay_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ValidateBedrockTunnelResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ValidateBedrockTunnelResponse) ProtoMessage() {}
+
+func (x *ValidateBedrockTunnelResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_mcsd_relay_v1_relay_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ValidateBedrockTunnelResponse.ProtoReflect.Descriptor instead.
+func (*ValidateBedrockTunnelResponse) Descriptor() ([]byte, []int) {
+	return file_mcsd_relay_v1_relay_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *ValidateBedrockTunnelResponse) GetValid() bool {
+	if x != nil {
+		return x.Valid
+	}
+	return false
+}
+
 var File_mcsd_relay_v1_relay_proto protoreflect.FileDescriptor
 
 const file_mcsd_relay_v1_relay_proto_rawDesc = "" +
@@ -801,7 +916,13 @@ const file_mcsd_relay_v1_relay_proto_rawDesc = "" +
 	"SessionEnd\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x125\n" +
-	"\bended_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\aendedAt*X\n" +
+	"\bended_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\aendedAt\"t\n" +
+	"\x1cValidateBedrockTunnelRequest\x12\x1b\n" +
+	"\tserver_id\x18\x01 \x01(\tR\bserverId\x12!\n" +
+	"\fbedrock_port\x18\x02 \x01(\rR\vbedrockPort\x12\x14\n" +
+	"\x05token\x18\x03 \x01(\tR\x05token\"5\n" +
+	"\x1dValidateBedrockTunnelResponse\x12\x14\n" +
+	"\x05valid\x18\x01 \x01(\bR\x05valid*X\n" +
 	"\n" +
 	"JoinIntent\x12\x1b\n" +
 	"\x17JOIN_INTENT_UNSPECIFIED\x10\x00\x12\x16\n" +
@@ -811,11 +932,12 @@ const file_mcsd_relay_v1_relay_proto_rawDesc = "" +
 	"\x19JOIN_DECISION_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14JOIN_DECISION_TUNNEL\x10\x01\x12\x19\n" +
 	"\x15JOIN_DECISION_STOPPED\x10\x02\x12\x1b\n" +
-	"\x17JOIN_DECISION_NOT_FOUND\x10\x032\x90\x02\n" +
+	"\x17JOIN_DECISION_NOT_FOUND\x10\x032\x84\x03\n" +
 	"\fRelayService\x12K\n" +
 	"\bRegister\x12\x1e.mcsd.relay.v1.RegisterRequest\x1a\x1f.mcsd.relay.v1.RegisterResponse\x12T\n" +
 	"\vResolveJoin\x12!.mcsd.relay.v1.ResolveJoinRequest\x1a\".mcsd.relay.v1.ResolveJoinResponse\x12]\n" +
-	"\x0eReportSessions\x12$.mcsd.relay.v1.ReportSessionsRequest\x1a%.mcsd.relay.v1.ReportSessionsResponseB\xd7\x01\n" +
+	"\x0eReportSessions\x12$.mcsd.relay.v1.ReportSessionsRequest\x1a%.mcsd.relay.v1.ReportSessionsResponse\x12r\n" +
+	"\x15ValidateBedrockTunnel\x12+.mcsd.relay.v1.ValidateBedrockTunnelRequest\x1a,.mcsd.relay.v1.ValidateBedrockTunnelResponseB\xd7\x01\n" +
 	"\x11com.mcsd.relay.v1B\n" +
 	"RelayProtoP\x01Z`github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/controlplane/mcsd/relay/v1;relayv1\xa2\x02\x03MRX\xaa\x02\rMcsd.Relay.V1\xca\x02\rMcsd\\Relay\\V1\xe2\x02\x19Mcsd\\Relay\\V1\\GPBMetadata\xea\x02\x0fMcsd::Relay::V1b\x06proto3"
 
@@ -832,20 +954,22 @@ func file_mcsd_relay_v1_relay_proto_rawDescGZIP() []byte {
 }
 
 var file_mcsd_relay_v1_relay_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_mcsd_relay_v1_relay_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_mcsd_relay_v1_relay_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_mcsd_relay_v1_relay_proto_goTypes = []any{
-	(JoinIntent)(0),                // 0: mcsd.relay.v1.JoinIntent
-	(JoinDecision)(0),              // 1: mcsd.relay.v1.JoinDecision
-	(*RegisterRequest)(nil),        // 2: mcsd.relay.v1.RegisterRequest
-	(*RegisterResponse)(nil),       // 3: mcsd.relay.v1.RegisterResponse
-	(*ResolveJoinRequest)(nil),     // 4: mcsd.relay.v1.ResolveJoinRequest
-	(*ResolveJoinResponse)(nil),    // 5: mcsd.relay.v1.ResolveJoinResponse
-	(*ReportSessionsRequest)(nil),  // 6: mcsd.relay.v1.ReportSessionsRequest
-	(*ReportSessionsResponse)(nil), // 7: mcsd.relay.v1.ReportSessionsResponse
-	(*SessionEvent)(nil),           // 8: mcsd.relay.v1.SessionEvent
-	(*SessionStart)(nil),           // 9: mcsd.relay.v1.SessionStart
-	(*SessionEnd)(nil),             // 10: mcsd.relay.v1.SessionEnd
-	(*timestamppb.Timestamp)(nil),  // 11: google.protobuf.Timestamp
+	(JoinIntent)(0),                       // 0: mcsd.relay.v1.JoinIntent
+	(JoinDecision)(0),                     // 1: mcsd.relay.v1.JoinDecision
+	(*RegisterRequest)(nil),               // 2: mcsd.relay.v1.RegisterRequest
+	(*RegisterResponse)(nil),              // 3: mcsd.relay.v1.RegisterResponse
+	(*ResolveJoinRequest)(nil),            // 4: mcsd.relay.v1.ResolveJoinRequest
+	(*ResolveJoinResponse)(nil),           // 5: mcsd.relay.v1.ResolveJoinResponse
+	(*ReportSessionsRequest)(nil),         // 6: mcsd.relay.v1.ReportSessionsRequest
+	(*ReportSessionsResponse)(nil),        // 7: mcsd.relay.v1.ReportSessionsResponse
+	(*SessionEvent)(nil),                  // 8: mcsd.relay.v1.SessionEvent
+	(*SessionStart)(nil),                  // 9: mcsd.relay.v1.SessionStart
+	(*SessionEnd)(nil),                    // 10: mcsd.relay.v1.SessionEnd
+	(*ValidateBedrockTunnelRequest)(nil),  // 11: mcsd.relay.v1.ValidateBedrockTunnelRequest
+	(*ValidateBedrockTunnelResponse)(nil), // 12: mcsd.relay.v1.ValidateBedrockTunnelResponse
+	(*timestamppb.Timestamp)(nil),         // 13: google.protobuf.Timestamp
 }
 var file_mcsd_relay_v1_relay_proto_depIdxs = []int32{
 	0,  // 0: mcsd.relay.v1.ResolveJoinRequest.intent:type_name -> mcsd.relay.v1.JoinIntent
@@ -853,16 +977,18 @@ var file_mcsd_relay_v1_relay_proto_depIdxs = []int32{
 	8,  // 2: mcsd.relay.v1.ReportSessionsRequest.events:type_name -> mcsd.relay.v1.SessionEvent
 	9,  // 3: mcsd.relay.v1.SessionEvent.start:type_name -> mcsd.relay.v1.SessionStart
 	10, // 4: mcsd.relay.v1.SessionEvent.end:type_name -> mcsd.relay.v1.SessionEnd
-	11, // 5: mcsd.relay.v1.SessionStart.started_at:type_name -> google.protobuf.Timestamp
-	11, // 6: mcsd.relay.v1.SessionEnd.ended_at:type_name -> google.protobuf.Timestamp
+	13, // 5: mcsd.relay.v1.SessionStart.started_at:type_name -> google.protobuf.Timestamp
+	13, // 6: mcsd.relay.v1.SessionEnd.ended_at:type_name -> google.protobuf.Timestamp
 	2,  // 7: mcsd.relay.v1.RelayService.Register:input_type -> mcsd.relay.v1.RegisterRequest
 	4,  // 8: mcsd.relay.v1.RelayService.ResolveJoin:input_type -> mcsd.relay.v1.ResolveJoinRequest
 	6,  // 9: mcsd.relay.v1.RelayService.ReportSessions:input_type -> mcsd.relay.v1.ReportSessionsRequest
-	3,  // 10: mcsd.relay.v1.RelayService.Register:output_type -> mcsd.relay.v1.RegisterResponse
-	5,  // 11: mcsd.relay.v1.RelayService.ResolveJoin:output_type -> mcsd.relay.v1.ResolveJoinResponse
-	7,  // 12: mcsd.relay.v1.RelayService.ReportSessions:output_type -> mcsd.relay.v1.ReportSessionsResponse
-	10, // [10:13] is the sub-list for method output_type
-	7,  // [7:10] is the sub-list for method input_type
+	11, // 10: mcsd.relay.v1.RelayService.ValidateBedrockTunnel:input_type -> mcsd.relay.v1.ValidateBedrockTunnelRequest
+	3,  // 11: mcsd.relay.v1.RelayService.Register:output_type -> mcsd.relay.v1.RegisterResponse
+	5,  // 12: mcsd.relay.v1.RelayService.ResolveJoin:output_type -> mcsd.relay.v1.ResolveJoinResponse
+	7,  // 13: mcsd.relay.v1.RelayService.ReportSessions:output_type -> mcsd.relay.v1.ReportSessionsResponse
+	12, // 14: mcsd.relay.v1.RelayService.ValidateBedrockTunnel:output_type -> mcsd.relay.v1.ValidateBedrockTunnelResponse
+	11, // [11:15] is the sub-list for method output_type
+	7,  // [7:11] is the sub-list for method input_type
 	7,  // [7:7] is the sub-list for extension type_name
 	7,  // [7:7] is the sub-list for extension extendee
 	0,  // [0:7] is the sub-list for field type_name
@@ -883,7 +1009,7 @@ func file_mcsd_relay_v1_relay_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_mcsd_relay_v1_relay_proto_rawDesc), len(file_mcsd_relay_v1_relay_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   9,
+			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

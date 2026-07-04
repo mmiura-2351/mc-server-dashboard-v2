@@ -1922,6 +1922,10 @@
       "MetaResponse": {
         "description": "Deployment facts the Web UI reads before a server exists (issue #1002).",
         "properties": {
+          "bedrock_enabled": {
+            "title": "Bedrock Enabled",
+            "type": "boolean"
+          },
           "default_memory_limit_mb": {
             "anyOf": [
               {
@@ -1951,6 +1955,7 @@
         },
         "required": [
           "relay_enabled",
+          "bedrock_enabled",
           "default_memory_limit_mb",
           "max_memory_limit_mb"
         ],
@@ -2947,6 +2952,28 @@
             ],
             "title": "Assigned Worker Id"
           },
+          "bedrock_address": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bedrock Address"
+          },
+          "bedrock_port": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bedrock Port"
+          },
           "community_id": {
             "title": "Community Id",
             "type": "string"
@@ -3058,6 +3085,8 @@
           "game_port",
           "slug",
           "join_hostname",
+          "bedrock_address",
+          "bedrock_port",
           "desired_state",
           "observed_state",
           "observed_at",

@@ -25,17 +25,17 @@ _sym_db = _symbol_database.Default()
 from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x19mcsd/relay/v1/relay.proto\x12\rmcsd.relay.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"]\n\x0fRegisterRequest\x12\x17\n\x0ftunnel_endpoint\x18\x01 \x01(\t\x12\x15\n\rtunnel_ca_pem\x18\x02 \x01(\t\x12\x1a\n\x12\x61\x63tive_session_ids\x18\x03 \x03(\t\"\'\n\x10RegisterResponse\x12\x13\n\x0b\x62\x61se_domain\x18\x01 \x01(\t\"`\n\x12ResolveJoinRequest\x12\x0c\n\x04slug\x18\x01 \x01(\t\x12\x11\n\tplayer_ip\x18\x02 \x01(\t\x12)\n\x06intent\x18\x03 \x01(\x0e\x32\x19.mcsd.relay.v1.JoinIntent\"|\n\x13ResolveJoinResponse\x12-\n\x08\x64\x65\x63ision\x18\x01 \x01(\x0e\x32\x1b.mcsd.relay.v1.JoinDecision\x12\r\n\x05token\x18\x02 \x01(\t\x12\x14\n\x0c\x64isplay_name\x18\x03 \x01(\t\x12\x11\n\tserver_id\x18\x04 \x01(\t\"D\n\x15ReportSessionsRequest\x12+\n\x06\x65vents\x18\x01 \x03(\x0b\x32\x1b.mcsd.relay.v1.SessionEvent\"\x18\n\x16ReportSessionsResponse\"o\n\x0cSessionEvent\x12,\n\x05start\x18\x01 \x01(\x0b\x32\x1b.mcsd.relay.v1.SessionStartH\x00\x12(\n\x03\x65nd\x18\x02 \x01(\x0b\x32\x19.mcsd.relay.v1.SessionEndH\x00\x42\x07\n\x05\x65vent\"\xad\x01\n\x0cSessionStart\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x11\n\tserver_id\x18\x02 \x01(\t\x12\x0c\n\x04slug\x18\x03 \x01(\t\x12\x11\n\tplayer_ip\x18\x04 \x01(\t\x12\x10\n\x08username\x18\x05 \x01(\t\x12\x13\n\x0bplayer_uuid\x18\x06 \x01(\t\x12.\n\nstarted_at\x18\x07 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\"N\n\nSessionEnd\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12,\n\x08\x65nded_at\x18\x02 \x01(\x0b\x32\x1a.google.protobuf.Timestamp*X\n\nJoinIntent\x12\x1b\n\x17JOIN_INTENT_UNSPECIFIED\x10\x00\x12\x16\n\x12JOIN_INTENT_STATUS\x10\x01\x12\x15\n\x11JOIN_INTENT_LOGIN\x10\x02*\x7f\n\x0cJoinDecision\x12\x1d\n\x19JOIN_DECISION_UNSPECIFIED\x10\x00\x12\x18\n\x14JOIN_DECISION_TUNNEL\x10\x01\x12\x19\n\x15JOIN_DECISION_STOPPED\x10\x02\x12\x1b\n\x17JOIN_DECISION_NOT_FOUND\x10\x03\x32\x90\x02\n\x0cRelayService\x12K\n\x08Register\x12\x1e.mcsd.relay.v1.RegisterRequest\x1a\x1f.mcsd.relay.v1.RegisterResponse\x12T\n\x0bResolveJoin\x12!.mcsd.relay.v1.ResolveJoinRequest\x1a\".mcsd.relay.v1.ResolveJoinResponse\x12]\n\x0eReportSessions\x12$.mcsd.relay.v1.ReportSessionsRequest\x1a%.mcsd.relay.v1.ReportSessionsResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x19mcsd/relay/v1/relay.proto\x12\rmcsd.relay.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"]\n\x0fRegisterRequest\x12\x17\n\x0ftunnel_endpoint\x18\x01 \x01(\t\x12\x15\n\rtunnel_ca_pem\x18\x02 \x01(\t\x12\x1a\n\x12\x61\x63tive_session_ids\x18\x03 \x03(\t\"\'\n\x10RegisterResponse\x12\x13\n\x0b\x62\x61se_domain\x18\x01 \x01(\t\"`\n\x12ResolveJoinRequest\x12\x0c\n\x04slug\x18\x01 \x01(\t\x12\x11\n\tplayer_ip\x18\x02 \x01(\t\x12)\n\x06intent\x18\x03 \x01(\x0e\x32\x19.mcsd.relay.v1.JoinIntent\"|\n\x13ResolveJoinResponse\x12-\n\x08\x64\x65\x63ision\x18\x01 \x01(\x0e\x32\x1b.mcsd.relay.v1.JoinDecision\x12\r\n\x05token\x18\x02 \x01(\t\x12\x14\n\x0c\x64isplay_name\x18\x03 \x01(\t\x12\x11\n\tserver_id\x18\x04 \x01(\t\"D\n\x15ReportSessionsRequest\x12+\n\x06\x65vents\x18\x01 \x03(\x0b\x32\x1b.mcsd.relay.v1.SessionEvent\"\x18\n\x16ReportSessionsResponse\"o\n\x0cSessionEvent\x12,\n\x05start\x18\x01 \x01(\x0b\x32\x1b.mcsd.relay.v1.SessionStartH\x00\x12(\n\x03\x65nd\x18\x02 \x01(\x0b\x32\x19.mcsd.relay.v1.SessionEndH\x00\x42\x07\n\x05\x65vent\"\xad\x01\n\x0cSessionStart\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x11\n\tserver_id\x18\x02 \x01(\t\x12\x0c\n\x04slug\x18\x03 \x01(\t\x12\x11\n\tplayer_ip\x18\x04 \x01(\t\x12\x10\n\x08username\x18\x05 \x01(\t\x12\x13\n\x0bplayer_uuid\x18\x06 \x01(\t\x12.\n\nstarted_at\x18\x07 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\"N\n\nSessionEnd\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12,\n\x08\x65nded_at\x18\x02 \x01(\x0b\x32\x1a.google.protobuf.Timestamp\"V\n\x1cValidateBedrockTunnelRequest\x12\x11\n\tserver_id\x18\x01 \x01(\t\x12\x14\n\x0c\x62\x65\x64rock_port\x18\x02 \x01(\r\x12\r\n\x05token\x18\x03 \x01(\t\".\n\x1dValidateBedrockTunnelResponse\x12\r\n\x05valid\x18\x01 \x01(\x08*X\n\nJoinIntent\x12\x1b\n\x17JOIN_INTENT_UNSPECIFIED\x10\x00\x12\x16\n\x12JOIN_INTENT_STATUS\x10\x01\x12\x15\n\x11JOIN_INTENT_LOGIN\x10\x02*\x7f\n\x0cJoinDecision\x12\x1d\n\x19JOIN_DECISION_UNSPECIFIED\x10\x00\x12\x18\n\x14JOIN_DECISION_TUNNEL\x10\x01\x12\x19\n\x15JOIN_DECISION_STOPPED\x10\x02\x12\x1b\n\x17JOIN_DECISION_NOT_FOUND\x10\x03\x32\x84\x03\n\x0cRelayService\x12K\n\x08Register\x12\x1e.mcsd.relay.v1.RegisterRequest\x1a\x1f.mcsd.relay.v1.RegisterResponse\x12T\n\x0bResolveJoin\x12!.mcsd.relay.v1.ResolveJoinRequest\x1a\".mcsd.relay.v1.ResolveJoinResponse\x12]\n\x0eReportSessions\x12$.mcsd.relay.v1.ReportSessionsRequest\x1a%.mcsd.relay.v1.ReportSessionsResponse\x12r\n\x15ValidateBedrockTunnel\x12+.mcsd.relay.v1.ValidateBedrockTunnelRequest\x1a,.mcsd.relay.v1.ValidateBedrockTunnelResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'mcsd.relay.v1.relay_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_JOININTENT']._serialized_start=902
-  _globals['_JOININTENT']._serialized_end=990
-  _globals['_JOINDECISION']._serialized_start=992
-  _globals['_JOINDECISION']._serialized_end=1119
+  _globals['_JOININTENT']._serialized_start=1038
+  _globals['_JOININTENT']._serialized_end=1126
+  _globals['_JOINDECISION']._serialized_start=1128
+  _globals['_JOINDECISION']._serialized_end=1255
   _globals['_REGISTERREQUEST']._serialized_start=77
   _globals['_REGISTERREQUEST']._serialized_end=170
   _globals['_REGISTERRESPONSE']._serialized_start=172
@@ -54,6 +54,10 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_SESSIONSTART']._serialized_end=820
   _globals['_SESSIONEND']._serialized_start=822
   _globals['_SESSIONEND']._serialized_end=900
-  _globals['_RELAYSERVICE']._serialized_start=1122
-  _globals['_RELAYSERVICE']._serialized_end=1394
+  _globals['_VALIDATEBEDROCKTUNNELREQUEST']._serialized_start=902
+  _globals['_VALIDATEBEDROCKTUNNELREQUEST']._serialized_end=988
+  _globals['_VALIDATEBEDROCKTUNNELRESPONSE']._serialized_start=990
+  _globals['_VALIDATEBEDROCKTUNNELRESPONSE']._serialized_end=1036
+  _globals['_RELAYSERVICE']._serialized_start=1258
+  _globals['_RELAYSERVICE']._serialized_end=1646
 # @@protoc_insertion_point(module_scope)

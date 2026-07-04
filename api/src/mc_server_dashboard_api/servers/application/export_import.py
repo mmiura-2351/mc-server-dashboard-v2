@@ -24,9 +24,11 @@ Both reuse the C1 machinery rather than re-implementing it:
 Failure posture (import): the archive is fully validated (metadata shape AND the
 hardened entry checks — zip-slip, size, entry-count) BEFORE the row commits, so a
 hostile archive is rejected (413/422) with NO server row created (issue #277).
-Only a genuine storage failure during the post-commit write pass can leave a
-committed row behind; that mid-write class reuses the #243/#252 seed-failure
-posture -- :class:`WorkingSetSeedFailedError` (503 ``seed_failed``) -- leaving a
+Only a genuine storage failure during the post-commit write pass, or a Bedrock
+port-allocation failure (window exhaustion or the concurrent-racer backstop)
+while re-creating the plugin set (issue #1551), can leave a committed row
+behind; all reuse the #243/#252 seed-failure posture
+-- :class:`WorkingSetSeedFailedError` (503 ``seed_failed``) -- leaving a
 committed but degraded row that is repairable via the files API, rather than an
 unmapped 500. It is now the ONLY post-commit failure class.
 
@@ -53,12 +55,17 @@ from mc_server_dashboard_api.servers.application.files import (
     _validate_archive,
 )
 from mc_server_dashboard_api.servers.application.manage_server import CreateServer
+from mc_server_dashboard_api.servers.application.plugins import (
+    allocate_bedrock_port_if_geyser,
+)
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     InvalidExportMetadataError,
     InvalidFilePathError,
+    PortAlreadyTakenError,
+    PortRangeExhaustedError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
     WorkingSetSeedFailedError,
@@ -70,6 +77,7 @@ from mc_server_dashboard_api.servers.domain.plugin import (
     PluginSource,
     ServerPlugin,
 )
+from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.server_properties import (
     set_rcon_properties,
 )
@@ -187,12 +195,19 @@ class ImportServer:
     The caps are fields (not bare constants) so a test can inject tiny caps and
     trip the size / entry-count guards with a small archive; production wiring uses
     the defaults.
+
+    Import is a Bedrock enablement path like the two install paths (issue #1551):
+    re-creating the exported plugin set runs the SAME Geyser detection and
+    allocation as :class:`InstallPlugin` / :class:`InstallFromCatalog`
+    (``bedrock_port_range`` is the deployment's assignable Bedrock UDP window, or
+    ``None`` when the gate is off -- no allocation, import still succeeds).
     """
 
     create_server: CreateServer
     file_store: FileStore
     max_bytes: int = MAX_UPLOAD_BYTES
     max_entries: int = MAX_ARCHIVE_ENTRIES
+    bedrock_port_range: PortRange | None = None
 
     async def __call__(
         self,
@@ -232,7 +247,7 @@ class ImportServer:
             community_id=community_id, server_id=server.id, content=content
         )
         await self._import_plugins(
-            server_id=server.id,
+            server=server,
             plugin_dicts=metadata.plugins,
             now=self.create_server.clock.now(),
         )
@@ -296,20 +311,52 @@ class ImportServer:
     async def _import_plugins(
         self,
         *,
-        server_id: ServerId,
+        server: Server,
         plugin_dicts: list[dict[str, object]],
         now: dt.datetime,
     ) -> None:
-        """Re-create plugin rows from the exported metadata (issue #1335)."""
+        """Re-create plugin rows from the exported metadata (issue #1335).
+
+        Import is an enablement path like the two install paths (issue #1551): a
+        Geyser row in the exported set runs the SAME detection and allocation as
+        :class:`InstallPlugin` / :class:`InstallFromCatalog`
+        (``allocate_bedrock_port_if_geyser``), inside this same transaction so the
+        plugin rows and the port commit atomically. By this point the server row
+        and its working set are already committed (issue #274), so a Bedrock
+        window exhaustion -- or the ``UNIQUE(bedrock_port)`` backstop firing on a
+        concurrent allocation racer (:class:`PortAlreadyTakenError`, the #1550
+        race) -- is a post-commit failure here, not a clean abort with no row
+        created; both reuse the #243/#252 seed-failure posture --
+        :class:`WorkingSetSeedFailedError` (503 ``seed_failed``) -- rather than
+        the install paths' distinct ``bedrock_port_range_exhausted`` / 409
+        ``bedrock_port_taken`` (which imply nothing was created yet).
+        """
 
         if not plugin_dicts:
             return
         uow = self.create_server.uow
-        async with uow:
-            for raw in plugin_dicts:
-                plugin = _deserialize_plugin(raw, server_id=server_id, now=now)
-                await uow.plugins.add(plugin)
-            await uow.commit()
+        try:
+            async with uow:
+                for raw in plugin_dicts:
+                    plugin = _deserialize_plugin(raw, server_id=server.id, now=now)
+                    await uow.plugins.add(plugin)
+                    await allocate_bedrock_port_if_geyser(
+                        uow,
+                        server=server,
+                        plugin=plugin,
+                        port_range=self.bedrock_port_range,
+                        now=now,
+                    )
+                await uow.commit()
+        except (PortAlreadyTakenError, PortRangeExhaustedError) as exc:
+            _logger.warning(
+                "import plugin metadata failed (Bedrock port allocation: %s); "
+                "server row committed but plugin rows are unpublished (repairable "
+                "via the plugins API)",
+                type(exc).__name__,
+                extra={"server_id": str(server.id.value)},
+            )
+            raise WorkingSetSeedFailedError(str(server.id.value)) from exc
 
 
 @dataclass(frozen=True)

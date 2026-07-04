@@ -30,10 +30,11 @@ const EnvPrefix = "MCD_RELAY_"
 
 // Config is the relay's resolved configuration (RELAY.md Section 13).
 type Config struct {
-	API    APIConfig
-	Game   GameConfig
-	Tunnel TunnelConfig
-	Log    LogConfig
+	API     APIConfig
+	Game    GameConfig
+	Tunnel  TunnelConfig
+	Bedrock BedrockConfig
+	Log     LogConfig
 }
 
 // APIConfig is the API connection and authentication surface. Same shape as the
@@ -86,6 +87,41 @@ type TunnelConfig struct {
 	MaxConnsPerIP uint32
 	// TLS is the tunnel listener TLS material. Required.
 	TLS TunnelTLSConfig
+}
+
+// BedrockConfig is the Bedrock tunnel QUIC listener surface (epic #1540,
+// issue #1545; docs/app/BEDROCK_TUNNEL.md). The listener reuses the tunnel
+// listener's TLS certificate (TunnelConfig.TLS) -- a distinct ALPN
+// distinguishes the two on the wire -- so there is no separate cert/key pair
+// here.
+type BedrockConfig struct {
+	// Enabled toggles the Bedrock QUIC/UDP tunnel listener (default false).
+	// Off by default so a Java-only relay neither binds nor requires the
+	// Bedrock UDP ports (bedrock.tunnel_listen and the per-tunnel bedrock_port
+	// window) -- a host-port conflict on either must not take Java joins down
+	// on upgrade (issue #1584). Mirrors the API's relay.bedrock_enabled /
+	// MCD_API_RELAY__BEDROCK_ENABLED; compose wires both services from the
+	// same operator setting.
+	Enabled bool
+	// TunnelListen is the public QUIC/UDP address Workers dial to open a
+	// Bedrock tunnel (default :25675). This mirrors the API-side
+	// relay.bedrock_tunnel_port default (docs/app/CONFIGURATION.md Section
+	// 5.13): both are operator-configured, kept in sync like
+	// game.listen/tunnel.listen already are with relay.game_port/tunnel_port.
+	TunnelListen string
+	// TunnelMaxConnsPerIP caps concurrent unauthenticated handshake windows
+	// per source IP on the Bedrock tunnel QUIC listener (default 64) -- the
+	// same posture as tunnel.max_conns_per_ip on the TCP tunnel listener
+	// (issue #968; docs/app/BEDROCK_TUNNEL.md Section 8).
+	TunnelMaxConnsPerIP uint32
+	// MaxFlowsPerIP caps concurrent Bedrock client flows (by source address)
+	// per source IP on one bound bedrock_port (default 32). Hygiene against
+	// RakNet unconnected-ping amplification/spam on the public UDP ingress
+	// (docs/app/BEDROCK_TUNNEL.md).
+	MaxFlowsPerIP uint32
+	// NewFlowsPerIPPerSecond caps the rate of new flows per source IP on one
+	// bound bedrock_port (default 10).
+	NewFlowsPerIPPerSecond uint32
 }
 
 // TunnelTLSConfig is the tunnel listener's server certificate material.
@@ -143,6 +179,13 @@ type fileConfig struct {
 			AdvertisedCAFile *string `toml:"advertised_ca_file"`
 		} `toml:"tls"`
 	} `toml:"tunnel"`
+	Bedrock struct {
+		Enabled                *bool   `toml:"enabled"`
+		TunnelListen           *string `toml:"tunnel_listen"`
+		TunnelMaxConnsPerIP    *uint32 `toml:"tunnel_max_conns_per_ip"`
+		MaxFlowsPerIP          *uint32 `toml:"max_flows_per_ip"`
+		NewFlowsPerIPPerSecond *uint32 `toml:"new_flows_per_ip_per_second"`
+	} `toml:"bedrock"`
 	Log struct {
 		Level  *string `toml:"level"`
 		Format *string `toml:"format"`
@@ -163,6 +206,12 @@ func defaults() Config {
 		Tunnel: TunnelConfig{
 			Listen:        ":25665",
 			MaxConnsPerIP: 64,
+		},
+		Bedrock: BedrockConfig{
+			TunnelListen:           ":25675",
+			TunnelMaxConnsPerIP:    64,
+			MaxFlowsPerIP:          32,
+			NewFlowsPerIPPerSecond: 10,
 		},
 		Log: LogConfig{
 			Level:  "info",
@@ -225,6 +274,13 @@ func applyFile(cfg *Config, path string) error {
 	setString(&cfg.Tunnel.TLS.CertFile, fc.Tunnel.TLS.CertFile)
 	setString(&cfg.Tunnel.TLS.KeyFile, fc.Tunnel.TLS.KeyFile)
 	setString(&cfg.Tunnel.TLS.AdvertisedCAFile, fc.Tunnel.TLS.AdvertisedCAFile)
+	if fc.Bedrock.Enabled != nil {
+		cfg.Bedrock.Enabled = *fc.Bedrock.Enabled
+	}
+	setString(&cfg.Bedrock.TunnelListen, fc.Bedrock.TunnelListen)
+	setUint32(&cfg.Bedrock.TunnelMaxConnsPerIP, fc.Bedrock.TunnelMaxConnsPerIP)
+	setUint32(&cfg.Bedrock.MaxFlowsPerIP, fc.Bedrock.MaxFlowsPerIP)
+	setUint32(&cfg.Bedrock.NewFlowsPerIPPerSecond, fc.Bedrock.NewFlowsPerIPPerSecond)
 	setString(&cfg.Log.Level, fc.Log.Level)
 	setString(&cfg.Log.Format, fc.Log.Format)
 
@@ -265,6 +321,23 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 	setEnvString(&cfg.Tunnel.TLS.CertFile, getenv, "TUNNEL_TLS_CERT_FILE")
 	setEnvString(&cfg.Tunnel.TLS.KeyFile, getenv, "TUNNEL_TLS_KEY_FILE")
 	setEnvString(&cfg.Tunnel.TLS.AdvertisedCAFile, getenv, "TUNNEL_TLS_ADVERTISED_CA_FILE")
+	if v := getenv(EnvPrefix + "BEDROCK_ENABLED"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("config: %sBEDROCK_ENABLED: %w", EnvPrefix, err)
+		}
+		cfg.Bedrock.Enabled = b
+	}
+	setEnvString(&cfg.Bedrock.TunnelListen, getenv, "BEDROCK_TUNNEL_LISTEN")
+	if err := setEnvUint32(&cfg.Bedrock.TunnelMaxConnsPerIP, getenv, "BEDROCK_TUNNEL_MAX_CONNS_PER_IP"); err != nil {
+		return err
+	}
+	if err := setEnvUint32(&cfg.Bedrock.MaxFlowsPerIP, getenv, "BEDROCK_MAX_FLOWS_PER_IP"); err != nil {
+		return err
+	}
+	if err := setEnvUint32(&cfg.Bedrock.NewFlowsPerIPPerSecond, getenv, "BEDROCK_NEW_FLOWS_PER_IP_PER_SECOND"); err != nil {
+		return err
+	}
 	setEnvString(&cfg.Log.Level, getenv, "LOG_LEVEL")
 	setEnvString(&cfg.Log.Format, getenv, "LOG_FORMAT")
 

@@ -17,6 +17,7 @@ import pytest
 
 from mc_server_dashboard_api.servers.adapters.file_store import StorageFileStoreAdapter
 from mc_server_dashboard_api.servers.application.manage_server import (
+    BedrockJoinability,
     CreateServer,
     DeleteServer,
     ListServers,
@@ -28,6 +29,9 @@ from mc_server_dashboard_api.servers.domain.backup import (
     BackupHealth,
     BackupId,
     BackupSource,
+)
+from mc_server_dashboard_api.servers.domain.bedrock_tunnel import (
+    BedrockTunnelCredentials,
 )
 from mc_server_dashboard_api.servers.domain.cpu_allocation import (
     CPU_ALLOCATION_CONFIG_KEY,
@@ -52,6 +56,12 @@ from mc_server_dashboard_api.servers.domain.errors import (
 )
 from mc_server_dashboard_api.servers.domain.memory_limit import (
     MEMORY_LIMIT_CONFIG_KEY,
+)
+from mc_server_dashboard_api.servers.domain.plugin import (
+    LoaderType,
+    PluginId,
+    PluginSource,
+    ServerPlugin,
 )
 from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.value_objects import (
@@ -909,6 +919,86 @@ async def test_list_is_scoped_to_the_community() -> None:
     uow.servers.seed(_server(community_id=community_b, name="b1"))
     listed = await ListServers(uow=uow)(community_id=community_a)
     assert {s.name.value for s in listed} == {"a1", "a2"}
+
+
+# --- BedrockJoinability (issue #1555) ---------------------------------------
+
+
+def _geyser_plugin(
+    server_id: ServerId, *, enabled: bool = True, rel_path: str = "plugins/Geyser.jar"
+) -> ServerPlugin:
+    return ServerPlugin(
+        id=PluginId.new(),
+        server_id=server_id,
+        rel_path=rel_path,
+        filename=rel_path.rsplit("/", 1)[-1],
+        display_name="Geyser-Spigot",
+        description=None,
+        loader_type=LoaderType.PLUGIN,
+        source=PluginSource.LOCAL,
+        source_project_id=None,
+        source_version_id=None,
+        version_number=None,
+        checksum_sha512="abc",
+        sha256=None,
+        size_bytes=100,
+        enabled=enabled,
+        installed_by=None,
+        created_at=_NOW,
+        updated_at=_NOW,
+        mod_identifier="Geyser-Spigot",
+    )
+
+
+async def test_bedrock_joinability_false_when_sole_geyser_disabled() -> None:
+    uow = FakeUnitOfWork()
+    server = _server(community_id=CommunityId(uuid.uuid4()))
+    uow.plugins.seed(_geyser_plugin(server.id, enabled=False))
+    assert await BedrockJoinability(uow=uow).for_server(server.id) is False
+
+
+async def test_bedrock_joinability_true_when_geyser_reenabled() -> None:
+    uow = FakeUnitOfWork()
+    server = _server(community_id=CommunityId(uuid.uuid4()))
+    uow.plugins.seed(_geyser_plugin(server.id, enabled=True))
+    assert await BedrockJoinability(uow=uow).for_server(server.id) is True
+
+
+async def test_bedrock_joinability_true_when_one_of_two_geyser_copies_enabled() -> None:
+    uow = FakeUnitOfWork()
+    server = _server(community_id=CommunityId(uuid.uuid4()))
+    uow.plugins.seed(
+        _geyser_plugin(server.id, enabled=True, rel_path="plugins/Geyser.jar")
+    )
+    uow.plugins.seed(
+        _geyser_plugin(
+            server.id, enabled=False, rel_path="plugins/Geyser.jar.old.disabled"
+        )
+    )
+    assert await BedrockJoinability(uow=uow).for_server(server.id) is True
+
+
+async def test_bedrock_joinability_false_when_no_geyser_plugin() -> None:
+    uow = FakeUnitOfWork()
+    server = _server(community_id=CommunityId(uuid.uuid4()))
+    assert await BedrockJoinability(uow=uow).for_server(server.id) is False
+
+
+async def test_bedrock_joinability_for_servers_batches_and_classifies_each() -> None:
+    # The list-endpoint gate (avoids one query per server, issue #1555): a single
+    # for_servers() call classifies every server correctly, including one with no
+    # plugins at all.
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    enabled_server = _server(community_id=community, name="enabled")
+    disabled_server = _server(community_id=community, name="disabled")
+    bare_server = _server(community_id=community, name="bare")
+    uow.plugins.seed(_geyser_plugin(enabled_server.id, enabled=True))
+    uow.plugins.seed(_geyser_plugin(disabled_server.id, enabled=False))
+    joinable = await BedrockJoinability(uow=uow).for_servers(
+        [enabled_server.id, disabled_server.id, bare_server.id]
+    )
+    assert joinable == {enabled_server.id}
 
 
 # --- update ----------------------------------------------------------------
@@ -1884,6 +1974,53 @@ async def test_delete_removes_server_and_sweeps_grants() -> None:
     assert uow.commits == 1
     # The working set is always packed into the retained final tar.gz (#777).
     assert store.pruned == [server.id]
+
+
+class _RecordingBedrockTunnel(BedrockTunnelCredentials):
+    """Records the server ids whose tunnel credential was evicted (issue #1544)."""
+
+    def __init__(self) -> None:
+        self.closed: list[ServerId] = []
+
+    def close(self, server_id: ServerId) -> None:
+        self.closed.append(server_id)
+
+
+async def test_delete_evicts_bedrock_tunnel_credential_even_at_observed_unknown() -> (
+    None
+):
+    # Deleting a server forgets its in-memory Bedrock tunnel credential (issue
+    # #1544), or a stale entry lingers and keeps ValidateBedrockTunnel answering
+    # valid for a gone server. observed=unknown (a lost terminal report) still
+    # counts as at-rest, so the delete proceeds and must evict there too.
+    uow = FakeUnitOfWork()
+    store = FakeBackupArchiveStore()
+    tunnel = _RecordingBedrockTunnel()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community, observed=ObservedState.UNKNOWN)
+    uow.servers.seed(server)
+    await DeleteServer(uow=uow, backup_store=store, bedrock_tunnel=tunnel)(
+        community_id=community, server_id=server.id
+    )
+    assert server.id not in uow.servers.by_id
+    assert tunnel.closed == [server.id]
+
+
+async def test_delete_does_not_evict_when_pack_fails() -> None:
+    # The eviction runs only after a successful delete: a fail-closed pack (#777)
+    # aborts before the row is gone, so the still-live server keeps its credential.
+    uow = FakeUnitOfWork()
+    store = FakeBackupArchiveStore(pack_fails=True)
+    tunnel = _RecordingBedrockTunnel()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    with pytest.raises(RuntimeError):
+        await DeleteServer(uow=uow, backup_store=store, bedrock_tunnel=tunnel)(
+            community_id=community, server_id=server.id
+        )
+    assert server.id in uow.servers.by_id
+    assert tunnel.closed == []
 
 
 async def test_delete_with_backups_keeps_newest_archive_and_prunes_the_rest() -> None:

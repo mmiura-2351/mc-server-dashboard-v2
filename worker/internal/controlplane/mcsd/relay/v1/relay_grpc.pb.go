@@ -31,9 +31,10 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	RelayService_Register_FullMethodName       = "/mcsd.relay.v1.RelayService/Register"
-	RelayService_ResolveJoin_FullMethodName    = "/mcsd.relay.v1.RelayService/ResolveJoin"
-	RelayService_ReportSessions_FullMethodName = "/mcsd.relay.v1.RelayService/ReportSessions"
+	RelayService_Register_FullMethodName              = "/mcsd.relay.v1.RelayService/Register"
+	RelayService_ResolveJoin_FullMethodName           = "/mcsd.relay.v1.RelayService/ResolveJoin"
+	RelayService_ReportSessions_FullMethodName        = "/mcsd.relay.v1.RelayService/ReportSessions"
+	RelayService_ValidateBedrockTunnel_FullMethodName = "/mcsd.relay.v1.RelayService/ValidateBedrockTunnel"
 )
 
 // RelayServiceClient is the client API for RelayService service.
@@ -59,6 +60,15 @@ type RelayServiceClient interface {
 	// SessionEnd). The API persists them as game_session rows; upsert-on-id
 	// makes retries after transient errors safe. RELAY.md Sections 6 and 8.
 	ReportSessions(ctx context.Context, in *ReportSessionsRequest, opts ...grpc.CallOption) (*ReportSessionsResponse, error)
+	// ValidateBedrockTunnel is called by the relay when it accepts a Worker's
+	// QUIC dial-out for a Bedrock tunnel (epic #1540, issue #1544). Unlike the
+	// per-player join token -- which the relay matches locally because it
+	// minted the waiter itself via its own ResolveJoin call -- the Bedrock
+	// tunnel is opened API-initiated at server-running time, so the relay has
+	// no prior waiter to match against and asks the API to confirm the token
+	// instead. This keeps the relay itself free of a persistent server list;
+	// its own state stays limited to in-flight tunnel connections.
+	ValidateBedrockTunnel(ctx context.Context, in *ValidateBedrockTunnelRequest, opts ...grpc.CallOption) (*ValidateBedrockTunnelResponse, error)
 }
 
 type relayServiceClient struct {
@@ -99,6 +109,16 @@ func (c *relayServiceClient) ReportSessions(ctx context.Context, in *ReportSessi
 	return out, nil
 }
 
+func (c *relayServiceClient) ValidateBedrockTunnel(ctx context.Context, in *ValidateBedrockTunnelRequest, opts ...grpc.CallOption) (*ValidateBedrockTunnelResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ValidateBedrockTunnelResponse)
+	err := c.cc.Invoke(ctx, RelayService_ValidateBedrockTunnel_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RelayServiceServer is the server API for RelayService service.
 // All implementations must embed UnimplementedRelayServiceServer
 // for forward compatibility.
@@ -122,6 +142,15 @@ type RelayServiceServer interface {
 	// SessionEnd). The API persists them as game_session rows; upsert-on-id
 	// makes retries after transient errors safe. RELAY.md Sections 6 and 8.
 	ReportSessions(context.Context, *ReportSessionsRequest) (*ReportSessionsResponse, error)
+	// ValidateBedrockTunnel is called by the relay when it accepts a Worker's
+	// QUIC dial-out for a Bedrock tunnel (epic #1540, issue #1544). Unlike the
+	// per-player join token -- which the relay matches locally because it
+	// minted the waiter itself via its own ResolveJoin call -- the Bedrock
+	// tunnel is opened API-initiated at server-running time, so the relay has
+	// no prior waiter to match against and asks the API to confirm the token
+	// instead. This keeps the relay itself free of a persistent server list;
+	// its own state stays limited to in-flight tunnel connections.
+	ValidateBedrockTunnel(context.Context, *ValidateBedrockTunnelRequest) (*ValidateBedrockTunnelResponse, error)
 	mustEmbedUnimplementedRelayServiceServer()
 }
 
@@ -140,6 +169,9 @@ func (UnimplementedRelayServiceServer) ResolveJoin(context.Context, *ResolveJoin
 }
 func (UnimplementedRelayServiceServer) ReportSessions(context.Context, *ReportSessionsRequest) (*ReportSessionsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReportSessions not implemented")
+}
+func (UnimplementedRelayServiceServer) ValidateBedrockTunnel(context.Context, *ValidateBedrockTunnelRequest) (*ValidateBedrockTunnelResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ValidateBedrockTunnel not implemented")
 }
 func (UnimplementedRelayServiceServer) mustEmbedUnimplementedRelayServiceServer() {}
 func (UnimplementedRelayServiceServer) testEmbeddedByValue()                      {}
@@ -216,6 +248,24 @@ func _RelayService_ReportSessions_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RelayService_ValidateBedrockTunnel_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ValidateBedrockTunnelRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RelayServiceServer).ValidateBedrockTunnel(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RelayService_ValidateBedrockTunnel_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RelayServiceServer).ValidateBedrockTunnel(ctx, req.(*ValidateBedrockTunnelRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RelayService_ServiceDesc is the grpc.ServiceDesc for RelayService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -234,6 +284,10 @@ var RelayService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ReportSessions",
 			Handler:    _RelayService_ReportSessions_Handler,
+		},
+		{
+			MethodName: "ValidateBedrockTunnel",
+			Handler:    _RelayService_ValidateBedrockTunnel_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

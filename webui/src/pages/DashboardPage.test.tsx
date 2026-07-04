@@ -57,6 +57,8 @@ function server(overrides: Record<string, unknown> = {}) {
     assigned_worker_id: "worker-a",
     config: {},
     join_hostname: null,
+    bedrock_address: null,
+    bedrock_port: null,
     ...overrides,
   };
 }
@@ -687,6 +689,215 @@ describe("DashboardPage join address in server list (issue #982)", () => {
 
     const port = await screen.findByText(":25565");
     expect(port.tagName).toBe("SPAN");
+  });
+});
+
+describe("DashboardPage Bedrock address badge (issue #1543)", () => {
+  it("shows the Bedrock badge when bedrock_port is set (cards view)", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ bedrock_address: "play.example.com", bedrock_port: 19132 }),
+    ]);
+    renderPage();
+
+    const badge = await screen.findByRole("button", {
+      name: `${t("dashboard.bedrockLabel")}: play.example.com:19132`,
+    });
+    expect(badge).toBeInTheDocument();
+    // Tooltip copies the host only and points the port at Bedrock's Port field.
+    expect(badge).toHaveAttribute(
+      "title",
+      t("dashboard.bedrockAddressCopyTitle", { port: 19132 }),
+    );
+  });
+
+  it("hides the Bedrock badge when bedrock_port is null (cards view)", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ bedrock_address: null, bedrock_port: null }),
+    ]);
+    renderPage();
+
+    await screen.findByText("survival");
+    expect(
+      screen.queryByRole("button", {
+        name: new RegExp(t("dashboard.bedrockLabel")),
+      }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("Java badge is unchanged when the Bedrock badge is also shown (cards view)", async () => {
+    mockApi.get.mockResolvedValue([
+      server({
+        join_hostname: "survival.relay.example.com",
+        bedrock_address: "play.example.com",
+        bedrock_port: 19132,
+      }),
+    ]);
+    renderPage();
+
+    expect(
+      await screen.findByRole("button", {
+        name: "survival.relay.example.com",
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("clicking the Bedrock badge copies the host only and shows Copied! (cards view)", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ bedrock_address: "play.example.com", bedrock_port: 19132 }),
+    ]);
+    renderPage();
+    const badge = await screen.findByRole("button", {
+      name: `${t("dashboard.bedrockLabel")}: play.example.com:19132`,
+    });
+
+    if (!("execCommand" in document)) {
+      Object.defineProperty(document, "execCommand", {
+        value: () => true,
+        writable: true,
+        configurable: true,
+      });
+    }
+    // Capture the value handed to the clipboard fallback textarea: it must be
+    // the bare host with no `:port` (Bedrock's Port field is separate).
+    let copiedText: string | null = null;
+    const execSpy = vi
+      .spyOn(document, "execCommand")
+      .mockImplementation((command) => {
+        if (command === "copy") {
+          const areas = document.querySelectorAll("textarea");
+          copiedText = areas[areas.length - 1]?.value ?? null;
+        }
+        return true;
+      });
+
+    fireEvent.click(badge);
+
+    expect(execSpy).toHaveBeenCalledWith("copy");
+    expect(copiedText).toBe("play.example.com");
+    expect(
+      await screen.findByText(t("dashboard.copiedBedrockAddress")),
+    ).toBeInTheDocument();
+
+    execSpy.mockRestore();
+  });
+
+  it("shows the Bedrock address in the address cell (table view)", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ bedrock_address: "play.example.com", bedrock_port: 19132 }),
+    ]);
+    renderPage();
+
+    await screen.findByText("survival");
+    fireEvent.click(
+      screen.getByRole("button", { name: t("dashboard.view.table") }),
+    );
+
+    expect(
+      await screen.findByRole("button", {
+        name: `${t("dashboard.bedrockLabel")}: play.example.com:19132`,
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("clicking the Bedrock badge copies the host only and shows Copied! (table view)", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ bedrock_address: "play.example.com", bedrock_port: 19132 }),
+    ]);
+    renderPage();
+
+    await screen.findByText("survival");
+    fireEvent.click(
+      screen.getByRole("button", { name: t("dashboard.view.table") }),
+    );
+
+    const badge = await screen.findByRole("button", {
+      name: `${t("dashboard.bedrockLabel")}: play.example.com:19132`,
+    });
+
+    if (!("execCommand" in document)) {
+      Object.defineProperty(document, "execCommand", {
+        value: () => true,
+        writable: true,
+        configurable: true,
+      });
+    }
+    // Capture the value handed to the clipboard fallback textarea: it must be
+    // the bare host with no `:port` (Bedrock's Port field is separate).
+    let copiedText: string | null = null;
+    const execSpy = vi
+      .spyOn(document, "execCommand")
+      .mockImplementation((command) => {
+        if (command === "copy") {
+          const areas = document.querySelectorAll("textarea");
+          copiedText = areas[areas.length - 1]?.value ?? null;
+        }
+        return true;
+      });
+
+    fireEvent.click(badge);
+
+    expect(execSpy).toHaveBeenCalledWith("copy");
+    expect(copiedText).toBe("play.example.com");
+    expect(
+      await screen.findByText(t("dashboard.copiedBedrockAddress")),
+    ).toBeInTheDocument();
+
+    execSpy.mockRestore();
+  });
+
+  it("Java and Bedrock copy states are independent (cards view)", async () => {
+    mockApi.get.mockResolvedValue([
+      server({
+        join_hostname: "survival.relay.example.com",
+        bedrock_address: "play.example.com",
+        bedrock_port: 19132,
+      }),
+    ]);
+    renderPage();
+    const bedrockBadge = await screen.findByRole("button", {
+      name: `${t("dashboard.bedrockLabel")}: play.example.com:19132`,
+    });
+
+    if (!("execCommand" in document)) {
+      Object.defineProperty(document, "execCommand", {
+        value: () => true,
+        writable: true,
+        configurable: true,
+      });
+    }
+    const execSpy = vi.spyOn(document, "execCommand").mockReturnValue(true);
+
+    // Copying the Bedrock address must not flip the Java badge to "Copied!".
+    fireEvent.click(bedrockBadge);
+    expect(
+      await screen.findByText(t("dashboard.copiedBedrockAddress")),
+    ).toBeInTheDocument();
+    expect(screen.getByText("survival.relay.example.com")).toBeInTheDocument();
+    // Both copied labels are the same literal, so pin exactly one is showing.
+    expect(screen.getAllByText(t("dashboard.copiedJoinHostname"))).toHaveLength(
+      1,
+    );
+
+    // And vice versa once the Bedrock badge has reverted (real 1500ms timer).
+    await screen.findByRole(
+      "button",
+      { name: `${t("dashboard.bedrockLabel")}: play.example.com:19132` },
+      { timeout: 3000 },
+    );
+    fireEvent.click(screen.getByText("survival.relay.example.com"));
+    expect(
+      await screen.findByText(t("dashboard.copiedJoinHostname")),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: `${t("dashboard.bedrockLabel")}: play.example.com:19132`,
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText(t("dashboard.copiedJoinHostname"))).toHaveLength(
+      1,
+    );
+
+    execSpy.mockRestore();
   });
 });
 

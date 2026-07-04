@@ -7,6 +7,8 @@ Rows are translated to/from the framework-free domain entity here.
 
 from __future__ import annotations
 
+import uuid
+from collections.abc import Iterable
 from typing import cast
 
 from sqlalchemy import delete, distinct, select, update
@@ -19,6 +21,7 @@ from mc_server_dashboard_api.servers.domain.plugin import (
     PluginSide,
     PluginSource,
     ServerPlugin,
+    has_enabled_geyser,
 )
 from mc_server_dashboard_api.servers.domain.plugin_repository import PluginRepository
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
@@ -107,6 +110,27 @@ class SqlAlchemyPluginRepository(PluginRepository):
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_plugin(row) for row in rows]
+
+    async def enabled_geyser_server_ids(
+        self, server_ids: Iterable[ServerId]
+    ) -> set[ServerId]:
+        ids = [server_id.value for server_id in server_ids]
+        if not ids:
+            return set()
+        # One query for every server in ``ids`` (issue #1555), rather than a
+        # list_for_server() per server, so the servers list response gate does not
+        # add a per-row query. Rows are grouped by server_id and classified with
+        # the same has_enabled_geyser() predicate list_for_server() callers use.
+        stmt = select(ServerPluginModel).where(ServerPluginModel.server_id.in_(ids))
+        rows = (await self._session.execute(stmt)).scalars().all()
+        grouped: dict[uuid.UUID, list[ServerPlugin]] = {}
+        for row in rows:
+            grouped.setdefault(row.server_id, []).append(_to_plugin(row))
+        return {
+            ServerId(server_id)
+            for server_id, plugins in grouped.items()
+            if has_enabled_geyser(plugins)
+        }
 
     async def delete(self, plugin_id: PluginId) -> None:
         stmt = delete(ServerPluginModel).where(ServerPluginModel.id == plugin_id.value)

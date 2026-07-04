@@ -53,6 +53,7 @@ from mc_server_dashboard_api.fleet.adapters.real_time_events import (
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
 from mc_server_dashboard_api.fleet.adapters.relay_server import register_relay_service
 from mc_server_dashboard_api.fleet.adapters.relay_state import (
+    BedrockTunnelTable,
     JoinTokenTable,
     RelayRegistration,
 )
@@ -511,6 +512,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "(the RelayService shares the control-plane gRPC listener)"
             )
 
+    # bedrock_enabled has no effect without relay.enabled: the deployment gate is
+    # relay.enabled AND relay.bedrock_enabled (RelaySettings docstring), so with
+    # the relay off no bedrock_port is ever allocated and the flag is silently
+    # inert (issue #1552). Warn (not fatal) rather than leaving the contradictory
+    # config undiagnosed.
+    if settings.relay.bedrock_enabled and not settings.relay.enabled:
+        logging.getLogger(__name__).warning(
+            "relay.bedrock_enabled is true but relay.enabled is false; "
+            "bedrock_enabled has no effect without the relay (the deployment gate "
+            "is relay.enabled AND relay.bedrock_enabled). Set relay.enabled=true "
+            "or drop relay.bedrock_enabled."
+        )
+
     # The control channel must be authenticated AND encrypted (NFR-SEC-1). The
     # gRPC listener serves over TLS when control.tls.cert_file/key_file are both
     # set; control.tls.insecure=true opts in to a plaintext listener for
@@ -609,10 +623,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             control_plane_state,
             timeout_seconds=settings.control.command_timeout_seconds,
         )
+        # Bedrock relay tunnel dispatch (issue #1544) shares the relay's
+        # registration and its own tunnel-token table with the RelayService
+        # servicer registered below (only when relay.enabled). Constructed
+        # unconditionally here -- cheap, in-memory, and harmless when the relay
+        # is off, since a server never carries a bedrock_port unless the relay
+        # Bedrock gate was on at allocation time (issue #1541) -- so the sink
+        # can dispatch OpenBedrockTunnel/CloseBedrockTunnel regardless of
+        # construction order relative to the relay.enabled block.
+        relay_registration = RelayRegistration()
+        bedrock_tunnel_table = BedrockTunnelTable()
+        # Exposed on app state so the request-scoped DeleteServer use case can
+        # evict a deleted server's tunnel credential (issue #1544).
+        app.state.bedrock_tunnel_table = bedrock_tunnel_table
         # The control-plane event path writes back observed server state through
         # this sink (its own session per call; the servicer has no request UoW).
         state_sink = ServersServerStateSink(
-            create_session_factory(engine), clock=ServersSystemClock()
+            create_session_factory(engine),
+            clock=ServersSystemClock(),
+            control_plane=app.state.control_plane,
+            relay_registration=relay_registration,
+            bedrock_tunnel_table=bedrock_tunnel_table,
+            bedrock_tunnel_port=settings.relay.bedrock_tunnel_port,
         )
         # A final-snapshot result that arrives after its dispatch timed out (a late
         # TRANSFER_FAILED once the worker's transfer bound aborts the upload, or a
@@ -702,8 +734,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     grpc_server,
                     credential=settings.relay.credential,
                     base_domain=settings.relay.base_domain,
-                    registration=RelayRegistration(),
+                    registration=relay_registration,
                     token_table=JoinTokenTable(),
+                    bedrock_tunnel_table=bedrock_tunnel_table,
                     resolver=ServersServerRouteResolver(create_session_factory(engine)),
                     registry=registry,
                     control_plane=app.state.control_plane,
