@@ -335,18 +335,23 @@ paths are not part of this Port.
 | `delete_dir(community_id, server_id, rel_path)` | Recursively delete a directory subtree from `current/` | **No** per-file version capture: file versioning (Section 5) is the fine-grained single-file mechanism, whereas whole-subtree recovery is what backups (Section 3.3) exist for; capturing a version per member of a large subtree would be a storage-amplification bomb. Missing dir → `NotFoundError`. Bumps the generation + stamps the `api-edit` sentinel (#889). |
 | `rename_file(community_id, server_id, from_path, to_path)` | Rename/move a single file atomically within `current/` | **No** version capture on either side (issue #1164): a rename does not change the content, so retaining versions would waste storage; the caller's content-addressed cache (plugin JARs) or backups cover recovery. Missing source → `NotFoundError`. Bumps the generation + stamps the `api-edit` sentinel (#889). |
 | `rename_dir(community_id, server_id, from_path, to_path)` | Rename/move a directory atomically within `current/` | **No** per-file version capture (same reasoning as `delete_dir`, issue #1191). Missing source dir → `NotFoundError`. Bumps the generation + stamps the `api-edit` sentinel (#889). |
-| `make_dir(community_id, server_id, rel_path)` | Create an (empty) directory in `current/` | Backend-dependent (see note). Idempotent. **Requires a published snapshot** — a never-snapshotted server has no live `current/` to create the directory under, so `make_dir` raises `NotFoundError` (behaviour aligned across both adapters in #896, including object which previously bumped the generation with no snapshot). Bumps the generation + stamps the `api-edit` sentinel (#889), uniformly with the other edits even though no content lands on object backends. |
+| `make_dir(community_id, server_id, rel_path)` | Create an (empty) directory in `current/` | Backend-dependent (see note). Idempotent. **Requires a published snapshot** — a never-snapshotted server has no live `current/` to create the directory under, so `make_dir` raises `NotFoundError` (behaviour aligned across both adapters in #896, including object which previously bumped the generation with no snapshot). Bumps the generation + stamps the `api-edit` sentinel (#889), uniformly with the other edits. On object backends it also writes a zero-byte `.dir` marker object under the prefix so the otherwise-empty directory is visible in listings (#1125; see note). |
 
-**Empty-directory limitation (`make_dir`).** fs / remote-fs materialize a real
+**Empty-directory representation (`make_dir`).** fs / remote-fs materialize a real
 empty directory, which rides the hydrate tar as a directory member (the tar is
 built recursively, so empty dirs survive a snapshot round-trip). **Object storage
 has no real directories** — a directory exists only as the shared key-prefix of
-its files (Section 7.3), so an *empty* directory cannot be represented and
-`make_dir` writes no directory object there; the directory becomes observable once
-a file is written under it. This is documented honestly rather than papered over
-with a marker object that would pollute listings. On both backends `make_dir` still
-bumps the generation marker (#889, see Section 4.4), so the store generation stays
-in lockstep across adapters.
+its files (Section 7.3), so an *empty* directory has no key to make it visible. To
+give it one, `make_dir` writes a zero-byte `.dir` marker object under the directory
+prefix (#1125), so the otherwise-empty directory shows up in listings. `list_dir`
+filters the `.dir` marker out of its entries (`_entries_at_level`), so the API
+never surfaces it as a file. The marker is a real object, though: it rides the
+hydrate tar to the Worker (a literal `foo/.dir` file appears in the live working
+directory), is re-packed into the next snapshot, and is carried into
+`create_backup_from_current`/restore — so on object backends the empty directory
+persists as a `.dir` marker throughout the working-set lifecycle rather than as a
+true directory entry. On both backends `make_dir` bumps the generation marker
+(#889, see Section 4.4), so the store generation stays in lockstep across adapters.
 
 ### 3.5 File version retention / rollback
 
@@ -490,9 +495,10 @@ post-edit hydrate (#767) on the next start and boot the PRE-edit world, and that
 scratch's in-flight stale snapshot — the same Worker, `base == current` — would
 pass the publish-time guard (Section 8) and clobber the edit; the sentinel makes it
 a different-publisher publish whose base now lags, so the guard refuses it. The bump
-is uniform across all five ops for a simple invariant: even `make_dir` (which adds
-no `current/` content on `fs`, and is a content no-op on object backends) bumps, so
-the staleness reasoning never special-cases which edit "really" changed the world.
+is uniform across all five ops for a simple invariant: even `make_dir` (which only
+creates an empty directory — a real one on `fs`, a zero-byte `.dir` marker on
+object backends per #1125) bumps, so the staleness reasoning never special-cases
+which edit "really" changed the world.
 
 A single-file `write_file` and a whole-working-set publish/restore are never
 issued concurrently for the same server: they are serialized at the application
