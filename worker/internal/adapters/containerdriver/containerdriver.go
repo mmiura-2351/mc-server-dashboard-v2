@@ -748,6 +748,24 @@ type instance struct {
 	// survived-kill restore must not stomp (issue #392). Nil in production.
 	beforeSurvivedReset func()
 
+	// metricsMu guards the cached metrics RCON connection reused across player-count
+	// samples (issue #1622). It is a dedicated lock — never i.mu — held only for the
+	// duration of a sample's dial+"list" or the terminal close, so a slow RCON round
+	// trip cannot stall the state machine (Status/Stop/supervise). The connection is
+	// kept separate from the console-command and graceful-stop RCON paths (each of
+	// which dials its own transient connection), so no cross-path locking arises.
+	metricsMu sync.Mutex
+	// metricsControl is the persistent RCON connection player-count sampling reuses;
+	// nil before the first dial and after a poisoned connection is discarded. The
+	// rcon client is not safe for concurrent use and poisons itself on any Execute
+	// error, so access is serialized by metricsMu and a broken connection is
+	// discarded to force a redial on the next sample.
+	metricsControl execution.ServerControl
+	// metricsClosed latches once the instance terminates and closeMetricsControl has
+	// run, so a late in-flight sample does not redial a connection nobody would
+	// close.
+	metricsClosed bool
+
 	mu       sync.Mutex
 	state    execution.ServerState
 	stopping bool
@@ -1147,6 +1165,10 @@ func (i *instance) finishTerminal(state execution.ServerState, detail string) {
 	i.closed = true
 	close(i.events)
 	i.mu.Unlock()
+	// Release the cached metrics RCON connection so it never outlives the instance
+	// (issue #1622). Closing i.events above stops the metrics pump, so this cannot
+	// contend with a sample for long.
+	i.closeMetricsControl()
 }
 
 func (i *instance) Status() execution.ServerState {
@@ -1191,21 +1213,59 @@ func (i *instance) Sample(ctx context.Context) (execution.MetricsSample, error) 
 	}, nil
 }
 
-// queryPlayerCount opens a transient RCON connection and sends "list" to get
-// the online player count. It is best-effort: any error (RCON not ready,
-// dial failure, unparseable response) returns 0 so the metrics sample is
-// still emitted with honest zeroes rather than failing the whole sample.
+// queryPlayerCount reuses a persistent per-instance RCON connection and sends
+// "list" to get the online player count. Dialing once and reusing the connection
+// across samples keeps the vanilla server from logging a "Thread RCON Client
+// started/shutting down" pair on every metrics tick (issue #1622).
+//
+// It is best-effort: any error (RCON not ready, dial failure, unparseable
+// response) returns 0 so the metrics sample is still emitted with honest zeroes
+// rather than failing the whole sample. The rcon client poisons itself on any
+// Execute error, so a failed sample discards the connection and the next sample
+// redials a fresh one — at most one redial per tick, never a hot loop. Access is
+// serialized by metricsMu so the terminal close (closeMetricsControl) cannot race
+// a sample.
 func (i *instance) queryPlayerCount(ctx context.Context) uint32 {
-	ctrl, err := i.openControl(ctx, i.spec, i.rconHost)
-	if err != nil {
+	i.metricsMu.Lock()
+	defer i.metricsMu.Unlock()
+
+	// The instance has terminated and its connection was closed; do not redial —
+	// nothing would close a fresh connection.
+	if i.metricsClosed {
 		return 0
 	}
-	defer func() { _ = ctrl.Close() }()
-	reply, err := ctrl.Execute(ctx, "list")
+
+	if i.metricsControl == nil {
+		ctrl, err := i.openControl(ctx, i.spec, i.rconHost)
+		if err != nil {
+			return 0
+		}
+		i.metricsControl = ctrl
+	}
+
+	reply, err := i.metricsControl.Execute(ctx, "list")
 	if err != nil {
+		// The rcon client poisoned this connection; discard it so the next sample
+		// redials rather than reading off a broken stream.
+		_ = i.metricsControl.Close()
+		i.metricsControl = nil
 		return 0
 	}
 	return parsePlayerCount(reply)
+}
+
+// closeMetricsControl closes the cached metrics RCON connection (if any) and
+// latches metricsClosed so a late in-flight sample does not redial a connection
+// nobody would close. Called from the terminal paths so the connection never
+// outlives the instance (issue #1622).
+func (i *instance) closeMetricsControl() {
+	i.metricsMu.Lock()
+	defer i.metricsMu.Unlock()
+	i.metricsClosed = true
+	if i.metricsControl != nil {
+		_ = i.metricsControl.Close()
+		i.metricsControl = nil
+	}
 }
 
 // parsePlayerCount extracts the online count from a Minecraft "list" response.
@@ -1556,6 +1616,13 @@ func (i *instance) supervise() {
 	i.closed = true
 	close(i.events)
 	i.mu.Unlock()
+
+	// Release the cached metrics RCON connection now the container is gone so it
+	// does not leak an fd into the next container (issue #1622). This runs after the
+	// container removal above so it never delays a restart; closing i.events stops
+	// the metrics pump, so any in-flight sample unblocks and this acquires the lock
+	// without waiting out a full sample.
+	i.closeMetricsControl()
 }
 
 // isTransportError reports whether err from a docker call is a transport-level
