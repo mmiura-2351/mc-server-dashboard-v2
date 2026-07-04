@@ -208,6 +208,7 @@ export function CommunityGroupsTab({
         title={t("communitySettings.groups.deleteDialogTitle")}
         body={t("communitySettings.groups.deleteDialogBody")}
         confirmLabel={t("communitySettings.groups.deleteConfirm")}
+        busy={remove.isPending}
         onConfirm={() => {
           if (deleting !== null) {
             remove.mutate(deleting);
@@ -432,6 +433,7 @@ function GroupDetail({
         title={t("communitySettings.groups.removePlayerDialogTitle")}
         body={t("communitySettings.groups.removePlayerDialogBody")}
         confirmLabel={t("communitySettings.groups.removePlayerConfirm")}
+        busy={removePlayer.isPending}
         onConfirm={() => {
           if (removingPlayer !== null) {
             removePlayer.mutate(removingPlayer.uuid);

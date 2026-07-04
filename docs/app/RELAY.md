@@ -1,7 +1,7 @@
 # Game Ingress Relay
 
-> Status: **Design** · Audience: contributors to `api/`, `worker/`, `relay/`,
-> `proto/`, `webui/`
+> Status: **Implemented** (epic #659; Bedrock ingress epic #1540) · Audience:
+> contributors to `api/`, `worker/`, `relay/`, `proto/`, `webui/`
 >
 > This document is the design for epic
 > [#659](https://github.com/mmiura-2351/mc-server-dashboard-v2/issues/659):
