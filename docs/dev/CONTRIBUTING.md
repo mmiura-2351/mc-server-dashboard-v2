@@ -5,9 +5,9 @@ requests, review, and merge. Behavioral guidance for *how to write the code* is
 in [`../../CLAUDE.md`](../../CLAUDE.md); documentation conventions are in
 [`../README.md`](../README.md).
 
-> Hooks and CI are wired (see Section 4 and `.github/workflows/`). Some other
-> steps reference mechanisms still being set up; follow the intent, concrete
-> commands are added as the toolchain lands.
+> Hooks and CI are wired (see Section 4 and `.github/workflows/`); the commands
+> below are concrete and enforced (the pre-push `make check` and the CI
+> workflows).
 
 ## 1. Issues
 

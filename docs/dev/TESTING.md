@@ -7,9 +7,10 @@ per-component (Python `api/`, Go `worker/`) and is pinned as it lands. On
 mechanics, a future per-component tooling doc wins; on discipline, this document
 wins.
 
-> **Status**: the test toolchains are still being set up. Entries marked
-> *(forthcoming)* gain concrete commands later; the discipline below applies
-> from the first line of code.
+> **Status**: the per-component test toolchains are in place and CI-enforced
+> (`api/` `pytest`, `worker/` and `relay/` `go test`, `webui/` Vitest, run via
+> `make check`; see `.github/workflows/`). The discipline below applies from the
+> first line of code.
 
 ## 1. The cycle: Red → Green → Refactor
 
@@ -85,8 +86,8 @@ Favor many small, fast tests over a few slow, broad ones (the testing pyramid):
 
 Fast tests run continuously in the TDD inner loop; the slower, broader tests run
 before a change is integrated. Concrete layer names, directory layout, and run
-commands are per-component and *(forthcoming)*. Both `api/` and `worker/` follow
-the same discipline described above.
+commands are per-component (see each module's `Makefile` targets and CI
+workflow). Both `api/` and `worker/` follow the same discipline described above.
 
 ## 6. References
 
