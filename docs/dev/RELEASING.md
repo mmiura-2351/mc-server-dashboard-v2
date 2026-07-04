@@ -77,16 +77,25 @@ changelog.
 
 ### 4.1 Version source of truth: the git tag
 
-**The git tag is the single authority for the version.** There is no version
-file to bump and no separate field to keep in sync — the `vX.Y.Z` tag on a
-commit *is* the release version. This is the simplest correct choice at this
-stage: one repository-wide SemVer (per the monorepo note above), releases cut by
-tag push (Section 4.3), and nothing that can drift out of step.
+**The git tag is the single authority for the version.** No version file tracks
+the release and none is bumped per release — the `vX.Y.Z` tag on a commit *is*
+the release version. The only checked-in `version` fields, `api/pyproject.toml`
+and `webui/package.json`, are held at a frozen `0.0.0`: their manifests carry a
+`version` field by convention (PEP 621 requires it; npm's manifest expects it),
+but neither is a release version — neither is read at runtime and both are
+intentionally never bumped. This is the simplest correct choice at this stage:
+one repository-wide SemVer (per the monorepo note above), releases cut by tag
+push (Section 4.3), and nothing that can drift out of step.
 
-Components do not embed a hard-coded version today. When packaging exists,
-`api/` and `worker/` derive their version from the tag at build time
-(`git describe`, Go `-ldflags`, a setuptools-scm-style mechanism, etc.) rather
-than from a checked-in constant.
+The components do not yet derive their version from the tag at build time. The
+Worker embeds a hard-coded placeholder: `worker/cmd/worker/main.go` declares
+`const version = "0.0.0-dev"` and advertises it as `worker_version` at
+registration, so a Worker built from any tag reports `0.0.0-dev` to the control
+plane. Neither the `worker/` nor the `relay/` Docker build passes `-ldflags`,
+and the release workflow injects nothing, so no component binary carries the
+release tag today. Wiring the tag into the build (`git describe`, Go
+`-ldflags`, a setuptools-scm-style mechanism for `api/`, etc.) rather than
+relying on a checked-in constant is tracked in #1624.
 
 **Alternatives considered and rejected:**
 
