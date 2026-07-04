@@ -270,6 +270,53 @@ describe("Step 2 — runtime port check", () => {
       await screen.findByText(t("serverCreate.portTaken")),
     ).toBeInTheDocument();
   });
+
+  it("ignores a stale out-of-order port-check response (#1592)", async () => {
+    // Two blurs in quick succession on different ports: the first port's check
+    // resolves *after* the second's. Without a request guard the stale "taken"
+    // verdict for 25565 would clobber the current "available" verdict for 25566.
+    let resolveFirst: (v: unknown) => void = () => {};
+    let resolveSecond: (v: unknown) => void = () => {};
+    mockApi.get.mockImplementation((path: string) => {
+      if (path === "/api/ports/check/25565") {
+        return new Promise((resolve) => {
+          resolveFirst = resolve;
+        });
+      }
+      if (path === "/api/ports/check/25566") {
+        return new Promise((resolve) => {
+          resolveSecond = resolve;
+        });
+      }
+      return defaultGet(path);
+    });
+    renderPage();
+    await pickTypeAndVersion();
+    fireEvent.click(screen.getByText(t("serverCreate.next")));
+
+    const portInput = await screen.findByLabelText(t("serverCreate.portLabel"));
+    // First blur on 25565 leaves its check pending.
+    fireEvent.change(portInput, { target: { value: "25565" } });
+    fireEvent.blur(portInput);
+    // Second blur on 25566 supersedes it.
+    fireEvent.change(portInput, { target: { value: "25566" } });
+    fireEvent.blur(portInput);
+
+    // The current (second) request resolves first: available.
+    resolveSecond({ in_range: true, available: true });
+    expect(
+      await screen.findByText(t("serverCreate.portAvailable")),
+    ).toBeInTheDocument();
+
+    // The stale (first) request resolves later as taken — it must be ignored.
+    resolveFirst({ in_range: true, available: false });
+    await waitFor(() =>
+      expect(
+        screen.getByText(t("serverCreate.portAvailable")),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(t("serverCreate.portTaken"))).toBeNull();
+  });
 });
 
 describe("Step 2 — port control gated on relay mode (#1002)", () => {

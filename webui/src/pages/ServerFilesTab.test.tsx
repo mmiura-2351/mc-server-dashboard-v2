@@ -393,6 +393,44 @@ describe("ServerFilesTab operations", () => {
     );
   });
 
+  it("disables the Create button while the folder-create request is in flight", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "a.txt", is_dir: false }]),
+    });
+    // Keep the create request pending so the busy state stays observable.
+    let resolveCreate: (() => void) | undefined;
+    mockApi.post.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveCreate = resolve;
+        }),
+    );
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    const row = screen.getByText(/a\.txt/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.newFolder") }),
+    );
+    fireEvent.change(screen.getByLabelText(t("files.folderName")), {
+      target: { value: "datapacks" },
+    });
+
+    const create = screen.getByRole("button", { name: t("files.create") });
+    fireEvent.click(create);
+
+    // While the POST is pending the button is disabled, so a double-click
+    // cannot fire a second (conflicting) request (#1591).
+    await waitFor(() => expect(create).toBeDisabled());
+    fireEvent.click(create);
+    expect(mockApi.post).toHaveBeenCalledTimes(1);
+
+    resolveCreate?.();
+  });
+
   it("renames an entry via context menu with a {from, to} body", async () => {
     routeGet({
       detail: server(),

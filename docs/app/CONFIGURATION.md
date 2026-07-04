@@ -1,6 +1,6 @@
 # Configuration
 
-> Status: **Design** · Audience: contributors and operators of `api/` and
+> Status: **Implemented** · Audience: contributors and operators of `api/` and
 > `worker/`
 >
 > This document defines the **runtime configuration surface** of v2 and the
@@ -10,10 +10,9 @@
 > win and this document is wrong.
 >
 > Scope is the *configuration contract* — which keys exist, what they select,
-> and their defaults — not how configuration is loaded. The loader lands with
-> the implementation (epic #3+). Key names below are the agreed surface; minor
-> renames during implementation are acceptable as long as the grouping and
-> selection semantics hold.
+> and their defaults — not how configuration is loaded. The loaders are shipped
+> and fail fast on a bad config (Section 2); the key names below are the settled
+> surface.
 
 ## Table of Contents
 
@@ -64,10 +63,9 @@ overriding the file:
 
 - **Defaults** are the values in this document; a key omitted everywhere takes
   its default. A key with no default (marked *required*) must be supplied.
-- **Config file** — a single file per service (e.g. `api.toml` /
-  `worker.toml`; the concrete format is fixed when the loader lands). Holds the
-  non-secret bulk of configuration and is the recommended place for
-  adapter-selection and tuning keys.
+- **Config file** — a single **TOML** file per service (e.g. `api.toml` /
+  `worker.toml`). Holds the non-secret bulk of configuration and is the
+  recommended place for adapter-selection and tuning keys.
 - **Environment variables** — highest precedence; override any file value. The
   intended channel for **secrets** (Section 3) and for per-deployment overrides
   (container/orchestrator injection). Names are the UPPERCASE keys in the tables
@@ -80,7 +78,7 @@ starting in a half-configured state.
 The tables below give the **logical key name**. The environment-variable form
 is the key prefixed per service (`MCD_API_` for `api/`, `MCD_WORKER_` for
 `worker/`) to avoid collisions; the file form nests the same key under its
-group. The exact prefix is confirmed when the loader lands.
+group.
 
 ---
 

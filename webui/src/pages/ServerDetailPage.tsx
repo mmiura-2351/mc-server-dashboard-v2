@@ -1405,6 +1405,10 @@ function Settings({
     typeof server.cpu_millis === "number" ? String(server.cpu_millis) : "",
   );
   const [portHint, setPortHint] = useState<TranslationKey | null>(null);
+  // Only the latest issued check may apply its result: blurs on different ports
+  // can resolve out of order and a stale response must not clobber the current
+  // hint (#1592).
+  const portCheckRequest = useRef(0);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
   // Re-sync form state when the server prop changes (e.g. after a save +
@@ -1557,6 +1561,7 @@ function Settings({
 
   const checkPort = async () => {
     if (port === "" || Number(port) === server.game_port) {
+      portCheckRequest.current += 1;
       setPortHint(
         Number(port) === server.game_port ? "serverDetail.port.current" : null,
       );
@@ -1564,13 +1569,16 @@ function Settings({
     }
     const parsed = Number(port);
     if (!Number.isInteger(parsed)) {
+      portCheckRequest.current += 1;
       setPortHint("serverDetail.port.outOfRange");
       return;
     }
+    const requestId = ++portCheckRequest.current;
     try {
       const result = await api.get(
         apiPath("/api/ports/check/{port}", { port: String(parsed) }),
       );
+      if (portCheckRequest.current !== requestId) return;
       if (result.in_range === false) {
         setPortHint("serverDetail.port.outOfRange");
       } else if (result.available === false) {
@@ -1579,6 +1587,7 @@ function Settings({
         setPortHint("serverDetail.port.available");
       }
     } catch {
+      if (portCheckRequest.current !== requestId) return;
       setPortHint("serverDetail.port.checkError");
     }
   };

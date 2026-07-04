@@ -86,6 +86,12 @@ def test_cache_control_no_store_on_auth_refresh(client: TestClient) -> None:
     assert resp.headers.get("cache-control") == "no-store"
 
 
+def test_cache_control_no_store_on_auth_session(client: TestClient) -> None:
+    resp = client.post("/api/auth/session")
+    # Returns 401 (no refresh cookie); the middleware still runs.
+    assert resp.headers.get("cache-control") == "no-store"
+
+
 def test_cache_control_no_store_on_users_me(client: TestClient) -> None:
     resp = client.get("/api/users/me")
     # Returns 401 (no Bearer token); the middleware still runs.
