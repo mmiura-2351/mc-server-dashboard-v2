@@ -1,6 +1,6 @@
 # Database
 
-> Status: **Design** · Audience: contributors to `api/`
+> Status: **Implemented** · Audience: contributors to `api/`
 >
 > This document defines the persistence model for the core entities sketched in
 > [`REQUIREMENTS.md`](../REQUIREMENTS.md) Appendix B: the tables, their keys and
@@ -13,9 +13,10 @@
 > API owns. Bulk artifacts (world data, server JARs, backup archives) are **not**
 > stored here; they live behind the `Storage` Port and are specified in
 > [`STORAGE.md`](STORAGE.md) (issue #17). A `Backup` row here is the *metadata* of
-> a retained snapshot; the archive bytes are in `Storage`. Migration tooling (how
-> the schema is versioned and applied) lands with epic #3 and is **out of scope**
-> here. Runtime configuration is in `CONFIGURATION.md` (issue #16).
+> a retained snapshot; the archive bytes are in `Storage`. The schema is versioned
+> and applied by **Alembic** (`api/migrations/`); this document specifies the
+> logical model, not the per-migration DDL. Runtime configuration is in
+> `CONFIGURATION.md` (issue #16).
 
 ## Table of Contents
 
@@ -72,8 +73,8 @@ behind the persistence Port, a deployment that genuinely wants a single file can
 provide a SQLite adapter later without a domain change — the Port shape does not
 assume small scale (REQUIREMENTS.md Section 1.1).
 
-The concrete migration toolchain (Alembic or equivalent) is **not** decided here;
-it lands with epic #3.
+The concrete migration toolchain is **Alembic**, with the migrations under
+`api/migrations/`.
 
 ---
 
@@ -90,7 +91,7 @@ it lands with epic #3.
   retained even when their referenced actors/targets are gone (Section 9).
 - **Naming.** Tables are singular (`user`, `server`), snake_case columns. Foreign
   keys are `<entity>_id`. This is a logical model; exact DDL is owned by the
-  migration tooling (epic #3).
+  Alembic migrations (`api/migrations/`).
 - **Enums** are stored as short text with a `CHECK` constraint (or a native enum
   type) rather than opaque integers, so rows are readable and new values are a
   migration, not a code-coupled magic number.
