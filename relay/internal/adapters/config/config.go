@@ -95,6 +95,14 @@ type TunnelConfig struct {
 // distinguishes the two on the wire -- so there is no separate cert/key pair
 // here.
 type BedrockConfig struct {
+	// Enabled toggles the Bedrock QUIC/UDP tunnel listener (default false).
+	// Off by default so a Java-only relay neither binds nor requires the
+	// Bedrock UDP ports (bedrock.tunnel_listen and the per-tunnel bedrock_port
+	// window) -- a host-port conflict on either must not take Java joins down
+	// on upgrade (issue #1584). Mirrors the API's relay.bedrock_enabled /
+	// MCD_API_RELAY__BEDROCK_ENABLED; compose wires both services from the
+	// same operator setting.
+	Enabled bool
 	// TunnelListen is the public QUIC/UDP address Workers dial to open a
 	// Bedrock tunnel (default :25675). This mirrors the API-side
 	// relay.bedrock_tunnel_port default (docs/app/CONFIGURATION.md Section
@@ -172,6 +180,7 @@ type fileConfig struct {
 		} `toml:"tls"`
 	} `toml:"tunnel"`
 	Bedrock struct {
+		Enabled                *bool   `toml:"enabled"`
 		TunnelListen           *string `toml:"tunnel_listen"`
 		TunnelMaxConnsPerIP    *uint32 `toml:"tunnel_max_conns_per_ip"`
 		MaxFlowsPerIP          *uint32 `toml:"max_flows_per_ip"`
@@ -265,6 +274,9 @@ func applyFile(cfg *Config, path string) error {
 	setString(&cfg.Tunnel.TLS.CertFile, fc.Tunnel.TLS.CertFile)
 	setString(&cfg.Tunnel.TLS.KeyFile, fc.Tunnel.TLS.KeyFile)
 	setString(&cfg.Tunnel.TLS.AdvertisedCAFile, fc.Tunnel.TLS.AdvertisedCAFile)
+	if fc.Bedrock.Enabled != nil {
+		cfg.Bedrock.Enabled = *fc.Bedrock.Enabled
+	}
 	setString(&cfg.Bedrock.TunnelListen, fc.Bedrock.TunnelListen)
 	setUint32(&cfg.Bedrock.TunnelMaxConnsPerIP, fc.Bedrock.TunnelMaxConnsPerIP)
 	setUint32(&cfg.Bedrock.MaxFlowsPerIP, fc.Bedrock.MaxFlowsPerIP)
@@ -309,6 +321,13 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 	setEnvString(&cfg.Tunnel.TLS.CertFile, getenv, "TUNNEL_TLS_CERT_FILE")
 	setEnvString(&cfg.Tunnel.TLS.KeyFile, getenv, "TUNNEL_TLS_KEY_FILE")
 	setEnvString(&cfg.Tunnel.TLS.AdvertisedCAFile, getenv, "TUNNEL_TLS_ADVERTISED_CA_FILE")
+	if v := getenv(EnvPrefix + "BEDROCK_ENABLED"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("config: %sBEDROCK_ENABLED: %w", EnvPrefix, err)
+		}
+		cfg.Bedrock.Enabled = b
+	}
 	setEnvString(&cfg.Bedrock.TunnelListen, getenv, "BEDROCK_TUNNEL_LISTEN")
 	if err := setEnvUint32(&cfg.Bedrock.TunnelMaxConnsPerIP, getenv, "BEDROCK_TUNNEL_MAX_CONNS_PER_IP"); err != nil {
 		return err

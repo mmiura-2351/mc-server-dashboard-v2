@@ -100,22 +100,31 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("bind game listener %q: %w", cfg.Game.Listen, err)
 	}
 
-	// The Bedrock tunnel listener reuses the TCP tunnel's TLS certificate (same
-	// CA the Worker already gets via Register -> OpenBedrockTunnel.tls_ca_pem,
-	// docs/app/BEDROCK_TUNNEL.md); only the negotiated ALPN differs, so the two
-	// listeners are distinguishable on the wire despite sharing a cert.
-	bedrockTLS := tunnelTLS.Clone()
-	bedrockTLS.NextProtos = []string{bedrock.ALPN}
-	// Pre-auth handshake-window caps on the QUIC listener itself (the #968
-	// posture, mirroring tunnelCaps above) -- distinct from the per-tunnel
-	// caps below, which govern the public UDP ingress of each bound tunnel.
-	bedrockTunnelCaps := ipcaps.NewIPCaps(cfg.Bedrock.TunnelMaxConnsPerIP, 0, 0, time.Now, logger)
-	newBedrockIPCaps := func() *ipcaps.IPCaps {
-		return ipcaps.NewIPCaps(cfg.Bedrock.MaxFlowsPerIP, cfg.Bedrock.NewFlowsPerIPPerSecond, 0, time.Now, logger)
-	}
-	bedrockLn, err := bedrock.NewListener(cfg.Bedrock.TunnelListen, bedrockTLS, apiClient, bedrockTunnelCaps, newBedrockIPCaps, logger)
-	if err != nil {
-		return fmt.Errorf("bind bedrock tunnel listener %q: %w", cfg.Bedrock.TunnelListen, err)
+	// The Bedrock tunnel listener is strictly opt-in (cfg.Bedrock.Enabled,
+	// default false, issue #1584): a Java-only relay must neither bind nor
+	// require the Bedrock UDP ports, so an upgrade cannot fail to start on a
+	// host-port conflict and take Java joins down. When enabled, it reuses
+	// the TCP tunnel's TLS certificate (same CA the Worker already gets via
+	// Register -> OpenBedrockTunnel.tls_ca_pem, docs/app/BEDROCK_TUNNEL.md);
+	// only the negotiated ALPN differs, so the two listeners are
+	// distinguishable on the wire despite sharing a cert.
+	var bedrockLn *bedrock.Listener
+	if cfg.Bedrock.Enabled {
+		bedrockTLS := tunnelTLS.Clone()
+		bedrockTLS.NextProtos = []string{bedrock.ALPN}
+		// Pre-auth handshake-window caps on the QUIC listener itself (the #968
+		// posture, mirroring tunnelCaps above) -- distinct from the per-tunnel
+		// caps below, which govern the public UDP ingress of each bound tunnel.
+		bedrockTunnelCaps := ipcaps.NewIPCaps(cfg.Bedrock.TunnelMaxConnsPerIP, 0, 0, time.Now, logger)
+		newBedrockIPCaps := func() *ipcaps.IPCaps {
+			return ipcaps.NewIPCaps(cfg.Bedrock.MaxFlowsPerIP, cfg.Bedrock.NewFlowsPerIPPerSecond, 0, time.Now, logger)
+		}
+		bedrockLn, err = bedrock.NewListener(cfg.Bedrock.TunnelListen, bedrockTLS, apiClient, bedrockTunnelCaps, newBedrockIPCaps, logger)
+		if err != nil {
+			return fmt.Errorf("bind bedrock tunnel listener %q: %w", cfg.Bedrock.TunnelListen, err)
+		}
+	} else {
+		logger.Info("bedrock disabled")
 	}
 
 	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
@@ -134,7 +143,7 @@ func run(ctx context.Context) error {
 	logger.Info("relay starting", "game_listen", cfg.Game.Listen, "tunnel_listen", cfg.Tunnel.Listen, "bedrock_tunnel_listen", cfg.Bedrock.TunnelListen)
 
 	var wg sync.WaitGroup
-	wg.Add(5)
+	wg.Add(4)
 	go func() { defer wg.Done(); svc.Run(svcCtx) }()
 	go func() { defer wg.Done(); reporter.Run(svcCtx) }()
 	go func() {
@@ -144,13 +153,16 @@ func run(ctx context.Context) error {
 			stop()
 		}
 	}()
-	go func() {
-		defer wg.Done()
-		if err := bedrockLn.Serve(sigCtx); err != nil {
-			logger.Error("bedrock tunnel listener stopped", "error", err)
-			stop()
-		}
-	}()
+	if bedrockLn != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := bedrockLn.Serve(sigCtx); err != nil {
+				logger.Error("bedrock tunnel listener stopped", "error", err)
+				stop()
+			}
+		}()
+	}
 	go func() {
 		defer wg.Done()
 		if err := gameLn.Serve(sigCtx); err != nil {

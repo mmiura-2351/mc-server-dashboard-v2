@@ -631,6 +631,24 @@ git pull
 > (fs deployments set `COMPOSE_PROFILES=` empty instead — see the breaking-change
 > box above.)
 
+> **Upgrade note — Bedrock is opt-in on the relay (issue #1584).** The relay's
+> Bedrock QUIC/UDP tunnel listener is gated on `bedrock.enabled` (`relay.toml`) /
+> `MCD_RELAY_BEDROCK_ENABLED` (env), default **false** — `compose.yaml` feeds it
+> from the same `MCD_API_RELAY__BEDROCK_ENABLED` flag the API already reads (see
+> `.env.example`), so operators toggle Bedrock in one place for both services. A
+> Java-only / Bedrock-off relay upgrading to a revision carrying the Bedrock epic
+> binds neither the Bedrock tunnel port (`25675/udp`) nor the per-server
+> `19132-19231/udp` window, so it is unaffected and cannot fail to start on a
+> host-port conflict there. `compose.yaml` still *publishes* both Bedrock UDP
+> port entries unconditionally (Compose has no clean per-port conditional syntax
+> on a single service) — if a host already has something else bound to
+> `25675/udp` or a port in `19132-19231/udp`, the relay container can still fail
+> Docker's own port allocation even with Bedrock disabled; free the conflicting
+> port or move the relay to a host without one. See
+> [`../app/RELAY.md`](../app/RELAY.md) Section 13 and
+> [`../app/BEDROCK_TUNNEL.md`](../app/BEDROCK_TUNNEL.md) Section 9 for the
+> `bedrock.enabled` key, and "Bedrock (Geyser)" below for turning Bedrock on.
+
 Stacks that were first deployed before the `api` image pre-created the storage
 mount point have an `api-storage` volume owned by root, so the non-root app
 (uid 10001) cannot write to it. Fix the ownership once, then bring the stack up:
@@ -911,7 +929,9 @@ record — see below) and needs these additional steps:
    record, Bedrock clients must connect by raw IP; the hostname fails with
    Bedrock's "Server address is not correctly formatted" (its message for a
    hostname it can't resolve).
-2. Set `MCD_API_RELAY__BEDROCK_ENABLED=true` in `.env` (see `.env.example`).
+2. Set `MCD_API_RELAY__BEDROCK_ENABLED=true` in `.env` (see `.env.example`) —
+   this single flag now also gates the relay's own Bedrock listener (issue
+   #1584; see the upgrade note in [Section 9](#9-upgrade)).
 3. Open the two additional firewall rows above on the relay host: the Bedrock
    QUIC tunnel port (25675/udp) and the client-facing UDP window
    (19132-19231/udp, `compose.yaml`'s relay service already publishes both).
