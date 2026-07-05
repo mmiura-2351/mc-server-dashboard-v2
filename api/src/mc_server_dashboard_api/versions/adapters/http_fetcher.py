@@ -14,7 +14,11 @@ from mc_server_dashboard_api.versions.adapters.ssrf_guard import (
     BlockedHostError,
     assert_url_allowed,
 )
-from mc_server_dashboard_api.versions.domain.fetcher import FetchError, JsonFetcher
+from mc_server_dashboard_api.versions.domain.fetcher import (
+    FetchError,
+    FetchNotFoundError,
+    JsonFetcher,
+)
 
 # A bounded per-request timeout so a hung source cannot stall a request thread.
 _TIMEOUT = httpx.Timeout(10.0)
@@ -28,6 +32,7 @@ class HttpxJsonFetcher(JsonFetcher):
             assert_url_allowed(url)
             async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
                 response = await client.get(url)
+                _check_not_found(response)
                 response.raise_for_status()
                 return response.json()
         except BlockedHostError as exc:
@@ -40,9 +45,17 @@ class HttpxJsonFetcher(JsonFetcher):
             assert_url_allowed(url)
             async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
                 response = await client.get(url)
+                _check_not_found(response)
                 response.raise_for_status()
                 return response.text
         except BlockedHostError as exc:
             raise FetchError(str(exc)) from exc
         except httpx.HTTPError as exc:
             raise FetchError(str(exc)) from exc
+
+
+def _check_not_found(response: httpx.Response) -> None:
+    """Raise :class:`FetchNotFoundError` if the response is 404."""
+
+    if response.status_code == 404:
+        raise FetchNotFoundError(f"404 Not Found: {response.url}")
