@@ -16,6 +16,10 @@ from __future__ import annotations
 
 import httpx
 
+from mc_server_dashboard_api.versions.adapters.ssrf_guard import (
+    BlockedHostError,
+    assert_url_allowed,
+)
 from mc_server_dashboard_api.versions.domain.errors import (
     JarDownloadError,
     JarTooLargeError,
@@ -37,10 +41,13 @@ class HttpxJarFetcher(JarFetcher):
 
     async def fetch(self, url: str) -> bytes:
         try:
+            assert_url_allowed(url)
             async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
                 async with client.stream("GET", url) as response:
                     response.raise_for_status()
                     return await _read_capped(response)
+        except BlockedHostError as exc:
+            raise JarDownloadError(str(exc)) from exc
         except httpx.HTTPError as exc:
             raise JarDownloadError(str(exc)) from exc
 

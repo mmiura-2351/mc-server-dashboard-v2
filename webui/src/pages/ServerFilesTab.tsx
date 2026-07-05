@@ -1160,6 +1160,7 @@ export function ServerFilesTab({
             : t("files.delete.dialogBody")
         }
         confirmLabel={t("files.delete.confirm")}
+        busy={kbDelete.isPending}
         onConfirm={() => kbDelete.mutate()}
         onClose={() => setKbDeleteOpen(false)}
       />
@@ -1650,6 +1651,7 @@ function Listing({
         title={t("files.delete.dialogTitle")}
         body={t("files.delete.dialogBody")}
         confirmLabel={t("files.delete.confirm")}
+        busy={remove.isPending}
         onConfirm={() => deleting !== null && remove.mutate(deleting)}
         onClose={() => setDeleting(null)}
       />
@@ -2555,6 +2557,7 @@ function MkdirDialog({
       value={name}
       onChange={setName}
       confirmLabel={t("files.create")}
+      busy={create.isPending}
       onConfirm={() => create.mutate()}
       onClose={onClose}
     />
@@ -2612,6 +2615,7 @@ function RenameDialog({
       value={name}
       onChange={setName}
       confirmLabel={t("files.rename")}
+      busy={rename.isPending}
       onConfirm={() => rename.mutate()}
       onClose={onClose}
     />
@@ -2625,6 +2629,7 @@ function PromptDialog({
   value,
   onChange,
   confirmLabel,
+  busy,
   onConfirm,
   onClose,
 }: {
@@ -2633,6 +2638,9 @@ function PromptDialog({
   value: string;
   onChange: (value: string) => void;
   confirmLabel: string;
+  // Disables the confirm button while the create/rename mutation is in flight,
+  // so a double-click can't issue a second POST that conflicts (#1591).
+  busy?: boolean;
   onConfirm: () => void;
   onClose: () => void;
 }) {
@@ -2649,7 +2657,7 @@ function PromptDialog({
           <button
             type="button"
             className="btn primary"
-            disabled={value.trim().length === 0}
+            disabled={busy || value.trim().length === 0}
             onClick={onConfirm}
           >
             {confirmLabel}

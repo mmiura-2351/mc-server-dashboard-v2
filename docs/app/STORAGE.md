@@ -460,7 +460,7 @@ via `AbortMultipartUpload`. Both reclaim paths apply an **mtime / `Initiated` ag
 threshold** (1 h): a spool or upload younger than the threshold may belong to a
 live write still in flight, so it is left alone — mirroring the `incoming/`
 lease-guard discipline (#183) and keeping the sweep safe even if it ever runs
-periodically rather than only at startup (Section 8.5).
+periodically rather than only at startup (Section 9.5).
 
 `Initiated` is **optional** in the S3 `ListMultipartUploads` response, and
 SeaweedFS 4.33 omits it. When it is absent the adapter age-gates the upload by
@@ -502,7 +502,7 @@ which edit "really" changed the world.
 
 A single-file `write_file` and a whole-working-set publish/restore are never
 issued concurrently for the same server: they are serialized at the application
-layer per the Section 6.9 state-branching policy and decision 8.2 (Storage file
+layer per the Section 6.9 state-branching policy and decision 9.2 (Storage file
 edits happen only on a stopped server, while publish happens for a running
 server's snapshot or during restore, which requires a stop). The Storage adapter
 itself does not arbitrate concurrent publish and `write_file` on the same server;
@@ -979,7 +979,7 @@ Each records the decision, alternatives, and rationale, compactly
 copy-on-write version scheme (Section 5) and the per-family publish mechanism
 (Section 4.2) — are not repeated here.
 
-### 8.1 Per-Community → per-server namespacing; JARs shared
+### 9.1 Per-Community → per-server namespacing; JARs shared
 
 **Decision.** Authoritative data is namespaced `communities/<id>/servers/<id>/`;
 JARs live in a single shared, content-addressed `jars/` pool (Section 2).
@@ -995,7 +995,7 @@ data and are reused across servers (FR-VER-3), so a shared content-addressed poo
 deduplicates by construction; per-Community pools would store the same vanilla
 JAR many times.
 
-### 8.2 Atomicity enforced by `Storage`; state preconditions by the application
+### 9.2 Atomicity enforced by `Storage`; state preconditions by the application
 
 **Decision.** `Storage` guarantees atomic publish and traversal safety
 unconditionally. Server-state preconditions (e.g. "restore requires a stopped
@@ -1010,7 +1010,7 @@ concerns and the control plane. The Section 6.9 policy is a business rule and
 belongs in the use case. `Storage` stays a pure store: always-safe primitives,
 no policy.
 
-### 8.3 The Port hides the data-plane transport
+### 9.3 The Port hides the data-plane transport
 
 **Decision.** `Storage` exposes streams and a publish handshake (Section 3.1);
 the API↔Worker transfer wire format is the data plane (epic #8), not part of this
@@ -1022,7 +1022,7 @@ Port.
 plane evolve (chunking, resumable transfer, future delta sync — FR-DATA-5)
 without changing the store contract. The two meet at the stream boundary only.
 
-### 8.4 Backups are whole-working-set archives, not Storage-internal links
+### 9.4 Backups are whole-working-set archives, not Storage-internal links
 
 **Decision.** A backup is a self-contained archive (Section 3.3), independent of
 any Worker and of the current `current/`.
@@ -1036,7 +1036,7 @@ deletion of the live working set and restores cleanly via the same atomic-publis
 path. In-place clones would couple a backup's integrity to the live copy's
 lifecycle and are backend-specific (not all backends offer cheap clones).
 
-### 8.5 Out of scope / deferred (carried as follow-ups, not implemented here)
+### 9.5 Out of scope / deferred (carried as follow-ups, not implemented here)
 
 - **Orphan-sweep scheduling** (Section 4.3): the recovery sweep is specified;
   *when* it runs (startup, periodic) is an operational detail for the

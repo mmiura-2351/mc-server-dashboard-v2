@@ -10,6 +10,10 @@ from __future__ import annotations
 
 import httpx
 
+from mc_server_dashboard_api.versions.adapters.ssrf_guard import (
+    BlockedHostError,
+    assert_url_allowed,
+)
 from mc_server_dashboard_api.versions.domain.fetcher import FetchError, JsonFetcher
 
 # A bounded per-request timeout so a hung source cannot stall a request thread.
@@ -21,18 +25,24 @@ class HttpxJsonFetcher(JsonFetcher):
 
     async def get_json(self, url: str) -> object:
         try:
+            assert_url_allowed(url)
             async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
                 response = await client.get(url)
                 response.raise_for_status()
                 return response.json()
+        except BlockedHostError as exc:
+            raise FetchError(str(exc)) from exc
         except (httpx.HTTPError, ValueError) as exc:
             raise FetchError(str(exc)) from exc
 
     async def get_text(self, url: str) -> str:
         try:
+            assert_url_allowed(url)
             async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
                 response = await client.get(url)
                 response.raise_for_status()
                 return response.text
+        except BlockedHostError as exc:
+            raise FetchError(str(exc)) from exc
         except httpx.HTTPError as exc:
             raise FetchError(str(exc)) from exc
