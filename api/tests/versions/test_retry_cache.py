@@ -6,6 +6,7 @@ import pytest
 
 from mc_server_dashboard_api.versions.adapters.retry_cache import RetryCachingFetcher
 from mc_server_dashboard_api.versions.domain.errors import CatalogUnavailableError
+from mc_server_dashboard_api.versions.domain.fetcher import FetchNotFoundError
 from tests.versions.fakes import FakeJsonFetcher, FlakyJsonFetcher
 
 _URL = "https://example.test/manifest.json"
@@ -92,3 +93,15 @@ async def test_expired_cache_does_not_serve() -> None:
     clock[0] = 100.0  # past the TTL
     with pytest.raises(CatalogUnavailableError):
         await fetcher.get_json(_URL)
+
+
+@pytest.mark.asyncio
+async def test_not_found_is_not_retried() -> None:
+    """A 404 is definitive — retrying won't help (#1539)."""
+
+    inner = FakeJsonFetcher({}, not_found_urls={_URL})
+    fetcher = RetryCachingFetcher(inner=inner, attempts=3, sleep=_no_sleep)
+    with pytest.raises(FetchNotFoundError):
+        await fetcher.get_json(_URL)
+    # Only one attempt: the 404 was not retried.
+    assert len(inner.calls) == 1
