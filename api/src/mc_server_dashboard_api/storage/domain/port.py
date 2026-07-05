@@ -575,11 +575,14 @@ class FileStore(abc.ABC):
 
         fs / remote-fs materialize a real empty directory. **Object storage has no
         real directories** — a directory exists only as the shared key-prefix of
-        its files (Section 7.3), so an *empty* directory cannot be represented and
-        ``make_dir`` is a no-op there; the directory becomes observable once a file
-        is written under it. This backend-dependent semantics is the honest
-        limitation, documented rather than papered over with a marker object that
-        would pollute listings. Idempotent: creating an existing directory is fine.
+        its files (Section 7.3), so an *empty* directory has no key to make it
+        visible; ``make_dir`` writes a zero-byte ``.dir`` marker object under the
+        prefix so the directory shows up in listings (issue #1125). ``list_dir``
+        filters the marker out of its entries, but the marker is a real object: it
+        rides the hydrate tar to the Worker (a literal ``foo/.dir`` file appears in
+        the live working directory), is re-packed into the next snapshot, and is
+        carried into backups/restores. Idempotent: creating an existing directory is
+        fine. See STORAGE.md Section 3.4 for the full lifecycle note.
         """
 
 
