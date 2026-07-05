@@ -79,6 +79,7 @@ cp .env.example .env
 | `MCSD_SCRATCH_DIR` | Absolute host path for the worker scratch dir | choose a path, e.g. `/opt/mcsd/scratch` |
 | `DOCKER_GID` | GID of the host `docker` group | `getent group docker \| cut -d: -f3` |
 | `API_HTTP_PORT` | Published host port for the API HTTP surface | default `8000` |
+| `API_HTTP_BIND_IP` | Host interface for the API port; `127.0.0.1` (default) binds loopback only, `0.0.0.0` binds all interfaces | default `127.0.0.1` |
 
 `POSTGRES_USER` and `POSTGRES_DB` default to `mcsd`; `MCD_API_CONTROL__WORKER_CREDENTIAL`
 is reused by the worker as its `MCD_WORKER_API_CREDENTIAL` (wired in
@@ -136,7 +137,8 @@ docker compose ps
 docker compose logs -f api worker
 ```
 
-The API HTTP surface is then on `http://<host>:${API_HTTP_PORT}` (default 8000);
+The API HTTP surface is then on `http://127.0.0.1:${API_HTTP_PORT}` (default
+8000) — the port binds to loopback by default (`API_HTTP_BIND_IP`, Section 3);
 the entire HTTP API is namespaced under `/api` (issue #498), so `GET
 /api/healthz` returns the liveness + database-reachability probe.
 
@@ -148,7 +150,7 @@ is multi-stage: a Node stage builds the React SPA (`webui/dist`, Node major pinn
 by `webui/.nvmrc`, npm pinned by `webui/package.json` `engines`), and the runtime
 stage copies that build in. `compose.yaml` points the API at it with
 `MCD_API_WEBUI__DIST_DIR=/app/webui/dist`, so the SPA is served on the **same
-origin** as the API at `http://<host>:${API_HTTP_PORT}/`.
+origin** as the API at `http://127.0.0.1:${API_HTTP_PORT}/`.
 
 The entire HTTP API is namespaced under `/api` (issue #498), so `/api/*` is the
 API (REST, WebSocket, the OpenAPI schema/docs, and the health/readiness/metrics
@@ -482,7 +484,10 @@ How it works: the browser reaches the Cloudflare edge over HTTPS (the public
 hostname is configured in the Cloudflare Zero Trust dashboard); `cloudflared`
 runs inside the compose network and forwards traffic to `api:8000` over plain
 HTTP on the internal Docker network. No inbound port, no TLS certificate, and
-no reverse proxy are needed on the host.
+no reverse proxy are needed on the host. The default loopback bind
+(`API_HTTP_BIND_IP=127.0.0.1`) is correct for this topology — `cloudflared`
+reaches the API via the compose-internal network, not the host port, so the
+API does not need to be published on all interfaces.
 
 To enable:
 
@@ -530,8 +535,11 @@ can reach directly (CONFIGURATION.md Section 5.1).
 For deployments that do not use Cloudflare, any TLS-terminating reverse proxy
 (Caddy, nginx, Traefik, etc.) in front of the API's HTTP port achieves the same
 result. The proxy terminates TLS with a certificate from Let's Encrypt (or
-another CA) and forwards to `http://localhost:${API_HTTP_PORT}`. This is a
-standard reverse-proxy setup and is not detailed here.
+another CA) and forwards to `http://localhost:${API_HTTP_PORT}`. The default
+loopback bind (`API_HTTP_BIND_IP=127.0.0.1`) works when the proxy runs on the
+same host; set `API_HTTP_BIND_IP=0.0.0.0` in `.env` if the proxy is on a
+different host. This is a standard reverse-proxy setup and is not detailed
+here.
 
 #### HTTP-only fallback (LAN / development)
 
@@ -540,7 +548,11 @@ available, set:
 
 ```sh
 MCD_API_AUTH__TOKEN__REFRESH_COOKIE_SECURE=false
+API_HTTP_BIND_IP=0.0.0.0
 ```
+
+`API_HTTP_BIND_IP=0.0.0.0` is required here because there is no tunnel or
+same-host reverse proxy — clients on the LAN must reach the API directly.
 
 This drops the `Secure` attribute from the refresh cookie so the browser stores
 it over HTTP and silent refresh works. **Security caveat:** the cookie is then
@@ -648,6 +660,21 @@ git pull
 > [`../app/RELAY.md`](../app/RELAY.md) Section 13 and
 > [`../app/BEDROCK_TUNNEL.md`](../app/BEDROCK_TUNNEL.md) Section 9 for the
 > `bedrock.enabled` key, and "Bedrock (Geyser)" below for turning Bedrock on.
+
+> **Upgrade note — the API port now binds to loopback by default (issue
+> #1609).** `compose.yaml` now publishes the API HTTP port on `127.0.0.1`
+> (loopback) instead of `0.0.0.0` (all interfaces). This closes an unintended
+> direct-access surface: an operator running the Cloudflare Tunnel profile
+> previously had the plaintext API reachable on `http://<host-ip>:8000` even
+> though the tunnel section promised no inbound port. After this change, only
+> `cloudflared` (on the compose-internal network) and same-host processes reach
+> the API by default. **If your deployment relies on the API being reachable
+> from the network** (no tunnel, no same-host reverse proxy, or LAN/dev
+> setups), add to `.env` before rebuilding:
+>
+> ```sh
+> API_HTTP_BIND_IP=0.0.0.0
+> ```
 
 Stacks that were first deployed before the `api` image pre-created the storage
 mount point have an `api-storage` volume owned by root, so the non-root app

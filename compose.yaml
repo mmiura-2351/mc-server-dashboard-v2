@@ -206,7 +206,7 @@ services:
     volumes:
       - api-storage:/data/storage
     ports:
-      - "${API_HTTP_PORT}:8000"      # HTTP REST + /data-plane
+      - "${API_HTTP_BIND_IP:-127.0.0.1}:${API_HTTP_PORT}:8000"      # HTTP REST + /data-plane
       # The gRPC control plane (50051) is intentionally NOT published to the
       # host: the in-compose worker dials api:50051 over the internal network,
       # and the plaintext control listener must never be reachable off-host.
