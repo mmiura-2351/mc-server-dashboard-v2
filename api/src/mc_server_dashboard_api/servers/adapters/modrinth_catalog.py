@@ -73,6 +73,10 @@ def _assert_no_private_ips(
         addrs = resolver(hostname)
     except (socket.gaierror, OSError) as exc:
         raise CatalogUnavailableError(f"DNS resolution failed for {hostname}") from exc
+    if not addrs:
+        raise CatalogUnavailableError(
+            f"DNS resolution for {hostname!r} returned no addresses"
+        )
     for addr in addrs:
         ip = ipaddress.ip_address(addr)
         if not ip.is_global:

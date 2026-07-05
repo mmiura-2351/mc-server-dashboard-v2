@@ -185,6 +185,12 @@ def test_assert_no_private_ips_rejects_cgnat() -> None:
         )
 
 
+def test_assert_no_private_ips_rejects_empty_resolver_result() -> None:
+    """An empty resolver result must fail closed, not silently pass."""
+    with pytest.raises(CatalogUnavailableError, match="returned no addresses"):
+        _assert_no_private_ips("evil.example.com", _resolver=_resolver_for())
+
+
 def test_assert_no_private_ips_rejects_if_any_addr_private() -> None:
     """If any resolved address is private, the check fails."""
     with pytest.raises(CatalogUnavailableError, match="private"):

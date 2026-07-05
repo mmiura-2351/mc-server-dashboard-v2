@@ -81,3 +81,9 @@ def test_rejects_dns_failure() -> None:
 
     with pytest.raises(BlockedHostError, match="DNS resolution failed"):
         assert_url_allowed(_PUBLIC, _resolver=_boom)
+
+
+def test_rejects_empty_resolver_result() -> None:
+    """An empty resolver result must fail closed, not silently pass."""
+    with pytest.raises(BlockedHostError, match="returned no addresses"):
+        assert_url_allowed(_PUBLIC, _resolver=_resolver_for())
