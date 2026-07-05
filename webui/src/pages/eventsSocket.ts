@@ -4,15 +4,17 @@
  * The dashboard runs two event streams — the community status stream
  * (`communityEvents.ts`) and the per-server detail stream (`serverEvents.ts`) —
  * which share the exact same socket mechanics: connect with the current access
- * token in the `?token=` query, reconnect with exponential backoff + jitter on
- * loss (reset on a successful open), reconnect with the fresh token after a
- * session refresh rotates it (reconnect-on-rotate), and tear down cleanly. This
- * module owns that machinery once; the two clients are thin wrappers supplying a
- * URL builder and a raw-frame handler.
+ * token in the `Sec-WebSocket-Protocol` subprotocol header, reconnect with
+ * exponential backoff + jitter on loss (reset on a successful open), reconnect
+ * with the fresh token after a session refresh rotates it (reconnect-on-rotate),
+ * and tear down cleanly. This module owns that machinery once; the two clients
+ * are thin wrappers supplying a URL builder and a raw-frame handler.
  *
- * The token rides the `?token=` query parameter: browsers cannot set request
- * headers on a WebSocket upgrade, so the API accepts the access token there
- * (`_ws_access_token` in api/.../dependencies.py).
+ * The token rides the `Sec-WebSocket-Protocol` header as
+ * `["access_token", "<jwt>"]`: browsers cannot set `Authorization` on a
+ * WebSocket upgrade, and putting the JWT in a query parameter leaks it into
+ * access logs (#1596). The API echoes `access_token` as the accepted
+ * subprotocol (RFC 6455 compliant).
  *
  * This module carries no React or TanStack Query: the wrappers supply callbacks
  * so a hook can patch the query cache without entangling this core.
@@ -58,9 +60,9 @@ export interface EventsSocketCallbacks {
 }
 
 /**
- * Owns one events socket and its reconnect loop. Construct it with a URL builder
- * (given the current access token), call {@link start}, and {@link close} it on
- * teardown. Not for reuse across endpoints — make a new one per active target.
+ * Owns one events socket and its reconnect loop. Construct it with a URL builder,
+ * call {@link start}, and {@link close} it on teardown. Not for reuse across
+ * endpoints — make a new one per active target.
  */
 export class EventsSocketClient {
   private socket: WebSocket | null = null;
@@ -72,7 +74,7 @@ export class EventsSocketClient {
   private stopped = false;
 
   constructor(
-    private readonly buildUrl: (token: string) => string,
+    private readonly buildUrl: () => string,
     private readonly callbacks: EventsSocketCallbacks,
     private readonly random: () => number = Math.random,
   ) {}
@@ -108,7 +110,7 @@ export class EventsSocketClient {
       return;
     }
     this.connectedToken = token;
-    const socket = new WebSocket(this.buildUrl(token));
+    const socket = new WebSocket(this.buildUrl(), ["access_token", token]);
     this.socket = socket;
     socket.onopen = () => {
       this.attempt = 0;
