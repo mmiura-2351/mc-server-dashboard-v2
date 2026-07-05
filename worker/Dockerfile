@@ -20,8 +20,11 @@ RUN go mod download
 
 COPY . .
 
+# Version injected at build time; defaults to the dev placeholder.
+ARG VERSION=0.0.0-dev
+
 # CGO disabled -> a static binary that runs on the slim runtime base.
-RUN CGO_ENABLED=0 GOOS=linux go build -o /out/worker ./cmd/worker
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-X main.version=${VERSION}" -o /out/worker ./cmd/worker
 
 # ---------------------------------------------------------------------------
 # Runtime: slim base with CA certificates. The in-compose deployment dials the
