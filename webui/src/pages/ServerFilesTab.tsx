@@ -31,7 +31,12 @@ import { zip } from "fflate";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate as useRouterNavigate } from "react-router";
 import { ApiError, api, postFormWithProgress } from "../api/client.ts";
-import { downloadFile, fetchFileBlob } from "../api/download.ts";
+import {
+  DownloadTooLargeError,
+  downloadFile,
+  fetchFileBlob,
+  MAX_DOWNLOAD_BYTES,
+} from "../api/download.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
 import { Modal } from "../components/Modal.tsx";
@@ -39,6 +44,7 @@ import { SimpleConfirmDialog } from "../components/SimpleConfirmDialog.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { UploadProgress } from "../components/UploadProgress.tsx";
 import { useUploadProgress } from "../components/useUploadProgress.ts";
+import { humanizeBytes } from "../format.ts";
 import { type TranslationKey, t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
@@ -949,7 +955,16 @@ export function ServerFilesTab({
         );
         pasted++;
       } catch (error) {
-        onError(error);
+        if (error instanceof DownloadTooLargeError) {
+          showToast(
+            t("files.error.downloadTooLarge", {
+              size: humanizeBytes(error.contentLength),
+            }),
+            "error",
+          );
+        } else {
+          onError(error);
+        }
       }
     }
     if (pasted > 0) {
@@ -1110,6 +1125,8 @@ export function ServerFilesTab({
         onChanged={refetchList}
         onError={onError}
         selected={selected}
+        dir={dir}
+        entries={listing.data?.entries ?? []}
         totalCount={listing.data?.entries.length ?? 0}
         onSelectAll={() => {
           if (listing.data) {
@@ -1612,7 +1629,18 @@ function Listing({
         )}?path=${encodeURIComponent(joinPath(dir, entry.name))}`,
         entry.name,
       ),
-    onError,
+    onError: (error) => {
+      if (error instanceof DownloadTooLargeError) {
+        showToast(
+          t("files.error.downloadTooLarge", {
+            size: humanizeBytes(error.contentLength),
+          }),
+          "error",
+        );
+        return;
+      }
+      onError(error);
+    },
   });
 
   // Drop-target state: which folder name is currently highlighted.
@@ -1899,7 +1927,16 @@ function Listing({
                           });
                           onExtract(file);
                         } catch (error) {
-                          onError(error);
+                          if (error instanceof DownloadTooLargeError) {
+                            showToast(
+                              t("files.error.downloadTooLarge", {
+                                size: humanizeBytes(error.contentLength),
+                              }),
+                              "error",
+                            );
+                          } else {
+                            onError(error);
+                          }
                         }
                       })();
                     }
@@ -2137,7 +2174,18 @@ function Viewer({
                   { community_id: communityId, server_id: serverId },
                 )}?path=${encodeURIComponent(path)}`,
                 downloadName,
-              ).catch(onError)
+              ).catch((error) => {
+                if (error instanceof DownloadTooLargeError) {
+                  showToast(
+                    t("files.error.downloadTooLarge", {
+                      size: humanizeBytes(error.contentLength),
+                    }),
+                    "error",
+                  );
+                } else {
+                  onError(error);
+                }
+              })
             }
           >
             {t("files.download")}
@@ -2398,6 +2446,8 @@ function Toolbar({
   onChanged,
   onError,
   selected,
+  dir,
+  entries,
   totalCount,
   onSelectAll,
   onDeselectAll,
@@ -2410,6 +2460,8 @@ function Toolbar({
   onChanged: () => void;
   onError: (error: unknown) => void;
   selected: Set<string>;
+  dir: string;
+  entries: DirEntry[];
   totalCount: number;
   onSelectAll: () => void;
   onDeselectAll: () => void;
@@ -2458,6 +2510,24 @@ function Toolbar({
     const paths = Array.from(selected);
     const total = paths.length;
 
+    // Pre-check: sum the sizes of selected files from the listing. Directories
+    // are excluded because the API expands them server-side; their `size` field
+    // is 0 in the listing so they don't contribute to the sum.
+    const sizeByPath = new Map(
+      entries.map((e) => [joinPath(dir, e.name), e.size]),
+    );
+    const totalBytes = paths.reduce(
+      (sum, p) => sum + (sizeByPath.get(p) ?? 0),
+      0,
+    );
+    if (totalBytes > MAX_DOWNLOAD_BYTES) {
+      showToast(
+        t("files.bulk.download.tooLarge", { size: humanizeBytes(totalBytes) }),
+        "error",
+      );
+      return;
+    }
+
     // Single file — download directly, no ZIP wrapper needed.
     if (total === 1) {
       const path = paths[0];
@@ -2473,7 +2543,14 @@ function Toolbar({
         );
         showToast(t("files.bulk.download.done", { done: 1 }), "success");
       } catch (error) {
-        if (!onForbiddenCheck(error)) {
+        if (error instanceof DownloadTooLargeError) {
+          showToast(
+            t("files.error.downloadTooLarge", {
+              size: humanizeBytes(error.contentLength),
+            }),
+            "error",
+          );
+        } else if (!onForbiddenCheck(error)) {
           showToast(
             t("files.bulk.download.partial", { done: 0, total: 1, failed: 1 }),
             "error",

@@ -19,6 +19,22 @@
 import { getAccessToken } from "../auth/tokenStore.ts";
 import { ApiError, getRefresher } from "./client.ts";
 
+/** Maximum download size (512 MiB), matching the upload limit. */
+export const MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024;
+
+/**
+ * Thrown when a download's Content-Length exceeds {@link MAX_DOWNLOAD_BYTES}.
+ * Callers show a user-facing message with the reported size.
+ */
+export class DownloadTooLargeError extends Error {
+  readonly contentLength: number;
+  constructor(contentLength: number) {
+    super(`Download too large: ${contentLength} bytes`);
+    this.name = "DownloadTooLargeError";
+    this.contentLength = contentLength;
+  }
+}
+
 /**
  * Fetch `path` with the current access token and save the response as a file
  * named `filename`. Throws {@link ApiError} on a non-2xx response so callers can
@@ -56,6 +72,20 @@ export async function fetchFileBlob(path: string): Promise<Blob> {
   if (!response.ok) {
     throw new ApiError(response.status, await readProblem(response));
   }
+
+  // Guard against OOM: reject downloads that exceed the size cap before
+  // buffering the body. The check is best-effort — some responses omit
+  // Content-Length (e.g. chunked transfers) and will pass through.
+  const cl = response.headers.get("content-length");
+  if (cl !== null) {
+    const size = Number(cl);
+    if (size > MAX_DOWNLOAD_BYTES) {
+      // Discard the body so the connection can be reused.
+      await response.body?.cancel();
+      throw new DownloadTooLargeError(size);
+    }
+  }
+
   return response.blob();
 }
 
