@@ -216,3 +216,87 @@ async def test_sweep_reread_skips_snapshot_made_live_after_pointer_read(
     # concurrent publisher.
     FsStorage(tmp_path).sweep()
     assert not old_snapshot.exists()
+
+
+async def test_hydrate_reader_rereads_current_when_reclaim_lands_in_lease_gap(
+    tmp_path: Path,
+) -> None:
+    """A concurrent restore flips+reclaims in the window between resolving
+    ``current`` and leasing it (issue #1607). The reader must re-verify and
+    converge on the NEW snapshot rather than reading from a reclaimed path."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"OLD"})
+
+    old_snapshot = snapshot_dir(tmp_path, community, server)
+    server_root = old_snapshot.parent.parent
+
+    # Seed the new snapshot on disk and prepare the flip+reclaim that a
+    # concurrent restore would perform.
+    new_snap_dir = server_root / "snapshots" / "new-snap"
+    new_snap_dir.mkdir(parents=True)
+    (new_snap_dir / "f").write_bytes(b"NEW")
+
+    call_count = {"n": 0}
+    original_current_dir = FsStorage._current_dir
+
+    def _racing_current_dir(self: FsStorage, cid: object, sid: object) -> Path:
+        call_count["n"] += 1
+        result = original_current_dir(self, cid, sid)  # type: ignore[arg-type]
+        if call_count["n"] == 1:
+            # Simulate the concurrent restore: flip the pointer and reclaim old.
+            link = server_root / "current"
+            tmp_link = server_root / ".current.race"
+            os.symlink(os.path.join("snapshots", "new-snap"), tmp_link)
+            os.replace(tmp_link, link)
+            import shutil
+
+            shutil.rmtree(old_snapshot)
+        return result
+
+    storage._current_dir = _racing_current_dir.__get__(storage, FsStorage)  # type: ignore[method-assign]
+
+    blob = await drain(storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == {"f": b"NEW"}
+
+
+async def test_file_stream_rereads_current_when_reclaim_lands_in_lease_gap(
+    tmp_path: Path,
+) -> None:
+    """Same as hydrate but for open_file_stream (issue #1607): a concurrent
+    restore in the resolve-lease gap must not yield a stale/deleted file."""
+
+    from mc_server_dashboard_api.storage.domain.value_objects import RelPath
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"OLD"})
+
+    old_snapshot = snapshot_dir(tmp_path, community, server)
+    server_root = old_snapshot.parent.parent
+
+    new_snap_dir = server_root / "snapshots" / "new-snap"
+    new_snap_dir.mkdir(parents=True)
+    (new_snap_dir / "f").write_bytes(b"NEW")
+
+    call_count = {"n": 0}
+    original_current_dir = FsStorage._current_dir
+
+    def _racing_current_dir(self: FsStorage, cid: object, sid: object) -> Path:
+        call_count["n"] += 1
+        result = original_current_dir(self, cid, sid)  # type: ignore[arg-type]
+        if call_count["n"] == 1:
+            link = server_root / "current"
+            tmp_link = server_root / ".current.race"
+            os.symlink(os.path.join("snapshots", "new-snap"), tmp_link)
+            os.replace(tmp_link, link)
+            import shutil
+
+            shutil.rmtree(old_snapshot)
+        return result
+
+    storage._current_dir = _racing_current_dir.__get__(storage, FsStorage)  # type: ignore[method-assign]
+
+    blob = await drain(storage.open_file_stream(community, server, RelPath("f")))
+    assert blob == b"NEW"
