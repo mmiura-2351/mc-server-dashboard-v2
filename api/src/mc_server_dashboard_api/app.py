@@ -783,6 +783,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     control_plane=app.state.control_plane,
                     data_plane_base_url=settings.server.effective_data_plane_base_url,
                     worker_credential=settings.control.worker_credential,
+                    snapshot_timeout_seconds=settings.control.snapshot_timeout_seconds,
                 ),
                 clock=ServersSystemClock(),
                 default_interval_seconds=settings.snapshot.default_interval_seconds,
@@ -807,6 +808,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 control_plane=app.state.control_plane,
                 data_plane_base_url=settings.server.effective_data_plane_base_url,
                 worker_credential=settings.control.worker_credential,
+                snapshot_timeout_seconds=settings.control.snapshot_timeout_seconds,
             )
             backup_scheduler = RunBackupScheduleTick(
                 uow=ServersUnitOfWork(create_session_factory(engine)),
