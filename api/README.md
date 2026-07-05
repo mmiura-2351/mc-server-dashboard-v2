@@ -37,17 +37,9 @@ Run from this directory (`api/`):
 
 Configuration is read at startup with `defaults < TOML file < MCD_API_ env`
 precedence (CONFIGURATION.md Sections 1–3). Secrets are env-only and masked in
-logs. The keys wired so far:
-
-| Logical key | Env var | Default | Notes |
-|---|---|---|---|
-| `database.url` | `MCD_API_DATABASE__URL` | *required, secret* | async DSN, e.g. `postgresql+asyncpg://user:pass@host/db` |
-| `server.host` | `MCD_API_SERVER__HOST` | `0.0.0.0` | |
-| `server.http_port` | `MCD_API_SERVER__HTTP_PORT` | `8000` | |
-| `log.level` | `MCD_API_LOG__LEVEL` | `info` | |
-| `log.format` | `MCD_API_LOG__FORMAT` | `json` | |
-
-A TOML config file is optional; point at it with `MCD_API_CONFIG_FILE`.
+logs. See [`../docs/app/CONFIGURATION.md`](../docs/app/CONFIGURATION.md)
+Section 5 for the full key reference. A TOML config file is optional; point at
+it with `MCD_API_CONFIG_FILE`.
 
 ## Run the dev server
 
