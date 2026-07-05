@@ -812,7 +812,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 uow=ServersUnitOfWork(create_session_factory(engine)),
                 create_backup=CreateBackup(
                     uow=ServersUnitOfWork(create_session_factory(engine)),
-                    control_plane=backup_control_plane,
                     backup_store=StorageBackupStoreAdapter(storage=storage),
                     snapshot_server=SnapshotServer(
                         uow=ServersUnitOfWork(create_session_factory(engine)),

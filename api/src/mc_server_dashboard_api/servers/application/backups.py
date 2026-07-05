@@ -8,11 +8,11 @@ state per the 6.9 table:
   {stopped, unknown}) -> archive directly from the authoritative Storage copy,
   through the :class:`BackupArchiveStore` seam (FR-BAK-2).
 - **running** (desired=running, observed=running, a worker assigned) ->
-  ``save-all`` via the RCON command seam, then an on-demand snapshot (the
-  :class:`SnapshotServer` hook, PR #114) so the just-saved live working set is
-  published to the authoritative copy, then archive that fresh snapshot. The
-  archive always reads the authoritative copy; the running path only makes that
-  copy current first (Section 6.9, FR-BAK-2).
+  on-demand snapshot (the :class:`SnapshotServer` hook, PR #114) whose worker
+  path quiesces safely (save-off + non-blocking save-all + settle-wait), so the
+  live working set is published to the authoritative copy, then archive that
+  fresh snapshot. The archive always reads the authoritative copy; the running
+  path only makes that copy current first (Section 6.9, FR-BAK-2).
 - **anything else** (starting/stopping/restarting/crashed, or a desired/observed
   mismatch) -> :class:`BackupUnsettledError` (409): neither source is well-defined.
 
@@ -46,9 +46,6 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import IO
 
-from mc_server_dashboard_api.servers.application.command_dispatch import (
-    dispatch_failure,
-)
 from mc_server_dashboard_api.servers.application.files import (
     MAX_ARCHIVE_ENTRIES,
     MAX_DECOMPRESSED_BYTES,
@@ -75,9 +72,6 @@ from mc_server_dashboard_api.servers.domain.backup_author_directory import (
 )
 from mc_server_dashboard_api.servers.domain.backup_store import BackupArchiveStore
 from mc_server_dashboard_api.servers.domain.clock import Clock
-from mc_server_dashboard_api.servers.domain.control_plane import (
-    ControlPlane,
-)
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
@@ -113,10 +107,6 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 
 _LOG = logging.getLogger(__name__)
 
-# The RCON line that flushes the live world to disk before a running-server
-# snapshot, so the archived working set is consistent (Section 6.9, FR-BAK-2).
-_SAVE_ALL_LINE = "save-all flush"
-
 # How much to stream per chunk when handing the uploaded archive to Storage; one
 # bounded block in flight, never the whole archive re-buffered.
 _UPLOAD_STREAM_CHUNK = 1024 * 1024
@@ -141,14 +131,13 @@ def _is_running(server: Server) -> bool:
 
 @dataclass(frozen=True)
 class CreateBackup:
-    """Create a backup, branching at-rest -> Storage / running -> save-all+snapshot.
+    """Create a backup, branching at-rest -> Storage / running -> snapshot.
 
     ``backup:create`` (manual) and the scheduled path both run through here; the
     ``source`` and ``created_by`` differ per caller.
     """
 
     uow: UnitOfWork
-    control_plane: ControlPlane
     backup_store: BackupArchiveStore
     snapshot_server: SnapshotServer
     clock: Clock
@@ -163,7 +152,7 @@ class CreateBackup:
         created_by: uuid.UUID | None = None,
     ) -> Backup:
         # Hold the per-server lifecycle lock across the at-rest check, the
-        # (possibly running-path save-all + snapshot) source preparation, and the
+        # (possibly running-path snapshot) source preparation, and the
         # archive of ``current`` (issue #827, #876): a lock-holding restore that
         # republishes ``current`` mid-tar would otherwise tear the archive (the
         # #827-class gap noted in #827). The same lock serializes this archive
@@ -174,7 +163,9 @@ class CreateBackup:
                 server = await _load(self.uow, community_id, server_id)
 
             if _is_running(server):
-                await self._save_all_and_snapshot(server)
+                await self.snapshot_server(
+                    community_id=server.community_id, server_id=server.id
+                )
             elif not server.is_at_rest():
                 # starting / stopping / restarting / crashed / mismatch: no source.
                 raise BackupUnsettledError(str(server_id.value))
@@ -208,28 +199,6 @@ class CreateBackup:
                 await self.uow.backups.add(backup)
                 await self.uow.commit()
             return backup
-
-    async def _save_all_and_snapshot(self, server: Server) -> None:
-        """Flush the live world (save-all) then publish an on-demand snapshot.
-
-        The running path of the 6.9 policy: the archive only ever reads the
-        authoritative copy, so first make that copy current — ``save-all`` over
-        RCON quiesces the world to the live working set, then the on-demand
-        snapshot publishes it. A failed save-all or snapshot fails the create
-        (the snapshot raises :class:`CommandDispatchError` / worker-unavailable).
-        """
-
-        assert server.assigned_worker_id is not None  # running invariant
-        outcome = await self.control_plane.command(
-            worker_id=server.assigned_worker_id,
-            server_id=server.id,
-            line=_SAVE_ALL_LINE,
-        )
-        if not outcome.success:
-            raise dispatch_failure(server_id=server.id, kind="SaveAll", outcome=outcome)
-        await self.snapshot_server(
-            community_id=server.community_id, server_id=server.id
-        )
 
 
 class _NullAuthorDirectory(BackupAuthorDirectory):

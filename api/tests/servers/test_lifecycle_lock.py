@@ -391,7 +391,6 @@ async def test_create_backup_takes_lock_around_its_work() -> None:
     uow = FakeUnitOfWork(servers=repo, backups=FakeBackupRepository())
     await CreateBackup(
         uow=uow,
-        control_plane=FakeControlPlane(),
         backup_store=archive,
         snapshot_server=SnapshotServer(uow=uow, control_plane=FakeControlPlane()),
         clock=FakeClock(_NOW),

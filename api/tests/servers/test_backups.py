@@ -4,8 +4,8 @@ Exercises :mod:`servers.application.backups` against fakes (no DB, no real
 Storage), per TESTING.md Section 4. Verifies:
 
 - the at-rest create path (archive directly from Storage, no save-all/snapshot);
-- the running create path orchestration (save-all RCON -> on-demand snapshot ->
-  archive), with the snapshot hook faked;
+- the running create path orchestration (on-demand snapshot -> archive), with the
+  snapshot hook faked;
 - a transitional server -> BackupUnsettledError on create;
 - nothing-to-archive -> BackupNotFoundError;
 - list is community-scoped and newest-first;
@@ -48,16 +48,11 @@ from mc_server_dashboard_api.servers.domain.backup import (
 from mc_server_dashboard_api.servers.domain.backup_author_directory import (
     BackupAuthorDirectory,
 )
-from mc_server_dashboard_api.servers.domain.control_plane import (
-    CommandOutcome,
-    CommandStatus,
-)
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
     BackupNotFoundError,
     BackupUnsettledError,
-    CommandDispatchError,
     FileTooLargeError,
     InvalidBackupArchiveError,
     ServerNotFoundError,
@@ -146,7 +141,6 @@ def _make_create(
 ) -> CreateBackup:
     return CreateBackup(
         uow=uow,
-        control_plane=control_plane,
         backup_store=archive,
         snapshot_server=SnapshotServer(uow=uow, control_plane=control_plane),
         clock=FakeClock(_NOW),
@@ -181,7 +175,7 @@ async def test_create_at_rest_archives_without_save_all_or_snapshot() -> None:
     assert persisted.health is BackupHealth.HEALTHY
 
 
-async def test_create_running_save_all_then_snapshot_then_archive() -> None:
+async def test_create_running_snapshot_then_archive() -> None:
     server = _running()
     repo = FakeServerRepository()
     repo.seed(server)
@@ -198,70 +192,10 @@ async def test_create_running_save_all_then_snapshot_then_archive() -> None:
     )
 
     kinds = [kind for kind, *_ in control_plane.dispatched]
-    # save-all (an RCON command) is dispatched, then the snapshot, then archive.
-    assert kinds == ["command", "snapshot"]
+    # The snapshot (whose worker path quiesces safely) is dispatched, then archive.
+    assert kinds == ["snapshot"]
     assert archive.created == [server.id]
     assert backup.storage_ref in archive.archives
-
-
-async def test_create_running_save_all_failure_fails_create() -> None:
-    server = _running()
-    repo = FakeServerRepository()
-    repo.seed(server)
-    uow = FakeUnitOfWork(servers=repo)
-    control_plane = FakeControlPlane(
-        outcomes={"command": CommandOutcome(status=CommandStatus.INVALID_STATE)}
-    )
-    archive = FakeBackupArchiveStore()
-    create = _make_create(uow, control_plane, archive)
-
-    with pytest.raises(CommandDispatchError):
-        await create(
-            community_id=_COMMUNITY,
-            server_id=server.id,
-            source=BackupSource.MANUAL,
-        )
-    # No snapshot and no archive when save-all failed.
-    assert [kind for kind, *_ in control_plane.dispatched] == ["command"]
-    assert archive.created == []
-
-
-async def test_create_running_save_all_failure_logs_warning_with_server_and_kind(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    # A failed save-all dispatch turns into a CommandDispatchError; the Worker's
-    # message is logged at WARN with server_id and command kind context so the
-    # failure is diagnosable, while the raw message stays out of the HTTP body
-    # (issue #200).
-    server = _running()
-    repo = FakeServerRepository()
-    repo.seed(server)
-    uow = FakeUnitOfWork(servers=repo)
-    control_plane = FakeControlPlane(
-        outcomes={
-            "command": CommandOutcome(
-                status=CommandStatus.INVALID_STATE, message="rcon refused"
-            )
-        }
-    )
-    archive = FakeBackupArchiveStore()
-    create = _make_create(uow, control_plane, archive)
-
-    with (
-        caplog.at_level(logging.WARNING),
-        pytest.raises(CommandDispatchError),
-    ):
-        await create(
-            community_id=_COMMUNITY,
-            server_id=server.id,
-            source=BackupSource.MANUAL,
-        )
-
-    record = next(r for r in caplog.records if r.levelno == logging.WARNING)
-    message = record.getMessage()
-    assert "rcon refused" in message
-    assert "SaveAll" in message
-    assert str(server.id.value) in message
 
 
 async def test_create_transitional_server_is_unsettled() -> None:
