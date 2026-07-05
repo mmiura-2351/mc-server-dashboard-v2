@@ -616,6 +616,10 @@ export const en = {
   "files.bulk.download.done": "Downloaded {done} file(s).",
   "files.bulk.download.partial":
     "Downloaded {done}/{total} file(s). {failed} failed.",
+  "files.bulk.download.tooLarge":
+    "The selected files total {size} which exceeds the 512 MiB download limit.",
+  "files.error.downloadTooLarge":
+    "That file is too large to download in the browser ({size}). The limit is 512 MiB.",
   "files.bulk.move": "Move selected",
   "files.bulk.move.dialogTitle": "Move selected items",
   "files.bulk.move.destLabel": "Destination directory",
@@ -641,6 +645,11 @@ export const en = {
   "files.contextMenu.upload": "Upload file",
   "files.contextMenu.newFolder": "New folder",
   "files.contextMenu.extractHere": "Extract here",
+  "files.contextMenu.copy": "Copy",
+  "files.contextMenu.moveTo": "Move to…",
+  "files.contextMenu.paste": "Paste",
+  "files.copied": "Copied to clipboard.",
+  "files.pasted": "Pasted.",
 
   // Navigation history (issue #1475).
   "files.nav.back": "Back",

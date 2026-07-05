@@ -1324,29 +1324,21 @@ func (m *Manager) takeRunningReserve(serverID string) (execution.Instance, sessi
 	return inst, start, takeFound
 }
 
-// peekStartCmd returns the recorded StartServer spec for a currently-tracked
-// running instance WITHOUT evicting or reserving it, so handleRestart can resolve
-// the driver/launch mode while the instance is still live and tracked. ok is false
-// when no instance is tracked for the id (the caller then runs the eviction path
-// to distinguish not-found from a reserved in-flight command).
-func (m *Manager) peekStartCmd(serverID string) (session.Command, bool) {
+// hasRunning reports whether a running instance is tracked for serverID WITHOUT
+// evicting or reserving it. handleRestart uses it as a cheap existence check so
+// the early-out failure paths leave the instance tracked and live.
+func (m *Manager) hasRunning(serverID string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, ok := m.instances[serverID]; !ok {
-		return session.Command{}, false
-	}
-	return m.startCmds[serverID], true
+	_, ok := m.instances[serverID]
+	return ok
 }
 
 func (m *Manager) handleRestart(ctx context.Context, cmd session.Command) session.CommandResult {
-	// Resolve the driver and launch mode from the recorded StartServer spec BEFORE
-	// evicting/reserving the instance, so a resolution failure surfaces while the
-	// instance is still tracked and live — no release of an already-evicted process
-	// that nothing else is tracking. This path is defensive (the recorded spec came
-	// from a StartServer that already validated both), but resolving first keeps the
-	// failure mode honest if it ever does fail.
-	start, ok := m.peekStartCmd(cmd.ServerID)
-	if !ok {
+	// Quick existence check: is there a running instance tracked for this id?
+	// We peek without evicting so the early-out failure paths ("not found" vs
+	// "in-flight") leave the instance tracked and live.
+	if !m.hasRunning(cmd.ServerID) {
 		// No tracked running instance: takeRunningReserve distinguishes a genuinely
 		// unknown id (SERVER_NOT_FOUND) from a reserved in-flight command — a detached
 		// stop or a start/hydrate mid-operation (BUSY, issue #780/#824).
@@ -1358,17 +1350,6 @@ func (m *Manager) handleRestart(ctx context.Context, cmd session.Command) sessio
 		return fail(cmd.CommandID, session.CommandErrorServerNotFound,
 			"instancemanager: server not running")
 	}
-	driver, ok := m.drivers[start.Driver]
-	if !ok {
-		return fail(cmd.CommandID, session.CommandErrorDriverUnavailable,
-			fmt.Sprintf("instancemanager: driver %q not offered by this Worker", start.Driver))
-	}
-	launchMode, ok := launchModeFor(start.LaunchMode)
-	if !ok {
-		return fail(cmd.CommandID, session.CommandErrorInternal,
-			fmt.Sprintf("instancemanager: unknown launch mode %q", start.LaunchMode))
-	}
-
 	inst, start, outcome := m.takeRunningReserve(cmd.ServerID)
 	switch outcome {
 	case takeNotFound:
@@ -1381,6 +1362,22 @@ func (m *Manager) handleRestart(ctx context.Context, cmd session.Command) sessio
 		// unassigning a server whose process may still be alive.
 		return fail(cmd.CommandID, session.CommandErrorBusy,
 			"instancemanager: a lifecycle command is already in flight for this server")
+	}
+	// Resolve the driver and launch mode from the authoritative start spec returned
+	// by takeRunningReserve. This is defensive (the recorded spec came from a
+	// StartServer that already validated both); on failure we re-register the instance
+	// so the still-running process stays tracked and reachable.
+	driver, ok := m.drivers[start.Driver]
+	if !ok {
+		m.restoreRunning(cmd.ServerID, inst, start)
+		return fail(cmd.CommandID, session.CommandErrorDriverUnavailable,
+			fmt.Sprintf("instancemanager: driver %q not offered by this Worker", start.Driver))
+	}
+	launchMode, ok := launchModeFor(start.LaunchMode)
+	if !ok {
+		m.restoreRunning(cmd.ServerID, inst, start)
+		return fail(cmd.CommandID, session.CommandErrorInternal,
+			fmt.Sprintf("instancemanager: unknown launch mode %q", start.LaunchMode))
 	}
 	// The id is reserved from here across the stop and the relaunch; it is handed off
 	// to the re-registered instance on a successful relaunch (launchReserved) and
@@ -1950,6 +1947,18 @@ func (m *Manager) reserve(serverID string) (ok bool, code session.CommandErrorCo
 func (m *Manager) release(serverID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	delete(m.reserved, serverID)
+}
+
+// restoreRunning reverses a takeRunningReserve: it puts the instance and its
+// start spec back into the tracked maps and clears the reservation, so the
+// still-running process remains reachable. Used when post-eviction validation
+// fails (e.g. driver no longer offered) and the process must stay tracked.
+func (m *Manager) restoreRunning(serverID string, inst execution.Instance, start session.Command) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.instances[serverID] = inst
+	m.startCmds[serverID] = start
 	delete(m.reserved, serverID)
 }
 
