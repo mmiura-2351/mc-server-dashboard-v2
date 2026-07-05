@@ -13,6 +13,7 @@ the ``server.properties`` keys (``resource-pack``, ``resource-pack-sha1``,
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import uuid
 from dataclasses import dataclass
@@ -86,10 +87,12 @@ class UploadResourcePack:
         if len(content) > MAX_RESOURCE_PACK_BYTES:
             raise FileTooLargeError(str(len(content)))
 
-        content = validate_and_normalize(content)
+        # Offloaded to a thread: zip validation/normalization and hashing are
+        # CPU-bound over up to MAX_RESOURCE_PACK_BYTES (256 MiB) (issue #1620).
+        content = await asyncio.to_thread(validate_and_normalize, content)
 
-        sha1 = hashlib.sha1(content).hexdigest()
-        sha256 = hashlib.sha256(content).hexdigest()
+        sha1 = (await asyncio.to_thread(hashlib.sha1, content)).hexdigest()
+        sha256 = (await asyncio.to_thread(hashlib.sha256, content)).hexdigest()
         now = self.clock.now()
 
         pack_id = ResourcePackId.new()
