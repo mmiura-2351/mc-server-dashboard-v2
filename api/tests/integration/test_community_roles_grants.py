@@ -149,12 +149,14 @@ async def test_create_role_duplicate_name_is_translated_to_conflict(
 
     await create(
         community_id=community.id,
+        actor_id=UserId(owner_id),
         name="Editor",
         permissions={Permission("server:read")},
     )
     with pytest.raises(RoleAlreadyExistsError):
         await create(
             community_id=community.id,
+            actor_id=UserId(owner_id),
             name="Editor",
             permissions={Permission("server:start")},
         )
@@ -173,11 +175,15 @@ async def test_delete_role_cascades_membership_assignments(
     factory = create_session_factory(engine)
     role = await CreateRole(uow=SqlAlchemyUnitOfWork(factory), clock=SystemClock())(
         community_id=community.id,
+        actor_id=UserId(owner_id),
         name="Editor",
         permissions={Permission("server:read")},
     )
     await AssignRole(uow=SqlAlchemyUnitOfWork(factory))(
-        community_id=community.id, user_id=UserId(member_id), role_id=role.id
+        community_id=community.id,
+        user_id=UserId(member_id),
+        role_id=role.id,
+        actor_id=UserId(owner_id),
     )
 
     async with engine.connect() as conn:
@@ -219,6 +225,7 @@ async def test_create_grant_persists_and_duplicate_is_translated(
     await _insert_server(engine, resource_id, community.id)
     grant = await create(
         community_id=community.id,
+        actor_id=UserId(owner_id),
         user_id=UserId(member_id),
         resource_type="server",
         resource_id=resource_id,
@@ -231,6 +238,7 @@ async def test_create_grant_persists_and_duplicate_is_translated(
     with pytest.raises(ResourceGrantAlreadyExistsError):
         await create(
             community_id=community.id,
+            actor_id=UserId(owner_id),
             user_id=UserId(member_id),
             resource_type="server",
             resource_id=resource_id,
@@ -254,6 +262,7 @@ async def test_cross_community_role_and_grant_ids_are_not_found(
     factory = create_session_factory(engine)
     role = await CreateRole(uow=SqlAlchemyUnitOfWork(factory), clock=SystemClock())(
         community_id=community_a.id,
+        actor_id=UserId(owner_a),
         name="Editor",
         permissions={Permission("server:read")},
     )
@@ -261,6 +270,7 @@ async def test_cross_community_role_and_grant_ids_are_not_found(
     await _insert_server(engine, resource_id, community_a.id)
     grant = await CreateGrant(uow=SqlAlchemyUnitOfWork(factory), clock=SystemClock())(
         community_id=community_a.id,
+        actor_id=UserId(owner_a),
         user_id=UserId(member_a),
         resource_type="server",
         resource_id=resource_id,
