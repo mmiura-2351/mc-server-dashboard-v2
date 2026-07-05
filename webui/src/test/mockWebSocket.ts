@@ -30,7 +30,10 @@ export class MockWebSocket {
   onerror: (() => void) | null = null;
   closed = false;
 
-  constructor(readonly url: string) {
+  constructor(
+    readonly url: string,
+    readonly protocols?: string | string[],
+  ) {
     MockWebSocket.instances.push(this);
   }
 

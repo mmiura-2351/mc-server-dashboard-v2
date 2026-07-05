@@ -1072,3 +1072,88 @@ async def test_exception_escaping_consider_is_logged_and_tick_continues(
         "unhandled exception" in record.message and record.levelno >= logging.ERROR
         for record in caplog.records
     )
+
+
+# --- stopped/unknown/assigned wedge recovery (issue #1599) -----------------
+
+
+async def test_stopped_unknown_assigned_connected_redispatches_stop() -> None:
+    # Issue #1599: (desired=stopped, observed=unknown, assigned) with the worker
+    # still connected -> redispatch the stop to converge.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.UNKNOWN,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock).tick()
+    # A confirmed stop dispatches stop + post-stop final snapshot.
+    assert [k for k, _, _ in cp.dispatched] == ["stop", "snapshot"]
+    assert cp.decremented == []  # the original stop owns the decrement
+
+
+async def test_stopped_unknown_assigned_connected_server_not_found() -> None:
+    # Issue #1599: worker connected + SERVER_NOT_FOUND (the process already exited)
+    # -> converges to stopped and unassigns.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.UNKNOWN,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        outcomes={"stop": CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND)}
+    )
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock).tick()
+    assert [k for k, _, _ in cp.dispatched] == ["stop"]
+    stored = uow.servers.by_id[server.id]
+    assert stored.assigned_worker_id is None
+    assert stored.observed_state is ObservedState.STOPPED
+
+
+async def test_stopped_unknown_assigned_disconnected_clears_assignment(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Issue #1599: (desired=stopped, observed=unknown, assigned) with the worker
+    # DISCONNECTED -> DB-only clear (no command dispatched), with WARNING log.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.UNKNOWN,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(connected={_WORKER: False})
+    clock = FakeClock(_NOW)
+    with caplog.at_level(logging.WARNING):
+        await _reconciler(uow, cp, clock).tick()
+    assert cp.dispatched == []
+    assert uow.servers.by_id[server.id].assigned_worker_id is None
+    assert any(
+        "1599" in record.message or "unknown" in record.message.lower()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+    )
+
+
+async def test_stopped_unknown_assigned_within_grace_is_skipped() -> None:
+    # The wedge recovery only fires past grace, preserving the in-flight window.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.UNKNOWN,
+        worker=_WORKER,
+        observed_at=_NOW - dt.timedelta(seconds=_GRACE - 1),
+        updated_at=_NOW - dt.timedelta(seconds=_GRACE - 1),
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock).tick()
+    assert cp.dispatched == []
+    assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER

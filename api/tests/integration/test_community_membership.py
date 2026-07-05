@@ -296,6 +296,7 @@ async def test_assign_role_from_another_community_fails(engine: AsyncEngine) -> 
             community_id=community_a.id,
             user_id=UserId(member_id),
             role_id=b_role.id,
+            actor_id=UserId(owner_a),
         )
 
 
@@ -314,7 +315,10 @@ async def test_assign_role_in_community_succeeds_and_lists(
         (owner_role,) = await uow.roles.list_for_community(community.id)
 
     await AssignRole(uow=SqlAlchemyUnitOfWork(factory))(
-        community_id=community.id, user_id=UserId(member_id), role_id=owner_role.id
+        community_id=community.id,
+        user_id=UserId(member_id),
+        role_id=owner_role.id,
+        actor_id=UserId(owner_id),
     )
 
     members = await ListMembers(

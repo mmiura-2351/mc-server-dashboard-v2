@@ -41,6 +41,7 @@ from mc_server_dashboard_api.community.domain.errors import (
     MembershipAlreadyExistsError,
     MembershipNotFoundError,
     MemberUserNotFoundError,
+    PermissionCeilingExceededError,
     RoleNotFoundError,
 )
 from mc_server_dashboard_api.community.domain.value_objects import (
@@ -227,11 +228,14 @@ async def assign_role(
             community_id=CommunityId(community_id),
             user_id=UserId(user_id),
             role_id=role_id,
+            actor_id=authorized.user_id,
         )
     except MembershipNotFoundError as exc:
         raise _not_found() from exc
     except RoleNotFoundError as exc:
         raise _not_found() from exc
+    except PermissionCeilingExceededError as exc:
+        raise _permission_ceiling(exc) from exc
     await recorder.record(
         AuditEvent(
             operation=ops.ROLE_ASSIGN,
@@ -294,6 +298,14 @@ def _parse_role_id(raw: str) -> RoleId:
         return RoleId(uuid.UUID(raw))
     except ValueError as exc:
         raise problem(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_role_id") from exc
+
+
+def _permission_ceiling(exc: PermissionCeilingExceededError) -> ProblemException:
+    return problem(
+        status.HTTP_403_FORBIDDEN,
+        "permission_ceiling",
+        extensions={"permissions": exc.exceeded},
+    )
 
 
 def _not_found() -> ProblemException:
