@@ -1916,14 +1916,13 @@ def get_create_backup(
 ) -> CreateBackup:
     """Assemble the :class:`CreateBackup` use case (backup:create).
 
-    Binds the RCON/snapshot seam (running path) and the Storage backup seam; the
+    Binds the snapshot seam (running path) and the Storage backup seam; the
     on-demand snapshot hook is the :class:`SnapshotServer` use case (PR #114).
     """
 
     session_factory = create_session_factory(get_engine(request))
     return CreateBackup(
         uow=ServersUnitOfWork(session_factory),
-        control_plane=control_plane,
         backup_store=backup_store,
         snapshot_server=SnapshotServer(
             uow=ServersUnitOfWork(session_factory),
