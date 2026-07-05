@@ -45,9 +45,10 @@
   NFR-SCALE-1); the configuration surface is the minimum needed to select
   adapters and tune the documented behaviours, not an exhaustive knob for every
   internal constant.
-- **Two independent processes.** `api/` (Python) and `worker/` (Go) are
-  configured independently; each has its own configuration. `proto/` is a build
-  artifact and has no runtime configuration.
+- **Three runtime processes.** `api/` (Python), `worker/` (Go), and `relay/`
+  (Go) are configured independently; each has its own configuration. `webui/`
+  (TypeScript) is a build-time component with no runtime configuration of its
+  own. `proto/` is a build artifact and has no runtime configuration.
 
 ---
 
