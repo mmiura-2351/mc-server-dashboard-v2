@@ -284,6 +284,12 @@ class WorkerSessionServicer(WorkerServiceServicer):
                 await watchdog
             except asyncio.CancelledError:
                 pass
+            except Exception:
+                _LOG.warning(
+                    "watchdog raised unexpectedly",
+                    extra={"worker_id": worker_id.value},
+                    exc_info=True,
+                )
             # Fail this worker's in-flight commands immediately: its outbound
             # stream is gone, so they can never be answered. Awaiters get a typed
             # WorkerNotConnectedError now instead of riding the full timeout.
