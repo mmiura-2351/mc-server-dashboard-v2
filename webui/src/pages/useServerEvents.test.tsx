@@ -188,7 +188,7 @@ describe("useServerEvents", () => {
     act(() => {
       setAccessToken("tok-2");
     });
-    expect(MockWebSocket.last().url).toContain("token=tok-2");
+    expect(MockWebSocket.last().protocols).toEqual(["access_token", "tok-2"]);
   });
 
   it("tears down the socket on unmount", () => {

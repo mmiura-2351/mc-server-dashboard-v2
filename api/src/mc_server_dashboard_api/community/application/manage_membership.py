@@ -24,6 +24,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from mc_server_dashboard_api.community.application.permission_ceiling import (
+    enforce_permission_ceiling,
+)
 from mc_server_dashboard_api.community.domain.clock import Clock
 from mc_server_dashboard_api.community.domain.entities import Membership, Role
 from mc_server_dashboard_api.community.domain.errors import (
@@ -233,7 +236,12 @@ class AssignRole:
     uow: UnitOfWork
 
     async def __call__(
-        self, *, community_id: CommunityId, user_id: UserId, role_id: RoleId
+        self,
+        *,
+        community_id: CommunityId,
+        user_id: UserId,
+        role_id: RoleId,
+        actor_id: UserId,
     ) -> None:
         async with self.uow:
             membership = await self.uow.memberships.get_by_user_and_community(
@@ -245,6 +253,13 @@ class AssignRole:
             role = await self.uow.roles.get_by_id(role_id)
             if role is None or role.community_id != community_id:
                 raise RoleNotFoundError(str(role_id.value))
+
+            await enforce_permission_ceiling(
+                self.uow,
+                actor_id=actor_id,
+                community_id=community_id,
+                conferred=role.permissions,
+            )
 
             if role_id in await self.uow.memberships.list_role_ids(membership.id):
                 return  # idempotent: already assigned, nothing to commit

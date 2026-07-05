@@ -355,10 +355,15 @@ async def test_assign_role_attaches_role_to_member() -> None:
     uow = FakeAuthzUnitOfWork()
     community = _seed_community(uow)
     user = UserId(uuid.uuid4())
+    actor = UserId(uuid.uuid4())
     membership = uow._membership_for(user, community.id)
     role = _seed_owner_role(uow, community.id)
+    # The seeded owner role has empty permissions, so any actor passes the ceiling.
+    uow._membership_for(actor, community.id)
 
-    await AssignRole(uow=uow)(community_id=community.id, user_id=user, role_id=role.id)
+    await AssignRole(uow=uow)(
+        community_id=community.id, user_id=user, role_id=role.id, actor_id=actor
+    )
 
     assert await uow.memberships.list_role_ids(membership.id) == [role.id]
     assert uow.commits == 1
@@ -368,11 +373,15 @@ async def test_assign_role_is_idempotent() -> None:
     uow = FakeAuthzUnitOfWork()
     community = _seed_community(uow)
     user = UserId(uuid.uuid4())
+    actor = UserId(uuid.uuid4())
     membership = uow._membership_for(user, community.id)
     role = _seed_owner_role(uow, community.id)
     uow.memberships.role_ids.setdefault(membership.id, []).append(role.id)
+    uow._membership_for(actor, community.id)
 
-    await AssignRole(uow=uow)(community_id=community.id, user_id=user, role_id=role.id)
+    await AssignRole(uow=uow)(
+        community_id=community.id, user_id=user, role_id=role.id, actor_id=actor
+    )
 
     assert await uow.memberships.list_role_ids(membership.id) == [role.id]
     assert uow.commits == 0
@@ -382,9 +391,14 @@ async def test_assign_role_to_non_member_raises_not_found() -> None:
     uow = FakeAuthzUnitOfWork()
     community = _seed_community(uow)
     role = _seed_owner_role(uow, community.id)
+    actor = UserId(uuid.uuid4())
+    uow._membership_for(actor, community.id)
     with pytest.raises(MembershipNotFoundError):
         await AssignRole(uow=uow)(
-            community_id=community.id, user_id=UserId(uuid.uuid4()), role_id=role.id
+            community_id=community.id,
+            user_id=UserId(uuid.uuid4()),
+            role_id=role.id,
+            actor_id=actor,
         )
 
 
@@ -392,10 +406,15 @@ async def test_assign_unknown_role_raises_not_found() -> None:
     uow = FakeAuthzUnitOfWork()
     community = _seed_community(uow)
     user = UserId(uuid.uuid4())
+    actor = UserId(uuid.uuid4())
     uow._membership_for(user, community.id)
+    uow._membership_for(actor, community.id)
     with pytest.raises(RoleNotFoundError):
         await AssignRole(uow=uow)(
-            community_id=community.id, user_id=user, role_id=RoleId(uuid.uuid4())
+            community_id=community.id,
+            user_id=user,
+            role_id=RoleId(uuid.uuid4()),
+            actor_id=actor,
         )
 
 
@@ -407,11 +426,16 @@ async def test_assign_role_from_another_community_fails() -> None:
     other = _seed_community(uow, "other")
     foreign_role = _seed_owner_role(uow, other.id)
     user = UserId(uuid.uuid4())
+    actor = UserId(uuid.uuid4())
     membership = uow._membership_for(user, community.id)
+    uow._membership_for(actor, community.id)
 
     with pytest.raises(RoleNotFoundError):
         await AssignRole(uow=uow)(
-            community_id=community.id, user_id=user, role_id=foreign_role.id
+            community_id=community.id,
+            user_id=user,
+            role_id=foreign_role.id,
+            actor_id=actor,
         )
     assert await uow.memberships.list_role_ids(membership.id) == []
 

@@ -144,6 +144,19 @@ class ResourceGrantNotFoundError(CommunityError):
     """
 
 
+class PermissionCeilingExceededError(CommunityError):
+    """The actor tried to confer permissions they do not themselves hold.
+
+    The grant-only-what-you-hold ceiling (issue #1595) requires that every
+    permission being conferred through a role or grant is already held by the
+    actor. ``exceeded`` lists the sorted codes the actor lacks.
+    """
+
+    def __init__(self, exceeded: list[str]) -> None:
+        self.exceeded = exceeded
+        super().__init__(", ".join(exceeded))
+
+
 class LastOwnerRemovalError(CommunityError):
     """Removing this member would leave the community with no Owner-role holder.
 
