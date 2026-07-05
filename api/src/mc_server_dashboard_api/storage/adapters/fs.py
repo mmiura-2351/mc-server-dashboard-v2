@@ -236,6 +236,29 @@ class FsStorage(Storage):
         with self._lease_lock:
             return self._leases.get(snapshot, 0) > 0
 
+    def _lease_current(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> tuple[Path, Callable[[], None]]:
+        """Resolve current and lease it, verified against the reclaim race (#1607).
+
+        After leasing, re-read ``current``. If it still matches, the lease was
+        acquired before any reclaim decision. If it changed (concurrent flip),
+        release and retry.
+        """
+
+        while True:
+            current = self._current_dir(community_id, server_id)
+            self._acquire_lease(current)
+            try:
+                recheck = self._current_dir(community_id, server_id)
+            except BaseException:
+                self._release_lease(current)
+                raise
+            if recheck == current:
+                snapshot = current
+                return snapshot, lambda: self._release_lease(snapshot)
+            self._release_lease(current)
+
     # --- active-staging leases (issue #183) --------------------------------
 
     def _register_staging(self, staging: Path) -> None:
@@ -281,6 +304,14 @@ class FsStorage(Storage):
         Safe to re-run; never touches the snapshot ``current`` resolves to. Exposed
         for the API startup lifespan hook and manual invocation.
 
+        Sweep-vs-flip race (issue #1606): a concurrent publish whose new snapshot
+        directory was already in the iteration but whose pointer flip lands after
+        the sweep started iterating would otherwise see the just-made-live snapshot
+        as an orphan and delete it. The guard below re-reads the ``current`` symlink
+        immediately before removing each candidate snapshot and skips it if the
+        pointer now names it. This mirrors the object adapter's per-candidate
+        pointer re-read (issue #113).
+
         In-flight staging (issue #183): a transfer staged but not yet committed is
         pinned by an in-process active-staging lease taken at ``begin_snapshot`` (and
         at ``restore_backup``) and released at commit/abort, so a sweep scheduled
@@ -300,13 +331,13 @@ class FsStorage(Storage):
                 self._sweep_server(server)
 
     def _sweep_server(self, server_root: Path) -> None:
-        live = self._live_snapshot_name(server_root)
         snapshots = server_root / "snapshots"
         if snapshots.is_dir():
-            for snap in snapshots.iterdir():
-                # Skip the live snapshot and any superseded one an active hydrate
-                # reader still holds a lease on; the next sweep reclaims it once the
-                # reader releases (Section 4.2 reader safety).
+            for snap in sorted(snapshots.iterdir(), key=lambda p: p.name):
+                # Re-read the live name per candidate: a concurrent publish may
+                # have flipped ``current`` onto this candidate after the iteration
+                # started (issue #1606, mirroring the object adapter's #113 guard).
+                live = self._live_snapshot_name(server_root)
                 if snap.name != live and not self._is_leased(snap):
                     _rmtree(snap)
         incoming = server_root / "incoming"
@@ -348,9 +379,7 @@ class FsStorage(Storage):
         # Re-resolving on first read also means the leased snapshot is exactly the
         # one whose bytes are streamed (Section 4.2 reader safety).
         def _open() -> tuple[Path, Callable[[], None]]:
-            current = self._current_dir(community_id, server_id)
-            self._acquire_lease(current)
-            return current, lambda: self._release_lease(current)
+            return self._lease_current(community_id, server_id)
 
         return _tar_stream(_open, self._tar_member_hook)
 
@@ -1115,16 +1144,15 @@ class FsStorage(Storage):
         # 4.2 reader safety). The lease protects the snapshot dir from a
         # concurrent publish/sweep for the whole duration of a large read.
         def _open() -> tuple[Path, Callable[[], None]]:
-            current = self._current_dir(community_id, server_id)
-            self._acquire_lease(current)
+            current, release = self._lease_current(community_id, server_id)
             try:
                 target = self._safe_target(current, rel_path)
                 if not target.is_file():
                     raise NotFoundError(f"file not found: {rel_path.value}")
             except BaseException:
-                self._release_lease(current)
+                release()
                 raise
-            return target, lambda: self._release_lease(current)
+            return target, release
 
         return _leased_file_stream(_open)
 

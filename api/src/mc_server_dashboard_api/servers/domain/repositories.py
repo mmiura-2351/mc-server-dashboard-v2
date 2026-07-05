@@ -257,7 +257,7 @@ class ServerRepository(abc.ABC):
 
         The candidate set the periodic divergence reconciler iterates: servers
         where the operator's intent and the last Worker-reported reality could be
-        out of step and an intent re-dispatch may be owed. Three shapes qualify:
+        out of step and an intent re-dispatch may be owed. Five shapes qualify:
 
         - ``desired=running`` with an observed state that is neither ``starting``
           nor ``running`` (a start that was never delivered, or a crash that the
@@ -265,7 +265,11 @@ class ServerRepository(abc.ABC):
         - ``desired=running`` with no assigned Worker (a compensation-failure
           orphan: the intent committed but placement never stuck);
         - ``desired=stopped`` with ``observed=running`` (a stop that was never
-          delivered).
+          delivered);
+        - ``desired=stopped``, ``observed=stopped``, still assigned (issue #847
+          bug 2: a stop wedged because its deferred unassign never ran);
+        - ``desired=stopped``, ``observed=unknown``, still assigned (issue #1599:
+          a stop interrupted mid-flight by an API restart or worker disconnect).
 
         Aligned servers (``running``/``starting`` under a running intent, settled
         ``stopped`` under a stopped intent) are excluded so the reconciler's tick

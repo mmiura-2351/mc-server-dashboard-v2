@@ -36,11 +36,9 @@ export interface CommunityEventsCallbacks {
   onDown: () => void;
 }
 
-/** Build the `wss?://…/api/communities/{cid}/events?token=…` URL for `cid`. */
-function eventsUrl(communityId: string, token: string): string {
-  const path = `/api/communities/${encodeURIComponent(communityId)}/events`;
-  const query = `?token=${encodeURIComponent(token)}`;
-  return `${wsOrigin()}${path}${query}`;
+/** Build the `wss?://…/api/communities/{cid}/events` URL for `cid`. */
+function eventsUrl(communityId: string): string {
+  return `${wsOrigin()}/api/communities/${encodeURIComponent(communityId)}/events`;
 }
 
 /**
@@ -91,7 +89,7 @@ export class CommunityEventsClient {
     random: () => number = Math.random,
   ) {
     this.socket = new EventsSocketClient(
-      (token) => eventsUrl(communityId, token),
+      () => eventsUrl(communityId),
       {
         onMessage: (raw) => {
           const status = parseStatusFrame(raw);

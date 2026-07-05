@@ -11,6 +11,7 @@ authoritative data even with extra orphan snapshots around.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
@@ -152,3 +153,150 @@ async def test_sweep_reclaims_crash_leftover_staging_with_no_handle(
     assert not incoming.exists() or not any(incoming.iterdir())
     blob = await drain(recovered.open_hydrate_source(community, server))
     assert read_tar(blob) == {"f": b"LIVE"}
+
+
+async def test_sweep_reread_skips_snapshot_made_live_after_pointer_read(
+    tmp_path: Path,
+) -> None:
+    """A publish whose new snapshot appeared in the iteration but whose pointer
+    flip lands after the sweep started iterating must not delete the now-live
+    snapshot (issue #1606).
+
+    The sweep iterates ``snapshots/`` and per-candidate re-reads the ``current``
+    symlink: if it now names the candidate, the candidate is live and is skipped.
+    Mirrors the object adapter's test for issue #113.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"OLD"})
+    old_snapshot = snapshot_dir(tmp_path, community, server)
+    server_root = old_snapshot.parent.parent
+
+    # Simulate a concurrent publisher at AFTER_MOVE stage: a fresh snapshot dir
+    # exists under snapshots/ but ``current`` still points at the OLD one. The name
+    # sorts after the live OLD snapshot so the sweep encounters OLD first.
+    new_snap_dir = server_root / "snapshots" / "zzz-concurrent-new"
+    new_snap_dir.mkdir(parents=True)
+    (new_snap_dir / "f").write_bytes(b"NEW")
+
+    # Subclass that flips the pointer on the FIRST _live_snapshot_name call (models
+    # the publish flip landing after the iteration started but before the guard
+    # re-reads for the NEW candidate).
+    reads = {"n": 0}
+
+    class _FlipOnFirstRead(FsStorage):
+        def _live_snapshot_name(self, sr: Path) -> str | None:
+            result = super()._live_snapshot_name(sr)
+            if sr == server_root:
+                reads["n"] += 1
+                if reads["n"] == 1:
+                    # Perform the atomic flip: current -> zzz-concurrent-new.
+                    link = sr / "current"
+                    tmp_link = sr / ".current.flip"
+                    os.symlink(
+                        os.path.join("snapshots", "zzz-concurrent-new"), tmp_link
+                    )
+                    os.replace(tmp_link, link)
+            return result
+
+    flipping = _FlipOnFirstRead(tmp_path)
+    flipping.sweep()
+
+    # The guard must have re-read the pointer at least twice (once per candidate).
+    assert reads["n"] >= 2, "the guard must re-read the pointer per candidate"
+    # The just-made-live snapshot survived the sweep.
+    assert new_snap_dir.exists()
+    assert (new_snap_dir / "f").read_bytes() == b"NEW"
+    # open_hydrate_source reads the NEW content through the flipped pointer.
+    blob = await drain(flipping.open_hydrate_source(community, server))
+    assert read_tar(blob) == {"f": b"NEW"}
+
+    # The now-superseded OLD snapshot is reclaimed by a follow-up sweep with no
+    # concurrent publisher.
+    FsStorage(tmp_path).sweep()
+    assert not old_snapshot.exists()
+
+
+async def test_hydrate_reader_rereads_current_when_reclaim_lands_in_lease_gap(
+    tmp_path: Path,
+) -> None:
+    """A concurrent restore flips+reclaims in the window between resolving
+    ``current`` and leasing it (issue #1607). The reader must re-verify and
+    converge on the NEW snapshot rather than reading from a reclaimed path."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"OLD"})
+
+    old_snapshot = snapshot_dir(tmp_path, community, server)
+    server_root = old_snapshot.parent.parent
+
+    # Seed the new snapshot on disk and prepare the flip+reclaim that a
+    # concurrent restore would perform.
+    new_snap_dir = server_root / "snapshots" / "new-snap"
+    new_snap_dir.mkdir(parents=True)
+    (new_snap_dir / "f").write_bytes(b"NEW")
+
+    call_count = {"n": 0}
+    original_current_dir = FsStorage._current_dir
+
+    def _racing_current_dir(self: FsStorage, cid: object, sid: object) -> Path:
+        call_count["n"] += 1
+        result = original_current_dir(self, cid, sid)  # type: ignore[arg-type]
+        if call_count["n"] == 1:
+            # Simulate the concurrent restore: flip the pointer and reclaim old.
+            link = server_root / "current"
+            tmp_link = server_root / ".current.race"
+            os.symlink(os.path.join("snapshots", "new-snap"), tmp_link)
+            os.replace(tmp_link, link)
+            import shutil
+
+            shutil.rmtree(old_snapshot)
+        return result
+
+    storage._current_dir = _racing_current_dir.__get__(storage, FsStorage)  # type: ignore[method-assign]
+
+    blob = await drain(storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == {"f": b"NEW"}
+
+
+async def test_file_stream_rereads_current_when_reclaim_lands_in_lease_gap(
+    tmp_path: Path,
+) -> None:
+    """Same as hydrate but for open_file_stream (issue #1607): a concurrent
+    restore in the resolve-lease gap must not yield a stale/deleted file."""
+
+    from mc_server_dashboard_api.storage.domain.value_objects import RelPath
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"OLD"})
+
+    old_snapshot = snapshot_dir(tmp_path, community, server)
+    server_root = old_snapshot.parent.parent
+
+    new_snap_dir = server_root / "snapshots" / "new-snap"
+    new_snap_dir.mkdir(parents=True)
+    (new_snap_dir / "f").write_bytes(b"NEW")
+
+    call_count = {"n": 0}
+    original_current_dir = FsStorage._current_dir
+
+    def _racing_current_dir(self: FsStorage, cid: object, sid: object) -> Path:
+        call_count["n"] += 1
+        result = original_current_dir(self, cid, sid)  # type: ignore[arg-type]
+        if call_count["n"] == 1:
+            link = server_root / "current"
+            tmp_link = server_root / ".current.race"
+            os.symlink(os.path.join("snapshots", "new-snap"), tmp_link)
+            os.replace(tmp_link, link)
+            import shutil
+
+            shutil.rmtree(old_snapshot)
+        return result
+
+    storage._current_dir = _racing_current_dir.__get__(storage, FsStorage)  # type: ignore[method-assign]
+
+    blob = await drain(storage.open_file_stream(community, server, RelPath("f")))
+    assert blob == b"NEW"

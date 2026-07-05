@@ -43,6 +43,15 @@ jobs:
       - name: Docs conventions (links, section-mark glyph, v1 term)
         run: python3 scripts/check_docs.py
 
+      # Unit-test the checked-in git hooks (post-checkout auto-restore,
+      # hooks-check assertions). Pure bash + temp git repos; mirrors the
+      # `make hooks-test` target so CI covers the same gate as local.
+      - name: Hook tests (post-checkout)
+        run: bash .githooks/test-post-checkout.sh
+
+      - name: Hook tests (hooks-check)
+        run: bash .githooks/test-hooks-check.sh
+
       # YAML-parse every workflow so a malformed workflow fails fast. PyYAML is
       # preinstalled with ubuntu-latest's system python3.
       - name: Workflow YAML parse

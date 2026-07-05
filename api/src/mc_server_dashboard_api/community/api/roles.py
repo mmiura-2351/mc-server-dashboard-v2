@@ -34,6 +34,7 @@ from mc_server_dashboard_api.community.domain.entities import Role
 from mc_server_dashboard_api.community.domain.errors import (
     InvalidPermissionError,
     InvalidRoleNameError,
+    PermissionCeilingExceededError,
     PresetRoleNotEditableError,
     RoleAlreadyExistsError,
     RoleNotFoundError,
@@ -133,6 +134,7 @@ async def create_role(
     try:
         role = await use_case(
             community_id=CommunityId(community_id),
+            actor_id=authorized.user_id,
             name=body.name,
             permissions=_parse_permissions(body.permissions),
         )
@@ -142,6 +144,8 @@ async def create_role(
         raise problem(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_name") from exc
     except UnknownPermissionError as exc:
         raise _invalid_permission() from exc
+    except PermissionCeilingExceededError as exc:
+        raise _permission_ceiling(exc) from exc
     await recorder.record(
         AuditEvent(
             operation=ops.ROLE_CREATE,
@@ -170,6 +174,7 @@ async def update_role(
         role = await use_case(
             community_id=CommunityId(community_id),
             role_id=RoleId(role_id),
+            actor_id=authorized.user_id,
             name=body.name,
             permissions=(
                 None
@@ -187,6 +192,8 @@ async def update_role(
         raise problem(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_name") from exc
     except UnknownPermissionError as exc:
         raise _invalid_permission() from exc
+    except PermissionCeilingExceededError as exc:
+        raise _permission_ceiling(exc) from exc
     await recorder.record(
         AuditEvent(
             operation=ops.ROLE_UPDATE,
@@ -242,6 +249,14 @@ def _parse_permissions(raw: list[str]) -> set[Permission]:
 
 def _invalid_permission() -> ProblemException:
     return problem(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_permission")
+
+
+def _permission_ceiling(exc: PermissionCeilingExceededError) -> ProblemException:
+    return problem(
+        status.HTTP_403_FORBIDDEN,
+        "permission_ceiling",
+        extensions={"permissions": exc.exceeded},
+    )
 
 
 def _not_found() -> ProblemException:

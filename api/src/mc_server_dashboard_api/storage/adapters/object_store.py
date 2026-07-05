@@ -477,6 +477,29 @@ class ObjectStorage(Storage):
             raise NotFoundError(f"no published snapshot for server {server_id.value}")
         return prefix
 
+    async def _lease_live_snapshot(
+        self, client: S3Client, community_id: CommunityId, server_id: ServerId
+    ) -> str:
+        """Resolve live snapshot prefix and lease it, verified (#1607).
+
+        After leasing, re-read the pointer. If it still matches, the lease was
+        acquired before any GC decision. If it changed (concurrent flip),
+        release and retry.
+        """
+
+        server_prefix = self._server_prefix(community_id, server_id)
+        while True:
+            prefix = await self._live_snapshot_prefix(client, community_id, server_id)
+            self._acquire_lease(prefix)
+            try:
+                recheck = await self._read_pointer(client, server_prefix)
+            except BaseException:
+                self._release_lease(prefix)
+                raise
+            if recheck == prefix:
+                return prefix
+            self._release_lease(prefix)
+
     # --- path-traversal containment (Section 6) ----------------------------
 
     def _safe_subkey(self, rel_path: RelPath) -> str:
@@ -621,10 +644,9 @@ class ObjectStorage(Storage):
         self, community_id: CommunityId, server_id: ServerId
     ) -> AsyncIterator[bytes]:
         async with self._client_factory() as client:
-            snapshot_prefix = await self._live_snapshot_prefix(
+            snapshot_prefix = await self._lease_live_snapshot(
                 client, community_id, server_id
             )
-            self._acquire_lease(snapshot_prefix)
             try:
                 members = sorted(
                     await client.list_objects(snapshot_prefix), key=lambda o: o.key
@@ -1275,10 +1297,9 @@ class ObjectStorage(Storage):
         rel_path: RelPath,
     ) -> AsyncIterator[bytes]:
         async with self._client_factory() as client:
-            snapshot_prefix = await self._live_snapshot_prefix(
+            snapshot_prefix = await self._lease_live_snapshot(
                 client, community_id, server_id
             )
-            self._acquire_lease(snapshot_prefix)
             try:
                 key = snapshot_prefix + sub
                 if await client.head_object(key) is None:

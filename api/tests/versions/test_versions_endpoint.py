@@ -21,7 +21,10 @@ from mc_server_dashboard_api.identity.domain.value_objects import (
     Username,
 )
 from mc_server_dashboard_api.versions.domain.catalog import VersionCatalog
-from mc_server_dashboard_api.versions.domain.errors import CatalogUnavailableError
+from mc_server_dashboard_api.versions.domain.errors import (
+    CatalogUnavailableError,
+    UnknownVersionError,
+)
 from mc_server_dashboard_api.versions.domain.value_objects import (
     JarSource,
     ServerType,
@@ -30,12 +33,15 @@ from mc_server_dashboard_api.versions.domain.value_objects import (
 
 
 class _FakeCatalog(VersionCatalog):
-    def __init__(self, *, down: bool = False) -> None:
+    def __init__(self, *, down: bool = False, unknown_version: bool = False) -> None:
         self.down = down
+        self.unknown_version = unknown_version
 
     async def list_versions(self, server_type: ServerType) -> list[VersionRef]:
         if self.down:
             raise CatalogUnavailableError("source down")
+        if self.unknown_version:
+            raise UnknownVersionError("no such version")
         return [VersionRef(server_type=server_type, version="1.21.1")]
 
     async def resolve(self, server_type: ServerType, version: str) -> JarSource:
@@ -102,3 +108,13 @@ def test_source_down_is_503() -> None:
         resp = client.get("/api/versions/vanilla")
     assert resp.status_code == 503
     assert resp.json()["reason"] == "catalog_unavailable"
+
+
+def test_unknown_version_is_404() -> None:
+    """UnknownVersionError from a catalog adapter surfaces as 404 (#1539)."""
+
+    client = _client(_FakeCatalog(unknown_version=True))
+    with client:
+        resp = client.get("/api/versions/vanilla")
+    assert resp.status_code == 404
+    assert resp.json()["reason"] == "unknown_version"

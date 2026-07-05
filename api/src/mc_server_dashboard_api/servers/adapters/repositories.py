@@ -379,6 +379,17 @@ class SqlAlchemyServerRepository(ServerRepository):
                     ServerModel.observed_state == ObservedState.STOPPED.value,
                     ServerModel.assigned_worker_id.is_not(None),
                 ),
+                # desired=stopped, observed=unknown, still assigned (issue #1599):
+                # a stop interrupted mid-flight (API restart maps STOPPING->unknown,
+                # or worker disconnect sets unknown without unassigning) wedges the
+                # row — no other path recovers it. The reconciler routes this to
+                # redispatch_stop (connected worker) or clear_stale_assignment
+                # (disconnected worker).
+                and_(
+                    ServerModel.desired_state == stopped,
+                    ServerModel.observed_state == ObservedState.UNKNOWN.value,
+                    ServerModel.assigned_worker_id.is_not(None),
+                ),
             )
         )
         rows = (await self._session.execute(stmt)).scalars().all()

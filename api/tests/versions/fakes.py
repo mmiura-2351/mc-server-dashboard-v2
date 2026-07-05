@@ -7,7 +7,11 @@ fake :class:`JarFetcher` / :class:`JarPool` hold bytes in memory.
 
 from __future__ import annotations
 
-from mc_server_dashboard_api.versions.domain.fetcher import FetchError, JsonFetcher
+from mc_server_dashboard_api.versions.domain.fetcher import (
+    FetchError,
+    FetchNotFoundError,
+    JsonFetcher,
+)
 from mc_server_dashboard_api.versions.domain.jar_fetcher import JarFetcher
 from mc_server_dashboard_api.versions.domain.jar_pool import (
     JarPool,
@@ -19,20 +23,31 @@ from mc_server_dashboard_api.versions.domain.jar_pool import (
 class FakeJsonFetcher(JsonFetcher):
     """Serve recorded JSON by URL; count calls; optionally fail every call."""
 
-    def __init__(self, payloads: dict[str, object], *, fail: bool = False) -> None:
+    def __init__(
+        self,
+        payloads: dict[str, object],
+        *,
+        fail: bool = False,
+        not_found_urls: set[str] | None = None,
+    ) -> None:
         self._payloads = payloads
         self.fail = fail
+        self._not_found_urls = not_found_urls or set()
         self.calls: list[str] = []
 
     async def get_json(self, url: str) -> object:
         self.calls.append(url)
         if self.fail:
             raise FetchError(f"forced failure for {url}")
+        if url in self._not_found_urls:
+            raise FetchNotFoundError(f"404 for {url}")
         if url not in self._payloads:
             raise FetchError(f"no fixture for {url}")
         return self._payloads[url]
 
     async def get_text(self, url: str) -> str:
+        if url in self._not_found_urls:
+            raise FetchNotFoundError(f"404 for {url}")
         raise FetchError(f"no text fixture for {url}")
 
 
