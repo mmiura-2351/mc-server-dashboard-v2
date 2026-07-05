@@ -180,15 +180,21 @@ fi
 # ── 2. Preflight ─────────────────────────────────────────────────────────────
 scripts/deploy_preflight.sh
 
+# ── 2b. Pull latest main ────────────────────────────────────────────────────
+echo "deploy: pulling latest main..."
+git pull --ff-only origin main
+
 # ── 3. Build all components (api -> relay -> worker) ─────────────────────────
+build_version="$(git describe --tags --always 2>/dev/null || echo 0.0.0-dev)"
+
 echo "deploy: building api..."
 sg docker -c "DOCKER_BUILDKIT=1 docker build --network=host -t mcsd-api:dev -f api/Dockerfile ."
 
 echo "deploy: building relay..."
-sg docker -c "DOCKER_BUILDKIT=1 docker build --network=host -t mcsd-relay:dev ./relay"
+sg docker -c "DOCKER_BUILDKIT=1 docker build --network=host --build-arg VERSION=${build_version} -t mcsd-relay:dev ./relay"
 
 echo "deploy: building worker..."
-sg docker -c "DOCKER_BUILDKIT=1 docker build --network=host -t mcsd-worker:dev ./worker"
+sg docker -c "DOCKER_BUILDKIT=1 docker build --network=host --build-arg VERSION=${build_version} -t mcsd-worker:dev ./worker"
 
 # ── 4. Deploy ─────────────────────────────────────────────────────────────────
 echo "deploy: starting services..."

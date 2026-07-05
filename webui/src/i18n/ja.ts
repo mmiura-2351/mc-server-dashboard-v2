@@ -622,6 +622,10 @@ export const ja: Record<TranslationKey, string> = {
   "files.bulk.download.done": "{done} 件をダウンロードしました。",
   "files.bulk.download.partial":
     "{done}/{total} 件をダウンロードしました。{failed} 件失敗しました。",
+  "files.bulk.download.tooLarge":
+    "選択ファイルの合計サイズ ({size}) が 512 MiB のダウンロード上限を超えています。",
+  "files.error.downloadTooLarge":
+    "ファイルサイズ ({size}) がブラウザでのダウンロード上限 (512 MiB) を超えています。",
   "files.bulk.move": "選択項目を移動",
   "files.bulk.move.dialogTitle": "選択項目の移動",
   "files.bulk.move.destLabel": "移動先ディレクトリ",
@@ -648,6 +652,11 @@ export const ja: Record<TranslationKey, string> = {
   "files.contextMenu.upload": "ファイルをアップロード",
   "files.contextMenu.newFolder": "新しいフォルダ",
   "files.contextMenu.extractHere": "ここに展開",
+  "files.contextMenu.copy": "コピー",
+  "files.contextMenu.moveTo": "移動先…",
+  "files.contextMenu.paste": "貼り付け",
+  "files.copied": "クリップボードにコピーしました。",
+  "files.pasted": "貼り付けしました。",
 
   // Navigation history (issue #1475).
   "files.nav.back": "戻る",
