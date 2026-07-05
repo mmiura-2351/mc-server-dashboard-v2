@@ -906,10 +906,25 @@ export function ServerFilesTab({
   const pasteFilesRef = useRef(async () => {});
   pasteFilesRef.current = async () => {
     if (clipboard.length === 0) return;
+    const existingNames = new Set(
+      (listing.data?.entries ?? []).filter((e) => !e.is_dir).map((e) => e.name),
+    );
     const total = clipboard.length;
     let pasted = 0;
     for (const srcPath of clipboard) {
       const name = srcPath.split("/").at(-1) ?? srcPath;
+      // Overwrite confirmation — same check as the context-menu upload path.
+      if (existingNames.has(name)) {
+        const { action } = await new Promise<{
+          action: "overwrite" | "skip" | "cancel";
+          applyAll: boolean;
+        }>((resolve) => {
+          setOverwritePrompt({ fileName: name, showApplyAll: false, resolve });
+        });
+        setOverwritePrompt(null);
+        if (action === "cancel") return;
+        if (action === "skip") continue;
+      }
       try {
         const blob = await fetchFileBlob(
           `${apiPath(
@@ -917,6 +932,10 @@ export function ServerFilesTab({
             { community_id: communityId, server_id: serverId },
           )}?path=${encodeURIComponent(srcPath)}`,
         );
+        if (blob.size > MAX_UPLOAD_BYTES) {
+          showToast(t("files.error.tooLarge"), "error");
+          continue;
+        }
         const file = new File([blob], name);
         const form = new FormData();
         form.append("file", file);
@@ -990,10 +1009,19 @@ export function ServerFilesTab({
       }
 
       if (e.key === "c" && (e.ctrlKey || e.metaKey)) {
-        if (selected.size > 0) {
+        if (selected.size > 0 && listing.data) {
           e.preventDefault();
-          setClipboard(Array.from(selected));
-          showToast(t("files.copied"), "success");
+          const dirNames = new Set(
+            listing.data.entries.filter((en) => en.is_dir).map((en) => en.name),
+          );
+          const files = Array.from(selected).filter((p) => {
+            const name = p.split("/").at(-1) ?? p;
+            return !dirNames.has(name);
+          });
+          if (files.length > 0) {
+            setClipboard(files);
+            showToast(t("files.copied"), "success");
+          }
         }
         return;
       }
@@ -1768,7 +1796,6 @@ function Listing({
       )}
       {moveEntry !== null && (
         <MoveEntryDialog
-          entry={moveEntry}
           dir={dir}
           onClose={() => setMoveEntry(null)}
           onMove={(dest) => {
@@ -1825,7 +1852,7 @@ function Listing({
                   : undefined
               }
               onCopy={
-                ctxEntry
+                ctxEntry && !ctxEntry.is_dir
                   ? () => {
                       setContextMenu(null);
                       onCopy([joinPath(dir, ctxEntry.name)]);
@@ -2673,7 +2700,6 @@ function MoveEntryDialog({
   onClose,
   onMove,
 }: {
-  entry: DirEntry;
   dir: string;
   onClose: () => void;
   onMove: (dest: string) => void;

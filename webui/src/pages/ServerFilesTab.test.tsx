@@ -3809,7 +3809,7 @@ describe("Copy/paste", () => {
     ).toBeInTheDocument();
   });
 
-  it("shows Copy in context menu for a folder", async () => {
+  it("hides Copy in context menu for a folder", async () => {
     routeGet({
       detail: server(),
       list: listing([{ name: "world", is_dir: true }]),
@@ -3821,8 +3821,8 @@ describe("Copy/paste", () => {
     fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
 
     expect(
-      screen.getByRole("menuitem", { name: t("files.contextMenu.copy") }),
-    ).toBeInTheDocument();
+      screen.queryByRole("menuitem", { name: t("files.contextMenu.copy") }),
+    ).not.toBeInTheDocument();
   });
 
   it("shows Paste in empty-space context menu after copying", async () => {
@@ -3907,6 +3907,12 @@ describe("Copy/paste", () => {
 
     // Paste.
     fireEvent.keyDown(document, { key: "v", ctrlKey: true });
+
+    // Same-name file exists, so overwrite dialog appears first.
+    await screen.findByText(t("files.overwrite.title"));
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.overwrite.overwrite") }),
+    );
 
     // Should download and re-upload the file.
     await waitFor(() =>
@@ -3994,12 +4000,114 @@ describe("Copy/paste", () => {
       screen.getByRole("menuitem", { name: t("files.contextMenu.paste") }),
     );
 
+    // Same-name file exists, so overwrite dialog appears.
+    await screen.findByText(t("files.overwrite.title"));
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.overwrite.overwrite") }),
+    );
+
     await waitFor(() =>
       expect(mockDownload.fetchFileBlob).toHaveBeenCalledWith(
         `${FILES_BASE}/download?path=readme.txt`,
       ),
     );
     await waitFor(() => expect(mockPostFormWithProgress).toHaveBeenCalled());
+  });
+
+  it("paste shows overwrite confirmation when same-name file exists", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "readme.txt", is_dir: false }]),
+    });
+    mockPostFormWithProgress.mockResolvedValue(undefined);
+    renderPage();
+    await openFiles();
+    await screen.findByText(/readme\.txt/);
+
+    // Copy and paste.
+    fireEvent.click(screen.getByRole("checkbox", { name: "readme.txt" }));
+    fireEvent.keyDown(document, { key: "c", ctrlKey: true });
+    await screen.findByText(t("files.copied"));
+
+    fireEvent.keyDown(document, { key: "v", ctrlKey: true });
+
+    // Overwrite dialog should appear.
+    expect(
+      await screen.findByText(t("files.overwrite.title")),
+    ).toBeInTheDocument();
+  });
+
+  it("paste skips file when user clicks skip in overwrite dialog", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "readme.txt", is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/readme\.txt/);
+
+    // Copy and paste.
+    fireEvent.click(screen.getByRole("checkbox", { name: "readme.txt" }));
+    fireEvent.keyDown(document, { key: "c", ctrlKey: true });
+    await screen.findByText(t("files.copied"));
+
+    fireEvent.keyDown(document, { key: "v", ctrlKey: true });
+    await screen.findByText(t("files.overwrite.title"));
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.overwrite.skip") }),
+    );
+
+    // No download or upload should occur.
+    await waitFor(() =>
+      expect(
+        screen.queryByText(t("files.overwrite.title")),
+      ).not.toBeInTheDocument(),
+    );
+    expect(mockDownload.fetchFileBlob).not.toHaveBeenCalled();
+  });
+
+  it("Ctrl+C filters out folders from selection", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "world", is_dir: true },
+        { name: "readme.txt", is_dir: false },
+      ]),
+    });
+    mockPostFormWithProgress.mockResolvedValue(undefined);
+    renderPage();
+    await openFiles();
+    await screen.findByText(/readme\.txt/);
+
+    // Select all (includes the folder).
+    fireEvent.keyDown(document, { key: "a", ctrlKey: true });
+    await waitFor(() => {
+      expect(screen.getByRole("checkbox", { name: "world" })).toBeChecked();
+      expect(
+        screen.getByRole("checkbox", { name: "readme.txt" }),
+      ).toBeChecked();
+    });
+
+    // Copy — should only copy the file, not the folder.
+    fireEvent.keyDown(document, { key: "c", ctrlKey: true });
+    await screen.findByText(t("files.copied"));
+
+    // Paste — should download only readme.txt.
+    fireEvent.keyDown(document, { key: "v", ctrlKey: true });
+
+    // Overwrite since readme.txt exists.
+    await screen.findByText(t("files.overwrite.title"));
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.overwrite.overwrite") }),
+    );
+
+    await waitFor(() =>
+      expect(mockDownload.fetchFileBlob).toHaveBeenCalledWith(
+        `${FILES_BASE}/download?path=readme.txt`,
+      ),
+    );
+    // Should have only downloaded one file (the file, not the folder).
+    expect(mockDownload.fetchFileBlob).toHaveBeenCalledTimes(1);
   });
 });
 
