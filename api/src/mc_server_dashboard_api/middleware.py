@@ -77,6 +77,7 @@ _NO_STORE_PATHS = frozenset(
         "/api/auth/refresh",
         "/api/auth/session",
         "/api/users/me",
+        "/api/users/me/sessions",
     }
 )
 

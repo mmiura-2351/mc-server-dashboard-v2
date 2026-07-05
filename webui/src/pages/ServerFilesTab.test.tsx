@@ -46,6 +46,15 @@ vi.mock("../api/client.ts", async () => {
 const mockDownload = vi.hoisted(() => ({
   downloadFile: vi.fn(),
   fetchFileBlob: vi.fn(),
+  MAX_DOWNLOAD_BYTES: 512 * 1024 * 1024,
+  DownloadTooLargeError: class DownloadTooLargeError extends Error {
+    readonly contentLength: number;
+    constructor(contentLength: number) {
+      super(`Download too large: ${contentLength} bytes`);
+      this.name = "DownloadTooLargeError";
+      this.contentLength = contentLength;
+    }
+  },
 }));
 vi.mock("../api/download.ts", () => mockDownload);
 

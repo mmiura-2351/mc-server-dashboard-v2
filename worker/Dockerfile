@@ -10,7 +10,7 @@
 # ---------------------------------------------------------------------------
 # Builder: compile a static binary.
 # ---------------------------------------------------------------------------
-FROM golang:1.26 AS builder
+FROM golang:1.26.4 AS builder
 
 WORKDIR /src
 
@@ -32,7 +32,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-X main.version=${VERSION}" -o /
 # cross-host path, where the worker verifies the API's TLS cert (see
 # docs/dev/DEPLOYMENT.md).
 # ---------------------------------------------------------------------------
-FROM debian:bookworm-slim AS runtime
+FROM debian:bookworm-20260623-slim AS runtime
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
