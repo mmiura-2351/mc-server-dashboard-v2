@@ -60,6 +60,8 @@ def assert_url_allowed(
         addrs = resolver(hostname)
     except (socket.gaierror, OSError) as exc:
         raise BlockedHostError(f"DNS resolution failed for {hostname}") from exc
+    if not addrs:
+        raise BlockedHostError(f"DNS resolution for {hostname} returned no addresses")
     for addr in addrs:
         ip = ipaddress.ip_address(addr)
         if not ip.is_global:
