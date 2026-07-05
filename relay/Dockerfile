@@ -19,8 +19,11 @@ RUN go mod download
 
 COPY . .
 
+# Version injected at build time; defaults to the dev placeholder.
+ARG VERSION=0.0.0-dev
+
 # CGO disabled -> a static binary that runs on the slim runtime base.
-RUN CGO_ENABLED=0 GOOS=linux go build -o /out/relay ./cmd/relay
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-X main.version=${VERSION}" -o /out/relay ./cmd/relay
 
 # ---------------------------------------------------------------------------
 # Runtime: slim base with CA certificates. Needed when the relay dials the API

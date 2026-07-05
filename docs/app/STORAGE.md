@@ -147,7 +147,11 @@ Notes:
   `rollback_file`, #889) instead mutates `current/` itself rather than flipping a
   fresh pointer, so its mutate→bump crash window is **not** the safe direction: a
   crash after the mutation but before the bump leaves the edited world live at the
-  OLD generation, and a same-Worker scratch with `held == store` would then skip the
+  OLD generation. Multi-member edits (`delete_dir` on fs uses `rmtree` —
+  per-member unlinks; on object backends `delete_dir` / `rename_dir` /
+  `rename_file` are per-object loops) additionally have a **mid-mutation window**:
+  a crash partway through the loop leaves `current/` partially mutated at a stale
+  generation (see Section 4.4 accepted gap, issue #1608). A same-Worker scratch with `held == store` would then skip the
   post-edit hydrate (#767) and boot the PRE-edit world — re-opening #889's staleness
   for that edit until the next bump. To keep that window crash-recoverable rather
   than racy against a concurrent publish, the edit's mutate+bump — and a
@@ -332,9 +336,9 @@ paths are not part of this Port.
 | `list_dir(community_id, server_id, rel_path) -> [entry]` | Browse a directory in `current/` | Same path validation. |
 | `write_file(community_id, server_id, rel_path, bytes)` | Edit one file in `current/`, retaining the prior version | Captures the previous content into `versions/` (Section 5) before overwriting. The per-file write is atomic (Section 4.4). Bumps the generation + stamps the `api-edit` sentinel (#889). |
 | `delete_file(community_id, server_id, rel_path)` | Delete one file from `current/`, retaining the prior content | Captures the content into `versions/` (Section 5) **before** removing, so a delete is reversible by rollback exactly like an edit. Missing path → `NotFoundError`. Bumps the generation + stamps the `api-edit` sentinel (#889). |
-| `delete_dir(community_id, server_id, rel_path)` | Recursively delete a directory subtree from `current/` | **No** per-file version capture: file versioning (Section 5) is the fine-grained single-file mechanism, whereas whole-subtree recovery is what backups (Section 3.3) exist for; capturing a version per member of a large subtree would be a storage-amplification bomb. Missing dir → `NotFoundError`. Bumps the generation + stamps the `api-edit` sentinel (#889). |
-| `rename_file(community_id, server_id, from_path, to_path)` | Rename/move a single file atomically within `current/` | **No** version capture on either side (issue #1164): a rename does not change the content, so retaining versions would waste storage; the caller's content-addressed cache (plugin JARs) or backups cover recovery. Missing source → `NotFoundError`. Bumps the generation + stamps the `api-edit` sentinel (#889). |
-| `rename_dir(community_id, server_id, from_path, to_path)` | Rename/move a directory atomically within `current/` | **No** per-file version capture (same reasoning as `delete_dir`, issue #1191). Missing source dir → `NotFoundError`. Bumps the generation + stamps the `api-edit` sentinel (#889). |
+| `delete_dir(community_id, server_id, rel_path)` | Recursively delete a directory subtree from `current/` | **No** per-file version capture: file versioning (Section 5) is the fine-grained single-file mechanism, whereas whole-subtree recovery is what backups (Section 3.3) exist for; capturing a version per member of a large subtree would be a storage-amplification bomb. Missing dir → `NotFoundError`. Bumps the generation + stamps the `api-edit` sentinel (#889). **Not crash-atomic across the subtree:** fs uses `rmtree` (per-member unlinks); object uses a per-object delete loop. A crash mid-op leaves a partially deleted subtree at a stale generation (Section 4.4 accepted gap, #1608). |
+| `rename_file(community_id, server_id, from_path, to_path)` | Rename/move a single file within `current/` | **No** version capture on either side (issue #1164): a rename does not change the content, so retaining versions would waste storage; the caller's content-addressed cache (plugin JARs) or backups cover recovery. Missing source → `NotFoundError`. Bumps the generation + stamps the `api-edit` sentinel (#889). Atomic on fs (`rename(2)`); on object backends it is a copy+delete pair — not crash-atomic (#1608). |
+| `rename_dir(community_id, server_id, from_path, to_path)` | Rename/move a directory within `current/` | **No** per-file version capture (same reasoning as `delete_dir`, issue #1191). Missing source dir → `NotFoundError`. Bumps the generation + stamps the `api-edit` sentinel (#889). Atomic on fs (`rename(2)`); on object backends it is a per-object copy+delete loop — not crash-atomic (#1608). |
 | `make_dir(community_id, server_id, rel_path)` | Create an (empty) directory in `current/` | Backend-dependent (see note). Idempotent. **Requires a published snapshot** — a never-snapshotted server has no live `current/` to create the directory under, so `make_dir` raises `NotFoundError` (behaviour aligned across both adapters in #896, including object which previously bumped the generation with no snapshot). Bumps the generation + stamps the `api-edit` sentinel (#889), uniformly with the other edits. On object backends it also writes a zero-byte `.dir` marker object under the prefix so the otherwise-empty directory is visible in listings (#1125; see note). |
 
 **Empty-directory representation (`make_dir`).** fs / remote-fs materialize a real
@@ -507,6 +511,35 @@ edits happen only on a stopped server, while publish happens for a running
 server's snapshot or during restore, which requires a stop). The Storage adapter
 itself does not arbitrate concurrent publish and `write_file` on the same server;
 the application layer is responsible for not issuing them concurrently.
+
+**Accepted gap: multi-member edits are not crash-atomic (issue #1608).**
+Single-file mutations (`write_file`, `delete_file`) are atomic at file
+granularity (temp-sibling rename on fs, single-object PUT on object), but
+multi-member edits span several non-atomic steps before the generation bump:
+
+- **fs `delete_dir`:** `shutil.rmtree` — per-member unlinks.
+- **fs `rename_dir` / `rename_file`:** a single `rename(2)` — **atomic**.
+- **object `delete_dir`:** a per-object `delete_object` loop.
+- **object `rename_dir` / `rename_file`:** per-object `copy_object` +
+  `delete_object` loops.
+- **object `delete_file`:** the version-capture step is a single-object PUT
+  (atomic), but the content `delete_object` is a separate step.
+
+A crash mid-loop leaves `current/` partially mutated at a stale generation.
+Because the missing-region gate (Section 4.5) runs only at publish time, a
+partially-deleted world hydrates silently on the next start — the gate does not
+re-check `current/` on hydrate.
+
+**Why not stage-then-flip:** routing these edits through the staging-then-publish
+path (Section 4.1) would turn every directory delete/rename into a
+full-working-set republish (copy the entire `current/` minus the deleted subtree
+into a fresh snapshot, then flip the pointer), adding multi-minute latency on
+large worlds for a narrow window (requires a crash during a manual at-rest file
+op on a stopped server).
+
+**Recovery:** the operator sees the request fail. Re-running the same edit
+converges (the remaining members are deleted/renamed, then the generation bumps),
+or a backup restore (Section 3.3) replaces the torn `current/` wholesale.
 
 ### 4.5 Recovering from a refused `working_set_incomplete` publish (#854/#887)
 
@@ -768,7 +801,7 @@ differ**, and #16 selects between them explicitly. Config: set
 | Path-traversal | The same canonicalization is applied to derive the **key** from `rel_path`; a `rel_path` that would escape the server's key prefix is rejected (Section 6). No symlinks exist, removing that vector. |
 | Garbage collection | Orphaned prefixes (from aborted/crashed publishes, or old prefixes after a flip) are reclaimed by a sweep keyed off the live pointer (Section 4.3). |
 | Best for | Decoupling the authoritative store from any host filesystem; durability/scale beyond local disk. |
-| Caveat | No atomic multi-object rename and no real directories — hence the pointer-flip design. List operations are prefix scans. |
+| Caveat | No atomic multi-object rename and no real directories — hence the pointer-flip design. List operations are prefix scans. Multi-member at-rest edits (`delete_dir`, `rename_dir`, `rename_file`) are per-object loops, not crash-atomic (Section 4.4 accepted gap, #1608). |
 
 **Shipped deployment (issue #702).** This is the **default** backend for the
 compose deployment, realized over **SeaweedFS** (Apache-2.0, master/volume,

@@ -780,3 +780,62 @@ async def test_check_reachable_succeeds_for_healthy_backend() -> None:
 
     store, storage = _store_and_storage()
     await storage.check_reachable(endpoint="http://localhost:8333", bucket="mcsdata")
+
+
+async def test_hydrate_reader_rereads_when_gc_lands_in_lease_gap() -> None:
+    """A concurrent restore flips+GCs in the window between resolving the live
+    snapshot prefix and leasing it (issue #1607). The reader must re-verify and
+    converge on the NEW snapshot rather than reading from a GC'd prefix."""
+
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    await _publish(storage, community, server, {"f": b"OLD"})
+
+    call_count = {"n": 0}
+    original = ObjectStorage._live_snapshot_prefix
+
+    async def _racing_live_snapshot_prefix(
+        self: ObjectStorage, client: S3Client, cid: CommunityId, sid: ServerId
+    ) -> str:
+        result = await original(self, client, cid, sid)
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            # Between the first resolve and the lease, a concurrent restore
+            # publishes new content (flips + GCs the old snapshot prefix).
+            await _publish(storage, community, server, {"f": b"NEW"})
+        return result
+
+    storage._live_snapshot_prefix = _racing_live_snapshot_prefix.__get__(  # type: ignore[method-assign]
+        storage, ObjectStorage
+    )
+
+    blob = await drain(storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == {"f": b"NEW"}
+
+
+async def test_file_stream_rereads_when_gc_lands_in_lease_gap() -> None:
+    """Same as hydrate but for open_file_stream (issue #1607): a concurrent
+    restore in the resolve-lease gap must not yield a stale/deleted file."""
+
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    await _publish(storage, community, server, {"f": b"OLD"})
+
+    call_count = {"n": 0}
+    original = ObjectStorage._live_snapshot_prefix
+
+    async def _racing_live_snapshot_prefix(
+        self: ObjectStorage, client: S3Client, cid: CommunityId, sid: ServerId
+    ) -> str:
+        result = await original(self, client, cid, sid)
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            await _publish(storage, community, server, {"f": b"NEW"})
+        return result
+
+    storage._live_snapshot_prefix = _racing_live_snapshot_prefix.__get__(  # type: ignore[method-assign]
+        storage, ObjectStorage
+    )
+
+    blob = await drain(storage.open_file_stream(community, server, RelPath("f")))
+    assert blob == b"NEW"

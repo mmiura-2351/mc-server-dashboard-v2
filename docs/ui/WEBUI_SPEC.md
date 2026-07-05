@@ -181,14 +181,16 @@ Global resource pack library (not community-scoped) and per-server assignment.
 
 | Path | Notes |
 |---|---|
-| `WS /communities/{cid}/servers/{sid}/events?streams=status,log,metrics&token=…` | Typed frames `{stream, ts, payload}`. `status`: `{state, detail}` · `log`: `{line, stream}` · `metrics`: `{cpu_millis, memory_bytes, player_count}` · `gap`: client fell behind (always delivered). |
-| `WS /communities/{cid}/events?token=…` | Community-wide **status-only** firehose; frames carry `server_id`. |
+| `WS /communities/{cid}/servers/{sid}/events?streams=status,log,metrics` | Typed frames `{stream, ts, payload}`. `status`: `{state, detail}` · `log`: `{line, stream}` · `metrics`: `{cpu_millis, memory_bytes, player_count}` · `gap`: client fell behind (always delivered). |
+| `WS /communities/{cid}/events` | Community-wide **status-only** firehose; frames carry `server_id`. |
 
-Auth: browsers pass the access token as `?token=` (header also honored for
-non-browser clients). Close codes mirror REST: 4400 bad `streams`, 4401
-unauthenticated, 4403 forbidden, 4404 not found / not a member. Authorization
-is re-checked every 60 s mid-stream. Delivery is best-effort; REST keeps
-working if the socket dies (FR-MON-4).
+Auth: browsers pass the access token via `Sec-WebSocket-Protocol` as two
+subprotocols `["access_token", "<jwt>"]`; the server echoes `access_token` as
+the accepted subprotocol (RFC 6455). The `Authorization: Bearer` header is also
+honored for non-browser clients. Close codes mirror REST: 4400 bad `streams`,
+4401 unauthenticated, 4403 forbidden, 4404 not found / not a member.
+Authorization is re-checked every 60 s mid-stream. Delivery is best-effort;
+REST keeps working if the socket dies (FR-MON-4).
 
 Note: the data-plane endpoints (`/api/data-plane/...`) are Worker-credential-only
 transfer endpoints — not part of the UI surface.
@@ -438,8 +440,9 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   `POST /api/auth/refresh` (the in-session 401-retry path), where reuse-detection
   still applies; a mid-session refresh failure still hard-logs-out (a genuinely
   expired / revoked session).
-- WS connections carry `?token=`; on token rotation, sockets are reconnected
-  (or left until the 60 s re-auth closes them — reconnect-on-rotate chosen).
+- WS connections carry the access token in the `Sec-WebSocket-Protocol`
+  subprotocol header (`["access_token", "<jwt>"]`, issue #1596); on token
+  rotation, sockets are reconnected (reconnect-on-rotate chosen).
 
 ### 7.2 Real-time strategy
 - One WS per open server-detail page + one community WS for the dashboard.
