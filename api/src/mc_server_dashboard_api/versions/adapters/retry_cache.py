@@ -30,7 +30,11 @@ from dataclasses import dataclass, field
 
 from mc_server_dashboard_api.versions.domain.cache import CacheInvalidator
 from mc_server_dashboard_api.versions.domain.errors import CatalogUnavailableError
-from mc_server_dashboard_api.versions.domain.fetcher import FetchError, JsonFetcher
+from mc_server_dashboard_api.versions.domain.fetcher import (
+    FetchError,
+    FetchNotFoundError,
+    JsonFetcher,
+)
 
 
 @dataclass
@@ -77,6 +81,12 @@ class RetryCachingFetcher(JsonFetcher, CacheInvalidator):
         for attempt in range(self.attempts):
             try:
                 payload = await fetch(url)
+            except FetchNotFoundError:
+                # A 404 is definitive ("this resource does not exist"), not a
+                # transient outage — retrying won't help. Re-raise immediately
+                # so catalog adapters can translate it to UnknownVersionError
+                # rather than the retryable CatalogUnavailableError (#1539).
+                raise
             except FetchError as exc:
                 last_error = exc
                 if attempt + 1 < self.attempts:

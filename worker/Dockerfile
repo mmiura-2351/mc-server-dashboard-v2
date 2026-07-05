@@ -10,7 +10,7 @@
 # ---------------------------------------------------------------------------
 # Builder: compile a static binary.
 # ---------------------------------------------------------------------------
-FROM golang:1.26 AS builder
+FROM golang:1.26.4 AS builder
 
 WORKDIR /src
 
@@ -20,8 +20,11 @@ RUN go mod download
 
 COPY . .
 
+# Version injected at build time; defaults to the dev placeholder.
+ARG VERSION=0.0.0-dev
+
 # CGO disabled -> a static binary that runs on the slim runtime base.
-RUN CGO_ENABLED=0 GOOS=linux go build -o /out/worker ./cmd/worker
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-X main.version=${VERSION}" -o /out/worker ./cmd/worker
 
 # ---------------------------------------------------------------------------
 # Runtime: slim base with CA certificates. The in-compose deployment dials the
@@ -29,7 +32,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /out/worker ./cmd/worker
 # cross-host path, where the worker verifies the API's TLS cert (see
 # docs/dev/DEPLOYMENT.md).
 # ---------------------------------------------------------------------------
-FROM debian:bookworm-slim AS runtime
+FROM debian:bookworm-20260623-slim AS runtime
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \

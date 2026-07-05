@@ -6,9 +6,10 @@ generation, and the tag-driven release workflow are in place (Sections 3 and 4).
 Building and publishing deployable artifacts stays aspirational until a
 packaging/deployment design exists, and is marked *(forthcoming)* below.
 
-> **One version for the whole monorepo.** `api/`, `worker/`, and `proto/` ship
-> together and are kept in lock-step (see [`CONTRIBUTING.md`](CONTRIBUTING.md)
-> and [`../REQUIREMENTS.md`](../REQUIREMENTS.md)). They therefore share **one
+> **One version for the whole monorepo.** `api/`, `worker/`, `relay/`, `webui/`,
+> and `proto/` ship together and are kept in lock-step (see
+> [`CONTRIBUTING.md`](CONTRIBUTING.md) and
+> [`../REQUIREMENTS.md`](../REQUIREMENTS.md)). They therefore share **one
 > repository-wide SemVer version**, not per-component versions.
 
 ## 1. Versioning (SemVer)
@@ -87,15 +88,14 @@ intentionally never bumped. This is the simplest correct choice at this stage:
 one repository-wide SemVer (per the monorepo note above), releases cut by tag
 push (Section 4.3), and nothing that can drift out of step.
 
-The components do not yet derive their version from the tag at build time. The
-Worker embeds a hard-coded placeholder: `worker/cmd/worker/main.go` declares
-`const version = "0.0.0-dev"` and advertises it as `worker_version` at
-registration, so a Worker built from any tag reports `0.0.0-dev` to the control
-plane. Neither the `worker/` nor the `relay/` Docker build passes `-ldflags`,
-and the release workflow injects nothing, so no component binary carries the
-release tag today. Wiring the tag into the build (`git describe`, Go
-`-ldflags`, a setuptools-scm-style mechanism for `api/`, etc.) rather than
-relying on a checked-in constant is tracked in #1624.
+Both `worker/cmd/worker/main.go` and `relay/cmd/relay/main.go` declare
+`var version = "0.0.0-dev"`, overridden at build time via
+`go build -ldflags "-X main.version=<tag>"`. The Dockerfiles accept a
+`VERSION` build arg (defaulting to `0.0.0-dev`), and `make build`,
+`scripts/update.sh`, and `scripts/deploy.sh` pass
+`git describe --tags --always` as that arg. A plain `go build` without
+`-ldflags` (or a compose build without the arg) keeps the `0.0.0-dev`
+fallback, which is correct for local development.
 
 **Alternatives considered and rejected:**
 
@@ -113,9 +113,9 @@ relying on a checked-in constant is tracked in #1624.
 2. Cut a release by tagging `vX.Y.Z` on a green `main` commit and pushing the
    tag; the release workflow publishes the GitHub Release with notes generated
    from the PRs merged since the previous tag (Section 3).
-3. *(forthcoming)* A release builds and publishes both components (`api/`,
-   `worker/`) from the same tagged commit, so the `api/` and `worker/` artifacts
-   of a release come from one source revision. Both components now have
+3. *(forthcoming)* A release builds and publishes all components (`api/`,
+   `worker/`, `relay/`, `webui/`) from the same tagged commit, so the artifacts
+   of a release come from one source revision. All runtime components now have
    Dockerfiles and a single-host compose stack
    ([`DEPLOYMENT.md`](DEPLOYMENT.md)), but no registry-publish target exists yet;
    the workflow in Section 4.3 only publishes the GitHub Release.
