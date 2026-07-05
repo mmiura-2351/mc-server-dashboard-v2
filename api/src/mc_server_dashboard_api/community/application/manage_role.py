@@ -26,6 +26,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from mc_server_dashboard_api.community.application.permission_ceiling import (
+    enforce_permission_ceiling,
+)
 from mc_server_dashboard_api.community.domain.clock import Clock
 from mc_server_dashboard_api.community.domain.entities import Role
 from mc_server_dashboard_api.community.domain.errors import (
@@ -41,6 +44,7 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     Permission,
     RoleId,
     RoleName,
+    UserId,
 )
 
 
@@ -90,6 +94,7 @@ class CreateRole:
         self,
         *,
         community_id: CommunityId,
+        actor_id: UserId,
         name: str,
         permissions: set[Permission],
     ) -> Role:
@@ -106,6 +111,12 @@ class CreateRole:
             is_preset=False,
         )
         async with self.uow:
+            await enforce_permission_ceiling(
+                self.uow,
+                actor_id=actor_id,
+                community_id=community_id,
+                conferred=validated,
+            )
             await self.uow.roles.add(role)
             await self.uow.commit()
         return role
@@ -129,6 +140,7 @@ class UpdateRole:
         *,
         community_id: CommunityId,
         role_id: RoleId,
+        actor_id: UserId,
         name: str | None = None,
         permissions: set[Permission] | None = None,
     ) -> Role:
@@ -142,7 +154,15 @@ class UpdateRole:
             if name is not None:
                 role.name = RoleName(name)
             if permissions is not None:
-                role.permissions = _validate_permissions(permissions)
+                validated = _validate_permissions(permissions)
+                conferred = validated - role.permissions
+                await enforce_permission_ceiling(
+                    self.uow,
+                    actor_id=actor_id,
+                    community_id=community_id,
+                    conferred=conferred,
+                )
+                role.permissions = validated
             role.updated_at = self.clock.now()
             await self.uow.roles.update(role)
             await self.uow.commit()

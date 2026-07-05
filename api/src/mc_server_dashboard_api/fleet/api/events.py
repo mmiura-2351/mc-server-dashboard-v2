@@ -63,6 +63,7 @@ from mc_server_dashboard_api.dependencies import (
     get_read_server,
     get_real_time_events,
     get_server_community_lookup,
+    ws_accept_subprotocol,
 )
 from mc_server_dashboard_api.fleet.domain.real_time_events import (
     EventStream,
@@ -170,7 +171,7 @@ async def server_events(
         await websocket.close(code=_CLOSE_BAD_REQUEST)
         return
 
-    await websocket.accept()
+    await websocket.accept(subprotocol=ws_accept_subprotocol(websocket))
     # The bus is keyed by the worker-reported server id string (the UUID's text
     # form, as it arrives on the control-plane stream).
     subscription = bus.subscribe(server_id=str(server_id), streams=streams)
@@ -256,7 +257,7 @@ async def community_events(
         await websocket.close(code=denied)
         return
 
-    await websocket.accept()
+    await websocket.accept(subprotocol=ws_accept_subprotocol(websocket))
     subscription = bus.subscribe_all(streams=frozenset({EventStream.STATUS}))
     # Per-connection server->community cache: each server id is looked up at most
     # once, bounding queries while the firehose may carry many servers' events.

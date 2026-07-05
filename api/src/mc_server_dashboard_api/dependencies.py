@@ -1019,18 +1019,44 @@ def _unauthenticated() -> ProblemException:
     )
 
 
+_WS_TOKEN_SUBPROTOCOL = "access_token"
+
+
 def _ws_access_token(websocket: WebSocket) -> str | None:
     """Resolve the Bearer access token from a WebSocket handshake.
 
-    Browsers cannot set request headers on a WebSocket upgrade, so the token is
-    accepted from the ``token`` query parameter; the ``Authorization: Bearer``
-    header is also honoured for non-browser clients (and the test client).
+    Browsers cannot set ``Authorization`` on a WebSocket upgrade, so the token
+    is carried in the ``Sec-WebSocket-Protocol`` subprotocol header as the
+    element following the ``access_token`` marker (RFC 6455 compliant).  The
+    ``Authorization: Bearer`` header is also honoured for non-browser clients
+    (and the test client).
     """
 
     header = websocket.headers.get("authorization")
     if header is not None and header.startswith("Bearer "):
         return header[len("Bearer ") :]
-    return websocket.query_params.get("token")
+    subprotocols: list[str] = websocket.scope.get("subprotocols", [])
+    try:
+        idx = subprotocols.index(_WS_TOKEN_SUBPROTOCOL)
+    except ValueError:
+        return None
+    if idx + 1 < len(subprotocols):
+        return subprotocols[idx + 1]
+    return None
+
+
+def ws_accept_subprotocol(websocket: WebSocket) -> str | None:
+    """Return ``access_token`` if the client offered it, else ``None``.
+
+    Called at accept time so the server echoes the marker subprotocol back to
+    the client (RFC 6455 requires the accepted subprotocol to be one of those
+    offered by the client).
+    """
+
+    subprotocols: list[str] = websocket.scope.get("subprotocols", [])
+    if _WS_TOKEN_SUBPROTOCOL in subprotocols:
+        return _WS_TOKEN_SUBPROTOCOL
+    return None
 
 
 async def get_current_user_ws(websocket: WebSocket) -> User | None:

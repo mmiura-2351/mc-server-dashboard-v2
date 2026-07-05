@@ -109,14 +109,16 @@ if [ "$build_api" -eq 1 ]; then
 	sg docker -c "DOCKER_BUILDKIT=1 docker build --network=host -t mcsd-api:dev -f api/Dockerfile ."
 fi
 
+build_version="$(git describe --tags --always 2>/dev/null || echo 0.0.0-dev)"
+
 if [ "$build_relay" -eq 1 ]; then
 	echo "update: building relay..."
-	sg docker -c "DOCKER_BUILDKIT=1 docker build --network=host -t mcsd-relay:dev ./relay"
+	sg docker -c "DOCKER_BUILDKIT=1 docker build --network=host --build-arg VERSION=${build_version} -t mcsd-relay:dev ./relay"
 fi
 
 if [ "$build_worker" -eq 1 ]; then
 	echo "update: building worker..."
-	sg docker -c "DOCKER_BUILDKIT=1 docker build --network=host -t mcsd-worker:dev ./worker"
+	sg docker -c "DOCKER_BUILDKIT=1 docker build --network=host --build-arg VERSION=${build_version} -t mcsd-worker:dev ./worker"
 fi
 
 # ── 5. Deploy ─────────────────────────────────────────────────────────────────

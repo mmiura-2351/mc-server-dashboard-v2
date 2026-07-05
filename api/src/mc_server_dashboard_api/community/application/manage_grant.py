@@ -26,6 +26,9 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
+from mc_server_dashboard_api.community.application.permission_ceiling import (
+    enforce_permission_ceiling,
+)
 from mc_server_dashboard_api.community.domain.clock import Clock
 from mc_server_dashboard_api.community.domain.entities import ResourceGrant
 from mc_server_dashboard_api.community.domain.errors import (
@@ -73,6 +76,7 @@ class CreateGrant:
         self,
         *,
         community_id: CommunityId,
+        actor_id: UserId,
         user_id: UserId,
         resource_type: str,
         resource_id: uuid.UUID,
@@ -106,6 +110,14 @@ class CreateGrant:
                 community_id, resource_type, resource_id
             ):
                 raise GrantResourceNotFoundError(str(resource_id))
+            await enforce_permission_ceiling(
+                self.uow,
+                actor_id=actor_id,
+                community_id=community_id,
+                conferred=validated,
+                resource_type=resource_type,
+                resource_id=resource_id,
+            )
             await self.uow.resource_grants.add(grant)
             await self.uow.commit()
         return grant

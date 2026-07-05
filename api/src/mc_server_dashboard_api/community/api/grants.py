@@ -35,6 +35,7 @@ from mc_server_dashboard_api.community.domain.errors import (
     GrantTargetNotMemberError,
     InvalidGrantResourceTypeError,
     InvalidPermissionError,
+    PermissionCeilingExceededError,
     ResourceGrantAlreadyExistsError,
     ResourceGrantNotFoundError,
     UnknownPermissionError,
@@ -117,6 +118,7 @@ async def create_grant(
     try:
         grant = await use_case(
             community_id=CommunityId(community_id),
+            actor_id=authorized.user_id,
             user_id=_parse_user_id(body.user_id),
             resource_type=body.resource_type,
             resource_id=_parse_resource_id(body.resource_id),
@@ -138,6 +140,8 @@ async def create_grant(
         raise _invalid_permission() from exc
     except ResourceGrantAlreadyExistsError as exc:
         raise problem(status.HTTP_409_CONFLICT, "grant_exists") from exc
+    except PermissionCeilingExceededError as exc:
+        raise _permission_ceiling(exc) from exc
     await recorder.record(
         AuditEvent(
             operation=ops.GRANT_CREATE,
@@ -206,6 +210,14 @@ def _parse_permissions(raw: list[str]) -> set[Permission]:
         return {Permission(code) for code in raw}
     except InvalidPermissionError as exc:
         raise _invalid_permission() from exc
+
+
+def _permission_ceiling(exc: PermissionCeilingExceededError) -> ProblemException:
+    return problem(
+        status.HTTP_403_FORBIDDEN,
+        "permission_ceiling",
+        extensions={"permissions": exc.exceeded},
+    )
 
 
 def _invalid_permission() -> ProblemException:

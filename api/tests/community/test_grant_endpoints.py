@@ -22,6 +22,7 @@ from mc_server_dashboard_api.community.domain.errors import (
     GrantResourceNotFoundError,
     GrantTargetNotMemberError,
     InvalidGrantResourceTypeError,
+    PermissionCeilingExceededError,
     ResourceGrantAlreadyExistsError,
     ResourceGrantNotFoundError,
     UnknownPermissionError,
@@ -273,6 +274,23 @@ def test_create_grant_duplicate_returns_409() -> None:
     )
     assert resp.status_code == 409
     assert resp.json()["reason"] == "grant_exists"
+
+
+def test_create_grant_ceiling_exceeded_returns_403() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        create_uc=_FakeUseCase(error=PermissionCeilingExceededError(["server:start"])),
+    )
+    client = next(_client(app))
+    resp = client.post(
+        f"/api/communities/{uuid.uuid4()}/grants",
+        json=_create_body(UserId(uuid.uuid4())),
+    )
+    assert resp.status_code == 403
+    body = resp.json()
+    assert body["reason"] == "permission_ceiling"
+    assert body["permissions"] == ["server:start"]
 
 
 # --- revoke -----------------------------------------------------------------

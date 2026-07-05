@@ -25,6 +25,7 @@ from mc_server_dashboard_api.community.domain.errors import (
     MembershipAlreadyExistsError,
     MembershipNotFoundError,
     MemberUserNotFoundError,
+    PermissionCeilingExceededError,
     RoleNotFoundError,
 )
 from mc_server_dashboard_api.community.domain.permission_checker import (
@@ -386,6 +387,25 @@ def test_assign_role_invalid_role_id_returns_422() -> None:
         json={"role_id": "not-a-uuid"},
     )
     assert resp.status_code == 422
+
+
+def test_assign_role_ceiling_exceeded_returns_403() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        assign_uc=_FakeUseCase(
+            error=PermissionCeilingExceededError(["community:delete"])
+        ),
+    )
+    client = next(_client(app))
+    resp = client.post(
+        f"/api/communities/{uuid.uuid4()}/members/{uuid.uuid4()}/roles",
+        json={"role_id": str(uuid.uuid4())},
+    )
+    assert resp.status_code == 403
+    body = resp.json()
+    assert body["reason"] == "permission_ceiling"
+    assert body["permissions"] == ["community:delete"]
 
 
 def test_unassign_role_authorized_returns_204() -> None:
