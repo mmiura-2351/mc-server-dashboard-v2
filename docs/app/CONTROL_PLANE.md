@@ -60,6 +60,12 @@ service WorkerService {
 - `ApiMessage` — everything the API sends (registration acknowledgement,
   commands).
 
+The same gRPC listener also serves `RelayService`
+(`mcsd.relay.v1.RelayService`) when the relay is enabled
+(CONFIGURATION.md Section 5, `relay.enabled`). RelayService has its own
+credential (`relay.credential`) and its own `.proto` contract
+(`proto/mcsd/relay/v1/relay.proto`); see RELAY.md Section 6 for details.
+
 The channel is authenticated and encrypted (REQUIREMENTS.md NFR-SEC-1).
 **Authentication** is the shared Worker credential carried in call metadata
 (`authorization: Bearer <credential>`); **encryption** is server-side TLS on the
