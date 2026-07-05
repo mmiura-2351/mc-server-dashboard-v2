@@ -98,6 +98,12 @@ def test_cache_control_no_store_on_users_me(client: TestClient) -> None:
     assert resp.headers.get("cache-control") == "no-store"
 
 
+def test_cache_control_no_store_on_users_me_sessions(client: TestClient) -> None:
+    resp = client.get("/api/users/me/sessions")
+    # Returns 401 (no Bearer token); the middleware still runs.
+    assert resp.headers.get("cache-control") == "no-store"
+
+
 def test_cache_control_absent_on_generic_endpoint(client: TestClient) -> None:
     resp = client.get("/api/healthz")
     assert "cache-control" not in resp.headers
