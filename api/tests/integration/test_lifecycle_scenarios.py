@@ -562,3 +562,150 @@ async def test_disconnect_marks_unknown_then_stop_then_start(
     )(community_id=community, server_id=server_id)
     assert restarted.desired_state is DesiredState.RUNNING
     assert restarted.assigned_worker_id == WorkerId(next_worker)
+
+
+# --- Chain 5: stopped/unknown/assigned wedge recovery (issue #1599) --------
+
+
+async def test_api_restart_mid_stop_wedge_recovered_by_reconciler(
+    engine: AsyncEngine,
+) -> None:
+    """start -> stop dispatched (desired=stopped committed, observed=stopping) ->
+    API restart (reset_unverifiable maps stopping->unknown) -> reconciler tick
+    (redispatch_stop to connected worker) -> start succeeds.
+
+    Wedge path 1 from issue #1599: the stop was dispatched and the worker began
+    stopping, but the API restarted before the confirmed-stop unassign ran.
+    Startup's reset_unverifiable_observed_states maps STOPPING->unknown, leaving
+    (stopped, unknown, assigned). The reconciler routes this to redispatch_stop
+    (worker connected), which converges the row and clears the assignment.
+    """
+
+    clock = _AdvancingClock(_NOW)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    server_id = server.id
+    community = server.community_id
+
+    worker = uuid.uuid4()
+    await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(worker)), clock
+    )(community_id=community, server_id=server_id)
+
+    # The operator stops; the Worker is mid-stop (STOPPING). Simulate by stopping
+    # with a successful dispatch (desired=stopped committed, observed converges to
+    # stopped). But we need to leave the row in the wedge state, so instead we'll
+    # stop and then simulate the API restart mapping. Do a stop that leaves the
+    # assignment held (snapshot timeout path).
+    class _SnapshotTimeout(FakeControlPlane):
+        async def snapshot(self, **kwargs: object) -> CommandOutcome:
+            raise WorkerUnavailableError("timeout", upload_may_be_live=True)
+
+    await _stop_server_use_case(
+        engine, _SnapshotTimeout(place_to=WorkerId(worker)), clock
+    )(community_id=community, server_id=server_id)
+
+    # After a graceful stop whose snapshot timed out: (stopped, stopped, assigned).
+    # Now simulate an API restart that maps the observed state to unknown — the
+    # real scenario is STOPPING->unknown but here we drive the wedge state directly
+    # via reset_unverifiable. Since the row is at observed=stopped (terminal), we
+    # directly update it to unknown to model the race condition.
+    factory = create_session_factory(engine)
+    async with ServersUnitOfWork(factory) as uow:
+        row = await uow.servers.get_by_id(server_id)
+        assert row is not None
+        # Directly record observed=unknown to simulate the wedge.
+        await uow.servers.record_observed_state(
+            server_id,
+            observed_state=ObservedState.UNKNOWN,
+            observed_at=clock.now(),
+        )
+        await uow.commit()
+
+    wedged = await _load(engine, server_id)
+    assert wedged is not None
+    assert wedged.desired_state is DesiredState.STOPPED
+    assert wedged.observed_state is ObservedState.UNKNOWN
+    assert wedged.assigned_worker_id == WorkerId(worker)
+
+    # The reconciler tick: worker connected -> redispatch_stop. The worker's
+    # SERVER_NOT_FOUND means the process already exited (the original stop
+    # completed worker-side).
+    await _reconciler_tick(
+        engine,
+        FakeControlPlane(
+            outcomes={"stop": CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND)}
+        ),
+        clock,
+    )
+    recovered = await _load(engine, server_id)
+    assert recovered is not None
+    assert recovered.assigned_worker_id is None
+    assert recovered.observed_state is ObservedState.STOPPED
+
+    # The next start re-places against the now-unassigned row.
+    next_worker = uuid.uuid4()
+    restarted = await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(next_worker)), clock
+    )(community_id=community, server_id=server_id)
+    assert restarted.desired_state is DesiredState.RUNNING
+    assert restarted.assigned_worker_id == WorkerId(next_worker)
+
+
+async def test_worker_disconnect_mid_stop_wedge_recovered_by_reconciler(
+    engine: AsyncEngine,
+) -> None:
+    """start -> stop dispatched -> worker disconnects mid-stop
+    (mark_worker_servers_unknown sets unknown without unassigning) -> reconciler
+    tick (worker disconnected -> clear_stale_assignment) -> start succeeds.
+
+    Wedge path 2 from issue #1599: the stop was dispatched but the worker
+    disconnected before the confirmed-stop unassign ran. mark_worker_servers_unknown
+    sets observed=unknown without clearing the assignment, leaving (stopped, unknown,
+    assigned). The reconciler routes this to clear_stale_assignment (worker
+    disconnected), which clears the assignment so a later start can re-place.
+    """
+
+    clock = _AdvancingClock(_NOW)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    server_id = server.id
+    community = server.community_id
+
+    worker = uuid.uuid4()
+    await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(worker)), clock
+    )(community_id=community, server_id=server_id)
+
+    # The stop is dispatched and the desired=stopped intent commits. Use a snapshot
+    # timeout to leave the assignment held (the normal path for this wedge creation).
+    class _SnapshotTimeout(FakeControlPlane):
+        async def snapshot(self, **kwargs: object) -> CommandOutcome:
+            raise WorkerUnavailableError("timeout", upload_may_be_live=True)
+
+    await _stop_server_use_case(
+        engine, _SnapshotTimeout(place_to=WorkerId(worker)), clock
+    )(community_id=community, server_id=server_id)
+
+    # Now the worker disconnects: mark_worker_servers_unknown sets observed=unknown.
+    await _sink(engine, clock).mark_worker_servers_unknown(worker_id=str(worker))
+
+    wedged = await _load(engine, server_id)
+    assert wedged is not None
+    assert wedged.desired_state is DesiredState.STOPPED
+    assert wedged.observed_state is ObservedState.UNKNOWN
+    assert wedged.assigned_worker_id == WorkerId(worker)
+
+    # The reconciler tick with the worker DISCONNECTED -> clear_stale_assignment.
+    await _reconciler_tick(
+        engine, FakeControlPlane(connected={WorkerId(worker): False}), clock
+    )
+    recovered = await _load(engine, server_id)
+    assert recovered is not None
+    assert recovered.assigned_worker_id is None
+
+    # The next start re-places against the now-unassigned row.
+    next_worker = uuid.uuid4()
+    restarted = await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(next_worker)), clock
+    )(community_id=community, server_id=server_id)
+    assert restarted.desired_state is DesiredState.RUNNING
+    assert restarted.assigned_worker_id == WorkerId(next_worker)

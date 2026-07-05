@@ -535,7 +535,20 @@ class FakeServerRepository(ServerRepository):
                 and server.observed_state is ObservedState.STOPPED
                 and server.assigned_worker_id is not None
             )
-            if stale_running or orphan or stop_undelivered or stop_wedged:
+            # Issue #1599: a stop interrupted mid-flight leaves (stopped, unknown,
+            # assigned) — API restart or worker disconnect.
+            stop_unknown_wedged = (
+                stopped
+                and server.observed_state is ObservedState.UNKNOWN
+                and server.assigned_worker_id is not None
+            )
+            if (
+                stale_running
+                or orphan
+                or stop_undelivered
+                or stop_wedged
+                or stop_unknown_wedged
+            ):
                 out.append(replace(server))
         return out
 

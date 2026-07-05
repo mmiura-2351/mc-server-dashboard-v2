@@ -33,9 +33,14 @@ Divergence matrix (per candidate, after a grace window has lapsed):
   (``StartServer`` 409s on ``require_unassigned`` before flipping desired, and the
   sink no longer unassigns). DB-only, so it runs even on a disconnected Worker — the
   deliberate replacement for #217's sink-unassign, which raced the snapshot window.
-- Disconnected Worker -> skip: ``observed=unknown`` is expected while the Worker
-  is gone, and the reconnect assignment rebuild owns that case (FR-WRK-4). The
-  orphan path has no assigned Worker, so it is unaffected by this skip.
+- ``desired=stopped``, observed ``unknown``, still assigned (issue #1599): a stop
+  interrupted mid-flight (API restart maps STOPPING->unknown, or worker disconnect
+  sets unknown without unassigning). Connected Worker -> redispatch the stop.
+  Disconnected Worker -> clear the assignment (DB-only; same as the stopped wedge).
+- Disconnected Worker -> skip (``desired=running`` side only):
+  ``observed=unknown`` is expected while the Worker is gone, and the reconnect
+  assignment rebuild owns that case (FR-WRK-4). The orphan path has no assigned
+  Worker, so it is unaffected by this skip.
 
 Grace window — a divergence is acted on only once it has persisted past a grace
 (measured from ``max(updated_at, observed_at or updated_at)`` — the later of the
@@ -278,8 +283,9 @@ class RunReconcilerTick:
                 return None  # disconnected: reconnect rebuild owns it
             return "redispatch_start"
         # desired=stopped: list_reconcilable returns observed=running (stop never
-        # delivered) and observed=stopped+assigned (a stop wedged mid final-snapshot,
-        # issue #847 bug 2).
+        # delivered), observed=stopped+assigned (a stop wedged mid final-snapshot,
+        # issue #847 bug 2), and observed=unknown+assigned (a stop interrupted
+        # mid-flight, issue #1599).
         if server.assigned_worker_id is None:
             return None
         if server.observed_state is ObservedState.STOPPED:
@@ -287,6 +293,16 @@ class RunReconcilerTick:
             # already stopped); it does not need a connected Worker, so it runs even
             # when the holding Worker is gone — exactly the crash case it recovers.
             return "clear_stale_assignment"
+        if server.observed_state is ObservedState.UNKNOWN:
+            # Issue #1599: API restart or worker disconnect interrupted a stop
+            # mid-flight, leaving (stopped, unknown, assigned). If the worker is
+            # gone, clear the assignment (DB-only, same as the stopped wedge); if
+            # connected, redispatch the stop to converge.
+            if not self.control_plane.is_worker_connected(
+                worker_id=server.assigned_worker_id
+            ):
+                return "clear_stale_assignment"
+            return "redispatch_stop"
         if not self.control_plane.is_worker_connected(
             worker_id=server.assigned_worker_id
         ):

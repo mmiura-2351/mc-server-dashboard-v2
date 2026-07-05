@@ -61,11 +61,16 @@ async def test_create_grant_persists_a_grant_for_a_member() -> None:
     uow = FakeAuthzUnitOfWork()
     community = CommunityId.new()
     user = UserId(uuid.uuid4())
+    actor = UserId(uuid.uuid4())
     resource_id = uuid.uuid4()
     _seed_member(uow, user, community)
+    uow.add_role(
+        actor, community, {Permission("server:start"), Permission("server:stop")}
+    )
     uow.add_resource(community, "server", resource_id)
     grant = await CreateGrant(uow=uow, clock=_FakeClock())(
         community_id=community,
+        actor_id=actor,
         user_id=user,
         resource_type="server",
         resource_id=resource_id,
@@ -80,10 +85,13 @@ async def test_create_grant_rejects_nonexistent_resource() -> None:
     uow = FakeAuthzUnitOfWork()
     community = CommunityId.new()
     user = UserId(uuid.uuid4())
+    actor = UserId(uuid.uuid4())
     _seed_member(uow, user, community)
+    uow.add_role(actor, community, {Permission("server:start")})
     with pytest.raises(GrantResourceNotFoundError):
         await CreateGrant(uow=uow, clock=_FakeClock())(
             community_id=community,
+            actor_id=actor,
             user_id=user,
             resource_type="server",
             resource_id=uuid.uuid4(),
@@ -97,12 +105,15 @@ async def test_create_grant_rejects_resource_in_another_community() -> None:
     community = CommunityId.new()
     other = CommunityId.new()
     user = UserId(uuid.uuid4())
+    actor = UserId(uuid.uuid4())
     resource_id = uuid.uuid4()
     _seed_member(uow, user, community)
+    uow.add_role(actor, community, {Permission("server:start")})
     uow.add_resource(other, "server", resource_id)
     with pytest.raises(GrantResourceNotFoundError):
         await CreateGrant(uow=uow, clock=_FakeClock())(
             community_id=community,
+            actor_id=actor,
             user_id=user,
             resource_type="server",
             resource_id=resource_id,
@@ -116,6 +127,7 @@ async def test_create_grant_rejects_non_member_target() -> None:
     with pytest.raises(GrantTargetNotMemberError):
         await CreateGrant(uow=uow, clock=_FakeClock())(
             community_id=CommunityId.new(),
+            actor_id=UserId(uuid.uuid4()),
             user_id=UserId(uuid.uuid4()),
             resource_type="server",
             resource_id=uuid.uuid4(),
@@ -132,6 +144,7 @@ async def test_create_grant_rejects_unknown_resource_type() -> None:
     with pytest.raises(InvalidGrantResourceTypeError):
         await CreateGrant(uow=uow, clock=_FakeClock())(
             community_id=community,
+            actor_id=UserId(uuid.uuid4()),
             user_id=user,
             resource_type="widget",
             resource_id=uuid.uuid4(),
@@ -147,6 +160,7 @@ async def test_create_grant_rejects_community_wide_permission() -> None:
     with pytest.raises(UnknownPermissionError):
         await CreateGrant(uow=uow, clock=_FakeClock())(
             community_id=community,
+            actor_id=UserId(uuid.uuid4()),
             user_id=user,
             resource_type="server",
             resource_id=uuid.uuid4(),

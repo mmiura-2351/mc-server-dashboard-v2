@@ -58,18 +58,16 @@ export interface ServerEventsCallbacks {
 }
 
 /**
- * Build the
- * `wss?://…/api/communities/{cid}/servers/{sid}/events?streams=…&token=…`
+ * Build the `wss?://…/api/communities/{cid}/servers/{sid}/events?streams=…`
  * URL. `streams` is the comma list the API's `_parse_streams` expects.
  */
 export function serverEventsUrl(
   communityId: string,
   serverId: string,
   streams: readonly Stream[],
-  token: string,
 ): string {
   const path = `/api/communities/${encodeURIComponent(communityId)}/servers/${encodeURIComponent(serverId)}/events`;
-  const query = `?streams=${encodeURIComponent(streams.join(","))}&token=${encodeURIComponent(token)}`;
+  const query = `?streams=${encodeURIComponent(streams.join(","))}`;
   return `${wsOrigin()}${path}${query}`;
 }
 
@@ -161,7 +159,7 @@ export class ServerEventsClient {
     random: () => number = Math.random,
   ) {
     this.socket = new EventsSocketClient(
-      (token) => serverEventsUrl(communityId, serverId, ALL_STREAMS, token),
+      () => serverEventsUrl(communityId, serverId, ALL_STREAMS),
       {
         onMessage: (raw) => {
           const frame = parseServerFrame(raw);

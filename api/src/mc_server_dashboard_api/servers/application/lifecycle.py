@@ -1152,25 +1152,37 @@ class StopServer:
     async def clear_stale_assignment(
         self, *, community_id: CommunityId, server_id: ServerId
     ) -> Server:
-        """Release a stop wedged at (stopped, stopped, assigned) (issue #847 bug 2).
+        """Release a stop wedged at (stopped, stopped|unknown, assigned).
+
+        Originally issue #847 bug 2 (observed=stopped); extended by issue #1599 to
+        also cover observed=unknown (a stop interrupted mid-flight by an API restart
+        or a worker disconnect).
 
         The reconciler's recovery arm for a stop whose deferred unassign never ran
         — an API crash or an HTTP-task cancellation between the observed=stopped
         commit and the post-snapshot clear in ``_record_stopped_then_final_snapshot``
-        leaves the row assigned forever. No other path converges it: ``StartServer``
-        409s on ``require_unassigned`` before flipping desired, and the sink no
-        longer unassigns from a status report (bug 1). This deliberate recovery
-        replaces #217's sink-unassign, which used to rescue the case but raced the
-        snapshot window.
+        leaves the row assigned forever, and an API restart or worker disconnect
+        mid-stop leaves (stopped, unknown, assigned). No other path converges
+        either triple: ``StartServer`` 409s on ``require_unassigned`` before
+        flipping desired, and the sink no longer unassigns from a status report
+        (bug 1). This deliberate recovery replaces #217's sink-unassign, which used
+        to rescue the case but raced the snapshot window.
+
+        For observed=unknown the reconciler only routes here when the worker is
+        DISCONNECTED; a connected worker takes the redispatch_stop path instead.
+        A live TOCTOU guard verifies the worker is still disconnected at execution
+        time — if it reconnected between list_reconcilable and now, this raises
+        InvalidLifecycleTransitionError so the next tick can redispatch_stop.
 
         Clears ONLY the assignment via the same guard the deferred clear uses
         (``clear_assignment_after_final_snapshot``): a still desired=stopped row
         still assigned to that worker. No command is dispatched — the server is
-        already stopped — and no placement-load decrement (the stop that wedged the
-        row already decremented). The clear is logged loud: the final snapshot was
-        never published, so a later cross-worker re-placement loses progression
-        since the last periodic snapshot (the documented #845/#847 exposure; a
-        same-worker start reuses the retained scratch, #767).
+        already stopped (or the worker is gone) — and no placement-load decrement
+        (the stop that wedged the row already decremented). The clear is logged
+        loud: the final snapshot was never published, so a later cross-worker
+        re-placement loses progression since the last periodic snapshot (the
+        documented #845/#847 exposure; a same-worker start reuses the retained
+        scratch, #767).
         """
 
         async with self.uow:
@@ -1178,27 +1190,43 @@ class StopServer:
             worker_id = server.assigned_worker_id
             if (
                 server.desired_state is not DesiredState.STOPPED
-                or server.observed_state is not ObservedState.STOPPED
+                or server.observed_state
+                not in (ObservedState.STOPPED, ObservedState.UNKNOWN)
                 or worker_id is None
             ):
                 # The row moved since list_reconcilable snapshotted it; nothing for
                 # this recovery arm to do.
                 raise InvalidLifecycleTransitionError(str(server_id.value))
+            # TOCTOU guard for the unknown case (issue #1599): the reconciler routes
+            # here only when the worker is disconnected, but the worker may have
+            # reconnected in between. If so, bail — the next tick will redispatch.
+            if server.observed_state is ObservedState.UNKNOWN:
+                if self.control_plane.is_worker_connected(worker_id=worker_id):
+                    raise InvalidLifecycleTransitionError(str(server_id.value))
             cleared = await self.uow.servers.clear_assignment_after_final_snapshot(
                 server_id, worker_id
             )
             await self.uow.commit()
         if cleared:
             server.assigned_worker_id = None
-            _LOG.warning(
-                "recovered a stop wedged at (stopped, stopped, assigned) for server "
-                "%s: released worker %s. The final snapshot was never published, so "
-                "a cross-worker re-placement loses progression since the last "
-                "periodic snapshot (#845/#847); a same-worker start reuses the "
-                "retained scratch (#767)",
-                server_id.value,
-                worker_id.value,
-            )
+            if server.observed_state is ObservedState.UNKNOWN:
+                _LOG.warning(
+                    "recovered a stop wedged at (stopped, unknown, assigned) for "
+                    "server %s: released worker %s (issue #1599). The worker was "
+                    "disconnected; the stop was interrupted mid-flight",
+                    server_id.value,
+                    worker_id.value,
+                )
+            else:
+                _LOG.warning(
+                    "recovered a stop wedged at (stopped, stopped, assigned) for "
+                    "server %s: released worker %s. The final snapshot was never "
+                    "published, so a cross-worker re-placement loses progression "
+                    "since the last periodic snapshot (#845/#847); a same-worker "
+                    "start reuses the retained scratch (#767)",
+                    server_id.value,
+                    worker_id.value,
+                )
         return server
 
     async def clear_assignment_after_late_snapshot(
