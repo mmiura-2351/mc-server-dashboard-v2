@@ -87,3 +87,11 @@ def test_rejects_empty_resolver_result() -> None:
     """An empty resolver result must fail closed, not silently pass."""
     with pytest.raises(BlockedHostError, match="returned no addresses"):
         assert_url_allowed(_PUBLIC, _resolver=_resolver_for())
+
+
+def test_rejects_url_without_host() -> None:
+    """An HTTPS URL with no hostname is refused."""
+    with pytest.raises(BlockedHostError, match="no host"):
+        assert_url_allowed(
+            "https:///server.jar", _resolver=_resolver_for("93.184.216.34")
+        )
