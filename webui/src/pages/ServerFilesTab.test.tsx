@@ -3787,3 +3787,548 @@ describe("ServerFilesTab overwrite confirmation", () => {
     });
   });
 });
+
+// ── Copy/paste (issue #1465) ──────────────────────────────────────────────────
+
+describe("Copy/paste", () => {
+  it("shows Copy in context menu for a file", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "readme.txt", is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+
+    const row = (await screen.findByText(/readme\.txt/)).closest(
+      "li",
+    ) as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+
+    expect(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.copy") }),
+    ).toBeInTheDocument();
+  });
+
+  it("hides Copy in context menu for a folder", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "world", is_dir: true }]),
+    });
+    renderPage();
+    await openFiles();
+
+    const row = (await screen.findByText(/world/)).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+
+    expect(
+      screen.queryByRole("menuitem", { name: t("files.contextMenu.copy") }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows Paste in empty-space context menu after copying", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "readme.txt", is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/readme\.txt/);
+
+    // Copy via context menu.
+    const row = screen.getByText(/readme\.txt/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.copy") }),
+    );
+
+    // Wait for the toast to confirm copy.
+    await screen.findByText(t("files.copied"));
+
+    // Right-click on empty space.
+    const fileList = document.querySelector(".file-list") as HTMLElement;
+    fireEvent.contextMenu(fileList, { clientX: 50, clientY: 50 });
+
+    expect(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.paste") }),
+    ).toBeInTheDocument();
+  });
+
+  it("does not show Paste when clipboard is empty", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "readme.txt", is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/readme\.txt/);
+
+    // Right-click on empty space without prior copy.
+    const fileList = document.querySelector(".file-list") as HTMLElement;
+    fireEvent.contextMenu(fileList, { clientX: 50, clientY: 50 });
+
+    expect(
+      screen.queryByRole("menuitem", { name: t("files.contextMenu.paste") }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("Ctrl+C copies selected files", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "readme.txt", is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/readme\.txt/);
+
+    // Select the file.
+    fireEvent.click(screen.getByRole("checkbox", { name: "readme.txt" }));
+
+    // Press Ctrl+C.
+    fireEvent.keyDown(document, { key: "c", ctrlKey: true });
+
+    // Should see copied toast.
+    expect(await screen.findByText(t("files.copied"))).toBeInTheDocument();
+  });
+
+  it("Ctrl+V pastes copied files (download + upload)", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "readme.txt", is_dir: false }]),
+    });
+    mockPostFormWithProgress.mockResolvedValue(undefined);
+    renderPage();
+    await openFiles();
+    await screen.findByText(/readme\.txt/);
+
+    // Select and copy.
+    fireEvent.click(screen.getByRole("checkbox", { name: "readme.txt" }));
+    fireEvent.keyDown(document, { key: "c", ctrlKey: true });
+    await screen.findByText(t("files.copied"));
+
+    // Paste.
+    fireEvent.keyDown(document, { key: "v", ctrlKey: true });
+
+    // Same-name file exists, so overwrite dialog appears first.
+    await screen.findByText(t("files.overwrite.title"));
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.overwrite.overwrite") }),
+    );
+
+    // Should download and re-upload the file.
+    await waitFor(() =>
+      expect(mockDownload.fetchFileBlob).toHaveBeenCalledWith(
+        `${FILES_BASE}/download?path=readme.txt`,
+      ),
+    );
+    await waitFor(() => expect(mockPostFormWithProgress).toHaveBeenCalled());
+    const [url] = mockPostFormWithProgress.mock.calls[0];
+    expect(url).toBe(`${FILES_BASE}/upload?path=&extract=false`);
+  });
+
+  it("Ctrl+V does nothing when clipboard is empty", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "readme.txt", is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/readme\.txt/);
+
+    fireEvent.keyDown(document, { key: "v", ctrlKey: true });
+
+    // No download or upload should occur.
+    expect(mockDownload.fetchFileBlob).not.toHaveBeenCalled();
+    expect(mockPostFormWithProgress).not.toHaveBeenCalled();
+  });
+
+  it("Ctrl+V does nothing when server is running", async () => {
+    routeGet({
+      detail: server({ observed_state: "running", desired_state: "running" }),
+      list: listing([{ name: "readme.txt", is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/readme\.txt/);
+
+    // Select and copy (copy is read-only, so it works while running).
+    fireEvent.click(screen.getByRole("checkbox", { name: "readme.txt" }));
+    fireEvent.keyDown(document, { key: "c", ctrlKey: true });
+    await screen.findByText(t("files.copied"));
+
+    // Paste should be blocked.
+    fireEvent.keyDown(document, { key: "v", ctrlKey: true });
+    expect(mockDownload.fetchFileBlob).not.toHaveBeenCalled();
+  });
+
+  it("Ctrl+V does nothing without canEdit", async () => {
+    mockCan = (code) => code !== "file:edit";
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "readme.txt", is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/readme\.txt/);
+
+    // Can't select (no checkboxes) but test Ctrl+V regardless.
+    fireEvent.keyDown(document, { key: "v", ctrlKey: true });
+    expect(mockDownload.fetchFileBlob).not.toHaveBeenCalled();
+  });
+
+  it("paste via context menu triggers download + upload", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "readme.txt", is_dir: false }]),
+    });
+    mockPostFormWithProgress.mockResolvedValue(undefined);
+    renderPage();
+    await openFiles();
+    await screen.findByText(/readme\.txt/);
+
+    // Copy via context menu.
+    const row = screen.getByText(/readme\.txt/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.copy") }),
+    );
+    await screen.findByText(t("files.copied"));
+
+    // Paste via context menu on empty space.
+    const fileList = document.querySelector(".file-list") as HTMLElement;
+    fireEvent.contextMenu(fileList, { clientX: 50, clientY: 50 });
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.paste") }),
+    );
+
+    // Same-name file exists, so overwrite dialog appears.
+    await screen.findByText(t("files.overwrite.title"));
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.overwrite.overwrite") }),
+    );
+
+    await waitFor(() =>
+      expect(mockDownload.fetchFileBlob).toHaveBeenCalledWith(
+        `${FILES_BASE}/download?path=readme.txt`,
+      ),
+    );
+    await waitFor(() => expect(mockPostFormWithProgress).toHaveBeenCalled());
+  });
+
+  it("paste shows overwrite confirmation when same-name file exists", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "readme.txt", is_dir: false }]),
+    });
+    mockPostFormWithProgress.mockResolvedValue(undefined);
+    renderPage();
+    await openFiles();
+    await screen.findByText(/readme\.txt/);
+
+    // Copy and paste.
+    fireEvent.click(screen.getByRole("checkbox", { name: "readme.txt" }));
+    fireEvent.keyDown(document, { key: "c", ctrlKey: true });
+    await screen.findByText(t("files.copied"));
+
+    fireEvent.keyDown(document, { key: "v", ctrlKey: true });
+
+    // Overwrite dialog should appear.
+    expect(
+      await screen.findByText(t("files.overwrite.title")),
+    ).toBeInTheDocument();
+  });
+
+  it("paste skips file when user clicks skip in overwrite dialog", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "readme.txt", is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/readme\.txt/);
+
+    // Copy and paste.
+    fireEvent.click(screen.getByRole("checkbox", { name: "readme.txt" }));
+    fireEvent.keyDown(document, { key: "c", ctrlKey: true });
+    await screen.findByText(t("files.copied"));
+
+    fireEvent.keyDown(document, { key: "v", ctrlKey: true });
+    await screen.findByText(t("files.overwrite.title"));
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.overwrite.skip") }),
+    );
+
+    // No download or upload should occur.
+    await waitFor(() =>
+      expect(
+        screen.queryByText(t("files.overwrite.title")),
+      ).not.toBeInTheDocument(),
+    );
+    expect(mockDownload.fetchFileBlob).not.toHaveBeenCalled();
+  });
+
+  it("Ctrl+C filters out folders from selection", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "world", is_dir: true },
+        { name: "readme.txt", is_dir: false },
+      ]),
+    });
+    mockPostFormWithProgress.mockResolvedValue(undefined);
+    renderPage();
+    await openFiles();
+    await screen.findByText(/readme\.txt/);
+
+    // Select all (includes the folder).
+    fireEvent.keyDown(document, { key: "a", ctrlKey: true });
+    await waitFor(() => {
+      expect(screen.getByRole("checkbox", { name: "world" })).toBeChecked();
+      expect(
+        screen.getByRole("checkbox", { name: "readme.txt" }),
+      ).toBeChecked();
+    });
+
+    // Copy — should only copy the file, not the folder.
+    fireEvent.keyDown(document, { key: "c", ctrlKey: true });
+    await screen.findByText(t("files.copied"));
+
+    // Paste — should download only readme.txt.
+    fireEvent.keyDown(document, { key: "v", ctrlKey: true });
+
+    // Overwrite since readme.txt exists.
+    await screen.findByText(t("files.overwrite.title"));
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.overwrite.overwrite") }),
+    );
+
+    await waitFor(() =>
+      expect(mockDownload.fetchFileBlob).toHaveBeenCalledWith(
+        `${FILES_BASE}/download?path=readme.txt`,
+      ),
+    );
+    // Should have only downloaded one file (the file, not the folder).
+    expect(mockDownload.fetchFileBlob).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── Move to... context menu (issue #1465) ───────────────────────────────────
+
+describe("Move to... context menu", () => {
+  it("shows Move to... in context menu for a file when canEdit", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "readme.txt", is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+
+    const row = (await screen.findByText(/readme\.txt/)).closest(
+      "li",
+    ) as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+
+    expect(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.moveTo") }),
+    ).toBeInTheDocument();
+  });
+
+  it("hides Move to... when canEdit is false", async () => {
+    mockCan = (code) => code !== "file:edit";
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "readme.txt", is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+
+    const row = (await screen.findByText(/readme\.txt/)).closest(
+      "li",
+    ) as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+
+    expect(
+      screen.queryByRole("menuitem", { name: t("files.contextMenu.moveTo") }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("hides Move to... when server is running", async () => {
+    routeGet({
+      detail: server({ observed_state: "running", desired_state: "running" }),
+      list: listing([{ name: "readme.txt", is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+
+    const row = (await screen.findByText(/readme\.txt/)).closest(
+      "li",
+    ) as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+
+    expect(
+      screen.queryByRole("menuitem", { name: t("files.contextMenu.moveTo") }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("opens a dialog and moves the file to the destination", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "readme.txt", is_dir: false }]),
+    });
+    mockApi.post.mockResolvedValue(undefined);
+    renderPage();
+    await openFiles();
+
+    const row = (await screen.findByText(/readme\.txt/)).closest(
+      "li",
+    ) as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.moveTo") }),
+    );
+
+    // Move dialog appears with destination input.
+    const input = screen.getByLabelText(t("files.bulk.move.destLabel"));
+    fireEvent.change(input, { target: { value: "archive" } });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.bulk.move.confirm") }),
+    );
+
+    await waitFor(() => expect(mockApi.post).toHaveBeenCalled());
+    const [url, init] = mockApi.post.mock.calls[0];
+    expect(url).toBe(`${FILES_BASE}/rename`);
+    expect(JSON.parse((init as { body: string }).body)).toEqual({
+      from: "readme.txt",
+      to: "archive/readme.txt",
+    });
+  });
+});
+
+// ── Arrow key navigation (issue #1465) ──────────────────────────────────────
+
+describe("Arrow key navigation", () => {
+  it("ArrowDown focuses the first file row", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "a.txt", is_dir: false },
+        { name: "b.txt", is_dir: false },
+      ]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    fireEvent.keyDown(document, { key: "ArrowDown" });
+
+    // The first file-name button should be focused.
+    const firstBtn = document.querySelector(
+      ".file-list .file-name",
+    ) as HTMLElement;
+    expect(document.activeElement).toBe(firstBtn);
+  });
+
+  it("ArrowDown moves focus to the next row", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "a.txt", is_dir: false },
+        { name: "b.txt", is_dir: false },
+      ]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    // Focus the first row.
+    fireEvent.keyDown(document, { key: "ArrowDown" });
+    // Move to second row.
+    fireEvent.keyDown(document, { key: "ArrowDown" });
+
+    const buttons = document.querySelectorAll(".file-list .file-name");
+    expect(document.activeElement).toBe(buttons[1]);
+  });
+
+  it("ArrowUp moves focus to the previous row", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "a.txt", is_dir: false },
+        { name: "b.txt", is_dir: false },
+      ]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    // Focus the first, then second row.
+    fireEvent.keyDown(document, { key: "ArrowDown" });
+    fireEvent.keyDown(document, { key: "ArrowDown" });
+
+    // Now go up.
+    fireEvent.keyDown(document, { key: "ArrowUp" });
+
+    const buttons = document.querySelectorAll(".file-list .file-name");
+    expect(document.activeElement).toBe(buttons[0]);
+  });
+
+  it("ArrowUp on first row stays on first row", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "a.txt", is_dir: false },
+        { name: "b.txt", is_dir: false },
+      ]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    // Focus the first row.
+    fireEvent.keyDown(document, { key: "ArrowDown" });
+    // Try to go up past the first row.
+    fireEvent.keyDown(document, { key: "ArrowUp" });
+
+    const buttons = document.querySelectorAll(".file-list .file-name");
+    expect(document.activeElement).toBe(buttons[0]);
+  });
+
+  it("ArrowDown on last row stays on last row", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "a.txt", is_dir: false },
+        { name: "b.txt", is_dir: false },
+      ]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    // Focus first, then second (last) row.
+    fireEvent.keyDown(document, { key: "ArrowDown" });
+    fireEvent.keyDown(document, { key: "ArrowDown" });
+    // Try to go past the last.
+    fireEvent.keyDown(document, { key: "ArrowDown" });
+
+    const buttons = document.querySelectorAll(".file-list .file-name");
+    expect(document.activeElement).toBe(buttons[1]);
+  });
+
+  it("ArrowUp focuses the last row when no row is focused", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "a.txt", is_dir: false },
+        { name: "b.txt", is_dir: false },
+      ]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    fireEvent.keyDown(document, { key: "ArrowUp" });
+
+    const buttons = document.querySelectorAll(".file-list .file-name");
+    expect(document.activeElement).toBe(buttons[1]);
+  });
+});

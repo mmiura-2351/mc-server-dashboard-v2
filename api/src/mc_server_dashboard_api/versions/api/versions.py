@@ -56,6 +56,7 @@ from mc_server_dashboard_api.versions.application.list_versions import (
 from mc_server_dashboard_api.versions.domain.errors import (
     CatalogUnavailableError,
     UnknownServerTypeError,
+    UnknownVersionError,
 )
 from mc_server_dashboard_api.versions.domain.value_objects import ServerType
 
@@ -186,6 +187,8 @@ async def list_versions(
     parsed = _parse_server_type(server_type)
     try:
         versions = await use_case(server_type=parsed)
+    except UnknownVersionError as exc:
+        raise _unknown_version() from exc
     except CatalogUnavailableError as exc:
         raise _service_unavailable() from exc
     return VersionsResponse(versions=[v.version for v in versions])
@@ -202,6 +205,10 @@ def _parse_server_type(value: str) -> ServerType:
 
 def _unknown_type() -> ProblemException:
     return problem(status.HTTP_404_NOT_FOUND, "unknown_server_type")
+
+
+def _unknown_version() -> ProblemException:
+    return problem(status.HTTP_404_NOT_FOUND, "unknown_version")
 
 
 def _service_unavailable() -> ProblemException:

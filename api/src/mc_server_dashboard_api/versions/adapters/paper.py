@@ -18,7 +18,10 @@ from urllib.parse import quote
 
 from mc_server_dashboard_api.versions.domain.catalog import VersionCatalog
 from mc_server_dashboard_api.versions.domain.errors import UnknownVersionError
-from mc_server_dashboard_api.versions.domain.fetcher import JsonFetcher
+from mc_server_dashboard_api.versions.domain.fetcher import (
+    FetchNotFoundError,
+    JsonFetcher,
+)
 from mc_server_dashboard_api.versions.domain.value_objects import (
     HashAlgorithm,
     JarSource,
@@ -48,9 +51,12 @@ class PaperCatalog(VersionCatalog):
     async def resolve(self, server_type: ServerType, version: str) -> JarSource:
         _require_paper(server_type)
         version_q = quote(version, safe="")
-        build_detail = await self.fetcher.get_json(
-            f"{_BASE}/versions/{version_q}/builds/latest"
-        )
+        try:
+            build_detail = await self.fetcher.get_json(
+                f"{_BASE}/versions/{version_q}/builds/latest"
+            )
+        except FetchNotFoundError:
+            raise UnknownVersionError(f"paper {version}")
         download = _server_default(build_detail)
         if download is None:
             raise UnknownVersionError(f"paper {version} has no download")
