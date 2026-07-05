@@ -641,6 +641,11 @@ export const en = {
   "files.contextMenu.upload": "Upload file",
   "files.contextMenu.newFolder": "New folder",
   "files.contextMenu.extractHere": "Extract here",
+  "files.contextMenu.copy": "Copy",
+  "files.contextMenu.moveTo": "Move to…",
+  "files.contextMenu.paste": "Paste",
+  "files.copied": "Copied to clipboard.",
+  "files.pasted": "Pasted.",
 
   // Navigation history (issue #1475).
   "files.nav.back": "Back",

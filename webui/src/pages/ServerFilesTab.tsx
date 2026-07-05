@@ -869,6 +869,10 @@ export function ServerFilesTab({
     };
   }, []);
 
+  // Internal clipboard for copy/paste (issue #1465). Stores full relative
+  // paths of copied files. Persists across directory changes.
+  const [clipboard, setClipboard] = useState<string[]>([]);
+
   // Keyboard-triggered delete/rename (issue #1465). These are separate from
   // the inline button flows in Listing so the parent can drive them from
   // keydown without refactoring Listing's internal state.
@@ -898,7 +902,68 @@ export function ServerFilesTab({
     },
   });
 
-  // Keyboard shortcuts: Delete/Backspace, F2, Ctrl+A, Escape.
+  /** Paste copied files into the current directory (download + upload). */
+  const pasteFilesRef = useRef(async () => {});
+  pasteFilesRef.current = async () => {
+    if (clipboard.length === 0) return;
+    const existingNames = new Set(
+      (listing.data?.entries ?? []).filter((e) => !e.is_dir).map((e) => e.name),
+    );
+    const total = clipboard.length;
+    let pasted = 0;
+    for (const srcPath of clipboard) {
+      const name = srcPath.split("/").at(-1) ?? srcPath;
+      // Overwrite confirmation — same check as the context-menu upload path.
+      if (existingNames.has(name)) {
+        const { action } = await new Promise<{
+          action: "overwrite" | "skip" | "cancel";
+          applyAll: boolean;
+        }>((resolve) => {
+          setOverwritePrompt({ fileName: name, showApplyAll: false, resolve });
+        });
+        setOverwritePrompt(null);
+        if (action === "cancel") return;
+        if (action === "skip") continue;
+      }
+      try {
+        const blob = await fetchFileBlob(
+          `${apiPath(
+            "/api/communities/{community_id}/servers/{server_id}/files/download",
+            { community_id: communityId, server_id: serverId },
+          )}?path=${encodeURIComponent(srcPath)}`,
+        );
+        if (blob.size > MAX_UPLOAD_BYTES) {
+          showToast(t("files.error.tooLarge"), "error");
+          continue;
+        }
+        const file = new File([blob], name);
+        const form = new FormData();
+        form.append("file", file);
+        await postFormWithProgress(
+          `${apiPath(
+            "/api/communities/{community_id}/servers/{server_id}/files/upload",
+            { community_id: communityId, server_id: serverId },
+          )}?path=${encodeURIComponent(dir)}&extract=false` as never,
+          form,
+          () => {},
+        );
+        pasted++;
+      } catch (error) {
+        onError(error);
+      }
+    }
+    if (pasted > 0) {
+      showToast(
+        total === 1
+          ? t("files.pasted")
+          : t("files.bulk.upload.done", { done: pasted }),
+        "success",
+      );
+      refetchList();
+    }
+  };
+
+  // Keyboard shortcuts: Delete/Backspace, F2, Ctrl+A, Escape, Ctrl+C, Ctrl+V, arrows.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       // Skip when a text input / textarea / contenteditable is focused — the
@@ -943,16 +1008,64 @@ export function ServerFilesTab({
         return;
       }
 
+      if (e.key === "c" && (e.ctrlKey || e.metaKey)) {
+        if (selected.size > 0 && listing.data) {
+          e.preventDefault();
+          const dirNames = new Set(
+            listing.data.entries.filter((en) => en.is_dir).map((en) => en.name),
+          );
+          const files = Array.from(selected).filter((p) => {
+            const name = p.split("/").at(-1) ?? p;
+            return !dirNames.has(name);
+          });
+          if (files.length > 0) {
+            setClipboard(files);
+            showToast(t("files.copied"), "success");
+          }
+        }
+        return;
+      }
+
+      if (e.key === "v" && (e.ctrlKey || e.metaKey)) {
+        if (clipboard.length > 0 && canEdit && !notAtRest) {
+          e.preventDefault();
+          void pasteFilesRef.current();
+        }
+        return;
+      }
+
       if (e.key === "Escape") {
         if (selected.size > 0) {
           setSelected(new Set());
         }
+        return;
+      }
+
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        if (!listing.data || listing.data.entries.length === 0) return;
+        e.preventDefault();
+        const buttons = Array.from(
+          document.querySelectorAll<HTMLElement>(".file-list .file-name"),
+        );
+        if (buttons.length === 0) return;
+        const focused = document.activeElement;
+        const currentIdx = buttons.indexOf(focused as HTMLElement);
+        let nextIdx: number;
+        if (currentIdx === -1) {
+          nextIdx = e.key === "ArrowDown" ? 0 : buttons.length - 1;
+        } else {
+          nextIdx =
+            e.key === "ArrowDown"
+              ? Math.min(currentIdx + 1, buttons.length - 1)
+              : Math.max(currentIdx - 1, 0);
+        }
+        buttons[nextIdx].focus();
       }
     };
 
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
-  }, [selected, canEdit, notAtRest, listing.data, dir]);
+  }, [selected, canEdit, notAtRest, listing.data, dir, clipboard, showToast]);
 
   if (!canRead) {
     return <p className="field-error">{t("files.denied")}</p>;
@@ -1085,6 +1198,12 @@ export function ServerFilesTab({
               dropEnabled={dropEnabled}
               onMoveTo={moveFiles}
               onUpload={upload}
+              hasClipboard={clipboard.length > 0}
+              onCopy={(paths) => {
+                setClipboard(paths);
+                showToast(t("files.copied"), "success");
+              }}
+              onPaste={() => void pasteFilesRef.current()}
               onBeforeUpload={async (fileName) => {
                 const exists = (listing.data?.entries ?? []).some(
                   (e) => !e.is_dir && e.name === fileName,
@@ -1428,6 +1547,9 @@ function Listing({
   dropEnabled,
   onMoveTo,
   onUpload,
+  hasClipboard,
+  onCopy,
+  onPaste,
   onBeforeUpload,
   onExtract,
 }: {
@@ -1447,6 +1569,9 @@ function Listing({
   dropEnabled: boolean;
   onMoveTo: (paths: string[], destDir: string) => Promise<void>;
   onUpload: { mutate: (file: File) => void };
+  hasClipboard: boolean;
+  onCopy: (paths: string[]) => void;
+  onPaste: () => void;
   onBeforeUpload: (fileName: string) => Promise<boolean>;
   onExtract: (file: File) => void;
 }) {
@@ -1454,6 +1579,7 @@ function Listing({
   const [renaming, setRenaming] = useState<DirEntry | null>(null);
   const [deleting, setDeleting] = useState<DirEntry | null>(null);
   const [mkdirOpen, setMkdirOpen] = useState(false);
+  const [moveEntry, setMoveEntry] = useState<DirEntry | null>(null);
   const uploadRef = useRef<HTMLInputElement>(null);
   const [contextMenu, setContextMenu] = useState<{
     entry: DirEntry | null;
@@ -1668,6 +1794,16 @@ function Listing({
           onError={onError}
         />
       )}
+      {moveEntry !== null && (
+        <MoveEntryDialog
+          dir={dir}
+          onClose={() => setMoveEntry(null)}
+          onMove={(dest) => {
+            setMoveEntry(null);
+            void onMoveTo([joinPath(dir, moveEntry.name)], dest);
+          }}
+        />
+      )}
       {contextMenu !== null &&
         (() => {
           const ctxEntry = contextMenu.entry;
@@ -1715,6 +1851,22 @@ function Listing({
                     }
                   : undefined
               }
+              onCopy={
+                ctxEntry && !ctxEntry.is_dir
+                  ? () => {
+                      setContextMenu(null);
+                      onCopy([joinPath(dir, ctxEntry.name)]);
+                    }
+                  : undefined
+              }
+              onMoveTo={
+                ctxEntry
+                  ? () => {
+                      setContextMenu(null);
+                      setMoveEntry(ctxEntry);
+                    }
+                  : undefined
+              }
               onUpload={() => {
                 setContextMenu(null);
                 uploadRef.current?.click();
@@ -1723,6 +1875,14 @@ function Listing({
                 setContextMenu(null);
                 setMkdirOpen(true);
               }}
+              onPaste={
+                hasClipboard
+                  ? () => {
+                      setContextMenu(null);
+                      onPaste();
+                    }
+                  : undefined
+              }
               onExtract={
                 isZip
                   ? () => {
@@ -1765,8 +1925,11 @@ function FileContextMenu({
   onDownload,
   onRename,
   onDelete,
+  onCopy,
+  onMoveTo,
   onUpload,
   onNewFolder,
+  onPaste,
   onExtract,
 }: {
   entry: DirEntry | null;
@@ -1779,8 +1942,11 @@ function FileContextMenu({
   onDownload?: () => void;
   onRename?: () => void;
   onDelete?: () => void;
+  onCopy?: () => void;
+  onMoveTo?: () => void;
   onUpload: () => void;
   onNewFolder: () => void;
+  onPaste?: () => void;
   onExtract?: () => void;
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
@@ -1833,6 +1999,16 @@ function FileContextMenu({
           {t("files.contextMenu.rename")}
         </button>
       )}
+      {entry !== null && onCopy && (
+        <button type="button" role="menuitem" onClick={onCopy}>
+          {t("files.contextMenu.copy")}
+        </button>
+      )}
+      {entry !== null && canEdit && !running && onMoveTo && (
+        <button type="button" role="menuitem" onClick={onMoveTo}>
+          {t("files.contextMenu.moveTo")}
+        </button>
+      )}
       {entry !== null && canEdit && !running && onDelete && (
         <button
           type="button"
@@ -1856,6 +2032,11 @@ function FileContextMenu({
       {canEdit && !running && (
         <button type="button" role="menuitem" onClick={onNewFolder}>
           {t("files.contextMenu.newFolder")}
+        </button>
+      )}
+      {canEdit && !running && onPaste && (
+        <button type="button" role="menuitem" onClick={onPaste}>
+          {t("files.contextMenu.paste")}
         </button>
       )}
     </div>
@@ -2502,6 +2683,32 @@ function BulkMoveDialog({
   return (
     <PromptDialog
       title={t("files.bulk.move.dialogTitle")}
+      label={t("files.bulk.move.destLabel")}
+      value={dest}
+      onChange={setDest}
+      confirmLabel={t("files.bulk.move.confirm")}
+      onConfirm={() => onMove(dest.trim())}
+      onClose={onClose}
+    />
+  );
+}
+
+// ── Single-entry move dialog (context menu) ─────────────────────────────────
+
+function MoveEntryDialog({
+  dir,
+  onClose,
+  onMove,
+}: {
+  dir: string;
+  onClose: () => void;
+  onMove: (dest: string) => void;
+}) {
+  const [dest, setDest] = useState(dir);
+
+  return (
+    <PromptDialog
+      title={t("files.contextMenu.moveTo")}
       label={t("files.bulk.move.destLabel")}
       value={dest}
       onChange={setDest}
