@@ -236,6 +236,29 @@ class FsStorage(Storage):
         with self._lease_lock:
             return self._leases.get(snapshot, 0) > 0
 
+    def _lease_current(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> tuple[Path, Callable[[], None]]:
+        """Resolve current and lease it, verified against the reclaim race (#1607).
+
+        After leasing, re-read ``current``. If it still matches, the lease was
+        acquired before any reclaim decision. If it changed (concurrent flip),
+        release and retry.
+        """
+
+        while True:
+            current = self._current_dir(community_id, server_id)
+            self._acquire_lease(current)
+            try:
+                recheck = self._current_dir(community_id, server_id)
+            except BaseException:
+                self._release_lease(current)
+                raise
+            if recheck == current:
+                snapshot = current
+                return snapshot, lambda: self._release_lease(snapshot)
+            self._release_lease(current)
+
     # --- active-staging leases (issue #183) --------------------------------
 
     def _register_staging(self, staging: Path) -> None:
@@ -356,9 +379,7 @@ class FsStorage(Storage):
         # Re-resolving on first read also means the leased snapshot is exactly the
         # one whose bytes are streamed (Section 4.2 reader safety).
         def _open() -> tuple[Path, Callable[[], None]]:
-            current = self._current_dir(community_id, server_id)
-            self._acquire_lease(current)
-            return current, lambda: self._release_lease(current)
+            return self._lease_current(community_id, server_id)
 
         return _tar_stream(_open, self._tar_member_hook)
 
@@ -1123,16 +1144,15 @@ class FsStorage(Storage):
         # 4.2 reader safety). The lease protects the snapshot dir from a
         # concurrent publish/sweep for the whole duration of a large read.
         def _open() -> tuple[Path, Callable[[], None]]:
-            current = self._current_dir(community_id, server_id)
-            self._acquire_lease(current)
+            current, release = self._lease_current(community_id, server_id)
             try:
                 target = self._safe_target(current, rel_path)
                 if not target.is_file():
                     raise NotFoundError(f"file not found: {rel_path.value}")
             except BaseException:
-                self._release_lease(current)
+                release()
                 raise
-            return target, lambda: self._release_lease(current)
+            return target, release
 
         return _leased_file_stream(_open)
 
