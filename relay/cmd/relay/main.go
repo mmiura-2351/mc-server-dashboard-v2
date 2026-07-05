@@ -42,6 +42,10 @@ const tokenTTL = 10 * time.Second
 // that were still splicing (issue #1051).
 const drainTimeout = 30 * time.Second
 
+// version is the relay build string logged at startup. Overridden at build
+// time via -ldflags "-X main.version=<tag>" (see relay/Dockerfile).
+var version = "0.0.0-dev"
+
 // configPathEnv names the env var pointing at the TOML config file (optional).
 const configPathEnv = "MCD_RELAY_CONFIG"
 
@@ -143,7 +147,7 @@ func run(ctx context.Context) error {
 	// bedrock_tunnel_listen is only logged when the Bedrock listener is bound
 	// (issue #1590): advertising the port while Bedrock is disabled is
 	// misleading because nothing is listening on it.
-	startArgs := []any{"game_listen", cfg.Game.Listen, "tunnel_listen", cfg.Tunnel.Listen}
+	startArgs := []any{"version", version, "game_listen", cfg.Game.Listen, "tunnel_listen", cfg.Tunnel.Listen}
 	if cfg.Bedrock.Enabled {
 		startArgs = append(startArgs, "bedrock_tunnel_listen", cfg.Bedrock.TunnelListen)
 	}

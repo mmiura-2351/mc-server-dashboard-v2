@@ -3,9 +3,9 @@
 v2 is developed **test-first**, following Kent Beck's Test-Driven Development.
 This document fixes the *discipline and philosophy* of testing for the project.
 The concrete tooling — test runners, commands, directory layout, CI wiring — is
-per-component (Python `api/`, Go `worker/`) and is pinned as it lands. On
-mechanics, a future per-component tooling doc wins; on discipline, this document
-wins.
+per-component (Python `api/`, Go `worker/`, Go `relay/`, TypeScript `webui/`)
+and is pinned as it lands. On mechanics, a future per-component tooling doc
+wins; on discipline, this document wins.
 
 > **Status**: the per-component test toolchains are in place and CI-enforced
 > (`api/` `pytest`, `worker/` and `relay/` `go test`, `webui/` Vitest, run via
@@ -87,7 +87,8 @@ Favor many small, fast tests over a few slow, broad ones (the testing pyramid):
 Fast tests run continuously in the TDD inner loop; the slower, broader tests run
 before a change is integrated. Concrete layer names, directory layout, and run
 commands are per-component (see each module's `Makefile` targets and CI
-workflow). Both `api/` and `worker/` follow the same discipline described above.
+workflow). All components (`api/`, `worker/`, `relay/`, `webui/`) follow the
+same discipline described above.
 
 ## 6. References
 

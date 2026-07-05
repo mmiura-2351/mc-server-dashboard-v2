@@ -377,10 +377,9 @@ func TestResentStopDuringOrphanRetryRejectedBusy(t *testing.T) {
 }
 
 // A RestartServer whose recorded driver is no longer offered by this Worker must
-// fail WITHOUT evicting the live running instance (issue #829 item 3): the
-// driver/launch-mode resolution happens before takeRunningReserve, so the failure
-// leaves the process tracked rather than releasing an already-evicted live process
-// untracked. The server stays running and a subsequent stop still terminates it.
+// fail WITHOUT evicting the live running instance: the driver/launch-mode
+// resolution happens after takeRunningReserve (issue #1619) but on failure the
+// instance is restored so the still-running process stays tracked and reachable.
 func TestRestartUnavailableDriverLeavesInstanceTracked(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, &fakeControl{reply: "ok"}).WithTransfer(&fakeTransfer{})
@@ -397,7 +396,7 @@ func TestRestartUnavailableDriverLeavesInstanceTracked(t *testing.T) {
 	}
 
 	// The instance must still be tracked and live: a ServerCommand reaches it (a
-	// running instance), proving the failed restart did not evict it.
+	// running instance), proving the failed restart restored it after eviction.
 	if sc := m.Handle(context.Background(), session.Command{CommandID: "c", ServerID: "s1", Kind: "ServerCommand", Line: "list"}); sc.ErrorCode == session.CommandErrorServerNotFound {
 		t.Fatalf("ServerCommand after failed restart = %+v, want the instance still tracked (not evicted)", sc)
 	}

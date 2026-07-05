@@ -492,11 +492,14 @@ ps:
 
 # Build images without starting services. Useful for pre-building before a
 # deploy window. Builds all three components with host networking (the
-# BuildKit DNS workaround documented in the deploy memory).
+# BuildKit DNS workaround documented in the deploy memory). The VERSION build
+# arg injects the git tag into the Go binaries via -ldflags (issue #1624).
+BUILD_VERSION := $(shell git describe --tags --always 2>/dev/null || echo 0.0.0-dev)
+
 build:
 	sg docker -c "DOCKER_BUILDKIT=1 docker build --network=host -t mcsd-api:dev -f api/Dockerfile ."
-	sg docker -c "DOCKER_BUILDKIT=1 docker build --network=host -t mcsd-relay:dev ./relay"
-	sg docker -c "DOCKER_BUILDKIT=1 docker build --network=host -t mcsd-worker:dev ./worker"
+	sg docker -c "DOCKER_BUILDKIT=1 docker build --network=host --build-arg VERSION=$(BUILD_VERSION) -t mcsd-relay:dev ./relay"
+	sg docker -c "DOCKER_BUILDKIT=1 docker build --network=host --build-arg VERSION=$(BUILD_VERSION) -t mcsd-worker:dev ./worker"
 
 # Stop and remove containers + networks. Volumes (db-data, api-storage,
 # seaweedfs-data) are NOT removed — use `docker compose down -v` manually
