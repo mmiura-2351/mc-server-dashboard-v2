@@ -48,6 +48,9 @@ if [ ! -f .env ]; then
 	read -rp "API_HTTP_PORT [8000]: " API_HTTP_PORT
 	API_HTTP_PORT="${API_HTTP_PORT:-8000}"
 
+	read -rp "API_HTTP_BIND_IP (127.0.0.1=loopback, 0.0.0.0=all) [127.0.0.1]: " API_HTTP_BIND_IP
+	API_HTTP_BIND_IP="${API_HTTP_BIND_IP:-127.0.0.1}"
+
 	read -rp "Storage backend (object/fs) [object]: " STORAGE_BACKEND
 	STORAGE_BACKEND="${STORAGE_BACKEND:-object}"
 	if [ "$STORAGE_BACKEND" != "object" ] && [ "$STORAGE_BACKEND" != "fs" ]; then
@@ -165,6 +168,7 @@ CLOUDFLARE_TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
 
 # --- Published host ports --------------------------------------------------
 API_HTTP_PORT=${API_HTTP_PORT}
+API_HTTP_BIND_IP=${API_HTTP_BIND_IP}
 ENVEOF
 
 	echo ""
