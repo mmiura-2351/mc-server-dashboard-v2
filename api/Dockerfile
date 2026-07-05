@@ -12,7 +12,7 @@
 # `webui/` while the python stages copy from `api/`.
 
 # uv binary, copied from the official image (pinned tag).
-FROM ghcr.io/astral-sh/uv:0.11.25 AS uv
+FROM ghcr.io/astral-sh/uv:0.11.26 AS uv
 
 # ---------------------------------------------------------------------------
 # Webui: build the SPA into /webui/dist. Node major matches webui/.nvmrc (24);
