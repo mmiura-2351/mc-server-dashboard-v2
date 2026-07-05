@@ -27,6 +27,16 @@ class FetchError(Exception):
     """
 
 
+class FetchNotFoundError(FetchError):
+    """The upstream returned HTTP 404 for the requested URL.
+
+    Semantically distinct from a transport failure or a non-404 HTTP error: a 404
+    is a definitive "this resource does not exist", not a transient outage. The
+    retry/cache wrapper does not retry it; catalog adapters translate it to
+    :class:`~.errors.UnknownVersionError` when the 404 URL was version-specific.
+    """
+
+
 class JsonFetcher(abc.ABC):
     """Port: GET a URL as JSON or raw text (a document fetcher)."""
 

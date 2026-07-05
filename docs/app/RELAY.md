@@ -497,6 +497,10 @@ config, wiring at the edge.
 | `relay.enabled` | `false` | Master switch: serve RelayService, expose `join_hostname`, run the prune loop. |
 | `relay.credential` | — (required when enabled; secret) | Shared secret the relay presents. |
 | `relay.base_domain` | — (required when enabled) | e.g. `mc.example.com`; used to build `join_hostname` and validate registration. |
+| `relay.game_port` | `25565` | Relay container's published game-listener host port. The allocator excludes it from the assignable game-port range when the relay is enabled. |
+| `relay.tunnel_port` | `25665` | Relay container's published tunnel-listener host port. Excluded from the assignable range like `game_port`. |
+| `relay.bedrock_enabled` | `false` | Bedrock ingress gate. When on (with `relay.enabled`), Geyser detection allocates a Bedrock port and server responses surface `bedrock_address`/`bedrock_port`. |
+| `relay.bedrock_tunnel_port` | `25675` | Relay container's published Bedrock tunnel (QUIC) UDP listener host port. Excluded from the assignable Bedrock window when the Bedrock gate is on. |
 | `relay.session_retention_days` | `90` | `game_session` prune window. |
 
 **Relay binary — `relay.toml`:**

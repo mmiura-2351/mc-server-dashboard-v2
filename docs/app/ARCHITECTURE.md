@@ -122,7 +122,9 @@ and lets the Worker's lifecycle logic be unit-tested with a fake driver
 repo/
 ├── proto/        # buf: protobuf + gRPC control-plane contract (shared)
 ├── api/          # Python: authoritative service (Hexagonal, per-domain)
-└── worker/       # Go: stateless execution agent (Hexagonal)
+├── worker/       # Go: stateless execution agent (Hexagonal)
+├── relay/        # Go: game-ingress relay (RELAY.md)
+└── webui/        # TypeScript: browser UI (build-time component)
 ```
 
 ### 3.1 What lives where
@@ -130,8 +132,10 @@ repo/
 | Module | Language / tool | Owns |
 |---|---|---|
 | `proto/` | buf (protobuf) | the typed control-plane contract: the bidi-stream service, command and event messages, capability advertisement. No logic. |
-| `api/` | Python | identity & auth, Communities/membership, authorization, server lifecycle records, the `Storage` Port + adapters, Worker registry & placement, both planes' API-side ends, audit, version/JAR resolution. The authoritative state. |
+| `api/` | Python | identity & auth, Communities/membership, authorization, server lifecycle records, the `Storage` Port + adapters, Worker registry & placement, both planes' API-side ends, audit, version/JAR resolution. The authoritative state. Also serves `RelayService` on the same gRPC listener (RELAY.md Section 6). |
 | `worker/` | Go | the gRPC stream client to the API, the `ExecutionDriver` Port + container adapter, local scratch working-dir management, Java-runtime selection, hydrate/snapshot transfer client, RCON, log/metric/heartbeat emission. No authoritative state. |
+| `relay/` | Go | the game-ingress relay: public Minecraft listener, Worker dial-back tunnel, Bedrock (QUIC) tunnel, session tracking. Connects to the API via `RelayService` gRPC (RELAY.md). |
+| `webui/` | TypeScript (React) | browser UI. Build-time component served as static assets by `api/`; no independent runtime process. |
 
 ### 3.2 Dependency direction between modules
 
@@ -379,3 +383,6 @@ This document links these and does not duplicate their content.
 | [`CONFIGURATION.md`](CONFIGURATION.md) | Runtime configuration & adapter selection |
 | [`STORAGE.md`](STORAGE.md) | `Storage` adapter contracts & atomic snapshot publish |
 | [`CONTROL_PLANE.md`](CONTROL_PLANE.md) | Concrete control-plane messages |
+| [`RELAY.md`](RELAY.md) | Game-ingress relay design, tunnel protocol, session tracking |
+| [`BEDROCK.md`](BEDROCK.md) | Bedrock Edition ingress via Geyser + relay |
+| [`BEDROCK_TUNNEL.md`](BEDROCK_TUNNEL.md) | Bedrock (QUIC) tunnel protocol between relay and Worker |

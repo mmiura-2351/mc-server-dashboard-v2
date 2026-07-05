@@ -128,6 +128,12 @@ is dirty, then build:
 ./scripts/deploy_preflight.sh && docker compose up -d --build
 ```
 
+**Automated path:** `make deploy` (`scripts/deploy.sh`) wraps the above with
+interactive `.env` generation (first run), a `git pull --ff-only origin main` to
+fetch the latest revision, image builds, a post-deploy `/api/healthz` check, and
+a `.last-deploy-sha` stamp for selective rebuilds. Prefer it over the manual
+commands; use `make update` for subsequent upgrades (Section 9).
+
 This builds the `api` and `worker` images, starts `db`, runs `migrate` to apply
 the schema, then starts `api` and `worker`. Check status and logs:
 
@@ -139,6 +145,17 @@ docker compose logs -f api worker
 The API HTTP surface is then on `http://<host>:${API_HTTP_PORT}` (default 8000);
 the entire HTTP API is namespaced under `/api` (issue #498), so `GET
 /api/healthz` returns the liveness + database-reachability probe.
+
+### Compose healthcheck
+
+The `api` service carries a compose `healthcheck` that hits `GET /api/healthz`
+(the same endpoint the deploy/update scripts curl-loop). It uses the image's
+Python interpreter (`urllib.request`), so no extra binary is needed. The
+`worker`, `relay`, and `cloudflared` services depend on `api` with
+`condition: service_healthy`, so they do not start until the API is actually
+serving (not merely "started"). `db` and `seaweedfs` already have their own
+healthchecks; `api` waits for both (`service_healthy` / `service_completed_successfully`
+for `migrate`).
 
 ### How the Web UI ships
 
@@ -593,9 +610,14 @@ atomically via `docker compose up`) ensures the API's handler for any new code
 is in place before the worker starts emitting it.
 
 ```sh
-git pull
-./scripts/deploy_preflight.sh && docker compose up -d --build
+./scripts/deploy_preflight.sh && git pull --ff-only origin main && docker compose up -d --build
 ```
+
+**Automated path:** `make update` (`scripts/update.sh`) runs the preflight, pulls,
+detects which components changed since the last deploy (via `.last-deploy-sha`),
+rebuilds only what changed (api before worker — worker restart bounces running MC
+servers), runs a post-deploy `/api/healthz` check, and stamps the new SHA. Use
+`FORCE=1` to rebuild all components unconditionally.
 
 > **Breaking change — the default storage backend is now `object` (SeaweedFS).**
 > Before this revision the shipped default was the local-volume `fs` backend. The

@@ -95,6 +95,18 @@ async def test_resolve_raises_when_no_server_default_download() -> None:
 
 
 @pytest.mark.asyncio
+async def test_resolve_unknown_version_raises_on_upstream_404() -> None:
+    """An upstream 404 for a nonexistent version is UnknownVersionError, not
+    CatalogUnavailableError (#1539)."""
+
+    not_found_url = f"{_BASE}/versions/9.9.9/builds/latest"
+    fetcher = FakeJsonFetcher({}, not_found_urls={not_found_url})
+    catalog = PaperCatalog(fetcher=fetcher)
+    with pytest.raises(UnknownVersionError):
+        await catalog.resolve(ServerType.PAPER, "9.9.9")
+
+
+@pytest.mark.asyncio
 async def test_vanilla_request_rejected() -> None:
     catalog, _ = _catalog()
     with pytest.raises(UnknownVersionError):

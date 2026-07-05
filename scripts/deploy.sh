@@ -176,6 +176,10 @@ fi
 # ── 2. Preflight ─────────────────────────────────────────────────────────────
 scripts/deploy_preflight.sh
 
+# ── 2b. Pull latest main ────────────────────────────────────────────────────
+echo "deploy: pulling latest main..."
+git pull --ff-only origin main
+
 # ── 3. Build all components (api -> relay -> worker) ─────────────────────────
 echo "deploy: building api..."
 sg docker -c "DOCKER_BUILDKIT=1 docker build --network=host -t mcsd-api:dev -f api/Dockerfile ."
