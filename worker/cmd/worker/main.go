@@ -36,9 +36,9 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
 
-// version is the Worker build string advertised at registration. It is a
-// placeholder until release tooling injects a real value.
-const version = "0.0.0-dev"
+// version is the Worker build string advertised at registration. Overridden at
+// build time via -ldflags "-X main.version=<tag>" (see worker/Dockerfile).
+var version = "0.0.0-dev"
 
 // configPathEnv names the env var pointing at the TOML config file (optional).
 const configPathEnv = "MCD_WORKER_CONFIG"

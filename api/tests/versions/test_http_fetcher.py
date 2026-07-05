@@ -15,7 +15,10 @@ import pytest
 
 from mc_server_dashboard_api.versions.adapters import ssrf_guard
 from mc_server_dashboard_api.versions.adapters.http_fetcher import HttpxJsonFetcher
-from mc_server_dashboard_api.versions.domain.fetcher import FetchError
+from mc_server_dashboard_api.versions.domain.fetcher import (
+    FetchError,
+    FetchNotFoundError,
+)
 
 _URL = "https://example.test/manifest.json"
 
@@ -80,6 +83,32 @@ async def test_get_text_private_ip_is_fetch_error(
 ) -> None:
     monkeypatch.setattr(ssrf_guard, "_resolve_host", lambda _host: ["127.0.0.1"])
     with pytest.raises(FetchError, match="private"):
+        await HttpxJsonFetcher().get_text(_URL)
+
+
+@pytest.mark.asyncio
+async def test_get_json_404_is_fetch_not_found_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 404 is a definitive 'not found', distinct from a transient error (#1539)."""
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, content=b"not found")
+
+    _install_transport(monkeypatch, handler)
+    with pytest.raises(FetchNotFoundError):
+        await HttpxJsonFetcher().get_json(_URL)
+
+
+@pytest.mark.asyncio
+async def test_get_text_404_is_fetch_not_found_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, content=b"not found")
+
+    _install_transport(monkeypatch, handler)
+    with pytest.raises(FetchNotFoundError):
         await HttpxJsonFetcher().get_text(_URL)
 
 
