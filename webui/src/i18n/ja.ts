@@ -648,6 +648,11 @@ export const ja: Record<TranslationKey, string> = {
   "files.contextMenu.upload": "ファイルをアップロード",
   "files.contextMenu.newFolder": "新しいフォルダ",
   "files.contextMenu.extractHere": "ここに展開",
+  "files.contextMenu.copy": "コピー",
+  "files.contextMenu.moveTo": "移動先…",
+  "files.contextMenu.paste": "貼り付け",
+  "files.copied": "クリップボードにコピーしました。",
+  "files.pasted": "貼り付けしました。",
 
   // Navigation history (issue #1475).
   "files.nav.back": "戻る",
