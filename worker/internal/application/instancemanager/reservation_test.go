@@ -377,10 +377,10 @@ func TestResentStopDuringOrphanRetryRejectedBusy(t *testing.T) {
 }
 
 // A RestartServer whose recorded driver is no longer offered by this Worker must
-// return DRIVER_UNAVAILABLE and release the reservation so the id is not wedged.
-// The driver/launch-mode resolution happens after takeRunningReserve (issue #1619),
-// so the instance is evicted, but the reservation is cleanly released.
-func TestRestartUnavailableDriverReleasesReservation(t *testing.T) {
+// fail WITHOUT evicting the live running instance: the driver/launch-mode
+// resolution happens after takeRunningReserve (issue #1619) but on failure the
+// instance is restored so the still-running process stays tracked and reachable.
+func TestRestartUnavailableDriverLeavesInstanceTracked(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, &fakeControl{reply: "ok"}).WithTransfer(&fakeTransfer{})
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
@@ -395,11 +395,15 @@ func TestRestartUnavailableDriverReleasesReservation(t *testing.T) {
 		t.Fatalf("restart with unavailable driver = %+v, want DRIVER_UNAVAILABLE", res)
 	}
 
-	// The instance is evicted by takeRunningReserve before driver resolution, so
-	// a ServerCommand no longer reaches it. Verify the id is not left reserved
-	// (wedged): a fresh start succeeds, proving the reservation was released.
+	// The instance must still be tracked and live: a ServerCommand reaches it (a
+	// running instance), proving the failed restart restored it after eviction.
+	if sc := m.Handle(context.Background(), session.Command{CommandID: "c", ServerID: "s1", Kind: "ServerCommand", Line: "list"}); sc.ErrorCode == session.CommandErrorServerNotFound {
+		t.Fatalf("ServerCommand after failed restart = %+v, want the instance still tracked (not evicted)", sc)
+	}
+	// And the id must not be left reserved: restore the driver and confirm a stop
+	// still cleanly terminates the still-tracked instance.
 	m.drivers["container"] = d
-	if start := m.Handle(context.Background(), startCmd()); !start.Success {
-		t.Fatalf("start after failed restart = %+v, want success (id not wedged)", start)
+	if stop := m.Handle(context.Background(), session.Command{CommandID: "stop", ServerID: "s1", Kind: "StopServer"}); !stop.Success {
+		t.Fatalf("stop after failed restart = %+v, want success (instance was still tracked, id not wedged)", stop)
 	}
 }
