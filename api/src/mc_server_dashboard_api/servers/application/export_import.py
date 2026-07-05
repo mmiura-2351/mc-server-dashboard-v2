@@ -39,6 +39,7 @@ so a converter can be written later.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import io
 import json
@@ -225,7 +226,9 @@ class ImportServer:
         # (issue #277). The metadata member is included in this pass (it is a normal
         # archive entry); only its write is skipped later. The body bytes are
         # already in memory, so the dry-run pass is cheap.
-        _validate_archive(
+        # Offloaded to a thread: decompression is CPU-bound (issue #1620).
+        await asyncio.to_thread(
+            _validate_archive,
             EXPORT_METADATA_FILENAME + ".zip",  # route to the zip branch
             content,
             max_bytes=self.max_bytes,
@@ -271,12 +274,19 @@ class ImportServer:
         """
 
         try:
-            for entry_path, data in _archive_entries(
-                EXPORT_METADATA_FILENAME + ".zip",  # route to the zip branch
-                content,
-                max_bytes=self.max_bytes,
-                max_entries=self.max_entries,
-            ):
+            # Materialize the entry list on a thread: decompression is CPU-bound
+            # (issue #1620). The async write loop below iterates the result.
+            entries = await asyncio.to_thread(
+                lambda: list(
+                    _archive_entries(
+                        EXPORT_METADATA_FILENAME + ".zip",  # route to the zip branch
+                        content,
+                        max_bytes=self.max_bytes,
+                        max_entries=self.max_entries,
+                    )
+                )
+            )
+            for entry_path, data in entries:
                 if entry_path == EXPORT_METADATA_FILENAME:
                     continue
                 if entry_path == _PROPERTIES_FILENAME:
