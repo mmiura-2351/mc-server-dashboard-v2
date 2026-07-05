@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAccessToken, setAccessToken } from "../auth/tokenStore.ts";
 import { ApiError, resetForTesting, setRefresher } from "./client.ts";
-import { downloadFile } from "./download.ts";
+import {
+  DownloadTooLargeError,
+  downloadFile,
+  fetchFileBlob,
+  MAX_DOWNLOAD_BYTES,
+} from "./download.ts";
 
 describe("downloadFile", () => {
   const clicks: HTMLAnchorElement[] = [];
@@ -170,6 +175,76 @@ describe("downloadFile", () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(error).toBeInstanceOf(ApiError);
       expect(error.status).toBe(401);
+    });
+  });
+
+  describe("download size cap", () => {
+    it("rejects a download whose Content-Length exceeds the cap", async () => {
+      const oversized = MAX_DOWNLOAD_BYTES + 1;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(
+          new Response(new Blob(["x"]), {
+            status: 200,
+            headers: { "content-length": String(oversized) },
+          }),
+        ),
+      );
+
+      const error = await downloadFile("/api/x", "big.zip").catch((e) => e);
+
+      expect(error).toBeInstanceOf(DownloadTooLargeError);
+      expect(error.contentLength).toBe(oversized);
+      expect(clicks).toHaveLength(0);
+    });
+
+    it("allows a download exactly at the cap", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(
+          new Response(new Blob(["ok"]), {
+            status: 200,
+            headers: { "content-length": String(MAX_DOWNLOAD_BYTES) },
+          }),
+        ),
+      );
+
+      await downloadFile("/api/x", "ok.zip");
+
+      expect(clicks).toHaveLength(1);
+    });
+
+    it("allows a download with no Content-Length header", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi
+          .fn()
+          .mockResolvedValue(
+            new Response(new Blob(["chunked"]), { status: 200 }),
+          ),
+      );
+
+      await downloadFile("/api/x", "chunked.zip");
+
+      expect(clicks).toHaveLength(1);
+    });
+
+    it("exposes the size on fetchFileBlob too", async () => {
+      const oversized = MAX_DOWNLOAD_BYTES + 100;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(
+          new Response(new Blob(["x"]), {
+            status: 200,
+            headers: { "content-length": String(oversized) },
+          }),
+        ),
+      );
+
+      const error = await fetchFileBlob("/api/x").catch((e) => e);
+
+      expect(error).toBeInstanceOf(DownloadTooLargeError);
+      expect(error.contentLength).toBe(oversized);
     });
   });
 });
