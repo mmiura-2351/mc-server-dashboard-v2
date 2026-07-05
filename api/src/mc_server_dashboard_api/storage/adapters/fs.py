@@ -1321,6 +1321,7 @@ class FsStorage(Storage):
             target = self._safe_target(current, rel_path)
             if not target.is_dir():
                 raise NotFoundError(f"directory not found: {rel_path.value}")
+            # rmtree is per-member unlinks — not crash-atomic (#1608).
             shutil.rmtree(target)
             _fsync_dir(target.parent)
             # Authoritative edit -> bump the generation (issue #889).

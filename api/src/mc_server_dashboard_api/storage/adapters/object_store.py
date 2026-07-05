@@ -1480,6 +1480,7 @@ class ObjectStorage(Storage):
                 objs = await client.list_objects(snapshot_prefix + dir_suffix)
                 if not objs:
                     raise NotFoundError(f"directory not found: {rel_path.value}")
+                # Per-object delete loop — not crash-atomic (#1608).
                 for obj in objs:
                     await client.delete_object(obj.key)
                 await client.put_object(
@@ -1550,6 +1551,7 @@ class ObjectStorage(Storage):
                 objs = await client.list_objects(snapshot_prefix + from_suffix)
                 if not objs:
                     raise NotFoundError(f"directory not found: {from_path.value}")
+                # Per-object copy+delete loop — not crash-atomic (#1608).
                 for obj in objs:
                     rest = obj.key[len(snapshot_prefix + from_suffix) :]
                     await client.copy_object(
