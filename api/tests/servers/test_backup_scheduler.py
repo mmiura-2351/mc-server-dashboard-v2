@@ -83,7 +83,6 @@ def _build(
     control_plane = FakeControlPlane()
     create = CreateBackup(
         uow=uow,
-        control_plane=control_plane,
         backup_store=archive,
         snapshot_server=SnapshotServer(uow=uow, control_plane=control_plane),
         clock=clock,
@@ -155,7 +154,7 @@ async def test_failed_backup_is_retried_next_tick() -> None:
     assert archive.created == [server.id]
 
 
-async def test_running_scheduled_server_is_backed_up_via_save_all_snapshot() -> None:
+async def test_running_scheduled_server_is_backed_up_via_snapshot() -> None:
     uow = FakeUnitOfWork()
     worker = WorkerId(uuid.uuid4())
     server = _server(
@@ -168,7 +167,6 @@ async def test_running_scheduled_server_is_backed_up_via_save_all_snapshot() -> 
     control_plane = FakeControlPlane()
     create = CreateBackup(
         uow=uow,
-        control_plane=control_plane,
         backup_store=FakeBackupArchiveStore(),
         snapshot_server=SnapshotServer(uow=uow, control_plane=control_plane),
         clock=FakeClock(_NOW),
@@ -178,7 +176,7 @@ async def test_running_scheduled_server_is_backed_up_via_save_all_snapshot() -> 
     await scheduler.tick()
     clock.set(_NOW + dt.timedelta(seconds=_HOUR))
     await scheduler.tick()
-    # The running path ran save-all then snapshot before archiving.
-    assert [k for k, *_ in control_plane.dispatched] == ["command", "snapshot"]
+    # The running path dispatches a snapshot (worker quiesces safely).
+    assert [k for k, *_ in control_plane.dispatched] == ["snapshot"]
     rows = await uow.backups.list_for_server(server.id)
     assert len(rows) == 1
