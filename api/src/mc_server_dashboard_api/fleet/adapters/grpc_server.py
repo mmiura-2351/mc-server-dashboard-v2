@@ -46,7 +46,7 @@ from grpc import aio
 from mc_server_dashboard_api.fleet.adapters.control_plane import ControlPlaneState
 from mc_server_dashboard_api.fleet.domain.clock import Clock
 from mc_server_dashboard_api.fleet.domain.control_plane import WorkerNotConnectedError
-from mc_server_dashboard_api.fleet.domain.entities import Worker
+from mc_server_dashboard_api.fleet.domain.entities import Worker, WorkerStatus
 from mc_server_dashboard_api.fleet.domain.errors import InvalidWorkerIdError
 from mc_server_dashboard_api.fleet.domain.real_time_events import (
     EventStream,
@@ -115,6 +115,24 @@ _LOG_STREAM_BY_PROTO: dict[int, str] = {
     pb.LOG_STREAM_STDERR: "stderr",
 }
 
+# Server-side gRPC keepalive: transport-level dead-peer detection. The server
+# sends HTTP/2 PINGs at heartbeat_timeout intervals; if the peer does not ACK
+# within _KEEPALIVE_TIMEOUT_MS, the transport closes and the Session teardown
+# fires mark_worker_servers_unknown (issue #1600).
+_KEEPALIVE_TIMEOUT_MS = 20_000
+
+
+def _keepalive_options(heartbeat_timeout: dt.timedelta) -> list[tuple[str, int]]:
+    """Derive server-side gRPC keepalive channel options from heartbeat_timeout."""
+
+    return [
+        ("grpc.keepalive_time_ms", int(heartbeat_timeout.total_seconds() * 1000)),
+        ("grpc.keepalive_timeout_ms", _KEEPALIVE_TIMEOUT_MS),
+        # Required: the default of 2 stops PINGs after 2 pings with no outbound
+        # data, and the API->Worker direction is mostly idle.
+        ("grpc.http2.max_pings_without_data", 0),
+    ]
+
 
 def _emitted_at_from_proto(message: pb.WorkerMessage) -> dt.datetime | None:
     """Return the Worker's authoritative event time, or None when unset/zero.
@@ -177,6 +195,29 @@ class WorkerSessionServicer(WorkerServiceServicer):
         self._state_sink = state_sink
         self._real_time_events = real_time_events
 
+    async def _watch_liveness(self, worker_id: WorkerId, session: SessionToken) -> None:
+        """Poll worker liveness and return when heartbeats lapse (issue #1600).
+
+        The registry derives liveness from ``Clock.now()`` vs
+        ``last_heartbeat_at``; polling at ``heartbeat_interval`` (timeout/3)
+        gives prompt detection while keeping the check cheap. Returning ends
+        the ``Session`` generator's ``asyncio.wait``, triggering the existing
+        teardown path (``mark_disconnected`` + ``mark_worker_servers_unknown``).
+        """
+
+        interval = self._heartbeat_interval.total_seconds()
+        while True:
+            await asyncio.sleep(interval)
+            if not self._registry.is_current_session(worker_id, session):
+                return  # superseded by reconnect
+            snapshot = self._registry.get(worker_id)
+            if snapshot is None or snapshot.status is WorkerStatus.OFFLINE:
+                _LOG.warning(
+                    "worker heartbeat lapsed; ending session",
+                    extra={"worker_id": worker_id.value},
+                )
+                return
+
     async def Session(  # noqa: N802 (gRPC-generated method name)
         self,
         request_iterator: AsyncIterator[pb.WorkerMessage],
@@ -195,6 +236,10 @@ class WorkerSessionServicer(WorkerServiceServicer):
         # Read inbound events/results in a background task while this generator
         # yields the Worker's outbound commands; both share the one stream.
         reader = asyncio.ensure_future(self._read_inbound(worker_id, request_iterator))
+        # Application-level heartbeat watchdog (issue #1600): polls the
+        # registry's derived liveness at heartbeat_interval; returns when
+        # heartbeats lapse, ending the Session through the normal teardown.
+        watchdog = asyncio.ensure_future(self._watch_liveness(worker_id, session))
         # Tracks the in-flight outbound.get() so the finally can cancel it even if
         # this generator is cancelled mid-await (an abrupt gRPC RPC cancel): an
         # uncancelled get() would await the orphaned queue forever, leaking a
@@ -205,18 +250,21 @@ class WorkerSessionServicer(WorkerServiceServicer):
             while True:
                 outbound_get = asyncio.ensure_future(outbound.get())
                 done, _ = await asyncio.wait(
-                    {outbound_get, reader}, return_when=asyncio.FIRST_COMPLETED
+                    {outbound_get, reader, watchdog},
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
                 if outbound_get in done:
                     yield outbound_get.result()
                 else:
-                    # The inbound stream ended; stop yielding and tear down.
+                    # The inbound stream ended or the watchdog detected a
+                    # heartbeat lapse; stop yielding and tear down.
                     outbound_get.cancel()
                     break
         finally:
             if outbound_get is not None:
                 outbound_get.cancel()
             reader.cancel()
+            watchdog.cancel()
             # Retrieve the reader's outcome so a transport error it raised is not
             # logged as an unretrieved task exception; a cancellation is expected.
             # A genuine terminal error (e.g. a transport drop, or an unexpected
@@ -232,6 +280,10 @@ class WorkerSessionServicer(WorkerServiceServicer):
                     extra={"worker_id": worker_id.value},
                     exc_info=True,
                 )
+            try:
+                await watchdog
+            except asyncio.CancelledError:
+                pass
             # Fail this worker's in-flight commands immediately: its outbound
             # stream is gone, so they can never be answered. Awaiters get a typed
             # WorkerNotConnectedError now instead of riding the full timeout.
@@ -543,7 +595,7 @@ def make_grpc_server(
     rule is enforced at the edge before this is called.
     """
 
-    server = aio.server()
+    server = aio.server(options=_keepalive_options(heartbeat_timeout))
     servicer = WorkerSessionServicer(
         registry=registry,
         clock=clock,

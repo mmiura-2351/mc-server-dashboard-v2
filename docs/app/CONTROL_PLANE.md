@@ -207,6 +207,20 @@ The Worker emits `Event{Heartbeat}` every `heartbeat_interval` (returned in
 its liveness window, `control.heartbeat_timeout_seconds` (CONFIGURATION.md
 Section 5.1), which is set comfortably above the interval (FR-WRK-2).
 
+**Enforcement** (issue #1600): Two complementary mechanisms detect a dead peer:
+
+1. **Server-side gRPC keepalive.** The server sends HTTP/2 PINGs at
+   `heartbeat_timeout` intervals; if the peer does not ACK within 20 s the
+   transport closes, ending the `Session` and triggering the existing teardown
+   (`mark_disconnected` + `mark_worker_servers_unknown`).
+2. **Per-session heartbeat watchdog.** A coroutine polls the registry's derived
+   liveness every `heartbeat_interval` (timeout / 3). When `Worker.status`
+   returns `OFFLINE` (heartbeats lapsed past the timeout), the watchdog returns,
+   ending the `Session` generator's `asyncio.wait` and triggering the same
+   teardown. The watchdog checks `is_current_session` before acting, so a stale
+   watchdog on a superseded session exits without clobbering the reconnected
+   worker.
+
 ### 4.4 Disconnect and reconnect
 
 A stream ends on a clean close, a transport error, or a missed-heartbeat
