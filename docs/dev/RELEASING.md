@@ -6,9 +6,10 @@ generation, and the tag-driven release workflow are in place (Sections 3 and 4).
 Building and publishing deployable artifacts stays aspirational until a
 packaging/deployment design exists, and is marked *(forthcoming)* below.
 
-> **One version for the whole monorepo.** `api/`, `worker/`, and `proto/` ship
-> together and are kept in lock-step (see [`CONTRIBUTING.md`](CONTRIBUTING.md)
-> and [`../REQUIREMENTS.md`](../REQUIREMENTS.md)). They therefore share **one
+> **One version for the whole monorepo.** `api/`, `worker/`, `relay/`, `webui/`,
+> and `proto/` ship together and are kept in lock-step (see
+> [`CONTRIBUTING.md`](CONTRIBUTING.md) and
+> [`../REQUIREMENTS.md`](../REQUIREMENTS.md)). They therefore share **one
 > repository-wide SemVer version**, not per-component versions.
 
 ## 1. Versioning (SemVer)
@@ -113,9 +114,9 @@ relying on a checked-in constant is tracked in #1624.
 2. Cut a release by tagging `vX.Y.Z` on a green `main` commit and pushing the
    tag; the release workflow publishes the GitHub Release with notes generated
    from the PRs merged since the previous tag (Section 3).
-3. *(forthcoming)* A release builds and publishes both components (`api/`,
-   `worker/`) from the same tagged commit, so the `api/` and `worker/` artifacts
-   of a release come from one source revision. Both components now have
+3. *(forthcoming)* A release builds and publishes all components (`api/`,
+   `worker/`, `relay/`, `webui/`) from the same tagged commit, so the artifacts
+   of a release come from one source revision. All runtime components now have
    Dockerfiles and a single-host compose stack
    ([`DEPLOYMENT.md`](DEPLOYMENT.md)), but no registry-publish target exists yet;
    the workflow in Section 4.3 only publishes the GitHub Release.

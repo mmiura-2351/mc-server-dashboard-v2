@@ -56,20 +56,20 @@ Do not bypass a failing hook with `--no-verify`; fix the cause and commit again
 
 ## 3. Common commands
 
-Run from the repo root. Each target fans out to both modules; the 90% path is
+Run from the repo root. Each target fans out to all modules; the 90% path is
 covered here.
 
 | Task | Command | Does |
 |---|---|---|
-| Format both modules | `make format` | ruff format + `ruff check --fix` (api), `gofmt -w` (worker), biome (webui) |
-| Lint + typecheck | `make lint` | ruff, mypy, import-linter (api); gofmt-check, `go vet`, golangci-lint (worker); `buf lint` (proto); biome + tsc (webui) |
-| Test | `make test` | `pytest` (api), `go test ./...` + `worker-e2e-compile` (worker), vitest (webui) |
+| Format all modules | `make format` | ruff format + `ruff check --fix` (api), `gofmt -w` (worker, relay), biome (webui) |
+| Lint + typecheck | `make lint` | ruff, mypy, import-linter (api); gofmt-check, `go vet`, golangci-lint (worker, relay); `buf lint` (proto); biome + tsc (webui) |
+| Test | `make test` | `pytest` (api), `go test ./...` + `worker-e2e-compile` (worker), `go test ./...` + `relay-e2e-compile` (relay), vitest (webui) |
 | Full gate | `make check` | `hooks-check` + `lint` + `test` + `webui-build` + `openapi-check` + `proto-check` + `docs-check` — what pre-push and CI run |
 | Regenerate proto stubs | `make proto-gen` | regenerate the Go + Python control-plane stubs (Section 6) |
 | Check proto stubs are current | `make proto-check` | regenerate and fail if the committed stubs drift |
 | Regenerate webui OpenAPI client | `make openapi-gen` | regenerate `webui/openapi.json` + `webui/src/api/schema.ts` from the api routes |
 | Check webui OpenAPI client is current | `make openapi-check` | regenerate and fail if the committed client artifacts drift |
-| Install pinned local tooling | `make bootstrap` | golangci-lint into `worker/.bin`, `uv sync` for api |
+| Install pinned local tooling | `make bootstrap` | golangci-lint into `worker/.bin`, `uv sync` for api, `npm ci` for webui |
 | Install git hooks | `make hooks-install` | one-time, sets `core.hooksPath` |
 
 Before opening a PR, run `make check`. It is the same gate CI enforces, so a
@@ -82,6 +82,8 @@ When you are working inside one module, its README has the full command list
 
 - `api/` — [`../../api/README.md`](../../api/README.md)
 - `worker/` — [`../../worker/README.md`](../../worker/README.md)
+- `relay/` — [`../../relay/README.md`](../../relay/README.md)
+- `webui/` — [`../../webui/README.md`](../../webui/README.md)
 - `proto/` — [`../../proto/README.md`](../../proto/README.md)
 
 ## 4. Where things live
