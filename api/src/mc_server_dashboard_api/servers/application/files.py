@@ -35,6 +35,7 @@ is refused at the edge before any dispatch or Storage write.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import tarfile
 import zipfile
@@ -713,7 +714,11 @@ class UploadFile:
                 # in a dry-run pass BEFORE writing anything: a mid-archive rejection
                 # then leaves no partially-written versioned files (issue #269). The
                 # archive bytes are already in memory, so the second pass is cheap.
-                _validate_archive(
+                # Offloaded to a thread: decompression is CPU-bound and can process
+                # up to MAX_UPLOAD_BYTES (512 MiB), blocking the event loop
+                # (issue #1620).
+                await asyncio.to_thread(
+                    _validate_archive,
                     filename,
                     content,
                     max_bytes=self.max_bytes,
@@ -722,12 +727,14 @@ class UploadFile:
                 # Guard every extracted entry against the content directory
                 # (issue #1337). Scan all entries before writing so a single
                 # offending member rejects the whole archive cleanly.
-                entries = list(
-                    _archive_entries(
-                        filename,
-                        content,
-                        max_bytes=self.max_bytes,
-                        max_entries=self.max_entries,
+                entries = await asyncio.to_thread(
+                    lambda: list(
+                        _archive_entries(
+                            filename,
+                            content,
+                            max_bytes=self.max_bytes,
+                            max_entries=self.max_entries,
+                        )
                     )
                 )
                 for entry_path, _data in entries:
