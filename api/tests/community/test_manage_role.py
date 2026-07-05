@@ -11,6 +11,7 @@ read/update/delete reject a role from another community as not-found
 from __future__ import annotations
 
 import datetime as dt
+import uuid
 
 import pytest
 
@@ -37,6 +38,7 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     Permission,
     RoleId,
     RoleName,
+    UserId,
 )
 from tests.community.fakes import FakeAuthzUnitOfWork
 
@@ -85,8 +87,15 @@ def _seed_custom_role(
 async def test_create_role_persists_a_validated_role() -> None:
     uow = FakeAuthzUnitOfWork()
     community = CommunityId.new()
+    actor = UserId(uuid.uuid4())
+    uow.add_role(
+        actor,
+        community,
+        {Permission("server:read"), Permission("server:start")},
+    )
     role = await CreateRole(uow=uow, clock=_FakeClock())(
         community_id=community,
+        actor_id=actor,
         name="Editor",
         permissions={Permission("server:read"), Permission("server:start")},
     )
@@ -101,6 +110,7 @@ async def test_create_role_rejects_unknown_permission() -> None:
     with pytest.raises(UnknownPermissionError):
         await CreateRole(uow=uow, clock=_FakeClock())(
             community_id=CommunityId.new(),
+            actor_id=UserId(uuid.uuid4()),
             name="Bad",
             permissions={Permission("server:teleport")},
         )
@@ -112,6 +122,7 @@ async def test_create_role_rejects_platform_admin_permission() -> None:
     with pytest.raises(UnknownPermissionError):
         await CreateRole(uow=uow, clock=_FakeClock())(
             community_id=CommunityId.new(),
+            actor_id=UserId(uuid.uuid4()),
             name="Bad",
             permissions={Permission("worker:manage")},
         )
@@ -121,10 +132,13 @@ async def test_create_role_rejects_platform_admin_permission() -> None:
 async def test_update_role_replaces_name_and_permissions() -> None:
     uow = FakeAuthzUnitOfWork()
     community = CommunityId.new()
+    actor = UserId(uuid.uuid4())
+    uow.add_role(actor, community, {Permission("server:stop")})
     role_id = _seed_custom_role(uow, community)
     role = await UpdateRole(uow=uow, clock=_FakeClock())(
         community_id=community,
         role_id=role_id,
+        actor_id=actor,
         name="Operator",
         permissions={Permission("server:stop")},
     )
@@ -140,6 +154,7 @@ async def test_update_role_rejects_editing_the_preset_owner_role() -> None:
         await UpdateRole(uow=uow, clock=_FakeClock())(
             community_id=community,
             role_id=owner_id,
+            actor_id=UserId(uuid.uuid4()),
             permissions={Permission("server:read")},
         )
 
@@ -152,6 +167,7 @@ async def test_update_role_rejects_unknown_permission() -> None:
         await UpdateRole(uow=uow, clock=_FakeClock())(
             community_id=community,
             role_id=role_id,
+            actor_id=UserId(uuid.uuid4()),
             permissions={Permission("server:teleport")},
         )
 
@@ -163,6 +179,7 @@ async def test_update_role_in_other_community_is_not_found() -> None:
         await UpdateRole(uow=uow, clock=_FakeClock())(
             community_id=CommunityId.new(),
             role_id=role_id,
+            actor_id=UserId(uuid.uuid4()),
             name="X",
         )
 
