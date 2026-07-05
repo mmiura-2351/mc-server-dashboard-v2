@@ -1325,10 +1325,11 @@ func (m *Manager) takeRunningReserve(serverID string) (execution.Instance, sessi
 }
 
 // peekStartCmd returns the recorded StartServer spec for a currently-tracked
-// running instance WITHOUT evicting or reserving it, so handleRestart can resolve
-// the driver/launch mode while the instance is still live and tracked. ok is false
-// when no instance is tracked for the id (the caller then runs the eviction path
-// to distinguish not-found from a reserved in-flight command).
+// running instance WITHOUT evicting or reserving it. handleRestart uses it as
+// a cheap existence check so the early-out failure paths leave the instance
+// tracked and live. ok is false when no instance is tracked for the id (the
+// caller then runs the eviction path to distinguish not-found from a reserved
+// in-flight command).
 func (m *Manager) peekStartCmd(serverID string) (session.Command, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1339,13 +1340,10 @@ func (m *Manager) peekStartCmd(serverID string) (session.Command, bool) {
 }
 
 func (m *Manager) handleRestart(ctx context.Context, cmd session.Command) session.CommandResult {
-	// Resolve the driver and launch mode from the recorded StartServer spec BEFORE
-	// evicting/reserving the instance, so a resolution failure surfaces while the
-	// instance is still tracked and live — no release of an already-evicted process
-	// that nothing else is tracking. This path is defensive (the recorded spec came
-	// from a StartServer that already validated both), but resolving first keeps the
-	// failure mode honest if it ever does fail.
-	start, ok := m.peekStartCmd(cmd.ServerID)
+	// Quick existence check: is there a running instance tracked for this id?
+	// We peek without evicting so the early-out failure paths ("not found" vs
+	// "in-flight") leave the instance tracked and live.
+	_, ok := m.peekStartCmd(cmd.ServerID)
 	if !ok {
 		// No tracked running instance: takeRunningReserve distinguishes a genuinely
 		// unknown id (SERVER_NOT_FOUND) from a reserved in-flight command — a detached
@@ -1358,17 +1356,6 @@ func (m *Manager) handleRestart(ctx context.Context, cmd session.Command) sessio
 		return fail(cmd.CommandID, session.CommandErrorServerNotFound,
 			"instancemanager: server not running")
 	}
-	driver, ok := m.drivers[start.Driver]
-	if !ok {
-		return fail(cmd.CommandID, session.CommandErrorDriverUnavailable,
-			fmt.Sprintf("instancemanager: driver %q not offered by this Worker", start.Driver))
-	}
-	launchMode, ok := launchModeFor(start.LaunchMode)
-	if !ok {
-		return fail(cmd.CommandID, session.CommandErrorInternal,
-			fmt.Sprintf("instancemanager: unknown launch mode %q", start.LaunchMode))
-	}
-
 	inst, start, outcome := m.takeRunningReserve(cmd.ServerID)
 	switch outcome {
 	case takeNotFound:
@@ -1381,6 +1368,22 @@ func (m *Manager) handleRestart(ctx context.Context, cmd session.Command) sessio
 		// unassigning a server whose process may still be alive.
 		return fail(cmd.CommandID, session.CommandErrorBusy,
 			"instancemanager: a lifecycle command is already in flight for this server")
+	}
+	// Resolve the driver and launch mode from the authoritative start spec returned
+	// by takeRunningReserve. This is defensive (the recorded spec came from a
+	// StartServer that already validated both); on failure we release the reservation
+	// so the id is not left claimed.
+	driver, ok := m.drivers[start.Driver]
+	if !ok {
+		m.release(cmd.ServerID)
+		return fail(cmd.CommandID, session.CommandErrorDriverUnavailable,
+			fmt.Sprintf("instancemanager: driver %q not offered by this Worker", start.Driver))
+	}
+	launchMode, ok := launchModeFor(start.LaunchMode)
+	if !ok {
+		m.release(cmd.ServerID)
+		return fail(cmd.CommandID, session.CommandErrorInternal,
+			fmt.Sprintf("instancemanager: unknown launch mode %q", start.LaunchMode))
 	}
 	// The id is reserved from here across the stop and the relaunch; it is handed off
 	// to the re-registered instance on a successful relaunch (launchReserved) and

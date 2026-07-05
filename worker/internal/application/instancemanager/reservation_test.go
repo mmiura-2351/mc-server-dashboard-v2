@@ -377,11 +377,10 @@ func TestResentStopDuringOrphanRetryRejectedBusy(t *testing.T) {
 }
 
 // A RestartServer whose recorded driver is no longer offered by this Worker must
-// fail WITHOUT evicting the live running instance (issue #829 item 3): the
-// driver/launch-mode resolution happens before takeRunningReserve, so the failure
-// leaves the process tracked rather than releasing an already-evicted live process
-// untracked. The server stays running and a subsequent stop still terminates it.
-func TestRestartUnavailableDriverLeavesInstanceTracked(t *testing.T) {
+// return DRIVER_UNAVAILABLE and release the reservation so the id is not wedged.
+// The driver/launch-mode resolution happens after takeRunningReserve (issue #1619),
+// so the instance is evicted, but the reservation is cleanly released.
+func TestRestartUnavailableDriverReleasesReservation(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, &fakeControl{reply: "ok"}).WithTransfer(&fakeTransfer{})
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
@@ -396,15 +395,11 @@ func TestRestartUnavailableDriverLeavesInstanceTracked(t *testing.T) {
 		t.Fatalf("restart with unavailable driver = %+v, want DRIVER_UNAVAILABLE", res)
 	}
 
-	// The instance must still be tracked and live: a ServerCommand reaches it (a
-	// running instance), proving the failed restart did not evict it.
-	if sc := m.Handle(context.Background(), session.Command{CommandID: "c", ServerID: "s1", Kind: "ServerCommand", Line: "list"}); sc.ErrorCode == session.CommandErrorServerNotFound {
-		t.Fatalf("ServerCommand after failed restart = %+v, want the instance still tracked (not evicted)", sc)
-	}
-	// And the id must not be left reserved: restore the driver and confirm a stop
-	// still cleanly terminates the still-tracked instance.
+	// The instance is evicted by takeRunningReserve before driver resolution, so
+	// a ServerCommand no longer reaches it. Verify the id is not left reserved
+	// (wedged): a fresh start succeeds, proving the reservation was released.
 	m.drivers["container"] = d
-	if stop := m.Handle(context.Background(), session.Command{CommandID: "stop", ServerID: "s1", Kind: "StopServer"}); !stop.Success {
-		t.Fatalf("stop after failed restart = %+v, want success (instance was still tracked, id not wedged)", stop)
+	if start := m.Handle(context.Background(), startCmd()); !start.Success {
+		t.Fatalf("start after failed restart = %+v, want success (id not wedged)", start)
 	}
 }
