@@ -28,6 +28,7 @@ from mc_server_dashboard_api.fleet.adapters.control_plane import ControlPlaneSta
 from mc_server_dashboard_api.fleet.adapters.grpc_server import (
     _MAX_CONSECUTIVE_HANDLER_FAILURES,
     WorkerSessionServicer,
+    _keepalive_options,
 )
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
 from mc_server_dashboard_api.fleet.domain.entities import WorkerStatus
@@ -819,3 +820,116 @@ async def test_metrics_is_published_to_real_time_events(harness: _Harness) -> No
         "player_count": 3,
     }
     await call.done_writing()
+
+
+# ---------------------------------------------------------------------------
+# Heartbeat-timeout enforcement (issue #1600)
+# ---------------------------------------------------------------------------
+
+# A short timeout keeps the watchdog poll (timeout/3) under ~0.1 s so the
+# session-end detection is fast enough for a test. The shared clock between
+# registry and servicer lets us advance liveness deterministically while the
+# watchdog's asyncio.sleep still runs at real-time pace.
+_SHORT_TIMEOUT = dt.timedelta(seconds=0.3)
+
+
+def _shared_clock_harness() -> _Harness:
+    """Harness whose registry and servicer share the same FakeClock.
+
+    The default harness fixture gives each its own clock. The watchdog
+    detects a lapse by reading ``registry.get()`` which derives liveness
+    from the *registry's* clock; advancing one clock must also advance the
+    other for the watchdog to see OFFLINE, so a shared instance is needed.
+    """
+
+    clock = FakeClock(_T0)
+    return _Harness(
+        InMemoryWorkerRegistry(clock=clock, heartbeat_timeout=_SHORT_TIMEOUT),
+        clock,
+    )
+
+
+async def test_heartbeat_lapse_ends_session_and_marks_servers_unknown() -> None:
+    h = _shared_clock_harness()
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call.write(_register_message())
+        await call.read()  # ack
+
+        # Advance the shared clock past the liveness window; the watchdog's
+        # next poll (at most ~0.1 s real time) will see the worker OFFLINE.
+        h.clock.set(_T0 + _SHORT_TIMEOUT + dt.timedelta(seconds=1))
+        await _drain_to_eof(call)
+
+        snapshot = h.registry.list_workers()[0]
+        assert snapshot.status is WorkerStatus.OFFLINE
+        assert h.state_sink.unknown_for == [_WORKER_ID]
+    finally:
+        await h.stop()
+
+
+async def test_refreshed_heartbeats_keep_session_alive() -> None:
+    h = _shared_clock_harness()
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call.write(_register_message())
+        await call.read()  # ack
+
+        # Advance the clock to just under the timeout multiple times,
+        # heartbeating each time. The session must stay alive.
+        for i in range(1, 4):
+            # Advance to just under the timeout since last heartbeat.
+            h.clock.set(_T0 + dt.timedelta(seconds=0.2 * i))
+            await call.write(_heartbeat_message())
+            # Let the server process the heartbeat.
+            await asyncio.sleep(0.05)
+
+        # The worker should still be online after sustained heartbeats.
+        snapshot = h.registry.list_workers()[0]
+        assert snapshot.status is WorkerStatus.ONLINE
+        assert h.state_sink.unknown_for == []
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+async def test_watchdog_ends_superseded_session() -> None:
+    # Register on call A, re-register on call B; verify stale session A's
+    # watchdog exits (is_current_session → False) without clobbering B.
+    # The clock is NOT advanced: A's watchdog exits on the session check
+    # alone, and B's liveness stays within the timeout.
+    h = _shared_clock_harness()
+    try:
+        stub = await h.start()
+        call_a = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call_a.write(_register_message())
+        await call_a.read()  # ack
+
+        call_b = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call_b.write(_register_message())
+        await call_b.read()  # ack
+
+        # Session A's watchdog polls after ~0.1 s, sees its session is
+        # superseded (is_current_session returns False), and exits. That
+        # ends the Session generator for A through the normal teardown.
+        await _drain_to_eof(call_a)
+
+        # Session B's worker must stay ONLINE: the stale watchdog exited
+        # without marking disconnected or marking servers unknown.
+        snapshot = h.registry.list_workers()[0]
+        assert snapshot.status is WorkerStatus.ONLINE
+        assert h.state_sink.unknown_for == []
+        await call_b.done_writing()
+    finally:
+        await h.stop()
+
+
+def test_keepalive_options_derive_from_heartbeat_timeout() -> None:
+    timeout = dt.timedelta(seconds=30)
+    options = _keepalive_options(timeout)
+    options_dict = dict(options)
+    assert options_dict["grpc.keepalive_time_ms"] == 30_000
+    assert options_dict["grpc.keepalive_timeout_ms"] == 20_000
+    assert options_dict["grpc.http2.max_pings_without_data"] == 0

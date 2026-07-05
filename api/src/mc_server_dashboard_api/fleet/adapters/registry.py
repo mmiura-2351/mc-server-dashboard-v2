@@ -5,7 +5,9 @@ Holds the connected Workers in a process-local dict. At this scale
 stream, so an in-memory map is sufficient; a future milestone can swap a shared
 adapter behind the same Port without touching the gRPC edge or the read
 endpoint. Liveness is re-derived on every read from the injected ``Clock`` and
-the configured heartbeat timeout, so no background sweep is needed.
+the configured heartbeat timeout, so no background sweep is needed for
+liveness reads; stream timeout enforcement lives in the per-session
+watchdog coroutine in ``grpc_server.py`` (issue #1600).
 
 Drain intent outlives connections: the registry remembers which worker ids an
 operator has drained, so a re-registration of a drained id comes back DRAINING
