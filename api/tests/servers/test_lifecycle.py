@@ -3083,3 +3083,77 @@ async def test_redispatch_stop_failure_keeps_assignment() -> None:
         )
     stored = uow.servers.by_id[ServerId(server_id)]
     assert stored.assigned_worker_id == WorkerId(worker)
+
+
+# --- clear_stale_assignment (issue #1599: stopped/unknown/assigned) --------
+
+
+async def test_clear_stale_assignment_stopped_unknown_disconnected_clears() -> None:
+    # Issue #1599: (stopped, unknown, assigned) + worker disconnected -> clears.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.UNKNOWN,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(connected={WorkerId(worker): False})
+    result = await StopServer(
+        uow=uow, control_plane=cp, clock=FakeClock(_NOW)
+    ).clear_stale_assignment(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    assert result.assigned_worker_id is None
+    assert cp.dispatched == []
+
+
+async def test_clear_stale_assignment_stopped_unknown_connected_raises() -> None:
+    # Issue #1599: (stopped, unknown, assigned) + worker connected -> TOCTOU guard
+    # raises InvalidLifecycleTransitionError (the next tick will redispatch_stop).
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.UNKNOWN,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(connected={WorkerId(worker): True})
+    with pytest.raises(InvalidLifecycleTransitionError):
+        await StopServer(
+            uow=uow, control_plane=cp, clock=FakeClock(_NOW)
+        ).clear_stale_assignment(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+    # Assignment kept.
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.assigned_worker_id == WorkerId(worker)
+
+
+async def test_clear_stale_assignment_stopped_stopped_still_works() -> None:
+    # The original #847 case still works: (stopped, stopped, assigned) clears.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.STOPPED,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane()
+    result = await StopServer(
+        uow=uow, control_plane=cp, clock=FakeClock(_NOW)
+    ).clear_stale_assignment(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    assert result.assigned_worker_id is None

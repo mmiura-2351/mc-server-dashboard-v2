@@ -110,13 +110,14 @@ describe("CommunityEventsClient", () => {
     };
   }
 
-  it("connects with the access token in the ?token= query", () => {
+  it("connects with the access token in the subprotocol header", () => {
     const { client } = makeClient();
     client.start();
     expect(MockWebSocket.last().url).toContain(
       `/api/communities/${CID}/events`,
     );
-    expect(MockWebSocket.last().url).toContain("token=tok-1");
+    expect(MockWebSocket.last().url).not.toContain("token=");
+    expect(MockWebSocket.last().protocols).toEqual(["access_token", "tok-1"]);
     client.close();
   });
 
@@ -182,13 +183,13 @@ describe("CommunityEventsClient", () => {
     client.start();
     const first = MockWebSocket.last();
     first.open();
-    expect(first.url).toContain("token=tok-1");
+    expect(first.protocols).toEqual(["access_token", "tok-1"]);
 
     setAccessToken("tok-2"); // rotation
     expect(first.closed).toBe(true);
     const second = MockWebSocket.last();
     expect(MockWebSocket.instances).toHaveLength(2);
-    expect(second.url).toContain("token=tok-2");
+    expect(second.protocols).toEqual(["access_token", "tok-2"]);
     client.close();
   });
 

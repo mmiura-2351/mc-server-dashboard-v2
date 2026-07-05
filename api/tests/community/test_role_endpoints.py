@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 from mc_server_dashboard_api.app import create_app
 from mc_server_dashboard_api.community.domain.entities import Role
 from mc_server_dashboard_api.community.domain.errors import (
+    PermissionCeilingExceededError,
     PresetRoleNotEditableError,
     RoleAlreadyExistsError,
     RoleNotFoundError,
@@ -230,6 +231,25 @@ def test_create_role_malformed_permission_returns_422() -> None:
     assert resp.json()["reason"] == "invalid_permission"
 
 
+def test_create_role_ceiling_exceeded_returns_403() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        create_uc=_FakeUseCase(
+            error=PermissionCeilingExceededError(["community:delete"])
+        ),
+    )
+    client = next(_client(app))
+    resp = client.post(
+        f"/api/communities/{uuid.uuid4()}/roles",
+        json={"name": "Editor", "permissions": ["server:read"]},
+    )
+    assert resp.status_code == 403
+    body = resp.json()
+    assert body["reason"] == "permission_ceiling"
+    assert body["permissions"] == ["community:delete"]
+
+
 # --- update -----------------------------------------------------------------
 
 
@@ -258,6 +278,23 @@ def test_update_role_cross_community_gets_404() -> None:
         json={"name": "X"},
     )
     assert resp.status_code == 404
+
+
+def test_update_role_ceiling_exceeded_returns_403() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        update_uc=_FakeUseCase(error=PermissionCeilingExceededError(["server:delete"])),
+    )
+    client = next(_client(app))
+    resp = client.patch(
+        f"/api/communities/{uuid.uuid4()}/roles/{uuid.uuid4()}",
+        json={"permissions": ["server:read"]},
+    )
+    assert resp.status_code == 403
+    body = resp.json()
+    assert body["reason"] == "permission_ceiling"
+    assert body["permissions"] == ["server:delete"]
 
 
 # --- delete -----------------------------------------------------------------

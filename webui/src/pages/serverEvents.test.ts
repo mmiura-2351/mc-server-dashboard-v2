@@ -15,11 +15,11 @@ function frame(stream: string, payload: unknown) {
 }
 
 describe("serverEventsUrl", () => {
-  it("builds the events path with the streams comma list and token", () => {
-    const url = serverEventsUrl(CID, SID, ["status", "log", "metrics"], "tok");
+  it("builds the events path with the streams comma list (no token)", () => {
+    const url = serverEventsUrl(CID, SID, ["status", "log", "metrics"]);
     expect(url).toContain(`/api/communities/${CID}/servers/${SID}/events`);
     expect(url).toContain("streams=status%2Clog%2Cmetrics");
-    expect(url).toContain("token=tok");
+    expect(url).not.toContain("token=");
   });
 });
 
@@ -111,13 +111,14 @@ describe("ServerEventsClient", () => {
     return { client, onFrame, onOpen, onDown };
   }
 
-  it("subscribes to all three streams with the token", () => {
+  it("subscribes to all three streams with the token in subprotocol", () => {
     const { client } = makeClient();
     client.start();
-    const url = MockWebSocket.last().url;
-    expect(url).toContain(`/api/communities/${CID}/servers/${SID}/events`);
-    expect(url).toContain("streams=status%2Clog%2Cmetrics");
-    expect(url).toContain("token=tok-1");
+    const ws = MockWebSocket.last();
+    expect(ws.url).toContain(`/api/communities/${CID}/servers/${SID}/events`);
+    expect(ws.url).toContain("streams=status%2Clog%2Cmetrics");
+    expect(ws.url).not.toContain("token=");
+    expect(ws.protocols).toEqual(["access_token", "tok-1"]);
     client.close();
   });
 
@@ -151,7 +152,7 @@ describe("ServerEventsClient", () => {
 
     MockWebSocket.last().open();
     setAccessToken("tok-2"); // rotation
-    expect(MockWebSocket.last().url).toContain("token=tok-2");
+    expect(MockWebSocket.last().protocols).toEqual(["access_token", "tok-2"]);
     client.close();
   });
 

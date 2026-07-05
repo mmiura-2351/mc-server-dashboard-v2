@@ -88,15 +88,14 @@ intentionally never bumped. This is the simplest correct choice at this stage:
 one repository-wide SemVer (per the monorepo note above), releases cut by tag
 push (Section 4.3), and nothing that can drift out of step.
 
-The components do not yet derive their version from the tag at build time. The
-Worker embeds a hard-coded placeholder: `worker/cmd/worker/main.go` declares
-`const version = "0.0.0-dev"` and advertises it as `worker_version` at
-registration, so a Worker built from any tag reports `0.0.0-dev` to the control
-plane. Neither the `worker/` nor the `relay/` Docker build passes `-ldflags`,
-and the release workflow injects nothing, so no component binary carries the
-release tag today. Wiring the tag into the build (`git describe`, Go
-`-ldflags`, a setuptools-scm-style mechanism for `api/`, etc.) rather than
-relying on a checked-in constant is tracked in #1624.
+Both `worker/cmd/worker/main.go` and `relay/cmd/relay/main.go` declare
+`var version = "0.0.0-dev"`, overridden at build time via
+`go build -ldflags "-X main.version=<tag>"`. The Dockerfiles accept a
+`VERSION` build arg (defaulting to `0.0.0-dev`), and `make build`,
+`scripts/update.sh`, and `scripts/deploy.sh` pass
+`git describe --tags --always` as that arg. A plain `go build` without
+`-ldflags` (or a compose build without the arg) keeps the `0.0.0-dev`
+fallback, which is correct for local development.
 
 **Alternatives considered and rejected:**
 

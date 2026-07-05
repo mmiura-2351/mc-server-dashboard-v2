@@ -48,6 +48,9 @@ if [ ! -f .env ]; then
 	read -rp "API_HTTP_PORT [8000]: " API_HTTP_PORT
 	API_HTTP_PORT="${API_HTTP_PORT:-8000}"
 
+	read -rp "API_HTTP_BIND_IP (127.0.0.1=loopback, 0.0.0.0=all) [127.0.0.1]: " API_HTTP_BIND_IP
+	API_HTTP_BIND_IP="${API_HTTP_BIND_IP:-127.0.0.1}"
+
 	read -rp "Storage backend (object/fs) [object]: " STORAGE_BACKEND
 	STORAGE_BACKEND="${STORAGE_BACKEND:-object}"
 	if [ "$STORAGE_BACKEND" != "object" ] && [ "$STORAGE_BACKEND" != "fs" ]; then
@@ -165,6 +168,7 @@ CLOUDFLARE_TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
 
 # --- Published host ports --------------------------------------------------
 API_HTTP_PORT=${API_HTTP_PORT}
+API_HTTP_BIND_IP=${API_HTTP_BIND_IP}
 ENVEOF
 
 	echo ""
@@ -181,14 +185,16 @@ echo "deploy: pulling latest main..."
 git pull --ff-only origin main
 
 # ── 3. Build all components (api -> relay -> worker) ─────────────────────────
+build_version="$(git describe --tags --always 2>/dev/null || echo 0.0.0-dev)"
+
 echo "deploy: building api..."
 sg docker -c "DOCKER_BUILDKIT=1 docker build --network=host -t mcsd-api:dev -f api/Dockerfile ."
 
 echo "deploy: building relay..."
-sg docker -c "DOCKER_BUILDKIT=1 docker build --network=host -t mcsd-relay:dev ./relay"
+sg docker -c "DOCKER_BUILDKIT=1 docker build --network=host --build-arg VERSION=${build_version} -t mcsd-relay:dev ./relay"
 
 echo "deploy: building worker..."
-sg docker -c "DOCKER_BUILDKIT=1 docker build --network=host -t mcsd-worker:dev ./worker"
+sg docker -c "DOCKER_BUILDKIT=1 docker build --network=host --build-arg VERSION=${build_version} -t mcsd-worker:dev ./worker"
 
 # ── 4. Deploy ─────────────────────────────────────────────────────────────────
 echo "deploy: starting services..."
