@@ -164,11 +164,13 @@ async def _load(
 
 
 def _guard_content_dir(server_type: ServerType, rel_path: str) -> None:
-    """Reject a Files API path that falls under the plugin content directory.
+    """Reject a Files API path that is a direct child of the content directory.
 
     The content directory (``mods/`` or ``plugins/``) is managed exclusively by
-    the Plugin API. Server types that do not support plugins (vanilla) are
-    unguarded -- :func:`content_dir_for_server_type` raises
+    the Plugin API for its top-level files (the managed JARs). Subdirectory
+    config files (e.g. ``plugins/Essentials/config.yml``) are user-editable and
+    pass through (issue #1670). Server types that do not support plugins
+    (vanilla) are unguarded -- :func:`content_dir_for_server_type` raises
     :class:`UnsupportedPluginServerTypeError` for those, which we catch and
     skip.
     """
@@ -179,7 +181,10 @@ def _guard_content_dir(server_type: ServerType, rel_path: str) -> None:
         return
 
     normalized = str(PurePosixPath(rel_path))
-    if normalized == content_dir or normalized.startswith(f"{content_dir}/"):
+    if normalized == content_dir:
+        raise ContentDirProtectedError(rel_path)
+    prefix = f"{content_dir}/"
+    if normalized.startswith(prefix) and "/" not in normalized[len(prefix) :]:
         raise ContentDirProtectedError(rel_path)
 
 
