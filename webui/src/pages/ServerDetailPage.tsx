@@ -22,6 +22,7 @@ import { type Can, useCan } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
 import { dashboardPath } from "../routes.ts";
 import { isEulaNotAccepted, lifecycleErrorMessage } from "./lifecycleErrors.ts";
+import { stripMinecraftCodes } from "./mcFormat.ts";
 import { ServerBackupsTab } from "./ServerBackupsTab.tsx";
 import { ServerFilesTab } from "./ServerFilesTab.tsx";
 import { ServerPlayersTab } from "./ServerPlayersTab.tsx";
@@ -1019,7 +1020,7 @@ function LogView({
         ) : (
           <div key={entry.id} className={`log-line ${entry.kind}`}>
             {entry.kind === "command" ? "> " : ""}
-            {entry.line}
+            {stripMinecraftCodes(entry.line)}
           </div>
         ),
       )}
@@ -1066,7 +1067,7 @@ function Console({
       events.appendLocal([
         { kind: "command", line },
         ...(output.length > 0
-          ? [{ kind: "output" as const, line: output }]
+          ? [{ kind: "output" as const, line: stripMinecraftCodes(output) }]
           : []),
       ]);
     },
