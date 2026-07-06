@@ -364,7 +364,7 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   restore" two-step); typed-confirm dialog. A `quarantined` backup requires a
   second force-acknowledge confirmation before the `?force=true` restore is
   issued.
-- Create backup button (works on running servers — save-all + snapshot path);
+- Create backup button (works on running servers — on-demand snapshot path);
   upload backup (file picker).
 - Schedule: per-server interval via the `backup_interval_hours` key on the
   server `config` blob (`PATCH …/servers/{sid}`) — no dedicated endpoint; the
