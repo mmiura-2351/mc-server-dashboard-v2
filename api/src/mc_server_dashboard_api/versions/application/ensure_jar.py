@@ -19,10 +19,14 @@ caller passes it to short-circuit the re-download.
 from __future__ import annotations
 
 import hashlib
+import logging
 from dataclasses import dataclass
 
 from mc_server_dashboard_api.versions.domain.catalog import VersionCatalog
-from mc_server_dashboard_api.versions.domain.errors import JarHashMismatchError
+from mc_server_dashboard_api.versions.domain.errors import (
+    JarHashMismatchError,
+    VersionError,
+)
 from mc_server_dashboard_api.versions.domain.jar_fetcher import JarFetcher
 from mc_server_dashboard_api.versions.domain.jar_pool import JarPool
 from mc_server_dashboard_api.versions.domain.value_objects import (
@@ -31,10 +35,34 @@ from mc_server_dashboard_api.versions.domain.value_objects import (
     ServerType,
 )
 
+_LOG = logging.getLogger(__name__)
+
 _HASHLIB_NAME = {
     HashAlgorithm.SHA1: "sha1",
     HashAlgorithm.SHA256: "sha256",
 }
+
+
+@dataclass(frozen=True)
+class EnsuredJar:
+    """Result of an ensure-on-start: the pool content key and the source fingerprint."""
+
+    key: str  # pool content key (SHA-256)
+    source_fingerprint: str | None  # None only on resolve-failure fallback
+
+
+def source_fingerprint(source: JarSource) -> str:
+    """Derive a comparable fingerprint from a resolved :class:`JarSource`.
+
+    For sources that publish a digest (vanilla SHA-1, Paper SHA-256, Forge SHA-1):
+    ``"{algorithm}:{hash}"``.  For sources without a digest (Fabric):
+    ``"url:{download_url}"`` — the URL embeds the loader/installer versions, so a
+    version bump produces a different fingerprint.
+    """
+
+    if source.expected_hash is not None and source.hash_algorithm is not None:
+        return f"{source.hash_algorithm.value}:{source.expected_hash.lower()}"
+    return f"url:{source.url}"
 
 
 @dataclass(frozen=True)
@@ -51,13 +79,52 @@ class EnsureJar:
         server_type: ServerType,
         version: str,
         known_key: str | None = None,
-    ) -> str:
+        known_source: str | None = None,
+    ) -> EnsuredJar:
+        # Always resolve the latest build so we detect upstream updates.
+        try:
+            source = await self.catalog.resolve(server_type, version)
+        except VersionError:
+            # Catalog unavailable: fall back to the existing JAR if pooled.
+            if known_key is not None and await self.pool.has(known_key):
+                _LOG.warning(
+                    "catalog resolve failed for %s %s; falling back to pooled JAR %s",
+                    server_type.value,
+                    version,
+                    known_key,
+                )
+                return EnsuredJar(known_key, known_source)
+            raise
+
+        fingerprint = source_fingerprint(source)
+
         if known_key is not None and await self.pool.has(known_key):
-            return known_key
-        source = await self.catalog.resolve(server_type, version)
+            # The existing JAR is still pooled.  Skip the download when the
+            # source fingerprint matches (same build) OR when we can prove
+            # identity via SHA-256 (Paper back-compat shortcut: the pool key IS
+            # the published sha256, so no recorded fingerprint is needed).
+            if known_source == fingerprint:
+                return EnsuredJar(known_key, fingerprint)
+            if (
+                source.hash_algorithm is HashAlgorithm.SHA256
+                and source.expected_hash is not None
+                and known_key.lower() == source.expected_hash.lower()
+            ):
+                return EnsuredJar(known_key, fingerprint)
+            # Fingerprint differs: a newer build is available upstream.
+            _LOG.info(
+                "upstream JAR updated for %s %s (old fingerprint: %s, "
+                "new: %s); downloading new build",
+                server_type.value,
+                version,
+                known_source,
+                fingerprint,
+            )
+
         data = await self.fetcher.fetch(source.url)
         _verify(source, data)
-        return await self.pool.put(data)
+        key = await self.pool.put(data)
+        return EnsuredJar(key, fingerprint)
 
 
 def _verify(source: JarSource, data: bytes) -> None:

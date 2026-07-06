@@ -59,6 +59,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
 from mc_server_dashboard_api.servers.domain.jar_provisioner import JarProvisioningError
 from mc_server_dashboard_api.servers.domain.value_objects import (
     JAR_KEY_CONFIG_FIELD,
+    JAR_SOURCE_CONFIG_FIELD,
     CommunityId,
     DesiredState,
     ObservedState,
@@ -320,9 +321,170 @@ async def test_start_records_resolved_jar_key_in_config() -> None:
     await use_case(community_id=CommunityId(community), server_id=ServerId(server_id))
 
     # The ensure ran (before placement), and the resolved key is persisted.
-    assert provisioner.calls == [("vanilla", "1.21.1", None)]
+    assert provisioner.calls == [("vanilla", "1.21.1", None, None)]
     stored = uow.servers.by_id[ServerId(server_id)]
     assert stored.config[JAR_KEY_CONFIG_FIELD] == "a" * 64
+    assert JAR_SOURCE_CONFIG_FIELD in stored.config
+
+
+async def test_start_persists_both_jar_config_fields() -> None:
+    """Both the pool key and the source fingerprint are written to config (#1676)."""
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = FakeControlPlane(place_to=WorkerId(worker))
+    provisioner = FakeJarProvisioner(key="b" * 64, source="sha1:cafe0123")
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=provisioner,
+        store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
+    )
+
+    await use_case(community_id=CommunityId(community), server_id=ServerId(server_id))
+
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.config[JAR_KEY_CONFIG_FIELD] == "b" * 64
+    assert stored.config[JAR_SOURCE_CONFIG_FIELD] == "sha1:cafe0123"
+
+
+async def test_start_passes_known_source_to_provisioner() -> None:
+    """When a server already has a recorded source fingerprint, it is forwarded."""
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            config={
+                JAR_KEY_CONFIG_FIELD: "c" * 64,
+                JAR_SOURCE_CONFIG_FIELD: "sha1:oldfingerprint",
+            },
+        )
+    )
+    cp = FakeControlPlane(place_to=WorkerId(worker))
+    provisioner = FakeJarProvisioner(key="c" * 64)
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=provisioner,
+        store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
+    )
+
+    await use_case(community_id=CommunityId(community), server_id=ServerId(server_id))
+
+    assert provisioner.calls == [("vanilla", "1.21.1", "c" * 64, "sha1:oldfingerprint")]
+
+
+async def test_start_jar_update_does_not_skip_hydrate_when_held_is_stale() -> None:
+    """When the JAR changes and the Worker holds a stale generation, hydrate runs
+    (the normal path: the new JAR is delivered via hydrate)."""
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            config={JAR_KEY_CONFIG_FIELD: "d" * 64},
+        )
+    )
+    cp = FakeControlPlane(
+        place_to=WorkerId(worker),
+        # Worker holds generation 0, store is at 1 -> stale, should hydrate.
+        held={(WorkerId(worker), ServerId(server_id)): 0},
+    )
+    provisioner = FakeJarProvisioner(key="e" * 64)  # different key = JAR updated
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=provisioner,
+        store_generation=FakeStoreGenerationReader(generation=1),
+        file_store=FakeFileStore(seed_eula=True),
+    )
+
+    await use_case(community_id=CommunityId(community), server_id=ServerId(server_id))
+
+    # Hydrate should have run (not skipped).
+    assert ("hydrate", WorkerId(worker), ServerId(server_id)) in cp.dispatched
+
+
+async def test_start_jar_update_skips_hydrate_when_held_is_fresh_and_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When the JAR changes but the Worker holds a fresh generation, skip hydrate
+    for world safety but log a warning (#1676)."""
+    import logging
+
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            config={JAR_KEY_CONFIG_FIELD: "d" * 64},
+        )
+    )
+    cp = FakeControlPlane(
+        place_to=WorkerId(worker),
+        # Worker holds generation 5, store is at 5 -> fresh, skip hydrate.
+        held={(WorkerId(worker), ServerId(server_id)): 5},
+    )
+    provisioner = FakeJarProvisioner(key="e" * 64)  # different key = JAR updated
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=provisioner,
+        store_generation=FakeStoreGenerationReader(generation=5),
+        file_store=FakeFileStore(seed_eula=True),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    # Hydrate should NOT have run (skip-hydrate active).
+    assert ("hydrate", WorkerId(worker), ServerId(server_id)) not in cp.dispatched
+    assert "JAR updated" in caplog.text
+    assert "skip-hydrate is active" in caplog.text
+
+
+async def test_place_and_start_persists_both_jar_config_fields() -> None:
+    """place_and_start also records the source fingerprint (#1676)."""
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.UNKNOWN,
+        )
+    )
+    cp = FakeControlPlane(place_to=WorkerId(worker))
+    provisioner = FakeJarProvisioner(key="a" * 64, source="sha1:abc123")
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=provisioner,
+        store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
+    )
+
+    await use_case.place_and_start(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.config[JAR_KEY_CONFIG_FIELD] == "a" * 64
+    assert stored.config[JAR_SOURCE_CONFIG_FIELD] == "sha1:abc123"
 
 
 async def test_start_fails_before_placement_when_jar_provisioning_fails() -> None:
