@@ -64,6 +64,7 @@ from mc_server_dashboard_api.servers.domain.groups import (
 from mc_server_dashboard_api.servers.domain.jar_provisioner import (
     JarProvisioner,
     JarProvisioningError,
+    ProvisionedJar,
 )
 from mc_server_dashboard_api.servers.domain.lifecycle_lock import LifecycleLock
 from mc_server_dashboard_api.servers.domain.memory_limit import memory_limit_from_config
@@ -121,18 +122,30 @@ class FakeJarProvisioner(JarProvisioner):
     ensure call so a test can assert it ran before placement.
     """
 
-    def __init__(self, *, key: str = "f" * 64, fail: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        key: str = "f" * 64,
+        source: str | None = "sha256:" + "f" * 64,
+        fail: bool = False,
+    ) -> None:
         self._key = key
+        self._source = source
         self._fail = fail
-        self.calls: list[tuple[str, str, str | None]] = []
+        self.calls: list[tuple[str, str, str | None, str | None]] = []
 
     async def ensure(
-        self, *, server_type: str, version: str, known_key: str | None
-    ) -> str:
-        self.calls.append((server_type, version, known_key))
+        self,
+        *,
+        server_type: str,
+        version: str,
+        known_key: str | None,
+        known_source: str | None = None,
+    ) -> ProvisionedJar:
+        self.calls.append((server_type, version, known_key, known_source))
         if self._fail:
             raise JarProvisioningError("forced provisioning failure")
-        return self._key
+        return ProvisionedJar(key=self._key, source=self._source)
 
 
 class FakeStoreGenerationReader(StoreGenerationReader):

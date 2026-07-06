@@ -15,6 +15,7 @@ inject the right JAR.
 from __future__ import annotations
 
 import abc
+from dataclasses import dataclass
 
 
 class JarProvisioningError(Exception):
@@ -27,16 +28,30 @@ class JarProvisioningError(Exception):
     """
 
 
+@dataclass(frozen=True)
+class ProvisionedJar:
+    """Result of a JAR provisioning: the pool content key and source fingerprint."""
+
+    key: str
+    source: str | None
+
+
 class JarProvisioner(abc.ABC):
     """Port: ensure the resolved JAR is pooled; return its content key (FR-VER-3)."""
 
     @abc.abstractmethod
     async def ensure(
-        self, *, server_type: str, version: str, known_key: str | None
-    ) -> str:
+        self,
+        *,
+        server_type: str,
+        version: str,
+        known_key: str | None,
+        known_source: str | None = None,
+    ) -> ProvisionedJar:
         """Ensure the JAR for ``(server_type, version)`` is pooled; return its key.
 
         ``known_key`` is the previously-recorded content key, if any: when the JAR
-        is already pooled under it, the download is skipped. Raises
+        is already pooled under it, the download is skipped. ``known_source`` is
+        the previously-recorded source fingerprint for update detection. Raises
         :class:`JarProvisioningError` on any failure to obtain a verified JAR.
         """
