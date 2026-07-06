@@ -23,6 +23,7 @@ from mc_server_dashboard_api.versions.adapters.vanilla import (
 from mc_server_dashboard_api.versions.application.ensure_jar import EnsureJar
 from mc_server_dashboard_api.versions.domain.errors import (
     CatalogUnavailableError,
+    JarDownloadError,
     JarHashMismatchError,
 )
 from mc_server_dashboard_api.versions.domain.value_objects import JarSource, ServerType
@@ -167,6 +168,32 @@ async def test_known_key_present_skips_download_when_fingerprint_matches() -> No
     assert result.key == key
     assert result.source_fingerprint == fingerprint
     assert jar_fetcher.calls == []  # no re-download
+
+
+@pytest.mark.asyncio
+async def test_migration_vanilla_re_downloads_once_without_known_source() -> None:
+    """Pre-#1676 vanilla server: pooled key + no known_source + SHA-1 source.
+
+    The SHA-256 shortcut does not apply (source is SHA-1), and known_source is
+    None so the fingerprint comparison fails.  The JAR is re-downloaded once,
+    returning the same key and the new fingerprint for future starts.
+    """
+    good_sha1 = hashlib.sha1(_JAR).hexdigest()
+    ensure, pool, jar_fetcher = _ensure(good_sha1)
+    key = hashlib.sha256(_JAR).hexdigest()
+    pool.stored[key] = _JAR  # already pooled
+
+    result = await ensure(
+        server_type=ServerType.VANILLA,
+        version="1.21.1",
+        known_key=key,
+        # No known_source: pre-#1676 server
+    )
+
+    assert result.key == key
+    assert result.source_fingerprint == f"sha1:{good_sha1}"
+    # One-time re-download (fingerprint mismatch: None != "sha1:...").
+    assert jar_fetcher.calls == [_JAR_URL]
 
 
 @pytest.mark.asyncio
@@ -342,4 +369,65 @@ async def test_resolve_failure_without_pooled_key_raises() -> None:
     ensure = EnsureJar(catalog=catalog, fetcher=jar_fetcher, pool=pool)
 
     with pytest.raises(CatalogUnavailableError):
+        await ensure(server_type=ServerType.VANILLA, version="1.21.1")
+
+
+class _FailingJarFetcher(FakeJarFetcher):
+    """A JAR fetcher that raises JarDownloadError on every fetch."""
+
+    async def fetch(self, url: str) -> bytes:
+        self.calls.append(url)
+        raise JarDownloadError(f"download failed for {url}")
+
+
+@pytest.mark.asyncio
+async def test_download_failure_with_pooled_key_falls_back(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When download of a new build fails but the old JAR is pooled, fall back."""
+    old_sha1 = hashlib.sha1(_JAR).hexdigest()
+    # Catalog publishes a DIFFERENT hash than what we recorded, so the
+    # fingerprint mismatches and the code proceeds to download.
+    new_sha1 = hashlib.sha1(_NEW_JAR).hexdigest()
+    json_fetcher = FakeJsonFetcher(
+        {_MANIFEST_URL: _manifest(), _VERSION_URL: _new_detail(new_sha1)}
+    )
+    catalog = CompositeCatalog(
+        by_type={ServerType.VANILLA: VanillaCatalog(fetcher=json_fetcher)}
+    )
+    pool = FakeJarPool()
+    key = hashlib.sha256(_JAR).hexdigest()
+    pool.stored[key] = _JAR
+    jar_fetcher = _FailingJarFetcher({})
+    ensure = EnsureJar(catalog=catalog, fetcher=jar_fetcher, pool=pool)
+
+    old_fingerprint = f"sha1:{old_sha1}"
+    with caplog.at_level(logging.WARNING):
+        result = await ensure(
+            server_type=ServerType.VANILLA,
+            version="1.21.1",
+            known_key=key,
+            known_source=old_fingerprint,
+        )
+
+    assert result.key == key
+    assert result.source_fingerprint == old_fingerprint
+    assert "falling back to pooled" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_download_failure_without_pooled_key_raises() -> None:
+    """When download fails and no existing JAR is pooled, raise."""
+    good_sha1 = hashlib.sha1(_JAR).hexdigest()
+    json_fetcher = FakeJsonFetcher(
+        {_MANIFEST_URL: _manifest(), _VERSION_URL: _detail(good_sha1)}
+    )
+    catalog = CompositeCatalog(
+        by_type={ServerType.VANILLA: VanillaCatalog(fetcher=json_fetcher)}
+    )
+    pool = FakeJarPool()
+    jar_fetcher = _FailingJarFetcher({})
+    ensure = EnsureJar(catalog=catalog, fetcher=jar_fetcher, pool=pool)
+
+    with pytest.raises(JarDownloadError):
         await ensure(server_type=ServerType.VANILLA, version="1.21.1")

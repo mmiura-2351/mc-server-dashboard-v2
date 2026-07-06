@@ -1201,8 +1201,12 @@ function Console({
 // overrides editor (issue #645) so they can't be edited or deleted, but their
 // values are preserved across a save (see `Settings`) since the PATCH replaces
 // the whole `config` blob. `resolved_jar_sha256` is the resolved-JAR content
-// address written by the start path (servers/domain/value_objects.py).
-const SYSTEM_MANAGED_CONFIG_KEYS = new Set(["resolved_jar_sha256"]);
+// address and `resolved_jar_source` is the source fingerprint for auto-update
+// detection (issue #1676), both written by the start path.
+const SYSTEM_MANAGED_CONFIG_KEYS = new Set([
+  "resolved_jar_sha256",
+  "resolved_jar_source",
+]);
 
 // The per-server memory limit (issue #709) rides the `config` blob as a reserved
 // key (unit: MiB), but it has a dedicated field rather than a raw override row,

@@ -5,15 +5,14 @@ the version exists (cheap, no download); START ensures the JAR is in the pool.
 Given a ``(server_type, version)`` it resolves the :class:`JarSource` via the
 catalog, downloads the bytes, verifies them against the source's published digest
 (SHA-1 for vanilla, SHA-256 for Paper), and stores them content-addressed —
-returning the resulting :class:`JarKey` (its SHA-256). A hash mismatch rejects the
-bytes and raises before anything is stored, so a start fails cleanly before
-placement/dispatch.
+returning an :class:`EnsuredJar` carrying the pool content key (SHA-256) and the
+source fingerprint used for update detection (issue #1676).
 
-The download is skipped when the JAR is already pooled. The pool key is the
-bytes' SHA-256, which is *not* the source's expected digest for vanilla (SHA-1),
-so presence cannot be tested from the source descriptor alone before the first
-download; once the content key is known (recorded on the server, issue #118) the
-caller passes it to short-circuit the re-download.
+On each start the catalog is resolved to obtain the latest build's fingerprint.
+The download is skipped when the recorded ``known_source`` fingerprint matches, or
+when a SHA-256 shortcut proves identity (Paper). When the catalog or the download
+fails and a ``known_key`` is still pooled, the existing JAR is reused with a
+warning so the server still starts.
 """
 
 from __future__ import annotations
@@ -24,7 +23,9 @@ from dataclasses import dataclass
 
 from mc_server_dashboard_api.versions.domain.catalog import VersionCatalog
 from mc_server_dashboard_api.versions.domain.errors import (
+    JarDownloadError,
     JarHashMismatchError,
+    JarTooLargeError,
     VersionError,
 )
 from mc_server_dashboard_api.versions.domain.jar_fetcher import JarFetcher
@@ -67,7 +68,10 @@ def source_fingerprint(source: JarSource) -> str:
 
 @dataclass(frozen=True)
 class EnsureJar:
-    """Resolve, download-and-verify, and pool a server JAR; return its content key."""
+    """Resolve, download-and-verify, and pool a server JAR.
+
+    Returns an :class:`EnsuredJar` with the pool key and source fingerprint.
+    """
 
     catalog: VersionCatalog
     fetcher: JarFetcher
@@ -121,8 +125,21 @@ class EnsureJar:
                 fingerprint,
             )
 
-        data = await self.fetcher.fetch(source.url)
-        _verify(source, data)
+        try:
+            data = await self.fetcher.fetch(source.url)
+            _verify(source, data)
+        except (JarDownloadError, JarTooLargeError, JarHashMismatchError):
+            # Download/verify failed: fall back to the existing JAR if pooled.
+            if known_key is not None and await self.pool.has(known_key):
+                _LOG.warning(
+                    "JAR download/verify failed for %s %s; "
+                    "falling back to pooled JAR %s",
+                    server_type.value,
+                    version,
+                    known_key,
+                )
+                return EnsuredJar(known_key, known_source)
+            raise
         key = await self.pool.put(data)
         return EnsuredJar(key, fingerprint)
 

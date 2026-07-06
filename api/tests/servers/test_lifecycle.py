@@ -418,8 +418,6 @@ async def test_start_jar_update_skips_hydrate_when_held_is_fresh_and_warns(
 ) -> None:
     """When the JAR changes but the Worker holds a fresh generation, skip hydrate
     for world safety but log a warning (#1676)."""
-    import logging
-
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
     uow.servers.seed(

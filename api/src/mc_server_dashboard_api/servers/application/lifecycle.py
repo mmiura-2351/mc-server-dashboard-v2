@@ -289,10 +289,6 @@ class StartServer:
                 held_generation,
                 store_generation,
             )
-        elif jar_changed and not skip_hydrate:
-            # Held generation is stale or absent: hydrate will deliver the new JAR
-            # (the default path — skip_hydrate is already False).
-            pass
 
         dispatch = _Dispatch()
         try:
