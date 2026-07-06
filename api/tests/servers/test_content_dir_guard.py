@@ -172,6 +172,24 @@ class TestGuardContentDir:
         """``config/test.yml`` is outside the content dir -- must be allowed."""
         _guard_content_dir(ServerType.FABRIC, "config/test.yml")
 
+    # -- Subdirectory config files (issue #1670) -----------------------------
+
+    def test_allows_subdir_config_in_mods(self) -> None:
+        """``mods/some-mod/config.yml`` is a subdirectory file -- allowed."""
+        _guard_content_dir(ServerType.FABRIC, "mods/some-mod/config.yml")
+
+    def test_allows_subdir_config_in_plugins(self) -> None:
+        """``plugins/Essentials/config.yml`` is a subdirectory file -- allowed."""
+        _guard_content_dir(ServerType.PAPER, "plugins/Essentials/config.yml")
+
+    def test_allows_deep_nested_config(self) -> None:
+        """``plugins/Geyser/locale/en.json`` -- deeply nested, allowed."""
+        _guard_content_dir(ServerType.PAPER, "plugins/Geyser/locale/en.json")
+
+    def test_allows_dot_prefix_subdir(self) -> None:
+        """``./mods/some-mod/settings.json`` normalizes to a subdir -- allowed."""
+        _guard_content_dir(ServerType.FABRIC, "./mods/some-mod/settings.json")
+
 
 # ---------------------------------------------------------------------------
 # Part 1b: Use-case integration -- WriteFile
@@ -192,6 +210,23 @@ async def test_write_file_rejects_content_dir() -> None:
             rel_path="mods/evil.jar",
             content=b"payload",
         )
+
+
+async def test_write_file_allows_content_dir_subdir() -> None:
+    """A write to a subdirectory config file inside mods/ should succeed."""
+    uow = FakeUnitOfWork()
+    server = _server(server_type=ServerType.FABRIC)
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+    uc = WriteFile(uow=uow, control_plane=FakeControlPlane(), file_store=fs)
+
+    await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        rel_path="mods/some-mod/config.yml",
+        content=b"setting: true",
+    )
+    assert fs.files["mods/some-mod/config.yml"] == b"setting: true"
 
 
 async def test_write_file_allows_outside_content_dir() -> None:
