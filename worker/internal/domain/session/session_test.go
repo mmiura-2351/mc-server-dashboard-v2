@@ -1141,3 +1141,154 @@ func TestRegisterStatusResyncEmptyEmitsNothing(t *testing.T) {
 	cancel()
 	<-done
 }
+
+// A handled-kind command with an empty ServerID must be rejected with
+// CommandErrorServerNotFound and never reach the handler (issue #1618). Every
+// handled kind is server-scoped by contract; an empty id bypasses the
+// per-server lane machinery and would run inline on the receive goroutine.
+func TestHandledKindWithEmptyServerIDRejected(t *testing.T) {
+	transport := newFakeTransport(acceptedAck())
+	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
+	clock := newFakeClock()
+	handler := newFakeHandler(CommandResult{Success: true})
+	r := NewRunner(dialer, testCaps(), clock, discardLogger(), WithCommandHandler(handler))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+
+	handledKinds := []string{
+		"StartServer", "StopServer", "RestartServer", "ServerCommand",
+		"HydrateTrigger", "SnapshotTrigger", "ReadFile", "EditFile", "ListFiles",
+		"TunnelDial", "OpenBedrockTunnel", "CloseBedrockTunnel",
+	}
+	for i, kind := range handledKinds {
+		transport.commands <- Command{
+			CommandID: fmt.Sprintf("cmd-%d", i),
+			ServerID:  "",
+			Kind:      kind,
+		}
+	}
+
+	waitFor(t, func() bool { return len(transport.resultsCopy()) == len(handledKinds) })
+
+	for i, res := range transport.resultsCopy() {
+		if res.CommandID != fmt.Sprintf("cmd-%d", i) {
+			t.Errorf("result[%d] CommandID = %q, want cmd-%d", i, res.CommandID, i)
+		}
+		if res.Success {
+			t.Errorf("result[%d] (%s) Success = true, want false", i, handledKinds[i])
+		}
+		if res.ErrorCode != CommandErrorServerNotFound {
+			t.Errorf("result[%d] (%s) ErrorCode = %v, want CommandErrorServerNotFound", i, handledKinds[i], res.ErrorCode)
+		}
+		if res.ErrorMessage == "" {
+			t.Errorf("result[%d] (%s) ErrorMessage empty, want a description", i, handledKinds[i])
+		}
+	}
+
+	if n := len(handler.handledCopy()); n != 0 {
+		t.Errorf("handler invoked %d times, want 0 (empty ServerID must not reach handler)", n)
+	}
+
+	cancel()
+	<-done
+}
+
+// An empty-ServerID handled-kind command must not block the receive loop: it
+// is rejected instantly with CommandErrorServerNotFound, so a subsequent command
+// for a real server proceeds without delay (issue #1618).
+func TestEmptyServerIDCommandDoesNotBlockReceiveLoop(t *testing.T) {
+	transport := newFakeTransport(acceptedAck())
+	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
+	clock := newFakeClock()
+	handler := newLaneHandler("")
+	r := NewRunner(dialer, testCaps(), clock, discardLogger(), WithCommandHandler(handler))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+
+	// Send an empty-ServerID handled-kind, then a real server command.
+	transport.commands <- Command{CommandID: "hyd", ServerID: "", Kind: "HydrateTrigger"}
+	transport.commands <- Command{CommandID: "stop-s2", ServerID: "s2", Kind: "StopServer"}
+
+	// stop-s2 must complete successfully.
+	waitFor(t, func() bool {
+		for _, res := range transport.resultsCopy() {
+			if res.CommandID == "stop-s2" && res.Success {
+				return true
+			}
+		}
+		return false
+	})
+
+	// hyd must have been rejected with CommandErrorServerNotFound.
+	var hydResult *CommandResult
+	for _, res := range transport.resultsCopy() {
+		if res.CommandID == "hyd" {
+			r := res
+			hydResult = &r
+		}
+	}
+	if hydResult == nil {
+		t.Fatal("hyd result not found")
+	}
+	if hydResult.Success {
+		t.Error("hyd Success = true, want false")
+	}
+	if hydResult.ErrorCode != CommandErrorServerNotFound {
+		t.Errorf("hyd ErrorCode = %v, want CommandErrorServerNotFound", hydResult.ErrorCode)
+	}
+
+	// The handler must have processed only stop-s2, never hyd.
+	ids := handler.handledIDs()
+	if len(ids) != 1 || ids[0] != "stop-s2" {
+		t.Errorf("handler processed %v, want only [stop-s2]", ids)
+	}
+
+	cancel()
+	<-done
+}
+
+// An empty-ServerID command with an unknown (or empty) Kind must still get the
+// canned "unsupported" result with CommandErrorInternal — the empty-ServerID
+// guard only applies to handled kinds (issue #1618).
+func TestEmptyServerIDUnknownKindStaysUnsupported(t *testing.T) {
+	transport := newFakeTransport(acceptedAck())
+	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
+	clock := newFakeClock()
+	handler := newFakeHandler(CommandResult{Success: true})
+	r := NewRunner(dialer, testCaps(), clock, discardLogger(), WithCommandHandler(handler))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+
+	transport.commands <- Command{CommandID: "empty", ServerID: "", Kind: ""}
+	transport.commands <- Command{CommandID: "fleet", ServerID: "", Kind: "SomeFutureFleetCommand"}
+
+	waitFor(t, func() bool { return len(transport.resultsCopy()) == 2 })
+
+	for _, res := range transport.resultsCopy() {
+		if res.Success {
+			t.Errorf("result %q Success = true, want false (unsupported)", res.CommandID)
+		}
+		if res.ErrorCode != CommandErrorInternal {
+			t.Errorf("result %q ErrorCode = %v, want CommandErrorInternal", res.CommandID, res.ErrorCode)
+		}
+		if res.ErrorMessage == "" {
+			t.Errorf("result %q ErrorMessage empty, want an explanation", res.CommandID)
+		}
+	}
+
+	if n := len(handler.handledCopy()); n != 0 {
+		t.Errorf("handler invoked %d times, want 0", n)
+	}
+
+	cancel()
+	<-done
+}
