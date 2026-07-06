@@ -75,6 +75,10 @@ from dataclasses import dataclass
 from mc_server_dashboard_api.servers.application.command_dispatch import (
     dispatch_failure as _dispatch_failure,
 )
+from mc_server_dashboard_api.servers.domain.bedrock_tunnel import (
+    BedrockTunnelSync,
+    NullBedrockTunnelSync,
+)
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.committed_resources import (
     committed_resources_by_worker,
@@ -168,6 +172,7 @@ class StartServer:
     store_generation: StoreGenerationReader
     file_store: FileStore
     lifecycle_lock: LifecycleLock = NullLifecycleLock()
+    bedrock_tunnel_sync: BedrockTunnelSync = NullBedrockTunnelSync()
 
     async def __call__(
         self,
@@ -320,6 +325,15 @@ class StartServer:
             if applied:
                 server.observed_state = ObservedState.RUNNING
                 server.observed_at = observed_at
+                # Sync the Bedrock tunnel to match the convergence write (issue
+                # #1602): the repository write above bypasses the sink's hook, so
+                # without this the tunnel is never opened on the INVALID_STATE path.
+                await self.bedrock_tunnel_sync.sync_observed(
+                    server_id=server_id,
+                    worker_id=worker_id,
+                    bedrock_port=server.bedrock_port,
+                    running=True,
+                )
             return server
         failure = _dispatch_failure(
             server_id=server_id, kind="StartServer", outcome=outcome
@@ -543,6 +557,13 @@ class StartServer:
             if applied:
                 server.observed_state = ObservedState.RUNNING
                 server.observed_at = observed_at
+                # Sync the Bedrock tunnel (issue #1602), same as __call__'s arm.
+                await self.bedrock_tunnel_sync.sync_observed(
+                    server_id=server_id,
+                    worker_id=worker_id,
+                    bedrock_port=server.bedrock_port,
+                    running=True,
+                )
             return server
         if outcome.status is CommandStatus.BUSY:
             # A BUSY start means another mutating lifecycle command for this id is
@@ -805,6 +826,7 @@ class StopServer:
     uow: UnitOfWork
     control_plane: ControlPlane
     clock: Clock
+    bedrock_tunnel_sync: BedrockTunnelSync = NullBedrockTunnelSync()
 
     async def __call__(
         self, *, community_id: CommunityId, server_id: ServerId, force: bool = False
@@ -873,6 +895,13 @@ class StopServer:
                 server.observed_state = ObservedState.STOPPED
                 server.observed_at = observed_at
                 server.assigned_worker_id = None
+                # Close the Bedrock tunnel (issue #1602).
+                await self.bedrock_tunnel_sync.sync_observed(
+                    server_id=server_id,
+                    worker_id=worker_id,
+                    bedrock_port=server.bedrock_port,
+                    running=False,
+                )
             return server
         if not outcome.success:
             raise _dispatch_failure(
@@ -963,6 +992,13 @@ class StopServer:
         if applied:
             server.observed_state = ObservedState.STOPPED
             server.observed_at = observed_at
+            # Close the Bedrock tunnel (issue #1602).
+            await self.bedrock_tunnel_sync.sync_observed(
+                server_id=server_id,
+                worker_id=worker_id,
+                bedrock_port=server.bedrock_port,
+                running=False,
+            )
         # Final snapshot AFTER the process has exited (the confirmed stop returns only
         # once the Worker reports the process gone) and BEFORE the unassign, so the
         # captured working set is quiescent (FR-DATA-4, FR-DATA-7).
@@ -1137,6 +1173,13 @@ class StopServer:
                 server.observed_state = ObservedState.STOPPED
                 server.observed_at = observed_at
                 server.assigned_worker_id = None
+                # Close the Bedrock tunnel (issue #1602).
+                await self.bedrock_tunnel_sync.sync_observed(
+                    server_id=server_id,
+                    worker_id=worker_id,
+                    bedrock_port=server.bedrock_port,
+                    running=False,
+                )
             return server
         # A confirmed live stop: converge observed=stopped, take the final snapshot,
         # THEN unassign — the same deferred-unassign sequence StopServer.__call__

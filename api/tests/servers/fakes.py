@@ -26,6 +26,7 @@ from mc_server_dashboard_api.servers.domain.backup_repository import (
     BackupRepository,
 )
 from mc_server_dashboard_api.servers.domain.backup_store import BackupArchiveStore
+from mc_server_dashboard_api.servers.domain.bedrock_tunnel import BedrockTunnelSync
 from mc_server_dashboard_api.servers.domain.catalog_provider import (
     CatalogProject,
     CatalogProvider,
@@ -1411,3 +1412,25 @@ class FakePluginCacheStore(PluginCacheStore):
 
     async def delete(self, sha256: str) -> None:
         self.blobs.pop(sha256, None)
+
+
+class FakeBedrockTunnelSync(BedrockTunnelSync):
+    """Recording :class:`BedrockTunnelSync` double (issue #1602).
+
+    Records ``(server_id, worker_id, bedrock_port, running)`` tuples so a test
+    can assert the lifecycle invoked the tunnel sync on the INVALID_STATE and
+    confirmed-stop convergence paths.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[ServerId, WorkerId, int | None, bool]] = []
+
+    async def sync_observed(
+        self,
+        *,
+        server_id: ServerId,
+        worker_id: WorkerId,
+        bedrock_port: int | None,
+        running: bool,
+    ) -> None:
+        self.calls.append((server_id, worker_id, bedrock_port, running))
