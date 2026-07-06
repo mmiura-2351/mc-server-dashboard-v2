@@ -312,7 +312,7 @@ the bytes have moved (STORAGE.md Section 8):
 API-side orchestrations rely on this ordering. Hydrate-then-start (the API issues
 `HydrateTrigger`, awaits its result, then `StartServer`) relies on the working
 set being present before launch; the running-backup chain
-(save-all → `SnapshotTrigger` → archive) relies on the snapshot being published
+(`SnapshotTrigger` — worker-side quiesce — → archive) relies on the snapshot being published
 before it archives from authoritative Storage. A worker change that emitted the
 trigger result before the transfer completed would silently break both flows —
 the API would proceed against an unhydrated or unpublished working set with no
