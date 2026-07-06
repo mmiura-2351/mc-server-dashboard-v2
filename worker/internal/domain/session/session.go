@@ -270,9 +270,12 @@ func (r *Runner) serve(ctx context.Context, transport Transport, interval time.D
 // one server never interleave) while different servers' lanes run concurrently —
 // a slow graceful Stop on one server no longer delays commands for another (issue
 // #95). A command with no server id (or an unset/unknown oneof) has no lane to
-// order against, so it is handled inline; an unhandled kind gets an "unsupported"
-// result. A command is never silently dropped (CONTROL_PLANE.md Section 5). Every
-// result is pushed to results, drained by the single sender in serve.
+// order against, so it is handled inline; the inline path is guaranteed instant:
+// for an empty id, handleCommand either rejects a handled (server-scoped) kind
+// with CommandErrorServerNotFound (issue #1618) or returns the canned
+// "unsupported" result. A command is never silently dropped (CONTROL_PLANE.md
+// Section 5). Every result is pushed to results, drained by the single sender in
+// serve.
 func (r *Runner) receiveLoop(ctx context.Context, transport Transport, disp *dispatcher) error {
 	for {
 		cmd, err := transport.RecvCommand(ctx)
@@ -318,9 +321,20 @@ func (r *Runner) handle(ctx context.Context, cmd Command) CommandResult {
 }
 
 // handleCommand produces the CommandResult for a command, dispatching to the
-// handler for a handled kind and answering "unsupported" otherwise.
+// handler for a handled kind and answering "unsupported" otherwise. A handled
+// kind with an empty ServerID is rejected with CommandErrorServerNotFound
+// rather than dispatched: every handled kind is server-scoped by contract, so
+// an empty id means the command cannot reach any server (issue #1618).
 func (r *Runner) handleCommand(ctx context.Context, cmd Command) CommandResult {
 	if r.handler != nil && IsHandledKind(cmd.Kind) {
+		if cmd.ServerID == "" {
+			return CommandResult{
+				CommandID:    cmd.CommandID,
+				Success:      false,
+				ErrorCode:    CommandErrorServerNotFound,
+				ErrorMessage: fmt.Sprintf("session: server-scoped command %q arrived with an empty server id", cmd.Kind),
+			}
+		}
 		r.logger.Info("dispatching command",
 			"command_id", cmd.CommandID, "server_id", cmd.ServerID, "kind", cmd.Kind)
 		return r.handler.Handle(ctx, cmd)
@@ -341,6 +355,10 @@ func (r *Runner) handleCommand(ctx context.Context, cmd Command) CommandResult {
 // manager's Manager.Handle): a kind the handler accepts but this filter omits
 // is answered with the canned "unsupported" result and never reaches the
 // handler (issue #219). An instancemanager test guards that contract.
+//
+// Every kind listed here is server-scoped; a future worker-scoped (fleet-wide)
+// command kind must NOT be added to this list without revisiting the empty-
+// ServerID guard in handleCommand (issue #1618).
 func IsHandledKind(kind string) bool {
 	switch kind {
 	case "StartServer", "StopServer", "RestartServer", "ServerCommand",
