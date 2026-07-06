@@ -791,7 +791,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "grpcio-tools", specifier = ">=1.80.0,<1.82" },
+    { name = "grpcio-tools", specifier = ">=1.80.0,<1.83" },
     { name = "import-linter", specifier = ">=2.11" },
     { name = "mypy", specifier = ">=2.1.0" },
     { name = "mypy-protobuf", specifier = ">=5.1.0,<6" },
