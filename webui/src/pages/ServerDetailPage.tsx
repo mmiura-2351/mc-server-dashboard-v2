@@ -1126,7 +1126,7 @@ function Console({
     if (needle.length === 0 || entry.kind === "gap") {
       return true;
     }
-    return entry.line.toLowerCase().includes(needle);
+    return stripMinecraftCodes(entry.line).toLowerCase().includes(needle);
   });
 
   return (
