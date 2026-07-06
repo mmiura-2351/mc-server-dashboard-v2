@@ -439,7 +439,7 @@ branch on server state. This policy is shared by 6.10 (File Management) and
 |---|---|---|
 | File read | Authoritative Storage copy | Read-through to the Worker's live working set |
 | File edit | Authoritative Storage copy | Applied to the Worker's live working set (effect may require a restart). A file edit **creates** the target if it does not exist yet (create-through), the same as an at-rest edit — a valid relative path to a not-yet-existing file is never rejected as a bad path. |
-| Backup | Archive directly from the authoritative Storage copy | `save-all` via RCON → on-demand snapshot → archive (no stop required) |
+| Backup | Archive directly from the authoritative Storage copy | On-demand snapshot (worker quiesces via save-off → save-all → settle-wait) → archive (no stop required) |
 | Restore | Replace the authoritative working set | **Stop required** (hot replacement of a live working set is unsafe) |
 
 ### 6.10 File Management
@@ -459,8 +459,8 @@ branch on server state. This policy is shared by 6.10 (File Management) and
 - FR-BAK-1: Members with permission can create, list, restore, and delete
   backups of a server.
 - FR-BAK-2: Backups are produced per the 6.9 state policy: from the authoritative
-  Storage copy when stopped, or via `save-all` → on-demand snapshot → archive
-  when running. A backup is effectively a retained snapshot and does not depend
+  Storage copy when stopped, or via on-demand snapshot (worker quiesces via
+  save-off → save-all → settle-wait) → archive when running. A backup is effectively a retained snapshot and does not depend
   on a specific Worker.
 - FR-BAK-3: Scheduled backups are supported. The M1 schedule is a per-server
   `backup_interval_hours` integer (stored in `server.config`; absent = no scheduled
@@ -566,7 +566,7 @@ The open questions from the first draft are resolved as follows:
 |---|---|---|---|
 | 1 | Community provisioning flow | **Admin-only creation.** Only a platform administrator creates a Community and assigns its owner. Self-service dropped (Section 2.3). | FR-COMM-2 |
 | 2 | Invitation mechanism | **Manual add.** A Community owner/admin adds an existing user account directly. Invite links / email dropped (Section 2.3). | FR-MEM-1 |
-| 3 | File/backup semantics for running servers | **State-branching policy** (read/edit read-through to the Worker when running; backup via save-all→snapshot→archive; restore requires stop). | 6.9, FR-FILE-2, FR-BAK-4 |
+| 3 | File/backup semantics for running servers | **State-branching policy** (read/edit read-through to the Worker when running; backup via worker-quiesced snapshot→archive; restore requires stop). | 6.9, FR-FILE-2, FR-BAK-4 |
 | 4 | Snapshot interval policy | **Periodic default + per-server override + event-driven** (graceful stop, on-demand backup). | FR-DATA-7 |
 | 5 | Transport | **gRPC bidirectional stream** for the control plane; **API-terminated HTTP** for the bulk data plane. | 5.1, 5.2 |
 | 6 | Worker placement (M1) | **Resource-aware, advisory**: capability filter, then commit-based memory gate (hard, OOM-enforced) and CPU least-loaded rank (soft, oversubscribed) against advertised `HostResources`; `NoEligibleWorker` if memory cannot fit. Placement isolated for a future scheduler. | FR-WRK-3, #710, #707, #724 |
