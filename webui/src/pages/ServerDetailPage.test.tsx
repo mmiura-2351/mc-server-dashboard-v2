@@ -2479,6 +2479,27 @@ describe("ServerDetailPage Console tab", () => {
     expect(screen.queryByText("drop this")).not.toBeInTheDocument();
   });
 
+  it("filters against §-stripped text, matching what is displayed", async () => {
+    await openConsole({ observed_state: "running" });
+    act(() => {
+      MockWebSocket.last().message(
+        serverFrame("log", {
+          line: " §8- §afloodgate§r, §aGeyser-Spigot",
+          stream: "stdout",
+        }),
+      );
+      MockWebSocket.last().message(
+        serverFrame("log", { line: "unrelated line", stream: "stdout" }),
+      );
+    });
+    fireEvent.change(
+      screen.getByPlaceholderText(t("serverDetail.console.filter")),
+      { target: { value: "floodgate, geyser" } },
+    );
+    expect(screen.getByText(/floodgate, Geyser-Spigot/)).toBeInTheDocument();
+    expect(screen.queryByText("unrelated line")).not.toBeInTheDocument();
+  });
+
   it("clears the stream", async () => {
     await openConsole({ observed_state: "running" });
     act(() => {
