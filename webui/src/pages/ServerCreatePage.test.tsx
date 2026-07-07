@@ -118,12 +118,11 @@ async function pickTypeAndVersion() {
   );
 }
 
-// Walk steps 1→3 leaving a created-ready form: pick a type, the latest version
-// preselects, advance to runtime then config, and fill the name.
+// Walk steps 1→2 leaving a create-ready form: pick a type, the latest version
+// preselects, advance to config, and fill the name.
 async function reachConfigStep(name = "survival") {
   await pickTypeAndVersion();
   fireEvent.click(screen.getByText(t("serverCreate.next")));
-  fireEvent.click(await screen.findByText(t("serverCreate.next")));
   const nameInput = await screen.findByLabelText(t("serverCreate.nameLabel"));
   fireEvent.change(nameInput, { target: { value: name } });
 }
@@ -200,7 +199,7 @@ describe("Step 1 — type & version", () => {
   });
 });
 
-describe("Step 2 — runtime port check", () => {
+describe("Step 2 — port check", () => {
   it("auto-suggests the game port from /ports/available on entering step 2", async () => {
     renderPage();
     await pickTypeAndVersion();
@@ -375,7 +374,7 @@ describe("Step 2 — port control gated on relay mode (#1002)", () => {
     renderPage();
     await pickTypeAndVersion();
     fireEvent.click(screen.getByText(t("serverCreate.next")));
-    // Advancing to runtime resolves; in relay mode the port field is hidden.
+    // Advancing to config resolves; in relay mode the port field is hidden.
     await waitFor(() =>
       expect(screen.queryByLabelText(t("serverCreate.portLabel"))).toBeNull(),
     );
@@ -396,7 +395,7 @@ describe("Step 2 — port control gated on relay mode (#1002)", () => {
   });
 });
 
-describe("Step 3 — config & EULA", () => {
+describe("Step 2 — config & EULA", () => {
   it("warns when the EULA is not accepted", async () => {
     renderPage();
     await reachConfigStep();
@@ -452,7 +451,7 @@ describe("Step 3 — config & EULA", () => {
   });
 });
 
-describe("Step 3 — resource allocation (#715)", () => {
+describe("Step 2 — resource allocation (#715)", () => {
   it("includes set memory limit and CPU allocation in the create config", async () => {
     mockApi.post.mockResolvedValue({ id: "s-new" });
     renderPage();
@@ -624,7 +623,7 @@ describe("create error surfacing", () => {
   });
 });
 
-describe("Step 3 — join address name (slug) field (issue #981, gated on relay #1006)", () => {
+describe("Step 2 — join address name (slug) field (issue #981, gated on relay #1006)", () => {
   // The slug field is only shown when relay is enabled (#1006).
   function relayGet(path: string) {
     if (path === "/api/meta") {
@@ -633,7 +632,7 @@ describe("Step 3 — join address name (slug) field (issue #981, gated on relay 
     return defaultGet(path);
   }
 
-  it("renders the optional slug field on step 3 in relay mode", async () => {
+  it("renders the optional slug field on step 2 in relay mode", async () => {
     mockApi.get.mockImplementation(relayGet);
     renderPage();
     await reachConfigStep();

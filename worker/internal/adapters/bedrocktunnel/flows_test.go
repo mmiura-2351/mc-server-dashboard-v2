@@ -9,6 +9,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -299,6 +300,104 @@ func TestFlowRegistryEvictIdleFreesCeilingCapacity(t *testing.T) {
 	r.mu.Unlock()
 	if !presentAfter {
 		t.Fatal("flow 99 not admitted after eviction freed capacity")
+	}
+}
+
+// readPump self-evicts the flow and closes its socket on a non-eviction read
+// error, allowing forward to redial a fresh socket on the next datagram.
+func TestFlowRegistryReadPumpErrorEvictsFlowAndRedials(t *testing.T) {
+	geyser := newFakeGeyser(t)
+	sender := &fakeSender{}
+	var dials atomic.Int32
+	dialUDP := func(_ context.Context, _ string) (net.Conn, error) {
+		dials.Add(1)
+		return net.Dial("udp", geyser.addr())
+	}
+	r := newFlowRegistry(dialUDP, geyser.addr(), sender, discardLogger(), "s1")
+	defer r.closeAll()
+
+	// First forward: dials socket #1, starts readPump.
+	if err := r.forward(context.Background(), 1, []byte("a")); err != nil {
+		t.Fatalf("forward(1): %v", err)
+	}
+	_ = sender.waitSent(t, 1) // wait for the echo reply to confirm pump is running
+	if dials.Load() != 1 {
+		t.Fatalf("dials = %d, want 1", dials.Load())
+	}
+
+	// Simulate a read error by closing the socket under readPump.
+	r.mu.Lock()
+	fs := r.byID[1]
+	r.mu.Unlock()
+	_ = fs.conn.Close()
+
+	// readPump should self-evict: byID[1] disappears.
+	waitFor(t, func() bool {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		_, ok := r.byID[1]
+		return !ok
+	})
+
+	// A second forward redials a fresh socket.
+	if err := r.forward(context.Background(), 1, []byte("b")); err != nil {
+		t.Fatalf("forward(1) after eviction: %v", err)
+	}
+	if dials.Load() != 2 {
+		t.Fatalf("dials = %d after re-forward, want 2", dials.Load())
+	}
+
+	// The new pump echoes back.
+	frames := sender.waitSent(t, 2)
+	last := frames[len(frames)-1]
+	id := binary.BigEndian.Uint32(last[:flowIDSize])
+	payload := string(last[flowIDSize:])
+	if id != 1 {
+		t.Fatalf("reply flow id = %d, want 1", id)
+	}
+	if len(payload) < 5 || payload[:5] != "echo:" {
+		t.Fatalf("reply payload = %q, want echo: prefix", payload)
+	}
+}
+
+// readPump does NOT evict a replacement flow that was inserted for the same
+// id after the original was already removed (pointer-identity guard).
+func TestFlowRegistryReadPumpErrorDoesNotEvictReplacementFlow(t *testing.T) {
+	// Build a registry; we won't use forward -- we drive readPump manually.
+	sender := &fakeSender{}
+	dialUDP := func(context.Context, string) (net.Conn, error) {
+		return nil, errors.New("unused")
+	}
+	r := newFlowRegistry(dialUDP, "127.0.0.1:1", sender, discardLogger(), "s1")
+	defer r.closeAll()
+
+	// fs1: the old socket whose readPump will error.
+	c1a, c1b := net.Pipe()
+	fs1 := &flowSocket{conn: c1a, lastSeen: time.Now()}
+
+	// fs2: a replacement already inserted under the same id.
+	c2a, _ := net.Pipe()
+	fs2 := &flowSocket{conn: c2a, lastSeen: time.Now()}
+
+	r.mu.Lock()
+	r.byID[7] = fs2 // replacement is already in place
+	r.mu.Unlock()
+
+	// Close fs1's read end so readPump returns immediately.
+	_ = c1b.Close()
+
+	// Run readPump synchronously for the OLD socket -- it should see the
+	// pointer mismatch and leave fs2 untouched.
+	r.readPump(7, fs1)
+
+	r.mu.Lock()
+	cur, ok := r.byID[7]
+	r.mu.Unlock()
+	if !ok {
+		t.Fatal("byID[7] deleted, want replacement fs2 to survive")
+	}
+	if cur != fs2 {
+		t.Fatal("byID[7] changed, want it to still be fs2")
 	}
 }
 

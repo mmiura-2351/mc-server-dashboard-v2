@@ -174,6 +174,11 @@ func (l *Listener) handleStatus(ctx context.Context, conn net.Conn, r *bufio.Rea
 
 	statusJSON, ok := l.cache.Get(slug)
 	if !ok {
+		// Per-IP join-rate cap: cache misses trigger a ResolveJoin RPC, so
+		// they share the login path's rate budget (RELAY.md Section 11).
+		if !l.caps.AllowJoin(ip) {
+			return
+		}
 		statusJSON = l.resolveStatus(ctx, hs, slug, ip)
 		if statusJSON == "" {
 			return
@@ -198,7 +203,8 @@ func (l *Listener) handleStatus(ctx context.Context, conn net.Conn, r *bufio.Rea
 // resolveStatus handles a status-cache miss: resolve the slug and either fetch
 // the real status through a tunnel (running), synthesize a stopped response, or
 // answer from the unavailable fallback. It returns the status JSON to send, or
-// "" if the connection should be dropped (NOT_FOUND).
+// "" if the connection should be dropped (NOT_FOUND). Callers must gate on
+// AllowJoin before calling (the resolve issues a ResolveJoin RPC).
 func (l *Listener) resolveStatus(ctx context.Context, hs mc.Handshake, slug, ip string) string {
 	rctx, cancel := context.WithTimeout(ctx, resolveJoinTimeout)
 	defer cancel()
@@ -261,7 +267,7 @@ func (l *Listener) fetchStatusThroughTunnel(ctx context.Context, hs mc.Handshake
 
 // handleLogin serves the login path (RELAY.md Section 4).
 func (l *Listener) handleLogin(ctx context.Context, conn net.Conn, r *bufio.Reader, hs mc.Handshake, slug, ip string) {
-	// Per-IP join-rate cap applies to login attempts only (RELAY.md Section 11).
+	// Per-IP join-rate cap (RELAY.md Section 11).
 	if !l.caps.AllowJoin(ip) {
 		_ = conn.Close()
 		return

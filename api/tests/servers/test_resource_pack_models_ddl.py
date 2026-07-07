@@ -92,3 +92,8 @@ def test_assignments_assigned_by_has_no_foreign_key() -> None:
 def test_assignments_timestamps_not_nullable() -> None:
     assert _ASSIGNMENTS.c.created_at.nullable is False
     assert _ASSIGNMENTS.c.updated_at.nullable is False
+
+
+def test_assignments_resource_pack_id_index() -> None:
+    index_names = {idx.name for idx in _ASSIGNMENTS.indexes}
+    assert "ix_srv_rp_assignments_resource_pack_id" in index_names

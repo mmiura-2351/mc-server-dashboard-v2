@@ -17,7 +17,42 @@ from __future__ import annotations
 
 import abc
 
-from mc_server_dashboard_api.servers.domain.value_objects import ServerId
+from mc_server_dashboard_api.servers.domain.value_objects import ServerId, WorkerId
+
+
+class BedrockTunnelSync(abc.ABC):
+    """Port: open/close a Bedrock tunnel to match observed state (issue #1602).
+
+    The lifecycle's INVALID_STATE convergence writes observed=running through
+    the repository directly, bypassing the sink's ``_sync_bedrock_tunnel``.
+    This Port lets the application layer invoke the tunnel open/close without
+    importing the adapters or fleet context (import-linter).
+    """
+
+    @abc.abstractmethod
+    async def sync_observed(
+        self,
+        *,
+        server_id: ServerId,
+        worker_id: WorkerId,
+        bedrock_port: int | None,
+        running: bool,
+    ) -> None:
+        """Open or close the tunnel for ``server_id`` based on ``running``."""
+
+
+class NullBedrockTunnelSync(BedrockTunnelSync):
+    """No-op :class:`BedrockTunnelSync` for callers that never exercise the path."""
+
+    async def sync_observed(
+        self,
+        *,
+        server_id: ServerId,
+        worker_id: WorkerId,
+        bedrock_port: int | None,
+        running: bool,
+    ) -> None:
+        return None
 
 
 class BedrockTunnelCredentials(abc.ABC):
