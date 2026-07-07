@@ -59,6 +59,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
 from mc_server_dashboard_api.servers.domain.jar_provisioner import JarProvisioningError
 from mc_server_dashboard_api.servers.domain.value_objects import (
     JAR_KEY_CONFIG_FIELD,
+    JAR_SOURCE_CONFIG_FIELD,
     CommunityId,
     DesiredState,
     ObservedState,
@@ -68,6 +69,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     WorkerId,
 )
 from tests.servers.fakes import (
+    FakeBedrockTunnelSync,
     FakeClock,
     FakeControlPlane,
     FakeFileStore,
@@ -138,6 +140,7 @@ def _server(
     observed: ObservedState = ObservedState.STOPPED,
     worker_id: uuid.UUID | None = None,
     config: dict[str, object] | None = None,
+    bedrock_port: int | None = None,
 ) -> Server:
     return Server(
         id=ServerId(server_id),
@@ -153,6 +156,7 @@ def _server(
         assigned_worker_id=None if worker_id is None else WorkerId(worker_id),
         created_at=_NOW,
         updated_at=_NOW,
+        bedrock_port=bedrock_port,
     )
 
 
@@ -320,9 +324,168 @@ async def test_start_records_resolved_jar_key_in_config() -> None:
     await use_case(community_id=CommunityId(community), server_id=ServerId(server_id))
 
     # The ensure ran (before placement), and the resolved key is persisted.
-    assert provisioner.calls == [("vanilla", "1.21.1", None)]
+    assert provisioner.calls == [("vanilla", "1.21.1", None, None)]
     stored = uow.servers.by_id[ServerId(server_id)]
     assert stored.config[JAR_KEY_CONFIG_FIELD] == "a" * 64
+    assert JAR_SOURCE_CONFIG_FIELD in stored.config
+
+
+async def test_start_persists_both_jar_config_fields() -> None:
+    """Both the pool key and the source fingerprint are written to config (#1676)."""
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = FakeControlPlane(place_to=WorkerId(worker))
+    provisioner = FakeJarProvisioner(key="b" * 64, source="sha1:cafe0123")
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=provisioner,
+        store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
+    )
+
+    await use_case(community_id=CommunityId(community), server_id=ServerId(server_id))
+
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.config[JAR_KEY_CONFIG_FIELD] == "b" * 64
+    assert stored.config[JAR_SOURCE_CONFIG_FIELD] == "sha1:cafe0123"
+
+
+async def test_start_passes_known_source_to_provisioner() -> None:
+    """When a server already has a recorded source fingerprint, it is forwarded."""
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            config={
+                JAR_KEY_CONFIG_FIELD: "c" * 64,
+                JAR_SOURCE_CONFIG_FIELD: "sha1:oldfingerprint",
+            },
+        )
+    )
+    cp = FakeControlPlane(place_to=WorkerId(worker))
+    provisioner = FakeJarProvisioner(key="c" * 64)
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=provisioner,
+        store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
+    )
+
+    await use_case(community_id=CommunityId(community), server_id=ServerId(server_id))
+
+    assert provisioner.calls == [("vanilla", "1.21.1", "c" * 64, "sha1:oldfingerprint")]
+
+
+async def test_start_jar_update_does_not_skip_hydrate_when_held_is_stale() -> None:
+    """When the JAR changes and the Worker holds a stale generation, hydrate runs
+    (the normal path: the new JAR is delivered via hydrate)."""
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            config={JAR_KEY_CONFIG_FIELD: "d" * 64},
+        )
+    )
+    cp = FakeControlPlane(
+        place_to=WorkerId(worker),
+        # Worker holds generation 0, store is at 1 -> stale, should hydrate.
+        held={(WorkerId(worker), ServerId(server_id)): 0},
+    )
+    provisioner = FakeJarProvisioner(key="e" * 64)  # different key = JAR updated
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=provisioner,
+        store_generation=FakeStoreGenerationReader(generation=1),
+        file_store=FakeFileStore(seed_eula=True),
+    )
+
+    await use_case(community_id=CommunityId(community), server_id=ServerId(server_id))
+
+    # Hydrate should have run (not skipped).
+    assert ("hydrate", WorkerId(worker), ServerId(server_id)) in cp.dispatched
+
+
+async def test_start_jar_update_skips_hydrate_when_held_is_fresh_and_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When the JAR changes but the Worker holds a fresh generation, skip hydrate
+    for world safety but log a warning (#1676)."""
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            config={JAR_KEY_CONFIG_FIELD: "d" * 64},
+        )
+    )
+    cp = FakeControlPlane(
+        place_to=WorkerId(worker),
+        # Worker holds generation 5, store is at 5 -> fresh, skip hydrate.
+        held={(WorkerId(worker), ServerId(server_id)): 5},
+    )
+    provisioner = FakeJarProvisioner(key="e" * 64)  # different key = JAR updated
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=provisioner,
+        store_generation=FakeStoreGenerationReader(generation=5),
+        file_store=FakeFileStore(seed_eula=True),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    # Hydrate should NOT have run (skip-hydrate active).
+    assert ("hydrate", WorkerId(worker), ServerId(server_id)) not in cp.dispatched
+    assert "JAR updated" in caplog.text
+    assert "skip-hydrate is active" in caplog.text
+
+
+async def test_place_and_start_persists_both_jar_config_fields() -> None:
+    """place_and_start also records the source fingerprint (#1676)."""
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.UNKNOWN,
+        )
+    )
+    cp = FakeControlPlane(place_to=WorkerId(worker))
+    provisioner = FakeJarProvisioner(key="a" * 64, source="sha1:abc123")
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=provisioner,
+        store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
+    )
+
+    await use_case.place_and_start(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.config[JAR_KEY_CONFIG_FIELD] == "a" * 64
+    assert stored.config[JAR_SOURCE_CONFIG_FIELD] == "sha1:abc123"
 
 
 async def test_start_fails_before_placement_when_jar_provisioning_fails() -> None:
@@ -3157,3 +3320,372 @@ async def test_clear_stale_assignment_stopped_stopped_still_works() -> None:
         community_id=CommunityId(community), server_id=ServerId(server_id)
     )
     assert result.assigned_worker_id is None
+
+
+# --- bedrock tunnel sync (issue #1602) --------------------------------------
+
+
+async def test_start_invalid_state_syncs_bedrock_tunnel_open() -> None:
+    # INVALID_STATE convergence on __call__ must invoke the Bedrock tunnel sync
+    # with running=True when the server carries a bedrock_port (issue #1602).
+    community, server_id, worker = _ids()
+    bedrock_port = 19132
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            bedrock_port=bedrock_port,
+        )
+    )
+    cp = FakeControlPlane(
+        place_to=WorkerId(worker),
+        outcomes={
+            "start": CommandOutcome(
+                status=CommandStatus.INVALID_STATE, message="already running"
+            )
+        },
+    )
+    tunnel_sync = FakeBedrockTunnelSync()
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
+        bedrock_tunnel_sync=tunnel_sync,
+    )
+
+    await use_case(community_id=CommunityId(community), server_id=ServerId(server_id))
+
+    assert len(tunnel_sync.calls) == 1
+    sid, wid, port, running = tunnel_sync.calls[0]
+    assert sid == ServerId(server_id)
+    assert wid == WorkerId(worker)
+    assert port == bedrock_port
+    assert running is True
+
+
+async def test_start_invalid_state_no_sync_when_write_dropped() -> None:
+    # When the #216 guard drops the observed=running write (applied=False),
+    # the tunnel sync must NOT be called — a fresher write already synced.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    seeded = _server(
+        community_id=community,
+        server_id=server_id,
+        bedrock_port=19132,
+    )
+    # A fresher write already stamped the row; the guard drops the equal-stamped write.
+    seeded.observed_at = _NOW
+    uow.servers.seed(seeded)
+    cp = FakeControlPlane(
+        place_to=WorkerId(worker),
+        outcomes={
+            "start": CommandOutcome(
+                status=CommandStatus.INVALID_STATE, message="already running"
+            )
+        },
+    )
+    tunnel_sync = FakeBedrockTunnelSync()
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
+        bedrock_tunnel_sync=tunnel_sync,
+    )
+
+    await use_case(community_id=CommunityId(community), server_id=ServerId(server_id))
+
+    # The write was dropped, so no sync call.
+    assert tunnel_sync.calls == []
+
+
+async def test_start_busy_does_not_sync_bedrock_tunnel() -> None:
+    # BUSY is NOT positive evidence — no tunnel sync.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            bedrock_port=19132,
+        )
+    )
+    cp = FakeControlPlane(
+        place_to=WorkerId(worker),
+        outcomes={
+            "start": CommandOutcome(status=CommandStatus.BUSY, message="in flight")
+        },
+    )
+    tunnel_sync = FakeBedrockTunnelSync()
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
+        bedrock_tunnel_sync=tunnel_sync,
+    )
+
+    with pytest.raises(CommandDispatchError):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert tunnel_sync.calls == []
+
+
+async def test_redispatch_start_invalid_state_syncs_bedrock_tunnel_open() -> None:
+    # redispatch_start INVALID_STATE convergence must invoke the tunnel sync
+    # with running=True (issue #1602).
+    community, server_id, worker = _ids()
+    bedrock_port = 19132
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.UNKNOWN,
+            worker_id=worker,
+            bedrock_port=bedrock_port,
+        )
+    )
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(status=CommandStatus.INVALID_STATE, message="running")
+    )
+    tunnel_sync = FakeBedrockTunnelSync()
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
+        bedrock_tunnel_sync=tunnel_sync,
+    )
+
+    await use_case.redispatch_start(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert len(tunnel_sync.calls) == 1
+    sid, wid, port, running = tunnel_sync.calls[0]
+    assert sid == ServerId(server_id)
+    assert wid == WorkerId(worker)
+    assert port == bedrock_port
+    assert running is True
+
+
+async def test_redispatch_start_invalid_state_no_sync_when_write_dropped() -> None:
+    # Dropped write -> no sync call.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    seeded = _server(
+        community_id=community,
+        server_id=server_id,
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.UNKNOWN,
+        worker_id=worker,
+        bedrock_port=19132,
+    )
+    seeded.observed_at = _NOW
+    uow.servers.seed(seeded)
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(status=CommandStatus.INVALID_STATE, message="running")
+    )
+    tunnel_sync = FakeBedrockTunnelSync()
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
+        bedrock_tunnel_sync=tunnel_sync,
+    )
+
+    await use_case.redispatch_start(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert tunnel_sync.calls == []
+
+
+async def test_stop_server_not_found_syncs_bedrock_tunnel_close() -> None:
+    # StopServer.__call__ SERVER_NOT_FOUND arm: syncs tunnel close (issue #1602).
+    community, server_id, worker = _ids()
+    bedrock_port = 19132
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+            bedrock_port=bedrock_port,
+        )
+    )
+    cp = FakeControlPlane(outcome=CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND))
+    tunnel_sync = FakeBedrockTunnelSync()
+    use_case = StopServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        bedrock_tunnel_sync=tunnel_sync,
+    )
+
+    await use_case(community_id=CommunityId(community), server_id=ServerId(server_id))
+
+    assert len(tunnel_sync.calls) == 1
+    sid, wid, port, running = tunnel_sync.calls[0]
+    assert sid == ServerId(server_id)
+    assert wid == WorkerId(worker)
+    assert port == bedrock_port
+    assert running is False
+
+
+async def test_stop_confirmed_syncs_bedrock_tunnel_close() -> None:
+    # StopServer.__call__ confirmed-stop arm: syncs tunnel close (issue #1602).
+    community, server_id, worker = _ids()
+    bedrock_port = 19132
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+            bedrock_port=bedrock_port,
+        )
+    )
+    cp = FakeControlPlane()
+    tunnel_sync = FakeBedrockTunnelSync()
+    use_case = StopServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        bedrock_tunnel_sync=tunnel_sync,
+    )
+
+    await use_case(community_id=CommunityId(community), server_id=ServerId(server_id))
+
+    assert len(tunnel_sync.calls) == 1
+    sid, wid, port, running = tunnel_sync.calls[0]
+    assert sid == ServerId(server_id)
+    assert wid == WorkerId(worker)
+    assert port == bedrock_port
+    assert running is False
+
+
+async def test_redispatch_stop_server_not_found_syncs_bedrock_tunnel_close() -> None:
+    # redispatch_stop SERVER_NOT_FOUND arm: syncs tunnel close (issue #1602).
+    community, server_id, worker = _ids()
+    bedrock_port = 19132
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+            bedrock_port=bedrock_port,
+        )
+    )
+    cp = FakeControlPlane(outcome=CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND))
+    tunnel_sync = FakeBedrockTunnelSync()
+    use_case = StopServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        bedrock_tunnel_sync=tunnel_sync,
+    )
+
+    await use_case.redispatch_stop(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert len(tunnel_sync.calls) == 1
+    _, _, port, running = tunnel_sync.calls[0]
+    assert port == bedrock_port
+    assert running is False
+
+
+async def test_redispatch_stop_confirmed_syncs_bedrock_tunnel_close() -> None:
+    # redispatch_stop confirmed-stop arm (success): syncs tunnel close (#1602).
+    community, server_id, worker = _ids()
+    bedrock_port = 19132
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+            bedrock_port=bedrock_port,
+        )
+    )
+    cp = FakeControlPlane()
+    tunnel_sync = FakeBedrockTunnelSync()
+    use_case = StopServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        bedrock_tunnel_sync=tunnel_sync,
+    )
+
+    await use_case.redispatch_stop(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert len(tunnel_sync.calls) == 1
+    _, _, port, running = tunnel_sync.calls[0]
+    assert port == bedrock_port
+    assert running is False
+
+
+async def test_start_invalid_state_no_sync_without_bedrock_port() -> None:
+    # A server without a bedrock_port must not trigger a sync call: the
+    # NullBedrockTunnelSync default handles this, but verify the Port's
+    # bedrock_port=None is passed through correctly.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(community_id=community, server_id=server_id)  # no bedrock_port
+    )
+    cp = FakeControlPlane(
+        place_to=WorkerId(worker),
+        outcomes={
+            "start": CommandOutcome(
+                status=CommandStatus.INVALID_STATE, message="already running"
+            )
+        },
+    )
+    tunnel_sync = FakeBedrockTunnelSync()
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
+        bedrock_tunnel_sync=tunnel_sync,
+    )
+
+    await use_case(community_id=CommunityId(community), server_id=ServerId(server_id))
+
+    # The sync IS called (the Port decides whether to act on bedrock_port=None).
+    # The FakeBedrockTunnelSync records it; the real NullBedrockTunnelSync is a
+    # no-op, and the real BedrockTunnelSyncer returns early on bedrock_port=None.
+    assert len(tunnel_sync.calls) == 1
+    assert tunnel_sync.calls[0][2] is None  # bedrock_port

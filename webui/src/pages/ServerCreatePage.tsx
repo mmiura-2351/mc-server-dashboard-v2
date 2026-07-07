@@ -14,10 +14,10 @@ import { useCanCode } from "../permissions/useCan.ts";
 import { dashboardPath } from "../routes.ts";
 import { handleTabKeyDown, panelId, tabId, useTabHash } from "./urlState.ts";
 
-// Server create wizard (WEBUI_SPEC.md 6.3). Three steps for a fresh server
-// (type & version → runtime → config & EULA) plus an "Import ZIP" tab that
-// uploads a prior export. The whole page is gated on `server:create`; the
-// server stays authoritative (any 403/422/409 is surfaced honestly).
+// Server create wizard (WEBUI_SPEC.md 6.3). Two steps for a fresh server
+// (type & version → config & EULA) plus an "Import ZIP" tab that uploads a
+// prior export. The whole page is gated on `server:create`; the server stays
+// authoritative (any 403/422/409 is surfaced honestly).
 
 // The catalogued types `GET /versions` can resolve (vanilla/paper/fabric/forge).
 type CatalogType = "vanilla" | "paper" | "fabric" | "forge";
@@ -213,7 +213,7 @@ function Wizard({ communityId }: { communityId: string }) {
 }
 
 // ---------------------------------------------------------------------------
-// New-server wizard (3 steps)
+// New-server wizard (2 steps)
 // ---------------------------------------------------------------------------
 
 interface PropOverride {
@@ -303,7 +303,7 @@ function NewServerWizard({ communityId }: { communityId: string }) {
 
   const portCheck = usePortCheck(port);
 
-  // On reaching the runtime step, prefill the game port from the next free port
+  // On reaching the config step, prefill the game port from the next free port
   // (GET /ports/available, SPEC 6.3) unless the user has already typed one. A
   // failed suggest leaves the field empty — the user can still type a port.
   useEffect(() => {
@@ -462,6 +462,22 @@ function NewServerWizard({ communityId }: { communityId: string }) {
 
       {step === 2 && (
         <div className="card">
+          <div className="field">
+            <label htmlFor="name-input">{t("serverCreate.nameLabel")}</label>
+            <input
+              id="name-input"
+              type="text"
+              value={name}
+              placeholder={t("serverCreate.namePlaceholder")}
+              onChange={(e) => setName(e.target.value)}
+            />
+            {nameError !== undefined && (
+              <div className="error" role="alert">
+                {nameError}
+              </div>
+            )}
+          </div>
+
           {relayEnabled ? null : (
             <div className="field">
               <label htmlFor="port-input">{t("serverCreate.portLabel")}</label>
@@ -478,42 +494,6 @@ function NewServerWizard({ communityId }: { communityId: string }) {
               <PortFeedback state={portCheck.state} />
             </div>
           )}
-          <div className="wizard-foot">
-            <button
-              type="button"
-              className="btn ghost"
-              onClick={() => setStep(1)}
-            >
-              {t("serverCreate.back")}
-            </button>
-            <button
-              type="button"
-              className="btn primary"
-              onClick={() => setStep(3)}
-            >
-              {t("serverCreate.next")}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {step === 3 && (
-        <div className="card">
-          <div className="field">
-            <label htmlFor="name-input">{t("serverCreate.nameLabel")}</label>
-            <input
-              id="name-input"
-              type="text"
-              value={name}
-              placeholder={t("serverCreate.namePlaceholder")}
-              onChange={(e) => setName(e.target.value)}
-            />
-            {nameError !== undefined && (
-              <div className="error" role="alert">
-                {nameError}
-              </div>
-            )}
-          </div>
 
           {relayEnabled && (
             <div className="field">
@@ -607,7 +587,7 @@ function NewServerWizard({ communityId }: { communityId: string }) {
             <button
               type="button"
               className="btn ghost"
-              onClick={() => setStep(2)}
+              onClick={() => setStep(1)}
             >
               {t("serverCreate.back")}
             </button>
@@ -637,7 +617,6 @@ function NewServerWizard({ communityId }: { communityId: string }) {
 function StepRail({ step }: { step: number }) {
   const steps: TranslationKey[] = [
     "serverCreate.step.type",
-    "serverCreate.step.runtime",
     "serverCreate.step.config",
   ];
   return (

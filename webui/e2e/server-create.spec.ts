@@ -40,10 +40,7 @@ test("owner creates a server via the wizard", async ({ page, request }) => {
     .toBeGreaterThan(0);
   await page.getByRole("button", { name: "Next" }).click();
 
-  // Step 2: runtime. Keep the defaults (container, auto-suggested port).
-  await page.getByRole("button", { name: "Next" }).click();
-
-  // Step 3: config & EULA. Name it, accept the EULA, create.
+  // Step 2: config & EULA. Name it, accept the EULA, create.
   await page.locator("#name-input").fill(serverName);
   await page.getByRole("checkbox").check();
   await page

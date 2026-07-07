@@ -83,6 +83,9 @@ from mc_server_dashboard_api.servers.adapters.backup_loop import run_backup_loop
 from mc_server_dashboard_api.servers.adapters.backup_store import (
     StorageBackupStoreAdapter,
 )
+from mc_server_dashboard_api.servers.adapters.bedrock_tunnel_sync import (
+    BedrockTunnelSyncer,
+)
 from mc_server_dashboard_api.servers.adapters.clock import (
     SystemClock as ServersSystemClock,
 )
@@ -636,6 +639,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Exposed on app state so the request-scoped DeleteServer use case can
         # evict a deleted server's tunnel credential (issue #1544).
         app.state.bedrock_tunnel_table = bedrock_tunnel_table
+        # Bedrock tunnel syncer (issue #1602): shared by the sink (status-change
+        # path) and the lifecycle use cases (INVALID_STATE convergence path).
+        # Built unconditionally; the Port's sync_observed returns early when
+        # bedrock_port is None, so it is harmless when the relay is off.
+        bedrock_tunnel_syncer = BedrockTunnelSyncer(
+            create_session_factory(engine),
+            control_plane=app.state.control_plane,
+            relay_registration=relay_registration,
+            bedrock_tunnel_table=bedrock_tunnel_table,
+            bedrock_tunnel_port=settings.relay.bedrock_tunnel_port,
+        )
+        app.state.bedrock_tunnel_sync = bedrock_tunnel_syncer
         # The control-plane event path writes back observed server state through
         # this sink (its own session per call; the servicer has no request UoW).
         state_sink = ServersServerStateSink(
@@ -869,11 +884,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     # reconciler paths (issue #876): a tick that eventually acquires
                     # the lock will contend correctly against HTTP-path holders.
                     lifecycle_lock=PgLifecycleLock(engine=engine),
+                    bedrock_tunnel_sync=bedrock_tunnel_syncer,
                 ),
                 make_stop_server=lambda: StopServer(
                     uow=ServersUnitOfWork(create_session_factory(engine)),
                     control_plane=reconciler_control_plane,
                     clock=ServersSystemClock(),
+                    bedrock_tunnel_sync=bedrock_tunnel_syncer,
                 ),
                 control_plane=reconciler_control_plane,
                 store_generation=StorageGenerationReader(storage=storage),
