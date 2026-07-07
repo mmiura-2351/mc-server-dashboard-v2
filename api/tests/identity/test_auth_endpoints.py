@@ -12,9 +12,10 @@ import uuid
 from collections.abc import Callable, Iterator
 
 import httpx
+import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from mc_server_dashboard_api.app import create_app
 from mc_server_dashboard_api.dependencies import (
     get_authenticate_request,
     get_login,
@@ -90,8 +91,17 @@ def _assert_no_set_cookie(resp: httpx.Response, name: str) -> None:
     )
 
 
+_shared_app: FastAPI
+
+
+@pytest.fixture(autouse=True)
+def _bind_shared_app(shared_app: FastAPI) -> None:
+    global _shared_app
+    _shared_app = shared_app
+
+
 def _client(**overrides: object) -> Iterator[TestClient]:
-    app = create_app()
+    app = _shared_app
     for dependency, value in overrides.items():
         app.dependency_overrides[_PROVIDERS[dependency]] = _provider(value)
     with TestClient(app) as client:
