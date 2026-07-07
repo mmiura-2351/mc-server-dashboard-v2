@@ -18,9 +18,10 @@ import datetime as dt
 import uuid
 from collections.abc import Iterator
 
+import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from mc_server_dashboard_api.app import create_app
 from mc_server_dashboard_api.community.application.list_all_communities import (
     CommunityPage,
 )
@@ -101,9 +102,23 @@ class _FakeUseCase:
         return self._result
 
 
+_shared_app: FastAPI
+
+
+@pytest.fixture(autouse=True)
+def _bind_shared_app(shared_app: FastAPI) -> None:
+    global _shared_app
+    _shared_app = shared_app
+
+
 def _client(app: object) -> Iterator[TestClient]:
     with TestClient(app) as client:  # type: ignore[arg-type]
         yield client
+
+
+# The app-building helpers below reuse the per-worker shared app and clear its
+# dependency overrides on entry, so a helper called twice in one test starts
+# clean (the shared_app wrapper clears between tests).
 
 
 # --- provisioning (platform-admin axis) ------------------------------------
@@ -112,7 +127,8 @@ def _client(app: object) -> Iterator[TestClient]:
 def _provision_app(
     *, platform_admin: bool, use_case: _FakeUseCase | None = None
 ) -> object:
-    app = create_app()
+    app = _shared_app
+    app.dependency_overrides.clear()
     user = make_user()
     user.is_platform_admin = platform_admin
     app.dependency_overrides[get_current_user] = lambda: user
@@ -189,7 +205,8 @@ def _managed_app(
     rename_uc: _FakeUseCase | None = None,
     delete_uc: _FakeUseCase | None = None,
 ) -> object:
-    app = create_app()
+    app = _shared_app
+    app.dependency_overrides.clear()
     user = make_user()
     user.is_platform_admin = platform_admin
     app.dependency_overrides[get_current_user] = lambda: user
@@ -303,7 +320,8 @@ def test_delete_non_member_gets_404() -> None:
 def test_list_my_communities_returns_user_communities() -> None:
     community = _community()
     use_case = _FakeUseCase(result=[community])
-    app = create_app()
+    app = _shared_app
+    app.dependency_overrides.clear()
     app.dependency_overrides[get_current_user] = lambda: make_user()
     app.dependency_overrides[get_list_my_communities] = lambda: use_case
     client = next(_client(app))
@@ -348,7 +366,8 @@ def _summary(name: str, *, members: int = 0, servers: int = 0) -> CommunitySumma
 
 
 def _admin_list_app(*, platform_admin: bool, use_case: _FakeUseCase) -> object:
-    app = create_app()
+    app = _shared_app
+    app.dependency_overrides.clear()
     user = make_user()
     user.is_platform_admin = platform_admin
     app.dependency_overrides[get_current_user] = lambda: user
@@ -419,7 +438,8 @@ def test_grant_in_one_community_does_not_open_another() -> None:
         ) -> bool:
             return community_id == community_a.id
 
-    app = create_app()
+    app = _shared_app
+    app.dependency_overrides.clear()
     app.dependency_overrides[get_current_user] = lambda: make_user()
     app.dependency_overrides[get_membership_visibility] = _ScopedVisibility
     app.dependency_overrides[get_permission_checker] = lambda: _FakeChecker(allow=True)
