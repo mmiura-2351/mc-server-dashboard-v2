@@ -81,6 +81,8 @@ from mc_server_dashboard_api.servers.domain.snapshot_cadence import (
 )
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import (
+    JAR_KEY_CONFIG_FIELD,
+    JAR_SOURCE_CONFIG_FIELD,
     CommunityId,
     DesiredState,
     ObservedState,
@@ -158,6 +160,10 @@ _RESERVED_CONFIG_KEYS = frozenset(
         CPU_ALLOCATION_CONFIG_KEY,
         SNAPSHOT_INTERVAL_CONFIG_KEY,
         BACKUP_INTERVAL_CONFIG_KEY,
+        # System-written JAR keys (issues #118, #1676). Written by the start
+        # path; never operator-settable, hidden from the overrides editor.
+        JAR_KEY_CONFIG_FIELD,
+        JAR_SOURCE_CONFIG_FIELD,
         # Platform-managed server.properties keys (issue #1243). These are set
         # by _seed_initial_working_set (create) and _rewrite_server_port
         # (update); user config must not override them via the properties
