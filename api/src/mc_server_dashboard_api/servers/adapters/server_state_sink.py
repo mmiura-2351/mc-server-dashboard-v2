@@ -176,6 +176,27 @@ class ServersServerStateSink(ServerStateSink):
             await repo.mark_worker_servers_unknown(WorkerId(parsed), self._clock.now())
             await session.commit()
 
+    async def existing_server_ids(self, *, server_ids: list[str]) -> set[str]:
+        # Unparseable (non-UUID) IDs are treated as existing so the caller never
+        # classifies them as deleted. ScanHeldServers advertises any content-
+        # bearing dir in the scratch root (not just UUIDs), so a safety copy like
+        # "<id>.bak" could be advertised; misclassifying it would cause the worker
+        # to RemoveAll it (issue #924 review).
+        unparseable: set[str] = set()
+        valid: list[uuid.UUID] = []
+        for sid in server_ids:
+            parsed = _parse_id(sid, kind="server_id")
+            if parsed is None:
+                unparseable.add(sid)
+            else:
+                valid.append(parsed)
+        if not valid:
+            return unparseable
+        async with self._session_factory() as session:
+            repo = SqlAlchemyServerRepository(session)
+            existing = await repo.existing_ids([ServerId(v) for v in valid])
+            return {str(sid.value) for sid in existing} | unparseable
+
     async def running_assignment_ids(self, *, worker_id: str) -> dict[str, int]:
         parsed = _parse_id(worker_id, kind="worker_id")
         if parsed is None:

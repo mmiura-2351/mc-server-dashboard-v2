@@ -566,6 +566,9 @@ class FakeServerRepository(ServerRepository):
                 out.append(replace(server))
         return out
 
+    async def existing_ids(self, server_ids: list[ServerId]) -> set[ServerId]:
+        return {sid for sid in server_ids if sid in self.by_id}
+
     async def delete(self, server_id: ServerId) -> None:
         self.by_id.pop(server_id, None)
 

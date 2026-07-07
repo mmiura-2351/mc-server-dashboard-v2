@@ -173,10 +173,16 @@ prefix) falls back to generation 0. The fsck requires a quiesced working set
 (regionfsck's safety contract), so the Worker's startup sequence runs the
 container orphan sweep first to stop any live writers before scanning. A Worker that reports nothing held, or an
 older Worker that does not set the field, hydrates as before. The
-API answers `RegisterAck`: `accepted` plus the `heartbeat_interval` it expects
-and the `transfer_deadline` that bounds one data-plane transfer Worker-side
-(Section 5); on refusal, `accepted=false` with a `rejection_reason` and the API
-closes the stream.
+API answers `RegisterAck`: `accepted` plus the `heartbeat_interval` it expects,
+the `transfer_deadline` that bounds one data-plane transfer Worker-side
+(Section 5), and `unknown_held_server_ids` — the subset of `held_servers` whose
+server no longer exists in the API (deleted while the scratch was live, issue
+#924). The Worker reclaims the scratch dir and `.hydrate-<id>-*` leftovers for
+each listed id but does **not** reclaim `.displaced-<id>` trees (issue #911:
+retained for operator recovery). The list is fail-safe: a DB error on the API
+side yields an empty list rather than misclassifying a live server as deleted.
+On refusal, `accepted=false` with a `rejection_reason` and the API closes the
+stream.
 
 ### 4.2 Steady state
 

@@ -395,6 +395,15 @@ class SqlAlchemyServerRepository(ServerRepository):
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_server(row) for row in rows]
 
+    async def existing_ids(self, server_ids: list[ServerId]) -> set[ServerId]:
+        if not server_ids:
+            return set()
+        stmt = select(ServerModel.id).where(
+            ServerModel.id.in_([sid.value for sid in server_ids])
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return {ServerId(row) for row in rows}
+
     async def delete(self, server_id: ServerId) -> None:
         stmt = delete(ServerModel).where(ServerModel.id == server_id.value)
         await self._session.execute(stmt)
