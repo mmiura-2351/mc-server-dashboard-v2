@@ -937,11 +937,14 @@ def test_keepalive_options_derive_from_heartbeat_timeout() -> None:
 
 # ---- unknown held server ids (issue #924) --------------------------------
 
+_SERVER_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+_SERVER_B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
 
 async def test_register_ack_carries_unknown_held_server_ids() -> None:
     """RegisterAck returns the subset of held servers that no longer exist."""
-    # Only "server-a" is known; "server-b" is deleted.
-    sink = FakeServerStateSink(known_server_ids={"server-a"})
+    # Only _SERVER_A is known; _SERVER_B is deleted.
+    sink = FakeServerStateSink(known_server_ids={_SERVER_A})
     h = _Harness(
         InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
         FakeClock(_T0),
@@ -950,12 +953,12 @@ async def test_register_ack_carries_unknown_held_server_ids() -> None:
     try:
         stub = await h.start()
         call = stub.Session(metadata=_auth(_CREDENTIAL))
-        await call.write(_register_message(held_servers={"server-a": 1, "server-b": 2}))
+        await call.write(_register_message(held_servers={_SERVER_A: 1, _SERVER_B: 2}))
         response = await call.read()
 
         assert response.register_ack.accepted is True
         unknown = list(response.register_ack.unknown_held_server_ids)
-        assert unknown == ["server-b"]
+        assert unknown == [_SERVER_B]
         await call.done_writing()
     finally:
         await h.stop()
@@ -963,7 +966,7 @@ async def test_register_ack_carries_unknown_held_server_ids() -> None:
 
 async def test_register_ack_empty_unknown_when_all_known() -> None:
     """RegisterAck returns an empty list when all held servers still exist."""
-    sink = FakeServerStateSink(known_server_ids={"server-a", "server-b"})
+    sink = FakeServerStateSink(known_server_ids={_SERVER_A, _SERVER_B})
     h = _Harness(
         InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
         FakeClock(_T0),
@@ -972,7 +975,7 @@ async def test_register_ack_empty_unknown_when_all_known() -> None:
     try:
         stub = await h.start()
         call = stub.Session(metadata=_auth(_CREDENTIAL))
-        await call.write(_register_message(held_servers={"server-a": 1, "server-b": 2}))
+        await call.write(_register_message(held_servers={_SERVER_A: 1, _SERVER_B: 2}))
         response = await call.read()
 
         assert response.register_ack.accepted is True
@@ -997,7 +1000,7 @@ async def test_register_ack_sink_error_yields_empty_unknown_list() -> None:
     try:
         stub = await h.start()
         call = stub.Session(metadata=_auth(_CREDENTIAL))
-        await call.write(_register_message(held_servers={"server-a": 1}))
+        await call.write(_register_message(held_servers={_SERVER_A: 1}))
         response = await call.read()
 
         assert response.register_ack.accepted is True
@@ -1023,6 +1026,38 @@ async def test_register_ack_no_held_servers_yields_empty_unknown() -> None:
         response = await call.read()
 
         assert response.register_ack.accepted is True
+        assert list(response.register_ack.unknown_held_server_ids) == []
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+async def test_register_ack_unparseable_held_id_treated_as_existing() -> None:
+    """An unparseable (non-UUID) held ID must NOT be classified as deleted.
+
+    ScanHeldServers advertises any content-bearing dir in the scratch root, so
+    a safety copy like '<id>.bak' could appear. Misclassifying it as deleted
+    would cause the worker to RemoveAll it.
+    """
+    # "not-a-uuid" is unparseable; _SERVER_A is a valid UUID-shaped id that
+    # is known. Neither should appear in the unknown list.
+    sink = FakeServerStateSink(known_server_ids={_SERVER_A})
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+    )
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call.write(
+            _register_message(held_servers={_SERVER_A: 1, "not-a-uuid": 3})
+        )
+        response = await call.read()
+
+        assert response.register_ack.accepted is True
+        # "not-a-uuid" is unparseable so it must be treated as existing (safe),
+        # not classified as deleted.
         assert list(response.register_ack.unknown_held_server_ids) == []
         await call.done_writing()
     finally:

@@ -588,9 +588,9 @@ class RegisterAck(_message.Message):
         The Worker reclaims the scratch dir and .hydrate-<id>-* leftovers for each id
         listed here, but does NOT reclaim .displaced-<id> trees (issue #911: those are
         intentionally retained for operator recovery). An empty list means every
-        advertised held server is still known; a non-empty list is fail-safe: if the
-        API cannot compute it (e.g. a DB error), it sends an empty list rather than
-        risk misclassifying a live server as deleted.
+        advertised held server is still known (or that the API could not compute the
+        subset, e.g. a DB error — the empty list is the fail-safe default so a
+        transient failure never misclassifies a live server as deleted).
         """
 
     def __init__(

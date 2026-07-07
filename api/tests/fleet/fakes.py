@@ -80,7 +80,22 @@ class FakeServerStateSink(ServerStateSink):
     async def existing_server_ids(self, *, server_ids: list[str]) -> set[str]:
         if self._known_server_ids is None:
             return set(server_ids)
-        return {sid for sid in server_ids if sid in self._known_server_ids}
+        # Match the real adapter's contract: unparseable (non-UUID) IDs are
+        # treated as existing so they are never misclassified as deleted (issue
+        # #924 review). Only IDs that parse as UUID and are NOT in the known set
+        # are reported absent.
+        import uuid
+
+        result: set[str] = set()
+        for sid in server_ids:
+            try:
+                uuid.UUID(sid)
+            except ValueError:
+                result.add(sid)  # unparseable -> safe (existing)
+                continue
+            if sid in self._known_server_ids:
+                result.add(sid)
+        return result
 
     async def running_assignment_ids(self, *, worker_id: str) -> dict[str, int]:
         self.counted_for.append(worker_id)

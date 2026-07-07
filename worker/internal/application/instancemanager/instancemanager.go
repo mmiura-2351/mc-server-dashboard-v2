@@ -1238,12 +1238,14 @@ func (m *Manager) ReclaimDeletedScratches(serverIDs []string) {
 				continue
 			}
 			dir := filepath.Join(m.scratchDir, id)
-			if err := os.RemoveAll(dir); err != nil {
-				m.logger.Warn("failed to reclaim deleted-server scratch",
-					"server_id", id, "dir", dir, "error", err)
-			} else {
-				m.logger.Info("reclaimed orphaned scratch for deleted server",
-					"server_id", id, "dir", dir)
+			if _, statErr := os.Stat(dir); statErr == nil {
+				if err := os.RemoveAll(dir); err != nil {
+					m.logger.Warn("failed to reclaim deleted-server scratch",
+						"server_id", id, "dir", dir, "error", err)
+				} else {
+					m.logger.Info("reclaimed orphaned scratch for deleted server",
+						"server_id", id, "dir", dir)
+				}
 			}
 			m.sweepHydrateLeftovers(id)
 			// NOTE: .displaced-<id> trees are intentionally NOT reclaimed here
