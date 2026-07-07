@@ -551,10 +551,12 @@ func TestHandleStatusCacheHitNotRateCapped(t *testing.T) {
 	// status exchange.
 	go func() {
 		_, _ = playerSide.Write(statusRequestPacket())
-		// Read the Status Response, then send a Ping.
+		// Read the Status Response, then send a Ping, then read the Pong so
+		// the write does not block until the deadline expires.
 		br := bufio.NewReader(playerSide)
 		readTestPacket(t, br)
 		_, _ = playerSide.Write(pingPacket(42))
+		readTestPacket(t, br)
 	}()
 
 	r := bufio.NewReaderSize(relaySide, mc.MaxPreRouteBytes)
@@ -589,10 +591,13 @@ func TestHandleStatusCacheMissAllowedResolves(t *testing.T) {
 
 	go func() {
 		_, _ = playerSide.Write(statusRequestPacket())
-		// Read the Status Response (synthesized stopped), then send a Ping.
+		// Read the Status Response (synthesized stopped), then send a Ping,
+		// then read the Pong so the write does not block until the deadline
+		// expires.
 		br := bufio.NewReader(playerSide)
 		readTestPacket(t, br)
 		_, _ = playerSide.Write(pingPacket(42))
+		readTestPacket(t, br)
 	}()
 
 	r := bufio.NewReaderSize(relaySide, mc.MaxPreRouteBytes)
