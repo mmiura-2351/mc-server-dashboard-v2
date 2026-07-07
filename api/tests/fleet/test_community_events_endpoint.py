@@ -19,10 +19,10 @@ import uuid
 from collections.abc import Iterator
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from mc_server_dashboard_api.app import create_app
 from mc_server_dashboard_api.community.domain.permission_checker import (
     MembershipVisibility,
     PermissionChecker,
@@ -80,6 +80,15 @@ class _FakeLookup:
         return self._mapping.get(server_id)
 
 
+_shared_app: FastAPI
+
+
+@pytest.fixture(autouse=True)
+def _bind_shared_app(shared_app: FastAPI) -> None:
+    global _shared_app
+    _shared_app = shared_app
+
+
 def _app(
     *,
     member: bool = True,
@@ -88,7 +97,10 @@ def _app(
     bus: RealTimeEvents | None = None,
     lookup: dict[str, uuid.UUID] | None = None,
 ) -> object:
-    app = create_app()
+    # Reuse the per-worker shared app; clear overrides on entry so a helper called
+    # twice in one test starts clean (the shared_app wrapper clears between tests).
+    app = _shared_app
+    app.dependency_overrides.clear()
     user = make_user()
 
     def _user_or_none() -> object | None:

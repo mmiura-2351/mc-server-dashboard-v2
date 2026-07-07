@@ -11,9 +11,10 @@ from __future__ import annotations
 import datetime as dt
 from collections.abc import Iterator
 
+import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from mc_server_dashboard_api.app import create_app
 from mc_server_dashboard_api.dependencies import (
     get_current_user,
     get_worker_registry,
@@ -24,6 +25,14 @@ from tests.identity.fakes import make_user
 
 _T0 = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 
+_shared_app: FastAPI
+
+
+@pytest.fixture(autouse=True)
+def _bind_shared_app(shared_app: FastAPI) -> None:
+    global _shared_app
+    _shared_app = shared_app
+
 
 def _client(app: object) -> Iterator[TestClient]:
     with TestClient(app) as client:  # type: ignore[arg-type]
@@ -33,7 +42,10 @@ def _client(app: object) -> Iterator[TestClient]:
 def _app(
     *, platform_admin: bool, seed: bool = True
 ) -> tuple[object, InMemoryWorkerRegistry]:
-    app = create_app()
+    # Reuse the per-worker shared app; clear overrides on entry so a helper called
+    # twice in one test starts clean (the shared_app wrapper clears between tests).
+    app = _shared_app
+    app.dependency_overrides.clear()
     registry = InMemoryWorkerRegistry(
         clock=FakeClock(_T0), heartbeat_timeout=dt.timedelta(seconds=30)
     )
