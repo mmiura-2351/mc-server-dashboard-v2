@@ -18,6 +18,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     ForeignKey,
+    Index,
     String,
 )
 from sqlalchemy.dialects.postgresql import UUID
@@ -52,6 +53,9 @@ class ServerResourcePackAssignmentModel(Base):
     """Row of the ``server_resource_pack_assignments`` table (migration 0018)."""
 
     __tablename__ = "server_resource_pack_assignments"
+    __table_args__ = (
+        Index("ix_srv_rp_assignments_resource_pack_id", "resource_pack_id"),
+    )
 
     server_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
