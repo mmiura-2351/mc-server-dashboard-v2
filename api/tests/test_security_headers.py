@@ -8,9 +8,9 @@ endpoints, and emits HSTS only when the request arrives over HTTPS.
 from collections.abc import Iterator
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from mc_server_dashboard_api.app import create_app
 from mc_server_dashboard_api.dependencies import get_login, get_refresh_session
 from mc_server_dashboard_api.identity.domain.errors import (
     InvalidCredentialsError,
@@ -29,8 +29,9 @@ class _RejectRefresh:
 
 
 @pytest.fixture
-def client() -> Iterator[TestClient]:
-    app = create_app()
+def client(shared_app: FastAPI) -> Iterator[TestClient]:
+    app = shared_app
+    app.dependency_overrides.clear()
     # Override auth use cases so the endpoints respond without a database.
     app.dependency_overrides[get_login] = lambda: _RejectLogin()
     app.dependency_overrides[get_refresh_session] = lambda: _RejectRefresh()

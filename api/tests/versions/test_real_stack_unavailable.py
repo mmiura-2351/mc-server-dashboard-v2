@@ -15,9 +15,9 @@ boundary sees a typed error rather than a bare ``FetchError`` leaking out as a 5
 from __future__ import annotations
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from mc_server_dashboard_api.app import create_app
 from mc_server_dashboard_api.dependencies import (
     get_current_user,
     get_version_catalog,
@@ -63,8 +63,18 @@ def _fake_user() -> User:
     return make_user()
 
 
+_shared_app: FastAPI
+
+
+@pytest.fixture(autouse=True)
+def _bind_shared_app(shared_app: FastAPI) -> None:
+    global _shared_app
+    _shared_app = shared_app
+
+
 def _client() -> TestClient:
-    app = create_app()
+    app = _shared_app
+    app.dependency_overrides.clear()
     app.dependency_overrides[get_version_catalog] = _down_catalog
     app.dependency_overrides[get_current_user] = _fake_user
     return TestClient(app)
