@@ -24,6 +24,11 @@ from mc_server_dashboard_api.servers.domain.errors import InvalidServerNameError
 # inject ``server.jar`` into the working-set tar.
 JAR_KEY_CONFIG_FIELD = "resolved_jar_sha256"
 
+# The source fingerprint recorded alongside the pool key for update detection
+# (issue #1676). On each start, the catalog is resolved and the new fingerprint
+# compared to this stored value; a mismatch triggers a re-download.
+JAR_SOURCE_CONFIG_FIELD = "resolved_jar_source"
+
 
 @dataclass(frozen=True)
 class ServerId:
