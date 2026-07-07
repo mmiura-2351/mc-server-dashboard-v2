@@ -50,7 +50,16 @@ export default defineConfig({
   },
   test: {
     globals: true,
-    environment: "jsdom",
+    // happy-dom is the global DOM environment: its per-file setup is far
+    // cheaper than jsdom's, roughly halving the suite's environment term
+    // (issue #1751, following the node-env split for DOM-free logic tests in
+    // #1750). Four files depend on jsdom-specific DOM behavior and pin
+    // themselves back to jsdom with a `// @vitest-environment jsdom` docblock:
+    // ServerFilesTab (DataTransfer/webkitGetAsEntry drag-and-drop), AccountPage
+    // (label matching), and DashboardPage/ServerDetailPage (the execCommand
+    // clipboard fallback and WAI-ARIA focus return). jsdom stays a dev-dep for
+    // them.
+    environment: "happy-dom",
     setupFiles: ["./src/test/setup.ts"],
     // Unit tests live under src/; the Playwright E2E specs under e2e/ are run by
     // Playwright (npm run e2e), not Vitest — scope the include so Vitest does

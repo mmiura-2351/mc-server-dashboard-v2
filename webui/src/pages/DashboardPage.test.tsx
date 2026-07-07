@@ -1,3 +1,8 @@
+// @vitest-environment jsdom
+// Pinned to jsdom: the copy-to-clipboard tests assert the
+// document.execCommand("copy") fallback, which is only exercised when
+// navigator.clipboard is absent. jsdom omits it; happy-dom provides it, so the
+// fallback is skipped and the assertions fail (issue #1751).
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router";
