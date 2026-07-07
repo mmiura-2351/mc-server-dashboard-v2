@@ -1,3 +1,5 @@
+// @vitest-environment node
+// DOM-free logic test; runs under Node to skip per-file jsdom setup (issue #1734).
 import { describe, expect, it, vi } from "vitest";
 
 // Capture the factory that lazyRetry passes to React.lazy so we can invoke it
