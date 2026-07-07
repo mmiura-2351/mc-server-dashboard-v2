@@ -82,6 +82,7 @@ def _client(
     *, platform_admin: bool = True, **overrides: object
 ) -> Iterator[TestClient]:
     app = _shared_app
+    app.dependency_overrides.clear()
     admin = make_user(username="admin", is_platform_admin=platform_admin)
     app.dependency_overrides[get_current_user] = _provider(admin)
     for dependency, value in overrides.items():
