@@ -1,3 +1,7 @@
+// @vitest-environment jsdom
+// Pinned to jsdom: the drag-and-drop tests rely on jsdom's DataTransfer /
+// DataTransferItem / webkitGetAsEntry behavior, which happy-dom implements
+// differently so drop handlers never fire (issue #1751).
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   act,
