@@ -20,9 +20,9 @@ import uuid
 from collections.abc import Iterator
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from mc_server_dashboard_api.app import create_app
 from mc_server_dashboard_api.audit.domain import operations as ops
 from mc_server_dashboard_api.audit.domain.events import Outcome
 from mc_server_dashboard_api.community.adapters.permission_checker import (
@@ -211,6 +211,15 @@ class _FakeDownload:
         return _gen()
 
 
+_shared_app: FastAPI
+
+
+@pytest.fixture(autouse=True)
+def _bind_shared_app(shared_app: FastAPI) -> None:
+    global _shared_app
+    _shared_app = shared_app
+
+
 def _app(
     *,
     member: bool,
@@ -230,7 +239,8 @@ def _app(
     search: _FakeUseCase | None = None,
     recorder: RecordingAuditRecorder | None = None,
 ) -> object:
-    app = create_app()
+    app = _shared_app
+    app.dependency_overrides.clear()
     app.dependency_overrides[get_current_user] = lambda: make_user()
     app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(
         member=member
@@ -1407,7 +1417,8 @@ def test_file_read_grant_on_one_server_opens_exactly_that_server() -> None:
     authz_uow.add_role(user, com, set())
     authz_uow.add_grant(user, com, "server", server_x, {Permission("file:read")})
 
-    app = create_app()
+    app = _shared_app
+    app.dependency_overrides.clear()
     user_obj = make_user()
     user_obj.id = type(user_obj.id)(user_id)
     app.dependency_overrides[get_current_user] = lambda: user_obj
@@ -1466,7 +1477,8 @@ def _real_write_app(
     file_store = StorageFileStoreAdapter(storage=FsStorage(tmp_path))  # type: ignore[arg-type]
     use_case = WriteFile(uow=uow, control_plane=None, file_store=file_store)  # type: ignore[arg-type]
 
-    app = create_app()
+    app = _shared_app
+    app.dependency_overrides.clear()
     app.dependency_overrides[get_current_user] = lambda: make_user()
     app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(
         member=True
