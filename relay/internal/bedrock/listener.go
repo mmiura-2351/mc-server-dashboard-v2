@@ -66,6 +66,12 @@ type Listener struct {
 	newIPCaps func() *ipcaps.IPCaps
 	logger    *slog.Logger
 
+	// handshakeDeadline bounds each phase of a dial-out's pre-auth window
+	// (accept the handshake stream, validate, await the peer's stream close).
+	// NewListener defaults it to the handshakeDeadline const; it is a field so
+	// tests can inject a short value instead of waiting the production 5 s.
+	handshakeDeadline time.Duration
+
 	// mu guards tunnels, the live port->Tunnel index used for takeover
 	// (#1565). This is NOT a server table: it holds only ports with a
 	// currently bound Tunnel -- populated by bindOrTakeover on a successful
@@ -91,7 +97,7 @@ func NewListener(addr string, tlsConf *tls.Config, validator Validator, caps *ip
 	if err != nil {
 		return nil, err
 	}
-	return &Listener{ln: ln, validator: validator, caps: caps, newIPCaps: newIPCaps, logger: logger, tunnels: make(map[uint32]*Tunnel)}, nil
+	return &Listener{ln: ln, validator: validator, caps: caps, newIPCaps: newIPCaps, logger: logger, handshakeDeadline: handshakeDeadline, tunnels: make(map[uint32]*Tunnel)}, nil
 }
 
 // Addr returns the listener's bound address.
@@ -156,7 +162,7 @@ func (l *Listener) handshake(ctx context.Context, conn *quic.Conn) (*Tunnel, *be
 	// handshake stream -- otherwise a peer that completes the QUIC/TLS
 	// handshake and then never opens a stream is reclaimed only by the (much
 	// longer) idle timeout.
-	acceptCtx, acceptCancel := context.WithTimeout(ctx, handshakeDeadline)
+	acceptCtx, acceptCancel := context.WithTimeout(ctx, l.handshakeDeadline)
 	stream, err := conn.AcceptStream(acceptCtx)
 	acceptCancel()
 	if err != nil {
@@ -172,7 +178,7 @@ func (l *Listener) handshake(ctx context.Context, conn *quic.Conn) (*Tunnel, *be
 		return nil, nil
 	}
 
-	validateCtx, validateCancel := context.WithTimeout(ctx, handshakeDeadline)
+	validateCtx, validateCancel := context.WithTimeout(ctx, l.handshakeDeadline)
 	valid, err := l.validator.ValidateBedrockTunnel(validateCtx, hello.GetServerId(), hello.GetBedrockPort(), hello.GetToken())
 	validateCancel()
 	if err != nil {
@@ -277,14 +283,14 @@ func (l *Listener) unregister(bedrockPort uint32, tun *Tunnel) {
 func (l *Listener) reject(conn *quic.Conn, stream *quic.Stream, reason string) {
 	_ = writeAck(stream, false, reason)
 	_ = stream.Close()
-	awaitStreamPeerClose(stream)
+	awaitStreamPeerClose(stream, l.handshakeDeadline)
 	_ = conn.CloseWithError(0, reason)
 }
 
 // awaitStreamPeerClose blocks until the peer closes its side of stream or
-// handshakeDeadline elapses.
-func awaitStreamPeerClose(stream *quic.Stream) {
-	_ = stream.SetReadDeadline(time.Now().Add(handshakeDeadline))
+// deadline elapses.
+func awaitStreamPeerClose(stream *quic.Stream, deadline time.Duration) {
+	_ = stream.SetReadDeadline(time.Now().Add(deadline))
 	buf := make([]byte, 1)
 	for {
 		if _, err := stream.Read(buf); err != nil {
