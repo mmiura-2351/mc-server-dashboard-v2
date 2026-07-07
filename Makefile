@@ -115,8 +115,13 @@ api-format: api-env-check
 	cd api && uv run ruff format .
 	cd api && uv run ruff check --fix .
 
+# Parallelize the suite with pytest-xdist, mirroring CI (.github/workflows/
+# api.yml). `-n auto` fans out across the host's cores; `--dist worksteal`
+# rebalances the queue so a slow file can't strand an idle worker (#1729). The
+# scratch-DB fixtures are worker-safe (per-worker `<dbname>_<uuid>`, #1146).
+# Coverage stays CI-only (#325) -- not added here.
 api-test: api-env-check
-	cd api && uv run pytest
+	cd api && uv run pytest -n auto --dist worksteal
 
 # ---------------------------------------------------------------------------
 # worker/ (Go)
