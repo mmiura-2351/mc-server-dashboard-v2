@@ -47,6 +47,7 @@ Docs are split by intent:
 | Doc | What it covers |
 |---|---|
 | [`dev/CONTRIBUTING.md`](dev/CONTRIBUTING.md) | The change workflow: issues, branch naming, commits, pull requests, review hygiene, and squash-merge. |
+| [`dev/AGENTS.md`](dev/AGENTS.md) | Agent-facing operational manual complementing `CONTRIBUTING.md`: the primary-checkout / live-deploy ground rules, worktree lifecycle, gh/account quirks, and the pre-PR checklist. |
 | [`dev/TESTING.md`](dev/TESTING.md) | The test-driven development discipline (Kent Beck): the red/green/refactor cycle, working disciplines, Tidy First, and what a good test looks like. Concrete tooling is per-component (`make test`; see the module READMEs). |
 | [`dev/RELEASING.md`](dev/RELEASING.md) | Versioning policy (a single repository-wide SemVer version), tag naming, and generated release notes (no hand-maintained CHANGELOG). The tag-driven release workflow; the git tag is the version source of truth. |
 | [`dev/DEPENDENCIES.md`](dev/DEPENDENCIES.md) | Pinning style, the 7-day supply-chain cooldown, security-update handling, and the automated-update policy across the Python and Go ecosystems. |
