@@ -16,9 +16,10 @@ import io
 import uuid
 from collections.abc import AsyncIterator
 
+import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from mc_server_dashboard_api.app import create_app
 from mc_server_dashboard_api.audit.domain import operations as ops
 from mc_server_dashboard_api.audit.domain.events import Outcome
 from mc_server_dashboard_api.dependencies import (
@@ -115,6 +116,15 @@ class _FakeDownloadUseCase:
         return _stream(), self._pack
 
 
+_shared_app: FastAPI
+
+
+@pytest.fixture(autouse=True)
+def _bind_shared_app(shared_app: FastAPI) -> None:
+    global _shared_app
+    _shared_app = shared_app
+
+
 def _app(
     *,
     upload: _FakeUseCase | None = None,
@@ -126,7 +136,8 @@ def _app(
     require_upload_perm: bool = True,
     store: FakeResourcePackStore | None = None,
 ) -> object:
-    app = create_app()
+    app = _shared_app
+    app.dependency_overrides.clear()
     user = make_user(is_platform_admin=is_admin)
     app.dependency_overrides[get_current_user] = lambda: user
     # The upload gate: if require_upload_perm is True, return the user (passes).
@@ -376,7 +387,8 @@ def _assignment_app(
         get_permission_checker,
     )
 
-    app = create_app()
+    app = _shared_app
+    app.dependency_overrides.clear()
     user = make_user()
     app.dependency_overrides[get_current_user] = lambda: user
 
