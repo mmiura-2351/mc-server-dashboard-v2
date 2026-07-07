@@ -57,18 +57,23 @@ func (f *fakeValidator) setValid(valid bool) {
 }
 
 // newTestListener runs a Listener with unlimited pre-auth handshake caps; use
-// newTestListenerWithCaps to exercise the cap itself.
-func newTestListener(t *testing.T, validator Validator) (*Listener, func()) {
+// newTestListenerWithCaps to exercise the cap itself. An optional deadline
+// overrides the production handshake deadline; it is applied before Serve
+// starts so the accept loop never races the write.
+func newTestListener(t *testing.T, validator Validator, deadline ...time.Duration) (*Listener, func()) {
 	t.Helper()
-	return newTestListenerWithCaps(t, validator, ipcaps.NewIPCaps(0, 0, 0, nil, nil))
+	return newTestListenerWithCaps(t, validator, ipcaps.NewIPCaps(0, 0, 0, nil, nil), deadline...)
 }
 
-func newTestListenerWithCaps(t *testing.T, validator Validator, preAuthCaps *ipcaps.IPCaps) (*Listener, func()) {
+func newTestListenerWithCaps(t *testing.T, validator Validator, preAuthCaps *ipcaps.IPCaps, deadline ...time.Duration) (*Listener, func()) {
 	t.Helper()
 	newCaps := func() *ipcaps.IPCaps { return ipcaps.NewIPCaps(0, 0, 0, nil, nil) }
 	ln, err := NewListener("127.0.0.1:0", selfSignedTLS(t), validator, preAuthCaps, newCaps, testLogger())
 	if err != nil {
 		t.Fatalf("NewListener: %v", err)
+	}
+	if len(deadline) > 0 {
+		ln.handshakeDeadline = deadline[0]
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -189,7 +194,10 @@ func TestListenerHandshakeRejectValidatorError(t *testing.T) {
 
 func TestListenerAcceptStreamTimeout(t *testing.T) {
 	validator := &fakeValidator{valid: true}
-	ln, stop := newTestListener(t, validator)
+	// A short, injected accept deadline keeps this test off the production 5 s
+	// const while still exercising the same AcceptStream-timeout path.
+	deadline := 200 * time.Millisecond
+	ln, stop := newTestListener(t, validator, deadline)
 	defer stop()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -197,11 +205,11 @@ func TestListenerAcceptStreamTimeout(t *testing.T) {
 	conn := dialQUIC(ctx, t, ln.Addr().String())
 
 	// Never open a stream: the connection must still be closed by the relay's
-	// AcceptStream deadline (handshakeDeadline), not left to quic-go's much
-	// longer idle timeout.
+	// AcceptStream deadline (the injected handshake deadline), not left to
+	// quic-go's much longer idle timeout.
 	select {
 	case <-conn.Context().Done():
-	case <-time.After(handshakeDeadline + 3*time.Second):
+	case <-time.After(deadline + 3*time.Second):
 		t.Fatal("expected the relay to close a connection that never opens a handshake stream")
 	}
 }
