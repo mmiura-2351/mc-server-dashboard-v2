@@ -22,6 +22,7 @@ import uuid
 from sqlalchemy import (
     CheckConstraint,
     ForeignKey,
+    Index,
     String,
     UniqueConstraint,
 )
@@ -79,6 +80,7 @@ class ServerGroupModel(Base):
     """Row of the ``server_group`` attachment join (issue #276)."""
 
     __tablename__ = "server_group"
+    __table_args__ = (Index("ix_server_group_server_id", "server_id"),)
 
     group_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),

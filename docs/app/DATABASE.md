@@ -481,7 +481,9 @@ The many-to-many attachment join between groups and servers.
 | `server_id` | uuid FK → `server.id` | `ON DELETE CASCADE` |
 
 Primary key: composite `(group_id, server_id)`. Both FKs cascade, so deleting a
-group or a server tidies its attachments automatically.
+group or a server tidies its attachments automatically. Index
+`ix_server_group_server_id` on `server_id` covers the reverse lookup direction
+(`list_groups_for_server`).
 
 **File-sync posture (issue #276, the smallest honest M2 choice).** On any change
 that affects an attached server's authoritative player file — attach, detach, or a
@@ -603,7 +605,9 @@ tables added by migration 0018.
 
 #### `server_resource_pack_assignments`
 
-At most one resource pack per server (the primary key is `server_id`).
+At most one resource pack per server (the primary key is `server_id`). Index
+`ix_srv_rp_assignments_resource_pack_id` on `resource_pack_id` covers the
+reverse lookup (`list_assignments_for_pack`).
 
 | Column | Type | Notes |
 |---|---|---|
