@@ -11,9 +11,10 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable, Iterator
 
+import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from mc_server_dashboard_api.app import create_app
 from mc_server_dashboard_api.audit.domain import operations as ops
 from mc_server_dashboard_api.audit.domain.events import Outcome
 from mc_server_dashboard_api.dependencies import (
@@ -66,8 +67,17 @@ _PROVIDERS = {
 }
 
 
+_shared_app: FastAPI
+
+
+@pytest.fixture(autouse=True)
+def _bind_shared_app(shared_app: FastAPI) -> None:
+    global _shared_app
+    _shared_app = shared_app
+
+
 def _client(user: object, **overrides: object) -> Iterator[TestClient]:
-    app = create_app()
+    app = _shared_app
     app.dependency_overrides[get_current_user] = _provider(user)
     for dependency, value in overrides.items():
         app.dependency_overrides[_PROVIDERS[dependency]] = _provider(value)
@@ -143,7 +153,7 @@ def test_change_password_user_gone_returns_401_invalid_token() -> None:
 
 def test_change_password_requires_auth() -> None:
     fake = _Fake(result=None)
-    app = create_app()
+    app = _shared_app
     app.dependency_overrides[get_change_password] = _provider(fake)
     with TestClient(app) as client:
         resp = client.put(

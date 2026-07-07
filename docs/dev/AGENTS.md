@@ -62,6 +62,13 @@ rebuild ships (issue #432).
 - Bare `gh pr view <N>` **errors** on this account's token (it queries the
   retired Projects-classic API). Always pass `--json ...`, or use the REST
   form `gh api repos/{owner}/{repo}/pulls/<N>`.
+- `gh pr edit <N>` **fails the same way** (Projects-classic GraphQL):
+  `--add-label` / `--remove-label` leave labels unchanged, and `--body`
+  silently no-ops. Avoid `gh pr edit` entirely; use the REST equivalents —
+  `gh api -X PATCH repos/{owner}/{repo}/pulls/<N> -f body=...` for title/body,
+  and `gh api -X POST repos/{owner}/{repo}/issues/<N>/labels
+  -f "labels[]=<label>"` / `gh api -X DELETE
+  repos/{owner}/{repo}/issues/<N>/labels/<label>` for labels.
 - `gh pr update-branch` does not exist in the installed `gh`. Use:
   `gh api -X PUT repos/{owner}/{repo}/pulls/<N>/update-branch`.
 - All agents share one GitHub account, so a PR's author identity can never
