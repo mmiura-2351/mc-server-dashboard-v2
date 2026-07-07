@@ -5,7 +5,7 @@
 # The primary checkout (repo root, NOT a worktree under .claude/worktrees/) is
 # the live-deployment build source: `docker compose` builds it from compose.yaml
 # + .env at the repo root, so a stray checkout silently changes what the next
-# rebuild deploys (docs/dev/CONTRIBUTING.md Section 3). Agent sessions have moved
+# rebuild deploys (docs/dev/AGENTS.md Section 1). Agent sessions have moved
 # it off main repeatedly (#809), so the hook now auto-restores instead of just
 # warning.
 #
