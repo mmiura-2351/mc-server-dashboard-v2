@@ -933,3 +933,97 @@ def test_keepalive_options_derive_from_heartbeat_timeout() -> None:
     assert options_dict["grpc.keepalive_time_ms"] == 30_000
     assert options_dict["grpc.keepalive_timeout_ms"] == 20_000
     assert options_dict["grpc.http2.max_pings_without_data"] == 0
+
+
+# ---- unknown held server ids (issue #924) --------------------------------
+
+
+async def test_register_ack_carries_unknown_held_server_ids() -> None:
+    """RegisterAck returns the subset of held servers that no longer exist."""
+    # Only "server-a" is known; "server-b" is deleted.
+    sink = FakeServerStateSink(known_server_ids={"server-a"})
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+    )
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call.write(_register_message(held_servers={"server-a": 1, "server-b": 2}))
+        response = await call.read()
+
+        assert response.register_ack.accepted is True
+        unknown = list(response.register_ack.unknown_held_server_ids)
+        assert unknown == ["server-b"]
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+async def test_register_ack_empty_unknown_when_all_known() -> None:
+    """RegisterAck returns an empty list when all held servers still exist."""
+    sink = FakeServerStateSink(known_server_ids={"server-a", "server-b"})
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+    )
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call.write(_register_message(held_servers={"server-a": 1, "server-b": 2}))
+        response = await call.read()
+
+        assert response.register_ack.accepted is True
+        assert list(response.register_ack.unknown_held_server_ids) == []
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+async def test_register_ack_sink_error_yields_empty_unknown_list() -> None:
+    """A sink exception yields an empty list; registration still succeeds."""
+
+    class _FailingSink(FakeServerStateSink):
+        async def existing_server_ids(self, *, server_ids: list[str]) -> set[str]:
+            raise RuntimeError("DB down")
+
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=_FailingSink(),
+    )
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call.write(_register_message(held_servers={"server-a": 1}))
+        response = await call.read()
+
+        assert response.register_ack.accepted is True
+        # Fail-safe: empty list rather than misclassifying.
+        assert list(response.register_ack.unknown_held_server_ids) == []
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+async def test_register_ack_no_held_servers_yields_empty_unknown() -> None:
+    """When the Worker advertises no held servers, unknown is empty."""
+    sink = FakeServerStateSink(known_server_ids=set())
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+    )
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call.write(_register_message())  # no held_servers
+        response = await call.read()
+
+        assert response.register_ack.accepted is True
+        assert list(response.register_ack.unknown_held_server_ids) == []
+        await call.done_writing()
+    finally:
+        await h.stop()

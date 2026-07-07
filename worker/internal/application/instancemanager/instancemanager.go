@@ -1160,6 +1160,11 @@ func (m *Manager) handleStop(ctx context.Context, cmd session.Command, graceful 
 //     reports it as held and the API's generation-gated hydrate (#763/#767) either
 //     reuses it (still current) or re-hydrates (stale). This bounds accumulation to
 //     at most one at-rest working set per stopped server, never an unbounded leak.
+//   - A server DELETED while its scratch was live is reclaimed at the next
+//     registration via ReclaimDeletedScratches (issue #924). The API computes the
+//     unknown subset of held_servers and returns it in RegisterAck; the Worker
+//     removes the scratch dir and hydrate leftovers but NOT .displaced-<id> trees
+//     (issue #911).
 func (m *Manager) removeScratch(serverID string) {
 	dir := filepath.Join(m.scratchDir, serverID)
 	if err := os.RemoveAll(dir); err != nil {
@@ -1203,6 +1208,49 @@ func (m *Manager) sweepHydrateLeftovers(serverID string) {
 			_ = os.RemoveAll(filepath.Join(m.scratchDir, e.Name()))
 		}
 	}
+}
+
+// ReclaimDeletedScratches removes scratch dirs for server ids the API confirmed
+// no longer exist (issue #924). It runs asynchronously on a goroutine so it does
+// not block heartbeats or command dispatch. Per id it validates the id, claims a
+// reservation (skipping running/orphaned/reserved ids), removes the scratch dir
+// and hydrate leftovers, then releases the reservation. .displaced-<id> trees are
+// intentionally NOT reclaimed (issue #911: retained for operator recovery).
+//
+// Reclamation contract update (issue #924, extending #841):
+//   - The post-stop final snapshot path (removeScratch) remains the primary GC.
+//   - This method covers the gap: a server deleted while its scratch was live
+//     (the final snapshot never arrived), reclaimed at the next registration.
+//   - Phase 2 (refresh held inventory per re-registration) is separable;
+//     convergence happens at the next worker restart.
+func (m *Manager) ReclaimDeletedScratches(serverIDs []string) {
+	go func() {
+		for _, id := range serverIDs {
+			if err := validateServerID(id); err != nil {
+				m.logger.Warn("refusing to reclaim scratch for unsafe server id",
+					"server_id", id, "error", err)
+				continue
+			}
+			ok, _, _ := m.reserve(id)
+			if !ok {
+				// The id is running, has a failed-stop orphan, or is reserved for
+				// an in-flight command — skip it rather than interfere.
+				continue
+			}
+			dir := filepath.Join(m.scratchDir, id)
+			if err := os.RemoveAll(dir); err != nil {
+				m.logger.Warn("failed to reclaim deleted-server scratch",
+					"server_id", id, "dir", dir, "error", err)
+			} else {
+				m.logger.Info("reclaimed orphaned scratch for deleted server",
+					"server_id", id, "dir", dir)
+			}
+			m.sweepHydrateLeftovers(id)
+			// NOTE: .displaced-<id> trees are intentionally NOT reclaimed here
+			// (issue #911). They are retained for operator recovery.
+			m.release(id)
+		}
+	}()
 }
 
 // takeOutcome is the result of takeStoppableReserve: an instance to stop was

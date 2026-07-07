@@ -163,6 +163,26 @@ func (r *Runner) runOnce(ctx context.Context) (registered bool, err error) {
 		setter.SetTransferDeadline(ack.TransferDeadline)
 	}
 
+	// Reclaim scratch dirs for held servers the API reports as deleted (issue
+	// #924). Defense in depth: intersect the ack's list with the held set this
+	// Register actually advertised, so a malformed ack cannot point the Worker
+	// at a server it never claimed to hold.
+	if reclaimer, ok := r.handler.(ScratchReclaimer); ok && len(ack.UnknownHeldServerIDs) > 0 {
+		held := make(map[string]bool, len(r.caps.HeldServers))
+		for _, hs := range r.caps.HeldServers {
+			held[hs.ServerID] = true
+		}
+		var toReclaim []string
+		for _, id := range ack.UnknownHeldServerIDs {
+			if held[id] {
+				toReclaim = append(toReclaim, id)
+			}
+		}
+		if len(toReclaim) > 0 {
+			reclaimer.ReclaimDeletedScratches(toReclaim)
+		}
+	}
+
 	// Re-emit the current state of every still-held instance so the API moves
 	// them out of its post-restart observed=unknown state within seconds rather
 	// than over the reconciler grace window (issue #985). These events flow

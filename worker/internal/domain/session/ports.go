@@ -59,6 +59,13 @@ type RegisterAck struct {
 	// API that does not set the field) leaves the transfer unbounded as before.
 	TransferDeadline time.Duration
 	RejectionReason  string
+	// UnknownHeldServerIDs is the subset of Register.held_servers whose server
+	// no longer exists in the API (deleted while the scratch was live, issue
+	// #924). The Worker reclaims the scratch dir and .hydrate-<id>-* leftovers
+	// for each id listed here. .displaced-<id> trees are NOT reclaimed (issue
+	// #911). An empty list (or an older API that does not set the field) means
+	// nothing to reclaim.
+	UnknownHeldServerIDs []string
 }
 
 // Command is an inbound API command, reduced to the fields the session and its
@@ -341,6 +348,17 @@ type TransferDeadlineSetter interface {
 	// SetTransferDeadline records the bound for one data-plane transfer (snapshot
 	// upload / hydrate download). A non-positive value leaves transfers unbounded.
 	SetTransferDeadline(d time.Duration)
+}
+
+// ScratchReclaimer is an optional CommandHandler capability: after registration
+// the session hands the handler the list of held server ids the API reports as
+// deleted (issue #924). The handler reclaims the scratch dir and hydrate
+// leftovers for each id, but NOT .displaced-<id> trees (issue #911).
+type ScratchReclaimer interface {
+	// ReclaimDeletedScratches removes scratch dirs for server ids the API
+	// confirmed no longer exist. It runs asynchronously and must not block
+	// heartbeats or command dispatch.
+	ReclaimDeletedScratches(serverIDs []string)
 }
 
 // StatusResyncer is an optional CommandHandler capability: after a successful

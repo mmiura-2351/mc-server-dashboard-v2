@@ -280,6 +280,15 @@ class ServerRepository(abc.ABC):
         """
 
     @abc.abstractmethod
+    async def existing_ids(self, server_ids: list[ServerId]) -> set[ServerId]:
+        """Return the subset of ``server_ids`` that still exist in the store.
+
+        Used by the control-plane RegisterAck to compute which held servers the
+        Worker advertised are no longer known (deleted while the scratch was live,
+        issue #924). The Worker reclaims the orphaned scratch for each unknown id.
+        """
+
+    @abc.abstractmethod
     async def delete(self, server_id: ServerId) -> None:
         """Delete the server row (its grants are swept separately, Section 10)."""
 

@@ -175,6 +175,16 @@ class ServersServerStateSink(ServerStateSink):
             await repo.mark_worker_servers_unknown(WorkerId(parsed), self._clock.now())
             await session.commit()
 
+    async def existing_server_ids(self, *, server_ids: list[str]) -> set[str]:
+        parsed = [_parse_id(sid, kind="server_id") for sid in server_ids]
+        valid = [p for p in parsed if p is not None]
+        if not valid:
+            return set()
+        async with self._session_factory() as session:
+            repo = SqlAlchemyServerRepository(session)
+            existing = await repo.existing_ids([ServerId(v) for v in valid])
+            return {str(sid.value) for sid in existing}
+
     async def running_assignment_ids(self, *, worker_id: str) -> dict[str, int]:
         parsed = _parse_id(worker_id, kind="worker_id")
         if parsed is None:

@@ -45,6 +45,7 @@ class FakeServerStateSink(ServerStateSink):
         running_ids: dict[str, set[str]] | None = None,
         fail_observed_for: set[str] | None = None,
         always_fail_observed: bool = False,
+        known_server_ids: set[str] | None = None,
     ) -> None:
         self.observed: list[tuple[str, str, str]] = []
         self.unknown_for: list[str] = []
@@ -58,6 +59,10 @@ class FakeServerStateSink(ServerStateSink):
         # that is permanently down (e.g. the DB is unreachable); used to exercise
         # the consecutive-failure containment cap (issue #807).
         self._always_fail_observed = always_fail_observed
+        # The set of server ids the sink reports as existing (issue #924). When
+        # None, all ids are treated as existing (the default for tests that do not
+        # exercise the unknown-held-server path).
+        self._known_server_ids = known_server_ids
 
     async def record_observed_state(
         self, *, server_id: str, worker_id: str, state: str
@@ -71,6 +76,11 @@ class FakeServerStateSink(ServerStateSink):
 
     async def mark_worker_servers_unknown(self, *, worker_id: str) -> None:
         self.unknown_for.append(worker_id)
+
+    async def existing_server_ids(self, *, server_ids: list[str]) -> set[str]:
+        if self._known_server_ids is None:
+            return set(server_ids)
+        return {sid for sid in server_ids if sid in self._known_server_ids}
 
     async def running_assignment_ids(self, *, worker_id: str) -> dict[str, int]:
         self.counted_for.append(worker_id)

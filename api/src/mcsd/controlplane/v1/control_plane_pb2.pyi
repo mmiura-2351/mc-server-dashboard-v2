@@ -554,6 +554,7 @@ class RegisterAck(_message.Message):
     HEARTBEAT_INTERVAL_FIELD_NUMBER: _builtins.int
     REJECTION_REASON_FIELD_NUMBER: _builtins.int
     TRANSFER_DEADLINE_FIELD_NUMBER: _builtins.int
+    UNKNOWN_HELD_SERVER_IDS_FIELD_NUMBER: _builtins.int
     accepted: _builtins.bool
     """accepted is true when the API admitted this Worker into the registry."""
     rejection_reason: _builtins.str
@@ -580,6 +581,18 @@ class RegisterAck(_message.Message):
         unset value (an older API) leaves the transfer unbounded as before.
         """
 
+    @_builtins.property
+    def unknown_held_server_ids(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]:
+        """unknown_held_server_ids is the subset of Register.held_servers whose server
+        no longer exists in the API (deleted while the scratch was live, issue #924).
+        The Worker reclaims the scratch dir and .hydrate-<id>-* leftovers for each id
+        listed here, but does NOT reclaim .displaced-<id> trees (issue #911: those are
+        intentionally retained for operator recovery). An empty list means every
+        advertised held server is still known; a non-empty list is fail-safe: if the
+        API cannot compute it (e.g. a DB error), it sends an empty list rather than
+        risk misclassifying a live server as deleted.
+        """
+
     def __init__(
         self,
         *,
@@ -587,10 +600,11 @@ class RegisterAck(_message.Message):
         heartbeat_interval: _duration_pb2.Duration | None = ...,
         rejection_reason: _builtins.str = ...,
         transfer_deadline: _duration_pb2.Duration | None = ...,
+        unknown_held_server_ids: _abc.Iterable[_builtins.str] | None = ...,
     ) -> None: ...
     _HasFieldArgType: _TypeAlias = _typing.Literal["heartbeat_interval", b"heartbeat_interval", "transfer_deadline", b"transfer_deadline"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["accepted", b"accepted", "heartbeat_interval", b"heartbeat_interval", "rejection_reason", b"rejection_reason", "transfer_deadline", b"transfer_deadline"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["accepted", b"accepted", "heartbeat_interval", b"heartbeat_interval", "rejection_reason", b"rejection_reason", "transfer_deadline", b"transfer_deadline", "unknown_held_server_ids", b"unknown_held_server_ids"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     def WhichOneof(self, oneof_group: _Never) -> None: ...
 
