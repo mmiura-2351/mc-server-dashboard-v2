@@ -220,8 +220,8 @@ profile edit, password change, account deletion.
 **Community workspace** — community switcher; dashboard with live server
 tiles (community WS); community rename/delete.
 
-**Server operations** — create (wizard: type → version → backend → port →
-EULA), import ZIP, export ZIP, start/stop/force-stop/restart, delete,
+**Server operations** — create (wizard: type/version → config/EULA),
+import ZIP, export ZIP, start/stop/force-stop/restart, delete,
 live status & uptime via WS, RCON console with command history, live log
 viewer (follow/pause/filter), metrics strip (CPU/mem/players).
 
@@ -306,13 +306,12 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 ### 6.3 Server create wizard
 1. **Type & version** — type cards from `GET /versions`; version dropdown
    from `GET /versions/{type}` (latest preselected).
-2. **Runtime** — game port:
-   auto-suggest from `GET /ports/available`, validate via
-   `GET /ports/check/{port}` on blur.
-3. **Config & EULA** — name, optional `server.properties` overrides (key
-   editor), EULA checkbox (required to start later; create allows deferred
-   acceptance — surfaced as a warning).
-4. Create → navigate to server detail. Alternative path: "Import ZIP" tab on
+2. **Config & EULA** — name, game port (direct-mode only: auto-suggest from
+   `GET /ports/available`, validate via `GET /ports/check/{port}` on blur),
+   optional `server.properties` overrides (key editor), EULA checkbox
+   (required to start later; create allows deferred acceptance — surfaced as
+   a warning).
+3. Create → navigate to server detail. Alternative path: "Import ZIP" tab on
    step 1 → upload form (`POST …/servers/import`).
 
 ### 6.4 Server detail — Overview

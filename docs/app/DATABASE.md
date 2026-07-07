@@ -364,6 +364,7 @@ here when it is added, so the blob does not accumulate undocumented keys.
 | Key | Unit / type | Set by | Feature / issue |
 |---|---|---|---|
 | `resolved_jar_sha256` | string (JAR content hash) | **system** — written by the start use case when a JAR is resolved; hidden from the config-overrides editor (issue #701) and never operator-settable | issue #118 |
+| `resolved_jar_source` | string (source fingerprint) | **system** — written by the start use case alongside `resolved_jar_sha256`; records the catalog's published digest or URL so a subsequent start can detect upstream updates without re-downloading (issue #1676). Format: `"{algorithm}:{hash}"` (e.g. `sha1:ab…`, `sha256:cd…`) or `"url:{download_url}"` (Fabric) | issue #1676 |
 | `snapshot_interval_seconds` | integer seconds | **operator** — per-server snapshot-cadence override (FR-DATA-7), clamped up to the configured floor | issue #107 |
 | `backup_interval_hours` | integer hours | **operator** — per-server backup-schedule interval (Section 8); absent means no scheduled backups | issue #117 |
 | `memory_limit_mb` | integer mebibytes (MiB) | **operator** — per-server memory limit; absent means no limit (the JVM heap stays at its default). The worker derives the JVM heap from it; the `container` driver also enforces it as a *hard* ceiling (see [`CONFIGURATION.md`](CONFIGURATION.md) Section 6.3) | issue #705 |
@@ -480,7 +481,9 @@ The many-to-many attachment join between groups and servers.
 | `server_id` | uuid FK → `server.id` | `ON DELETE CASCADE` |
 
 Primary key: composite `(group_id, server_id)`. Both FKs cascade, so deleting a
-group or a server tidies its attachments automatically.
+group or a server tidies its attachments automatically. Index
+`ix_server_group_server_id` on `server_id` covers the reverse lookup direction
+(`list_groups_for_server`).
 
 **File-sync posture (issue #276, the smallest honest M2 choice).** On any change
 that affects an attached server's authoritative player file — attach, detach, or a
@@ -602,7 +605,9 @@ tables added by migration 0018.
 
 #### `server_resource_pack_assignments`
 
-At most one resource pack per server (the primary key is `server_id`).
+At most one resource pack per server (the primary key is `server_id`). Index
+`ix_srv_rp_assignments_resource_pack_id` on `resource_pack_id` covers the
+reverse lookup (`list_assignments_for_pack`).
 
 | Column | Type | Notes |
 |---|---|---|

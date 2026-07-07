@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from mc_server_dashboard_api.servers.domain.jar_provisioner import (
     JarProvisioner,
     JarProvisioningError,
+    ProvisionedJar,
 )
 from mc_server_dashboard_api.versions.application.ensure_jar import EnsureJar
 from mc_server_dashboard_api.versions.domain.errors import VersionError
@@ -27,8 +28,13 @@ class CatalogJarProvisioner(JarProvisioner):
     ensure_jar: EnsureJar
 
     async def ensure(
-        self, *, server_type: str, version: str, known_key: str | None
-    ) -> str:
+        self,
+        *,
+        server_type: str,
+        version: str,
+        known_key: str | None,
+        known_source: str | None = None,
+    ) -> ProvisionedJar:
         try:
             catalog_type = ServerType(server_type)
         except ValueError as exc:
@@ -39,8 +45,12 @@ class CatalogJarProvisioner(JarProvisioner):
                 f"{server_type} is not provisionable at M1"
             ) from exc
         try:
-            return await self.ensure_jar(
-                server_type=catalog_type, version=version, known_key=known_key
+            result = await self.ensure_jar(
+                server_type=catalog_type,
+                version=version,
+                known_key=known_key,
+                known_source=known_source,
             )
         except VersionError as exc:
             raise JarProvisioningError(str(exc)) from exc
+        return ProvisionedJar(key=result.key, source=result.source_fingerprint)
