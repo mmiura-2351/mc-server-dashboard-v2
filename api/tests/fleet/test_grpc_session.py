@@ -88,12 +88,19 @@ class _Harness:
         registry: InMemoryWorkerRegistry,
         clock: FakeClock,
         *,
+        heartbeat_timeout: dt.timedelta = _TIMEOUT,
         state_sink: FakeServerStateSink | None = None,
         control_plane: ControlPlaneState | None = None,
         real_time_events: RecordingRealTimeEvents | None = None,
     ) -> None:
         self.registry = registry
         self.clock = clock
+        # The servicer derives its watchdog poll interval from this (timeout/3),
+        # so it must match the registry's timeout for the poll cadence to track
+        # the liveness window it polls (issue #1732). Defaults to the production
+        # 30 s used by most tests; the shared-clock tests pass _SHORT_TIMEOUT so
+        # the watchdog polls at ~0.1 s instead of 10 s.
+        self.heartbeat_timeout = heartbeat_timeout
         self.state_sink = state_sink or FakeServerStateSink()
         self.control_plane = control_plane or ControlPlaneState()
         self.real_time_events = real_time_events or RecordingRealTimeEvents()
@@ -107,7 +114,7 @@ class _Harness:
             registry=self.registry,
             clock=self.clock,
             worker_credential=_CREDENTIAL,
-            heartbeat_timeout=_TIMEOUT,
+            heartbeat_timeout=self.heartbeat_timeout,
             transfer_deadline=_TRANSFER_DEADLINE,
             control_plane=self.control_plane,
             state_sink=self.state_sink,
@@ -706,6 +713,14 @@ async def _drain_until_heartbeat_recorded(harness: _Harness) -> None:
     raise AssertionError("heartbeat was not recorded in time")
 
 
+async def _wait_for_heartbeat_at(harness: _Harness, expected: dt.datetime) -> None:
+    for _ in range(200):
+        if harness.registry.list_workers()[0].last_heartbeat_at == expected:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("heartbeat was not recorded in time")
+
+
 async def _wait_for_published(harness: _Harness, count: int) -> None:
     import asyncio
 
@@ -846,6 +861,7 @@ def _shared_clock_harness() -> _Harness:
     return _Harness(
         InMemoryWorkerRegistry(clock=clock, heartbeat_timeout=_SHORT_TIMEOUT),
         clock,
+        heartbeat_timeout=_SHORT_TIMEOUT,
     )
 
 
@@ -878,13 +894,16 @@ async def test_refreshed_heartbeats_keep_session_alive() -> None:
         await call.read()  # ack
 
         # Advance the clock to just under the timeout multiple times,
-        # heartbeating each time. The session must stay alive.
+        # heartbeating each time. The session must stay alive. The watchdog now
+        # polls at ~0.1 s (timeout/3), so wait for each heartbeat to be recorded
+        # before advancing again: that keeps now - last_heartbeat at one 0.2 s
+        # step (< the 0.3 s timeout) at every poll, so the test is deterministic
+        # regardless of scheduling under -n auto load (issue #1732).
         for i in range(1, 4):
-            # Advance to just under the timeout since last heartbeat.
-            h.clock.set(_T0 + dt.timedelta(seconds=0.2 * i))
+            at = _T0 + dt.timedelta(seconds=0.2 * i)
+            h.clock.set(at)
             await call.write(_heartbeat_message())
-            # Let the server process the heartbeat.
-            await asyncio.sleep(0.05)
+            await _wait_for_heartbeat_at(h, at)
 
         # The worker should still be online after sustained heartbeats.
         snapshot = h.registry.list_workers()[0]
