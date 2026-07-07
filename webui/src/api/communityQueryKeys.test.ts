@@ -1,3 +1,5 @@
+// @vitest-environment node
+// DOM-free logic test; runs under Node to skip per-file jsdom setup (issue #1734).
 import { QueryClient } from "@tanstack/react-query";
 import { describe, expect, it } from "vitest";
 import {
