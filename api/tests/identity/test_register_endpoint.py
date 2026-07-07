@@ -11,9 +11,9 @@ import datetime as dt
 from collections.abc import Iterator
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from mc_server_dashboard_api.app import create_app
 from mc_server_dashboard_api.audit.domain import operations as ops
 from mc_server_dashboard_api.audit.domain.events import Outcome
 from mc_server_dashboard_api.dependencies import get_audit_recorder, get_register_user
@@ -51,10 +51,19 @@ class _FakeRegisterUser:
         return self._result
 
 
+_shared_app: FastAPI
+
+
+@pytest.fixture(autouse=True)
+def _bind_shared_app(shared_app: FastAPI) -> None:
+    global _shared_app
+    _shared_app = shared_app
+
+
 def _client(
     use_case: _FakeRegisterUser, recorder: RecordingAuditRecorder | None = None
 ) -> Iterator[TestClient]:
-    app = create_app()
+    app = _shared_app
     app.dependency_overrides[get_register_user] = lambda: use_case
     if recorder is not None:
         app.dependency_overrides[get_audit_recorder] = lambda: recorder
