@@ -202,9 +202,11 @@ type fakeResolver struct {
 	result apiclient.ResolveResult
 	err    error
 	domain string
+	calls  atomic.Int32
 }
 
 func (f *fakeResolver) ResolveJoin(_ context.Context, _, _ string, _ apiclient.Intent) (apiclient.ResolveResult, error) {
+	f.calls.Add(1)
 	return f.result, f.err
 }
 
@@ -439,5 +441,169 @@ func TestHandleLoginStoppedDecision(t *testing.T) {
 	}
 	if sessions.started != 0 {
 		t.Errorf("no session should be started for a stopped server, got %d", sessions.started)
+	}
+}
+
+// --- handleStatus rate-cap tests ---
+
+// statusHandshake returns a valid status handshake (next_state=1) and its
+// parsed form for the given slug under baseDomain.
+func statusHandshake(t *testing.T, slug, baseDomain string) ([]byte, mc.Handshake) {
+	t.Helper()
+	addr := slug + "." + baseDomain
+	raw := handshakePacket(765, addr, 25565, 1)
+	hs, err := mc.ReadHandshake(bufio.NewReaderSize(
+		strings.NewReader(string(raw)), mc.MaxPreRouteBytes))
+	if err != nil {
+		t.Fatalf("parse handshake: %v", err)
+	}
+	return raw, hs
+}
+
+// statusRequestPacket returns a framed Status Request (id 0x00, empty body).
+func statusRequestPacket() []byte { return frameTestPacket(0x00, nil) }
+
+// pingPacket builds a Ping packet (id 0x01) with an int64 payload.
+func pingPacket(payload int64) []byte {
+	body := make([]byte, 8)
+	for i := 0; i < 8; i++ {
+		body[7-i] = byte(payload >> (8 * i))
+	}
+	return frameTestPacket(0x01, body)
+}
+
+// TestHandleStatusCacheMissRateCapped verifies that a status-cache miss from
+// an IP that has exhausted its join-rate budget is silently dropped without
+// calling ResolveJoin.
+func TestHandleStatusCacheMissRateCapped(t *testing.T) {
+	resolver := &fakeResolver{
+		result: apiclient.ResolveResult{Decision: apiclient.DecisionStopped, DisplayName: "X"},
+		domain: "mc.example.com",
+	}
+	cache := NewStatusCache(5*time.Second, 1024, time.Now)
+	caps := ipcaps.NewIPCaps(32, 1, 0, time.Now, nil) // 1 join/s
+
+	l := &Listener{
+		resolver: resolver,
+		cache:    cache,
+		caps:     caps,
+		logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	// Burn the single allowed join for this IP.
+	if !caps.AllowJoin("10.0.0.1") {
+		t.Fatal("first AllowJoin should succeed")
+	}
+
+	_, hs := statusHandshake(t, "amber", "mc.example.com")
+
+	playerSide, relaySide := net.Pipe()
+	defer func() { _ = playerSide.Close() }()
+
+	// Write a valid Status Request so handleStatus gets past the read.
+	go func() {
+		_, _ = playerSide.Write(statusRequestPacket())
+	}()
+
+	r := bufio.NewReaderSize(relaySide, mc.MaxPreRouteBytes)
+	l.handleStatus(context.Background(), relaySide, r, hs, "amber", "10.0.0.1")
+
+	// The connection should be closed silently (EOF on player side).
+	_ = playerSide.SetReadDeadline(time.Now().Add(time.Second))
+	buf := make([]byte, 1)
+	_, err := playerSide.Read(buf)
+	if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrClosedPipe) {
+		t.Errorf("expected EOF/closed pipe after rate-cap drop, got %v", err)
+	}
+
+	if c := resolver.calls.Load(); c != 0 {
+		t.Errorf("resolver should not have been called, got %d calls", c)
+	}
+}
+
+// TestHandleStatusCacheHitNotRateCapped verifies that cached status responses
+// are served even when the IP has exhausted its join-rate budget (cache hits
+// are not gated).
+func TestHandleStatusCacheHitNotRateCapped(t *testing.T) {
+	const cachedJSON = `{"description":{"text":"cached"}}`
+
+	resolver := &fakeResolver{domain: "mc.example.com"}
+	cache := NewStatusCache(5*time.Second, 1024, time.Now)
+	cache.Put("amber", cachedJSON)
+	caps := ipcaps.NewIPCaps(32, 1, 0, time.Now, nil) // 1 join/s
+
+	l := &Listener{
+		resolver: resolver,
+		cache:    cache,
+		caps:     caps,
+		logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	// Exhaust the join budget.
+	caps.AllowJoin("10.0.0.1")
+
+	_, hs := statusHandshake(t, "amber", "mc.example.com")
+
+	playerSide, relaySide := net.Pipe()
+	defer func() { _ = playerSide.Close() }()
+
+	// Write Status Request, then a Ping so handleStatus can complete the full
+	// status exchange.
+	go func() {
+		_, _ = playerSide.Write(statusRequestPacket())
+		// Read the Status Response, then send a Ping, then read the Pong so
+		// the write does not block until the deadline expires.
+		br := bufio.NewReader(playerSide)
+		readTestPacket(t, br)
+		_, _ = playerSide.Write(pingPacket(42))
+		readTestPacket(t, br)
+	}()
+
+	r := bufio.NewReaderSize(relaySide, mc.MaxPreRouteBytes)
+	l.handleStatus(context.Background(), relaySide, r, hs, "amber", "10.0.0.1")
+
+	if c := resolver.calls.Load(); c != 0 {
+		t.Errorf("resolver should not have been called for a cache hit, got %d calls", c)
+	}
+}
+
+// TestHandleStatusCacheMissAllowedResolves verifies that a status-cache miss
+// with sufficient join-rate budget proceeds to resolve.
+func TestHandleStatusCacheMissAllowedResolves(t *testing.T) {
+	resolver := &fakeResolver{
+		result: apiclient.ResolveResult{Decision: apiclient.DecisionStopped, DisplayName: "X"},
+		domain: "mc.example.com",
+	}
+	cache := NewStatusCache(5*time.Second, 1024, time.Now)
+	caps := ipcaps.NewIPCaps(32, 100, 0, time.Now, nil) // generous budget
+
+	l := &Listener{
+		resolver: resolver,
+		cache:    cache,
+		caps:     caps,
+		logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	_, hs := statusHandshake(t, "amber", "mc.example.com")
+
+	playerSide, relaySide := net.Pipe()
+	defer func() { _ = playerSide.Close() }()
+
+	go func() {
+		_, _ = playerSide.Write(statusRequestPacket())
+		// Read the Status Response (synthesized stopped), then send a Ping,
+		// then read the Pong so the write does not block until the deadline
+		// expires.
+		br := bufio.NewReader(playerSide)
+		readTestPacket(t, br)
+		_, _ = playerSide.Write(pingPacket(42))
+		readTestPacket(t, br)
+	}()
+
+	r := bufio.NewReaderSize(relaySide, mc.MaxPreRouteBytes)
+	l.handleStatus(context.Background(), relaySide, r, hs, "amber", "10.0.0.1")
+
+	if c := resolver.calls.Load(); c != 1 {
+		t.Errorf("resolver should have been called once, got %d calls", c)
 	}
 }

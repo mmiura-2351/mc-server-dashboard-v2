@@ -1,6 +1,7 @@
 // Package ipcaps provides the per-IP hygiene caps shared by the relay's
 // internet-exposed listeners (RELAY.md Section 11). The game listener uses both
-// the concurrent-connection cap and the join-rate cap; the tunnel listener uses
+// the concurrent-connection cap and the join-rate cap (login attempts and
+// status-cache-miss resolves share the same budget); the tunnel listener uses
 // only the concurrent-connection cap (its rate is naturally bounded by token
 // issuance). Sharing the type keeps the connection-cap logic in one place so the
 // two listeners cannot diverge.
@@ -140,8 +141,8 @@ func (c *IPCaps) Release(ip string) {
 	}
 }
 
-// AllowJoin reports whether a join (login) from ip is within the per-second
-// rate cap, counting this attempt. It uses a fixed one-second window per IP.
+// AllowJoin reports whether a join (login or status-resolve) from ip is within
+// the per-second rate cap, counting this attempt. It uses a fixed one-second window per IP.
 // A brand-new source IP is denied without being tracked once joinWindows
 // holds maxJoinWindowEntries entries (issue #1566); an IP already tracked is
 // unaffected by the ceiling and keeps renewing its own window as before.

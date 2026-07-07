@@ -342,10 +342,12 @@ per-slug **status cache** (default 5 s TTL):
 
 - Cache hit → answer the Status Response and Pong locally; no API or Worker
   involvement.
-- Cache miss, server running → resolve, tunnel, perform the status exchange
-  itself (forward the buffered handshake + Status Request, read the Status
-  Response), cache the JSON, answer, close. Players see the server's real
-  MOTD, player count, and favicon, at most 5 s stale.
+- Cache miss → the per-IP join-rate cap is checked first (same budget as
+  login attempts — Section 11); over the cap the connection is silently
+  dropped. Under the cap, server running → resolve, tunnel, perform the
+  status exchange itself (forward the buffered handshake + Status Request,
+  read the Status Response), cache the JSON, answer, close. Players see the
+  server's real MOTD, player count, and favicon, at most 5 s stale.
 
 **Stopped servers answer in-protocol** (owner decision):
 
@@ -444,8 +446,9 @@ collision — see `docs/dev/DEPLOYMENT.md` "Relay — Single-host port collision
   Java protocol has nothing before Login). Mitigations: silent-drop for
   unknown hostnames and malformed traffic, parse byte/time caps, per-IP
   concurrent-connection cap (default 32) and per-IP join-rate cap (default
-  10/s) — both config. This is hygiene, not DDoS protection; volumetric
-  defense is out of scope (Section 17).
+  10/s, gates both login attempts and status-cache-miss resolves) — both
+  config. This is hygiene, not DDoS protection; volumetric defense is out of
+  scope (Section 17).
 - **Tunnel listener** is TLS; a connection must present a valid single-use
   128-bit token within 5 s or it is dropped without a response. Tokens are
   minted by the API, bound to one resolve, and expire in 10 s, so the
@@ -511,7 +514,7 @@ config, wiring at the edge.
 | `game.listen` | `:25565` | Public player listener. |
 | `game.status_cache_seconds` | `5` | Status-ping cache TTL. |
 | `game.status_cache_max_entries` | `1024` | Maximum entries in the per-slug status-ping cache; oldest entry is evicted when the limit is exceeded. Must be positive. |
-| `game.max_conns_per_ip` / `game.joins_per_ip_per_second` | `32` / `10` | Hygiene caps (Section 11). |
+| `game.max_conns_per_ip` / `game.joins_per_ip_per_second` | `32` / `10` | Hygiene caps (Section 11). The join-rate cap gates both login attempts and status-cache-miss resolves. |
 | `tunnel.listen` | `:25665` | Worker dial-back listener (TLS). |
 | `tunnel.max_conns_per_ip` | `64` | Per-IP concurrent-connection cap on the tunnel listener (Section 11). |
 | `tunnel.public_endpoint` | — (required) | `host:port` advertised to Workers via `Register` → `TunnelDial`. |
