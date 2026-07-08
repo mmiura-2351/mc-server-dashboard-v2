@@ -94,6 +94,7 @@ def _app(
     resolver: FakeNameResolver | None = None,
 ) -> object:
     app = _shared_app
+    app.dependency_overrides.clear()
     user = make_user()
     user.is_platform_admin = platform_admin
     app.dependency_overrides[get_current_user] = lambda: user

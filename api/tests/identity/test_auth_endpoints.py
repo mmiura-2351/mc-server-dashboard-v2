@@ -102,6 +102,7 @@ def _bind_shared_app(shared_app: FastAPI) -> None:
 
 def _client(**overrides: object) -> Iterator[TestClient]:
     app = _shared_app
+    app.dependency_overrides.clear()
     for dependency, value in overrides.items():
         app.dependency_overrides[_PROVIDERS[dependency]] = _provider(value)
     with TestClient(app) as client:

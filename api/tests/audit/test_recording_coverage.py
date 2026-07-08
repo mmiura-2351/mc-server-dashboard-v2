@@ -115,6 +115,7 @@ def _bind_shared_app(shared_app: FastAPI) -> None:
 
 def _base_app(recorder: RecordingAuditRecorder, *, platform_admin: bool = False):  # type: ignore[no-untyped-def]
     app = _shared_app
+    app.dependency_overrides.clear()
     user = make_user()
     user.is_platform_admin = platform_admin
     app.dependency_overrides[get_current_user] = lambda: user
