@@ -73,7 +73,13 @@ PROTOC_GEN_GO_GRPC := worker/.bin/protoc-gen-go-grpc
 all: check
 
 # Full verification gate. Matches the pre-push hook and CI.
-check: hooks-check lint test webui-build openapi-check proto-check docs-check
+# Parallelized via scripts/check_parallel.sh: independent module chains
+# (api, webui, worker, relay, proto, hooks, docs) run concurrently in Phase 1,
+# then the drift checks (proto-check, openapi-check) that run generators
+# follow in Phase 2 after all readers have finished. See the script header
+# for the phasing rationale and bounded-parallelism notes.
+check:
+	scripts/check_parallel.sh
 
 lint: api-lint worker-lint relay-lint webui-lint proto-lint
 
