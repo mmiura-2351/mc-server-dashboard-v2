@@ -48,8 +48,8 @@ from fastapi.responses import StreamingResponse
 from mc_server_dashboard_api.dependencies import (
     ResolvedJarLookup,
     get_resolved_jar_lookup,
-    get_settings,
     get_storage,
+    get_worker_credential,
 )
 from mc_server_dashboard_api.http_problem import problem
 from mc_server_dashboard_api.storage.domain.errors import (
@@ -149,20 +149,20 @@ def _bounded_missing_regions(
 
 
 async def require_worker_credential(
-    request: Request,
+    expected: Annotated[str | None, Depends(get_worker_credential)],
     authorization: Annotated[str | None, Header()] = None,
 ) -> None:
     """Authenticate a data-plane request by the shared Worker credential.
 
     Mirrors the control-plane auth model (CONTROL_PLANE.md Section 4.1): a
     ``Authorization: Bearer <credential>`` header compared constant-time against
-    ``control.worker_credential``. A missing/wrong credential is a uniform 401.
-    The credential is required to mount the data plane, enforced at app startup
-    (the app factory fails fast); it is non-None here.
+    ``control.worker_credential``, injected via ``Depends(get_worker_credential)``
+    so a test can substitute it through ``dependency_overrides`` (issue #1753). A
+    missing/wrong credential is a uniform 401. The credential is required to mount
+    the data plane, enforced at app startup (the app factory fails fast); it is
+    non-None here.
     """
 
-    settings = get_settings(request)
-    expected = settings.control.worker_credential
     presented = _bearer(authorization)
     if (
         expected is None
