@@ -6,11 +6,15 @@
 # openapi-check) in Phase 2 after all readers have finished. This avoids the
 # read-during-rewrite race between generators and lint/test/build targets.
 #
-# Phase 1 — reader chains (parallel, disjoint module dirs):
+# Phase 1a — Go lint (serial; golangci-lint enforces cache-level mutual
+#            exclusion, so worker-lint and relay-lint cannot overlap):
+#   worker-lint, relay-lint
+#
+# Phase 1b — reader chains (parallel, disjoint module dirs):
 #   A: api-lint → api-test              (api/)
 #   B: webui-lint → webui-test → webui-build  (webui/)
-#   C: worker-lint → worker-test → worker-e2e-compile  (worker/)
-#   D: relay-lint → relay-test → relay-e2e-compile     (relay/)
+#   C: worker-test → worker-e2e-compile (worker/)
+#   D: relay-test → relay-e2e-compile   (relay/)
 #   E: proto-lint                       (proto/)
 #   F: hooks-check → hooks-test         (.githooks/)
 #   G: docs-check                       (docs/)
@@ -18,6 +22,8 @@
 # Phase 2 — drift checks (serial; generators write files read by Phase 1):
 #   proto-check  (proto-gen + git diff; writes api/worker/relay stubs)
 #   openapi-check (openapi-gen + git diff; writes webui files)
+#   Skipped entirely if Phase 1 already failed (no point running generators
+#   on a known-broken tree).
 #
 # Bounded parallelism: 7 background jobs on a 4-core host. The heavy chains
 # (A, B) are CPU-bound; the lighter ones (C-G) finish quickly and free cores.
@@ -27,7 +33,10 @@
 set -uo pipefail
 
 LOGDIR=$(mktemp -d)
+# On normal exit: clean up the temp dir.
+# On INT/TERM: kill background jobs first, then exit (triggers EXIT cleanup).
 trap 'rm -rf "$LOGDIR"' EXIT
+trap 'jobs -p | xargs -r kill 2>/dev/null; exit 1' INT TERM
 
 failed_chains=()
 
@@ -56,8 +65,17 @@ make worker/.bin/golangci-lint >"$LOGDIR/golangci-install.log" 2>&1 || {
     exit 1
 }
 
-# --- Phase 1: reader chains in parallel ---
-echo "=== Phase 1: reader chains (parallel) ==="
+# --- Phase 1a: Go lint serial (golangci-lint cache mutual exclusion) ---
+# golangci-lint v2 enforces cache-level locking; overlapping runs against the
+# same GOLANGCI_LINT_CACHE abort with "parallel golangci-lint is running".
+# Serialize the two lint targets (~0.8s each), then let tests run in parallel.
+echo "=== Phase 1a: Go lint (serial) ==="
+
+run_chain worker-lint worker-lint || failed_chains+=(worker-lint)
+run_chain relay-lint  relay-lint  || failed_chains+=(relay-lint)
+
+# --- Phase 1b: reader chains in parallel ---
+echo "=== Phase 1b: reader chains (parallel) ==="
 
 run_chain api      api-lint api-test &
 pids[0]=$!; names[0]=api
@@ -65,10 +83,10 @@ pids[0]=$!; names[0]=api
 run_chain webui    webui-lint webui-test webui-build &
 pids[1]=$!; names[1]=webui
 
-run_chain worker   worker-lint worker-test worker-e2e-compile &
+run_chain worker   worker-test worker-e2e-compile &
 pids[2]=$!; names[2]=worker
 
-run_chain relay    relay-lint relay-test relay-e2e-compile &
+run_chain relay    relay-test relay-e2e-compile &
 pids[3]=$!; names[3]=relay
 
 run_chain proto    proto-lint &
@@ -87,8 +105,8 @@ for i in "${!pids[@]}"; do
     fi
 done
 
-# Report Phase 1 failures (dump logs) but continue to Phase 2 so all
-# failures are visible in one run.
+# Report Phase 1 failures and skip Phase 2 (no point running generators on
+# a known-broken tree).
 if (( ${#failed_chains[@]} > 0 )); then
     echo "" >&2
     echo "=== Phase 1 failures ===" >&2
@@ -97,6 +115,9 @@ if (( ${#failed_chains[@]} > 0 )); then
         cat "$LOGDIR/$name.log" >&2
         echo "" >&2
     done
+    echo "FAILED chains: ${failed_chains[*]}" >&2
+    echo "(Phase 2 drift checks skipped due to Phase 1 failures)" >&2
+    exit 1
 fi
 
 # --- Phase 2: drift checks (serial, after all readers) ---
