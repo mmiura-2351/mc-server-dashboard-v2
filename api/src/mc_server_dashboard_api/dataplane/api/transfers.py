@@ -351,7 +351,7 @@ async def publish_snapshot(
     if content_length is None:
         raise problem(status.HTTP_411_LENGTH_REQUIRED, "content_length_required")
     if content_length > _MAX_SNAPSHOT_BYTES:
-        raise problem(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "snapshot_too_large")
+        raise problem(status.HTTP_413_CONTENT_TOO_LARGE, "snapshot_too_large")
 
     scope = (CommunityId(community_id), ServerId(server_id))
     # Read the store's ``current`` once here (guard time) and ALWAYS thread it into
@@ -427,9 +427,7 @@ async def publish_snapshot(
         # the disk fills. (An over-run that stays under the cap surfaces as the
         # length mismatch above.)
         await storage.abort_snapshot(handle)
-        raise problem(
-            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "snapshot_too_large"
-        ) from None
+        raise problem(status.HTTP_413_CONTENT_TOO_LARGE, "snapshot_too_large") from None
     except _DeclaredLengthExceeded:
         # An under-declaring client streamed more than its Content-Length: abort
         # mid-stream rather than spooling the whole over-long body first.
