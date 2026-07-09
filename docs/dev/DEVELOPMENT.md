@@ -10,9 +10,10 @@ This document covers the *mechanics* of working in the tree. The change process
 [`TESTING.md`](TESTING.md); behavioral guidance for writing code is in
 [`../../CLAUDE.md`](../../CLAUDE.md).
 
-The repo is two services plus a shared contract: `api/` (Python),
-`worker/` (Go), and `proto/` (the buf control-plane module). A root `Makefile`
-provides unified commands that fan out to the per-module tooling.
+The repo is three services, a web UI, and a shared contract: `api/` (Python),
+`worker/` and `relay/` (Go), `webui/` (React/TypeScript), and `proto/` (the
+buf control-plane module). A root `Makefile` provides unified commands that
+fan out to the per-module tooling.
 
 ## 1. Prerequisites
 
@@ -103,6 +104,8 @@ boundaries) and Section 2 (the layering). A pointer map:
 | `worker/internal/application/` | Use cases, depending only on `domain`. | quadrant: `application` |
 | `worker/internal/adapters/` | Concrete Port implementations (drivers, clients). | quadrant: `adapters` |
 | `worker/internal/controlplane/` | Generated control-plane stubs (do not edit). | Section 6 below |
+| `relay/` | The Go game-ingress relay (hostname routing, Worker dial-back tunnel). | [`RELAY.md`](../app/RELAY.md) |
+| `webui/` | The React SPA. | [`../../webui/README.md`](../../webui/README.md) |
 
 The Hexagonal quadrants (`domain`, `application`, `adapters`, edge) and the Port
 catalog are in [`ARCHITECTURE.md`](../app/ARCHITECTURE.md) Sections 2 and 5. On

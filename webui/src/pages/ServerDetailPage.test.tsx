@@ -1,3 +1,8 @@
+// @vitest-environment jsdom
+// Pinned to jsdom: the copy-to-clipboard tests assert the
+// document.execCommand("copy") fallback (skipped when happy-dom provides
+// navigator.clipboard), and the WAI-ARIA focus-return test relies on jsdom's
+// focus handling (issue #1751).
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   act,

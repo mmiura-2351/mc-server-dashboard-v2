@@ -316,7 +316,9 @@ from mc_server_dashboard_api.servers.domain.backup_store import (
 )
 from mc_server_dashboard_api.servers.domain.bedrock_tunnel import (
     BedrockTunnelCredentials,
+    BedrockTunnelSync,
     NullBedrockTunnelCredentials,
+    NullBedrockTunnelSync,
 )
 from mc_server_dashboard_api.servers.domain.catalog_provider import (
     CatalogProvider,
@@ -387,6 +389,19 @@ def get_settings(request: Request) -> Settings:
 
     settings: Settings = request.app.state.settings
     return settings
+
+
+def get_worker_credential(request: Request) -> str | None:
+    """Return the shared Worker credential the data plane authenticates against.
+
+    The secret from ``control.worker_credential`` (CONFIGURATION.md Section 5.1),
+    resolved from app state so ``require_worker_credential`` can inject it via
+    ``Depends`` rather than reading settings itself — a test can then substitute it
+    through ``dependency_overrides`` like any other provider (issue #1753). ``None``
+    when no credential is configured (the control plane is disabled).
+    """
+
+    return get_settings(request).control.worker_credential
 
 
 def get_storage(request: Request) -> Storage:
@@ -1587,6 +1602,7 @@ def get_start_server(
         store_generation=StorageGenerationReader(storage=get_storage(request)),
         file_store=file_store,
         lifecycle_lock=get_lifecycle_lock(request),
+        bedrock_tunnel_sync=get_bedrock_tunnel_sync(request),
     )
 
 
@@ -1601,6 +1617,7 @@ def get_stop_server(
         uow=ServersUnitOfWork(session_factory),
         control_plane=control_plane,
         clock=ServersSystemClock(),
+        bedrock_tunnel_sync=get_bedrock_tunnel_sync(request),
     )
 
 
@@ -1886,6 +1903,21 @@ def get_bedrock_tunnel_credentials(request: Request) -> BedrockTunnelCredentials
     if table is None:
         return NullBedrockTunnelCredentials()
     return FleetBedrockTunnelCredentials(table)
+
+
+def get_bedrock_tunnel_sync(request: Request) -> BedrockTunnelSync:
+    """Bind the lifecycle tunnel sync to the fleet-backed syncer (#1602).
+
+    Reads the ``BedrockTunnelSyncer`` the app factory stored on app state.
+    Falls back to a no-op if absent (tests/minimal apps without relay state).
+    """
+
+    syncer: BedrockTunnelSync | None = getattr(
+        request.app.state, "bedrock_tunnel_sync", None
+    )
+    if syncer is None:
+        return NullBedrockTunnelSync()
+    return syncer
 
 
 def get_delete_server(

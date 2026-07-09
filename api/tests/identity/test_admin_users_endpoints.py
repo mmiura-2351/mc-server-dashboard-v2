@@ -12,9 +12,10 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable, Iterator
 
+import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from mc_server_dashboard_api.app import create_app
 from mc_server_dashboard_api.audit.domain import operations as ops
 from mc_server_dashboard_api.dependencies import (
     get_admin_create_user,
@@ -68,10 +69,20 @@ _PROVIDERS = {
 }
 
 
+_shared_app: FastAPI
+
+
+@pytest.fixture(autouse=True)
+def _bind_shared_app(shared_app: FastAPI) -> None:
+    global _shared_app
+    _shared_app = shared_app
+
+
 def _client(
     *, platform_admin: bool = True, **overrides: object
 ) -> Iterator[TestClient]:
-    app = create_app()
+    app = _shared_app
+    app.dependency_overrides.clear()
     admin = make_user(username="admin", is_platform_admin=platform_admin)
     app.dependency_overrides[get_current_user] = _provider(admin)
     for dependency, value in overrides.items():

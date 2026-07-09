@@ -146,13 +146,24 @@ func (r *flowRegistry) logCapOnce() {
 // readPump reads Geyser's replies for one flow and forwards them back over the
 // QUIC connection, prefixed with the same flow id the relay assigned
 // (docs/app/BEDROCK_TUNNEL.md Section 5: "the Worker only ever echoes back the
-// flow id"). It exits once the flow's socket is closed (idle eviction or
-// closeAll).
+// flow id"). It exits on any read error — whether from idle eviction, closeAll,
+// or an unexpected failure (e.g. ICMP port-unreachable) — and self-evicts the
+// flow entry so that forward will redial a fresh socket on the next datagram.
 func (r *flowRegistry) readPump(id uint32, fs *flowSocket) {
 	buf := make([]byte, udpReadBufferSize)
 	for {
 		n, err := fs.conn.Read(buf)
 		if err != nil {
+			r.mu.Lock()
+			evicted := false
+			if cur, ok := r.byID[id]; ok && cur == fs {
+				delete(r.byID, id)
+				evicted = true
+			}
+			r.mu.Unlock()
+			if evicted {
+				_ = fs.conn.Close()
+			}
 			return
 		}
 		r.mu.Lock()

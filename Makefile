@@ -73,7 +73,13 @@ PROTOC_GEN_GO_GRPC := worker/.bin/protoc-gen-go-grpc
 all: check
 
 # Full verification gate. Matches the pre-push hook and CI.
-check: hooks-check lint test webui-build openapi-check proto-check docs-check
+# Parallelized via scripts/check_parallel.sh: independent module chains
+# (api, webui, worker, relay, proto, hooks, docs) run concurrently in Phase 1,
+# then the drift checks (proto-check, openapi-check) that run generators
+# follow in Phase 2 after all readers have finished. See the script header
+# for the phasing rationale and bounded-parallelism notes.
+check:
+	scripts/check_parallel.sh
 
 lint: api-lint worker-lint relay-lint webui-lint proto-lint
 
@@ -115,8 +121,13 @@ api-format: api-env-check
 	cd api && uv run ruff format .
 	cd api && uv run ruff check --fix .
 
+# Parallelize the suite with pytest-xdist, mirroring CI (.github/workflows/
+# api.yml). `-n auto` fans out across the host's cores; `--dist worksteal`
+# rebalances the queue so a slow file can't strand an idle worker (#1729). The
+# scratch-DB fixtures are worker-safe (per-worker `<dbname>_<uuid>`, #1146).
+# Coverage stays CI-only (#325) -- not added here.
 api-test: api-env-check
-	cd api && uv run pytest
+	cd api && uv run pytest -n auto --dist worksteal
 
 # ---------------------------------------------------------------------------
 # worker/ (Go)

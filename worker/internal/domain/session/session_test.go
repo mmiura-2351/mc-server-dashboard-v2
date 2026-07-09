@@ -1292,3 +1292,90 @@ func TestEmptyServerIDUnknownKindStaysUnsupported(t *testing.T) {
 	cancel()
 	<-done
 }
+
+// The RegisterAck's unknown_held_server_ids is pushed onto a handler that
+// implements the optional ScratchReclaimer after registration (issue #924),
+// intersected with the held set this Register actually advertised.
+func TestRegisterAckUnknownHeldServerIDsPlumbedToReclaimer(t *testing.T) {
+	ack := acceptedAck()
+	ack.UnknownHeldServerIDs = []string{"srv-a", "srv-b"}
+	transport := newFakeTransport(ack)
+	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
+	clock := newFakeClock()
+	handler := newFakeHandler(CommandResult{Success: true})
+	// The caps advertise srv-a and srv-c as held; srv-b is NOT in held.
+	caps := testCaps()
+	caps.HeldServers = []HeldServer{
+		{ServerID: "srv-a", Generation: 1},
+		{ServerID: "srv-c", Generation: 2},
+	}
+	r := NewRunner(dialer, caps, clock, discardLogger(), WithCommandHandler(handler))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+
+	// Wait until the reclaimer has been called.
+	waitFor(t, func() bool { return len(handler.reclaimedIDsCopy()) > 0 })
+	got := handler.reclaimedIDsCopy()
+	// Only srv-a should be reclaimed (it was in both unknown and held); srv-b
+	// was in unknown but not held, so it should be filtered out.
+	if len(got) != 1 || got[0] != "srv-a" {
+		t.Fatalf("reclaimed ids = %v, want [srv-a]", got)
+	}
+
+	cancel()
+	<-done
+}
+
+// A handler that does not implement ScratchReclaimer is a no-op (no panic).
+func TestRegisterAckUnknownHeldServerIDsNoReclaimer(t *testing.T) {
+	ack := acceptedAck()
+	ack.UnknownHeldServerIDs = []string{"srv-a"}
+	transport := newFakeTransport(ack)
+	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
+	clock := newFakeClock()
+	// A nil handler means no ScratchReclaimer is available.
+	r := NewRunner(dialer, testCaps(), clock, discardLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+
+	waitFor(t, func() bool { return transport.registerCount() == 1 })
+	// No panic, no reclamation — the test passes by reaching here.
+
+	cancel()
+	<-done
+}
+
+// An empty unknown_held_server_ids list does not invoke the reclaimer.
+func TestRegisterAckEmptyUnknownHeldServerIDsSkipsReclaimer(t *testing.T) {
+	ack := acceptedAck()
+	// Explicitly empty list.
+	ack.UnknownHeldServerIDs = []string{}
+	transport := newFakeTransport(ack)
+	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
+	clock := newFakeClock()
+	handler := newFakeHandler(CommandResult{Success: true})
+	caps := testCaps()
+	caps.HeldServers = []HeldServer{{ServerID: "srv-a", Generation: 1}}
+	r := NewRunner(dialer, caps, clock, discardLogger(), WithCommandHandler(handler))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+
+	waitFor(t, func() bool { return transport.registerCount() == 1 })
+	// Give a small window for any erroneous reclaimer call to land.
+	time.Sleep(50 * time.Millisecond)
+	if got := handler.reclaimedIDsCopy(); len(got) != 0 {
+		t.Fatalf("reclaimed ids = %v, want empty", got)
+	}
+
+	cancel()
+	<-done
+}

@@ -727,7 +727,6 @@ export const en = {
   "serverCreate.tab.import": "Import ZIP",
   // Wizard step rail.
   "serverCreate.step.type": "Type & version",
-  "serverCreate.step.runtime": "Runtime",
   "serverCreate.step.config": "Config & EULA",
   "serverCreate.next": "Next",
   "serverCreate.back": "Back",
@@ -749,7 +748,7 @@ export const en = {
   "serverCreate.typeSub.paper": "performance fork",
   "serverCreate.typeSub.fabric": "light modding",
   "serverCreate.typeSub.forge": "heavy modding",
-  // Step 2 — runtime.
+  // Step 2 — config & EULA (port field is direct-mode only).
   "serverCreate.portLabel": "Game port",
   "serverCreate.portHint": "Auto-suggested from the next free port.",
   "serverCreate.portChecking": "Checking port availability…",
@@ -757,7 +756,6 @@ export const en = {
   "serverCreate.portTaken": "Port is already in use.",
   "serverCreate.portOutOfRange": "Port is outside the allowed range.",
   "serverCreate.portCheckFailed": "Could not check that port.",
-  // Step 3 — config & EULA.
   "serverCreate.nameLabel": "Server name",
   "serverCreate.namePlaceholder": "survival",
   // Per-server resource allocation in the create wizard (issue #715), mirroring

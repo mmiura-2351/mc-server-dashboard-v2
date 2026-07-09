@@ -286,6 +286,9 @@ type fakeHandler struct {
 	// called, modeling the instance manager re-reporting a live instance.
 	resyncCalls int
 	resyncEmit  []StatusEvent
+	// reclaimedIDs records the server ids passed to ReclaimDeletedScratches
+	// (issue #924).
+	reclaimedIDs []string
 }
 
 func newFakeHandler(result CommandResult) *fakeHandler {
@@ -340,6 +343,19 @@ func (h *fakeHandler) resyncCallsCopy() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.resyncCalls
+}
+
+// ReclaimDeletedScratches records the ids for test assertions (issue #924).
+func (h *fakeHandler) ReclaimDeletedScratches(serverIDs []string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.reclaimedIDs = append(h.reclaimedIDs, serverIDs...)
+}
+
+func (h *fakeHandler) reclaimedIDsCopy() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]string(nil), h.reclaimedIDs...)
 }
 
 func (h *fakeHandler) handledCopy() []Command {

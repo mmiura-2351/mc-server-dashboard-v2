@@ -102,6 +102,10 @@ jobs:
         # so the service's fresh `mcsd_test` is just the maintenance connection.
         env:
           MCD_TEST_DATABASE_URL: postgresql+asyncpg://mcsd:mcsd@localhost:5432/mcsd_test
+          # coverage.py's sys.monitoring core (Python 3.13, coverage >= 7.4)
+          # instruments at near-zero cost, versus the default sys.settrace
+          # CTracer that was eating the -n auto parallel speedup (#1730).
+          COVERAGE_CORE: sysmon
         # Coverage is CI-only (#325): local `uv run pytest` / `make api-test`
         # stay fast and uncluttered; CI surfaces the number and the missing
         # lines per source path. No floor enforced.

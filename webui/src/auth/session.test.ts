@@ -1,3 +1,5 @@
+// @vitest-environment node
+// DOM-free logic test; runs under Node to skip per-file jsdom setup (issue #1734).
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   hardLogout,

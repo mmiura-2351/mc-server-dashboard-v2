@@ -136,10 +136,11 @@ func (t *transport) RecvRegisterAck(_ context.Context) (session.RegisterAck, err
 		return session.RegisterAck{}, fmt.Errorf("controlplane: first API message was not a RegisterAck")
 	}
 	return session.RegisterAck{
-		Accepted:          ack.GetAccepted(),
-		HeartbeatInterval: ack.GetHeartbeatInterval().AsDuration(),
-		TransferDeadline:  ack.GetTransferDeadline().AsDuration(),
-		RejectionReason:   ack.GetRejectionReason(),
+		Accepted:             ack.GetAccepted(),
+		HeartbeatInterval:    ack.GetHeartbeatInterval().AsDuration(),
+		TransferDeadline:     ack.GetTransferDeadline().AsDuration(),
+		RejectionReason:      ack.GetRejectionReason(),
+		UnknownHeldServerIDs: ack.GetUnknownHeldServerIds(),
 	}, nil
 }
 

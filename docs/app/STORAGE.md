@@ -610,7 +610,9 @@ snapshot-success branches): that success proves the store supersedes the displac
 world, making the local copy redundant. A server deleted after a failed final
 snapshot never snapshots again and its displaced tree therefore **persists on the
 Worker indefinitely** — bounded to one working-set worth of disk per deleted
-server.
+server. Note: the issue #924 scratch reclaim (`ReclaimDeletedScratches`)
+intentionally does **not** reclaim `.displaced-<id>` trees — only the scratch dir
+and `.hydrate-<id>-*` leftovers.
 
 **Boot detection.** At Worker boot, after the held-server scan,
 `WarnOrphanDisplacedTrees` logs a `WARN` for each `.displaced-<id>` tree whose

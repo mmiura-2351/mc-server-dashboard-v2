@@ -225,13 +225,31 @@ class WorkerSessionServicer(WorkerServiceServicer):
     ) -> AsyncIterator[pb.ApiMessage]:
         await self._authenticate(context)
 
-        worker_id, correlation_id, session = await self._register(
+        worker_id, correlation_id, session, held_ids = await self._register(
             request_iterator, context
         )
         # The registry resets this Worker's load to zero on (re)registration;
         # rebuild it from the authoritative running-server tally so placement is
         # correct after a reconnect (epic #7 reconciliation obligation).
         await self._rebuild_assignments(worker_id)
+
+        # Compute which held servers the Worker advertised no longer exist (issue
+        # #924). Fail-safe: any exception returns an empty list so a DB error
+        # never misclassifies a live server as deleted.
+        unknown_held_ids: list[str] = []
+        if held_ids:
+            try:
+                existing = await self._state_sink.existing_server_ids(
+                    server_ids=held_ids
+                )
+                unknown_held_ids = [sid for sid in held_ids if sid not in existing]
+            except Exception:
+                _LOG.warning(
+                    "failed to compute unknown held servers; sending empty list",
+                    extra={"worker_id": worker_id.value},
+                    exc_info=True,
+                )
+
         outbound = self._control_plane.open_session(worker_id, session)
         # Read inbound events/results in a background task while this generator
         # yields the Worker's outbound commands; both share the one stream.
@@ -246,7 +264,10 @@ class WorkerSessionServicer(WorkerServiceServicer):
         # Task+Queue per disconnect (issue #788).
         outbound_get: asyncio.Future[pb.ApiMessage] | None = None
         try:
-            yield self._register_ack(correlation_id=correlation_id)
+            yield self._register_ack(
+                correlation_id=correlation_id,
+                unknown_held_server_ids=unknown_held_ids,
+            )
             while True:
                 outbound_get = asyncio.ensure_future(outbound.get())
                 done, _ = await asyncio.wait(
@@ -402,7 +423,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
         self,
         request_iterator: AsyncIterator[pb.WorkerMessage],
         context: aio.ServicerContext,
-    ) -> tuple[WorkerId, str, SessionToken]:
+    ) -> tuple[WorkerId, str, SessionToken, list[str]]:
         try:
             first = await request_iterator.__anext__()
         except StopAsyncIteration:
@@ -433,6 +454,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
             )
 
         now = self._clock.now()
+        held_servers = {hs.server_id: hs.generation for hs in register.held_servers}
         session = self._registry.register(
             Worker(
                 id=worker_id,
@@ -446,10 +468,10 @@ class WorkerSessionServicer(WorkerServiceServicer):
             # lifecycle layer skips the destructive hydrate on a same-worker restart
             # only when the held generation is fresh enough. A duplicate server id in
             # the repeated field keeps the last (a malformed Worker would be a bug).
-            held_servers={hs.server_id: hs.generation for hs in register.held_servers},
+            held_servers=held_servers,
         )
         _LOG.info("worker registered", extra={"worker_id": worker_id.value})
-        return worker_id, first.correlation_id, session
+        return worker_id, first.correlation_id, session, list(held_servers.keys())
 
     async def _handle(self, worker_id: WorkerId, message: pb.WorkerMessage) -> None:
         payload = message.WhichOneof("payload")
@@ -537,10 +559,17 @@ class WorkerSessionServicer(WorkerServiceServicer):
             ),
         )
 
-    def _register_ack(self, *, correlation_id: str) -> pb.ApiMessage:
+    def _register_ack(
+        self,
+        *,
+        correlation_id: str,
+        unknown_held_server_ids: list[str] | None = None,
+    ) -> pb.ApiMessage:
         ack = pb.RegisterAck(accepted=True)
         ack.heartbeat_interval.FromTimedelta(self._heartbeat_interval)
         ack.transfer_deadline.FromTimedelta(self._transfer_deadline)
+        if unknown_held_server_ids:
+            ack.unknown_held_server_ids.extend(unknown_held_server_ids)
         return pb.ApiMessage(correlation_id=correlation_id, register_ack=ack)
 
 

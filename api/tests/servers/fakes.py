@@ -26,6 +26,7 @@ from mc_server_dashboard_api.servers.domain.backup_repository import (
     BackupRepository,
 )
 from mc_server_dashboard_api.servers.domain.backup_store import BackupArchiveStore
+from mc_server_dashboard_api.servers.domain.bedrock_tunnel import BedrockTunnelSync
 from mc_server_dashboard_api.servers.domain.catalog_provider import (
     CatalogProject,
     CatalogProvider,
@@ -63,6 +64,7 @@ from mc_server_dashboard_api.servers.domain.groups import (
 from mc_server_dashboard_api.servers.domain.jar_provisioner import (
     JarProvisioner,
     JarProvisioningError,
+    ProvisionedJar,
 )
 from mc_server_dashboard_api.servers.domain.lifecycle_lock import LifecycleLock
 from mc_server_dashboard_api.servers.domain.memory_limit import memory_limit_from_config
@@ -120,18 +122,30 @@ class FakeJarProvisioner(JarProvisioner):
     ensure call so a test can assert it ran before placement.
     """
 
-    def __init__(self, *, key: str = "f" * 64, fail: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        key: str = "f" * 64,
+        source: str | None = "sha256:" + "f" * 64,
+        fail: bool = False,
+    ) -> None:
         self._key = key
+        self._source = source
         self._fail = fail
-        self.calls: list[tuple[str, str, str | None]] = []
+        self.calls: list[tuple[str, str, str | None, str | None]] = []
 
     async def ensure(
-        self, *, server_type: str, version: str, known_key: str | None
-    ) -> str:
-        self.calls.append((server_type, version, known_key))
+        self,
+        *,
+        server_type: str,
+        version: str,
+        known_key: str | None,
+        known_source: str | None = None,
+    ) -> ProvisionedJar:
+        self.calls.append((server_type, version, known_key, known_source))
         if self._fail:
             raise JarProvisioningError("forced provisioning failure")
-        return self._key
+        return ProvisionedJar(key=self._key, source=self._source)
 
 
 class FakeStoreGenerationReader(StoreGenerationReader):
@@ -551,6 +565,9 @@ class FakeServerRepository(ServerRepository):
             ):
                 out.append(replace(server))
         return out
+
+    async def existing_ids(self, server_ids: list[ServerId]) -> set[ServerId]:
+        return {sid for sid in server_ids if sid in self.by_id}
 
     async def delete(self, server_id: ServerId) -> None:
         self.by_id.pop(server_id, None)
@@ -1411,3 +1428,25 @@ class FakePluginCacheStore(PluginCacheStore):
 
     async def delete(self, sha256: str) -> None:
         self.blobs.pop(sha256, None)
+
+
+class FakeBedrockTunnelSync(BedrockTunnelSync):
+    """Recording :class:`BedrockTunnelSync` double (issue #1602).
+
+    Records ``(server_id, worker_id, bedrock_port, running)`` tuples so a test
+    can assert the lifecycle invoked the tunnel sync on the INVALID_STATE and
+    confirmed-stop convergence paths.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[ServerId, WorkerId, int | None, bool]] = []
+
+    async def sync_observed(
+        self,
+        *,
+        server_id: ServerId,
+        worker_id: WorkerId,
+        bedrock_port: int | None,
+        running: bool,
+    ) -> None:
+        self.calls.append((server_id, worker_id, bedrock_port, running))

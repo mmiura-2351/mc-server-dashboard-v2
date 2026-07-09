@@ -18,9 +18,10 @@ import datetime as dt
 import uuid
 from collections.abc import Iterator
 
+import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from mc_server_dashboard_api.app import create_app
 from mc_server_dashboard_api.community.adapters.permission_checker import (
     RepositoryMembershipVisibility,
     RoleGrantPermissionChecker,
@@ -225,6 +226,15 @@ def _bedrock_joinability(*plugins: ServerPlugin) -> BedrockJoinability:
     return BedrockJoinability(uow=FakeUnitOfWork(plugins=repo))
 
 
+_shared_app: FastAPI
+
+
+@pytest.fixture(autouse=True)
+def _bind_shared_app(shared_app: FastAPI) -> None:
+    global _shared_app
+    _shared_app = shared_app
+
+
 def _app(
     *,
     member: bool,
@@ -237,7 +247,8 @@ def _app(
     join_config: JoinHostnameConfig | None = None,
     bedrock: BedrockJoinability | None = None,
 ) -> object:
-    app = create_app()
+    app = _shared_app
+    app.dependency_overrides.clear()
     app.dependency_overrides[get_current_user] = lambda: make_user()
     app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(
         member=member
@@ -1042,7 +1053,8 @@ def _real_authz_app(
 ) -> object:
     """App wired with the real role+grant checker and a real ReadServer use case."""
 
-    app = create_app()
+    app = _shared_app
+    app.dependency_overrides.clear()
     user = make_user()
     user.id = type(user.id)(user_id)
     app.dependency_overrides[get_current_user] = lambda: user

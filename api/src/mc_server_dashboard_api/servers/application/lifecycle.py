@@ -75,6 +75,10 @@ from dataclasses import dataclass
 from mc_server_dashboard_api.servers.application.command_dispatch import (
     dispatch_failure as _dispatch_failure,
 )
+from mc_server_dashboard_api.servers.domain.bedrock_tunnel import (
+    BedrockTunnelSync,
+    NullBedrockTunnelSync,
+)
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.committed_resources import (
     committed_resources_by_worker,
@@ -99,7 +103,10 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNotRunningError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileStore
-from mc_server_dashboard_api.servers.domain.jar_provisioner import JarProvisioner
+from mc_server_dashboard_api.servers.domain.jar_provisioner import (
+    JarProvisioner,
+    ProvisionedJar,
+)
 from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
     LifecycleLock,
     NullLifecycleLock,
@@ -113,6 +120,7 @@ from mc_server_dashboard_api.servers.domain.store_generation import (
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import (
     JAR_KEY_CONFIG_FIELD,
+    JAR_SOURCE_CONFIG_FIELD,
     CommunityId,
     DesiredState,
     ObservedState,
@@ -168,6 +176,7 @@ class StartServer:
     store_generation: StoreGenerationReader
     file_store: FileStore
     lifecycle_lock: LifecycleLock = NullLifecycleLock()
+    bedrock_tunnel_sync: BedrockTunnelSync = NullBedrockTunnelSync()
 
     async def __call__(
         self,
@@ -200,16 +209,20 @@ class StartServer:
                 await self._check_eula(community_id, server_id)
             # Ensure the resolved JAR is pooled BEFORE placement/dispatch (FR-VER-3):
             # a download/verify failure fails the start here, before a Worker is
-            # placed or the desired state flipped. The ensure skips the download when
-            # the recorded content key is still pooled, so the steady-state cost is a
-            # presence check, not a fetch.
-            jar_key = await self._ensure_jar(server)
+            # placed or the desired state flipped. The ensure resolves the latest
+            # build from the catalog and downloads only when the source fingerprint
+            # changed (issue #1676).
+            previous_key = server.config.get(JAR_KEY_CONFIG_FIELD)
+            provisioned = await self._ensure_jar(server)
             worker_id = await self._place(server)
             if worker_id is None:
                 raise NoEligibleWorkerError(str(server_id.value))
             server.desired_state = DesiredState.RUNNING
             server.assigned_worker_id = worker_id
-            server.config = {**server.config, JAR_KEY_CONFIG_FIELD: jar_key}
+            config = {**server.config, JAR_KEY_CONFIG_FIELD: provisioned.key}
+            if provisioned.source is not None:
+                config[JAR_SOURCE_CONFIG_FIELD] = provisioned.source
+            server.config = config
             server.updated_at = self.clock.now()
             # Any failure across the CAS+commit window — a raising update_lifecycle or
             # commit, the lost-race abort, or this request task being cancelled at an
@@ -262,9 +275,25 @@ class StartServer:
         store_generation = await self.store_generation.current_generation(
             community_id=community_id, server_id=server_id
         )
+        jar_changed = provisioned.key != previous_key and previous_key is not None
         skip_hydrate = (
             held_generation is not None and held_generation >= store_generation
         )
+        if skip_hydrate and jar_changed:
+            # The JAR updated but the Worker holds a fresh working set (issue
+            # #1676).  World safety wins: skipping hydrate avoids rolling back
+            # region data.  The new JAR will be delivered on the next full hydrate
+            # (after the next snapshot publishes).
+            _LOG.warning(
+                "server %s JAR updated (%s -> %s) but skip-hydrate is active "
+                "(held generation %s >= store %s); the new JAR will not be "
+                "delivered until the next full hydrate",
+                server_id.value,
+                previous_key,
+                provisioned.key,
+                held_generation,
+                store_generation,
+            )
 
         dispatch = _Dispatch()
         try:
@@ -320,6 +349,15 @@ class StartServer:
             if applied:
                 server.observed_state = ObservedState.RUNNING
                 server.observed_at = observed_at
+                # Sync the Bedrock tunnel to match the convergence write (issue
+                # #1602): the repository write above bypasses the sink's hook, so
+                # without this the tunnel is never opened on the INVALID_STATE path.
+                await self.bedrock_tunnel_sync.sync_observed(
+                    server_id=server_id,
+                    worker_id=worker_id,
+                    bedrock_port=server.bedrock_port,
+                    running=True,
+                )
             return server
         failure = _dispatch_failure(
             server_id=server_id, kind="StartServer", outcome=outcome
@@ -382,12 +420,15 @@ class StartServer:
                 # Not an orphan (already assigned, or no longer desired-running):
                 # nothing for this path to reconcile.
                 raise InvalidLifecycleTransitionError(str(server_id.value))
-            jar_key = await self._ensure_jar(server)
+            provisioned = await self._ensure_jar(server)
             worker_id = await self._place(server)
             if worker_id is None:
                 raise NoEligibleWorkerError(str(server_id.value))
             server.assigned_worker_id = worker_id
-            server.config = {**server.config, JAR_KEY_CONFIG_FIELD: jar_key}
+            config = {**server.config, JAR_KEY_CONFIG_FIELD: provisioned.key}
+            if provisioned.source is not None:
+                config[JAR_SOURCE_CONFIG_FIELD] = provisioned.source
+            server.config = config
             server.updated_at = self.clock.now()
             # Release the placement reservation on any failure across the CAS+commit
             # window — a raising update_lifecycle or commit, the lost-race abort, or a
@@ -543,6 +584,13 @@ class StartServer:
             if applied:
                 server.observed_state = ObservedState.RUNNING
                 server.observed_at = observed_at
+                # Sync the Bedrock tunnel (issue #1602), same as __call__'s arm.
+                await self.bedrock_tunnel_sync.sync_observed(
+                    server_id=server_id,
+                    worker_id=worker_id,
+                    bedrock_port=server.bedrock_port,
+                    running=True,
+                )
             return server
         if outcome.status is CommandStatus.BUSY:
             # A BUSY start means another mutating lifecycle command for this id is
@@ -664,19 +712,22 @@ class StartServer:
         if b"eula=true" not in content.lower():
             raise EulaNotAcceptedError(str(server_id.value))
 
-    async def _ensure_jar(self, server: Server) -> str:
+    async def _ensure_jar(self, server: Server) -> ProvisionedJar:
         """Ensure the resolved JAR is pooled; return its content key (FR-VER-3).
 
-        Reuses the recorded content key (``config[JAR_KEY_CONFIG_FIELD]``) to skip a
-        re-download when the JAR is still pooled. A provisioning failure surfaces
-        before placement so the start fails cleanly.
+        Reuses the recorded content key (``config[JAR_KEY_CONFIG_FIELD]``) and source
+        fingerprint (``config[JAR_SOURCE_CONFIG_FIELD]``) to skip a re-download when
+        the upstream build has not changed. A provisioning failure surfaces before
+        placement so the start fails cleanly.
         """
 
         known_key = server.config.get(JAR_KEY_CONFIG_FIELD)
+        known_source = server.config.get(JAR_SOURCE_CONFIG_FIELD)
         return await self.jar_provisioner.ensure(
             server_type=server.server_type.value,
             version=server.mc_version,
             known_key=known_key if isinstance(known_key, str) else None,
+            known_source=known_source if isinstance(known_source, str) else None,
         )
 
     async def _compensate(
@@ -805,6 +856,7 @@ class StopServer:
     uow: UnitOfWork
     control_plane: ControlPlane
     clock: Clock
+    bedrock_tunnel_sync: BedrockTunnelSync = NullBedrockTunnelSync()
 
     async def __call__(
         self, *, community_id: CommunityId, server_id: ServerId, force: bool = False
@@ -873,6 +925,13 @@ class StopServer:
                 server.observed_state = ObservedState.STOPPED
                 server.observed_at = observed_at
                 server.assigned_worker_id = None
+                # Close the Bedrock tunnel (issue #1602).
+                await self.bedrock_tunnel_sync.sync_observed(
+                    server_id=server_id,
+                    worker_id=worker_id,
+                    bedrock_port=server.bedrock_port,
+                    running=False,
+                )
             return server
         if not outcome.success:
             raise _dispatch_failure(
@@ -963,6 +1022,13 @@ class StopServer:
         if applied:
             server.observed_state = ObservedState.STOPPED
             server.observed_at = observed_at
+            # Close the Bedrock tunnel (issue #1602).
+            await self.bedrock_tunnel_sync.sync_observed(
+                server_id=server_id,
+                worker_id=worker_id,
+                bedrock_port=server.bedrock_port,
+                running=False,
+            )
         # Final snapshot AFTER the process has exited (the confirmed stop returns only
         # once the Worker reports the process gone) and BEFORE the unassign, so the
         # captured working set is quiescent (FR-DATA-4, FR-DATA-7).
@@ -1137,6 +1203,13 @@ class StopServer:
                 server.observed_state = ObservedState.STOPPED
                 server.observed_at = observed_at
                 server.assigned_worker_id = None
+                # Close the Bedrock tunnel (issue #1602).
+                await self.bedrock_tunnel_sync.sync_observed(
+                    server_id=server_id,
+                    worker_id=worker_id,
+                    bedrock_port=server.bedrock_port,
+                    running=False,
+                )
             return server
         # A confirmed live stop: converge observed=stopped, take the final snapshot,
         # THEN unassign — the same deferred-unassign sequence StopServer.__call__

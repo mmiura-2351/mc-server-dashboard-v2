@@ -14,9 +14,10 @@ import datetime as dt
 import uuid
 from collections.abc import Iterator
 
+import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from mc_server_dashboard_api.app import create_app
 from mc_server_dashboard_api.audit.domain import operations as ops
 from mc_server_dashboard_api.audit.domain.events import Outcome
 from mc_server_dashboard_api.community.domain.entities import Community
@@ -103,8 +104,18 @@ def _client(app: object) -> Iterator[TestClient]:
         yield client
 
 
+_shared_app: FastAPI
+
+
+@pytest.fixture(autouse=True)
+def _bind_shared_app(shared_app: FastAPI) -> None:
+    global _shared_app
+    _shared_app = shared_app
+
+
 def _base_app(recorder: RecordingAuditRecorder, *, platform_admin: bool = False):  # type: ignore[no-untyped-def]
-    app = create_app()
+    app = _shared_app
+    app.dependency_overrides.clear()
     user = make_user()
     user.is_platform_admin = platform_admin
     app.dependency_overrides[get_current_user] = lambda: user
