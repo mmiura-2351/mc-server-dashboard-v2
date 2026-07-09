@@ -474,7 +474,7 @@ def test_download_unknown_backup_is_404() -> None:
 # --- upload (issue #281) ---------------------------------------------------
 
 
-def _multipart() -> dict[str, object]:
+def _multipart() -> dict[str, tuple[str, bytes, str]]:
     return {"file": ("backup.tar.gz", b"\x1f\x8bcontent", "application/gzip")}
 
 

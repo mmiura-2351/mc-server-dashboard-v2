@@ -11,9 +11,10 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 
+import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from mc_server_dashboard_api.app import create_app
 from mc_server_dashboard_api.audit.domain import operations as ops
 from mc_server_dashboard_api.dependencies import (
     get_audit_recorder,
@@ -84,6 +85,15 @@ def _user(*, admin: bool) -> User:
     )
 
 
+_shared_app: FastAPI
+
+
+@pytest.fixture(autouse=True)
+def _bind_shared_app(shared_app: FastAPI) -> None:
+    global _shared_app
+    _shared_app = shared_app
+
+
 def _client(
     *,
     admin: bool = True,
@@ -92,7 +102,8 @@ def _client(
     gc: object | None = None,
     recorder: object | None = None,
 ) -> TestClient:
-    app = create_app()
+    app = _shared_app
+    app.dependency_overrides.clear()
     app.dependency_overrides[get_current_user] = lambda: _user(admin=admin)
     if refresh is not None:
         app.dependency_overrides[get_catalog_refresh] = lambda: refresh
