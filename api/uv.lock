@@ -806,7 +806,7 @@ requires-dist = [
     { name = "asyncpg", specifier = ">=0.31.0,<0.32" },
     { name = "bcrypt", specifier = ">=5.0.0,<6" },
     { name = "fastapi", specifier = ">=0.136.3,<0.140" },
-    { name = "grpcio", specifier = ">=1.80.0,<1.82" },
+    { name = "grpcio", specifier = ">=1.80.0,<1.83" },
     { name = "httpx", specifier = ">=0.28.1,<0.29" },
     { name = "prometheus-client", specifier = ">=0.25.0,<0.26" },
     { name = "protobuf", specifier = ">=6.31.1,<7" },
