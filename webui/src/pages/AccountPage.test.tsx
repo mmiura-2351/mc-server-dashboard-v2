@@ -1,3 +1,7 @@
+// @vitest-environment jsdom
+// Pinned to jsdom: getByLabelText("Current password") is unambiguous under
+// jsdom but matches both the input and the show/hide toggle under happy-dom
+// (issue #1751).
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router";

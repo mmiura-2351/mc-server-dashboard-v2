@@ -12,9 +12,10 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterator
 
+import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from mc_server_dashboard_api.app import create_app
 from mc_server_dashboard_api.community.domain.permission_checker import (
     MembershipVisibility,
     PermissionChecker,
@@ -108,6 +109,15 @@ def _group(community: uuid.UUID, *, kind: GroupKind = GroupKind.OP) -> PlayerGro
     )
 
 
+_shared_app: FastAPI
+
+
+@pytest.fixture(autouse=True)
+def _bind_shared_app(shared_app: FastAPI) -> None:
+    global _shared_app
+    _shared_app = shared_app
+
+
 def _app(
     *,
     member: bool,
@@ -118,7 +128,8 @@ def _app(
     attach: _FakeUseCase | None = None,
     recorder: _RecordingRecorder | None = None,
 ) -> object:
-    app = create_app()
+    app = _shared_app
+    app.dependency_overrides.clear()
     app.dependency_overrides[get_current_user] = lambda: make_user()
     app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(
         member=member

@@ -64,6 +64,7 @@ def _client(
     use_case: _FakeRegisterUser, recorder: RecordingAuditRecorder | None = None
 ) -> Iterator[TestClient]:
     app = _shared_app
+    app.dependency_overrides.clear()
     app.dependency_overrides[get_register_user] = lambda: use_case
     if recorder is not None:
         app.dependency_overrides[get_audit_recorder] = lambda: recorder

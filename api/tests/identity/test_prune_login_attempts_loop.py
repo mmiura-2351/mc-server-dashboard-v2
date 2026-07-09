@@ -44,6 +44,41 @@ async def _run_for_ticks(spy: _SpyPruner, *, until: int) -> None:
         await task
 
 
+async def test_loop_sleeps_before_first_tick(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The loop awaits a full cadence before its first tick (issue #1740).
+
+    A ``TestClient`` lifespan under test lives for tens of milliseconds — far
+    less than the prune cadence (default 3600 s) — so deferring the first tick
+    past one sleep means no prune tick (and no DB-connection traceback) ever
+    fires inside a test's lifespan window.
+    """
+    spy = _SpyPruner()
+    ticks_at_first_sleep: list[int] = []
+    real_sleep = asyncio.sleep
+
+    async def _recording_sleep(delay: float) -> None:
+        if not ticks_at_first_sleep:
+            ticks_at_first_sleep.append(spy.ticks)
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", _recording_sleep)
+    task = asyncio.create_task(
+        run_prune_login_attempts_loop(cast(PruneLoginAttempts, spy), tick_seconds=1)
+    )
+    for _ in range(10000):
+        if ticks_at_first_sleep:
+            break
+        await real_sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # The first sleep observed zero ticks: the cadence elapses before any tick.
+    assert ticks_at_first_sleep == [0]
+
+
 async def test_loop_ticks_repeatedly() -> None:
     spy = _SpyPruner()
     await _run_for_ticks(spy, until=3)

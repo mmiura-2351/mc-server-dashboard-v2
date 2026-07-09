@@ -391,6 +391,19 @@ def get_settings(request: Request) -> Settings:
     return settings
 
 
+def get_worker_credential(request: Request) -> str | None:
+    """Return the shared Worker credential the data plane authenticates against.
+
+    The secret from ``control.worker_credential`` (CONFIGURATION.md Section 5.1),
+    resolved from app state so ``require_worker_credential`` can inject it via
+    ``Depends`` rather than reading settings itself — a test can then substitute it
+    through ``dependency_overrides`` like any other provider (issue #1753). ``None``
+    when no credential is configured (the control plane is disabled).
+    """
+
+    return get_settings(request).control.worker_credential
+
+
 def get_storage(request: Request) -> Storage:
     """Return the process-wide :class:`Storage` Port adapter from app state.
 

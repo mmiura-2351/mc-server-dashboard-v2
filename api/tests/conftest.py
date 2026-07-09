@@ -19,6 +19,26 @@ _SCRATCH_DB_URL: str | None = None
 """The per-run scratch database created for this session, if any (issue #379)."""
 
 
+def _is_xdist_controller(config: pytest.Config) -> bool:
+    """True only on the xdist controller process (``-n`` active, not a worker).
+
+    Under ``pytest -n``, ``pytest_configure`` runs once on the controller and
+    once per worker, but only workers run tests — so a scratch DB created on the
+    controller is never used, just created and dropped again (issue #1742).
+
+    This mirrors xdist's own ``is_xdist_controller`` helper, reimplemented
+    against ``config`` because the configure hook receives a ``Config`` object
+    whereas that helper only accepts a ``request``/``session``. xdist workers
+    carry ``config.workerinput``; the controller does not but has ``-n`` active
+    (``option.dist != "no"``). A serial run has neither, so it is *not* a
+    controller and still creates its DB. ``dist`` is read via ``getattr`` so an
+    environment where xdist never registered its options defaults to serial —
+    we skip only when positively identified as the controller.
+    """
+    is_worker = hasattr(config, "workerinput")
+    return not is_worker and getattr(config.option, "dist", "no") != "no"
+
+
 def pytest_configure(config: pytest.Config) -> None:
     """Redirect ``MCD_TEST_DATABASE_URL`` to a fresh per-run database (#379).
 
@@ -35,6 +55,11 @@ def pytest_configure(config: pytest.Config) -> None:
         "MCD_TEST_DATABASE_URL"
     )
     if base_url is None:
+        return
+    if _is_xdist_controller(config):
+        # The controller runs no tests; each worker creates its own scratch DB
+        # in its own pytest_configure. Skipping here avoids a wasted create/drop
+        # round-trip per run (issue #1742).
         return
     from tests.integration.scratch_db import (
         create_scratch_database,

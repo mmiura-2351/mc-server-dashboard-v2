@@ -11,7 +11,7 @@ import datetime as dt
 import uuid
 from collections.abc import Callable, Iterator
 
-import httpx
+import httpx2
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -74,7 +74,7 @@ def _provider(value: object) -> Callable[[], object]:
     return _provide
 
 
-def _set_cookie_header(resp: httpx.Response, name: str) -> str:
+def _set_cookie_header(resp: httpx2.Response, name: str) -> str:
     # The TestClient runs over plain HTTP, so a Secure cookie is never stored in
     # the jar; inspect the raw Set-Cookie header(s) instead.
     headers: list[str] = resp.headers.get_list("set-cookie")
@@ -84,7 +84,7 @@ def _set_cookie_header(resp: httpx.Response, name: str) -> str:
     raise AssertionError(f"no Set-Cookie for {name!r} in {headers!r}")
 
 
-def _assert_no_set_cookie(resp: httpx.Response, name: str) -> None:
+def _assert_no_set_cookie(resp: httpx2.Response, name: str) -> None:
     headers: list[str] = resp.headers.get_list("set-cookie")
     assert not any(header.startswith(f"{name}=") for header in headers), (
         f"unexpected Set-Cookie for {name!r} in {headers!r}"
@@ -102,6 +102,7 @@ def _bind_shared_app(shared_app: FastAPI) -> None:
 
 def _client(**overrides: object) -> Iterator[TestClient]:
     app = _shared_app
+    app.dependency_overrides.clear()
     for dependency, value in overrides.items():
         app.dependency_overrides[_PROVIDERS[dependency]] = _provider(value)
     with TestClient(app) as client:
