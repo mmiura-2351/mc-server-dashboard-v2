@@ -8,11 +8,35 @@ dummy URL is never dialed (NFR-TEST-1).
 
 import os
 import uuid
+from collections.abc import Iterator
 
 import pytest
+from fastapi import FastAPI
+
+from mc_server_dashboard_api.app import create_app
 
 _SCRATCH_DB_URL: str | None = None
 """The per-run scratch database created for this session, if any (issue #379)."""
+
+
+def _is_xdist_controller(config: pytest.Config) -> bool:
+    """True only on the xdist controller process (``-n`` active, not a worker).
+
+    Under ``pytest -n``, ``pytest_configure`` runs once on the controller and
+    once per worker, but only workers run tests — so a scratch DB created on the
+    controller is never used, just created and dropped again (issue #1742).
+
+    This mirrors xdist's own ``is_xdist_controller`` helper, reimplemented
+    against ``config`` because the configure hook receives a ``Config`` object
+    whereas that helper only accepts a ``request``/``session``. xdist workers
+    carry ``config.workerinput``; the controller does not but has ``-n`` active
+    (``option.dist != "no"``). A serial run has neither, so it is *not* a
+    controller and still creates its DB. ``dist`` is read via ``getattr`` so an
+    environment where xdist never registered its options defaults to serial —
+    we skip only when positively identified as the controller.
+    """
+    is_worker = hasattr(config, "workerinput")
+    return not is_worker and getattr(config.option, "dist", "no") != "no"
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -31,6 +55,11 @@ def pytest_configure(config: pytest.Config) -> None:
         "MCD_TEST_DATABASE_URL"
     )
     if base_url is None:
+        return
+    if _is_xdist_controller(config):
+        # The controller runs no tests; each worker creates its own scratch DB
+        # in its own pytest_configure. Skipping here avoids a wasted create/drop
+        # round-trip per run (issue #1742).
         return
     from tests.integration.scratch_db import (
         create_scratch_database,
@@ -54,8 +83,13 @@ def pytest_unconfigure(config: pytest.Config) -> None:
     drop_scratch_database(base_url, _SCRATCH_DB_URL)
 
 
-@pytest.fixture(autouse=True)
-def _dummy_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
+def _set_test_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Apply the default environment the app factory needs to build.
+
+    Shared by the per-test :func:`_dummy_database_url` fixture and the
+    session-scoped :func:`_session_app` fixture, so the single shared app builds
+    against exactly the same defaults an individually built app would (#1736).
+    """
     monkeypatch.setenv(
         "MCD_API_DATABASE__URL", "postgresql+asyncpg://test:test@localhost/test"
     )
@@ -75,3 +109,47 @@ def _dummy_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
     # Section 5.1, required-unless-insecure). Tests that exercise the TLS posture
     # or the fail-fast set these explicitly.
     monkeypatch.setenv("MCD_API_CONTROL__TLS__INSECURE", "true")
+
+
+@pytest.fixture(autouse=True)
+def _dummy_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_test_env(monkeypatch)
+
+
+@pytest.fixture(scope="session")
+def _session_app() -> FastAPI:
+    """Build the FastAPI app once per xdist worker (issue #1736).
+
+    ``create_app`` costs ~0.4 s warm — almost all of it FastAPI's per-route
+    dependency introspection during ``include_router`` — so building it once per
+    test dominated the api suite's CPU budget. Endpoint tests vary the app only
+    through ``app.dependency_overrides`` (never through ``create_app`` arguments),
+    so a single app shared across a worker's tests is sound; the :func:`shared_app`
+    wrapper clears those overrides around each test.
+
+    Consume this only via :func:`shared_app`. A test that needs a custom
+    ``settings``, or that mutates the app itself (middleware, ``app.state``, route
+    registration), must still build its own app with ``create_app``.
+
+    The environment is applied for the duration of the build only: ``create_app``
+    reads settings eagerly and captures them, so the process environment need not
+    stay patched afterwards (the per-test :func:`_dummy_database_url` keeps it
+    consistent for request handling).
+    """
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        _set_test_env(monkeypatch)
+        return create_app()
+
+
+@pytest.fixture
+def shared_app(_session_app: FastAPI) -> Iterator[FastAPI]:
+    """The per-worker session app with ``dependency_overrides`` cleared each test.
+
+    Function-scoped wrapper over :func:`_session_app`: it empties the override map
+    on entry and again on exit, so one test's fakes can never leak into another.
+    Endpoint-test modules bind this (typically via a module-level ``autouse``
+    fixture) and register their fakes on the yielded app.
+    """
+    _session_app.dependency_overrides.clear()
+    yield _session_app
+    _session_app.dependency_overrides.clear()

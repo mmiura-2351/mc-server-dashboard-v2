@@ -17,12 +17,13 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from mc_server_dashboard_api.app import create_app
 from mc_server_dashboard_api.dependencies import (
     get_resolved_jar_lookup,
     get_storage,
+    get_worker_credential,
 )
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from mc_server_dashboard_api.storage.domain.value_objects import (
@@ -33,10 +34,13 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 
 _CREDENTIAL = "test-worker-credential"
 
+_shared_app: FastAPI
+
 
 @pytest.fixture(autouse=True)
-def _worker_credential(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MCD_API_CONTROL__WORKER_CREDENTIAL", _CREDENTIAL)
+def _bind_shared_app(shared_app: FastAPI) -> None:
+    global _shared_app
+    _shared_app = shared_app
 
 
 def _tar_bytes(files: dict[str, bytes]) -> bytes:
@@ -63,14 +67,22 @@ def _read_tar(blob: bytes) -> dict[str, bytes]:
 def _setup(
     tmp_path: Path, *, resolved_jar: str | None = None
 ) -> tuple[TestClient, FsStorage]:
+    # Reuse the per-worker shared app; clear overrides on entry so a helper called
+    # twice in one test starts clean (the shared_app wrapper clears between tests).
+    app = _shared_app
+    app.dependency_overrides.clear()
     storage = FsStorage(tmp_path)
-    app = create_app()
     app.dependency_overrides[get_storage] = lambda: storage
 
     async def _lookup(_c: uuid.UUID, _s: uuid.UUID) -> str | None:
         return resolved_jar
 
     app.dependency_overrides[get_resolved_jar_lookup] = lambda: _lookup
+    # The Worker credential the data plane authenticates against is injected via
+    # Depends(get_worker_credential) (issue #1753), so the shared app — built with
+    # no credential configured — receives the test credential through the override
+    # rather than through the environment before build.
+    app.dependency_overrides[get_worker_credential] = lambda: _CREDENTIAL
     client = TestClient(app)
     return client, storage
 

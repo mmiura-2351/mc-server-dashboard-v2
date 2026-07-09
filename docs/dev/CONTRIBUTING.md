@@ -1,13 +1,17 @@
 # Contributing Workflow
 
 How a change moves from an idea to a merged PR: issues, branches, commits, pull
-requests, review, and merge. Behavioral guidance for *how to write the code* is
-in [`../../CLAUDE.md`](../../CLAUDE.md); documentation conventions are in
+requests, review, and merge. Documentation conventions are in
 [`../README.md`](../README.md).
 
 > Hooks and CI are wired (see Section 4 and `.github/workflows/`); the commands
 > below are concrete and enforced (the pre-push `make check` and the CI
 > workflows).
+
+> **LLM agents** — and anyone working on the shared deployment host — must
+> also read [`AGENTS.md`](AGENTS.md), the agent-facing operational manual
+> (host ground rules, worktree mechanics, tooling quirks). Everything in this
+> document applies there unchanged.
 
 ## 1. Issues
 
@@ -31,12 +35,12 @@ in [`../../CLAUDE.md`](../../CLAUDE.md); documentation conventions are in
 - If no issue exists, omit the `issue-{N}-` segment: `fix/{slug}` or
   `feature/{slug}`.
 
-Work in your own worktree, and create the branch there
-(`git checkout -B feature/issue-{N}-{slug}`). The primary checkout is the
-live-deployment build source (`docker compose` builds it from `compose.yaml` +
-`.env` at the repo root), so it must stay on `main` — never `git checkout` /
-`git switch` it as part of branch setup; a stray checkout silently changes what
-the next rebuild deploys.
+Development is **worktree-based**: the root checkout stays on `main`, and each
+branch lives in its own worktree
+(`git worktree add <path> -b feature/issue-{N}-{slug}`). The checked-in
+`post-checkout` hook enforces this by restoring the root checkout to `main`
+whenever a checkout moves it off (Section 4); to intentionally inspect a
+branch in the root checkout, see the override in [`AGENTS.md`](AGENTS.md).
 
 A freshly created worktree has no installed dependencies; run `make bootstrap`
 in it once (Section 4) before pushing, otherwise the pre-push `make check`
@@ -50,31 +54,14 @@ Install the git hooks once per clone:
 make hooks-install
 ```
 
-This points `core.hooksPath` at the checked-in `.githooks/`. The **pre-commit**
-hook formats and lints the modules with staged changes; the **pre-push** hook
-runs the full `make check` (lint + typecheck + test for both ecosystems). The
-**post-checkout** hook auto-restores the *primary* checkout (the repo root, not
-a worktree under `.claude/worktrees/`) to `main` whenever it is left off it —
-it is the deploy build source (Section 3), so a stray `git checkout`, `git
-switch`, or `gh pr checkout` is immediately undone. The hook stays silent in
-worktrees. Edge cases:
+This points `core.hooksPath` at the checked-in `.githooks/`:
 
-- **Dirty working tree** — if the primary checkout has uncommitted changes when
-  the stray checkout occurs, auto-restore is refused to protect those changes; a
-  loud error is printed instead. Stash or commit, then restore manually with
-  `git checkout main`.
-- **Intentional override** — set `MCSD_ALLOW_PRIMARY_BRANCH=1` in the
-  environment to suppress auto-restore for a single checkout (e.g. to inspect a
-  branch directly). A notice is still printed; restore manually when done. Note:
-  this variable persists for the lifetime of the shell process — unset it
-  explicitly (`unset MCSD_ALLOW_PRIMARY_BRANCH`) when the inspection is done,
-  or subsequent checkouts in the same shell will also be permitted.
-- **git bisect / git rebase** — the hook is silently skipped during in-progress
-  `git bisect`, `git rebase`, `git cherry-pick`, and `git merge` operations on
-  the primary checkout. These operations invoke `post-checkout` internally, and
-  restoring to `main` mid-operation would corrupt them. The auto-restore
-  adversary (an agent accidentally running `git checkout` or `gh pr checkout`)
-  does not create those in-progress state files.
+- **pre-commit** formats and lints the modules with staged changes.
+- **pre-push** runs the full `make check` (lint + typecheck + test for all
+  modules) — the same gate CI enforces.
+- **post-checkout** keeps the root checkout on `main` (the worktree model,
+  Section 3). It stays silent in worktrees; overrides and edge cases are in
+  [`AGENTS.md`](AGENTS.md).
 
 A fresh worktree also needs its dependencies installed once — each worktree
 keeps its own `webui/node_modules` and `api/.venv`, so a newly created one
@@ -84,9 +71,8 @@ starts empty:
 make bootstrap
 ```
 
-Without it the **pre-push** `make check` fails before it can run: `webui-lint`
-reports `biome: not found`, and `api`'s first `uv run` pays a cold sync. The
-target runs `npm ci` (webui) and `uv sync` (api).
+Without it the **pre-push** `make check` fails before it can run. The target
+runs `npm ci` (webui) and `uv sync` (api).
 
 - Don't bypass failing pre-commit / pre-push hooks; fix the cause. If a hook
   fails, the commit did not happen — make a **new** commit rather than
@@ -131,10 +117,7 @@ target runs `npm ci` (webui) and `uv sync` (api).
 Inspect a PR thoroughly:
 
 - **Description & metadata** —
-  `gh pr view <N> --json title,body,state,labels,headRefName`. The bare
-  `gh pr view <N>` errors on this account's token (it queries the retired
-  Projects-classic API), so always pass `--json`, or use the REST form
-  `gh api repos/{owner}/{repo}/pulls/<N>`.
+  `gh pr view <N> --json title,body,state,labels,headRefName`.
 - **The changes** — `gh pr diff <N>` (add `--name-only` for just the file list).
 - **Inline review comments** —
   `gh api repos/{owner}/{repo}/pulls/<N>/comments`. For the PR conversation

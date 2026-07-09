@@ -10,9 +10,10 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
+import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from mc_server_dashboard_api.app import create_app
 from mc_server_dashboard_api.config import Settings
 from mc_server_dashboard_api.dependencies import get_current_user, get_settings
 from tests.identity.fakes import make_user
@@ -23,13 +24,23 @@ def _client(app: object) -> Iterator[TestClient]:
         yield client
 
 
+_shared_app: FastAPI
+
+
+@pytest.fixture(autouse=True)
+def _bind_shared_app(shared_app: FastAPI) -> None:
+    global _shared_app
+    _shared_app = shared_app
+
+
 def _app(
     *,
     authenticated: bool = True,
     relay_enabled: bool = False,
     bedrock_enabled: bool = False,
 ) -> object:
-    app = create_app()
+    app = _shared_app
+    app.dependency_overrides.clear()
     if authenticated:
         app.dependency_overrides[get_current_user] = lambda: make_user()
     settings = Settings.model_validate(
@@ -88,7 +99,8 @@ def test_meta_reports_memory_limit_defaults_as_null() -> None:
 
 
 def test_meta_reports_configured_memory_limits() -> None:
-    app = create_app()
+    app = _shared_app
+    app.dependency_overrides.clear()
     app.dependency_overrides[get_current_user] = lambda: make_user()
     settings = Settings.model_validate(
         {

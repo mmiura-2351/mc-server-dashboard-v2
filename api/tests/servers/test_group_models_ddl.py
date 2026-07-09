@@ -67,3 +67,8 @@ def test_server_group_composite_pk_and_cascades() -> None:
         fks = list(_SERVER_GROUP.c[column].foreign_keys)
         assert len(fks) == 1
         assert fks[0].ondelete == "CASCADE"
+
+
+def test_server_group_server_id_index() -> None:
+    index_names = {idx.name for idx in _SERVER_GROUP.indexes}
+    assert "ix_server_group_server_id" in index_names

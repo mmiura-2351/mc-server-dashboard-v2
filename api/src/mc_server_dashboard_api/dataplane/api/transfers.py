@@ -48,8 +48,8 @@ from fastapi.responses import StreamingResponse
 from mc_server_dashboard_api.dependencies import (
     ResolvedJarLookup,
     get_resolved_jar_lookup,
-    get_settings,
     get_storage,
+    get_worker_credential,
 )
 from mc_server_dashboard_api.http_problem import problem
 from mc_server_dashboard_api.storage.domain.errors import (
@@ -149,20 +149,20 @@ def _bounded_missing_regions(
 
 
 async def require_worker_credential(
-    request: Request,
+    expected: Annotated[str | None, Depends(get_worker_credential)],
     authorization: Annotated[str | None, Header()] = None,
 ) -> None:
     """Authenticate a data-plane request by the shared Worker credential.
 
     Mirrors the control-plane auth model (CONTROL_PLANE.md Section 4.1): a
     ``Authorization: Bearer <credential>`` header compared constant-time against
-    ``control.worker_credential``. A missing/wrong credential is a uniform 401.
-    The credential is required to mount the data plane, enforced at app startup
-    (the app factory fails fast); it is non-None here.
+    ``control.worker_credential``, injected via ``Depends(get_worker_credential)``
+    so a test can substitute it through ``dependency_overrides`` (issue #1753). A
+    missing/wrong credential is a uniform 401. The credential is required to mount
+    the data plane, enforced at app startup (the app factory fails fast); it is
+    non-None here.
     """
 
-    settings = get_settings(request)
-    expected = settings.control.worker_credential
     presented = _bearer(authorization)
     if (
         expected is None
@@ -351,7 +351,7 @@ async def publish_snapshot(
     if content_length is None:
         raise problem(status.HTTP_411_LENGTH_REQUIRED, "content_length_required")
     if content_length > _MAX_SNAPSHOT_BYTES:
-        raise problem(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "snapshot_too_large")
+        raise problem(status.HTTP_413_CONTENT_TOO_LARGE, "snapshot_too_large")
 
     scope = (CommunityId(community_id), ServerId(server_id))
     # Read the store's ``current`` once here (guard time) and ALWAYS thread it into
@@ -427,9 +427,7 @@ async def publish_snapshot(
         # the disk fills. (An over-run that stays under the cap surfaces as the
         # length mismatch above.)
         await storage.abort_snapshot(handle)
-        raise problem(
-            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "snapshot_too_large"
-        ) from None
+        raise problem(status.HTTP_413_CONTENT_TOO_LARGE, "snapshot_too_large") from None
     except _DeclaredLengthExceeded:
         # An under-declaring client streamed more than its Content-Length: abort
         # mid-stream rather than spooling the whole over-long body first.

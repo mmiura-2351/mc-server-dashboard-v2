@@ -10,10 +10,10 @@ down (the servers-by-state query failure is swallowed and counted).
 from collections.abc import Iterator
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from prometheus_client.parser import text_string_to_metric_families
 
-from mc_server_dashboard_api.app import create_app
 from mc_server_dashboard_api.dependencies import (
     get_metrics_session_factory,
     get_worker_registry,
@@ -94,8 +94,9 @@ def _failing_session_factory() -> _FailingSession:
 
 
 @pytest.fixture
-def client() -> Iterator[TestClient]:
-    app = create_app()
+def client(shared_app: FastAPI) -> Iterator[TestClient]:
+    app = shared_app
+    app.dependency_overrides.clear()
     app.dependency_overrides[get_metrics_session_factory] = lambda: (
         _failing_session_factory
     )

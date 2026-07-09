@@ -729,7 +729,6 @@ export const ja: Record<TranslationKey, string> = {
   "serverCreate.tab.import": "ZIPをインポート",
   // Wizard step rail.
   "serverCreate.step.type": "種類とバージョン",
-  "serverCreate.step.runtime": "ランタイム",
   "serverCreate.step.config": "設定とEULA",
   "serverCreate.next": "次へ",
   "serverCreate.back": "戻る",
@@ -752,7 +751,7 @@ export const ja: Record<TranslationKey, string> = {
   "serverCreate.typeSub.paper": "高性能フォーク",
   "serverCreate.typeSub.fabric": "軽量Mod",
   "serverCreate.typeSub.forge": "本格Mod",
-  // Step 2 — runtime.
+  // Step 2 — config & EULA (port field is direct-mode only).
   "serverCreate.portLabel": "ゲームポート",
   "serverCreate.portHint": "空いている次のポートを自動入力しました。",
   "serverCreate.portChecking": "ポートの空き状況を確認しています…",
@@ -760,7 +759,6 @@ export const ja: Record<TranslationKey, string> = {
   "serverCreate.portTaken": "ポートはすでに使用されています。",
   "serverCreate.portOutOfRange": "ポートが許可された範囲外です。",
   "serverCreate.portCheckFailed": "そのポートを確認できませんでした。",
-  // Step 3 — config & EULA.
   "serverCreate.nameLabel": "サーバー名",
   "serverCreate.namePlaceholder": "survival",
   // Per-server resource allocation in the create wizard (issue #715).

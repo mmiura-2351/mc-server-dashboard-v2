@@ -91,6 +91,14 @@ dev = [
     "mypy-protobuf>=5.1.0,<6",
     # httpx (FastAPI's TestClient transport) is declared as a runtime dependency
     # above (the VersionCatalog adapters use it); no separate dev pin is needed.
+    # starlette's TestClient now prefers the httpx 2.x line, distributed under the
+    # separate `httpx2` import name so it coexists with the httpx 0.28 runtime pin
+    # above (#1741). Installing it makes starlette.testclient import httpx2; absent
+    # it, starlette emits a StarletteDeprecationWarning ("install httpx2 instead")
+    # on every test run. Test-only (production is served by uvicorn, not the
+    # TestClient), so it stays in the dev group. 2.5.0 (2026-06-25) is outside the
+    # 7-day cooldown (Section 3); cap the next major (dev tooling, Section 1).
+    "httpx2>=2.5.0,<3",
     # Async test support for pytest (async DB-probe + endpoint tests).
     # 1.4.0 (2026-05-26) is inside the 7-day cooldown as of this change; cap
     # below it. 1.3.0 (2025-11-10) is outside. Lift the cap once it ages out

@@ -947,8 +947,17 @@ type RegisterAck struct {
 	// Worker applies it as a per-transfer context deadline; a non-positive or
 	// unset value (an older API) leaves the transfer unbounded as before.
 	TransferDeadline *durationpb.Duration `protobuf:"bytes,4,opt,name=transfer_deadline,json=transferDeadline,proto3" json:"transfer_deadline,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// unknown_held_server_ids is the subset of Register.held_servers whose server
+	// no longer exists in the API (deleted while the scratch was live, issue #924).
+	// The Worker reclaims the scratch dir and .hydrate-<id>-* leftovers for each id
+	// listed here, but does NOT reclaim .displaced-<id> trees (issue #911: those are
+	// intentionally retained for operator recovery). An empty list means every
+	// advertised held server is still known (or that the API could not compute the
+	// subset, e.g. a DB error — the empty list is the fail-safe default so a
+	// transient failure never misclassifies a live server as deleted).
+	UnknownHeldServerIds []string `protobuf:"bytes,5,rep,name=unknown_held_server_ids,json=unknownHeldServerIds,proto3" json:"unknown_held_server_ids,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *RegisterAck) Reset() {
@@ -1005,6 +1014,13 @@ func (x *RegisterAck) GetRejectionReason() string {
 func (x *RegisterAck) GetTransferDeadline() *durationpb.Duration {
 	if x != nil {
 		return x.TransferDeadline
+	}
+	return nil
+}
+
+func (x *RegisterAck) GetUnknownHeldServerIds() []string {
+	if x != nil {
+		return x.UnknownHeldServerIds
 	}
 	return nil
 }
@@ -2738,12 +2754,13 @@ const file_mcsd_controlplane_v1_control_plane_proto_rawDesc = "" +
 	"\tresources\x18\x03 \x01(\v2#.mcsd.controlplane.v1.HostResourcesR\tresources\"O\n" +
 	"\rHostResources\x12\x1b\n" +
 	"\tcpu_cores\x18\x01 \x01(\rR\bcpuCores\x12!\n" +
-	"\fmemory_bytes\x18\x02 \x01(\x04R\vmemoryBytes\"\xe6\x01\n" +
+	"\fmemory_bytes\x18\x02 \x01(\x04R\vmemoryBytes\"\x9d\x02\n" +
 	"\vRegisterAck\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\x12H\n" +
 	"\x12heartbeat_interval\x18\x02 \x01(\v2\x19.google.protobuf.DurationR\x11heartbeatInterval\x12)\n" +
 	"\x10rejection_reason\x18\x03 \x01(\tR\x0frejectionReason\x12F\n" +
-	"\x11transfer_deadline\x18\x04 \x01(\v2\x19.google.protobuf.DurationR\x10transferDeadline\"\x9a\a\n" +
+	"\x11transfer_deadline\x18\x04 \x01(\v2\x19.google.protobuf.DurationR\x10transferDeadline\x125\n" +
+	"\x17unknown_held_server_ids\x18\x05 \x03(\tR\x14unknownHeldServerIds\"\x9a\a\n" +
 	"\n" +
 	"ApiCommand\x12\x1d\n" +
 	"\n" +

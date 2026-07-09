@@ -34,21 +34,14 @@ from mc_server_dashboard_api.fleet.adapters.relay_state import (
     BedrockTunnelTable,
     RelayRegistration,
 )
-from mc_server_dashboard_api.fleet.domain.control_plane import (
-    CloseBedrockTunnelCommand,
-    OpenBedrockTunnelCommand,
-    WorkerNotConnectedError,
-)
 from mc_server_dashboard_api.fleet.domain.server_state_sink import ServerStateSink
-from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId as FleetWorkerId
-from mc_server_dashboard_api.servers.adapters.plugin_repository import (
-    SqlAlchemyPluginRepository,
+from mc_server_dashboard_api.servers.adapters.bedrock_tunnel_sync import (
+    BedrockTunnelSyncer,
 )
 from mc_server_dashboard_api.servers.adapters.repositories import (
     SqlAlchemyServerRepository,
 )
 from mc_server_dashboard_api.servers.domain.clock import Clock
-from mc_server_dashboard_api.servers.domain.plugin import has_enabled_geyser
 from mc_server_dashboard_api.servers.domain.value_objects import (
     ObservedState,
     ServerId,
@@ -97,10 +90,18 @@ class ServersServerStateSink(ServerStateSink):
         # caller that does not care about the Bedrock relay path (e.g. a unit
         # test exercising only the parse-failure guards) need not supply them;
         # left unset, record_observed_state's bedrock sync is a no-op.
-        self._control_plane = control_plane
-        self._relay_registration = relay_registration
-        self._bedrock_tunnel_table = bedrock_tunnel_table
-        self._bedrock_tunnel_port = bedrock_tunnel_port
+        # Internally builds a BedrockTunnelSyncer when all deps are present
+        # (issue #1602: the syncer is now shared with the lifecycle Port).
+        self._syncer: BedrockTunnelSyncer | None = None
+        if control_plane is not None and bedrock_tunnel_table is not None:
+            assert relay_registration is not None
+            self._syncer = BedrockTunnelSyncer(
+                session_factory,
+                control_plane=control_plane,
+                relay_registration=relay_registration,
+                bedrock_tunnel_table=bedrock_tunnel_table,
+                bedrock_tunnel_port=bedrock_tunnel_port,
+            )
 
     async def record_observed_state(
         self, *, server_id: str, worker_id: str, state: str
@@ -149,8 +150,8 @@ class ServersServerStateSink(ServerStateSink):
                 ServerId(parsed), observed, self._clock.now(), unassign=False
             )
             await session.commit()
-            if applied and server.bedrock_port is not None:
-                await self._sync_bedrock_tunnel(
+            if applied and server.bedrock_port is not None and self._syncer is not None:
+                await self._syncer.sync_with_session(
                     session=session,
                     server_id=ServerId(parsed),
                     bedrock_port=server.bedrock_port,
@@ -175,6 +176,27 @@ class ServersServerStateSink(ServerStateSink):
             await repo.mark_worker_servers_unknown(WorkerId(parsed), self._clock.now())
             await session.commit()
 
+    async def existing_server_ids(self, *, server_ids: list[str]) -> set[str]:
+        # Unparseable (non-UUID) IDs are treated as existing so the caller never
+        # classifies them as deleted. ScanHeldServers advertises any content-
+        # bearing dir in the scratch root (not just UUIDs), so a safety copy like
+        # "<id>.bak" could be advertised; misclassifying it would cause the worker
+        # to RemoveAll it (issue #924 review).
+        unparseable: set[str] = set()
+        valid: list[uuid.UUID] = []
+        for sid in server_ids:
+            parsed = _parse_id(sid, kind="server_id")
+            if parsed is None:
+                unparseable.add(sid)
+            else:
+                valid.append(parsed)
+        if not valid:
+            return unparseable
+        async with self._session_factory() as session:
+            repo = SqlAlchemyServerRepository(session)
+            existing = await repo.existing_ids([ServerId(v) for v in valid])
+            return {str(sid.value) for sid in existing} | unparseable
+
     async def running_assignment_ids(self, *, worker_id: str) -> dict[str, int]:
         parsed = _parse_id(worker_id, kind="worker_id")
         if parsed is None:
@@ -182,139 +204,3 @@ class ServersServerStateSink(ServerStateSink):
         async with self._session_factory() as session:
             repo = SqlAlchemyServerRepository(session)
             return await repo.running_assignment_ids_for_worker(WorkerId(parsed))
-
-    async def _sync_bedrock_tunnel(
-        self,
-        *,
-        session: AsyncSession,
-        server_id: ServerId,
-        bedrock_port: int,
-        worker_id: WorkerId,
-        running: bool,
-    ) -> None:
-        """Open/close ``server_id``'s Bedrock tunnel to match its freshest state.
-
-        Skipped when the sink was built without the Bedrock dependencies (relay
-        disabled), and when every Geyser copy on the server is disabled — a
-        disabled Geyser is not listening on its RakNet port, so a tunnel to it
-        would sit idle (PM note, issue #1544).
-        """
-
-        control_plane = self._control_plane
-        bedrock_tunnel_table = self._bedrock_tunnel_table
-        if control_plane is None or bedrock_tunnel_table is None:
-            # The sink was built without the Bedrock dependencies (relay disabled).
-            # Reached only for a server that still carries a bedrock_port from when
-            # the gate was on, so it is rare, not per-report — logged at debug.
-            _LOG.debug(
-                "bedrock tunnel sync skipped: relay dependencies not configured",
-                extra={"server_id": str(server_id.value)},
-            )
-            return
-        plugins = await SqlAlchemyPluginRepository(session).list_for_server(server_id)
-        if not has_enabled_geyser(plugins):
-            # Every Geyser copy on the server is disabled, so nothing is listening
-            # on the RakNet port and a tunnel would sit idle (PM note, issue #1544).
-            _LOG.debug(
-                "bedrock tunnel sync skipped: no enabled Geyser plugin",
-                extra={"server_id": str(server_id.value)},
-            )
-            return
-        fleet_worker_id = FleetWorkerId(str(worker_id.value))
-        fleet_server_id = str(server_id.value)
-        if running:
-            await self._open_bedrock_tunnel(
-                control_plane=control_plane,
-                bedrock_tunnel_table=bedrock_tunnel_table,
-                worker_id=fleet_worker_id,
-                server_id=fleet_server_id,
-                bedrock_port=bedrock_port,
-            )
-        else:
-            await self._close_bedrock_tunnel(
-                control_plane=control_plane,
-                bedrock_tunnel_table=bedrock_tunnel_table,
-                worker_id=fleet_worker_id,
-                server_id=fleet_server_id,
-            )
-
-    async def _open_bedrock_tunnel(
-        self,
-        *,
-        control_plane: GrpcControlPlane,
-        bedrock_tunnel_table: BedrockTunnelTable,
-        worker_id: FleetWorkerId,
-        server_id: str,
-        bedrock_port: int,
-    ) -> None:
-        registered = (
-            self._relay_registration.current()
-            if self._relay_registration is not None
-            else None
-        )
-        if registered is None:
-            # No relay has registered its tunnel endpoint, so an OpenBedrockTunnel
-            # would have nothing to carry (mirrors relay_server.py's ResolveJoin
-            # STOPPED-on-no-registration arm).
-            _LOG.warning(
-                "bedrock tunnel open skipped: no relay registered",
-                extra={"server_id": server_id},
-            )
-            return
-        # The Bedrock QUIC tunnel listener is a distinct relay port from the Java
-        # TCP tunnel (RELAY.md Section 13's tunnel_port), but the SAME relay
-        # process registers both, so the reachable host is shared; only the port
-        # differs, and that port is operator-configured on both the relay and the
-        # API sides (relay.bedrock_tunnel_port), exactly like game_port/tunnel_port
-        # already are (RELAY.md Section 13) -- so it needs no separate self-report
-        # over Register.
-        #
-        # NOTE (issue #1545): if the relay's QUIC listener implementation decides to
-        # advertise its own Bedrock endpoint over Register instead, switch this to
-        # read that registered value rather than reconstructing host + configured
-        # port here -- the two must not drift.
-        relay_host = registered.endpoint.rsplit(":", 1)[0]
-        token = bedrock_tunnel_table.open(
-            server_id=server_id, bedrock_port=bedrock_port
-        )
-        try:
-            await control_plane.dispatch_fire_and_forget(
-                worker_id=worker_id,
-                server_id=server_id,
-                command=OpenBedrockTunnelCommand(
-                    relay_endpoint=f"{relay_host}:{self._bedrock_tunnel_port}",
-                    bedrock_port=bedrock_port,
-                    token=token,
-                    tls_ca_pem=registered.ca_pem,
-                ),
-            )
-        except WorkerNotConnectedError:
-            # The reporting worker just spoke on its stream, so this should not
-            # happen in practice; treated the same as relay_server.py's analogous
-            # guard rather than propagating (issue #776 poison-event handling
-            # already covers genuine failures).
-            _LOG.info(
-                "bedrock tunnel open skipped: worker not connected",
-                extra={"server_id": server_id},
-            )
-
-    async def _close_bedrock_tunnel(
-        self,
-        *,
-        control_plane: GrpcControlPlane,
-        bedrock_tunnel_table: BedrockTunnelTable,
-        worker_id: FleetWorkerId,
-        server_id: str,
-    ) -> None:
-        bedrock_tunnel_table.close(server_id=server_id)
-        try:
-            await control_plane.dispatch_fire_and_forget(
-                worker_id=worker_id,
-                server_id=server_id,
-                command=CloseBedrockTunnelCommand(),
-            )
-        except WorkerNotConnectedError:
-            _LOG.info(
-                "bedrock tunnel close skipped: worker not connected",
-                extra={"server_id": server_id},
-            )
