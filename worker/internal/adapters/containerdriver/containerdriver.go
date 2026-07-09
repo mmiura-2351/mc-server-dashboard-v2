@@ -386,10 +386,30 @@ func (d *Driver) launchContainer(ctx context.Context, spec execution.InstanceSpe
 	}
 	if err := d.docker.Start(ctx, id); err != nil {
 		// Best-effort cleanup of the created-but-unstarted container.
-		_ = d.docker.Remove(ctx, id)
+		d.removeCreated(ctx, id)
 		return "", err
 	}
 	return id, nil
+}
+
+// startCleanupRemoveTimeout bounds removeCreated's best-effort Remove of a
+// created-but-unstarted container after a failed Start. A healthy daemon
+// answers a remove well inside it (the startup Sweep's remove calls carry the
+// same 10s posture, issue #338); the bound only caps a wedged daemon.
+const startCleanupRemoveTimeout = 10 * time.Second
+
+// removeCreated is the best-effort cleanup of a created-but-unstarted container
+// whose Start failed. It runs detached from the command context
+// (context.WithoutCancel, bounded by startCleanupRemoveTimeout): a failed Start
+// is often *caused by* that context being cancelled (a dropped session stream),
+// and a Remove on the same context fails instantly, leaking a Created container
+// that pins the deterministic name until the #233 wait-for-name-free loop or a
+// worker-restart Sweep reaps it (issue #1715). The detachment mirrors the
+// driver's other cleanup calls (pullImage, Stop's escalation).
+func (d *Driver) removeCreated(ctx context.Context, id string) {
+	removeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), startCleanupRemoveTimeout)
+	defer cancel()
+	_ = d.docker.Remove(removeCtx, id)
 }
 
 // runInstallContainer creates and starts the supervised Forge install container,
@@ -420,7 +440,8 @@ func (d *Driver) runInstallContainer(ctx context.Context, spec execution.Instanc
 		return "", err
 	}
 	if err := d.docker.Start(ctx, id); err != nil {
-		_ = d.docker.Remove(ctx, id)
+		// Best-effort cleanup, detached from the command context (issue #1715).
+		d.removeCreated(ctx, id)
 		return "", err
 	}
 	return id, nil
