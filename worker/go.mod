@@ -2,6 +2,8 @@ module github.com/mmiura-2351/mc-server-dashboard-v2/worker
 
 go 1.26
 
+toolchain go1.26.5
+
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/quic-go/quic-go v0.60.0
