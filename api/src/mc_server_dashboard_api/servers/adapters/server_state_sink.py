@@ -119,6 +119,10 @@ class ServersServerStateSink(ServerStateSink):
             # Ownership guard: only the server's currently assigned worker may
             # write its observed state. A report from any other worker (stale or
             # misrouted) is dropped with a warning, not applied (defense-in-depth).
+            # This snapshot check is diagnostic only — the authoritative check is
+            # the expected_worker condition inside the guarded UPDATE below
+            # (issue #1708), which cannot be raced by a reassignment committing
+            # after this read.
             if server.assigned_worker_id != WorkerId(parsed_worker):
                 _LOG.warning(
                     "dropping status report from non-owning worker",
@@ -147,7 +151,18 @@ class ServersServerStateSink(ServerStateSink):
             # crash/timeout mid-window (the deliberate replacement for #217's
             # recovery). So this sink only caches the observed state.
             applied = await repo.record_observed_state(
-                ServerId(parsed), observed, self._clock.now(), unassign=False
+                ServerId(parsed),
+                observed,
+                self._clock.now(),
+                unassign=False,
+                # Assert the reporting worker inside the UPDATE's WHERE (issue
+                # #1708): a stop-unassign + re-place to another worker committing
+                # between the snapshot read above and this write must drop this
+                # (freshest-stamped) report instead of overwriting the new
+                # owner's state. Zero rows matched -> applied=False, which also
+                # skips the Bedrock tunnel sync below (a dropped write must not
+                # flip the tunnel).
+                expected_worker=WorkerId(parsed_worker),
             )
             await session.commit()
             if applied and server.bedrock_port is not None and self._syncer is not None:
