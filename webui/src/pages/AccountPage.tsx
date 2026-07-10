@@ -63,7 +63,10 @@ export function AccountPage() {
       </div>
     );
   }
-  if (userQuery.isError || userQuery.data === undefined) {
+  // Full-page error only when there is nothing to show (the initial load
+  // failed). A failed background refetch retains `data`, so the cached page
+  // keeps rendering through transient API blips (#1797).
+  if (userQuery.data === undefined) {
     return (
       <div className="account">
         <p className="sub">{t("account.loadError")}</p>

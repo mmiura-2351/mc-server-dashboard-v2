@@ -1,5 +1,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client.ts";
@@ -95,7 +101,7 @@ function renderPage() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  return render(
+  const result = render(
     <MemoryRouter initialEntries={[`/communities/${CID}/settings`]}>
       <QueryClientProvider client={queryClient}>
         <ToastProvider>
@@ -109,6 +115,7 @@ function renderPage() {
       </QueryClientProvider>
     </MemoryRouter>,
   );
+  return { ...result, queryClient };
 }
 
 // The page lands on Members; switch to the Grants tab.
@@ -489,5 +496,31 @@ describe("CommunityGrantsTab", () => {
         t("permissions.deniedNamed", { permission: "grant:manage" }),
       ),
     ).toBeInTheDocument();
+  });
+
+  it("keeps rendering cached grants when a background refetch fails (#1797)", async () => {
+    routeGet({
+      members: [member()],
+      servers: [server()],
+      grants: [grant()],
+    });
+    const { queryClient } = renderPage();
+    await openGrants();
+    await screen.findByText("server:start");
+
+    // Simulate a transient API outage: the next background refetch fails.
+    mockApi.get.mockRejectedValue(new ApiError(500, {}));
+    await act(() => queryClient.invalidateQueries());
+    // The query-state notification lands a task after invalidateQueries
+    // settles; flush it so the assertion sees the post-refetch render.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // The cached list stays on screen instead of the tab-level error.
+    expect(screen.getByText("server:start")).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("communitySettings.grants.loadError")),
+    ).not.toBeInTheDocument();
   });
 });

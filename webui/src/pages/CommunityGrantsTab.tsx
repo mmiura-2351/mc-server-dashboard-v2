@@ -131,8 +131,10 @@ export function CommunityGrantsTab({
   if (grants.isPending || members.isPending || servers.isPending) {
     return <p className="sub">{t("communitySettings.grants.loading")}</p>;
   }
+  // Error only when there is nothing to show (an initial load failed). A
+  // failed background refetch retains `data`, so the cached list keeps
+  // rendering through transient API blips (#1797).
   if (
-    grants.isError ||
     grants.data === undefined ||
     members.data === undefined ||
     servers.data === undefined

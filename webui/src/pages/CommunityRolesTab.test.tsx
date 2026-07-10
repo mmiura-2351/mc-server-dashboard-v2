@@ -1,5 +1,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client.ts";
@@ -68,7 +74,7 @@ function renderPage() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  return render(
+  const result = render(
     <MemoryRouter initialEntries={[`/communities/${CID}/settings`]}>
       <QueryClientProvider client={queryClient}>
         <ToastProvider>
@@ -82,6 +88,7 @@ function renderPage() {
       </QueryClientProvider>
     </MemoryRouter>,
   );
+  return { ...result, queryClient };
 }
 
 // The Roles tab is not the default; switch to it after the page loads.
@@ -362,5 +369,27 @@ describe("CommunityRolesTab", () => {
         t("permissions.deniedNamed", { permission: "role:manage" }),
       ),
     ).toBeInTheDocument();
+  });
+
+  it("keeps rendering cached roles when a background refetch fails (#1797)", async () => {
+    routeGet([role({ name: "Moderator" })]);
+    const { queryClient } = renderPage();
+    await openRolesTab();
+    await screen.findByText("Moderator");
+
+    // Simulate a transient API outage: the next background refetch fails.
+    mockApi.get.mockRejectedValue(new ApiError(500, {}));
+    await act(() => queryClient.invalidateQueries());
+    // The query-state notification lands a task after invalidateQueries
+    // settles; flush it so the assertion sees the post-refetch render.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // The cached list stays on screen instead of the tab-level error.
+    expect(screen.getByText("Moderator")).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("communitySettings.roles.loadError")),
+    ).not.toBeInTheDocument();
   });
 });
