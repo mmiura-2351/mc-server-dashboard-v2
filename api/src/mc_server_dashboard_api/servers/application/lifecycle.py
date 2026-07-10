@@ -1001,8 +1001,12 @@ class StopServer:
         CORRECT for the same reason as the timeout case. The ``CancelledError``
         propagates past the clear, leaving the row at (stopped, stopped, assigned).
 
-        In both held cases the reconciler's stale-stop arm (``clear_stale_assignment``)
-        recovers the row once the grace window lapses — grace-bounded. (Asymmetric
+        In both held cases the dispatch discarded its pending future, so the
+        worker's late ``CommandResult`` — once the upload settles — releases the
+        hold immediately via the late-snapshot sink (#891/#901); the reconciler's
+        stale-stop arm (``clear_stale_assignment``) is the backstop, recovering the
+        row once the grace window lapses if no late result arrives — grace-bounded.
+        (Asymmetric
         sub-case on disconnect: a worker that has not yet noticed the drop keeps its
         ``serveCtx`` alive and the upload running briefly after the clear; bounded by
         the worker's own stream/heartbeat failure detection — accepted.)
@@ -1307,8 +1311,9 @@ class StopServer:
     ) -> None:
         """Release a held assignment on a late final-snapshot result (issue #891).
 
-        The held-snapshot timeout path (``_record_stopped_then_final_snapshot``)
-        HOLDS the row at (stopped, stopped, assigned) for the stale-stop arm to
+        The held-snapshot timeout and cancellation paths
+        (``_record_stopped_then_final_snapshot``, #847/#901)
+        HOLD the row at (stopped, stopped, assigned) for the stale-stop arm to
         clear once grace lapses, because the worker may still be uploading. When the
         worker instead reports the snapshot's outcome LATE — a ``TRANSFER_FAILED``
         once its transfer bound aborts the upload (#874/#890), or a SUCCESS whose
@@ -1352,8 +1357,9 @@ class StopServer:
             _LOG.info(
                 "released worker %s for server %s on a LATE successful final "
                 "snapshot: the publish landed but its result arrived after the "
-                "dispatch timed out, so the held assignment is cleared now instead "
-                "of waiting out the stale-stop arm (#891)",
+                "dispatch was abandoned (timed out or cancelled), so the held "
+                "assignment is cleared now instead of waiting out the stale-stop "
+                "arm (#891/#901)",
                 worker_id.value,
                 server_id.value,
             )

@@ -855,6 +855,66 @@ async def test_periodic_snapshot_timeout_does_not_clear_final_snapshot_hold() ->
         await harness.stop()
 
 
+async def test_cancelled_final_snapshot_dispatch_clears_on_late_result() -> None:
+    # The CANCELLATION-held window (issue #901): a client disconnect cancels the
+    # HTTP-request task at the stop flow's final-snapshot await. The lifecycle
+    # holds the assignment exactly like the timeout case, so the cancelled
+    # dispatch must discard its pending future the same way — promoting the
+    # snapshot record — so the worker's late result is recognised as a held
+    # final-snapshot result and clears the assignment immediately, instead of
+    # being dropped on the matched path and waiting out the grace arm.
+    sink = _RecordingLateSnapshotSink()
+    state = ControlPlaneState(late_snapshot_sink=sink)
+    control_plane = GrpcControlPlane(state, timeout_seconds=5.0)
+    worker = WorkerId(_WORKER)
+    queue = state.open_session(worker, 1)
+
+    task = asyncio.create_task(
+        control_plane.dispatch(
+            worker_id=worker,
+            server_id=_SERVER,
+            command=SnapshotCommand(transfer_url="u", transfer_token="t"),
+            snapshot_is_final=True,
+        )
+    )
+    # Once the command is on the outbound queue, dispatch is parked awaiting the
+    # result future (queue.put on the unbounded queue never suspends).
+    command_id = (await queue.get()).api_command.command_id
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # The owning worker's late result clears the held assignment via the sink.
+    await state.resolve(command_id, worker, _failed_transfer_result())
+    assert sink.calls == [(_SERVER, worker.value, False)]
+
+
+async def test_cancelled_periodic_snapshot_dispatch_leaves_no_late_record() -> None:
+    # Round-2 scoping of #898 carried over to the cancellation window: only the
+    # stop-flow FINAL snapshot promotes a record. A cancelled PERIODIC snapshot
+    # dispatch is simply forgotten — its late result clears nothing.
+    sink = _RecordingLateSnapshotSink()
+    state = ControlPlaneState(late_snapshot_sink=sink)
+    control_plane = GrpcControlPlane(state, timeout_seconds=5.0)
+    worker = WorkerId(_WORKER)
+    queue = state.open_session(worker, 1)
+
+    task = asyncio.create_task(
+        control_plane.dispatch(
+            worker_id=worker,
+            server_id=_SERVER,
+            command=SnapshotCommand(transfer_url="u", transfer_token="t"),
+        )
+    )
+    command_id = (await queue.get()).api_command.command_id
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    await state.resolve(command_id, worker, _failed_transfer_result())
+    assert sink.calls == []
+
+
 async def test_reconnect_sweeps_promoted_late_snapshot_from_prior_session() -> None:
     # A snapshot dispatch TIMED OUT (promoted to _late_snapshots), then the worker
     # reconnected on a NEW session WITHOUT a clean teardown of the old one (so the

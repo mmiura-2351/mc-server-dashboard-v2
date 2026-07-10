@@ -38,6 +38,13 @@ const resolveJoinTimeout = 5 * time.Second
 // cannot pin the goroutine (issue #971).
 const disconnectWriteTimeout = 10 * time.Second
 
+// statusFlightWaitTimeout bounds how long a coalesced status waiter blocks on
+// another connection's in-flight exchange (issue #1720). It is the leader's
+// bounded worst case — ResolveJoin + dial-back wait + status read — so a
+// waiter never gives up on a leader that can still succeed, yet escapes one
+// wedged past its own deadlines.
+const statusFlightWaitTimeout = resolveJoinTimeout + dialBackTimeout + preRouteDeadline
+
 // Resolver is the API surface the listener needs. Narrowed to an interface so
 // tests inject a fake.
 type Resolver interface {
@@ -60,6 +67,9 @@ type Listener struct {
 	caps     *ipcaps.IPCaps
 	sessions SessionRecorder
 	logger   *slog.Logger
+
+	// flights coalesces concurrent status-cache misses per slug (issue #1720).
+	flights statusFlights
 
 	// inflight tracks handle goroutines so Drain can wait for them on shutdown.
 	inflight sync.WaitGroup
@@ -179,7 +189,7 @@ func (l *Listener) handleStatus(ctx context.Context, conn net.Conn, r *bufio.Rea
 		if !l.caps.AllowJoin(ip) {
 			return
 		}
-		statusJSON = l.resolveStatus(ctx, hs, slug, ip)
+		statusJSON = l.coalesceStatus(ctx, hs, slug, ip)
 		if statusJSON == "" {
 			return
 		}
@@ -198,6 +208,43 @@ func (l *Listener) handleStatus(ctx context.Context, conn net.Conn, r *bufio.Rea
 		return
 	}
 	_ = writePacket(conn, mc.PongPacket(payload))
+}
+
+// coalesceStatus runs resolveStatus behind a per-slug flight (issue #1720):
+// concurrent misses for the same slug share one live exchange instead of each
+// spawning a ResolveJoin + Worker dial-back. The leader's result — including
+// its failure fallback or NOT_FOUND drop — is handed to every waiter; nothing
+// beyond resolveStatus's own success-path Put reaches the cache.
+func (l *Listener) coalesceStatus(ctx context.Context, hs mc.Handshake, slug, ip string) string {
+	f, leader := l.flights.join(slug)
+	if !leader {
+		return l.waitStatusFlight(ctx, f, statusFlightWaitTimeout)
+	}
+	// Another flight may have completed and cached between this connection's
+	// cache miss and its join; re-check before paying for a fresh exchange.
+	statusJSON, ok := l.cache.Get(slug)
+	if !ok {
+		statusJSON = l.resolveStatus(ctx, hs, slug, ip)
+	}
+	l.flights.finish(slug, f, statusJSON)
+	return statusJSON
+}
+
+// waitStatusFlight blocks until the flight's leader publishes its result, the
+// timeout elapses, or ctx is cancelled. A timed-out waiter answers the
+// "unavailable" fallback for its own client only — the leader keeps fetching
+// and its result stays intact for the remaining waiters. Shutdown drops.
+func (l *Listener) waitStatusFlight(ctx context.Context, f *statusFlight, timeout time.Duration) string {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-f.done:
+		return f.json
+	case <-timer.C:
+		return mc.SynthesizedStatus(mc.UnavailableMOTD)
+	case <-ctx.Done():
+		return ""
+	}
 }
 
 // resolveStatus handles a status-cache miss: resolve the slug and either fetch

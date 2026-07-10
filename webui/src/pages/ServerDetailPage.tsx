@@ -110,12 +110,13 @@ function Loaded({
   const events = useServerEvents(communityId, serverId);
   const query = useQuery({
     queryKey: serverKey(communityId, serverId),
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api.get(
         apiPath("/api/communities/{community_id}/servers/{server_id}", {
           community_id: communityId,
           server_id: serverId,
         }),
+        { signal },
       ),
   });
 
@@ -1448,7 +1449,7 @@ function Settings({
   // meta query is shared with the create page via react-query's cache.
   const metaQuery = useQuery({
     queryKey: ["meta"],
-    queryFn: () => api.get("/api/meta"),
+    queryFn: ({ signal }) => api.get("/api/meta", { signal }),
   });
   const maxMemoryLimitMb: number =
     typeof metaQuery.data?.max_memory_limit_mb === "number"

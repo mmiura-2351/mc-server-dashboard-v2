@@ -2138,17 +2138,50 @@ func (m *Manager) statusDispatcher() {
 
 // logPump forwards an instance's captured log lines onto the merged log stream
 // (FR-MON-2). It exits when the instance closes its log channel (terminal
-// state). Under sink backpressure it drops the line with a warning: logs are a
-// stream, not state, so they keep the lossy posture (unlike status, which
-// coalesces; issue #96). The per-instance LogPump already bounds and marks drops
-// at the capture edge.
+// state). Under sink backpressure it drops the line: logs are a stream, not
+// state, so they keep the lossy posture (unlike status, which coalesces; issue
+// #96). The per-instance LogPump already bounds and marks drops at the capture
+// edge. Drops here are counted silently and reported as one aggregated summary
+// per congestion episode — when a line next gets through, or when the stream
+// ends — instead of one WARN per dropped line, which flooded the worker's own
+// log for the whole length of a control-plane outage (issue #1716). The counter
+// is goroutine-local: one pump goroutine runs per server, so no locking is
+// needed.
 func (m *Manager) logPump(serverID string, src execution.LogSource) {
+	dropped := 0
 	for ev := range src.Logs() {
 		select {
 		case m.logs <- session.LogEvent{ServerID: ev.ServerID, Line: ev.Line, Stream: mapLogStream(ev.Stream)}:
+			if dropped > 0 {
+				m.reportDroppedLogs(serverID, dropped)
+				dropped = 0
+			}
 		default:
-			m.logger.Warn("dropped log line; sink full", "server_id", serverID)
+			dropped++
 		}
+	}
+	if dropped > 0 {
+		m.reportDroppedLogs(serverID, dropped)
+	}
+}
+
+// reportDroppedLogs emits the aggregated summary for one sink-congestion
+// episode: a single WARN on the worker's own logger (operator observability)
+// and, best-effort, an in-band marker on the merged stream so downstream log
+// viewers learn about the gap — mirroring the per-instance LogPump's
+// dropped-count marker (execution/logpump.go). The marker send never blocks
+// and never displaces a real line: it is only attempted after a real line got
+// through (or the stream ended), and is skipped when the sink is still full —
+// the WARN already carries the count.
+func (m *Manager) reportDroppedLogs(serverID string, dropped int) {
+	m.logger.Warn("dropped log lines; sink full", "server_id", serverID, "count", dropped)
+	select {
+	case m.logs <- session.LogEvent{
+		ServerID: serverID,
+		Line:     fmt.Sprintf("[mcsd] dropped %d earlier log line(s); control-plane log stream backlogged", dropped),
+		Stream:   session.LogStreamStderr,
+	}:
+	default:
 	}
 }
 

@@ -162,6 +162,40 @@ describe("request", () => {
   });
 });
 
+describe("request cancellation", () => {
+  it("forwards the caller's abort signal to fetch", async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, []));
+    const controller = new AbortController();
+
+    await api.get("/api/communities", { signal: controller.signal });
+
+    expect(fetchMock.mock.calls[0][1].signal).toBe(controller.signal);
+  });
+
+  it("rejects with the abort error, not an ApiError, when aborted", async () => {
+    // Emulate fetch's abort contract: reject with an AbortError DOMException
+    // once the signal fires.
+    fetchMock.mockImplementation(
+      (_url: string, init: RequestInit) =>
+        new Promise((_, reject) => {
+          init.signal?.addEventListener("abort", () =>
+            reject(new DOMException("aborted", "AbortError")),
+          );
+        }),
+    );
+    const controller = new AbortController();
+
+    const promise = api
+      .get("/api/communities", { signal: controller.signal })
+      .catch((e) => e);
+    controller.abort();
+
+    const error = await promise;
+    expect(error).not.toBeInstanceOf(ApiError);
+    expect(error.name).toBe("AbortError");
+  });
+});
+
 describe("transparent 401 refresh", () => {
   it("refreshes once and retries the original request on a 401", async () => {
     fetchMock

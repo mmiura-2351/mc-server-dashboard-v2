@@ -53,7 +53,7 @@ export function AccountPage() {
   const userQuery = useCurrentUser();
   const communitiesQuery = useQuery({
     queryKey: ["communities"],
-    queryFn: () => api.get("/api/communities"),
+    queryFn: ({ signal }) => api.get("/api/communities", { signal }),
   });
 
   if (userQuery.isPending) {
