@@ -5,7 +5,8 @@
  * (`eventsSocket.ts`) for the dashboard's one community-scoped events stream
  * (`WS /communities/{cid}/events`, STATUS only). The core owns the socket
  * lifecycle (connect, backoff reconnect, reconnect-on-rotate, teardown); this
- * module supplies the community URL and parses the API's status frames.
+ * module supplies the community URL and parses the API's status frames and the
+ * GAP marker (the client fell behind and frames were dropped).
  *
  * This module carries no React or TanStack Query: the caller supplies callbacks
  * for status frames and the degraded transitions, so the dashboard hook can
@@ -27,9 +28,16 @@ export interface StatusEvent {
   state: string;
 }
 
+/** A parsed community-stream frame: a routable STATUS or the GAP marker. */
+export type CommunityFrame =
+  | ({ kind: "status" } & StatusEvent)
+  | { kind: "gap" };
+
 export interface CommunityEventsCallbacks {
   /** A parsed STATUS frame for a known server in this community. */
   onStatus: (event: StatusEvent) => void;
+  /** The stream fell behind and dropped frames (slow-client overflow). */
+  onGap: () => void;
   /** The connection opened (resubscribe / clear degraded). */
   onOpen: () => void;
   /** The connection went down and a reconnect is pending (enter degraded). */
@@ -42,12 +50,13 @@ function eventsUrl(communityId: string): string {
 }
 
 /**
- * Parse a wire frame into a {@link StatusEvent}, or null when it is not a
- * routable STATUS frame (the server-agnostic GAP marker, a non-status stream,
- * or a malformed body). A GAP frame carries no `server_id`, so it is dropped
- * here — the dashboard already reconciles via the list refetch path.
+ * Parse a wire frame into a {@link CommunityFrame}, or null when it is neither
+ * a routable STATUS frame nor the GAP marker (a non-status stream or a
+ * malformed body). The GAP marker is server-agnostic (`server_id` is null): it
+ * means frames were dropped for an unknown set of servers, so the caller must
+ * reconcile the whole list.
  */
-export function parseStatusFrame(raw: string): StatusEvent | null {
+export function parseCommunityFrame(raw: string): CommunityFrame | null {
   let frame: unknown;
   try {
     frame = JSON.parse(raw);
@@ -62,6 +71,9 @@ export function parseStatusFrame(raw: string): StatusEvent | null {
     server_id?: unknown;
     payload?: unknown;
   };
+  if (stream === "gap") {
+    return { kind: "gap" };
+  }
   if (stream !== "status" || typeof server_id !== "string") {
     return null;
   }
@@ -72,7 +84,7 @@ export function parseStatusFrame(raw: string): StatusEvent | null {
   if (typeof state !== "string") {
     return null;
   }
-  return { serverId: server_id, state };
+  return { kind: "status", serverId: server_id, state };
 }
 
 /**
@@ -92,10 +104,15 @@ export class CommunityEventsClient {
       () => eventsUrl(communityId),
       {
         onMessage: (raw) => {
-          const status = parseStatusFrame(raw);
-          if (status !== null) {
-            callbacks.onStatus(status);
+          const frame = parseCommunityFrame(raw);
+          if (frame === null) {
+            return;
           }
+          if (frame.kind === "gap") {
+            callbacks.onGap();
+            return;
+          }
+          callbacks.onStatus({ serverId: frame.serverId, state: frame.state });
         },
         onOpen: callbacks.onOpen,
         onDown: callbacks.onDown,

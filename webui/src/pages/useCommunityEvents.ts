@@ -7,7 +7,10 @@
  * server not in the loaded list (created after load) triggers one list refetch
  * to pick it up. While the socket is down it falls back to polling the servers
  * list every 10s (status only) and reports `degraded` so the dashboard can show
- * the live-degraded indicator; healthy WS does no polling.
+ * the live-degraded indicator; healthy WS does no polling. Because the API
+ * replays nothing on subscribe, every reconnect and every GAP frame (dropped
+ * frames on a slow client) triggers one list refetch to reconcile whatever the
+ * missed window contained (#1723).
  *
  * The client is recreated per active community id and torn down on switch /
  * unmount (sign-out unmounts the dashboard), so a stale community's socket
@@ -77,15 +80,34 @@ export function useCommunityEvents(communityId: string): boolean {
       );
     };
 
+    // Resync gate (#1723): true only until the socket's first connect outcome.
+    // Any later open — drop→reopen, an open after failed initial connects, or
+    // a rotation reconnect — follows a window in which status frames may have
+    // been dropped and are never replayed, so it must refetch the list once.
+    // The pristine first open needs no refetch: the mount fetch covers it.
+    let pristine = true;
+
     const client = new CommunityEventsClient(communityId, {
       onStatus: applyStatus,
+      onGap: () => {
+        // The stream fell behind and dropped status frames for an unknown set
+        // of servers: one list refetch reconciles them (#1723).
+        queryClient.invalidateQueries({ queryKey: serversKey(communityId) });
+      },
       onOpen: () => {
         stopPolling();
+        if (!pristine) {
+          // Transitions between the last poll tick (or the drop itself) and
+          // this reopen were lost for good; reconcile once (#1723).
+          queryClient.invalidateQueries({ queryKey: serversKey(communityId) });
+        }
+        pristine = false;
         setDegraded(false);
       },
       onDown: () => {
         // The socket reports onDown on the first failure and every later drop;
         // each one re-enters degraded and (re)arms the poll.
+        pristine = false;
         setDegraded(true);
         startPolling();
       },
