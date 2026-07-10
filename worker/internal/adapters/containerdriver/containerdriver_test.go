@@ -86,6 +86,10 @@ type fakeDocker struct {
 	// removeErrs, when non-empty, scripts per-call Remove results for the loop
 	// (the last entry repeats once exhausted); empty falls back to removeErr.
 	removeErrs []error
+	// removeCtxErrs records ctx.Err() at each Remove call, so a test can assert a
+	// cleanup Remove was issued on a live context rather than the already-cancelled
+	// command context (issue #1715).
+	removeCtxErrs []error
 
 	exitCode int64
 	exitErr  error
@@ -257,10 +261,11 @@ func (f *fakeDocker) Wait(_ context.Context, _ string) (int64, error) {
 	return f.exitCode, f.exitErr
 }
 
-func (f *fakeDocker) Remove(_ context.Context, id string) error {
+func (f *fakeDocker) Remove(ctx context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.removed = append(f.removed, id)
+	f.removeCtxErrs = append(f.removeCtxErrs, ctx.Err())
 	if len(f.removeErrs) > 0 {
 		err := f.removeErrs[0]
 		if len(f.removeErrs) > 1 {
@@ -2079,6 +2084,28 @@ func TestStartFailureCleansUpContainer(t *testing.T) {
 	}
 	if len(docker.removed) != 1 || docker.removed[0] != "container-1" {
 		t.Fatalf("removed = %v, want [container-1]", docker.removed)
+	}
+}
+
+// The start-failure cleanup Remove runs detached from the command context: when
+// the session stream drops mid-start, Start fails with context.Canceled and a
+// Remove on the same context would fail instantly, leaking a Created container
+// that pins the deterministic name mcsd-<id> (issue #1715).
+func TestStartFailureCleanupDetachedFromCancelledContext(t *testing.T) {
+	docker := newFakeDocker()
+	docker.startErr = context.Canceled
+	d := newTestDriver(docker, nil, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := d.Start(ctx, spec()); err == nil {
+		t.Fatal("expected Start to fail when start fails")
+	}
+	if len(docker.removed) != 1 || docker.removed[0] != "container-1" {
+		t.Fatalf("removed = %v, want [container-1]", docker.removed)
+	}
+	if docker.removeCtxErrs[0] != nil {
+		t.Fatalf("cleanup Remove ran on a dead context (ctx.Err() = %v), want a live detached context", docker.removeCtxErrs[0])
 	}
 }
 
