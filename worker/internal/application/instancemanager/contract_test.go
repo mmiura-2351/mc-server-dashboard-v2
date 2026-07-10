@@ -85,6 +85,16 @@ func driveRow(t *testing.T, row contractRow) session.CommandResult {
 	switch row.Precondition {
 	case "instance_stopped":
 		m := newManager(t, &fakeDriver{}, &fakeControl{reply: "ok"}).WithTransfer(&fakeTransfer{})
+		// The id's working set is present at rest (a prior hydrate/run left it):
+		// SnapshotTrigger's stopped path packs it. An absent working dir is the
+		// separate working_set_absent precondition (issue #1713).
+		seedScratch(t, m, serverID)
+		return m.Handle(ctx, contractCmd(t, row.Kind, serverID))
+
+	case "working_set_absent":
+		// No scratch dir for the id: a stopped-id snapshot must refuse rather than
+		// pack the absent dir into an empty tar (issue #1713).
+		m := newManager(t, &fakeDriver{}, &fakeControl{reply: "ok"}).WithTransfer(&fakeTransfer{})
 		return m.Handle(ctx, contractCmd(t, row.Kind, serverID))
 
 	case "instance_running":
