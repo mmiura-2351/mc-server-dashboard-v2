@@ -27,6 +27,16 @@ const (
 	DefaultShutdownTimeout = 10 * time.Second
 )
 
+// DefaultFlushTimeout bounds each ReportSessions RPC so a black-holed API
+// connection (NAT/firewall state loss) cannot wedge the single Run goroutine
+// until the OS abandons TCP retransmission (issue #1719; matches the
+// registerTimeout / resolveJoinTimeout posture). A timed-out flush takes the
+// error-restore path, so capOldest bounds the buffer during the outage. Sized
+// to match registerTimeout rather than the tighter resolveJoinTimeout because
+// a post-outage flush can carry up to 2×MaxBufferedEvents events (~2.5 MB
+// proto-encoded) on a slow uplink.
+const DefaultFlushTimeout = 10 * time.Second
+
 // MaxBufferedEvents caps each pending event slice (starts and ends separately)
 // during a sustained API outage. Beyond it the oldest events are dropped
 // (drop-oldest) with a log line — bounding memory at the cost of losing the
@@ -46,6 +56,7 @@ type Reporter struct {
 	logger          *slog.Logger
 	now             func() time.Time
 	interval        time.Duration
+	flushTimeout    time.Duration
 	shutdownTimeout time.Duration
 
 	mu          sync.Mutex
@@ -65,6 +76,7 @@ func NewReporter(client reportClient, logger *slog.Logger, now func() time.Time)
 		logger:          logger,
 		now:             now,
 		interval:        DefaultFlushInterval,
+		flushTimeout:    DefaultFlushTimeout,
 		shutdownTimeout: DefaultShutdownTimeout,
 		openIDs:         make(map[string]struct{}),
 		flushSignal:     make(chan struct{}, 1),
@@ -186,7 +198,12 @@ func (r *Reporter) flush(ctx context.Context) {
 	r.pendEnds = nil
 	r.mu.Unlock()
 
-	if err := r.client.ReportSessions(ctx, starts, ends); err != nil {
+	// Bound the RPC so a black-holed API connection cannot wedge the Run
+	// goroutine (issue #1719); a timeout falls through to the error-restore
+	// path below like any other failure.
+	rctx, cancel := context.WithTimeout(ctx, r.flushTimeout)
+	defer cancel()
+	if err := r.client.ReportSessions(rctx, starts, ends); err != nil {
 		r.logger.Warn("session report failed; will retry", "error", err, "starts", len(starts), "ends", len(ends))
 		r.mu.Lock()
 		r.pendStarts = capOldest(append(starts, r.pendStarts...), "start", r.logger)
