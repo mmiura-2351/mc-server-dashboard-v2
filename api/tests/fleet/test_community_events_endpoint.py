@@ -15,6 +15,7 @@ cleanup of the firehose subscription.
 
 from __future__ import annotations
 
+import datetime as dt
 import time
 import uuid
 from collections.abc import Iterator
@@ -241,6 +242,38 @@ def test_only_status_events_are_streamed() -> None:
         )
         frame = ws.receive_json()
     assert frame["stream"] == "status"
+
+
+# --- frame encoding: exact wire bytes (#1701) -------------------------------
+
+
+def test_community_frame_wire_text_is_the_exact_compact_json() -> None:
+    """Pins the wire bytes of the community shape (``server_id`` appended last).
+
+    The frame used to be serialized by Starlette's ``send_json``
+    (``json.dumps(..., separators=(",", ":"), ensure_ascii=False)``); encoding
+    once per event must keep the bytes identical for existing clients.
+    """
+
+    bus = InProcessRealTimeEvents()
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(bus=bus, lookup={str(server): community})
+    client = next(_client(app))
+    emitted = dt.datetime(2026, 6, 3, 12, 0, 0, tzinfo=dt.timezone.utc)
+    with client.websocket_connect(_url(community)) as ws:
+        bus.publish(
+            server_id=str(server),
+            event=RealTimeEvent(
+                stream=EventStream.STATUS,
+                payload={"state": "running"},
+                emitted_at=emitted,
+            ),
+        )
+        text = ws.receive_text()
+    assert text == (
+        '{"stream":"status","ts":"2026-06-03T12:00:00Z",'
+        f'"payload":{{"state":"running"}},"server_id":"{server}"}}'
+    )
 
 
 # --- connection lifecycle --------------------------------------------------

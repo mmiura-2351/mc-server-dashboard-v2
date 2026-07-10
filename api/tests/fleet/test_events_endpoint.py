@@ -283,6 +283,101 @@ def test_frame_ts_falls_back_to_receive_time_when_unset() -> None:
     assert before <= ts <= after
 
 
+# --- frame encoding: exact wire bytes, shared across subscribers (#1701) ---
+
+
+def test_frame_wire_text_is_the_exact_compact_json() -> None:
+    """Pins the wire bytes: key order, compact separators, unescaped non-ASCII.
+
+    The frame used to be serialized by Starlette's ``send_json``
+    (``json.dumps(..., separators=(",", ":"), ensure_ascii=False)``); encoding
+    once per event must keep the bytes identical for existing clients.
+    """
+
+    bus = InProcessRealTimeEvents()
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(bus=bus)
+    client = next(_client(app))
+    emitted = dt.datetime(2026, 6, 3, 12, 0, 0, tzinfo=dt.timezone.utc)
+    with client.websocket_connect(_url(community, server)) as ws:
+        bus.publish(
+            server_id=str(server),
+            event=RealTimeEvent(
+                stream=EventStream.LOG,
+                payload={"line": "héllo", "stream": "stdout"},
+                emitted_at=emitted,
+            ),
+        )
+        text = ws.receive_text()
+    assert text == (
+        '{"stream":"log","ts":"2026-06-03T12:00:00Z",'
+        '"payload":{"line":"héllo","stream":"stdout"}}'
+    )
+
+
+def test_frame_is_encoded_once_for_many_subscribers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One event fanned out to N subscribers builds its frame once (#1701)."""
+
+    from mc_server_dashboard_api.fleet.api import events as events_module
+
+    calls = 0
+    real_frame = events_module._frame
+
+    def _counting_frame(event: RealTimeEvent) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return real_frame(event)
+
+    monkeypatch.setattr(events_module, "_frame", _counting_frame)
+
+    bus = InProcessRealTimeEvents()
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(bus=bus)
+    client = next(_client(app))
+    with (
+        client.websocket_connect(_url(community, server)) as ws1,
+        client.websocket_connect(_url(community, server)) as ws2,
+        client.websocket_connect(_url(community, server)) as ws3,
+    ):
+        # All three subscriptions must be registered before the publish.
+        for _ in range(100):
+            if bus.subscriber_count(str(server)) == 3:
+                break
+            time.sleep(0.01)
+        assert bus.subscriber_count(str(server)) == 3
+        bus.publish(
+            server_id=str(server),
+            event=RealTimeEvent(
+                stream=EventStream.STATUS, payload={"state": "running"}
+            ),
+        )
+        frames = [ws.receive_json() for ws in (ws1, ws2, ws3)]
+    assert all(frame == frames[0] for frame in frames)
+    assert calls == 1
+
+
+def test_gap_marker_frame_is_never_cached() -> None:
+    """The adapter reuses one GAP instance across subscriptions and time; a
+    cached encoding would freeze its send-time ``ts`` at the first gap forever.
+    """
+
+    from mc_server_dashboard_api.fleet.api import events as events_module
+
+    gap = RealTimeEvent(stream=EventStream.GAP)
+    calls = 0
+
+    def _build(event: RealTimeEvent) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return events_module._frame(event)
+
+    events_module._encoded(gap, events_module._FRAME_SLOT, _build)
+    events_module._encoded(gap, events_module._FRAME_SLOT, _build)
+    assert calls == 2
+
+
 # --- streams parameter: omitted=all, present-but-invalid=rejected ----------
 
 
