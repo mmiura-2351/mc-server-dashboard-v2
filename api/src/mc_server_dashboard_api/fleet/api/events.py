@@ -43,6 +43,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import functools
+import json
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Annotated, Any
@@ -189,7 +190,7 @@ async def server_events(
     subscription = bus.subscribe(server_id=str(server_id), streams=streams)
 
     async def _deliver(event: RealTimeEvent) -> None:
-        await websocket.send_json(_frame(event))
+        await websocket.send_text(_encoded(event, _FRAME_SLOT, _frame))
 
     try:
         await _relay(websocket, subscription, reauthorize=recheck, deliver=_deliver)
@@ -265,7 +266,9 @@ async def community_events(
             membership=membership,
         ):
             return
-        await websocket.send_json(_community_frame(event))
+        await websocket.send_text(
+            _encoded(event, _COMMUNITY_FRAME_SLOT, _community_frame)
+        )
 
     try:
         await _relay(websocket, subscription, reauthorize=recheck, deliver=_deliver)
@@ -467,7 +470,9 @@ def _frame(event: RealTimeEvent) -> dict[str, object]:
     ``ts`` carries the Worker's authoritative ``emitted_at`` when the event has
     one, so a queued subscriber sees true event time; it falls back to the
     relay's send time when the Worker left ``emitted_at`` unset/zero (and for the
-    adapter-synthesised gap marker, which has none).
+    adapter-synthesised gap marker, which has none). Frames are encoded once per
+    event and shared (:func:`_encoded`), so the fallback is the first delivery's
+    send time, identical for every subscriber.
     """
 
     ts = event.emitted_at or dt.datetime.now(dt.timezone.utc)
@@ -476,3 +481,44 @@ def _frame(event: RealTimeEvent) -> dict[str, object]:
         "ts": serialize_utc(ts),
         "payload": event.payload,
     }
+
+
+# Cache slots for the encoded wire text, stashed on the event instance itself —
+# one per frame shape, because the community frame carries an extra
+# ``server_id`` and must never share an encoding with the per-server shape.
+_FRAME_SLOT = "_wire_frame_text"
+_COMMUNITY_FRAME_SLOT = "_wire_community_frame_text"
+
+
+def _encoded(
+    event: RealTimeEvent,
+    slot: str,
+    build: Callable[[RealTimeEvent], dict[str, object]],
+) -> str:
+    """Return ``event``'s frame text, encoded once and shared by all subscribers.
+
+    The bus hands every subscriber of a topic the *same* event object (frozen,
+    built fresh per publish, never mutated afterwards), so the first delivery
+    encodes the frame and stashes the text in ``slot`` on the instance; the
+    remaining deliveries reuse it — O(events) serializations instead of
+    O(events x subscribers) (#1701). The stash goes through ``__dict__``
+    because the dataclass is frozen; it is invisible to equality/repr and is
+    not carried over by ``dataclasses.replace``.
+
+    The GAP marker is exempt: the adapter reuses one module-level instance
+    across subscriptions and time, and its frame's ``ts`` is the send time,
+    which must stay fresh per occurrence (a cached gap would carry the first
+    gap's timestamp forever). A gap is per-subscriber anyway, so no sharing is
+    lost.
+
+    ``json.dumps`` arguments mirror Starlette's ``send_json`` so the wire bytes
+    are unchanged; ``send_text`` delivers the shared text.
+    """
+
+    if event.stream is EventStream.GAP:
+        return json.dumps(build(event), separators=(",", ":"), ensure_ascii=False)
+    text = event.__dict__.get(slot)
+    if text is None:
+        text = json.dumps(build(event), separators=(",", ":"), ensure_ascii=False)
+        event.__dict__[slot] = text
+    return text

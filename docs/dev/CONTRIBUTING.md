@@ -1,7 +1,8 @@
 # Contributing Workflow
 
 How a change moves from an idea to a merged PR: issues, branches, commits, pull
-requests, review, and merge. Documentation conventions are in
+requests, review, and merge. Behavioral guidance for *how to write the code* is
+in [`../../CLAUDE.md`](../../CLAUDE.md); documentation conventions are in
 [`../README.md`](../README.md).
 
 > Hooks and CI are wired (see Section 4 and `.github/workflows/`); the commands
