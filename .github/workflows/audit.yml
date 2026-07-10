@@ -1,6 +1,7 @@
 name: audit
 
-# Dependency vulnerability audit (govulncheck for worker/, pip-audit for api/).
+# Dependency vulnerability audit (govulncheck for the Go modules worker/ and
+# relay/, pip-audit for api/).
 #
 # WHY scheduled matters most: the majority of CVEs land against versions that
 # are ALREADY pinned in the lockfiles, not against a new diff. The weekly cron
@@ -28,6 +29,8 @@ on:
       - "api/pyproject.toml"
       - "worker/go.mod"
       - "worker/go.sum"
+      - "relay/go.mod"
+      - "relay/go.sum"
       - ".github/workflows/audit.yml"
 
 permissions:
@@ -36,9 +39,19 @@ permissions:
 jobs:
   govulncheck:
     runs-on: ubuntu-latest
+    strategy:
+      # A reachable CVE in one module must not cancel the other module's scan;
+      # each red result is an independent triage signal.
+      fail-fast: false
+      matrix:
+        # Every deployable Go module. worker/test/e2e/stub-geyser/ is
+        # deliberately absent: a standalone stdlib-only test fixture with no
+        # dependencies (see its go.mod), excluded from audits the same way it
+        # is excluded from the worker's build/vet/lint sweep.
+        module: [worker, relay]
     defaults:
       run:
-        working-directory: worker
+        working-directory: ${{ matrix.module }}
     steps:
       # Action versions are pinned to a commit SHA per
       # docs/dev/DEPENDENCIES.md (pinning + 7-day cooldown).
@@ -48,14 +61,14 @@ jobs:
       - name: Set up Go (caches the module + build cache)
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version-file: worker/go.mod
+          go-version-file: ${{ matrix.module }}/go.mod
 
       # govulncheck is pinned like the other Go tools (cf. GOLANGCI_VERSION in
       # the Makefile): an exact tag, never @latest, kept outside the cooldown.
       - name: Install govulncheck (pinned)
         run: go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
 
-      # Call-graph aware, so it only fails on vulnerabilities the worker's code
+      # Call-graph aware, so it only fails on vulnerabilities the module's code
       # actually reaches.
       - name: govulncheck
         run: govulncheck ./...
