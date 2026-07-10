@@ -632,6 +632,32 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 
 	workingDir := filepath.Join(m.scratchDir, cmd.ServerID)
 
+	if !running {
+		// Refuse a stopped-id snapshot whose working dir does not exist (issue
+		// #1713): there is no working set to capture, so packing would upload an
+		// empty tar as a candidate new generation with the staleness guard disabled
+		// (readGeneration on an absent dir is 0, so the base-generation header is
+		// omitted) — leaving the API-side empty-staging refusal as the only defense
+		// and burning a full pack+upload+refusal cycle. The usual cause is a benign
+		// duplicate: the final snapshot published, removeScratch GC'd the dir, but
+		// the CommandResult was lost on a dropped stream so the API re-dispatched.
+		// The worker keeps no tombstone that could tell that apart from a genuinely
+		// missing working set (e.g. never hydrated), so one distinct refusal covers
+		// both. SERVER_NOT_FOUND (not TRANSFER_FAILED): no working set is held for
+		// this id and no retry can succeed without a hydrate — a terminal
+		// condition, not a transient transfer failure. The check is race-free: the
+		// reservation above already holds off any hydrate/start that could create
+		// the dir concurrently. The running path needs no guard — a tracked
+		// instance's working dir was created by its start.
+		if _, err := os.Stat(workingDir); os.IsNotExist(err) {
+			m.logger.Warn("snapshot refused: working dir absent for stopped id",
+				"server_id", cmd.ServerID, "reason", "working_set_absent")
+			return fail(cmd.CommandID, session.CommandErrorServerNotFound,
+				"instancemanager: snapshot refused: working dir absent (no working set held for this id: "+
+					"scratch already GC'd after a published final snapshot, or never hydrated)")
+		}
+	}
+
 	// Pre-pack structural region fsck (#741): fail fast at the source if the
 	// working set is already corrupt (e.g. a region torn by a crash-during-save,
 	// #703), so we refuse the snapshot here — clear signal, no wasted tar+upload —

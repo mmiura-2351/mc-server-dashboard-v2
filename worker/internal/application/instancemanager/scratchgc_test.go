@@ -94,6 +94,34 @@ func TestStoppedSnapshotRemovesScratchAfterPublish(t *testing.T) {
 	}
 }
 
+// A duplicate stopped-id SnapshotTrigger arriving AFTER the scratch was GC'd —
+// the final snapshot published, removeScratch ran, but the CommandResult was lost
+// on a dropped stream so the API re-dispatched — must be refused WITHOUT a
+// transfer (issue #1713). Packing the absent dir uploads an empty tar with the
+// base-generation guard disabled (readGeneration(absent) is 0, so the header is
+// omitted), leaving the API-side empty-staging refusal as the only defense. The
+// refusal is SERVER_NOT_FOUND, not TRANSFER_FAILED: no working set is held for
+// the id, and no retry can succeed without a hydrate — a terminal condition, not
+// a transient transfer failure.
+func TestStoppedSnapshotAbsentWorkingDirRefusedWithoutTransfer(t *testing.T) {
+	tr := &fakeTransfer{}
+	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
+	seedScratch(t, m, "s1") // stopped id: no running instance
+
+	// The first final snapshot publishes and GCs the scratch.
+	if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
+		t.Fatalf("first stopped-id snapshot = %+v, want success", res)
+	}
+	// The duplicate re-dispatch finds the working dir absent and must refuse.
+	res := m.Handle(context.Background(), snapshotCmd())
+	if res.Success || res.ErrorCode != session.CommandErrorServerNotFound {
+		t.Fatalf("duplicate stopped-id snapshot after GC = %+v, want server-not-found refusal", res)
+	}
+	if len(tr.snapshots) != 1 {
+		t.Fatalf("the duplicate must not pack/upload the absent dir; snapshots = %v", tr.snapshots)
+	}
+}
+
 // A FAILED stopped-id snapshot must RETAIN the scratch: the working set was not
 // captured, so GC-ing it would lose the world exactly as the stop-time GC did
 // (issue #841). The retained scratch is reclaimed on a later retry or at startup.

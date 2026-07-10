@@ -257,7 +257,7 @@ running-server file access.
 | `RestartServer` | Stop then start in place. | none | FR-SRV-2 |
 | `ServerCommand` | Forward an RCON/console line. | `command_output` | FR-SRV-5 |
 | `HydrateTrigger` | Pull the working set from the data plane before launch; carries the transfer URL + one-time token. | none | FR-DATA-4 |
-| `SnapshotTrigger` | Push the working set back to the data plane (a running server's copy is bracketed save-off → async save-all → settle-wait → copy → save-on so the world is fully on disk and a region file is not captured torn — NOT `save-all flush`, whose synchronous main-thread flush crashed a live server via the watchdog, #693; a running snapshot that cannot quiesce — RCON down, save-off/save-all failing, or the save never settling — is refused `quiesce_unavailable` rather than packing a live world, #907). | none | FR-DATA-4, FR-DATA-7, Section 6.9 |
+| `SnapshotTrigger` | Push the working set back to the data plane (a running server's copy is bracketed save-off → async save-all → settle-wait → copy → save-on so the world is fully on disk and a region file is not captured torn — NOT `save-all flush`, whose synchronous main-thread flush crashed a live server via the watchdog, #693; a running snapshot that cannot quiesce — RCON down, save-off/save-all failing, or the save never settling — is refused `quiesce_unavailable` rather than packing a live world, #907; a stopped-id snapshot whose working dir is absent — already GC'd after a published final snapshot, or never hydrated — is refused `SERVER_NOT_FOUND` rather than packing an empty tar with the base-generation guard disabled, #1713). | none | FR-DATA-4, FR-DATA-7, Section 6.9 |
 | `ReadFile` | Read a path from a running server's live working set. | `file_content` | Section 6.9, Section 7.2 |
 | `EditFile` | Write a path in a running server's live working set. | none | Section 6.9, Section 7.2 |
 | `ListFiles` | List a directory in a running server's live working set (read-only). | `file_listing` | Section 6.9, Section 7.2 |
@@ -402,7 +402,7 @@ classes a Worker can hit:
 
 | Code | When |
 |---|---|
-| `SERVER_NOT_FOUND` | The target server is unknown to this Worker (no live instance: stop/restart/command on a not-running server, or a missing file target). |
+| `SERVER_NOT_FOUND` | The target server is unknown to this Worker (no live instance: stop/restart/command on a not-running server, a missing file target, or a stopped-id snapshot whose working dir is absent — already GC'd after a published final snapshot, or never hydrated; issue #1713). |
 | `INVALID_STATE` | The command is invalid for the current settled state (e.g. start or hydrate a running server, or a server with a failed-stop orphan pending termination). |
 | `BUSY` | Another mutating lifecycle command is already in flight for the server, so this one was refused without being applied (the reservation race, issue #824). Distinct from `INVALID_STATE`: the in-flight command's outcome is not yet known, so the API keeps the assignment/intent and retries on a later tick rather than converging an observed state. |
 | `DRIVER_UNAVAILABLE` | The requested execution driver is not offered by this Worker. |
