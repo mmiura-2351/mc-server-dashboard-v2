@@ -15,7 +15,13 @@
     "CommandErrorCode name (CONTROL_PLANE.md Section 7); 'ok' means success.",
     "Preconditions:",
     "  instance_running   - a tracked running instance exists for the server id",
-    "  instance_stopped   - no tracked instance and no orphan for the id",
+    "  instance_stopped   - no tracked instance and no orphan for the id; the",
+    "                       id's working set is present at the scratch root",
+    "  working_set_absent - no tracked instance and the id's working dir does not",
+    "                       exist at the scratch root: already GC'd after a",
+    "                       published final snapshot (a benign duplicate",
+    "                       SnapshotTrigger re-dispatched over a dropped stream),",
+    "                       or never hydrated on this Worker (issue #1713)",
     "  instance_absent    - the server id is unknown to this Worker",
     "  command_in_flight  - a mutating lifecycle command is reserved in flight for",
     "                       the id but no instance/orphan is tracked yet (issue #780):",
@@ -71,6 +77,7 @@
     {"kind": "HydrateTrigger", "precondition": "command_in_flight", "code": "busy"},
 
     {"kind": "SnapshotTrigger", "precondition": "instance_stopped", "code": "ok"},
+    {"kind": "SnapshotTrigger", "precondition": "working_set_absent", "code": "server_not_found"},
     {"kind": "SnapshotTrigger", "precondition": "command_in_flight", "code": "busy"},
     {"kind": "SnapshotTrigger", "precondition": "unsafe_server_id", "code": "file_access_denied"},
 
