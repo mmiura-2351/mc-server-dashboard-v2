@@ -35,4 +35,19 @@ describe("labelQueryFn", () => {
     const fn = labelQueryFn(() => Promise.reject(err), []);
     await expect(fn()).rejects.toBe(err);
   });
+
+  it("forwards the query-function context to the wrapped fn", async () => {
+    // TanStack calls the queryFn with a context carrying the abort signal;
+    // the wrapper must pass it through so requests stay cancellable (#1728).
+    const seen: unknown[] = [];
+    const fn = labelQueryFn((context: { signal: AbortSignal }) => {
+      seen.push(context);
+      return Promise.resolve([]);
+    }, []);
+    const context = { signal: new AbortController().signal };
+
+    await fn(context);
+
+    expect(seen).toEqual([context]);
+  });
 });

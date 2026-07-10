@@ -101,6 +101,7 @@ describe("AdminUsersPage", () => {
     expect(screen.getByText("alice@example.com")).toBeInTheDocument();
     expect(mockApi.get).toHaveBeenCalledWith(
       "/api/admin/users?limit=50&offset=0",
+      { signal: expect.any(AbortSignal) },
     );
   });
 
@@ -129,6 +130,7 @@ describe("AdminUsersPage", () => {
     await waitFor(() => {
       expect(mockApi.get).toHaveBeenCalledWith(
         "/api/admin/users?limit=50&offset=50",
+        { signal: expect.any(AbortSignal) },
       );
     });
   });
@@ -140,6 +142,7 @@ describe("AdminUsersPage", () => {
 
     expect(mockApi.get).toHaveBeenCalledWith(
       "/api/admin/users?limit=50&offset=50",
+      { signal: expect.any(AbortSignal) },
     );
   });
 
@@ -154,6 +157,7 @@ describe("AdminUsersPage", () => {
     await waitFor(() =>
       expect(mockApi.get).toHaveBeenCalledWith(
         "/api/admin/users?limit=50&offset=50",
+        { signal: expect.any(AbortSignal) },
       ),
     );
 
@@ -163,6 +167,7 @@ describe("AdminUsersPage", () => {
     await waitFor(() =>
       expect(mockApi.get).toHaveBeenCalledWith(
         "/api/admin/users?limit=50&offset=0",
+        { signal: expect.any(AbortSignal) },
       ),
     );
   });

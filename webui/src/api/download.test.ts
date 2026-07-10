@@ -5,6 +5,7 @@ import {
   DownloadTooLargeError,
   downloadFile,
   fetchFileBlob,
+  isAbortError,
   MAX_DOWNLOAD_BYTES,
 } from "./download.ts";
 
@@ -175,6 +176,60 @@ describe("downloadFile", () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(error).toBeInstanceOf(ApiError);
       expect(error.status).toBe(401);
+    });
+  });
+
+  describe("cancellation", () => {
+    it("forwards the abort signal to fetch", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(
+          new Response(new Blob(["zip-bytes"]), { status: 200 }),
+        );
+      vi.stubGlobal("fetch", fetchMock);
+      const controller = new AbortController();
+
+      await downloadFile("/api/x", "x.zip", controller.signal);
+
+      expect(fetchMock.mock.calls[0][1].signal).toBe(controller.signal);
+    });
+
+    it("rejects with the abort error and saves nothing when aborted", async () => {
+      // Emulate fetch's abort contract: reject with an AbortError DOMException
+      // once the signal fires.
+      const fetchMock = vi.fn(
+        (_url: string, init: RequestInit) =>
+          new Promise<Response>((_, reject) => {
+            init.signal?.addEventListener("abort", () =>
+              reject(new DOMException("aborted", "AbortError")),
+            );
+          }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      const controller = new AbortController();
+
+      const promise = downloadFile("/api/x", "x.zip", controller.signal).catch(
+        (e) => e,
+      );
+      controller.abort();
+
+      const error = await promise;
+      expect(isAbortError(error)).toBe(true);
+      expect(clicks).toHaveLength(0);
+    });
+  });
+
+  describe("isAbortError", () => {
+    it("identifies the AbortError DOMException fetch rejects with", () => {
+      expect(isAbortError(new DOMException("aborted", "AbortError"))).toBe(
+        true,
+      );
+    });
+
+    it("is false for other failures", () => {
+      expect(isAbortError(new ApiError(500, undefined))).toBe(false);
+      expect(isAbortError(new Error("boom"))).toBe(false);
+      expect(isAbortError(undefined)).toBe(false);
     });
   });
 
