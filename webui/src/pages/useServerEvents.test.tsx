@@ -82,6 +82,95 @@ describe("useServerEvents", () => {
     expect(state.logs).toEqual([{ id: expect.any(Number), kind: "gap" }]);
   });
 
+  it("does not append a gap marker on the initial open", () => {
+    setup();
+    act(() => {
+      MockWebSocket.last().open();
+    });
+    expect(state.logs).toEqual([]);
+  });
+
+  it("does not append a gap marker when connects fail before any open", () => {
+    setup();
+    act(() => {
+      MockWebSocket.last().fail();
+    });
+    act(() => {
+      vi.advanceTimersByTime(30000);
+      MockWebSocket.last().fail();
+    });
+    act(() => {
+      vi.advanceTimersByTime(30000);
+      MockWebSocket.last().open();
+    });
+    expect(state.logs).toEqual([]);
+  });
+
+  it("marks a drop with one gap so lines lost while down are labeled", () => {
+    setup();
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        frame("log", { line: "before", stream: "stdout" }),
+      );
+    });
+    act(() => {
+      MockWebSocket.last().fail();
+    });
+    act(() => {
+      vi.advanceTimersByTime(30000);
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        frame("log", { line: "after", stream: "stdout" }),
+      );
+    });
+    expect(state.logs).toEqual([
+      {
+        id: expect.any(Number),
+        kind: "line",
+        line: "before",
+        stream: "stdout",
+      },
+      { id: expect.any(Number), kind: "gap" },
+      { id: expect.any(Number), kind: "line", line: "after", stream: "stdout" },
+    ]);
+  });
+
+  it("does not stack gap markers across repeated failed reconnects", () => {
+    setup();
+    act(() => {
+      MockWebSocket.last().open();
+    });
+    act(() => {
+      MockWebSocket.last().fail();
+    });
+    for (let i = 0; i < 3; i++) {
+      act(() => {
+        vi.advanceTimersByTime(30000);
+        MockWebSocket.last().fail();
+      });
+    }
+    act(() => {
+      vi.advanceTimersByTime(30000);
+      MockWebSocket.last().open();
+    });
+    expect(state.logs).toEqual([{ id: expect.any(Number), kind: "gap" }]);
+  });
+
+  it("does not append a gap marker on a rotation reconnect", () => {
+    setup();
+    act(() => {
+      MockWebSocket.last().open();
+    });
+    act(() => {
+      setAccessToken("tok-2");
+    });
+    act(() => {
+      MockWebSocket.last().open();
+    });
+    expect(state.logs).toEqual([]);
+  });
+
   it("windows metrics samples to the last N", () => {
     setup();
     act(() => {
