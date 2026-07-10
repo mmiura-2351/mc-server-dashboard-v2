@@ -450,9 +450,15 @@ class FakeServerRepository(ServerRepository):
         observed_at: dt.datetime,
         *,
         unassign: bool = False,
+        expected_worker: WorkerId | None = None,
     ) -> bool:
         server = self.by_id.get(server_id)
         if server is None:
+            return False
+        # Mirror the real adapter's ownership condition (issue #1708): an asserted
+        # worker must still be the assigned one, and never matches an unassigned
+        # row.
+        if expected_worker is not None and server.assigned_worker_id != expected_worker:
             return False
         # Mirror the real adapter's monotonic guard (issue #216): drop a write
         # stamped no later than the row's current observed_at; a never-observed row

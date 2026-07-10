@@ -137,6 +137,34 @@ func (blockingClient) ReportSessions(ctx context.Context, _ []apiclient.SessionS
 	return ctx.Err()
 }
 
+// TestReporterFlushBoundedByTimeout pins the per-flush RPC deadline (issue
+// #1719): a black-holed API connection (an RPC that never returns) must not
+// wedge flush — and with it the single Run goroutine — beyond flushTimeout.
+// The timed-out batch must take the error-restore path so it is retried and
+// capOldest can bound the buffer during the outage.
+func TestReporterFlushBoundedByTimeout(t *testing.T) {
+	r := NewReporter(blockingClient{}, discardLogger(), nil)
+	r.flushTimeout = 50 * time.Millisecond
+	r.Start("srv", "amber", "1.2.3.4", "Steve", "")
+
+	done := make(chan struct{})
+	go func() { r.flush(context.Background()); close(done) }()
+
+	select {
+	case <-done:
+		// flush returned; the RPC was bounded.
+	case <-time.After(2 * time.Second):
+		t.Fatal("flush did not return; per-RPC deadline missing (black-holed API wedges the Run goroutine)")
+	}
+
+	r.mu.Lock()
+	got := len(r.pendStarts)
+	r.mu.Unlock()
+	if got != 1 {
+		t.Errorf("timed-out flush should restore the event for retry, pendStarts = %d, want 1", got)
+	}
+}
+
 func TestReporterShutdownFlushTimesOut(t *testing.T) {
 	r := NewReporter(blockingClient{}, discardLogger(), nil)
 	r.shutdownTimeout = 50 * time.Millisecond
