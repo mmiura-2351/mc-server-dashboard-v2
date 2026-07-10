@@ -9,8 +9,10 @@ CONTROL_PLANE.md Section 4:
    wrong credential aborts the stream with ``UNAUTHENTICATED`` before any
    message is processed.
 2. **Register first.** The first ``WorkerMessage`` MUST carry ``Register``
-   (FR-WRK-1); anything else aborts with ``FAILED_PRECONDITION``. On success the
-   Worker is added to the :class:`WorkerRegistry` and the API replies
+   (FR-WRK-1); anything else aborts with ``FAILED_PRECONDITION``. The wait for
+   it is bounded (issue #1700): a client that connects and sends nothing is
+   aborted with ``DEADLINE_EXCEEDED``. On success the Worker is added to the
+   :class:`WorkerRegistry` and the API replies
    ``RegisterAck{accepted, heartbeat_interval}``.
 3. **Steady state.** ``Event{Heartbeat}`` refreshes liveness (FR-WRK-2);
    ``Event{StatusChange}`` reconciles the server's observed state through the
@@ -114,6 +116,16 @@ _LOG_STREAM_BY_PROTO: dict[int, str] = {
     pb.LOG_STREAM_STDOUT: "stdout",
     pb.LOG_STREAM_STDERR: "stderr",
 }
+
+# Bound on the wait for the first (Register) message after the stream opens
+# (issue #1700). A healthy Worker sends Register immediately on connect, so a
+# credentialed client that connects and then sends nothing is broken or hostile;
+# without a deadline each such connect parks a servicer coroutine forever (the
+# liveness watchdog is only armed after registration, and gRPC keepalive detects
+# only a dead transport, not an idle-but-ACKing peer). Expiry aborts the stream
+# with DEADLINE_EXCEEDED. Generous relative to a healthy connect (milliseconds)
+# so a slow link never trips it.
+_REGISTRATION_TIMEOUT_SECONDS = 10.0
 
 # Server-side gRPC keepalive: transport-level dead-peer detection. The server
 # sends HTTP/2 PINGs at heartbeat_timeout intervals; if the peer does not ACK
@@ -425,7 +437,18 @@ class WorkerSessionServicer(WorkerServiceServicer):
         context: aio.ServicerContext,
     ) -> tuple[WorkerId, str, SessionToken, list[str]]:
         try:
-            first = await request_iterator.__anext__()
+            # Bounded (issue #1700): a credentialed client that connects and
+            # never sends Register must not hold the RPC forever. The deadline
+            # fires before any registration state exists, so the abort needs no
+            # cleanup.
+            first = await asyncio.wait_for(
+                request_iterator.__anext__(), timeout=_REGISTRATION_TIMEOUT_SECONDS
+            )
+        except TimeoutError:
+            await context.abort(
+                grpc.StatusCode.DEADLINE_EXCEEDED,
+                "no Register within the registration deadline",
+            )
         except StopAsyncIteration:
             await context.abort(
                 grpc.StatusCode.FAILED_PRECONDITION,

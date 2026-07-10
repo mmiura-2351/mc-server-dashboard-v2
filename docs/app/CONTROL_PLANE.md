@@ -143,7 +143,10 @@ backward-compatible change under the module's `FILE` breaking rule.
      │                                       │
 ```
 
-`Register` MUST be the first message on a fresh stream. It advertises the
+`Register` MUST be the first message on a fresh stream, and the API bounds the
+wait for it to a few seconds: a credentialed client that connects and sends
+nothing is aborted with `DEADLINE_EXCEEDED`, so an idle connect cannot park a
+servicer coroutine forever (issue #1700). It advertises the
 Worker's id, version, and `WorkerCapabilities` (available drivers, capacity
 hint, host resources) — the input to the API's greedy placement
 (FR-WRK-1, FR-WRK-3). It also carries `held_servers`: each server whose working
