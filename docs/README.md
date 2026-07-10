@@ -3,11 +3,11 @@
 Long-form documentation for the Minecraft Server Dashboard **v2**. The
 [root README](../README.md) carries the elevator pitch, philosophy, and
 architecture overview; everything that needs more than a paragraph lives here.
-[`REQUIREMENTS.md`](REQUIREMENTS.md) is the source of truth for scope. The four
+[`REQUIREMENTS.md`](REQUIREMENTS.md) is the source of truth for scope. The five
 modules each have their own README ([`api/`](../api/README.md),
-[`worker/`](../worker/README.md), [`webui/`](../webui/README.md),
-[`proto/`](../proto/README.md)); the per-screen Web UI specs live in
-[`ui/`](ui/).
+[`worker/`](../worker/README.md), [`relay/`](../relay/README.md),
+[`webui/`](../webui/README.md), [`proto/`](../proto/README.md)); the per-screen
+Web UI specs live in [`ui/`](ui/).
 
 Docs are split by intent:
 
