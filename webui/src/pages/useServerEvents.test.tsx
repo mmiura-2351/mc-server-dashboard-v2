@@ -29,17 +29,15 @@ function setup() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  const refetchSpy = vi.fn();
-  queryClient.getQueryCache().subscribe((event) => {
-    if (event.type === "updated" && event.action.type === "invalidate") {
-      refetchSpy();
-    }
-  });
+  // Counts resync requests by call. (A cache-event spy would undercount here:
+  // with no observer to refetch and clear `isInvalidated`, only the first
+  // invalidation of a query emits an "invalidate" event.)
+  const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
   const wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
   );
   const view = render(<Probe />, { wrapper });
-  return { queryClient, refetchSpy, view };
+  return { queryClient, invalidateSpy, view };
 }
 
 describe("useServerEvents", () => {
@@ -242,31 +240,110 @@ describe("useServerEvents", () => {
   });
 
   it("goes degraded on loss and refetches the detail query once (status only)", () => {
-    const { queryClient, refetchSpy } = setup();
-    queryClient.setQueryData(serverKey(CID, SID), {
-      id: SID,
-      observed_state: "running",
-    });
+    const { invalidateSpy } = setup();
     act(() => {
       MockWebSocket.last().open();
     });
     expect(state.degraded).toBe(false);
 
-    refetchSpy.mockClear();
     act(() => {
       MockWebSocket.last().fail();
     });
     expect(state.degraded).toBe(true);
-    expect(refetchSpy).toHaveBeenCalledTimes(1);
+    expect(invalidateSpy).toHaveBeenCalledTimes(1);
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: serverKey(CID, SID),
+    });
 
-    // No log/metrics polling: advancing time issues no further refetches.
-    refetchSpy.mockClear();
+    // Reopen resyncs once: frames from the down window are never replayed.
+    invalidateSpy.mockClear();
     act(() => {
       vi.advanceTimersByTime(30000);
       MockWebSocket.last().open();
     });
     expect(state.degraded).toBe(false);
-    expect(refetchSpy).not.toHaveBeenCalled();
+    expect(invalidateSpy).toHaveBeenCalledTimes(1);
+
+    // No log/metrics polling: advancing time issues no further refetches.
+    invalidateSpy.mockClear();
+    act(() => {
+      vi.advanceTimersByTime(60000);
+    });
+    expect(invalidateSpy).not.toHaveBeenCalled();
+  });
+
+  it("does not refetch on the pristine initial open", () => {
+    const { invalidateSpy } = setup();
+    act(() => {
+      MockWebSocket.last().open();
+    });
+    expect(invalidateSpy).not.toHaveBeenCalled();
+  });
+
+  it("refetches on the first open after failed initial connects", () => {
+    const { invalidateSpy } = setup();
+    act(() => {
+      MockWebSocket.last().fail();
+    });
+    // The onDown fallback refetched at drop time; the open must resync again
+    // because up to a full backoff window has passed since.
+    invalidateSpy.mockClear();
+    act(() => {
+      vi.advanceTimersByTime(30000);
+      MockWebSocket.last().open();
+    });
+    expect(invalidateSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("refetches the detail query on a rotation reconnect", () => {
+    const { invalidateSpy } = setup();
+    act(() => {
+      MockWebSocket.last().open();
+    });
+    invalidateSpy.mockClear();
+    act(() => {
+      setAccessToken("tok-2");
+    });
+    act(() => {
+      MockWebSocket.last().open();
+    });
+    expect(invalidateSpy).toHaveBeenCalledTimes(1);
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: serverKey(CID, SID),
+    });
+  });
+
+  it("refetches the detail query on a server-sent gap frame", () => {
+    const { invalidateSpy } = setup();
+    act(() => {
+      MockWebSocket.last().open();
+    });
+    invalidateSpy.mockClear();
+    act(() => {
+      MockWebSocket.last().message(frame("gap", {}));
+    });
+    expect(invalidateSpy).toHaveBeenCalledTimes(1);
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: serverKey(CID, SID),
+    });
+  });
+
+  it("issues one refetch per transition across a flapping connection", () => {
+    const { invalidateSpy } = setup();
+    act(() => {
+      MockWebSocket.last().open();
+    });
+    invalidateSpy.mockClear();
+    for (let i = 0; i < 2; i++) {
+      act(() => {
+        MockWebSocket.last().fail(); // one refetch: onDown REST fallback
+      });
+      act(() => {
+        vi.advanceTimersByTime(30000);
+        MockWebSocket.last().open(); // one refetch: reopen resync
+      });
+    }
+    expect(invalidateSpy).toHaveBeenCalledTimes(4);
   });
 
   it("reconnects with the fresh token on rotation", () => {
