@@ -50,22 +50,13 @@ vi.mock("../api/client.ts", async () => {
 const mockDownload = vi.hoisted(() => ({
   downloadFile: vi.fn(),
   fetchFileBlob: vi.fn(),
-  // Real predicate: the abort-swallowing paths under test depend on it.
-  isAbortError: (error: unknown) =>
-    typeof error === "object" &&
-    error !== null &&
-    (error as { name?: unknown }).name === "AbortError",
-  MAX_DOWNLOAD_BYTES: 512 * 1024 * 1024,
-  DownloadTooLargeError: class DownloadTooLargeError extends Error {
-    readonly contentLength: number;
-    constructor(contentLength: number) {
-      super(`Download too large: ${contentLength} bytes`);
-      this.name = "DownloadTooLargeError";
-      this.contentLength = contentLength;
-    }
-  },
 }));
-vi.mock("../api/download.ts", () => mockDownload);
+// Keep the real module (isAbortError, DownloadTooLargeError, the size cap)
+// and stub only the two network entry points.
+vi.mock("../api/download.ts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../api/download.ts")>()),
+  ...mockDownload,
+}));
 
 let mockCan: Can = () => true;
 vi.mock("../permissions/ActiveCommunityProvider.tsx", () => ({
@@ -539,7 +530,7 @@ describe("ServerFilesTab operations", () => {
     );
   });
 
-  it("aborts the previous in-flight download when a new one starts (#1728)", async () => {
+  it("runs concurrent row downloads independently, aborting only on unmount (#1728)", async () => {
     routeGet({
       detail: server(),
       list: listing([
@@ -556,7 +547,7 @@ describe("ServerFilesTab operations", () => {
           );
         }),
     );
-    renderPage();
+    const { unmount } = renderPage();
     await openFiles();
     await screen.findByText(/a\.txt/);
 
@@ -572,17 +563,69 @@ describe("ServerFilesTab operations", () => {
     await waitFor(() =>
       expect(mockDownload.downloadFile).toHaveBeenCalledTimes(1),
     );
-    const firstSignal = mockDownload.downloadFile.mock
-      .calls[0][2] as AbortSignal;
-    expect(firstSignal.aborted).toBe(false);
-
     startDownload(/b\.txt/);
     await waitFor(() =>
       expect(mockDownload.downloadFile).toHaveBeenCalledTimes(2),
     );
 
+    // Concurrent row downloads are legitimate: neither cancels the other.
+    const [first, second] = mockDownload.downloadFile.mock.calls.map(
+      (c) => c[2] as AbortSignal,
+    );
+    expect(first.aborted).toBe(false);
+    expect(second.aborted).toBe(false);
+
+    unmount();
+
+    // Leaving the view aborts everything still in flight.
+    expect(first.aborted).toBe(true);
+    expect(second.aborted).toBe(true);
+  });
+
+  it("viewer re-download supersedes the previous one without an error toast (#1728)", async () => {
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.includes("/files?path=") && !path.includes("list=")) {
+        return Promise.resolve({
+          path: "notes.txt",
+          content_base64: encodeUtf8Base64("hello\n"),
+        });
+      }
+      if (path.includes("/files?path=")) {
+        return Promise.resolve(listing([{ name: "notes.txt", is_dir: false }]));
+      }
+      return Promise.resolve(server());
+    });
+    // Emulate fetch's abort contract: stay pending until the signal fires.
+    mockDownload.downloadFile.mockImplementation(
+      (_path: string, _name: string, signal?: AbortSignal) =>
+        new Promise<void>((_, reject) => {
+          signal?.addEventListener("abort", () =>
+            reject(new DOMException("aborted", "AbortError")),
+          );
+        }),
+    );
+    renderPage();
+    await openFiles();
+    fireEvent.click(await screen.findByText(/notes\.txt/));
+    const downloadButton = await screen.findByRole("button", {
+      name: t("files.download"),
+    });
+
+    fireEvent.click(downloadButton);
+    await waitFor(() =>
+      expect(mockDownload.downloadFile).toHaveBeenCalledTimes(1),
+    );
+    const firstSignal = mockDownload.downloadFile.mock
+      .calls[0][2] as AbortSignal;
+
+    fireEvent.click(downloadButton);
+    await waitFor(() =>
+      expect(mockDownload.downloadFile).toHaveBeenCalledTimes(2),
+    );
+
+    // Re-requesting the same file supersedes the stale attempt...
     expect(firstSignal.aborted).toBe(true);
-    // The intentional cancel must not surface as an error toast.
+    // ...and the intentional cancel must not surface as an error toast.
     expect(
       screen.queryByText(t("files.error.generic")),
     ).not.toBeInTheDocument();
@@ -2092,12 +2135,60 @@ describe("ServerFilesTab bulk operations", () => {
     );
     expect(mockDownload.fetchFileBlob).toHaveBeenCalledWith(
       `${FILES_BASE}/download?path=a.txt`,
+      expect.any(AbortSignal),
     );
     expect(mockDownload.fetchFileBlob).toHaveBeenCalledWith(
       `${FILES_BASE}/download?path=b.txt`,
+      expect.any(AbortSignal),
     );
     // downloadFile should NOT have been called (ZIP handles both files).
     expect(mockDownload.downloadFile).not.toHaveBeenCalled();
+  });
+
+  it("aborts the bulk ZIP download when the tab unmounts mid-fetch (#1728)", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "a.txt", is_dir: false },
+        { name: "b.txt", is_dir: false },
+      ]),
+    });
+    // Emulate fetch's abort contract: stay pending until the signal fires.
+    mockDownload.fetchFileBlob.mockImplementation(
+      (_path: string, signal?: AbortSignal) =>
+        new Promise<Blob>((_, reject) => {
+          signal?.addEventListener("abort", () =>
+            reject(new DOMException("aborted", "AbortError")),
+          );
+        }),
+    );
+    const { unmount } = renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "b.txt" }), {
+      ctrlKey: true,
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.bulk.download") }),
+    );
+
+    // The loop is sequential: the first file's fetch is in flight.
+    await waitFor(() =>
+      expect(mockDownload.fetchFileBlob).toHaveBeenCalledTimes(1),
+    );
+    const signal = mockDownload.fetchFileBlob.mock.calls[0][1] as AbortSignal;
+    expect(signal.aborted).toBe(false);
+
+    unmount();
+
+    expect(signal.aborted).toBe(true);
+    // The aborted loop stops instead of fetching the remaining files.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(mockDownload.fetchFileBlob).toHaveBeenCalledTimes(1);
   });
 
   it("bulk downloads a single file directly without ZIP", async () => {

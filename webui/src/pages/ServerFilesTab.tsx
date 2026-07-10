@@ -165,6 +165,11 @@ function breadcrumbs(path: string): { name: string; path: string }[] {
  * download never outlives its view. Callers swallow the resulting AbortError
  * via {@link isAbortError} — an intentional cancel is not a user-visible
  * failure.
+ *
+ * Supersede-on-new fits views where a new request means "the same download
+ * again" (the Viewer's single file, the Toolbar's single selection). Where
+ * concurrent downloads of different files are legitimate, use
+ * {@link useDownloadSignals} instead.
  */
 function useDownloadSignal(): () => AbortSignal {
   const controller = useRef<AbortController | null>(null);
@@ -178,6 +183,31 @@ function useDownloadSignal(): () => AbortSignal {
     controller.current?.abort();
     controller.current = new AbortController();
     return controller.current.signal;
+  }, []);
+}
+
+/**
+ * Per-download variant of {@link useDownloadSignal}: every call hands out an
+ * independent signal, and only unmounting the owning component aborts the
+ * ones still in flight. Used by the Listing's row downloads, where starting a
+ * second download must not cancel the first (PR #1778 review). Aborting an
+ * already-settled controller at unmount is a no-op, so spent entries are
+ * harmless.
+ */
+function useDownloadSignals(): () => AbortSignal {
+  const controllers = useRef<AbortController[]>([]);
+  useEffect(
+    () => () => {
+      for (const controller of controllers.current) {
+        controller.abort();
+      }
+    },
+    [],
+  );
+  return useCallback(() => {
+    const controller = new AbortController();
+    controllers.current.push(controller);
+    return controller.signal;
   }, []);
 }
 
@@ -1645,7 +1675,7 @@ function Listing({
     },
   });
 
-  const nextDownloadSignal = useDownloadSignal();
+  const nextDownloadSignal = useDownloadSignals();
   const download = useMutation({
     mutationFn: (entry: DirEntry) =>
       downloadFile(
@@ -2603,8 +2633,10 @@ function Toolbar({
       return;
     }
 
-    // Multiple files — fetch all, bundle into a single ZIP.
+    // Multiple files — fetch all, bundle into a single ZIP. The whole
+    // operation shares one abort signal so leaving the view stops the loop.
     setBulkBusy(true);
+    const signal = nextDownloadSignal();
     const files: Record<string, Uint8Array> = {};
     let done = 0;
     let failed = 0;
@@ -2616,6 +2648,7 @@ function Toolbar({
             "/api/communities/{community_id}/servers/{server_id}/files/download",
             { community_id: communityId, server_id: serverId },
           )}?path=${encodeURIComponent(path)}`,
+          signal,
         );
         const buf = new Uint8Array(await blob.arrayBuffer());
         // Use full path as ZIP key to avoid collisions between files with the
@@ -2623,6 +2656,12 @@ function Toolbar({
         files[path] = buf;
         done += 1;
       } catch (error) {
+        if (isAbortError(error)) {
+          // Intentional cancel (view unmounted): stop fetching, save nothing.
+          setBulkBusy(false);
+          setBulkProgress(null);
+          return;
+        }
         failed += 1;
         if (onForbiddenCheck(error)) break;
       }
