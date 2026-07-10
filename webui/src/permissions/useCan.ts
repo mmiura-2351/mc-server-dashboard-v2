@@ -31,7 +31,7 @@ function useCapabilities(): EffectivePermissions {
   const { communityId } = useActiveCommunity();
   const { data } = useQuery({
     queryKey: capabilitiesKey(communityId ?? ""),
-    queryFn: () => fetchCapabilities(communityId as string),
+    queryFn: ({ signal }) => fetchCapabilities(communityId as string, signal),
     enabled: status === "signed-in" && communityId !== null,
   });
   return data ?? EMPTY;

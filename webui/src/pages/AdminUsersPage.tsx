@@ -114,7 +114,7 @@ export function AdminUsersPage() {
 
   const usersQuery = useQuery({
     queryKey: ["users", "list", offset],
-    queryFn: () => api.get(usersUrl(offset)),
+    queryFn: ({ signal }) => api.get(usersUrl(offset), { signal }),
     placeholderData: keepPreviousData,
   });
 

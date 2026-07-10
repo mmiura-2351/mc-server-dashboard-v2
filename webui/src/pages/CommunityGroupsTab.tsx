@@ -56,22 +56,24 @@ export function CommunityGroupsTab({
 
   const groups = useQuery({
     queryKey: groupsKeys.list(communityId),
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api.get(
         apiPath("/api/communities/{community_id}/groups", {
           community_id: communityId,
         }),
+        { signal },
       ),
   });
 
   // Community servers feed the attach picker; only needed to manage attachments.
   const servers = useQuery({
     queryKey: ["communities", communityId, "servers"],
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api.get(
         apiPath("/api/communities/{community_id}/servers", {
           community_id: communityId,
         }),
+        { signal },
       ),
     enabled: canManage,
   });
@@ -258,12 +260,13 @@ function GroupDetail({
 
   const attachedServers = useQuery({
     queryKey: attachmentsKeys.forGroup(communityId, group.id),
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api.get(
         apiPath("/api/communities/{community_id}/groups/{group_id}/servers", {
           community_id: communityId,
           group_id: group.id,
         }),
+        { signal },
       ),
   });
 

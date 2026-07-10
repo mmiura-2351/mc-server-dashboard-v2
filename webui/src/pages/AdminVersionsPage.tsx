@@ -22,7 +22,7 @@ import { t } from "../i18n/index.ts";
 export function AdminVersionsPage() {
   const typesQuery = useQuery({
     queryKey: ["versions", "types"],
-    queryFn: () => api.get("/api/versions"),
+    queryFn: ({ signal }) => api.get("/api/versions", { signal }),
   });
 
   const types = typesQuery.data?.server_types ?? [];
@@ -62,8 +62,10 @@ function Catalog({ types }: { types: string[] }) {
   const versionQueries = useQueries({
     queries: types.map((type) => ({
       queryKey: ["versions", type],
-      queryFn: () =>
-        api.get(apiPath("/api/versions/{server_type}", { server_type: type })),
+      queryFn: ({ signal }) =>
+        api.get(apiPath("/api/versions/{server_type}", { server_type: type }), {
+          signal,
+        }),
     })),
   });
 
@@ -182,7 +184,8 @@ function JarPool() {
 
   const statsQuery = useQuery({
     queryKey: ["versions", "jar-pool", "stats"],
-    queryFn: () => api.get("/api/versions/jar-pool/stats"),
+    queryFn: ({ signal }) =>
+      api.get("/api/versions/jar-pool/stats", { signal }),
   });
 
   const gc = useMutation({
