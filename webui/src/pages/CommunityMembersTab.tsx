@@ -33,11 +33,12 @@ export function CommunityMembersTab({
 
   const members = useQuery({
     queryKey: membersKeys.list(communityId),
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api.get(
         apiPath("/api/communities/{community_id}/members", {
           community_id: communityId,
         }),
+        { signal },
       ),
   });
 
@@ -45,11 +46,12 @@ export function CommunityMembersTab({
   // read roles and manage them (otherwise the picker is hidden anyway).
   const roles = useQuery({
     queryKey: rolesKeys.list(communityId),
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api.get(
         apiPath("/api/communities/{community_id}/roles", {
           community_id: communityId,
         }),
+        { signal },
       ),
     enabled: canReadRoles && canManageRoles,
   });

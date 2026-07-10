@@ -26,7 +26,7 @@ const REFRESH_INTERVAL_MS = 12_000;
 export function AdminWorkersPage() {
   const workersQuery = useQuery({
     queryKey: ["workers"],
-    queryFn: () => api.get("/api/workers"),
+    queryFn: ({ signal }) => api.get("/api/workers", { signal }),
     refetchInterval: REFRESH_INTERVAL_MS,
   });
 

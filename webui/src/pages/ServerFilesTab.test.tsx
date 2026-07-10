@@ -50,6 +50,11 @@ vi.mock("../api/client.ts", async () => {
 const mockDownload = vi.hoisted(() => ({
   downloadFile: vi.fn(),
   fetchFileBlob: vi.fn(),
+  // Real predicate: the abort-swallowing paths under test depend on it.
+  isAbortError: (error: unknown) =>
+    typeof error === "object" &&
+    error !== null &&
+    (error as { name?: unknown }).name === "AbortError",
   MAX_DOWNLOAD_BYTES: 512 * 1024 * 1024,
   DownloadTooLargeError: class DownloadTooLargeError extends Error {
     readonly contentLength: number;
@@ -198,7 +203,10 @@ describe("ServerFilesTab listing", () => {
     expect(await screen.findByText(/world/)).toBeInTheDocument();
     expect(screen.getByText(/server\.properties/)).toBeInTheDocument();
     await waitFor(() =>
-      expect(mockApi.get).toHaveBeenCalledWith(`${FILES_BASE}?path=&list=true`),
+      expect(mockApi.get).toHaveBeenCalledWith(
+        `${FILES_BASE}?path=&list=true`,
+        { signal: expect.any(AbortSignal) },
+      ),
     );
   });
 
@@ -243,6 +251,7 @@ describe("ServerFilesTab listing", () => {
     await waitFor(() =>
       expect(mockApi.get).toHaveBeenCalledWith(
         `${FILES_BASE}?path=world&list=true`,
+        { signal: expect.any(AbortSignal) },
       ),
     );
   });
@@ -525,8 +534,89 @@ describe("ServerFilesTab operations", () => {
       expect(mockDownload.downloadFile).toHaveBeenCalledWith(
         `${FILES_BASE}/download?path=log.txt`,
         "log.txt",
+        expect.any(AbortSignal),
       ),
     );
+  });
+
+  it("aborts the previous in-flight download when a new one starts (#1728)", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "a.txt", is_dir: false },
+        { name: "b.txt", is_dir: false },
+      ]),
+    });
+    // Emulate fetch's abort contract: stay pending until the signal fires.
+    mockDownload.downloadFile.mockImplementation(
+      (_path: string, _name: string, signal?: AbortSignal) =>
+        new Promise<void>((_, reject) => {
+          signal?.addEventListener("abort", () =>
+            reject(new DOMException("aborted", "AbortError")),
+          );
+        }),
+    );
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    const startDownload = (name: RegExp) => {
+      const row = screen.getByText(name).closest("li") as HTMLElement;
+      fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+      fireEvent.click(
+        screen.getByRole("menuitem", { name: t("files.contextMenu.download") }),
+      );
+    };
+
+    startDownload(/a\.txt/);
+    await waitFor(() =>
+      expect(mockDownload.downloadFile).toHaveBeenCalledTimes(1),
+    );
+    const firstSignal = mockDownload.downloadFile.mock
+      .calls[0][2] as AbortSignal;
+    expect(firstSignal.aborted).toBe(false);
+
+    startDownload(/b\.txt/);
+    await waitFor(() =>
+      expect(mockDownload.downloadFile).toHaveBeenCalledTimes(2),
+    );
+
+    expect(firstSignal.aborted).toBe(true);
+    // The intentional cancel must not surface as an error toast.
+    expect(
+      screen.queryByText(t("files.error.generic")),
+    ).not.toBeInTheDocument();
+  });
+
+  it("aborts the file-content request when the tab unmounts mid-load (#1728)", async () => {
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.includes("/files?path=") && !path.includes("list=")) {
+        return new Promise(() => {}); // content GET stays in flight forever
+      }
+      if (path.includes("/files?path=")) {
+        return Promise.resolve(listing([{ name: "notes.txt", is_dir: false }]));
+      }
+      return Promise.resolve(server());
+    });
+    const { unmount } = renderPage();
+    await openFiles();
+
+    fireEvent.click(await screen.findByText(/notes\.txt/));
+    await waitFor(() =>
+      expect(
+        mockApi.get.mock.calls.some((c) =>
+          (c[0] as string).includes("?path=notes.txt"),
+        ),
+      ).toBe(true),
+    );
+    const contentCall = mockApi.get.mock.calls.find((c) =>
+      (c[0] as string).includes("?path=notes.txt"),
+    ) as [string, { signal: AbortSignal }];
+    expect(contentCall[1].signal.aborted).toBe(false);
+
+    unmount();
+
+    expect(contentCall[1].signal.aborted).toBe(true);
   });
 });
 
@@ -652,6 +742,7 @@ describe("ServerFilesTab search", () => {
     await waitFor(() =>
       expect(mockApi.get).toHaveBeenCalledWith(
         `${FILES_BASE}?path=world%2Flevel.dat`,
+        { signal: expect.any(AbortSignal) },
       ),
     );
   });
@@ -682,6 +773,7 @@ describe("ServerFilesTab search", () => {
     await waitFor(() =>
       expect(mockApi.get).toHaveBeenCalledWith(
         `${FILES_BASE}?path=${encodeURIComponent("config/a b & c.yml")}`,
+        { signal: expect.any(AbortSignal) },
       ),
     );
   });
@@ -739,6 +831,7 @@ describe("ServerFilesTab history + rollback", () => {
     await waitFor(() =>
       expect(mockApi.get).toHaveBeenCalledWith(
         `${FILES_BASE}/history?path=a%20b.txt`,
+        { signal: expect.any(AbortSignal) },
       ),
     );
   });
@@ -827,6 +920,7 @@ describe("ServerFilesTab history + rollback", () => {
     await waitFor(() =>
       expect(mockApi.get).toHaveBeenCalledWith(
         `${FILES_BASE}/version?path=a%20b.txt&version_id=${VID1}`,
+        { signal: expect.any(AbortSignal) },
       ),
     );
   });
@@ -2033,6 +2127,7 @@ describe("ServerFilesTab bulk operations", () => {
     expect(mockDownload.downloadFile).toHaveBeenCalledWith(
       `${FILES_BASE}/download?path=a.txt`,
       "a.txt",
+      expect.any(AbortSignal),
     );
     expect(mockDownload.fetchFileBlob).not.toHaveBeenCalled();
   });
@@ -2907,6 +3002,7 @@ describe("ServerFilesTab navigation history", () => {
     await waitFor(() =>
       expect(mockApi.get).toHaveBeenCalledWith(
         `${FILES_BASE}?path=world&list=true`,
+        { signal: expect.any(AbortSignal) },
       ),
     );
   });
@@ -3036,6 +3132,7 @@ describe("ServerFilesTab unsaved changes guard", () => {
     await waitFor(() =>
       expect(mockApi.get).toHaveBeenCalledWith(
         `${FILES_BASE}?path=world&list=true`,
+        { signal: expect.any(AbortSignal) },
       ),
     );
     // The discard dialog should be gone.
@@ -3119,6 +3216,7 @@ describe("ServerFilesTab unsaved changes guard", () => {
     await waitFor(() =>
       expect(mockApi.get).toHaveBeenCalledWith(
         `${FILES_BASE}?path=world&list=true`,
+        { signal: expect.any(AbortSignal) },
       ),
     );
     expect(
@@ -3165,6 +3263,7 @@ describe("ServerFilesTab unsaved changes guard", () => {
     await waitFor(() =>
       expect(mockApi.get).toHaveBeenCalledWith(
         `${FILES_BASE}?path=world&list=true`,
+        { signal: expect.any(AbortSignal) },
       ),
     );
     expect(

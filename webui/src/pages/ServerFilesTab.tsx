@@ -35,6 +35,7 @@ import {
   DownloadTooLargeError,
   downloadFile,
   fetchFileBlob,
+  isAbortError,
   MAX_DOWNLOAD_BYTES,
 } from "../api/download.ts";
 import { apiPath } from "../api/path.ts";
@@ -155,6 +156,29 @@ function breadcrumbs(path: string): { name: string; path: string }[] {
     name,
     path: parts.slice(0, i + 1).join("/"),
   }));
+}
+
+/**
+ * Hands out the abort signal for a component's next file download
+ * (issue #1728). Starting a new download aborts the previous in-flight one,
+ * and unmounting the owning component aborts whatever is still running, so a
+ * download never outlives its view. Callers swallow the resulting AbortError
+ * via {@link isAbortError} — an intentional cancel is not a user-visible
+ * failure.
+ */
+function useDownloadSignal(): () => AbortSignal {
+  const controller = useRef<AbortController | null>(null);
+  useEffect(
+    () => () => {
+      controller.current?.abort();
+    },
+    [],
+  );
+  return useCallback(() => {
+    controller.current?.abort();
+    controller.current = new AbortController();
+    return controller.current.signal;
+  }, []);
 }
 
 /**
@@ -458,9 +482,10 @@ export function ServerFilesTab({
   const listing = useQuery({
     queryKey: listKey,
     enabled: canRead,
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api.get(
         `${filesBase(communityId, server.id)}?path=${encodeURIComponent(dir)}&list=true` as never,
+        { signal },
       ) as Promise<DirListing>,
   });
 
@@ -1620,6 +1645,7 @@ function Listing({
     },
   });
 
+  const nextDownloadSignal = useDownloadSignal();
   const download = useMutation({
     mutationFn: (entry: DirEntry) =>
       downloadFile(
@@ -1628,8 +1654,12 @@ function Listing({
           { community_id: communityId, server_id: serverId },
         )}?path=${encodeURIComponent(joinPath(dir, entry.name))}`,
         entry.name,
+        nextDownloadSignal(),
       ),
     onError: (error) => {
+      if (isAbortError(error)) {
+        return;
+      }
       if (error instanceof DownloadTooLargeError) {
         showToast(
           t("files.error.downloadTooLarge", {
@@ -2116,6 +2146,7 @@ function Viewer({
 }) {
   const { showToast } = useToast();
   const queryClient = useQueryClient();
+  const nextDownloadSignal = useDownloadSignal();
   // `null` until the user edits, so an untouched view always reflects the
   // server's content even after a save invalidates and refetches it.
   const [draft, setDraft] = useState<string | null>(null);
@@ -2129,9 +2160,10 @@ function Viewer({
   const contentKey = ["files", "content", communityId, serverId, path];
   const content = useQuery({
     queryKey: contentKey,
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api.get(
         `${filesBase(communityId, serverId)}?path=${encodeURIComponent(path)}` as never,
+        { signal },
       ) as Promise<FileContent>,
   });
 
@@ -2174,7 +2206,11 @@ function Viewer({
                   { community_id: communityId, server_id: serverId },
                 )}?path=${encodeURIComponent(path)}`,
                 downloadName,
+                nextDownloadSignal(),
               ).catch((error) => {
+                if (isAbortError(error)) {
+                  return;
+                }
                 if (error instanceof DownloadTooLargeError) {
                   showToast(
                     t("files.error.downloadTooLarge", {
@@ -2290,18 +2326,20 @@ function HistoryDrawer({
   const historyKey = ["files", "history", communityId, serverId, path];
   const history = useQuery({
     queryKey: historyKey,
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api.get(
         `${filesBase(communityId, serverId)}/history?path=${encodeURIComponent(path)}` as never,
+        { signal },
       ) as Promise<FileVersions>,
   });
 
   const preview = useQuery({
     queryKey: ["files", "version", communityId, serverId, path, previewing],
     enabled: previewing !== null,
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api.get(
         `${filesBase(communityId, serverId)}/version?path=${encodeURIComponent(path)}&version_id=${encodeURIComponent(previewing ?? "")}` as never,
+        { signal },
       ) as Promise<FileContent>,
   });
 
@@ -2468,6 +2506,7 @@ function Toolbar({
   onClearSelection: () => void;
 }) {
   const { showToast } = useToast();
+  const nextDownloadSignal = useDownloadSignal();
   const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
   const [bulkMoveOpen, setBulkMoveOpen] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
@@ -2540,10 +2579,13 @@ function Toolbar({
             { community_id: communityId, server_id: serverId },
           )}?path=${encodeURIComponent(path)}`,
           filename,
+          nextDownloadSignal(),
         );
         showToast(t("files.bulk.download.done", { done: 1 }), "success");
       } catch (error) {
-        if (error instanceof DownloadTooLargeError) {
+        if (isAbortError(error)) {
+          // Intentional cancel (new download started or view unmounted).
+        } else if (error instanceof DownloadTooLargeError) {
           showToast(
             t("files.error.downloadTooLarge", {
               size: humanizeBytes(error.contentLength),

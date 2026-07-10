@@ -192,12 +192,13 @@ export function ServerPluginsTab({
   const listQuery = useQuery({
     queryKey: pluginsKey(communityId, serverId),
     enabled: canRead,
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api.get(
         apiPath("/api/communities/{community_id}/servers/{server_id}/plugins", {
           community_id: communityId,
           server_id: serverId,
         }),
+        { signal },
       ),
   });
 
@@ -205,30 +206,32 @@ export function ServerPluginsTab({
   // shared with the create/detail pages via react-query's cache.
   const metaQuery = useQuery({
     queryKey: ["meta"],
-    queryFn: () => api.get("/api/meta"),
+    queryFn: ({ signal }) => api.get("/api/meta", { signal }),
   });
 
   const updatesQuery = useQuery({
     queryKey: pluginUpdatesKey(communityId, serverId),
     enabled: canRead,
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api.get(
         apiPath(
           "/api/communities/{community_id}/servers/{server_id}/plugins/updates",
           { community_id: communityId, server_id: serverId },
         ),
+        { signal },
       ),
   });
 
   const validationQuery = useQuery({
     queryKey: pluginValidationKey(communityId, serverId),
     enabled: canRead,
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api.get(
         apiPath(
           "/api/communities/{community_id}/servers/{server_id}/plugins/validate",
           { community_id: communityId, server_id: serverId },
         ),
+        { signal },
       ),
   });
 
@@ -780,7 +783,7 @@ function DependenciesView({
 }) {
   const query = useQuery({
     queryKey: ["plugins", communityId, serverId, pluginId, "dependencies"],
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api.get(
         apiPath(
           "/api/communities/{community_id}/servers/{server_id}/plugins/{plugin_id}/dependencies",
@@ -790,6 +793,7 @@ function DependenciesView({
             plugin_id: pluginId,
           },
         ),
+        { signal },
       ),
   });
 
@@ -1182,14 +1186,14 @@ function SearchResults({
 }) {
   const searchQuery = useQuery({
     queryKey: catalogSearchKey(communityId, serverId, query),
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       const basePath = apiPath(
         "/api/communities/{community_id}/servers/{server_id}/catalog/search",
         { community_id: communityId, server_id: serverId },
       );
       const params = query.length > 0 ? `q=${encodeURIComponent(query)}&` : "";
       const url = `${basePath}?${params}limit=20`;
-      return api.get(url as typeof basePath);
+      return api.get(url as typeof basePath, { signal });
     },
   });
 
@@ -1265,7 +1269,7 @@ function ProjectDetailModal({
 
   const detailQuery = useQuery({
     queryKey: catalogProjectKey(communityId, serverId, projectIdOrSlug),
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api.get(
         apiPath(
           "/api/communities/{community_id}/servers/{server_id}/catalog/projects/{project_id_or_slug}",
@@ -1275,6 +1279,7 @@ function ProjectDetailModal({
             project_id_or_slug: projectIdOrSlug,
           },
         ),
+        { signal },
       ),
   });
 
