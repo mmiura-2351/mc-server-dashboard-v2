@@ -30,14 +30,22 @@ Delivery is best-effort and decoupled from REST (FR-MON-4): if no event ever
 arrives, the socket simply stays quiet; a slow client that overflows its buffer
 gets a ``gap`` frame and keeps the newest events. Nothing else depends on a
 subscriber, so a closed socket never affects the control plane or REST.
+
+The endpoints are send-only, but the socket is still read: a companion reader
+task drains (and discards) anything the client sends, because uvicorn surfaces
+a client disconnect only through ``receive()`` or a failing send — without the
+reader, a client gone from a quiet topic would park its handler forever and
+leak the subscription and its re-authz queries (#1695).
 """
 
 from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import functools
 import uuid
-from typing import Annotated
+from collections.abc import Awaitable, Callable
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, WebSocket
 from starlette.websockets import WebSocketDisconnect
@@ -67,6 +75,7 @@ from mc_server_dashboard_api.dependencies import (
 )
 from mc_server_dashboard_api.fleet.domain.real_time_events import (
     EventStream,
+    EventSubscription,
     RealTimeEvent,
     RealTimeEvents,
 )
@@ -149,8 +158,10 @@ async def server_events(
         is_platform_admin=user.is_platform_admin,
     )
 
-    # The two-layer gate, applied before accept; re-applied mid-stream below.
-    denied = await _authorize(
+    # The two-layer gate, applied before accept; re-applied mid-stream by the
+    # relay loop every idle re-authz interval.
+    recheck = functools.partial(
+        _authorize,
         auth_user=auth_user,
         community=community,
         community_id=community_id,
@@ -159,6 +170,7 @@ async def server_events(
         checker=checker,
         read_server=read_server,
     )
+    denied = await recheck()
     if denied is not None:
         await websocket.close(code=denied)
         return
@@ -175,34 +187,12 @@ async def server_events(
     # The bus is keyed by the worker-reported server id string (the UUID's text
     # form, as it arrives on the control-plane stream).
     subscription = bus.subscribe(server_id=str(server_id), streams=streams)
+
+    async def _deliver(event: RealTimeEvent) -> None:
+        await websocket.send_json(_frame(event))
+
     try:
-        while True:
-            try:
-                event = await asyncio.wait_for(
-                    subscription.__anext__(), timeout=_REAUTHZ_INTERVAL_SECONDS
-                )
-            except StopAsyncIteration:
-                break
-            except asyncio.TimeoutError:
-                # Idle window elapsed: re-run the gate without touching delivery.
-                # A revoked subscriber is closed with the accept-time code.
-                denied = await _authorize(
-                    auth_user=auth_user,
-                    community=community,
-                    community_id=community_id,
-                    server_id=server_id,
-                    visibility=visibility,
-                    checker=checker,
-                    read_server=read_server,
-                )
-                if denied is not None:
-                    await websocket.close(code=denied)
-                    return
-                continue
-            await websocket.send_json(_frame(event))
-    except WebSocketDisconnect:
-        # Client went away; fall through to clean up the subscription.
-        pass
+        await _relay(websocket, subscription, reauthorize=recheck, deliver=_deliver)
     finally:
         await subscription.aclose()
 
@@ -247,12 +237,14 @@ async def community_events(
         is_platform_admin=user.is_platform_admin,
     )
 
-    denied = await _authorize_community(
+    recheck = functools.partial(
+        _authorize_community,
         auth_user=auth_user,
         community=community,
         visibility=visibility,
         checker=checker,
     )
+    denied = await recheck()
     if denied is not None:
         await websocket.close(code=denied)
         return
@@ -262,41 +254,111 @@ async def community_events(
     # Per-connection server->community cache: each server id is looked up at most
     # once, bounding queries while the firehose may carry many servers' events.
     membership: dict[str, bool] = {}
+
+    async def _deliver(event: RealTimeEvent) -> None:
+        # The GAP marker has no server; it is forwarded as-is so the client
+        # still learns it fell behind (best-effort delivery, FR-MON-4).
+        if event.stream is not EventStream.GAP and not await _in_community(
+            event=event,
+            community_id=community_id,
+            lookup=lookup,
+            membership=membership,
+        ):
+            return
+        await websocket.send_json(_community_frame(event))
+
+    try:
+        await _relay(websocket, subscription, reauthorize=recheck, deliver=_deliver)
+    finally:
+        await subscription.aclose()
+
+
+async def _client_gone(websocket: WebSocket) -> None:
+    """Return when the client disconnects.
+
+    The endpoints are send-only, so anything the client does send is read and
+    discarded; draining is what lets the server observe the eventual
+    ``websocket.disconnect`` message (#1695).
+    """
+
+    while True:
+        message = await websocket.receive()
+        if message["type"] == "websocket.disconnect":
+            return
+
+
+async def _relay(
+    websocket: WebSocket,
+    subscription: EventSubscription,
+    *,
+    reauthorize: Callable[[], Awaitable[int | None]],
+    deliver: Callable[[RealTimeEvent], Awaitable[None]],
+) -> None:
+    """Deliver subscription events until the client goes away or authz is revoked.
+
+    Each turn of the loop races three outcomes: the next buffered event (handed
+    to ``deliver``), the re-authz interval elapsing idle (``reauthorize`` re-runs
+    the accept-time gate without touching delivery; a denial closes the socket
+    with its code), and the client disconnecting. Disconnect is observed by a
+    companion reader task (:func:`_client_gone`) because a client gone from a
+    quiet topic never wakes the delivery wait (#1695). The pending-event task is
+    kept across idle re-checks, so no event is dropped; every exit path —
+    disconnect, subscription end, revocation, an exception, cancellation on
+    server shutdown — discards both helper tasks. The caller owns
+    ``subscription.aclose()``.
+    """
+
+    disconnected = asyncio.create_task(_client_gone(websocket))
+    next_event = asyncio.ensure_future(subscription.__anext__())
     try:
         while True:
-            try:
-                event = await asyncio.wait_for(
-                    subscription.__anext__(), timeout=_REAUTHZ_INTERVAL_SECONDS
-                )
-            except StopAsyncIteration:
-                break
-            except asyncio.TimeoutError:
-                denied = await _authorize_community(
-                    auth_user=auth_user,
-                    community=community,
-                    visibility=visibility,
-                    checker=checker,
-                )
+            done, _pending = await asyncio.wait(
+                {next_event, disconnected},
+                timeout=_REAUTHZ_INTERVAL_SECONDS,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if disconnected in done:
+                return
+            if next_event in done:
+                try:
+                    event = next_event.result()
+                except StopAsyncIteration:
+                    return
+                next_event = asyncio.ensure_future(subscription.__anext__())
+                await deliver(event)
+            else:
+                # Idle window elapsed: re-run the gate. A revoked subscriber is
+                # closed with the accept-time code.
+                denied = await reauthorize()
                 if denied is not None:
                     await websocket.close(code=denied)
                     return
-                continue
-            # The GAP marker has no server; it is forwarded as-is so the client
-            # still learns it fell behind (best-effort delivery, FR-MON-4).
-            if event.stream is EventStream.GAP:
-                await websocket.send_json(_community_frame(event))
-                continue
-            if await _in_community(
-                event=event,
-                community_id=community_id,
-                lookup=lookup,
-                membership=membership,
-            ):
-                await websocket.send_json(_community_frame(event))
     except WebSocketDisconnect:
+        # Client went away mid-send; the caller cleans up the subscription.
         pass
     finally:
-        await subscription.aclose()
+        # Cancel without awaiting: the loop collects a cancelled task on its
+        # next tick, while a suspension point here would let a concurrent
+        # cancellation (server shutdown, or the TestClient's scope teardown)
+        # resurface through the bare-cancelled helpers stripped of its original
+        # cause — an anyio cancel scope would then refuse to absorb it.
+        _discard(disconnected)
+        _discard(next_event)
+
+
+def _discard(task: asyncio.Future[Any]) -> None:
+    """Abandon a helper ``task``: cancel it, or consume an already-final outcome.
+
+    Retrieving the result/exception of a task that finished just as the loop
+    exited (e.g. a ``StopAsyncIteration`` completing alongside the disconnect)
+    keeps the event loop from logging it as never retrieved.
+    """
+
+    if task.done():
+        if not task.cancelled():
+            task.exception()
+    else:
+        task.cancel()
 
 
 async def _in_community(

@@ -19,11 +19,13 @@ export function capabilitiesKey(communityId: string) {
 
 export function fetchCapabilities(
   communityId: string,
+  signal?: AbortSignal,
 ): Promise<EffectivePermissions> {
   return api.get(
     apiPath("/api/communities/{community_id}/me/permissions", {
       community_id: communityId,
     }),
+    { signal },
   );
 }
 

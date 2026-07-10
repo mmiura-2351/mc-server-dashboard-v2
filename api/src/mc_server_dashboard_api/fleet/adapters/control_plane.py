@@ -104,9 +104,10 @@ class ControlPlaneState:
     asyncio event loop, so no lock is needed under cooperative scheduling.
 
     ``late_snapshot_sink`` is the optional write-back for a final-snapshot result
-    that arrives after its dispatch timed out and discarded the pending future
-    (issue #891): the held assignment is released immediately rather than waiting
-    out the reconciler grace. Left ``None`` in tests that only exercise dispatch.
+    that arrives after its dispatch timed out or was cancelled and discarded the
+    pending future (#891/#901): the held assignment is released immediately rather
+    than waiting out the reconciler grace. Left ``None`` in tests that only
+    exercise dispatch.
     """
 
     def __init__(
@@ -124,15 +125,17 @@ class ControlPlaneState:
         self._pending: dict[str, tuple[WorkerId, asyncio.Future[pb.CommandResult]]] = {}
         # command_id -> (dispatched worker, server id) for an IN-FLIGHT snapshot
         # command (issue #891). Held only while the future is pending so a timeout
-        # can promote the entry to ``_late_snapshots``; a normal resolution drops it.
+        # or cancellation can promote the entry to ``_late_snapshots``; a normal
+        # resolution drops it.
         self._snapshot_servers: dict[str, tuple[WorkerId, str]] = {}
         # command_id -> (dispatched worker, server id) for a SNAPSHOT whose pending
-        # future was discarded on a dispatch timeout (issue #891). A late
-        # CommandResult for it arrives unmatched (the future is gone); this record
-        # lets :meth:`resolve` recognise it as a held final-snapshot result and
-        # release the assignment via ``late_snapshot_sink`` instead of dropping it.
-        # Bounded: only timed-out snapshots land here, and each entry is popped when
-        # its late result arrives (a fresh uuid4 command_id never collides).
+        # future was discarded on a dispatch timeout or cancellation (#891/#901). A
+        # late CommandResult for it arrives unmatched (the future is gone); this
+        # record lets :meth:`resolve` recognise it as a held final-snapshot result
+        # and release the assignment via ``late_snapshot_sink`` instead of dropping
+        # it. Bounded: only timed-out/cancelled snapshots land here, and each entry
+        # is popped when its late result arrives (a fresh uuid4 command_id never
+        # collides).
         self._late_snapshots: dict[str, tuple[WorkerId, str]] = {}
         self._late_snapshot_sink = late_snapshot_sink
 
@@ -200,8 +203,8 @@ class ControlPlaneState:
         :meth:`fail_worker_pending` can fail it on that worker's disconnect.
 
         ``snapshot_server_id`` is set only for a snapshot command and names the
-        target server; it is retained on a timeout so a late result can be matched
-        to the held assignment (issue #891).
+        target server; it is retained on a timeout or cancellation so a late
+        result can be matched to the held assignment (#891/#901).
         """
 
         future: asyncio.Future[pb.CommandResult] = (
@@ -213,7 +216,7 @@ class ControlPlaneState:
         return future
 
     def discard_pending(self, command_id: str) -> None:
-        """Stop tracking ``command_id`` (on timeout or after resolution).
+        """Stop tracking ``command_id`` (on timeout or cancellation).
 
         For a SNAPSHOT command (issue #891), retain a (worker, server) record so a
         late ``CommandResult`` — the worker's transfer bound aborts a final-snapshot
@@ -251,7 +254,8 @@ class ControlPlaneState:
         entry = self._pending.get(command_id)
         if entry is None:
             # No pending future: either an already-resolved/forged command, or a
-            # late final-snapshot result for a dispatch that timed out (issue #891).
+            # late final-snapshot result for a dispatch that timed out or was
+            # cancelled (#891/#901).
             await self._clear_on_late_snapshot(command_id, worker_id, result)
             return
         owning_worker, future = entry
@@ -275,10 +279,11 @@ class ControlPlaneState:
     ) -> None:
         """Release a held assignment on a late final-snapshot result (#891).
 
-        Acts only when ``command_id`` is a snapshot whose dispatch timed out (its
-        record survives in ``_late_snapshots``); any other unmatched result is
-        dropped, as before. The #789 ownership guard: the reporting worker must be
-        the worker the snapshot was dispatched to — a report from any other worker
+        Acts only when ``command_id`` is a snapshot whose dispatch timed out or
+        was cancelled (its record survives in ``_late_snapshots``); any other
+        unmatched result is dropped, as before. The #789 ownership guard: the
+        reporting worker must be the worker the snapshot was dispatched to — a
+        report from any other worker
         leaves the record in place and is ignored, so a forged late result cannot
         clear the assignment. The guarded clear at the servers seam re-checks
         ``assigned_worker_id == worker_id``, so a row a racing start re-placed is
@@ -472,13 +477,14 @@ class GrpcControlPlane(ControlPlane):
             raise WorkerNotConnectedError(worker_id.value)
         command_id = str(uuid.uuid4())
         # A FINAL snapshot's server is recorded with the pending future so a timeout
-        # that discards the future still lets a late TRANSFER_FAILED / SUCCESS result
-        # be matched to the held assignment (issue #891). Only the stop-flow final
-        # snapshot is tracked: it is the sole command whose stop wedges the row at
-        # (stopped, stopped, assigned) for the held-snapshot window. Periodic and
-        # on-demand snapshots share the command type but take no worker reservation
-        # (running-id snapshots are reservation-free), so a stale late result of
-        # theirs must NOT clear a subsequent final-snapshot hold — they are untracked.
+        # or cancellation that discards the future still lets a late TRANSFER_FAILED
+        # / SUCCESS result be matched to the held assignment (#891/#901). Only the
+        # stop-flow final snapshot is tracked: it is the sole command whose stop
+        # wedges the row at (stopped, stopped, assigned) for the held-snapshot
+        # window. Periodic and on-demand snapshots share the command type but take
+        # no worker reservation (running-id snapshots are reservation-free), so a
+        # stale late result of theirs must NOT clear a subsequent final-snapshot
+        # hold — they are untracked.
         snapshot_server_id = (
             server_id
             if snapshot_is_final and isinstance(command, SnapshotCommand)
@@ -499,6 +505,16 @@ class GrpcControlPlane(ControlPlane):
         except TimeoutError as exc:
             self._state.discard_pending(command_id)
             raise CommandTimedOutError(command_id) from exc
+        except asyncio.CancelledError:
+            # A cancelled dispatch (the awaiting HTTP-request task died at this
+            # await, e.g. a client disconnect during the stop flow's final
+            # snapshot) abandons the future exactly like a timeout: the worker
+            # keeps working and may report late. Discard the pending entry so a
+            # final snapshot's record is promoted and its late result clears the
+            # held assignment (issue #901) instead of being dropped on the
+            # matched path — and so a cancelled future never lingers in _pending.
+            self._state.discard_pending(command_id)
+            raise
         return _to_result(result)
 
     async def dispatch_fire_and_forget(

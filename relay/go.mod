@@ -2,6 +2,8 @@ module github.com/mmiura-2351/mc-server-dashboard-v2/relay
 
 go 1.26
 
+toolchain go1.26.5
+
 // The relay's mcsd.relay.v1 Go stubs are generated into internal/genproto by a
 // dedicated buf template (proto/buf.gen.relay.yaml, run by `make proto-gen`):
 // the primary template emits them under the worker module, which Go's internal/

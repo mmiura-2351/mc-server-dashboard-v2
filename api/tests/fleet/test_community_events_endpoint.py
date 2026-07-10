@@ -15,6 +15,7 @@ cleanup of the firehose subscription.
 
 from __future__ import annotations
 
+import time
 import uuid
 from collections.abc import Iterator
 
@@ -259,3 +260,26 @@ def test_disconnect_cleans_up_subscription() -> None:
 
         time.sleep(0.01)
     assert bus.firehose_subscriber_count() == 0
+
+
+def test_disconnect_on_quiet_stream_releases_subscription() -> None:
+    """A client gone from a community with no status traffic is cleaned up.
+
+    The TestClient context exit *cancels* the handler task, which runs the
+    cleanup regardless of the bug (#1695); the disconnect is therefore sent
+    while the session is still alive — as under uvicorn, only reading the
+    socket can surface it on a stream that never publishes.
+    """
+
+    bus = InProcessRealTimeEvents()
+    community = uuid.uuid4()
+    app = _app(bus=bus)
+    client = next(_client(app))
+    with client.websocket_connect(_url(community)) as ws:
+        assert bus.firehose_subscriber_count() == 1
+        ws.close(1000)
+        for _ in range(100):
+            if bus.firehose_subscriber_count() == 0:
+                break
+            time.sleep(0.01)
+        assert bus.firehose_subscriber_count() == 0

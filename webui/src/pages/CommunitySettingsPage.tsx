@@ -48,11 +48,12 @@ function Loaded({ communityId }: { communityId: string }) {
   const [tab, setTab] = useTabHash(TABS);
   const query = useQuery({
     queryKey: ["communities", communityId],
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api.get(
         apiPath("/api/communities/{community_id}", {
           community_id: communityId,
         }),
+        { signal },
       ),
   });
 

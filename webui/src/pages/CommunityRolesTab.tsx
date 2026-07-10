@@ -47,11 +47,12 @@ export function CommunityRolesTab({
 
   const roles = useQuery({
     queryKey: rolesKeys.list(communityId),
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api.get(
         apiPath("/api/communities/{community_id}/roles", {
           community_id: communityId,
         }),
+        { signal },
       ),
   });
 

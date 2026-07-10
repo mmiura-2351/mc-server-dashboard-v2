@@ -246,7 +246,7 @@ function NewServerWizard({ communityId }: { communityId: string }) {
 
   const typesQuery = useQuery({
     queryKey: ["versions"],
-    queryFn: () => api.get("/api/versions"),
+    queryFn: ({ signal }) => api.get("/api/versions", { signal }),
   });
   const catalogTypes = typesQuery.data?.server_types ?? [];
 
@@ -255,7 +255,7 @@ function NewServerWizard({ communityId }: { communityId: string }) {
   // In direct mode the port stays user-editable (a port-forward is needed).
   const metaQuery = useQuery({
     queryKey: ["meta"],
-    queryFn: () => api.get("/api/meta"),
+    queryFn: ({ signal }) => api.get("/api/meta", { signal }),
   });
   // While loading or on error, default to showing the port control (treat as
   // direct-mode): hiding port controls on error is more disruptive than briefly
@@ -276,9 +276,10 @@ function NewServerWizard({ communityId }: { communityId: string }) {
 
   const versionsQuery = useQuery({
     queryKey: ["versions", type],
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api.get(
         apiPath("/api/versions/{server_type}", { server_type: type as string }),
+        { signal },
       ),
     enabled: type !== null,
   });
