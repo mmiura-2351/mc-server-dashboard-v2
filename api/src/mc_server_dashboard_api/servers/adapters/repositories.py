@@ -213,6 +213,7 @@ class SqlAlchemyServerRepository(ServerRepository):
         observed_at: dt.datetime,
         *,
         unassign: bool = False,
+        expected_worker: WorkerId | None = None,
     ) -> bool:
         values: dict[str, Any] = {
             "observed_state": observed_state.value,
@@ -232,17 +233,23 @@ class SqlAlchemyServerRepository(ServerRepository):
         # timestamps mean a genuine same-instant duplicate that is safe to drop. The
         # guard and the unassign live in one UPDATE, so a stale write's unassign
         # decision is dropped atomically with the state write.
-        stmt = (
-            update(ServerModel)
-            .where(
-                ServerModel.id == server_id.value,
-                or_(
-                    ServerModel.observed_at.is_(None),
-                    ServerModel.observed_at < observed_at,
-                ),
-            )
-            .values(**values)
-        )
+        conditions = [
+            ServerModel.id == server_id.value,
+            or_(
+                ServerModel.observed_at.is_(None),
+                ServerModel.observed_at < observed_at,
+            ),
+        ]
+        # Ownership condition (issue #1708), mirroring
+        # clear_assignment_after_final_snapshot's guard: when the caller asserts
+        # the reporting worker, the write lands only while that worker is STILL
+        # the assigned one — an unassigned row never matches. This closes the
+        # sink's read-then-write race (a reassignment committing between its
+        # ownership snapshot and this UPDATE) atomically, where the snapshot
+        # check alone cannot.
+        if expected_worker is not None:
+            conditions.append(ServerModel.assigned_worker_id == expected_worker.value)
+        stmt = update(ServerModel).where(*conditions).values(**values)
         result = await self._session.execute(stmt)
         # Report whether the guard accepted the write (rowcount == 1) so a
         # convergence caller can keep its returned entity honest (issue #292):

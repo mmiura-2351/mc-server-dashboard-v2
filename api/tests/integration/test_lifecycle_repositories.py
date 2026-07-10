@@ -332,6 +332,96 @@ async def test_record_observed_state_drops_stale_unassign_in_same_statement(
     assert loaded.assigned_worker_id == WorkerId(worker)
 
 
+async def test_record_observed_state_drops_write_from_lost_expected_worker(
+    engine: AsyncEngine,
+) -> None:
+    # Ownership condition in the guarded UPDATE (issue #1708): when the caller
+    # asserts the reporting worker via expected_worker, a row that is no longer
+    # assigned to that worker matches no row — even a FRESHER-stamped write from
+    # the stale worker is dropped, closing the read-then-write race the sink's
+    # snapshot ownership check alone leaves open.
+    community_id = await _seed_community(engine)
+    server_id = await _create_server(engine, community_id, "survival")
+    current_owner = uuid.uuid4()
+    stale_worker = uuid.uuid4()
+    factory = create_session_factory(engine)
+
+    async with ServersUnitOfWork(factory) as uow:
+        server = await uow.servers.get_by_id(server_id)
+        assert server is not None
+        server.desired_state = DesiredState.RUNNING
+        server.assigned_worker_id = WorkerId(current_owner)
+        server.updated_at = _NOW
+        await uow.servers.update_lifecycle(
+            server, expected_from=DesiredState.STOPPED, require_unassigned=True
+        )
+        await uow.servers.record_observed_state(
+            server_id, observed_state=ObservedState.RUNNING, observed_at=_OLD
+        )
+        await uow.commit()
+
+    # Fresher stamp, but the asserted worker no longer owns the row: dropped.
+    async with ServersUnitOfWork(factory) as uow:
+        applied = await uow.servers.record_observed_state(
+            server_id,
+            observed_state=ObservedState.STOPPED,
+            observed_at=_NOW,
+            expected_worker=WorkerId(stale_worker),
+        )
+        await uow.commit()
+    assert applied is False
+
+    async with ServersUnitOfWork(factory) as uow:
+        loaded = await uow.servers.get_by_id(server_id)
+    assert loaded is not None
+    assert loaded.observed_state is ObservedState.RUNNING
+    assert loaded.observed_at == _OLD
+
+    # The still-owning worker's write lands.
+    async with ServersUnitOfWork(factory) as uow:
+        applied = await uow.servers.record_observed_state(
+            server_id,
+            observed_state=ObservedState.STOPPED,
+            observed_at=_NOW,
+            expected_worker=WorkerId(current_owner),
+        )
+        await uow.commit()
+    assert applied is True
+
+    async with ServersUnitOfWork(factory) as uow:
+        loaded = await uow.servers.get_by_id(server_id)
+    assert loaded is not None
+    assert loaded.observed_state is ObservedState.STOPPED
+    assert loaded.observed_at == _NOW
+
+
+async def test_record_observed_state_drops_expected_worker_write_on_unassigned_row(
+    engine: AsyncEngine,
+) -> None:
+    # An asserted worker never matches an UNASSIGNED row (issue #1708): a stale
+    # worker's report arriving after a stop-unassign released the row is dropped,
+    # mirroring the sink's policy that only the assigned worker may write.
+    community_id = await _seed_community(engine)
+    server_id = await _create_server(engine, community_id, "survival")
+    factory = create_session_factory(engine)
+
+    async with ServersUnitOfWork(factory) as uow:
+        applied = await uow.servers.record_observed_state(
+            server_id,
+            observed_state=ObservedState.RUNNING,
+            observed_at=_NOW,
+            expected_worker=WorkerId(uuid.uuid4()),
+        )
+        await uow.commit()
+    assert applied is False
+
+    async with ServersUnitOfWork(factory) as uow:
+        loaded = await uow.servers.get_by_id(server_id)
+    assert loaded is not None
+    assert loaded.observed_state is ObservedState.STOPPED
+    assert loaded.observed_at is None
+
+
 async def test_mark_worker_servers_unknown_overrides_fresher_observed_at(
     engine: AsyncEngine,
 ) -> None:
@@ -509,6 +599,87 @@ async def test_sink_drops_status_from_non_owning_worker(engine: AsyncEngine) -> 
     assert loaded is not None
     # Observed state is unchanged from its created default (the write was dropped).
     assert loaded.observed_state is ObservedState.STOPPED
+
+
+async def test_sink_drops_stale_worker_report_racing_a_reassignment(
+    engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression for issue #1708: the sink's ownership check is read-then-write,
+    # so a stop-unassign + re-place to worker B can commit BETWEEN the sink's
+    # snapshot read (which still sees worker A as owner) and its guarded UPDATE.
+    # Worker A's stale report is stamped clock.now() — freshest — so the #216
+    # monotonic guard alone cannot drop it; the UPDATE's own ownership condition
+    # must. The race is simulated by interposing on the sink's snapshot read and
+    # committing the reassignment before the read returns.
+    community_id = await _seed_community(engine)
+    server_id = await _create_server(engine, community_id, "survival")
+    worker_a = uuid.uuid4()
+    worker_b = uuid.uuid4()
+    factory = create_session_factory(engine)
+
+    async with ServersUnitOfWork(factory) as uow:
+        server = await uow.servers.get_by_id(server_id)
+        assert server is not None
+        server.desired_state = DesiredState.RUNNING
+        server.assigned_worker_id = WorkerId(worker_a)
+        server.updated_at = _NOW
+        await uow.servers.update_lifecycle(
+            server, expected_from=DesiredState.STOPPED, require_unassigned=True
+        )
+        await uow.commit()
+
+    real_get_by_id = SqlAlchemyServerRepository.get_by_id
+    raced = False
+
+    async def get_by_id_then_reassign(
+        self: SqlAlchemyServerRepository, sid: ServerId
+    ) -> object:
+        # First call only (the sink's snapshot read): return the snapshot that
+        # still names worker A as owner, but first commit — in a separate
+        # session — the full stop-unassign + re-place-to-B sequence, all stamped
+        # OLDER than the sink's clock so only the ownership condition can drop
+        # the sink's write.
+        nonlocal raced
+        snapshot = await real_get_by_id(self, sid)
+        if raced:
+            return snapshot
+        raced = True
+        async with ServersUnitOfWork(factory) as uow:
+            row = await uow.servers.get_by_id(sid)
+            assert row is not None
+            row.desired_state = DesiredState.STOPPED
+            row.updated_at = _NOW
+            await uow.servers.update_lifecycle(row, expected_from=DesiredState.RUNNING)
+            await uow.servers.record_observed_state(
+                sid,
+                observed_state=ObservedState.STOPPED,
+                observed_at=_OLD,
+                unassign=True,
+            )
+            row.desired_state = DesiredState.RUNNING
+            row.assigned_worker_id = WorkerId(worker_b)
+            await uow.servers.update_lifecycle(
+                row, expected_from=DesiredState.STOPPED, require_unassigned=True
+            )
+            await uow.commit()
+        return snapshot
+
+    monkeypatch.setattr(
+        SqlAlchemyServerRepository, "get_by_id", get_by_id_then_reassign
+    )
+
+    sink = ServersServerStateSink(factory, clock=FakeClock(_NOW))
+    # Stale worker A reports a state B's server is not in; it must not land.
+    await sink.record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker_a), state="crashed"
+    )
+
+    async with ServersUnitOfWork(factory) as uow:
+        loaded = await uow.servers.get_by_id(server_id)
+    assert loaded is not None
+    assert loaded.observed_state is ObservedState.STOPPED
+    assert loaded.observed_at == _OLD
+    assert loaded.assigned_worker_id == WorkerId(worker_b)
 
 
 async def test_sink_keeps_assignment_when_owning_worker_reports_stopped_under_stopped(
