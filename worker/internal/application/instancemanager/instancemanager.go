@@ -2215,9 +2215,12 @@ func (m *Manager) reportDroppedLogs(serverID string, dropped int) {
 // Metrics event per tick until the instance terminates (done closed). When the
 // instance is not a StatsSource, or a sample errors, it emits an up-only sample
 // (server id with zero stats) so the API still learns the server is running
-// (FR-MON-3). A full sink drops the sample with a warning: metrics are a stream,
-// not state, so they keep the lossy posture (unlike status, which coalesces;
-// issue #96).
+// (FR-MON-3). A full sink drops the sample: metrics are a stream, not state, so
+// they keep the lossy posture (unlike status, which coalesces; issue #96).
+// Drops are counted silently and reported as one aggregated WARN per congestion
+// episode — when a sample next gets through, or when the pump exits — mirroring
+// logPump (issues #1716, #1783). The counter is goroutine-local: one pump
+// goroutine runs per server, so no locking is needed.
 func (m *Manager) metricsPump(serverID string, inst execution.Instance, done chan struct{}) {
 	stats, _ := inst.(execution.StatsSource)
 
@@ -2232,9 +2235,13 @@ func (m *Manager) metricsPump(serverID string, inst execution.Instance, done cha
 		cancel()
 	}()
 
+	dropped := 0
 	for {
 		select {
 		case <-done:
+			if dropped > 0 {
+				m.reportDroppedMetrics(serverID, dropped)
+			}
 			return
 		case <-m.clock.After(m.metricsInterval):
 		}
@@ -2252,10 +2259,24 @@ func (m *Manager) metricsPump(serverID string, inst execution.Instance, done cha
 
 		select {
 		case m.metrics <- sample:
+			if dropped > 0 {
+				m.reportDroppedMetrics(serverID, dropped)
+				dropped = 0
+			}
 		default:
-			m.logger.Warn("dropped metrics sample; sink full", "server_id", serverID)
+			dropped++
 		}
 	}
+}
+
+// reportDroppedMetrics emits the aggregated summary for one metrics
+// sink-congestion episode: a single WARN with the drop count, the metrics
+// counterpart of reportDroppedLogs. Unlike logs, no in-band marker is sent:
+// MetricsEvent carries only numeric fields, so a marker would have to be a
+// fabricated sample, and a gap in a periodic series is already visible to
+// consumers as missing points.
+func (m *Manager) reportDroppedMetrics(serverID string, dropped int) {
+	m.logger.Warn("dropped metrics samples; sink full", "server_id", serverID, "count", dropped)
 }
 
 // sampleWithTimeout calls Sample under a context that is cancelled when parent is
