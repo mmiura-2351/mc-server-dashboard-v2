@@ -216,6 +216,48 @@ describe("ServerDetailPage scaffold + header", () => {
       await screen.findByText(t("serverDetail.loadError")),
     ).toBeInTheDocument();
   });
+
+  it("keeps rendering cached data when a background refetch fails (#1724)", async () => {
+    mockApi.get.mockResolvedValue(server());
+    const { queryClient } = renderPage();
+    await screen.findByText("survival");
+
+    // Simulate a transient API outage: the next background refetch fails.
+    mockApi.get.mockRejectedValue(new ApiError(500, {}));
+    await act(() => queryClient.invalidateQueries());
+    // The query-state notification lands a task after invalidateQueries
+    // settles; flush it so the assertion sees the post-refetch render.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // The cached page stays on screen instead of a full-page error.
+    expect(screen.getByText("survival")).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("serverDetail.loadError")),
+    ).not.toBeInTheDocument();
+  });
+
+  it("recovers to fresh data once a refetch succeeds after a failure (#1724)", async () => {
+    mockApi.get.mockResolvedValue(server());
+    const { queryClient } = renderPage();
+    await screen.findByText("survival");
+
+    mockApi.get.mockRejectedValue(new ApiError(500, {}));
+    await act(() => queryClient.invalidateQueries());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // The API comes back: the next refetch replaces the stale data.
+    mockApi.get.mockResolvedValue(server({ name: "renamed" }));
+    await act(() => queryClient.invalidateQueries());
+
+    expect(await screen.findByText("renamed")).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("serverDetail.loadError")),
+    ).not.toBeInTheDocument();
+  });
 });
 
 describe("ServerDetailPage loader-aware content tab (#1320)", () => {
