@@ -621,3 +621,121 @@ func TestLogPumpReportsDropsOnceOnRecovery(t *testing.T) {
 	}
 	assertOneDropWarn(t, h, "s1", dropped)
 }
+
+// tickAndSettle fires one metrics tick and waits until the pump has finished
+// the iteration — sampled, attempted the send — and re-parked in its select,
+// observed as a new After registration on the fake clock. It makes the drop
+// tests deterministic: once it returns, the tick's send-or-drop has definitely
+// happened.
+func tickAndSettle(t *testing.T, clk *fakeClock) {
+	t.Helper()
+	waitFor(t, func() bool {
+		clk.mu.Lock()
+		defer clk.mu.Unlock()
+		return len(clk.chs) > 0
+	})
+	clk.mu.Lock()
+	before := clk.registers
+	clk.mu.Unlock()
+	clk.tick()
+	waitFor(t, func() bool {
+		clk.mu.Lock()
+		defer clk.mu.Unlock()
+		return clk.registers > before
+	})
+}
+
+// While the merged metrics sink is full, the metrics pump counts drops
+// silently, and when the instance terminates it emits exactly one aggregated
+// WARN carrying the count — not one WARN per dropped sample, the same per-drop
+// pattern issue #1716 removed from the log pump (issue #1783).
+func TestMetricsPumpAggregatesDropsIntoOneSummaryOnExit(t *testing.T) {
+	h := &syncSlogHandler{}
+	clk := &fakeClock{}
+	m := newDropTestManager(t, h).WithMetrics(clk, time.Hour)
+
+	done := make(chan struct{})
+	exited := make(chan struct{})
+	go func() {
+		m.metricsPump("s1", newRichInstance("s1"), done)
+		close(exited)
+	}()
+
+	// Fill the sink to capacity; nothing drains it (the control plane is "down").
+	fill := cap(m.Metrics())
+	for i := 0; i < fill; i++ {
+		tickAndSettle(t, clk)
+	}
+	if got := len(m.Metrics()); got != fill {
+		t.Fatalf("sink holds %d samples after %d ticks, want full (%d)", got, fill, fill)
+	}
+
+	// Three more ticks against the full sink; every sample is dropped.
+	for i := 0; i < 3; i++ {
+		tickAndSettle(t, clk)
+	}
+
+	// Terminal state: done closes and the pump flushes its drop count.
+	close(done)
+	select {
+	case <-exited:
+	case <-time.After(2 * time.Second):
+		t.Fatal("metrics pump did not exit after done closed")
+	}
+
+	assertOneDropWarn(t, h, "s1", 3)
+
+	// The sink still holds exactly the fill samples: dropped samples are gone
+	// and nothing was forced into a full sink.
+	if got := len(m.Metrics()); got != fill {
+		t.Fatalf("sink holds %d samples, want exactly %d", got, fill)
+	}
+}
+
+// When the sink drains and a sample next gets through (the control-plane
+// stream recovered), the pump reports the accumulated drops exactly once and
+// resets: later successful sends — and the eventual exit — report nothing
+// more (issue #1783).
+func TestMetricsPumpReportsDropsOnceOnRecovery(t *testing.T) {
+	h := &syncSlogHandler{}
+	clk := &fakeClock{}
+	m := newDropTestManager(t, h).WithMetrics(clk, time.Hour)
+
+	done := make(chan struct{})
+	exited := make(chan struct{})
+	go func() {
+		m.metricsPump("s1", newRichInstance("s1"), done)
+		close(exited)
+	}()
+
+	fill := cap(m.Metrics())
+	for i := 0; i < fill; i++ {
+		tickAndSettle(t, clk)
+	}
+	for i := 0; i < 3; i++ {
+		tickAndSettle(t, clk)
+	}
+
+	// Congestion is ongoing: nothing has been reported yet.
+	if records := h.snapshot(); len(records) != 0 {
+		t.Fatalf("got %d log records while the sink is still full, want none: %+v", len(records), records)
+	}
+
+	// Recovery: one slot frees, the next sample gets through, and the pump
+	// flushes the accumulated count.
+	<-m.Metrics()
+	tickAndSettle(t, clk)
+	assertOneDropWarn(t, h, "s1", 3)
+
+	// The episode is over: a later successful send and the pump's exit add no
+	// second summary.
+	<-m.Metrics()
+	tickAndSettle(t, clk)
+	close(done)
+	select {
+	case <-exited:
+	case <-time.After(2 * time.Second):
+		t.Fatal("metrics pump did not exit after done closed")
+	}
+	assertOneDropWarn(t, h, "s1", 3)
+}
