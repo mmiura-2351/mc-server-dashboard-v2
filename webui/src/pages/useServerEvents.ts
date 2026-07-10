@@ -6,7 +6,9 @@
  * accumulates a bounded log buffer and a windowed metrics buffer in React state,
  * and patches the server-detail query cache on each status frame so the header
  * pill updates live without a refetch. A `gap` frame is appended to the log
- * buffer as a marker so log views can render an inline "missed events" divider.
+ * buffer as a marker so log views can render an inline "missed events" divider;
+ * the hook appends the same marker itself when an open socket drops, because
+ * lines emitted while it is down are never replayed (#1726).
  *
  * Degraded handling follows SPEC 7.2: on socket loss the client reconnects with
  * backoff and the hook refetches the detail query once (status-only REST
@@ -93,6 +95,9 @@ export function useServerEvents(
     setDegraded(false);
     setStatusDetail("");
 
+    const appendGap = () =>
+      setLogs((prev) => trim([...prev, { id: nextId.current++, kind: "gap" }]));
+
     const onFrame = (frame: ServerFrame) => {
       if (frame.kind === "status") {
         // Patch the detail query so the header pill updates live (no refetch).
@@ -140,13 +145,27 @@ export function useServerEvents(
         return;
       }
       // gap
-      setLogs((prev) => trim([...prev, { id: nextId.current++, kind: "gap" }]));
+      appendGap();
     };
+
+    // Lines emitted between a drop and the reconnect are lost for good (the
+    // API replays nothing on subscribe), so mark the drop point with the same
+    // gap marker. `wasOpen` gates it: no marker before the first open, and the
+    // failed reconnect attempts that follow a drop (each fires onDown again)
+    // do not stack markers.
+    let wasOpen = false;
 
     const client = new ServerEventsClient(communityId, serverId, {
       onFrame,
-      onOpen: () => setDegraded(false),
+      onOpen: () => {
+        wasOpen = true;
+        setDegraded(false);
+      },
       onDown: () => {
+        if (wasOpen) {
+          wasOpen = false;
+          appendGap();
+        }
         setDegraded(true);
         // Status-only REST fallback: one refetch picks up the latest observed
         // state while the socket is down (no log/metrics polling, SPEC 7.2).
