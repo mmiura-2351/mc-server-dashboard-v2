@@ -70,13 +70,16 @@ export function ServerResourcePackSection({
 
   const assignmentQuery = useQuery({
     queryKey: assignmentKey(communityId, serverId),
-    queryFn: async (): Promise<ResourcePackAssignmentResponse | null> => {
+    queryFn: async ({
+      signal,
+    }): Promise<ResourcePackAssignmentResponse | null> => {
       try {
         const result = await api.get(
           apiPath(
             "/api/communities/{community_id}/servers/{server_id}/resource-pack",
             { community_id: communityId, server_id: serverId },
           ),
+          { signal },
         );
         // Guard: the API returns 404 when no pack is assigned, caught below.
         // A non-assignment response (missing resource_pack) is treated as null.
@@ -372,7 +375,7 @@ function AssignDialog({
 
   const packsQuery = useQuery({
     queryKey: ["resource-packs"],
-    queryFn: () => api.get("/api/resource-packs"),
+    queryFn: ({ signal }) => api.get("/api/resource-packs", { signal }),
   });
 
   const assign = useMutation({

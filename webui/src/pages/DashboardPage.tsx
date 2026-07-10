@@ -285,11 +285,12 @@ function Loaded({ communityId }: { communityId: string }) {
 
   const query = useQuery({
     queryKey: serversKey(communityId),
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api.get(
         apiPath("/api/communities/{community_id}/servers", {
           community_id: communityId,
         }),
+        { signal },
       ),
   });
 

@@ -67,23 +67,25 @@ export function ServerPlayersTab({
 
   const attached = useQuery({
     queryKey: attachmentsKeys.forServer(communityId, serverId),
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api.get(
         apiPath("/api/communities/{community_id}/servers/{server_id}/groups", {
           community_id: communityId,
           server_id: serverId,
         }),
+        { signal },
       ),
   });
 
   // Source for the attach picker; only needed to manage attachments.
   const community = useQuery({
     queryKey: groupsKeys.list(communityId),
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api.get(
         apiPath("/api/communities/{community_id}/groups", {
           community_id: communityId,
         }),
+        { signal },
       ),
     enabled: canManage,
   });
@@ -262,7 +264,8 @@ function SessionsView({
 
   const query = useQuery({
     queryKey: sessionsKey(communityId, serverId, offset),
-    queryFn: () => api.get(sessionsUrl(communityId, serverId, offset)),
+    queryFn: ({ signal }) =>
+      api.get(sessionsUrl(communityId, serverId, offset), { signal }),
   });
 
   const sessions: GameSessionResponse[] = query.data?.sessions ?? [];
