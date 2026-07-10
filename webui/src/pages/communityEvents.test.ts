@@ -4,7 +4,7 @@ import { installMockWebSocket, MockWebSocket } from "../test/mockWebSocket.ts";
 import {
   backoffDelayMs,
   CommunityEventsClient,
-  parseStatusFrame,
+  parseCommunityFrame,
 } from "./communityEvents.ts";
 
 const CID = "c1";
@@ -15,6 +15,15 @@ function statusFrame(serverId: string, state: string) {
     ts: "2026-06-06T00:00:00Z",
     payload: { state, detail: "" },
     server_id: serverId,
+  });
+}
+
+function gapFrame() {
+  return JSON.stringify({
+    stream: "gap",
+    ts: "t",
+    payload: {},
+    server_id: null,
   });
 }
 
@@ -39,34 +48,28 @@ describe("backoffDelayMs", () => {
   });
 });
 
-describe("parseStatusFrame", () => {
-  it("parses a status frame to {serverId, state}", () => {
-    expect(parseStatusFrame(statusFrame("s1", "running"))).toEqual({
+describe("parseCommunityFrame", () => {
+  it("parses a status frame to {kind, serverId, state}", () => {
+    expect(parseCommunityFrame(statusFrame("s1", "running"))).toEqual({
+      kind: "status",
       serverId: "s1",
       state: "running",
     });
   });
 
-  it("drops a GAP frame (no server_id)", () => {
-    expect(
-      parseStatusFrame(
-        JSON.stringify({
-          stream: "gap",
-          ts: "t",
-          payload: {},
-          server_id: null,
-        }),
-      ),
-    ).toBeNull();
+  it("parses the server-agnostic GAP marker", () => {
+    expect(parseCommunityFrame(gapFrame())).toEqual({ kind: "gap" });
   });
 
   it("drops a non-status stream and malformed input", () => {
     expect(
-      parseStatusFrame(JSON.stringify({ stream: "log", server_id: "s1" })),
+      parseCommunityFrame(JSON.stringify({ stream: "log", server_id: "s1" })),
     ).toBeNull();
-    expect(parseStatusFrame("not json")).toBeNull();
+    expect(parseCommunityFrame("not json")).toBeNull();
     expect(
-      parseStatusFrame(JSON.stringify({ stream: "status", server_id: "s1" })),
+      parseCommunityFrame(
+        JSON.stringify({ stream: "status", server_id: "s1" }),
+      ),
     ).toBeNull();
   });
 });
@@ -100,11 +103,13 @@ describe("CommunityEventsClient", () => {
     } = {},
   ) {
     const onStatus = vi.fn(overrides.onStatus);
+    const onGap = vi.fn();
     const onOpen = vi.fn();
     const onDown = vi.fn();
     return {
-      callbacks: { onStatus, onOpen, onDown },
+      callbacks: { onStatus, onGap, onOpen, onDown },
       onStatus,
+      onGap,
       onOpen,
       onDown,
     };
@@ -129,6 +134,17 @@ describe("CommunityEventsClient", () => {
 
     MockWebSocket.last().message(statusFrame("s1", "running"));
     expect(onStatus).toHaveBeenCalledWith({ serverId: "s1", state: "running" });
+    client.close();
+  });
+
+  it("fires onGap on a gap frame, not onStatus", () => {
+    const { client, onGap, onStatus } = makeClient();
+    client.start();
+    MockWebSocket.last().open();
+
+    MockWebSocket.last().message(gapFrame());
+    expect(onGap).toHaveBeenCalledTimes(1);
+    expect(onStatus).not.toHaveBeenCalled();
     client.close();
   });
 
