@@ -48,7 +48,7 @@ export MCD_API_DATABASE__URL="postgresql+asyncpg://mcsd:mcsd@localhost:5432/mcsd
 uv run uvicorn mc_server_dashboard_api.app:create_app --factory --reload
 ```
 
-Then `curl http://127.0.0.1:8000/healthz` — it returns `{"ok": ...,
+Then `curl http://127.0.0.1:8000/api/healthz` — it returns `{"ok": ...,
 "database_reachable": ...}`; `ok` is `false` (HTTP 200, degraded) when the
 database is unreachable rather than crashing.
 
