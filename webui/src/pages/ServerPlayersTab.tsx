@@ -141,7 +141,10 @@ export function ServerPlayersTab({
   if (attached.isPending) {
     return <p className="sub">{t("players.loading")}</p>;
   }
-  if (attached.isError || attached.data === undefined) {
+  // Error only when there is nothing to show (the initial load failed). A
+  // failed background refetch retains `data`, so the cached list keeps
+  // rendering through transient API blips (#1797).
+  if (attached.data === undefined) {
     return <p className="field-error">{t("players.loadError")}</p>;
   }
 
