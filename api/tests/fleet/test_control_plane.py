@@ -43,6 +43,7 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     ServerCommandCommand,
     SnapshotCommand,
     StartServerCommand,
+    TunnelDialCommand,
     WorkerNotConnectedError,
 )
 from mc_server_dashboard_api.fleet.domain.late_snapshot_sink import (
@@ -913,6 +914,37 @@ async def test_cancelled_periodic_snapshot_dispatch_leaves_no_late_record() -> N
 
     await state.resolve(command_id, worker, _failed_transfer_result())
     assert sink.calls == []
+
+
+async def test_cancelled_fire_and_forget_logger_discards_pending_entry() -> None:
+    # The fire-and-forget symmetry of the #901 cancellation arm (issue #1791):
+    # the detached logger task parked on the result future is cancelled (process
+    # shutdown). It must discard its correlation entry on the way out, like
+    # dispatch does, so _pending stays bounded. White-box on _pending /
+    # _background_tasks: a lingering non-snapshot entry has no behavioral
+    # surface — map boundedness IS the observable — and the shutdown scenario
+    # is precisely "the holder of the private task set cancels the task".
+    state = ControlPlaneState()
+    control_plane = GrpcControlPlane(state, timeout_seconds=5.0)
+    worker = WorkerId(_WORKER)
+    queue = state.open_session(worker, 1)
+
+    await control_plane.dispatch_fire_and_forget(
+        worker_id=worker,
+        server_id=_SERVER,
+        command=TunnelDialCommand(endpoint="relay:443", token="t", tls_ca_pem="ca"),
+    )
+    command_id = (await queue.get()).api_command.command_id
+    (task,) = control_plane._background_tasks
+    # queue.put/get on a non-empty unbounded queue never suspend, so the logger
+    # task has not started yet; yield once so it parks on the result future —
+    # cancelling a never-started task would skip its except arm entirely.
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert command_id not in state._pending
 
 
 async def test_reconnect_sweeps_promoted_late_snapshot_from_prior_session() -> None:

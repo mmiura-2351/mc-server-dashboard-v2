@@ -527,7 +527,7 @@ class GrpcControlPlane(ControlPlane):
         ResolveJoin response must return immediately rather than blocking on the
         ``CommandResult``. The result is still correlated and logged for
         diagnostics by a detached task, which also discards the pending entry on
-        timeout so the correlation map stays bounded.
+        timeout or cancellation (#1791) so the correlation map stays bounded.
 
         Raises :class:`WorkerNotConnectedError` synchronously when the Worker has
         no live session — the caller maps that to a STOPPED decision.
@@ -568,6 +568,12 @@ class GrpcControlPlane(ControlPlane):
                 extra={"command_id": command_id, "server_id": server_id},
             )
             return
+        except asyncio.CancelledError:
+            # The logger task was cancelled at this await (process shutdown, or
+            # GC of an abandoned task). Discard the entry so the correlation map
+            # stays bounded, mirroring dispatch's cancellation arm (issue #1791).
+            self._state.discard_pending(command_id)
+            raise
         if result.success:
             _LOG.debug(
                 "fire-and-forget command acknowledged",
