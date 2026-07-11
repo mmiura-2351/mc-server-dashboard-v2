@@ -1825,6 +1825,7 @@ def get_import_server(
         create_server=create_server,
         file_store=file_store,
         bedrock_port_range=_bedrock_port_range(request),
+        lifecycle_lock=get_lifecycle_lock(request),
     )
 
 

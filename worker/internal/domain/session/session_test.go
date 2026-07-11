@@ -1379,3 +1379,87 @@ func TestRegisterAckEmptyUnknownHeldServerIDsSkipsReclaimer(t *testing.T) {
 	cancel()
 	<-done
 }
+
+// TestReRegistrationRefreshesHeldServers verifies that after a reconnect, the
+// Runner uses the handler's current held-server inventory rather than the stale
+// boot-time snapshot (issue #1711). The test sets up two transports: the first
+// stream's close triggers a reconnect onto the second, and the handler's
+// HeldServers() return is changed between the two registrations so the test
+// can assert that the second Register carries the updated inventory.
+func TestReRegistrationRefreshesHeldServers(t *testing.T) {
+	// First transport: closes immediately after registration to trigger reconnect.
+	t1 := newFakeTransport(acceptedAck())
+	close(t1.commands) // stream ends right after register → reconnect
+	// Second transport: stays open so we can observe the caps it received.
+	t2 := newFakeTransport(acceptedAck())
+
+	dialer := &fakeDialer{transports: []*fakeTransport{t1, t2}}
+	clock := newFakeClock()
+	base := newFakeHandler(CommandResult{Success: true})
+	handler := &fakeHeldServerHandler{fakeHandler: base}
+
+	// The initial caps advertise server-a at generation 1.
+	initialHeld := []HeldServer{{ServerID: "server-a", Generation: 1}}
+	// The handler will return a newer inventory on the second call.
+	updatedHeld := []HeldServer{
+		{ServerID: "server-a", Generation: 5},
+		{ServerID: "server-b", Generation: 2},
+	}
+	handler.setHeldServers(initialHeld)
+
+	caps := testCaps()
+	caps.HeldServers = initialHeld
+	r := NewRunner(dialer, caps, clock, discardLogger(),
+		WithCommandHandler(handler),
+		WithBackoff(Backoff{Initial: time.Millisecond, Max: time.Millisecond}),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+
+	// Wait for the first registration.
+	waitFor(t, func() bool { return t1.registerCount() == 1 })
+
+	// The first registration must carry the initial held servers.
+	caps1 := t1.registeredCaps()
+	if len(caps1) != 1 {
+		t.Fatalf("expected 1 register on t1, got %d", len(caps1))
+	}
+	if len(caps1[0].HeldServers) != 1 || caps1[0].HeldServers[0].Generation != 1 {
+		t.Fatalf("first register held = %+v, want generation 1", caps1[0].HeldServers)
+	}
+
+	// Simulate a generation advance: the handler now returns updatedHeld.
+	handler.setHeldServers(updatedHeld)
+
+	// Fire the backoff timer to trigger the reconnect.
+	waitFor(t, func() bool { return clock.fireNext() })
+
+	// Wait for the second registration on the second transport.
+	waitFor(t, func() bool { return t2.registerCount() == 1 })
+
+	caps2 := t2.registeredCaps()
+	if len(caps2) != 1 {
+		t.Fatalf("expected 1 register on t2, got %d", len(caps2))
+	}
+	got := caps2[0].HeldServers
+	if len(got) != 2 {
+		t.Fatalf("second register held = %+v, want 2 entries", got)
+	}
+	// Verify the updated generations are advertised.
+	byID := make(map[string]uint64, len(got))
+	for _, hs := range got {
+		byID[hs.ServerID] = hs.Generation
+	}
+	if byID["server-a"] != 5 {
+		t.Errorf("server-a generation = %d, want 5", byID["server-a"])
+	}
+	if byID["server-b"] != 2 {
+		t.Errorf("server-b generation = %d, want 2", byID["server-b"])
+	}
+
+	cancel()
+	<-done
+}
