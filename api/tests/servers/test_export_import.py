@@ -65,6 +65,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 from tests.servers.fakes import (
     FakeClock,
     FakeFileStore,
+    FakeLifecycleLock,
     FakeServerRepository,
     FakeUnitOfWork,
     FakeVersionValidator,
@@ -827,3 +828,36 @@ async def test_import_geyser_does_not_clobber_concurrent_patch() -> None:
     assert stored.config == patched_config
     # The Bedrock port must still be allocated.
     assert stored.bedrock_port == 19132
+    # The returned server must carry the current state (API response fidelity):
+    # __call__ returns the re-fetched entity, not the stale create-time snapshot.
+    assert server.config == patched_config
+    assert server.bedrock_port == 19132
+
+
+async def test_import_plugins_takes_lifecycle_lock() -> None:
+    """_import_plugins acquires the per-server lifecycle lock around its work.
+
+    Mirrors the InstallPlugin / RemovePlugin lock-adoption tests: a recording
+    FakeLifecycleLock asserts the lock is acquired and released for the
+    imported server's id.
+    """
+
+    community = uuid.uuid4()
+    archive = await _export_archive(community=community, mod_identifier="Geyser-Spigot")
+
+    dst_uow = FakeUnitOfWork()
+    dst_store = FakeFileStore()
+    lock = FakeLifecycleLock()
+    imp = ImportServer(
+        create_server=_create_server(dst_uow, dst_store),
+        file_store=dst_store,
+        bedrock_port_range=_BEDROCK_RANGE,
+        lifecycle_lock=lock,
+    )
+    server = await imp(
+        community_id=CommunityId(community),
+        name="imported",
+        content=archive,
+    )
+
+    assert lock.events == [(server.id, "acquire"), (server.id, "release")]
