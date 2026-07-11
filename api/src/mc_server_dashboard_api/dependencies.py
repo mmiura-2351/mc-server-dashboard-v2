@@ -194,6 +194,9 @@ from mc_server_dashboard_api.servers.adapters.clock import (
 from mc_server_dashboard_api.servers.adapters.control_plane import (
     FleetControlPlaneAdapter,
 )
+from mc_server_dashboard_api.servers.adapters.cronsim_next_run_calculator import (
+    CronsimNextRunCalculator,
+)
 from mc_server_dashboard_api.servers.adapters.file_store import (
     StorageFileStoreAdapter,
 )
@@ -307,6 +310,14 @@ from mc_server_dashboard_api.servers.application.resource_packs import (
     ListResourcePacks,
     UnassignResourcePack,
     UploadResourcePack,
+)
+from mc_server_dashboard_api.servers.application.schedules import (
+    CreateSchedule,
+    DeleteSchedule,
+    ListScheduleRuns,
+    ListSchedules,
+    ReadSchedule,
+    UpdateSchedule,
 )
 from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
     SnapshotServer,
@@ -1490,6 +1501,60 @@ def get_list_server_groups(request: Request) -> ListServerGroups:
     return ListServerGroups(uow=ServersUnitOfWork(session_factory))
 
 
+def get_create_schedule(request: Request) -> CreateSchedule:
+    """Assemble the :class:`CreateSchedule` use case (schedule:manage, #1837).
+
+    Binds the clock (``next_run_at`` anchor) and the cronsim next-run calculator
+    (cron syntax validation + next-occurrence math).
+    """
+
+    session_factory = create_session_factory(get_engine(request))
+    return CreateSchedule(
+        uow=ServersUnitOfWork(session_factory),
+        clock=ServersSystemClock(),
+        calculator=CronsimNextRunCalculator(),
+    )
+
+
+def get_list_schedules(request: Request) -> ListSchedules:
+    """Assemble the :class:`ListSchedules` use case (schedule:read)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ListSchedules(uow=ServersUnitOfWork(session_factory))
+
+
+def get_read_schedule(request: Request) -> ReadSchedule:
+    """Assemble the :class:`ReadSchedule` use case (schedule:read)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ReadSchedule(uow=ServersUnitOfWork(session_factory))
+
+
+def get_update_schedule(request: Request) -> UpdateSchedule:
+    """Assemble the :class:`UpdateSchedule` use case (schedule:manage)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return UpdateSchedule(
+        uow=ServersUnitOfWork(session_factory),
+        clock=ServersSystemClock(),
+        calculator=CronsimNextRunCalculator(),
+    )
+
+
+def get_delete_schedule(request: Request) -> DeleteSchedule:
+    """Assemble the :class:`DeleteSchedule` use case (schedule:manage)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return DeleteSchedule(uow=ServersUnitOfWork(session_factory))
+
+
+def get_list_schedule_runs(request: Request) -> ListScheduleRuns:
+    """Assemble the :class:`ListScheduleRuns` use case (schedule:read)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ListScheduleRuns(uow=ServersUnitOfWork(session_factory))
+
+
 def _port_range(request: Request) -> PortRange:
     settings = get_settings(request)
     ports = settings.ports
@@ -2593,6 +2658,64 @@ def require_server_update_authz(
             )
 
         return ServerUpdateAuthz(auth_user=auth_user, authorize=authorize)
+
+    return _dependency
+
+
+class ScheduleWriteAuthz(NamedTuple):
+    """The schedule write gate's resources (issue #1837).
+
+    The schedule create/update/delete gate is two-layer and body-dependent: it
+    requires ``schedule:manage`` *and* the permission for the schedule's action,
+    which only the use case (with the action in hand) knows. So this dependency
+    runs Layer-1 membership at the edge and hands the route the authorized
+    :class:`AuthUser` plus an ``authorize(code)`` callable bound to the target
+    server resource; the use case calls it per required code and raises on the
+    first the caller lacks (the :class:`ServerUpdateAuthz` pattern, issue #458).
+    """
+
+    auth_user: AuthUser
+    authorize: Callable[[str], Awaitable[bool]]
+
+
+def require_schedule_write_authz(
+    *, resource_type: str, resource_id_param: str
+) -> Callable[..., Awaitable[ScheduleWriteAuthz]]:
+    """Build the schedule write-gate authorization dependency (issue #1837).
+
+    Runs the same Layer-1 membership check as :func:`require_permission`
+    (non-member -> 404, no existence signal), then returns the
+    :class:`ScheduleWriteAuthz` bundle. The two-layer Layer-2 decision
+    (``schedule:manage`` plus the action's own permission) is deferred to the
+    bound ``authorize`` callable, scoped to the target server so a per-server
+    grant applies (FR-AUTHZ-2).
+    """
+
+    async def _dependency(
+        request: Request,
+        user: Annotated[User, Depends(get_current_user)],
+        visibility: Annotated[MembershipVisibility, Depends(get_membership_visibility)],
+        checker: Annotated[PermissionChecker, Depends(get_permission_checker)],
+    ) -> ScheduleWriteAuthz:
+        auth_user = _to_auth_user(user)
+        community = CommunityId(_community_id_from_path(request))
+        if not await visibility.is_member(
+            user_id=auth_user.user_id, community_id=community
+        ):
+            raise _not_found()
+        resource_id = _resource_id_from_path(request, resource_id_param)
+        resource = ResourceRef(
+            community_id=community,
+            resource_type=resource_type,
+            resource_id=resource_id,
+        )
+
+        async def authorize(code: str) -> bool:
+            return await checker.can(
+                user=auth_user, operation=Permission(code), resource=resource
+            )
+
+        return ScheduleWriteAuthz(auth_user=auth_user, authorize=authorize)
 
     return _dependency
 

@@ -59,6 +59,13 @@ COMMUNITY_PERMISSIONS: frozenset[Permission] = frozenset(
         # Plugin/mod content management (issue #1150).
         "plugin:read",
         "plugin:manage",
+        # General scheduler CRUD (epic #649, issue #1837). ``schedule:manage``
+        # gates the write surface but is not sufficient on its own: creating or
+        # editing a schedule also requires the action's own permission (a command
+        # schedule needs ``server:command``, a backup schedule ``backup:schedule``,
+        # etc.), so ``schedule:manage`` cannot be used to escalate.
+        "schedule:read",
+        "schedule:manage",
     )
 )
 
@@ -121,13 +128,15 @@ def require_community_permission(permission: Permission) -> Permission:
 # The community-scoped permission families a grant on each ``resource_type`` may
 # carry. M1's only resource type is ``server`` (DATABASE.md Section 6); a server
 # grant is a per-server scope, so it may only carry the resource-scoped families —
-# server / file / backup / plugin operations — never community-wide codes (member, role,
-# grant, community). This keeps grants honest without enumerating every code.
+# server / file / backup / plugin / schedule operations — never community-wide codes
+# (member, role, grant, community). This keeps grants honest without enumerating
+# every code.
 GRANT_PERMISSIONS_BY_RESOURCE_TYPE: dict[str, frozenset[Permission]] = {
     "server": frozenset(
         permission
         for permission in COMMUNITY_PERMISSIONS
-        if permission.value.split(":", 1)[0] in ("server", "file", "backup", "plugin")
+        if permission.value.split(":", 1)[0]
+        in ("server", "file", "backup", "plugin", "schedule")
     ),
 }
 

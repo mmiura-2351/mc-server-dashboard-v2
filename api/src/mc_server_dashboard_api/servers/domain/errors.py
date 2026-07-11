@@ -569,3 +569,21 @@ class InvalidSchedulePayloadError(InvalidScheduleError):
     warning steps (offsets positive, distinct, at most 120 minutes) and no
     command; ``start`` / ``backup`` accept neither.
     """
+
+
+class ScheduleNotFoundError(ServerError):
+    """A schedule operation targeted a schedule that does not exist for the server.
+
+    Raised by read/update/delete/runs when the schedule id is unknown or belongs
+    to a *different* server (or a server outside the path community): reported as
+    not-found so no cross-server/community existence signal leaks (FR-COMM-3), the
+    same posture as a missing server. The edge maps this to 404.
+    """
+
+
+class ScheduleNameAlreadyExistsError(ServerError):
+    """Create/rename hit the per-server schedule name uniqueness constraint.
+
+    A schedule name is unique within a server (DATABASE.md's
+    ``uq_schedule_server_id_name``). The edge maps this to 409.
+    """
