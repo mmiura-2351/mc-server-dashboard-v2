@@ -89,7 +89,10 @@ export function CommunityMembersTab({
   if (members.isPending) {
     return <p className="sub">{t("communitySettings.members.loading")}</p>;
   }
-  if (members.isError || members.data === undefined) {
+  // Error only when there is nothing to show (the initial load failed). A
+  // failed background refetch retains `data`, so the cached list keeps
+  // rendering through transient API blips (#1797).
+  if (members.data === undefined) {
     return (
       <p className="field-error">{t("communitySettings.members.loadError")}</p>
     );

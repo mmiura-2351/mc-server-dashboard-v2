@@ -111,7 +111,10 @@ export function CommunityGroupsTab({
   if (groups.isPending) {
     return <p className="sub">{t("communitySettings.groups.loading")}</p>;
   }
-  if (groups.isError || groups.data === undefined) {
+  // Error only when there is nothing to show (the initial load failed). A
+  // failed background refetch retains `data`, so the cached list keeps
+  // rendering through transient API blips (#1797).
+  if (groups.data === undefined) {
     return (
       <p className="field-error">{t("communitySettings.groups.loadError")}</p>
     );
@@ -376,7 +379,10 @@ function GroupDetail({
         <h3>{t("communitySettings.groups.serversHeading")}</h3>
         {attachedServers.isPending ? (
           <p className="sub">{t("communitySettings.groups.serversLoading")}</p>
-        ) : attachedServers.isError || attachedServers.data === undefined ? (
+        ) : /* Error only when there is nothing to show (the initial load
+               failed). A failed background refetch retains `data`, so the
+               cached list keeps rendering through transient blips (#1797). */
+        attachedServers.data === undefined ? (
           <p className="field-error">
             {t("communitySettings.groups.serversLoadError")}
           </p>
