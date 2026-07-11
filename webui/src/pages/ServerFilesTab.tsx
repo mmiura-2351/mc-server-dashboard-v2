@@ -1247,7 +1247,11 @@ export function ServerFilesTab({
           )}
           {listing.isPending ? (
             <p className="sub">{t("files.loading")}</p>
-          ) : listing.isError ? (
+          ) : /* Error only when there is nothing to show (initial load
+               failed). A failed background refetch retains `data`, so
+               the cached listing keeps rendering through transient API
+               blips (#1805). */
+          listing.data === undefined ? (
             <p className="field-error">{t("files.listError")}</p>
           ) : (
             <Listing
@@ -2214,7 +2218,10 @@ function Viewer({
   if (content.isPending) {
     return <p className="sub">{t("files.loading")}</p>;
   }
-  if (content.isError) {
+  // Error only when there is nothing to show (initial load failed). A failed
+  // background refetch retains `data`, so the cached content keeps rendering
+  // through transient API blips (#1805).
+  if (content.data === undefined) {
     return <p className="field-error">{t("files.openError")}</p>;
   }
 
@@ -2406,7 +2413,11 @@ function HistoryDrawer({
       <p className="field-hint">{t("files.history.hint")}</p>
       {history.isPending ? (
         <p className="sub">{t("files.history.loading")}</p>
-      ) : history.isError ? (
+      ) : /* Error only when there is nothing to show (initial load
+           failed). A failed background refetch retains `data`, so the
+           cached history keeps rendering through transient blips
+           (#1805). */
+      history.data === undefined ? (
         <p className="field-error">{t("files.history.error")}</p>
       ) : history.data.versions.length === 0 ? (
         <p className="sub">{t("files.history.empty")}</p>
@@ -2485,7 +2496,11 @@ function HistoryDrawer({
           </p>
           {preview.isPending ? (
             <p className="sub">{t("files.history.preview.loading")}</p>
-          ) : preview.isError ? (
+          ) : /* Error only when there is nothing to show (initial load
+               failed). A failed background refetch retains `data`, so
+               the cached preview keeps rendering through transient
+               blips (#1805). */
+          preview.data === undefined ? (
             <p className="field-error">{t("files.history.preview.error")}</p>
           ) : isProbablyText(preview.data.content_base64) ? (
             <textarea

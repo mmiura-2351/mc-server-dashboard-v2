@@ -363,6 +363,29 @@ describe("AccountPage deletion", () => {
   });
 });
 
+describe("AccountPage memberships refetch failure (#1805)", () => {
+  it("keeps rendering cached communities when a background refetch fails", async () => {
+    const { queryClient } = renderPage();
+    await waitForLoaded();
+    await screen.findByText("Sakura SMP");
+
+    // Simulate a transient API outage: the next background refetch fails.
+    mockApi.get.mockRejectedValue(
+      new ApiError(500, { reason: "server_error" }),
+    );
+    await act(() => queryClient.invalidateQueries());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // The cached communities list stays on screen instead of the error.
+    expect(screen.getByText("Sakura SMP")).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("account.memberships.loadError")),
+    ).not.toBeInTheDocument();
+  });
+});
+
 describe("AccountPage logout", () => {
   it("logs out via the session layer", async () => {
     renderPage();

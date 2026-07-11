@@ -1,4 +1,4 @@
-import { screen } from "@testing-library/react";
+import { act, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAccessToken } from "../auth/tokenStore.ts";
 import { t } from "../i18n/index.ts";
@@ -214,6 +214,41 @@ describe("admin overview stats", () => {
     expect(
       await screen.findByText(t("admin.overview.loadError")),
     ).toBeInTheDocument();
+  });
+
+  it("keeps rendering cached overview when all three polling refetches fail (#1805)", async () => {
+    signedInAs(ADMIN);
+    const { queryClient } = renderApp({ path: "/admin" });
+    await screen.findByRole("heading", { name: t("admin.overview.fleet") });
+
+    // Simulate a transient API outage: all three overview endpoints fail.
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === "/api/users/me") return Promise.resolve(jsonResponse(ADMIN));
+      if (url === "/api/communities")
+        return Promise.resolve(jsonResponse([{ id: "c1", name: "Alpha" }]));
+      if (url.endsWith("/me/permissions"))
+        return Promise.resolve(jsonResponse({}));
+      if (
+        url === "/api/workers" ||
+        url === "/api/backups/statistics" ||
+        url === "/api/versions/jar-pool/stats"
+      )
+        return Promise.resolve(new Response("nope", { status: 503 }));
+      return Promise.resolve(tokenResponse());
+    });
+    await act(() => queryClient.invalidateQueries());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // The cached overview stays on screen instead of the error.
+    expect(
+      screen.getByRole("heading", { name: t("admin.overview.fleet") }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("admin.overview.loadError")),
+    ).not.toBeInTheDocument();
   });
 
   it("re-fetches worker data after 12 s so heartbeat ages do not freeze (#791)", async () => {

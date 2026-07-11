@@ -123,7 +123,7 @@ function renderPage() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  return render(
+  const result = render(
     <MemoryRouter initialEntries={[`/communities/${CID}/servers/${SID}`]}>
       <QueryClientProvider client={queryClient}>
         <ToastProvider>
@@ -137,6 +137,7 @@ function renderPage() {
       </QueryClientProvider>
     </MemoryRouter>,
   );
+  return { ...result, queryClient };
 }
 
 async function openFiles() {
@@ -4533,5 +4534,43 @@ describe("Arrow key navigation", () => {
 
     const buttons = document.querySelectorAll(".file-list .file-name");
     expect(document.activeElement).toBe(buttons[1]);
+  });
+});
+
+describe("ServerFilesTab refetch failure (#1805)", () => {
+  let restoreWs: () => void;
+  beforeEach(() => {
+    restoreWs = installMockWebSocket();
+    setAccessToken("tok-1");
+    mockApi.get.mockReset();
+    mockApi.put.mockReset();
+    mockApi.post.mockReset();
+    mockApi.delete.mockReset();
+    mockCan = () => true;
+  });
+  afterEach(() => {
+    restoreWs();
+    vi.clearAllMocks();
+  });
+
+  it("keeps rendering cached file listing when a background refetch fails", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "server.properties", is_dir: false }]),
+    });
+    const { queryClient } = renderPage();
+    await openFiles();
+    await screen.findByText(/server\.properties/);
+
+    // Simulate a transient API outage: the next background refetch fails.
+    mockApi.get.mockRejectedValue(new ApiError(500, {}));
+    await act(() => queryClient.invalidateQueries());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // The cached listing stays on screen instead of the error.
+    expect(screen.getByText(/server\.properties/)).toBeInTheDocument();
+    expect(screen.queryByText(t("files.listError"))).not.toBeInTheDocument();
   });
 });

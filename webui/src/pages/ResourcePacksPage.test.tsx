@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAccessToken } from "../auth/tokenStore.ts";
 import { t } from "../i18n/index.ts";
@@ -379,5 +379,24 @@ describe("resource packs library", () => {
     expect(
       await screen.findByText(t("resourcePacks.error.inUse")),
     ).toBeInTheDocument();
+  });
+
+  it("keeps rendering cached packs when a background refetch fails (#1805)", async () => {
+    signedIn();
+    const { queryClient } = renderApp({ path: "/resource-packs" });
+    await screen.findByText("Faithful");
+
+    // Simulate a transient API outage: resource packs endpoint fails.
+    signedIn({ listError: true });
+    await act(() => queryClient.invalidateQueries());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // The cached list stays on screen instead of the error.
+    expect(screen.getByText("Faithful")).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("resourcePacks.loadError")),
+    ).not.toBeInTheDocument();
   });
 });

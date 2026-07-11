@@ -1782,9 +1782,10 @@ async def test_update_config_overrides_creates_properties_when_absent() -> None:
     assert file_store.files["server.properties"] == b"motd=hello\n"
 
 
-async def test_update_config_overrides_file_failure_aborts_without_commit() -> None:
-    # A storage failure rewriting server.properties surfaces as a seed failure and
-    # leaves the config row uncommitted, so the DB and file do not drift (#1209).
+async def test_update_config_overrides_file_failure_after_commit() -> None:
+    # A storage failure rewriting server.properties happens after the DB commit
+    # (#1705). The row IS committed; the error is still surfaced so the caller
+    # knows the file diverged.
     uow = FakeUnitOfWork()
     community = CommunityId(uuid.uuid4())
     server = _server(community_id=community)
@@ -1796,7 +1797,7 @@ async def test_update_config_overrides_file_failure_aborts_without_commit() -> N
             server_id=server.id,
             config={"motd": "new"},
         )
-    assert uow.commits == 0
+    assert uow.commits == 1
 
 
 async def test_update_config_removing_override_clears_key_from_file() -> None:
@@ -1927,9 +1928,10 @@ async def test_update_to_same_game_port_does_not_rewrite_or_conflict() -> None:
     assert uow.commits == 1
 
 
-async def test_update_game_port_file_failure_aborts_without_commit() -> None:
-    # A storage failure rewriting server.properties surfaces as a seed failure and
-    # leaves the row uncommitted, so the DB and file do not drift (#311).
+async def test_update_game_port_file_failure_after_commit() -> None:
+    # A storage failure rewriting server.properties happens after the DB commit
+    # (#1705). The row IS committed with the new port; the error is still surfaced
+    # so the caller knows the file diverged.
     uow = FakeUnitOfWork()
     community = CommunityId(uuid.uuid4())
     server = _server(community_id=community, game_port=25565)
@@ -1940,8 +1942,59 @@ async def test_update_game_port_file_failure_aborts_without_commit() -> None:
             server_id=server.id,
             game_port=25570,
         )
-    assert uow.commits == 0
-    assert uow.servers.by_id[server.id].game_port == 25565
+    assert uow.commits == 1
+    assert uow.servers.by_id[server.id].game_port == 25570
+
+
+async def test_update_game_port_commit_failure_does_not_write_file() -> None:
+    # A commit failure (e.g. a unique-violation race) must NOT leave the file
+    # rewritten with the new port while the DB row stays at the old value —
+    # that was the pre-#1705 bug. Verify the file write never fires.
+
+    class _FailingCommitUoW(FakeUnitOfWork):
+        async def commit(self) -> None:
+            raise RuntimeError("simulated commit failure")
+
+    uow = _FailingCommitUoW()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community, game_port=25565)
+    uow.servers.seed(server)
+    file_store = FakeFileStore()
+    file_store.files["server.properties"] = b"server-port=25565\n"
+    with pytest.raises(RuntimeError, match="simulated commit failure"):
+        await _updater(uow, file_store=file_store)(
+            community_id=community,
+            server_id=server.id,
+            game_port=25570,
+        )
+    # The file must be untouched — no writes at all.
+    assert file_store.writes == []
+    assert file_store.files["server.properties"] == b"server-port=25565\n"
+
+
+async def test_update_config_overrides_commit_failure_does_not_write_file() -> None:
+    # Same as the port test: a commit failure must not leave server.properties
+    # rewritten with the new overrides (#1705).
+
+    class _FailingCommitUoW(FakeUnitOfWork):
+        async def commit(self) -> None:
+            raise RuntimeError("simulated commit failure")
+
+    uow = _FailingCommitUoW()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    server.config = {"motd": "old"}
+    uow.servers.seed(server)
+    file_store = FakeFileStore()
+    file_store.files["server.properties"] = b"motd=old\n"
+    with pytest.raises(RuntimeError, match="simulated commit failure"):
+        await _updater(uow, file_store=file_store)(
+            community_id=community,
+            server_id=server.id,
+            config={"motd": "new"},
+        )
+    assert file_store.writes == []
+    assert file_store.files["server.properties"] == b"motd=old\n"
 
 
 # --- delete ----------------------------------------------------------------

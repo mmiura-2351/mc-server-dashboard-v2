@@ -1,4 +1,10 @@
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAccessToken } from "../auth/tokenStore.ts";
 import { t } from "../i18n/index.ts";
@@ -272,6 +278,36 @@ describe("admin versions JAR pool", () => {
     expect(
       await screen.findByText(t("admin.versions.gcError")),
     ).toBeInTheDocument();
+  });
+
+  it("keeps rendering cached catalog when a background refetch fails (#1805)", async () => {
+    signedIn();
+    const { queryClient } = renderApp({ path: "/admin/versions" });
+    // Wait for both the catalog and jar pool stats to load.
+    await screen.findByText("vanilla");
+
+    // Simulate a transient API outage: version endpoints fail.
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === "/api/users/me") return Promise.resolve(jsonResponse(ADMIN));
+      if (url === "/api/communities")
+        return Promise.resolve(jsonResponse([{ id: "c1", name: "Alpha" }]));
+      if (url.endsWith("/me/permissions"))
+        return Promise.resolve(jsonResponse({}));
+      if (url.startsWith("/api/versions"))
+        return Promise.resolve(new Response("nope", { status: 503 }));
+      return Promise.resolve(tokenResponse());
+    });
+    await act(() => queryClient.invalidateQueries());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // The cached catalog stays on screen instead of the error.
+    expect(screen.getByText("vanilla")).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("admin.versions.loadError")),
+    ).not.toBeInTheDocument();
   });
 
   it("shows the error state when the JAR pool stats fail to load", async () => {

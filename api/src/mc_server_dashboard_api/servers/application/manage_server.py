@@ -525,9 +525,10 @@ class UpdateServer:
     ``server.properties`` through the file write seam so the DB ``game_port`` and
     the real bind port stay in sync; a legacy server with no properties file gets
     one created with just the port line. The range check runs before the state
-    gate (the same 422-before-409 precedence); the file rewrite happens before the
-    DB commit so a storage failure aborts the change rather than leaving the file
-    and row out of step (surfaced as a mapped 503).
+    gate (the same 422-before-409 precedence); the file rewrite happens after the
+    DB commit (#1705) so a commit failure (e.g. a unique-violation race) does not
+    leave the file and row out of step. The inverse divergence — committed row,
+    failed file write — is the self-healing direction (retryable).
     """
 
     uow: UnitOfWork
@@ -623,6 +624,12 @@ class UpdateServer:
                     if clash is not None and clash.id != server_id:
                         raise ServerNameAlreadyExistsError(new_name.value)
                     server.name = new_name
+                # Capture deferred file-write state (#1705): the actual writes
+                # happen after the DB commit so a commit failure does not
+                # leave the file and row out of step.
+                pending_overrides: dict[str, str] | None = None
+                pending_removed_keys: AbstractSet[str] = frozenset()
+                pending_port: int | None = None
                 if config is not None:
                     # Sync changed server.properties overrides to the file
                     # (#1209, #1242). Only non-reserved keys are properties
@@ -632,27 +639,20 @@ class UpdateServer:
                     old_overrides = _properties_overrides(server.config)
                     new_overrides = _properties_overrides(config)
                     if new_overrides != old_overrides:
-                        removed_keys = old_overrides.keys() - new_overrides.keys()
-                        await self._rewrite_properties_overrides(
-                            community_id=community_id,
-                            server_id=server_id,
-                            overrides=new_overrides,
-                            removed_keys=removed_keys,
+                        pending_overrides = new_overrides
+                        pending_removed_keys = (
+                            old_overrides.keys() - new_overrides.keys()
                         )
                     server.config = config
                 if game_port is not None and game_port != server.game_port:
-                    # Uniqueness check excluding the server's own current port, then
-                    # rewrite the at-rest server.properties before committing the row.
+                    # Uniqueness check excluding the server's own current port;
+                    # the file rewrite is deferred to after commit (#1705).
                     taken = await self.uow.servers.list_game_ports()
                     if server.game_port is not None:
                         taken.discard(server.game_port)
                     if game_port in taken:
                         raise PortAlreadyTakenError(str(game_port))
-                    await self._rewrite_server_port(
-                        community_id=community_id,
-                        server_id=server_id,
-                        port=game_port,
-                    )
+                    pending_port = game_port
                     server.game_port = game_port
                 if slug is not None and slug != server.slug:
                     # Uniqueness check excluding the server's own current slug
@@ -665,6 +665,24 @@ class UpdateServer:
                 server.updated_at = self.clock.now()
                 await self.uow.servers.update(server)
                 await self.uow.commit()
+            # Deferred file writes (#1705): run after the DB commit succeeds
+            # so a commit failure never leaves the file and row out of step.
+            # A post-commit file-write failure is the self-healing direction:
+            # the committed row is correct and the file can be re-written on
+            # a subsequent update.
+            if pending_overrides is not None:
+                await self._rewrite_properties_overrides(
+                    community_id=community_id,
+                    server_id=server_id,
+                    overrides=pending_overrides,
+                    removed_keys=pending_removed_keys,
+                )
+            if pending_port is not None:
+                await self._rewrite_server_port(
+                    community_id=community_id,
+                    server_id=server_id,
+                    port=pending_port,
+                )
             return server
 
     async def _authorize_update(
@@ -719,10 +737,10 @@ class UpdateServer:
         Reads the current file, rewrites its port line (or appends one), and
         writes it back through the versioned file seam. A legacy server with no
         properties file is handled by treating the absent file as empty, so a file
-        with just the port line is created. A storage failure is surfaced as
-        :class:`WorkingSetSeedFailedError` (mapped to 503): it is raised before the
-        DB commit, so the row's ``game_port`` is not changed and the file and row
-        do not drift.
+        with just the port line is created. Called after the DB commit (#1705): a
+        storage failure is surfaced as :class:`WorkingSetSeedFailedError` (mapped
+        to 503); the row's ``game_port`` is already committed, but the divergence
+        is the self-healing direction (the file can be re-written on retry).
         """
 
         try:
@@ -763,9 +781,11 @@ class UpdateServer:
         Reads the current ``server.properties``, applies the overrides via
         :func:`apply_overrides`, removes lines for keys in *removed_keys*
         (#1242), and writes it back. A legacy server with no properties file is
-        handled by treating the absent file as empty. A storage failure is
-        surfaced as :class:`WorkingSetSeedFailedError` (mapped to 503): it is
-        raised before the DB commit, so the config and the file do not drift.
+        handled by treating the absent file as empty. Called after the DB commit
+        (#1705): a storage failure is surfaced as
+        :class:`WorkingSetSeedFailedError` (mapped to 503); the config row is
+        already committed, but the divergence is the self-healing direction (the
+        file can be re-written on retry).
         """
 
         try:

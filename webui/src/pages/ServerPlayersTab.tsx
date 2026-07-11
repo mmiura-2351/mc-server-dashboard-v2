@@ -280,7 +280,10 @@ function SessionsView({
       <h2>{t("sessions.heading")}</h2>
       {query.isPending ? (
         <p className="sub">{t("sessions.loading")}</p>
-      ) : query.isError ? (
+      ) : /* Error only when there is nothing to show (initial load failed).
+           A failed background refetch retains `data`, so the cached list
+           keeps rendering through transient API blips (#1805). */
+      query.data === undefined ? (
         <p className="field-error">{t("sessions.loadError")}</p>
       ) : sessions.length === 0 ? (
         <p className="sub">{t("sessions.empty")}</p>

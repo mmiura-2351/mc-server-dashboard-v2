@@ -236,7 +236,10 @@ export function ServerBackupsTab({
   if (listQuery.isPending || statsQuery.isPending) {
     return <p className="sub">{t("backups.loading")}</p>;
   }
-  if (listQuery.isError || statsQuery.isError) {
+  // Error only when there is nothing to show (an initial load failed). A
+  // failed background refetch retains `data`, so the cached page keeps
+  // rendering through transient API blips (#1805).
+  if (listQuery.data === undefined || statsQuery.data === undefined) {
     return <p className="field-error">{t("backups.loadError")}</p>;
   }
 

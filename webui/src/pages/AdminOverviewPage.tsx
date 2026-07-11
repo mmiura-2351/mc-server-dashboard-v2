@@ -35,8 +35,13 @@ export function AdminOverviewPage() {
 
   const isPending =
     workersQuery.isPending || backupsQuery.isPending || jarPoolQuery.isPending;
-  const isError =
-    workersQuery.isError || backupsQuery.isError || jarPoolQuery.isError;
+  // Error only when there is nothing to show (an initial load failed). A
+  // failed background refetch (including polling blips) retains `data`, so the
+  // cached overview keeps rendering through transient API outages (#1805).
+  const isDataMissing =
+    workersQuery.data === undefined ||
+    backupsQuery.data === undefined ||
+    jarPoolQuery.data === undefined;
 
   return (
     <div className="admin-overview">
@@ -51,7 +56,7 @@ export function AdminOverviewPage() {
         <p className="sub" role="status">
           {t("admin.overview.loading")}
         </p>
-      ) : isError ? (
+      ) : isDataMissing ? (
         <p className="field-error" role="alert">
           {t("admin.overview.loadError")}
         </p>

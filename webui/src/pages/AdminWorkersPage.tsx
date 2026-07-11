@@ -43,7 +43,10 @@ export function AdminWorkersPage() {
         <p className="sub" role="status">
           {t("admin.workers.loading")}
         </p>
-      ) : workersQuery.isError ? (
+      ) : /* Error only when there is nothing to show (initial load failed).
+           A failed background refetch retains `data`, so the cached page
+           keeps rendering through transient API blips (#1805). */
+      workersQuery.data === undefined ? (
         <p className="field-error" role="alert">
           {t("admin.workers.loadError")}
         </p>
