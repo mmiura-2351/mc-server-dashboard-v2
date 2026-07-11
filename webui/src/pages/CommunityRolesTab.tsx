@@ -47,11 +47,12 @@ export function CommunityRolesTab({
 
   const roles = useQuery({
     queryKey: rolesKeys.list(communityId),
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api.get(
         apiPath("/api/communities/{community_id}/roles", {
           community_id: communityId,
         }),
+        { signal },
       ),
   });
 
@@ -80,7 +81,10 @@ export function CommunityRolesTab({
   if (roles.isPending) {
     return <p className="sub">{t("communitySettings.roles.loading")}</p>;
   }
-  if (roles.isError || roles.data === undefined) {
+  // Error only when there is nothing to show (the initial load failed). A
+  // failed background refetch retains `data`, so the cached list keeps
+  // rendering through transient API blips (#1797).
+  if (roles.data === undefined) {
     return (
       <p className="field-error">{t("communitySettings.roles.loadError")}</p>
     );

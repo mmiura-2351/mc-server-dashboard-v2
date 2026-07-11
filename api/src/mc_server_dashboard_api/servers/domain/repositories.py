@@ -142,6 +142,7 @@ class ServerRepository(abc.ABC):
         observed_at: dt.datetime,
         *,
         unassign: bool = False,
+        expected_worker: WorkerId | None = None,
     ) -> bool:
         """Cache the worker-reported observed state for ``server_id`` (FR-SRV-4).
 
@@ -155,12 +156,22 @@ class ServerRepository(abc.ABC):
         ``require_unassigned`` (issue #206). Crash/disconnect paths leave the
         assignment intact (the stickiness invariant), so they do not set it.
 
+        ``expected_worker`` makes the ownership check part of the guarded write
+        (issue #1708): when set, the write lands only while the row is STILL
+        assigned to that worker (an unassigned row never matches). The
+        control-plane sink asserts the reporting worker here so a stop-unassign
+        + re-place committing between its snapshot read and this write cannot
+        let the stale worker's (freshest-stamped) report overwrite the new
+        owner's state. API-driven convergence writers do not assert a worker:
+        they converge their own dispatch outcome, not a worker's report.
+
         Returns ``True`` when the write landed, ``False`` when the #216 monotonic
-        guard dropped it (a same-instant or fresher write already stamped the row)
-        or the server is absent. A convergence caller uses this to keep its
-        returned entity honest (issue #292): it mutates the entity's observed
-        fields only when ``True``, otherwise leaves them as-read so the return
-        never claims a write that did not land.
+        guard dropped it (a same-instant or fresher write already stamped the
+        row), the ``expected_worker`` ownership condition failed, or the server
+        is absent. A convergence caller uses this to keep its returned entity
+        honest (issue #292): it mutates the entity's observed fields only when
+        ``True``, otherwise leaves them as-read so the return never claims a
+        write that did not land.
         """
 
     @abc.abstractmethod

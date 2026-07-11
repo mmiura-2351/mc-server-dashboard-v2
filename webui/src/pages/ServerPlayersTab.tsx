@@ -67,23 +67,25 @@ export function ServerPlayersTab({
 
   const attached = useQuery({
     queryKey: attachmentsKeys.forServer(communityId, serverId),
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api.get(
         apiPath("/api/communities/{community_id}/servers/{server_id}/groups", {
           community_id: communityId,
           server_id: serverId,
         }),
+        { signal },
       ),
   });
 
   // Source for the attach picker; only needed to manage attachments.
   const community = useQuery({
     queryKey: groupsKeys.list(communityId),
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api.get(
         apiPath("/api/communities/{community_id}/groups", {
           community_id: communityId,
         }),
+        { signal },
       ),
     enabled: canManage,
   });
@@ -139,7 +141,10 @@ export function ServerPlayersTab({
   if (attached.isPending) {
     return <p className="sub">{t("players.loading")}</p>;
   }
-  if (attached.isError || attached.data === undefined) {
+  // Error only when there is nothing to show (the initial load failed). A
+  // failed background refetch retains `data`, so the cached list keeps
+  // rendering through transient API blips (#1797).
+  if (attached.data === undefined) {
     return <p className="field-error">{t("players.loadError")}</p>;
   }
 
@@ -262,7 +267,8 @@ function SessionsView({
 
   const query = useQuery({
     queryKey: sessionsKey(communityId, serverId, offset),
-    queryFn: () => api.get(sessionsUrl(communityId, serverId, offset)),
+    queryFn: ({ signal }) =>
+      api.get(sessionsUrl(communityId, serverId, offset), { signal }),
   });
 
   const sessions: GameSessionResponse[] = query.data?.sessions ?? [];

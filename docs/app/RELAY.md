@@ -348,6 +348,9 @@ per-slug **status cache** (default 5 s TTL):
   status exchange itself (forward the buffered handshake + Status Request,
   read the Status Response), cache the JSON, answer, close. Players see the
   server's real MOTD, player count, and favicon, at most 5 s stale.
+  Concurrent misses for the same slug are **coalesced**: the first performs
+  the exchange and the rest wait for its result (success or failure fallback
+  alike), so a burst of pings costs one ResolveJoin and one dial-back.
 
 **Stopped servers answer in-protocol** (owner decision):
 

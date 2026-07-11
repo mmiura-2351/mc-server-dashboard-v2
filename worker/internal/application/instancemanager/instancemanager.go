@@ -220,12 +220,13 @@ type Manager struct {
 	// retry stop would otherwise find no tracked instance and return
 	// SERVER_NOT_FOUND, which the API's stop convergence reads as "no live process"
 	// and unassigns — over a process/container that may still be lingering (issue
-	// #251). Keeping the running Instance here lets a retry re-attempt the driver
-	// Stop against the same handle and report success only on confirmed
-	// termination; until then start/hydrate over the id are rejected as they are
-	// for a running server. The instance's status pump clears the record if the
-	// orphan finally exits on its own.
-	orphans map[string]execution.Instance
+	// #251). Keeping the Instance and its driver name here lets a retry re-attempt
+	// the driver Stop against the same handle and resolve RCON identically (issue
+	// #1712), reporting success only on confirmed termination; until then
+	// start/hydrate over the id are rejected as they are for a running server. The
+	// instance's status pump clears the record if the orphan finally exits on its
+	// own.
+	orphans map[string]orphanEntry
 	// reserved marks a server id as having a mutating lifecycle command in flight so
 	// a duplicate re-issued after a stream reconnect cannot overlap the original
 	// (issue #780). It is claimed under mu and held across the long operation, then
@@ -294,7 +295,7 @@ func New(drivers map[string]execution.ExecutionDriver, scratchDir string, openCo
 		scanRegion:         scanRegionState,
 		instances:          map[string]execution.Instance{},
 		startCmds:          map[string]session.Command{},
-		orphans:            map[string]execution.Instance{},
+		orphans:            map[string]orphanEntry{},
 		reserved:           map[string]bool{},
 		events:             make(chan session.StatusEvent, 32),
 		logs:               make(chan session.LogEvent, 256),
@@ -631,6 +632,39 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	}
 
 	workingDir := filepath.Join(m.scratchDir, cmd.ServerID)
+
+	if !running {
+		// Refuse a stopped-id snapshot whose working dir does not exist (issue
+		// #1713): there is no working set to capture, so packing would upload an
+		// empty tar as a candidate new generation with the staleness guard disabled
+		// (readGeneration on an absent dir is 0, so the base-generation header is
+		// omitted) — leaving the API-side empty-staging refusal as the only defense
+		// and burning a full pack+upload+refusal cycle. The usual cause is a benign
+		// duplicate: the final snapshot published, removeScratch GC'd the dir, but
+		// the CommandResult was lost on a dropped stream so the API re-dispatched.
+		// The worker keeps no tombstone that could tell that apart from a genuinely
+		// missing working set (e.g. never hydrated), so one distinct refusal covers
+		// both. SERVER_NOT_FOUND (not TRANSFER_FAILED): no working set is held for
+		// this id and no retry can succeed without a hydrate — a terminal
+		// condition, not a transient transfer failure. The check is race-free: the
+		// reservation above already holds off any hydrate/start that could create
+		// the dir concurrently. The running path needs no guard — a tracked
+		// instance's working dir was created by its start.
+		//
+		// The "working dir absent" phrase in the message is load-bearing (issue
+		// #1790): the API's final-snapshot path keys on it (together with the
+		// SERVER_NOT_FOUND code) to downgrade this refusal from its data-loss
+		// ERROR to a benign-duplicate INFO — see _WORKING_SET_ABSENT_MARKER in
+		// api/src/mc_server_dashboard_api/servers/application/lifecycle.py.
+		// Reword only together with that discriminator (and both sides' tests).
+		if _, err := os.Stat(workingDir); os.IsNotExist(err) {
+			m.logger.Warn("snapshot refused: working dir absent for stopped id",
+				"server_id", cmd.ServerID, "reason", "working_set_absent")
+			return fail(cmd.CommandID, session.CommandErrorServerNotFound,
+				"instancemanager: snapshot refused: working dir absent (no working set held for this id: "+
+					"scratch already GC'd after a published final snapshot, or never hydrated)")
+		}
+	}
 
 	// Pre-pack structural region fsck (#741): fail fast at the source if the
 	// working set is already corrupt (e.g. a region torn by a crash-during-save,
@@ -1097,10 +1131,7 @@ func (m *Manager) startPumps(serverID string, inst execution.Instance) {
 }
 
 func (m *Manager) handleStop(ctx context.Context, cmd session.Command, graceful bool) session.CommandResult {
-	// Capture the driver name BEFORE takeStoppableReserve evicts the instance and
-	// deletes startCmds, so the pre-stop flush closure can open RCON using it.
-	driver := m.driverFor(cmd.ServerID)
-	inst, outcome := m.takeStoppableReserve(cmd.ServerID)
+	inst, driver, outcome := m.takeStoppableReserve(cmd.ServerID)
 	switch outcome {
 	case takeNotFound:
 		return fail(cmd.CommandID, session.CommandErrorServerNotFound,
@@ -1255,6 +1286,14 @@ func (m *Manager) ReclaimDeletedScratches(serverIDs []string) {
 	}()
 }
 
+// orphanEntry pairs a failed-stop orphan instance with the execution driver name
+// it was started under, so the retry stop can resolve the RCON dial host exactly
+// as stop #1 did (issue #1712).
+type orphanEntry struct {
+	inst   execution.Instance
+	driver string
+}
+
 // takeOutcome is the result of takeStoppableReserve: an instance to stop was
 // taken and reserved, no live instance exists (genuinely unknown -> SERVER_NOT_FOUND),
 // or a lifecycle command is already reserved in flight for the id (a detached stop
@@ -1279,14 +1318,21 @@ const (
 // lifecycle command — typically the original detached stop — is in flight) and
 // takeNotFound only for genuinely unknown ids. The caller must release on every
 // return path.
-func (m *Manager) takeStoppableReserve(serverID string) (execution.Instance, takeOutcome) {
+//
+// The returned driver is the execution driver name for the instance: read from
+// startCmds for a running instance (before deletion), or from the orphan entry
+// for a failed-stop orphan (issue #1712). This makes the driver capture atomic
+// with the take, eliminating the TOCTOU between a separate driverFor call and
+// the eviction.
+func (m *Manager) takeStoppableReserve(serverID string) (execution.Instance, string, takeOutcome) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if inst, ok := m.instances[serverID]; ok {
+		driver := m.startCmds[serverID].Driver
 		delete(m.instances, serverID)
 		delete(m.startCmds, serverID)
 		m.reserved[serverID] = true
-		return inst, takeFound
+		return inst, driver, takeFound
 	}
 	// Check the reservation BEFORE the orphan branch. A failed-stop orphan retains
 	// its instance record while a stop for the id is in flight (attemptStop deletes
@@ -1299,13 +1345,13 @@ func (m *Manager) takeStoppableReserve(serverID string) (execution.Instance, tak
 	// first rejects stop2 with takeInFlight (-> BUSY) instead, exactly as it
 	// already does for a detached running-instance stop (issue #780).
 	if m.reserved[serverID] {
-		return nil, takeInFlight
+		return nil, "", takeInFlight
 	}
-	if inst, ok := m.orphans[serverID]; ok {
+	if entry, ok := m.orphans[serverID]; ok {
 		m.reserved[serverID] = true
-		return inst, takeFound
+		return entry.inst, entry.driver, takeFound
 	}
-	return nil, takeNotFound
+	return nil, "", takeNotFound
 }
 
 // attemptStop runs the driver Stop for serverID's instance. On failure it
@@ -1321,12 +1367,13 @@ func (m *Manager) takeStoppableReserve(serverID string) (execution.Instance, tak
 // the tunnel — matching the API's own "any transition away from running closes
 // it" semantics (PR #1558).
 //
-// driverName is the driver that runs this server (captured BEFORE
-// takeStoppableReserve / takeRunningReserve evicts the instance and deletes
-// startCmds, so driverFor would return empty after eviction). On a graceful
-// stop, attemptStop passes a pre-fallback flush closure so the driver can flush
-// the live world (save-all + settle) before stop — the driver calls it always
-// before tryRCONStop on the graceful path (#1007).
+// driverName is the driver that runs this server (returned atomically by
+// takeStoppableReserve / takeRunningReserve alongside the instance). On a
+// graceful stop, attemptStop passes a pre-fallback flush closure so the driver
+// can flush the live world (save-all + settle) before stop — the driver calls it
+// always before tryRCONStop on the graceful path (#1007). On failure the driver
+// name is preserved on the orphan entry so a retry resolves RCON identically
+// (issue #1712).
 func (m *Manager) attemptStop(ctx context.Context, serverID string, inst execution.Instance, graceful bool, driverName string) error {
 	var preFallback func(context.Context) bool
 	if graceful {
@@ -1336,7 +1383,7 @@ func (m *Manager) attemptStop(ctx context.Context, serverID string, inst executi
 	}
 	if err := inst.Stop(ctx, graceful, preFallback); err != nil {
 		m.mu.Lock()
-		m.orphans[serverID] = inst
+		m.orphans[serverID] = orphanEntry{inst: inst, driver: driverName}
 		m.mu.Unlock()
 		return err
 	}
@@ -2036,7 +2083,7 @@ func (m *Manager) pump(serverID string, inst execution.Instance, done chan struc
 func (m *Manager) forgetOrphanIf(serverID string, inst execution.Instance) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.orphans[serverID] == inst {
+	if e, ok := m.orphans[serverID]; ok && e.inst == inst {
 		delete(m.orphans, serverID)
 	}
 }
@@ -2138,17 +2185,50 @@ func (m *Manager) statusDispatcher() {
 
 // logPump forwards an instance's captured log lines onto the merged log stream
 // (FR-MON-2). It exits when the instance closes its log channel (terminal
-// state). Under sink backpressure it drops the line with a warning: logs are a
-// stream, not state, so they keep the lossy posture (unlike status, which
-// coalesces; issue #96). The per-instance LogPump already bounds and marks drops
-// at the capture edge.
+// state). Under sink backpressure it drops the line: logs are a stream, not
+// state, so they keep the lossy posture (unlike status, which coalesces; issue
+// #96). The per-instance LogPump already bounds and marks drops at the capture
+// edge. Drops here are counted silently and reported as one aggregated summary
+// per congestion episode — when a line next gets through, or when the stream
+// ends — instead of one WARN per dropped line, which flooded the worker's own
+// log for the whole length of a control-plane outage (issue #1716). The counter
+// is goroutine-local: one pump goroutine runs per server, so no locking is
+// needed.
 func (m *Manager) logPump(serverID string, src execution.LogSource) {
+	dropped := 0
 	for ev := range src.Logs() {
 		select {
 		case m.logs <- session.LogEvent{ServerID: ev.ServerID, Line: ev.Line, Stream: mapLogStream(ev.Stream)}:
+			if dropped > 0 {
+				m.reportDroppedLogs(serverID, dropped)
+				dropped = 0
+			}
 		default:
-			m.logger.Warn("dropped log line; sink full", "server_id", serverID)
+			dropped++
 		}
+	}
+	if dropped > 0 {
+		m.reportDroppedLogs(serverID, dropped)
+	}
+}
+
+// reportDroppedLogs emits the aggregated summary for one sink-congestion
+// episode: a single WARN on the worker's own logger (operator observability)
+// and, best-effort, an in-band marker on the merged stream so downstream log
+// viewers learn about the gap — mirroring the per-instance LogPump's
+// dropped-count marker (execution/logpump.go). The marker send never blocks
+// and never displaces a real line: it is only attempted after a real line got
+// through (or the stream ended), and is skipped when the sink is still full —
+// the WARN already carries the count.
+func (m *Manager) reportDroppedLogs(serverID string, dropped int) {
+	m.logger.Warn("dropped log lines; sink full", "server_id", serverID, "count", dropped)
+	select {
+	case m.logs <- session.LogEvent{
+		ServerID: serverID,
+		Line:     fmt.Sprintf("[mcsd] dropped %d earlier log line(s); control-plane log stream backlogged", dropped),
+		Stream:   session.LogStreamStderr,
+	}:
+	default:
 	}
 }
 
@@ -2156,9 +2236,12 @@ func (m *Manager) logPump(serverID string, src execution.LogSource) {
 // Metrics event per tick until the instance terminates (done closed). When the
 // instance is not a StatsSource, or a sample errors, it emits an up-only sample
 // (server id with zero stats) so the API still learns the server is running
-// (FR-MON-3). A full sink drops the sample with a warning: metrics are a stream,
-// not state, so they keep the lossy posture (unlike status, which coalesces;
-// issue #96).
+// (FR-MON-3). A full sink drops the sample: metrics are a stream, not state, so
+// they keep the lossy posture (unlike status, which coalesces; issue #96).
+// Drops are counted silently and reported as one aggregated WARN per congestion
+// episode — when a sample next gets through, or when the pump exits — mirroring
+// logPump (issues #1716, #1783). The counter is goroutine-local: one pump
+// goroutine runs per server, so no locking is needed.
 func (m *Manager) metricsPump(serverID string, inst execution.Instance, done chan struct{}) {
 	stats, _ := inst.(execution.StatsSource)
 
@@ -2173,9 +2256,13 @@ func (m *Manager) metricsPump(serverID string, inst execution.Instance, done cha
 		cancel()
 	}()
 
+	dropped := 0
 	for {
 		select {
 		case <-done:
+			if dropped > 0 {
+				m.reportDroppedMetrics(serverID, dropped)
+			}
 			return
 		case <-m.clock.After(m.metricsInterval):
 		}
@@ -2193,10 +2280,24 @@ func (m *Manager) metricsPump(serverID string, inst execution.Instance, done cha
 
 		select {
 		case m.metrics <- sample:
+			if dropped > 0 {
+				m.reportDroppedMetrics(serverID, dropped)
+				dropped = 0
+			}
 		default:
-			m.logger.Warn("dropped metrics sample; sink full", "server_id", serverID)
+			dropped++
 		}
 	}
+}
+
+// reportDroppedMetrics emits the aggregated summary for one metrics
+// sink-congestion episode: a single WARN with the drop count, the metrics
+// counterpart of reportDroppedLogs. Unlike logs, no in-band marker is sent:
+// MetricsEvent carries only numeric fields, so a marker would have to be a
+// fabricated sample, and a gap in a periodic series is already visible to
+// consumers as missing points.
+func (m *Manager) reportDroppedMetrics(serverID string, dropped int) {
+	m.logger.Warn("dropped metrics samples; sink full", "server_id", serverID, "count", dropped)
 }
 
 // sampleWithTimeout calls Sample under a context that is cancelled when parent is

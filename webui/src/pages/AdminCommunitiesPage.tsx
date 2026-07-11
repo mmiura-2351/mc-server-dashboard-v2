@@ -52,7 +52,7 @@ export function AdminCommunitiesPage() {
 
   const communities = useQuery({
     queryKey: adminCommunitiesListKey(PAGE_SIZE, offset),
-    queryFn: () => api.get(communitiesUrl(offset)),
+    queryFn: ({ signal }) => api.get(communitiesUrl(offset), { signal }),
     placeholderData: keepPreviousData,
   });
 
@@ -277,8 +277,10 @@ function ProvisionDialog({
   // hint below. Only fetched while open.
   const users = useQuery({
     queryKey: ["users"],
-    queryFn: () =>
-      api.get("/api/admin/users?limit=100&offset=0" as "/api/admin/users"),
+    queryFn: ({ signal }) =>
+      api.get("/api/admin/users?limit=100&offset=0" as "/api/admin/users", {
+        signal,
+      }),
     enabled: open,
   });
 

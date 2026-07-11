@@ -18,17 +18,18 @@ const REFRESH_INTERVAL_MS = 12_000;
 export function AdminOverviewPage() {
   const workersQuery = useQuery({
     queryKey: ["workers"],
-    queryFn: () => api.get("/api/workers"),
+    queryFn: ({ signal }) => api.get("/api/workers", { signal }),
     refetchInterval: REFRESH_INTERVAL_MS,
   });
   const backupsQuery = useQuery({
     queryKey: ["backups", "statistics"],
-    queryFn: () => api.get("/api/backups/statistics"),
+    queryFn: ({ signal }) => api.get("/api/backups/statistics", { signal }),
     refetchInterval: REFRESH_INTERVAL_MS,
   });
   const jarPoolQuery = useQuery({
     queryKey: ["versions", "jar-pool", "stats"],
-    queryFn: () => api.get("/api/versions/jar-pool/stats"),
+    queryFn: ({ signal }) =>
+      api.get("/api/versions/jar-pool/stats", { signal }),
     refetchInterval: REFRESH_INTERVAL_MS,
   });
 

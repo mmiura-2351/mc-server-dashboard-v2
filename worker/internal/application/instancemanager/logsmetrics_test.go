@@ -3,6 +3,8 @@ package instancemanager
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -404,4 +406,336 @@ func waitFor(t *testing.T, cond func() bool) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("condition not met before deadline")
+}
+
+// fakeLogSource feeds the manager-level log pump directly, bypassing the start
+// machinery. Its channel is unbuffered so a send returns exactly when the pump
+// has received the line — the pump receives line N+1 only after line N's
+// forward attempt completed, which the drop tests use for sequencing.
+type fakeLogSource struct{ ch chan execution.LogEvent }
+
+func (s fakeLogSource) Logs() <-chan execution.LogEvent { return s.ch }
+
+// syncSlogHandler captures records under a mutex: the pump goroutine logs
+// concurrently with the test's assertions (capturingSlogHandler is
+// synchronous-use only).
+type syncSlogHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *syncSlogHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *syncSlogHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, r)
+	return nil
+}
+func (h *syncSlogHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *syncSlogHandler) WithGroup(string) slog.Handler      { return h }
+func (h *syncSlogHandler) snapshot() []slog.Record {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]slog.Record(nil), h.records...)
+}
+
+// newDropTestManager builds a manager whose logger records into h; the log
+// pump under test is driven directly, so no driver or metrics clock is wired.
+func newDropTestManager(t *testing.T, h *syncSlogHandler) *Manager {
+	t.Helper()
+	return New(map[string]execution.ExecutionDriver{}, t.TempDir(),
+		func(context.Context, string, string) (execution.ServerControl, error) {
+			return nil, fmt.Errorf("test: no rcon control configured")
+		}).
+		WithLogger(slog.New(h))
+}
+
+// assertOneDropWarn asserts h captured exactly one WARN carrying the server id
+// and the aggregated drop count.
+func assertOneDropWarn(t *testing.T, h *syncSlogHandler, serverID string, count int) {
+	t.Helper()
+	records := h.snapshot()
+	if len(records) != 1 {
+		t.Fatalf("got %d log records, want exactly 1 aggregated summary; records = %+v", len(records), records)
+	}
+	r := records[0]
+	if r.Level != slog.LevelWarn {
+		t.Fatalf("summary level = %v, want Warn", r.Level)
+	}
+	foundID, foundCount := false, false
+	r.Attrs(func(a slog.Attr) bool {
+		switch a.Key {
+		case "server_id":
+			foundID = a.Value.String() == serverID
+		case "count":
+			foundCount = a.Value.Kind() == slog.KindInt64 && a.Value.Int64() == int64(count)
+		}
+		return true
+	})
+	if !foundID || !foundCount {
+		t.Fatalf("summary attrs missing server_id=%q or count=%d: %+v", serverID, count, r)
+	}
+}
+
+// While the merged log sink is full, the manager-level log pump counts drops
+// silently, and when the instance's stream ends it emits exactly one aggregated
+// WARN carrying the count — not one WARN per dropped line, which flooded the
+// worker's own log during control-plane outages (issue #1716). With the sink
+// still full, no in-band marker is queued: the marker is best-effort and never
+// displaces a real line.
+func TestLogPumpAggregatesDropsIntoOneSummaryOnExit(t *testing.T) {
+	h := &syncSlogHandler{}
+	m := newDropTestManager(t, h)
+
+	src := fakeLogSource{ch: make(chan execution.LogEvent)}
+	done := make(chan struct{})
+	go func() {
+		m.logPump("s1", src)
+		close(done)
+	}()
+
+	// Fill the sink to capacity; nothing drains it (the control plane is "down").
+	fill := cap(m.Logs())
+	for i := 0; i < fill; i++ {
+		src.ch <- execution.LogEvent{ServerID: "s1", Line: fmt.Sprintf("line-%d", i), Stream: execution.LogStreamStdout}
+	}
+	waitFor(t, func() bool { return len(m.Logs()) == fill })
+
+	// Three more lines arrive against the full sink; every one is dropped.
+	for i := 0; i < 3; i++ {
+		src.ch <- execution.LogEvent{ServerID: "s1", Line: "overflow", Stream: execution.LogStreamStdout}
+	}
+
+	// Terminal state: the stream ends and the pump flushes its drop count.
+	close(src.ch)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("log pump did not exit after its source closed")
+	}
+
+	assertOneDropWarn(t, h, "s1", 3)
+
+	// The sink still holds exactly the fill lines: dropped lines are gone and no
+	// marker was forced into a full sink.
+	for i := 0; i < fill; i++ {
+		ev := <-m.Logs()
+		if strings.HasPrefix(ev.Line, "[mcsd]") {
+			t.Fatalf("unexpected marker in a full sink: %q", ev.Line)
+		}
+	}
+	select {
+	case ev := <-m.Logs():
+		t.Fatalf("sink held more than the fill lines: %+v", ev)
+	default:
+	}
+}
+
+// When the sink drains and a line next gets through (the control-plane stream
+// recovered), the pump reports the accumulated drops exactly once: one WARN on
+// the worker's own logger and one in-band "[mcsd] dropped ..." marker on the
+// merged stream so downstream log viewers learn about the gap (issue #1716).
+func TestLogPumpReportsDropsOnceOnRecovery(t *testing.T) {
+	h := &syncSlogHandler{}
+	m := newDropTestManager(t, h)
+
+	src := fakeLogSource{ch: make(chan execution.LogEvent)}
+	defer close(src.ch)
+	go m.logPump("s1", src)
+
+	pushed := 0
+	push := func(line string) {
+		src.ch <- execution.LogEvent{ServerID: "s1", Line: line, Stream: execution.LogStreamStdout}
+		pushed++
+	}
+
+	fill := cap(m.Logs())
+	for i := 0; i < fill; i++ {
+		push("fill")
+	}
+	waitFor(t, func() bool { return len(m.Logs()) == fill })
+
+	// Overflow while nothing drains. Once over-3's send returns, over-1 and
+	// over-2 have definitively been attempted and dropped; over-3's attempt may
+	// still be in flight.
+	push("over-1")
+	push("over-2")
+	push("over-3")
+
+	// Recovery: drain three slots, then push one more line. At most one pending
+	// attempt (over-3's) can claim a freed slot, so the recovery line always
+	// finds room — and at least one slot stays free for the marker after it.
+	delivered := 0
+	for i := 0; i < 3; i++ {
+		<-m.Logs()
+		delivered++
+	}
+	push("recovery")
+
+	// Read until the marker appears. Depending on whether over-3's in-flight
+	// attempt claimed a freed slot, the flush fires on over-3 (marker before the
+	// recovery line) or on the recovery line (marker after it) — the invariant
+	// is the count, not the position.
+	var marker session.LogEvent
+	timeout := time.After(2 * time.Second)
+	for marker.Line == "" {
+		select {
+		case ev := <-m.Logs():
+			if strings.HasPrefix(ev.Line, "[mcsd] dropped") {
+				marker = ev
+			} else {
+				delivered++
+			}
+		case <-timeout:
+			t.Fatal("no drop marker observed on the merged stream after recovery")
+		}
+	}
+	if marker.ServerID != "s1" || marker.Stream != session.LogStreamStderr {
+		t.Fatalf("marker event = %+v, want server s1 on stderr", marker)
+	}
+	var dropped int
+	if _, err := fmt.Sscanf(marker.Line, "[mcsd] dropped %d earlier log line(s); control-plane log stream backlogged", &dropped); err != nil {
+		t.Fatalf("marker line = %q, want the dropped-count format: %v", marker.Line, err)
+	}
+	if dropped < 2 {
+		t.Fatalf("marker count = %d, want at least 2 (over-1 and over-2 can never land)", dropped)
+	}
+
+	// Every pushed line is either delivered or aggregated into the one summary:
+	// the remaining delivered lines arrive, no second marker ever does.
+	for delivered < pushed-dropped {
+		select {
+		case ev := <-m.Logs():
+			if strings.HasPrefix(ev.Line, "[mcsd] dropped") {
+				t.Fatalf("second marker for a single congestion episode: %q", ev.Line)
+			}
+			delivered++
+		case <-timeout:
+			t.Fatalf("delivered %d of %d non-dropped lines before timeout", delivered, pushed-dropped)
+		}
+	}
+	select {
+	case ev := <-m.Logs():
+		t.Fatalf("unexpected extra event: %+v", ev)
+	default:
+	}
+	assertOneDropWarn(t, h, "s1", dropped)
+}
+
+// tickAndSettle fires one metrics tick and waits until the pump has finished
+// the iteration — sampled, attempted the send — and re-parked in its select,
+// observed as a new After registration on the fake clock. It makes the drop
+// tests deterministic: once it returns, the tick's send-or-drop has definitely
+// happened.
+func tickAndSettle(t *testing.T, clk *fakeClock) {
+	t.Helper()
+	waitFor(t, func() bool {
+		clk.mu.Lock()
+		defer clk.mu.Unlock()
+		return len(clk.chs) > 0
+	})
+	clk.mu.Lock()
+	before := clk.registers
+	clk.mu.Unlock()
+	clk.tick()
+	waitFor(t, func() bool {
+		clk.mu.Lock()
+		defer clk.mu.Unlock()
+		return clk.registers > before
+	})
+}
+
+// While the merged metrics sink is full, the metrics pump counts drops
+// silently, and when the instance terminates it emits exactly one aggregated
+// WARN carrying the count — not one WARN per dropped sample, the same per-drop
+// pattern issue #1716 removed from the log pump (issue #1783).
+func TestMetricsPumpAggregatesDropsIntoOneSummaryOnExit(t *testing.T) {
+	h := &syncSlogHandler{}
+	clk := &fakeClock{}
+	m := newDropTestManager(t, h).WithMetrics(clk, time.Hour)
+
+	done := make(chan struct{})
+	exited := make(chan struct{})
+	go func() {
+		m.metricsPump("s1", newRichInstance("s1"), done)
+		close(exited)
+	}()
+
+	// Fill the sink to capacity; nothing drains it (the control plane is "down").
+	fill := cap(m.Metrics())
+	for i := 0; i < fill; i++ {
+		tickAndSettle(t, clk)
+	}
+	if got := len(m.Metrics()); got != fill {
+		t.Fatalf("sink holds %d samples after %d ticks, want full (%d)", got, fill, fill)
+	}
+
+	// Three more ticks against the full sink; every sample is dropped.
+	for i := 0; i < 3; i++ {
+		tickAndSettle(t, clk)
+	}
+
+	// Terminal state: done closes and the pump flushes its drop count.
+	close(done)
+	select {
+	case <-exited:
+	case <-time.After(2 * time.Second):
+		t.Fatal("metrics pump did not exit after done closed")
+	}
+
+	assertOneDropWarn(t, h, "s1", 3)
+
+	// The sink still holds exactly the fill samples: dropped samples are gone
+	// and nothing was forced into a full sink.
+	if got := len(m.Metrics()); got != fill {
+		t.Fatalf("sink holds %d samples, want exactly %d", got, fill)
+	}
+}
+
+// When the sink drains and a sample next gets through (the control-plane
+// stream recovered), the pump reports the accumulated drops exactly once and
+// resets: later successful sends — and the eventual exit — report nothing
+// more (issue #1783).
+func TestMetricsPumpReportsDropsOnceOnRecovery(t *testing.T) {
+	h := &syncSlogHandler{}
+	clk := &fakeClock{}
+	m := newDropTestManager(t, h).WithMetrics(clk, time.Hour)
+
+	done := make(chan struct{})
+	exited := make(chan struct{})
+	go func() {
+		m.metricsPump("s1", newRichInstance("s1"), done)
+		close(exited)
+	}()
+
+	fill := cap(m.Metrics())
+	for i := 0; i < fill; i++ {
+		tickAndSettle(t, clk)
+	}
+	for i := 0; i < 3; i++ {
+		tickAndSettle(t, clk)
+	}
+
+	// Congestion is ongoing: nothing has been reported yet.
+	if records := h.snapshot(); len(records) != 0 {
+		t.Fatalf("got %d log records while the sink is still full, want none: %+v", len(records), records)
+	}
+
+	// Recovery: one slot frees, the next sample gets through, and the pump
+	// flushes the accumulated count.
+	<-m.Metrics()
+	tickAndSettle(t, clk)
+	assertOneDropWarn(t, h, "s1", 3)
+
+	// The episode is over: a later successful send and the pump's exit add no
+	// second summary.
+	<-m.Metrics()
+	tickAndSettle(t, clk)
+	close(done)
+	select {
+	case <-exited:
+	case <-time.After(2 * time.Second):
+		t.Fatal("metrics pump did not exit after done closed")
+	}
+	assertOneDropWarn(t, h, "s1", 3)
 }

@@ -42,7 +42,7 @@ export function ResourcePacksPage() {
 
   const listQuery = useQuery({
     queryKey: PACKS_KEY,
-    queryFn: () => api.get("/api/resource-packs"),
+    queryFn: ({ signal }) => api.get("/api/resource-packs", { signal }),
   });
 
   const refresh = () => {

@@ -57,11 +57,12 @@ export function CommunityGrantsTab({
   const members = useQuery({
     queryKey: membersKeys.list(communityId),
     queryFn: labelQueryFn(
-      () =>
+      ({ signal }: { signal: AbortSignal }) =>
         api.get(
           apiPath("/api/communities/{community_id}/members", {
             community_id: communityId,
           }),
+          { signal },
         ),
       [],
     ),
@@ -72,11 +73,12 @@ export function CommunityGrantsTab({
     // that DashboardPage and CommunityGroupsTab consume (#791).
     queryKey: ["communities", communityId, "servers", "grants-labels"] as const,
     queryFn: labelQueryFn(
-      () =>
+      ({ signal }: { signal: AbortSignal }) =>
         api.get(
           apiPath("/api/communities/{community_id}/servers", {
             community_id: communityId,
           }),
+          { signal },
         ),
       [],
     ),
@@ -84,7 +86,7 @@ export function CommunityGrantsTab({
 
   const grants = useQuery({
     queryKey: grantsKey(communityId, filterUserId),
-    queryFn: () => {
+    queryFn: ({ signal }) => {
       const base = apiPath("/api/communities/{community_id}/grants", {
         community_id: communityId,
       });
@@ -94,7 +96,7 @@ export function CommunityGrantsTab({
         filterUserId === ""
           ? base
           : (`${base}?user_id=${encodeURIComponent(filterUserId)}` as typeof base);
-      return api.get(url);
+      return api.get(url, { signal });
     },
   });
 
@@ -129,8 +131,10 @@ export function CommunityGrantsTab({
   if (grants.isPending || members.isPending || servers.isPending) {
     return <p className="sub">{t("communitySettings.grants.loading")}</p>;
   }
+  // Error only when there is nothing to show (an initial load failed). A
+  // failed background refetch retains `data`, so the cached list keeps
+  // rendering through transient API blips (#1797).
   if (
-    grants.isError ||
     grants.data === undefined ||
     members.data === undefined ||
     servers.data === undefined

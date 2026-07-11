@@ -12,7 +12,7 @@ dependencies = [
     # generator (grpcio-tools 1.80.0 emits protobuf-6 code). grpcio 1.81.0
     # (2026-06-01) is inside the 7-day cooldown as of this change, so cap below
     # it; lift the cap to <2 once it ages out (docs/dev/DEPENDENCIES.md Section 3).
-    "grpcio>=1.80.0,<1.82",
+    "grpcio>=1.80.0,<1.83",
     "protobuf>=6.31.1,<7",
     # API framework stack (ARCHITECTURE.md Section 7.4). 0.x libraries cap the
     # next minor; 1.x+/2.x cap the next major (docs/dev/DEPENDENCIES.md Section 1). All
@@ -87,7 +87,7 @@ dev = [
     # Control-plane codegen. grpcio-tools bundles protoc + the python/grpc
     # generators; mypy-protobuf adds .pyi type stubs. Both pinned outside the
     # cooldown (grpcio-tools 1.80.0 2026-03-30; mypy-protobuf 5.1.0 2026-04-28).
-    "grpcio-tools>=1.80.0,<1.82",
+    "grpcio-tools>=1.80.0,<1.83",
     "mypy-protobuf>=5.1.0,<6",
     # httpx (FastAPI's TestClient transport) is declared as a runtime dependency
     # above (the VersionCatalog adapters use it); no separate dev pin is needed.

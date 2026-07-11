@@ -48,18 +48,22 @@ function Loaded({ communityId }: { communityId: string }) {
   const [tab, setTab] = useTabHash(TABS);
   const query = useQuery({
     queryKey: ["communities", communityId],
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api.get(
         apiPath("/api/communities/{community_id}", {
           community_id: communityId,
         }),
+        { signal },
       ),
   });
 
   if (query.isPending) {
     return <p className="sub">{t("communitySettings.loading")}</p>;
   }
-  if (query.isError || query.data === undefined) {
+  // Full-page error only when there is nothing to show (the initial load
+  // failed). A failed background refetch retains `data`, so the cached page
+  // keeps rendering through transient API blips (#1797).
+  if (query.data === undefined) {
     return <p className="field-error">{t("communitySettings.loadError")}</p>;
   }
 

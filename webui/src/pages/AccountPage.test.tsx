@@ -3,7 +3,13 @@
 // jsdom but matches both the input and the show/hide toggle under happy-dom
 // (issue #1751).
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client.ts";
@@ -42,7 +48,7 @@ function renderPage() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  return render(
+  const result = render(
     <MemoryRouter>
       <QueryClientProvider client={queryClient}>
         <ToastProvider>
@@ -51,6 +57,7 @@ function renderPage() {
       </QueryClientProvider>
     </MemoryRouter>,
   );
+  return { ...result, queryClient };
 }
 
 beforeEach(() => {
@@ -107,6 +114,26 @@ describe("AccountPage profile", () => {
     expect(
       screen.queryByText(t("account.memberships.none")),
     ).not.toBeInTheDocument();
+  });
+
+  it("keeps rendering the cached profile when a background refetch fails (#1797)", async () => {
+    const { queryClient } = renderPage();
+    await waitForLoaded();
+
+    // Simulate a transient API outage: the next background refetch fails.
+    mockApi.get.mockRejectedValue(
+      new ApiError(500, { reason: "server_error" }),
+    );
+    await act(() => queryClient.invalidateQueries());
+    // The query-state notification lands a task after invalidateQueries
+    // settles; flush it so the assertion sees the post-refetch render.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // The cached page stays on screen instead of the full-page error.
+    expect(screen.getByDisplayValue("miura")).toBeInTheDocument();
+    expect(screen.queryByText(t("account.loadError"))).not.toBeInTheDocument();
   });
 
   it("saves profile edits and shows a success toast", async () => {

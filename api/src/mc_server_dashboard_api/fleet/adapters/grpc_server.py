@@ -9,8 +9,10 @@ CONTROL_PLANE.md Section 4:
    wrong credential aborts the stream with ``UNAUTHENTICATED`` before any
    message is processed.
 2. **Register first.** The first ``WorkerMessage`` MUST carry ``Register``
-   (FR-WRK-1); anything else aborts with ``FAILED_PRECONDITION``. On success the
-   Worker is added to the :class:`WorkerRegistry` and the API replies
+   (FR-WRK-1); anything else aborts with ``FAILED_PRECONDITION``. The wait for
+   it is bounded (issue #1700): a client that connects and sends nothing is
+   aborted with ``DEADLINE_EXCEEDED``. On success the Worker is added to the
+   :class:`WorkerRegistry` and the API replies
    ``RegisterAck{accepted, heartbeat_interval}``.
 3. **Steady state.** ``Event{Heartbeat}`` refreshes liveness (FR-WRK-2);
    ``Event{StatusChange}`` reconciles the server's observed state through the
@@ -115,11 +117,29 @@ _LOG_STREAM_BY_PROTO: dict[int, str] = {
     pb.LOG_STREAM_STDERR: "stderr",
 }
 
+# Bound on the wait for the first (Register) message after the stream opens
+# (issue #1700). A healthy Worker sends Register immediately on connect, so a
+# credentialed client that connects and then sends nothing is broken or hostile;
+# without a deadline each such connect parks a servicer coroutine forever (the
+# liveness watchdog is only armed after registration, and gRPC keepalive detects
+# only a dead transport, not an idle-but-ACKing peer). Expiry aborts the stream
+# with DEADLINE_EXCEEDED. Generous relative to a healthy connect (milliseconds)
+# so a slow link never trips it.
+_REGISTRATION_TIMEOUT_SECONDS = 10.0
+
 # Server-side gRPC keepalive: transport-level dead-peer detection. The server
 # sends HTTP/2 PINGs at heartbeat_timeout intervals; if the peer does not ACK
 # within _KEEPALIVE_TIMEOUT_MS, the transport closes and the Session teardown
 # fires mark_worker_servers_unknown (issue #1600).
 _KEEPALIVE_TIMEOUT_MS = 20_000
+
+# Floor on how often the server accepts client keepalive PINGs. The Worker
+# dials with client-side keepalive (Time=20s, worker/cmd/worker/main.go, issue
+# #1709), and C-core's default ping-strike enforcement (min interval 5 min,
+# max 2 strikes) would answer that cadence with GOAWAY ENHANCE_YOUR_CALM,
+# because the API->Worker direction is mostly idle so the pings arrive
+# "without data". Half the Worker's cadence leaves margin for timing skew.
+_MIN_PING_INTERVAL_MS = 10_000
 
 
 def _keepalive_options(heartbeat_timeout: dt.timedelta) -> list[tuple[str, int]]:
@@ -131,6 +151,11 @@ def _keepalive_options(heartbeat_timeout: dt.timedelta) -> list[tuple[str, int]]
         # Required: the default of 2 stops PINGs after 2 pings with no outbound
         # data, and the API->Worker direction is mostly idle.
         ("grpc.http2.max_pings_without_data", 0),
+        # Permit the Worker's client-side keepalive (issue #1709; see
+        # _MIN_PING_INTERVAL_MS). permit_without_calls covers the Worker's
+        # PermitWithoutStream pings between Session streams (reconnect backoff).
+        ("grpc.http2.min_ping_interval_without_data_ms", _MIN_PING_INTERVAL_MS),
+        ("grpc.keepalive_permit_without_calls", 1),
     ]
 
 
@@ -425,7 +450,18 @@ class WorkerSessionServicer(WorkerServiceServicer):
         context: aio.ServicerContext,
     ) -> tuple[WorkerId, str, SessionToken, list[str]]:
         try:
-            first = await request_iterator.__anext__()
+            # Bounded (issue #1700): a credentialed client that connects and
+            # never sends Register must not hold the RPC forever. The deadline
+            # fires before any registration state exists, so the abort needs no
+            # cleanup.
+            first = await asyncio.wait_for(
+                request_iterator.__anext__(), timeout=_REGISTRATION_TIMEOUT_SECONDS
+            )
+        except TimeoutError:
+            await context.abort(
+                grpc.StatusCode.DEADLINE_EXCEEDED,
+                "no Register within the registration deadline",
+            )
         except StopAsyncIteration:
             await context.abort(
                 grpc.StatusCode.FAILED_PRECONDITION,

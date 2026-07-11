@@ -110,19 +110,24 @@ function Loaded({
   const events = useServerEvents(communityId, serverId);
   const query = useQuery({
     queryKey: serverKey(communityId, serverId),
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api.get(
         apiPath("/api/communities/{community_id}/servers/{server_id}", {
           community_id: communityId,
           server_id: serverId,
         }),
+        { signal },
       ),
   });
 
   if (query.isPending) {
     return <p className="sub">{t("serverDetail.loading")}</p>;
   }
-  if (query.isError || query.data === undefined) {
+  // Full-page error only when there is nothing to show (the initial load
+  // failed). A failed background refetch retains `data`, so the cached page
+  // keeps rendering through transient API blips; the WS-driven degraded pill
+  // already signals that live updates are down (#1724).
+  if (query.data === undefined) {
     return <p className="field-error">{t("serverDetail.loadError")}</p>;
   }
 
@@ -1448,7 +1453,7 @@ function Settings({
   // meta query is shared with the create page via react-query's cache.
   const metaQuery = useQuery({
     queryKey: ["meta"],
-    queryFn: () => api.get("/api/meta"),
+    queryFn: ({ signal }) => api.get("/api/meta", { signal }),
   });
   const maxMemoryLimitMb: number =
     typeof metaQuery.data?.max_memory_limit_mb === "number"

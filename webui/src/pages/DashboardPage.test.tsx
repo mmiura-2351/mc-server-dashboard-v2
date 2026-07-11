@@ -4,7 +4,13 @@
 // navigator.clipboard is absent. jsdom omits it; happy-dom provides it, so the
 // fallback is skipped and the assertions fail (issue #1751).
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client.ts";
@@ -75,7 +81,7 @@ function renderPage(path = `/communities/${CID}`) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  return render(
+  const result = render(
     <MemoryRouter initialEntries={[path]}>
       <QueryClientProvider client={queryClient}>
         <ToastProvider>
@@ -86,6 +92,7 @@ function renderPage(path = `/communities/${CID}`) {
       </QueryClientProvider>
     </MemoryRouter>,
   );
+  return { ...result, queryClient };
 }
 
 beforeEach(() => {
@@ -149,6 +156,52 @@ describe("DashboardPage list", () => {
     expect(
       await screen.findByText(t("dashboard.loadError")),
     ).toBeInTheDocument();
+  });
+
+  it("keeps rendering cached servers when a background refetch fails (#1724)", async () => {
+    mockApi.get.mockResolvedValue([server()]);
+    const { queryClient } = renderPage();
+    await screen.findByText("survival");
+
+    // Simulate a transient API outage: the next background refetch fails.
+    mockApi.get.mockRejectedValue(
+      new ApiError(500, { reason: "server_error" }),
+    );
+    await act(() => queryClient.invalidateQueries());
+    // The query-state notification lands a task after invalidateQueries
+    // settles; flush it so the assertion sees the post-refetch render.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // The cached list stays on screen instead of a full-page error.
+    expect(screen.getByText("survival")).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("dashboard.loadError")),
+    ).not.toBeInTheDocument();
+  });
+
+  it("recovers to fresh data once a refetch succeeds after a failure (#1724)", async () => {
+    mockApi.get.mockResolvedValue([server()]);
+    const { queryClient } = renderPage();
+    await screen.findByText("survival");
+
+    mockApi.get.mockRejectedValue(
+      new ApiError(500, { reason: "server_error" }),
+    );
+    await act(() => queryClient.invalidateQueries());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // The API comes back: the next refetch replaces the stale list.
+    mockApi.get.mockResolvedValue([server({ name: "creative" })]);
+    await act(() => queryClient.invalidateQueries());
+
+    expect(await screen.findByText("creative")).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("dashboard.loadError")),
+    ).not.toBeInTheDocument();
   });
 });
 

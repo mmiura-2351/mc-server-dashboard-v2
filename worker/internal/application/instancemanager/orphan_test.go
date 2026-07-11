@@ -229,6 +229,94 @@ drain:
 	}
 }
 
+// flushOrphanInstance combines the orphanInstance latch (fail-then-succeed Stop)
+// with the rconFailInstance preFallback invocation, so a test can exercise the
+// pre-stop RCON flush across the orphan retry path.
+type flushOrphanInstance struct {
+	*fakeInstance
+	stopAfter int
+	stopCalls int
+	stopping  bool
+}
+
+func (i *flushOrphanInstance) Stop(ctx context.Context, graceful bool, preFallback ...func(context.Context) bool) error {
+	// Call the pre-fallback hook (the flush) before terminate, just as the real
+	// containerdriver does on the graceful path (#1007).
+	if graceful && len(preFallback) > 0 && preFallback[0] != nil {
+		_ = preFallback[0](ctx)
+	}
+	i.mu.Lock()
+	if i.stopping {
+		i.mu.Unlock()
+		return nil
+	}
+	i.stopping = true
+	i.stopCalls++
+	fail := i.stopCalls <= i.stopAfter
+	i.mu.Unlock()
+	if fail {
+		i.mu.Lock()
+		i.stopping = false
+		i.mu.Unlock()
+		return errors.New("driver: process survived kill")
+	}
+	return i.fakeInstance.Stop(ctx, graceful)
+}
+
+// flushOrphanDriver hands out flushOrphanInstances.
+type flushOrphanDriver struct {
+	inst      *flushOrphanInstance
+	stopAfter int
+}
+
+func (d *flushOrphanDriver) Start(_ context.Context, spec execution.InstanceSpec) (execution.Instance, error) {
+	d.inst = &flushOrphanInstance{fakeInstance: newFakeInstance(spec.ServerID), stopAfter: d.stopAfter}
+	return d.inst, nil
+}
+
+// A retried stop for a failed-stop orphan must pass the correct driver name to
+// openControl so the RCON flush resolves the container's address — not the
+// loopback host. On a docker-network topology (RCON not published to the host)
+// an empty driver makes the dial fail and the flush is silently skipped
+// (issue #1712).
+func TestOrphanRetryStopPassesDriverToFlush(t *testing.T) {
+	d := &flushOrphanDriver{stopAfter: 1} // first Stop fails, second succeeds
+	var drivers []string
+	scratch := t.TempDir()
+	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch,
+		func(_ context.Context, _ string, driver string) (execution.ServerControl, error) {
+			drivers = append(drivers, driver)
+			return &fakeControl{reply: "ok"}, nil
+		})
+	m.settlePollInterval = 0
+
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+
+	// Stop #1: driver is captured before take — flush runs with the correct driver.
+	first := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+	if first.Success {
+		t.Fatalf("first stop = %+v, want failure (driver could not confirm termination)", first)
+	}
+
+	// Stop #2 (retry): the orphan retry must still pass "container" to openControl,
+	// not an empty string.
+	drivers = nil // reset so we observe only the retry's flush
+	retry := m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: "s1", Kind: "StopServer"})
+	if !retry.Success {
+		t.Fatalf("retry stop = %+v, want success", retry)
+	}
+	if len(drivers) == 0 {
+		t.Fatal("retry stop did not call openControl (flush was skipped entirely)")
+	}
+	for i, got := range drivers {
+		if got != "container" {
+			t.Fatalf("retry openControl call %d driver = %q, want %q (orphan must retain the driver)", i, got, "container")
+		}
+	}
+}
+
 // A restart whose internal stop fails leaves the same orphan record: it does not
 // relaunch, and a retry stop can still terminate the orphan (issue #251).
 func TestRestartStopFailureLeavesOrphan(t *testing.T) {

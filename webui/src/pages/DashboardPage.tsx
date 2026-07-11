@@ -285,11 +285,12 @@ function Loaded({ communityId }: { communityId: string }) {
 
   const query = useQuery({
     queryKey: serversKey(communityId),
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api.get(
         apiPath("/api/communities/{community_id}/servers", {
           community_id: communityId,
         }),
+        { signal },
       ),
   });
 
@@ -310,7 +311,11 @@ function Loaded({ communityId }: { communityId: string }) {
       </DashboardChrome>
     );
   }
-  if (query.isError || query.data === undefined) {
+  // Full-page error only when there is nothing to show (the initial load
+  // failed). A failed background refetch retains `data`, so the cached list
+  // keeps rendering through transient API blips; the WS-driven degraded pill
+  // already signals that live updates are down (#1724).
+  if (query.data === undefined) {
     return (
       <DashboardChrome>
         <p className="field-error">{t("dashboard.loadError")}</p>

@@ -123,24 +123,26 @@ export function ServerBackupsTab({
   const statsQuery = useQuery({
     queryKey: statsKey(communityId, serverId),
     enabled: canRead,
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api.get(
         apiPath(
           "/api/communities/{community_id}/servers/{server_id}/backups/statistics",
           { community_id: communityId, server_id: serverId },
         ),
+        { signal },
       ),
   });
 
   const listQuery = useQuery({
     queryKey: backupsKey(communityId, serverId),
     enabled: canRead,
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api.get(
         apiPath("/api/communities/{community_id}/servers/{server_id}/backups", {
           community_id: communityId,
           server_id: serverId,
         }),
+        { signal },
       ),
   });
 

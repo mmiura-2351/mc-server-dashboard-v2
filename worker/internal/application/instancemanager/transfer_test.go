@@ -74,6 +74,7 @@ func (f *fakeTransfer) Snapshot(ctx context.Context, _, _, workingDir string, ba
 		f.mu.Unlock()
 		return 0, ctx.Err()
 	}
+	defer f.mu.Unlock()
 	f.snapshots = append(f.snapshots, workingDir)
 	f.snapshotHadWorkingSet = append(f.snapshotHadWorkingSet, hasWorkingSet(workingDir))
 	f.snapshotBaseGenerations = append(f.snapshotBaseGenerations, baseGeneration)
@@ -176,6 +177,7 @@ func TestHydrateTriggerWithoutTransferClientFails(t *testing.T) {
 func TestSnapshotTriggerPacksWorkingDir(t *testing.T) {
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
+	seedScratch(t, m, "s1") // an at-rest working set; absent is refused (#1713)
 
 	res := m.Handle(context.Background(), snapshotCmd())
 	if !res.Success {
@@ -190,6 +192,7 @@ func TestSnapshotTriggerPacksWorkingDir(t *testing.T) {
 func TestSnapshotTriggerTransferFailureIsCoded(t *testing.T) {
 	tr := &fakeTransfer{err: errors.New("boom")}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
+	seedScratch(t, m, "s1") // an at-rest working set; absent is refused (#1713)
 
 	res := m.Handle(context.Background(), snapshotCmd())
 	if res.Success || res.ErrorCode != session.CommandErrorTransferFailed {
@@ -439,6 +442,7 @@ func TestSnapshotTriggerUploadExceedingDeadlineAborts(t *testing.T) {
 	tr := &fakeTransfer{blockUntilCtxDone: true}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
 	m.SetTransferDeadline(20 * time.Millisecond)
+	seedScratch(t, m, "s1") // an at-rest working set; absent is refused (#1713)
 
 	res := m.Handle(context.Background(), snapshotCmd())
 	if res.Success || res.ErrorCode != session.CommandErrorTransferFailed {
@@ -477,6 +481,7 @@ func TestHydrateTriggerDownloadExceedingDeadlineAborts(t *testing.T) {
 func TestSnapshotTriggerWithoutDeadlineRunsUnbounded(t *testing.T) {
 	tr := &fakeTransfer{blockUntilCtxDone: true}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
+	seedScratch(t, m, "s1") // an at-rest working set; absent is refused (#1713)
 	// No SetTransferDeadline call: the bound is 0 (unbounded).
 
 	ctx, cancel := context.WithCancel(context.Background())

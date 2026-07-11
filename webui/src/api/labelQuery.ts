@@ -23,15 +23,17 @@ import { ApiError } from "./client.ts";
 
 /**
  * Wrap a label-resolution `queryFn` to swallow a 403 into `emptyValue`. Use only
- * for display-only secondary reads; never for the tab's primary read.
+ * for display-only secondary reads; never for the tab's primary read. The
+ * wrapped fn's arguments (TanStack's query-function context, carrying the abort
+ * signal) pass through untouched so requests stay cancellable (issue #1728).
  */
-export function labelQueryFn<T>(
-  queryFn: () => Promise<T>,
+export function labelQueryFn<T, A extends unknown[]>(
+  queryFn: (...args: A) => Promise<T>,
   emptyValue: T,
-): () => Promise<T> {
-  return async () => {
+): (...args: A) => Promise<T> {
+  return async (...args: A) => {
     try {
-      return await queryFn();
+      return await queryFn(...args);
     } catch (error) {
       if (error instanceof ApiError && error.status === 403) {
         return emptyValue;
