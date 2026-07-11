@@ -29,13 +29,26 @@ class BackupArchiveStore(abc.ABC):
 
     @abc.abstractmethod
     async def create_from_current(
-        self, *, community_id: CommunityId, server_id: ServerId
-    ) -> str:
-        """Archive the authoritative ``current/`` and return the archive ref (FR-BAK-1).
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> None:
+        """Archive the authoritative ``current/`` under the given ref (FR-BAK-1).
 
-        The stopped path and the tail of the running path both call this: Storage
-        only ever archives the authoritative copy (Section 6.9). Raises
-        :class:`BackupNotFoundError` if nothing is published to archive.
+        The caller pre-generates the ref and commits the metadata row first (#1707),
+        then writes the archive. A crash after the row commit but before the archive
+        write leaves a dangling row (detectable, self-healing), never an orphaned
+        archive with no row. Raises :class:`BackupNotFoundError` if nothing is
+        published to archive.
+        """
+
+    @abc.abstractmethod
+    async def list_archive_refs(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> list[str]:
+        """List all archive refs on storage (filesystem/object-store driven).
+
+        Returns every ref that has a physical archive, regardless of whether a
+        metadata row exists. Used by ``DeleteServer`` to prune orphaned archives
+        that have no row (issue #1707).
         """
 
     @abc.abstractmethod
@@ -126,11 +139,14 @@ class BackupArchiveStore(abc.ABC):
         community_id: CommunityId,
         server_id: ServerId,
         stream: AsyncIterator[bytes],
-    ) -> str:
-        """Store an uploaded archive verbatim, returning its ref (issue #281).
+        storage_ref: str,
+    ) -> None:
+        """Store an uploaded archive verbatim under the given ref (issue #281).
 
-        The caller has already validated the archive; this only stores the bytes
-        and returns the new ref (restorable via :meth:`restore`).
+        The caller pre-generates the ref and commits the metadata row first (#1707),
+        then stores the archive bytes. A crash after the row commit but before the
+        store write leaves a dangling row (detectable, self-healing), never an
+        orphaned archive with no row.
         """
 
     @abc.abstractmethod

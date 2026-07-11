@@ -352,12 +352,18 @@ class BackupStore(abc.ABC):
 
     @abc.abstractmethod
     async def create_backup_from_current(
-        self, community_id: CommunityId, server_id: ServerId
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        key: BackupKey | None = None,
     ) -> BackupKey:
         """Archive the authoritative ``current/`` into ``backups/`` (FR-BAK-1).
 
         The stopped-server path: Storage only ever archives the authoritative copy
-        (Section 3.3). Raises :class:`~.errors.NotFoundError` if nothing is published.
+        (Section 3.3). When *key* is provided the archive is stored under that key
+        (the caller pre-generated it so it could commit the metadata row first,
+        issue #1707); when ``None`` a fresh key is minted internally.
+        Raises :class:`~.errors.NotFoundError` if nothing is published.
         """
 
     @abc.abstractmethod
@@ -427,12 +433,17 @@ class BackupStore(abc.ABC):
 
     @abc.abstractmethod
     async def put_backup(
-        self, community_id: CommunityId, server_id: ServerId, stream: ByteStream
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        stream: ByteStream,
+        key: BackupKey | None = None,
     ) -> BackupKey:
         """Store an uploaded backup archive verbatim, returning its key (issue #281).
 
         The caller (the upload use case) has already VALIDATED the archive opens and
-        its entries are traversal-safe; Storage only stores the bytes under a fresh
+        its entries are traversal-safe; Storage stores the bytes under the provided
+        *key* (when the caller pre-generated it, issue #1707) or a fresh
         ``BackupKey`` in the server's ``backups/``, so the new backup is restorable
         through :meth:`restore_backup` exactly like a created one.
         """

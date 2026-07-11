@@ -1115,9 +1115,10 @@ class FakeBackupArchiveStore(BackupArchiveStore):
 
     Records every operation and tracks the archives that "exist" so a test can
     assert create -> ref, restore-of-known-ref, idempotent delete, and the
-    delete-ordering (archive removed before the metadata row). ``create_from_current``
-    mints a fresh ref; ``missing`` makes the next create raise the
-    no-working-set error.
+    delete-ordering (archive removed before the metadata row).
+    ``create_from_current`` writes an archive under the caller-provided
+    ``storage_ref``; ``missing`` makes the next create raise the no-working-set
+    error.
     """
 
     def __init__(self, *, missing: bool = False, pack_fails: bool = False) -> None:
@@ -1158,16 +1159,18 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         self._counter = 0
 
     async def create_from_current(
-        self, *, community_id: CommunityId, server_id: ServerId
-    ) -> str:
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> None:
         if self._missing:
             raise BackupNotFoundError(str(server_id.value))
-        self._counter += 1
-        ref = f"archive-{self._counter}"
-        self.archives.add(ref)
-        self.bytes_by_ref[ref] = b"archive-bytes"
+        self.archives.add(storage_ref)
+        self.bytes_by_ref[storage_ref] = b"archive-bytes"
         self.created.append(server_id)
-        return ref
+
+    async def list_archive_refs(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> list[str]:
+        return sorted(self.archives)
 
     async def restore(
         self,
@@ -1228,14 +1231,12 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         community_id: CommunityId,
         server_id: ServerId,
         stream: AsyncIterator[bytes],
-    ) -> str:
-        self._counter += 1
-        ref = f"archive-{self._counter}"
+        storage_ref: str,
+    ) -> None:
         data = b"".join([chunk async for chunk in stream])
-        self.archives.add(ref)
-        self.bytes_by_ref[ref] = data
+        self.archives.add(storage_ref)
+        self.bytes_by_ref[storage_ref] = data
         self.stored.append(server_id)
-        return ref
 
     async def size(
         self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str

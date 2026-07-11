@@ -49,6 +49,11 @@ from tests.storage.helpers import (
 )
 
 
+def _ref() -> str:
+    """Pre-generate a unique storage ref (mirrors what the application layer does)."""
+    return uuid.uuid4().hex
+
+
 def _scope() -> tuple[CommunityId, ServerId]:
     return CommunityId(uuid.uuid4()), ServerId(uuid.uuid4())
 
@@ -89,7 +94,10 @@ async def test_restore_round_trip_recovers_backed_up_content(tmp_path: Path) -> 
 
     # Publish the original working set, then back it up.
     await _publish(storage, community, server, {"server.properties": b"motd=original"})
-    ref = await adapter.create_from_current(community_id=community, server_id=server)
+    ref = _ref()
+    await adapter.create_from_current(
+        community_id=community, server_id=server, storage_ref=ref
+    )
 
     # Modify the authoritative copy (a later edit / snapshot).
     await _publish(storage, community, server, {"server.properties": b"motd=changed"})
@@ -112,7 +120,9 @@ async def test_create_with_nothing_published_translates_to_backup_not_found(
     adapter = StorageBackupStoreAdapter(storage=storage)
     community, server = _scope()
     with pytest.raises(BackupNotFoundError):
-        await adapter.create_from_current(community_id=community, server_id=server)
+        await adapter.create_from_current(
+            community_id=community, server_id=server, storage_ref=_ref()
+        )
 
 
 async def test_create_against_corrupt_working_set_raises_and_writes_no_archive(
@@ -144,7 +154,9 @@ async def test_create_against_corrupt_working_set_raises_and_writes_no_archive(
     )
 
     with pytest.raises(BackupCorruptError):
-        await adapter.create_from_current(community_id=community, server_id=server)
+        await adapter.create_from_current(
+            community_id=community, server_id=server, storage_ref=_ref()
+        )
 
     backups = server_root / "backups"
     archives = list(backups.glob("*.tar.gz")) if backups.is_dir() else []
@@ -266,7 +278,10 @@ async def test_delete_is_idempotent(tmp_path: Path) -> None:
     adapter = StorageBackupStoreAdapter(storage=storage)
     community, server = _scope()
     await _publish(storage, community, server, {"a": b"1"})
-    ref = await adapter.create_from_current(community_id=community, server_id=server)
+    ref = _ref()
+    await adapter.create_from_current(
+        community_id=community, server_id=server, storage_ref=ref
+    )
     await adapter.delete(community_id=community, server_id=server, storage_ref=ref)
     # A second delete of the same (now-missing) ref is a no-op, not an error.
     await adapter.delete(community_id=community, server_id=server, storage_ref=ref)
@@ -309,17 +324,22 @@ async def test_open_then_store_to_another_server_restores(tmp_path: Path) -> Non
     adapter = StorageBackupStoreAdapter(storage=storage)
     community, server = _scope()
     await _publish(storage, community, server, {"server.properties": b"motd=original"})
-    ref = await adapter.create_from_current(community_id=community, server_id=server)
+    ref = _ref()
+    await adapter.create_from_current(
+        community_id=community, server_id=server, storage_ref=ref
+    )
 
     archive = await drain(
         adapter.open(community_id=community, server_id=server, storage_ref=ref)
     )
 
     other_community, other_server = _scope()
-    new_ref = await adapter.store(
+    new_ref = _ref()
+    await adapter.store(
         community_id=other_community,
         server_id=other_server,
         stream=_stream_of(archive),
+        storage_ref=new_ref,
     )
     await adapter.restore(
         community_id=other_community, server_id=other_server, storage_ref=new_ref
@@ -346,7 +366,10 @@ async def test_size_reports_archive_byte_count(tmp_path: Path) -> None:
     adapter = StorageBackupStoreAdapter(storage=storage)
     community, server = _scope()
     await _publish(storage, community, server, {"a": b"1"})
-    ref = await adapter.create_from_current(community_id=community, server_id=server)
+    ref = _ref()
+    await adapter.create_from_current(
+        community_id=community, server_id=server, storage_ref=ref
+    )
     archive = await drain(
         adapter.open(community_id=community, server_id=server, storage_ref=ref)
     )
@@ -435,3 +458,25 @@ async def test_check_current_health_unpublished_returns_none(tmp_path: Path) -> 
         await adapter.check_current_health(community_id=community, server_id=server)
         is None
     )
+
+
+async def test_list_archive_refs_returns_all_filesystem_archives(
+    tmp_path: Path,
+) -> None:
+    """list_archive_refs scans the filesystem, not the DB (#1707)."""
+
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    await _publish(storage, community, server, {"a": b"1"})
+    ref1 = _ref()
+    await adapter.create_from_current(
+        community_id=community, server_id=server, storage_ref=ref1
+    )
+    ref2 = _ref()
+    await adapter.create_from_current(
+        community_id=community, server_id=server, storage_ref=ref2
+    )
+
+    refs = await adapter.list_archive_refs(community_id=community, server_id=server)
+    assert set(refs) == {ref1, ref2}

@@ -1061,9 +1061,13 @@ class ObjectStorage(Storage):
     # --- backup archive create / list / restore / delete (Section 3.3) -----
 
     async def create_backup_from_current(
-        self, community_id: CommunityId, server_id: ServerId
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        key: BackupKey | None = None,
     ) -> BackupKey:
-        key = BackupKey(uuid.uuid4().hex)
+        if key is None:
+            key = BackupKey(uuid.uuid4().hex)
         async with self._client_factory() as client:
             snapshot_prefix = await self._live_snapshot_prefix(
                 client, community_id, server_id
@@ -1238,13 +1242,18 @@ class ObjectStorage(Storage):
                 yield chunk
 
     async def put_backup(
-        self, community_id: CommunityId, server_id: ServerId, stream: ByteStream
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        stream: ByteStream,
+        key: BackupKey | None = None,
     ) -> BackupKey:
-        # Store the uploaded archive bytes verbatim under a fresh key (the caller
-        # already validated the archive). A single multipart upload makes the new
-        # object appear atomically, so a partial upload never lists as a backup
-        # (issue #281).
-        key = BackupKey(uuid.uuid4().hex)
+        # Store the uploaded archive bytes verbatim under the provided (or fresh) key
+        # (the caller already validated the archive). A single multipart upload makes
+        # the new object appear atomically, so a partial upload never lists as a
+        # backup (issue #281).
+        if key is None:
+            key = BackupKey(uuid.uuid4().hex)
         async with self._client_factory() as client:
             await client.upload_multipart(
                 self._backup_key(community_id, server_id, key), stream
