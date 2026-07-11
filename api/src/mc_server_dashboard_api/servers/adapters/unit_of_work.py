@@ -46,6 +46,10 @@ from mc_server_dashboard_api.servers.adapters.repositories import (
 from mc_server_dashboard_api.servers.adapters.resource_pack_repository import (
     SqlAlchemyResourcePackRepository,
 )
+from mc_server_dashboard_api.servers.adapters.schedule_repository import (
+    SqlAlchemyScheduleRepository,
+    SqlAlchemyScheduleRunRepository,
+)
 from mc_server_dashboard_api.servers.domain.repositories import ResourceGrantSweeper
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 
@@ -83,6 +87,8 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
         self.game_sessions = SqlAlchemyGameSessionRepository(self._session)
         self.plugins = SqlAlchemyPluginRepository(self._session)
         self.resource_packs = SqlAlchemyResourcePackRepository(self._session)
+        self.schedules = SqlAlchemyScheduleRepository(self._session)
+        self.schedule_runs = SqlAlchemyScheduleRunRepository(self._session)
         return self
 
     async def __aexit__(
