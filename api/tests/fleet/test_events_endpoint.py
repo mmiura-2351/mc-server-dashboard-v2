@@ -46,6 +46,7 @@ from mc_server_dashboard_api.fleet.domain.real_time_events import (
     EventStream,
     RealTimeEvent,
     RealTimeEvents,
+    notification_event,
 )
 from mc_server_dashboard_api.servers.domain.errors import ServerNotFoundError
 from tests.identity.fakes import make_user
@@ -218,6 +219,32 @@ def test_streams_query_filters_delivered_events() -> None:
         frame = ws.receive_json()
     # The LOG event was filtered; the first frame is the STATUS event.
     assert frame["stream"] == "status"
+
+
+def test_notification_stream_is_subscribable_and_delivered() -> None:
+    bus = InProcessRealTimeEvents()
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(bus=bus)
+    client = next(_client(app))
+    with client.websocket_connect(
+        _url(community, server, streams="notification")
+    ) as ws:
+        bus.publish(
+            server_id=str(server),
+            event=notification_event(
+                kind="schedule_failed",
+                title="Scheduled restart failed",
+                detail="worker unavailable",
+            ),
+        )
+        frame = ws.receive_json()
+    assert frame["stream"] == "notification"
+    assert frame["payload"] == {
+        "kind": "schedule_failed",
+        "title": "Scheduled restart failed",
+        "detail": "worker unavailable",
+    }
+    assert "ts" in frame
 
 
 def test_slow_consumer_receives_a_gap_frame() -> None:
@@ -404,6 +431,7 @@ def test_omitted_streams_subscribes_to_all() -> None:
         (EventStream.STATUS, {"state": "running"}),
         (EventStream.LOG, {"line": "hi"}),
         (EventStream.METRICS, {"cpu_millis": 1}),
+        (EventStream.NOTIFICATION, {"kind": "k", "title": "t", "detail": ""}),
     ]
     with client.websocket_connect(url) as ws:
         for stream, payload in cases:
@@ -411,8 +439,8 @@ def test_omitted_streams_subscribes_to_all() -> None:
                 server_id=str(server),
                 event=RealTimeEvent(stream=stream, payload=payload),
             )
-        delivered = {ws.receive_json()["stream"] for _ in range(3)}
-    assert delivered == {"status", "log", "metrics"}
+        delivered = {ws.receive_json()["stream"] for _ in range(4)}
+    assert delivered == {"status", "log", "metrics", "notification"}
 
 
 # --- mid-stream revocation -------------------------------------------------
