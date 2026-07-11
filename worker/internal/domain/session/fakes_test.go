@@ -140,17 +140,18 @@ type fakeTransport struct {
 
 	ack RegisterAck
 
-	registers   int
-	heartbeats  int
-	results     []CommandResult
-	statuses    []StatusEvent
-	logLines    []LogEvent
-	metrics     []MetricsEvent
-	closed      bool
-	commands    chan Command
-	recvErr     error // returned by RecvCommand once commands drains
-	registerErr error // returned by SendRegister, if set
-	ackErr      error // returned by RecvRegisterAck, if set
+	registers    int
+	registeredAt []Capabilities // caps captured per SendRegister call
+	heartbeats   int
+	results      []CommandResult
+	statuses     []StatusEvent
+	logLines     []LogEvent
+	metrics      []MetricsEvent
+	closed       bool
+	commands     chan Command
+	recvErr      error // returned by RecvCommand once commands drains
+	registerErr  error // returned by SendRegister, if set
+	ackErr       error // returned by RecvRegisterAck, if set
 }
 
 func newFakeTransport(ack RegisterAck) *fakeTransport {
@@ -161,10 +162,11 @@ func newFakeTransport(ack RegisterAck) *fakeTransport {
 	}
 }
 
-func (t *fakeTransport) SendRegister(_ context.Context, _ Capabilities) error {
+func (t *fakeTransport) SendRegister(_ context.Context, caps Capabilities) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.registers++
+	t.registeredAt = append(t.registeredAt, caps)
 	return t.registerErr
 }
 
@@ -235,6 +237,12 @@ func (t *fakeTransport) registerCount() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.registers
+}
+
+func (t *fakeTransport) registeredCaps() []Capabilities {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]Capabilities(nil), t.registeredAt...)
 }
 
 func (t *fakeTransport) heartbeatCount() int {
@@ -391,4 +399,26 @@ func (d *fakeDialer) dialCount() int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.calls
+}
+
+// fakeHeldServerHandler wraps a fakeHandler and adds HeldServerProvider so the
+// session refreshes caps before each registration (issue #1711). Tests that do
+// not need the refresh use fakeHandler directly, so the existing reclaim tests
+// are not affected by the new interface.
+type fakeHeldServerHandler struct {
+	*fakeHandler
+	mu          sync.Mutex
+	heldServers []HeldServer
+}
+
+func (h *fakeHeldServerHandler) HeldServers() []HeldServer {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]HeldServer(nil), h.heldServers...)
+}
+
+func (h *fakeHeldServerHandler) setHeldServers(hs []HeldServer) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.heldServers = hs
 }

@@ -115,6 +115,38 @@ func heldGeneration(workingDir, serverID string, log *slog.Logger) uint64 {
 	return gen
 }
 
+// HeldServers returns the working sets this Worker currently holds in its local
+// scratch, each tagged with its recorded generation (issue #1711). Unlike the
+// boot-time ScanHeldServers, it skips the region fsck: the Worker is still
+// running, so the torn-region recovery path (issue #834) is not needed for
+// freshness — only the recorded generation marker matters. The session calls
+// this before each (re-)registration so the advertised held set reflects
+// servers placed or generations advanced since boot.
+func (m *Manager) HeldServers() []session.HeldServer {
+	entries, err := os.ReadDir(m.scratchDir)
+	if err != nil {
+		return nil
+	}
+	var held []session.HeldServer
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		if strings.HasPrefix(entry.Name(), displacedPrefix) {
+			continue
+		}
+		workingDir := filepath.Join(m.scratchDir, entry.Name())
+		if !hasWorkingSet(workingDir) {
+			continue
+		}
+		held = append(held, session.HeldServer{
+			ServerID:   entry.Name(),
+			Generation: readGeneration(workingDir),
+		})
+	}
+	return held
+}
+
 // WarnOrphanDisplacedTrees logs a WARN for each .displaced-<id> tree in scratchDir
 // whose server id is NOT in heldServers (issue #911). A .displaced-<id> tree is a
 // last-resort recovery copy kept aside by a hydrate when a server's final stop

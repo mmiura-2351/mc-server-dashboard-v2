@@ -133,6 +133,12 @@ func (r *Runner) runOnce(ctx context.Context) (registered bool, err error) {
 		}
 	}()
 
+	// Refresh the held-server inventory so each (re-)registration advertises
+	// current generations, not the stale boot-time snapshot (issue #1711).
+	if provider, ok := r.handler.(HeldServerProvider); ok {
+		r.caps.HeldServers = provider.HeldServers()
+	}
+
 	if err := transport.SendRegister(ctx, r.caps); err != nil {
 		return false, fmt.Errorf("send register: %w", err)
 	}

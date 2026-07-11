@@ -1252,8 +1252,8 @@ func (m *Manager) sweepHydrateLeftovers(serverID string) {
 //   - The post-stop final snapshot path (removeScratch) remains the primary GC.
 //   - This method covers the gap: a server deleted while its scratch was live
 //     (the final snapshot never arrived), reclaimed at the next registration.
-//   - Phase 2 (refresh held inventory per re-registration) is separable;
-//     convergence happens at the next worker restart.
+//   - Phase 2 (refresh held inventory per re-registration) is implemented:
+//     HeldServers() (issue #1711) refreshes the advertised set each register.
 func (m *Manager) ReclaimDeletedScratches(serverIDs []string) {
 	go func() {
 		for _, id := range serverIDs {

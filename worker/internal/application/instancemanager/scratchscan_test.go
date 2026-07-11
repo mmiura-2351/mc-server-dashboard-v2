@@ -276,3 +276,43 @@ func TestWarnOrphanDisplacedTreesMissingScratchRootIsSafe(t *testing.T) {
 		t.Fatalf("got %d records from absent scratch dir, want 0", len(h.records))
 	}
 }
+
+// TestManagerHeldServersReadsCurrentGenerations verifies the Manager.HeldServers
+// method returns the current generation for each held working set (issue #1711).
+// Unlike the boot-time ScanHeldServers, HeldServers skips the region fsck: a
+// torn region in the scratch keeps its recorded generation because the Worker
+// is still running and the fsck is only needed to detect post-crash corruption.
+func TestManagerHeldServersReadsCurrentGenerations(t *testing.T) {
+	scratch := t.TempDir()
+
+	// A non-empty server dir with a generation marker.
+	srv := filepath.Join(scratch, "srv-a")
+	if err := os.MkdirAll(srv, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srv, "level.dat"), []byte("x"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeGeneration(srv, 3); err != nil {
+		t.Fatal(err)
+	}
+
+	m := New(nil, scratch, nil)
+
+	got := m.HeldServers()
+	if len(got) != 1 {
+		t.Fatalf("held = %v, want 1 entry", got)
+	}
+	if got[0].ServerID != "srv-a" || got[0].Generation != 3 {
+		t.Fatalf("held = %+v, want {srv-a gen 3}", got[0])
+	}
+
+	// Advance the generation and verify HeldServers reflects the new value.
+	if err := writeGeneration(srv, 10); err != nil {
+		t.Fatal(err)
+	}
+	got = m.HeldServers()
+	if len(got) != 1 || got[0].Generation != 10 {
+		t.Fatalf("after advance: held = %v, want generation 10", got)
+	}
+}
