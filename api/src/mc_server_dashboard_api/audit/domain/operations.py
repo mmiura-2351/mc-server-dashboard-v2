@@ -145,6 +145,15 @@ VERSION_JAR_GC: Final = "version:jar_gc"
 WORKER_DRAIN_SET: Final = "worker:drain_set"
 WORKER_DRAIN_CLEAR: Final = "worker:drain_clear"
 
+# Scheduler run (epic #649, issue #1838): the scheduler firing a due schedule's
+# action. Application-layer (the runner owns its own post-commit audit point,
+# like the integrity sweep), actor ``None`` — no operator is behind a scheduled
+# run. A successful/failed execution is audited (SUCCESS / ERROR); a precondition
+# skip is recorded only in the run history, not audited (nothing happened). Names
+# the operation, not a permission code (the run is scheduler-driven, not a gated
+# route); free-text column, see module docstring.
+SCHEDULE_RUN: Final = "schedule:run"
+
 # Player-group CRUD / player edits / attach-detach (issue #276). Recorded under
 # the group:manage permission the mutating routes require.
 GROUP_CREATE: Final = "group:create"

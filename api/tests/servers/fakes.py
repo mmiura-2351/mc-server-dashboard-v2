@@ -68,6 +68,7 @@ from mc_server_dashboard_api.servers.domain.jar_provisioner import (
 )
 from mc_server_dashboard_api.servers.domain.lifecycle_lock import LifecycleLock
 from mc_server_dashboard_api.servers.domain.memory_limit import memory_limit_from_config
+from mc_server_dashboard_api.servers.domain.notifier import ServerNotifier
 from mc_server_dashboard_api.servers.domain.plugin import (
     PluginId,
     PluginSource,
@@ -908,6 +909,14 @@ class FakeScheduleRepository(ScheduleRepository):
         schedule = self.by_id.get(schedule_id)
         return None if schedule is None else self._copy(schedule)
 
+    async def list_due(self, now: dt.datetime) -> list[Schedule]:
+        due = [
+            self._copy(s)
+            for s in self.by_id.values()
+            if s.enabled and s.next_run_at is not None and s.next_run_at <= now
+        ]
+        return sorted(due, key=lambda s: (s.next_run_at or now, s.id.value))
+
     async def list_for_server(self, server_id: ServerId) -> list[Schedule]:
         return sorted(
             (self._copy(s) for s in self.by_id.values() if s.server_id == server_id),
@@ -918,6 +927,22 @@ class FakeScheduleRepository(ScheduleRepository):
         # Mirror the adapter's staged UPDATE: a missing id matches no row.
         if schedule.id in self.by_id:
             self.by_id[schedule.id] = self._copy(schedule)
+
+    async def advance_run_state(
+        self,
+        schedule_id: ScheduleId,
+        *,
+        next_run_at: dt.datetime,
+        last_run_at: dt.datetime | None,
+    ) -> None:
+        # Mirror the adapter's guarded bookkeeping UPDATE: only an enabled row
+        # matches; a disabled/deleted schedule is silently left untouched.
+        schedule = self.by_id.get(schedule_id)
+        if schedule is None or not schedule.enabled:
+            return
+        self.by_id[schedule_id] = replace(
+            schedule, next_run_at=next_run_at, last_run_at=last_run_at
+        )
 
     async def delete(self, schedule_id: ScheduleId) -> None:
         self.by_id.pop(schedule_id, None)
@@ -941,6 +966,23 @@ class FakeScheduleRunRepository(ScheduleRunRepository):
             key=lambda r: (r.started_at, str(r.id.value)),
             reverse=True,
         )
+
+    async def prune_for_schedule(self, schedule_id: ScheduleId, *, keep: int) -> None:
+        kept = await self.list_for_schedule(schedule_id)
+        stale = {r.id for r in kept[keep:]}
+        self.rows = [r for r in self.rows if r.id not in stale]
+
+
+class FakeServerNotifier(ServerNotifier):
+    """Records published notifications for the runner tests."""
+
+    def __init__(self) -> None:
+        self.notifications: list[tuple[ServerId, str, str, str]] = []
+
+    def notify(
+        self, *, server_id: ServerId, kind: str, title: str, detail: str = ""
+    ) -> None:
+        self.notifications.append((server_id, kind, title, detail))
 
 
 class FakeUnitOfWork(UnitOfWork):

@@ -20,6 +20,11 @@ from pathlib import Path
 
 from fastapi import APIRouter, FastAPI
 
+from mc_server_dashboard_api.audit.adapters.clock import (
+    SystemClock as AuditSystemClock,
+)
+from mc_server_dashboard_api.audit.adapters.recorder import LoggingAuditRecorder
+from mc_server_dashboard_api.audit.adapters.writer import SqlAlchemyAuditWriter
 from mc_server_dashboard_api.audit.api import audit
 from mc_server_dashboard_api.community.api import (
     admin_communities,
@@ -92,6 +97,9 @@ from mc_server_dashboard_api.servers.adapters.clock import (
 from mc_server_dashboard_api.servers.adapters.control_plane import (
     FleetControlPlaneAdapter,
 )
+from mc_server_dashboard_api.servers.adapters.cronsim_next_run_calculator import (
+    CronsimNextRunCalculator,
+)
 from mc_server_dashboard_api.servers.adapters.file_store import (
     StorageFileStoreAdapter,
 )
@@ -105,6 +113,7 @@ from mc_server_dashboard_api.servers.adapters.late_snapshot_result_sink import (
     ServersLateSnapshotResultSink,
 )
 from mc_server_dashboard_api.servers.adapters.lifecycle_lock import PgLifecycleLock
+from mc_server_dashboard_api.servers.adapters.notifier import RealTimeEventsNotifier
 from mc_server_dashboard_api.servers.adapters.plugin_cache_gc_loop import (
     run_plugin_cache_gc_loop,
 )
@@ -120,6 +129,7 @@ from mc_server_dashboard_api.servers.adapters.reconciler_loop import (
 from mc_server_dashboard_api.servers.adapters.resource_pack_store import (
     ObjectResourcePackStore,
 )
+from mc_server_dashboard_api.servers.adapters.schedule_loop import run_schedule_loop
 from mc_server_dashboard_api.servers.adapters.server_route_resolver import (
     ServersServerRouteResolver,
 )
@@ -152,6 +162,8 @@ from mc_server_dashboard_api.servers.application.bedrock_sweep import (
 )
 from mc_server_dashboard_api.servers.application.game_sessions import PruneGameSessions
 from mc_server_dashboard_api.servers.application.lifecycle import (
+    RestartServer,
+    SendServerCommand,
     StartServer,
     StopServer,
 )
@@ -159,6 +171,10 @@ from mc_server_dashboard_api.servers.application.plugin_cache_gc import (
     RunPluginCacheGc,
 )
 from mc_server_dashboard_api.servers.application.reconciler import RunReconcilerTick
+from mc_server_dashboard_api.servers.application.schedule_runner import (
+    ExecuteScheduleAction,
+    RunScheduleTick,
+)
 from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
     RunSnapshotCadenceTick,
     SnapshotServer,
@@ -712,6 +728,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         grpc_server = None
         snapshot_task: asyncio.Task[None] | None = None
         backup_task: asyncio.Task[None] | None = None
+        schedule_task: asyncio.Task[None] | None = None
         reconciler_task: asyncio.Task[None] | None = None
         jar_gc_task: asyncio.Task[None] | None = None
         plugin_cache_gc_task: asyncio.Task[None] | None = None
@@ -866,6 +883,91 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
             )
             logging.getLogger(__name__).info("backup scheduler started")
+            # Run the general scheduler runner as a lifespan task (epic #649,
+            # issue #1838), alongside the snapshot/backup schedulers. Gated on the
+            # control plane like them: it dispatches only through the existing
+            # lifecycle/command/backup use cases, which need a Worker channel. Each
+            # use case gets its own UnitOfWork (fresh session) so concurrent
+            # actions never share a session (the reconciler's #871 pattern); the
+            # control-plane adapter, clock, JAR, and Storage seams are stateless
+            # and reused. Failure notifications go through the servers ServerNotifier
+            # Port bound to the same in-process real-time bus the gRPC session
+            # publishes onto (issue #1836).
+            schedule_control_plane = FleetControlPlaneAdapter(
+                registry=registry,
+                control_plane=app.state.control_plane,
+                data_plane_base_url=settings.server.effective_data_plane_base_url,
+                worker_credential=settings.control.worker_credential,
+                hydrate_timeout_seconds=settings.control.hydrate_timeout_seconds,
+                snapshot_timeout_seconds=settings.control.snapshot_timeout_seconds,
+                stop_timeout_seconds=settings.control.stop_timeout_seconds,
+            )
+            schedule_runner = RunScheduleTick(
+                uow=ServersUnitOfWork(create_session_factory(engine)),
+                execute=ExecuteScheduleAction(
+                    uow=ServersUnitOfWork(create_session_factory(engine)),
+                    send_command=SendServerCommand(
+                        uow=ServersUnitOfWork(create_session_factory(engine)),
+                        control_plane=schedule_control_plane,
+                    ),
+                    start_server=StartServer(
+                        uow=ServersUnitOfWork(create_session_factory(engine)),
+                        control_plane=schedule_control_plane,
+                        clock=ServersSystemClock(),
+                        jar_provisioner=CatalogJarProvisioner(
+                            ensure_jar=EnsureJar(
+                                catalog=version_catalog,
+                                fetcher=HttpxJarFetcher(),
+                                pool=StorageJarPool(jars=storage),
+                            )
+                        ),
+                        store_generation=StorageGenerationReader(storage=storage),
+                        file_store=StorageFileStoreAdapter(storage=storage),
+                        lifecycle_lock=PgLifecycleLock(engine=engine),
+                        bedrock_tunnel_sync=bedrock_tunnel_syncer,
+                    ),
+                    stop_server=StopServer(
+                        uow=ServersUnitOfWork(create_session_factory(engine)),
+                        control_plane=schedule_control_plane,
+                        clock=ServersSystemClock(),
+                        bedrock_tunnel_sync=bedrock_tunnel_syncer,
+                    ),
+                    restart_server=RestartServer(
+                        uow=ServersUnitOfWork(create_session_factory(engine)),
+                        control_plane=schedule_control_plane,
+                        clock=ServersSystemClock(),
+                    ),
+                    create_backup=CreateBackup(
+                        uow=ServersUnitOfWork(create_session_factory(engine)),
+                        backup_store=StorageBackupStoreAdapter(storage=storage),
+                        snapshot_server=SnapshotServer(
+                            uow=ServersUnitOfWork(create_session_factory(engine)),
+                            control_plane=schedule_control_plane,
+                        ),
+                        clock=ServersSystemClock(),
+                        # Take the per-server lifecycle lock like the HTTP backup
+                        # path (dependencies.get_create_backup): it serializes the
+                        # archive against a concurrent restore republishing
+                        # ``current`` mid-tar (the #827 tear).
+                        lifecycle_lock=PgLifecycleLock(engine=engine),
+                    ),
+                ),
+                calculator=CronsimNextRunCalculator(),
+                audit=LoggingAuditRecorder(
+                    SqlAlchemyAuditWriter(
+                        create_session_factory(engine), clock=AuditSystemClock()
+                    )
+                ),
+                notifier=RealTimeEventsNotifier(real_time_events),
+                clock=ServersSystemClock(),
+            )
+            schedule_task = asyncio.create_task(
+                run_schedule_loop(
+                    schedule_runner,
+                    tick_seconds=settings.schedule.tick_seconds,
+                )
+            )
+            logging.getLogger(__name__).info("schedule runner started")
             # Run the periodic divergence reconciler as a lifespan task (issue
             # #101), alongside the snapshot/backup schedulers. Gated on the control
             # plane like them: it re-dispatches durable-but-unsent lifecycle intent
@@ -1018,6 +1120,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 reconciler_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await reconciler_task
+            if schedule_task is not None:
+                schedule_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await schedule_task
             if backup_task is not None:
                 backup_task.cancel()
                 with suppress(asyncio.CancelledError):

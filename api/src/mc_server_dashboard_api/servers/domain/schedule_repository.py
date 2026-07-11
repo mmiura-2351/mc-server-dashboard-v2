@@ -9,6 +9,7 @@ raising, so callers decide policy (mirroring :class:`BackupRepository`).
 from __future__ import annotations
 
 import abc
+import datetime as dt
 
 from mc_server_dashboard_api.servers.domain.schedule import (
     Schedule,
@@ -28,6 +29,16 @@ class ScheduleRepository(abc.ABC):
     @abc.abstractmethod
     async def get_by_id(self, schedule_id: ScheduleId) -> Schedule | None:
         """Return the schedule with ``schedule_id``, or ``None`` if absent."""
+
+    @abc.abstractmethod
+    async def list_due(self, now: dt.datetime) -> list[Schedule]:
+        """Return enabled schedules whose ``next_run_at`` is at or before ``now``.
+
+        The runner's due poll (issue #1838), backed by the partial index
+        ``ix_schedule_next_run_at`` on ``(next_run_at) WHERE enabled``. A disabled
+        schedule carries no ``next_run_at`` and is never returned. Ordered by
+        ``next_run_at`` (id tie-break) so the poll is deterministic.
+        """
 
     @abc.abstractmethod
     async def list_for_server(self, server_id: ServerId) -> list[Schedule]:
@@ -66,4 +77,14 @@ class ScheduleRunRepository(abc.ABC):
         Backed by the ``(schedule_id, started_at)`` index; the history cap
         (50 per schedule, epic #649) is the runner's pruning concern, not a
         query limit here.
+        """
+
+    @abc.abstractmethod
+    async def prune_for_schedule(self, schedule_id: ScheduleId, *, keep: int) -> None:
+        """Delete all but the newest ``keep`` runs of ``schedule_id``.
+
+        The runner's history cap (issue #1838): run after each insert so a
+        schedule's run history stays bounded. Newest is by ``started_at`` (id
+        tie-break), matching :meth:`list_for_schedule`. A no-op when the schedule
+        has at most ``keep`` runs.
         """

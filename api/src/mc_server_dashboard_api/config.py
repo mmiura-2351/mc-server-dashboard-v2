@@ -317,6 +317,18 @@ class BackupSettings(_Section):
     schedule_tick_seconds: int = Field(default=300, gt=0)
 
 
+class ScheduleSettings(_Section):
+    """General-scheduler tick cadence (epic #649, issue #1838).
+
+    Schedules themselves (cron / interval, per-server) live in the ``schedule``
+    table; this only tunes how often the runner *wakes* to poll ``next_run_at``.
+    ``tick_seconds`` is the loop resolution — finer than the backup loop's cadence
+    since interval schedules can be sub-minute; it defaults to twenty seconds.
+    """
+
+    tick_seconds: int = Field(default=20, gt=0)
+
+
 class ReconcilerSettings(_Section):
     """Desired/observed divergence reconciler (issue #101).
 
@@ -759,6 +771,7 @@ class Settings(BaseSettings):
     storage: StorageSettings = Field(default_factory=StorageSettings)
     snapshot: SnapshotSettings = Field(default_factory=SnapshotSettings)
     backup: BackupSettings = Field(default_factory=BackupSettings)
+    schedule: ScheduleSettings = Field(default_factory=ScheduleSettings)
     reconciler: ReconcilerSettings = Field(default_factory=ReconcilerSettings)
     jar_gc: JarGcSettings = Field(default_factory=JarGcSettings)
     plugin_cache_gc: PluginCacheGcSettings = Field(
