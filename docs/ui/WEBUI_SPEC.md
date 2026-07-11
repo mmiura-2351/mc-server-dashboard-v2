@@ -126,6 +126,9 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 | GET / PATCH / DELETE | `…/groups/{gid}` | Read / rename / delete. |
 | POST / DELETE | `…/groups/{gid}/players[/{uuid}]` | Add / remove player (uuid + username). |
 | GET / PUT / DELETE | `…/groups/{gid}/servers[/{sid}]` | List / attach / detach server. |
+| GET / POST | `…/{sid}/schedules` | List / create a per-server schedule (`name`, `action` ∈ command\|start\|stop\|restart\|backup, `cron` XOR `interval_seconds`, `timezone`, `enabled`, `command` for `command`, `warning_steps` for stop/restart). Reads need `schedule:read`; writes need `schedule:manage` **and** the action's own permission (`command`→`server:command`, `start/stop/restart`→`server:{start,stop,restart}`, `backup`→`backup:schedule`) — anti-escalation. Authorization is write-time only: the runner (#1838) later executes as the system, so revoking a permission does not stop existing schedules. `next_run_at` is null while disabled, recomputed on enable. |
+| GET / PATCH / DELETE | `…/{sid}/schedules/{scid}` | Read / edit (partial; action immutable) / delete a schedule. |
+| GET | `…/{sid}/schedules/{scid}/runs` | Execution history newest-first (`schedule:read`). |
 
 Server response fields: `id`, `community_id`, `name`, `mc_edition`,
 `mc_version`, `server_type`, `config` (full blob),

@@ -6,14 +6,15 @@ gets the same HTTP mapping (409) instead of a raw ``IntegrityError`` (500).
 ``uq_server_community_name`` (migration 0005) is the name backstop;
 ``uq_server_game_port`` (migration 0009) and ``uq_server_bedrock_port``
 (migration 0027) are the port backstops; ``uq_server_slug`` (migration 0016) is
-the relay slug backstop.
+the relay slug backstop; ``uq_schedule_server_id_name`` (migration 0029) is the
+per-server schedule name backstop.
 
-Shared by two call sites, because *when* a violation surfaces depends on the
-statement shape: an INSERT staged via ``session.add`` (create) flushes at
+Shared by two kinds of call site, because *when* a violation surfaces depends on
+the statement shape: an INSERT staged via ``session.add`` (create) flushes at
 commit, so :class:`SqlAlchemyUnitOfWork` translates in ``commit``; an UPDATE
-(re-port #311, slug rename #955, Bedrock allocation #1541) executes -- and
-violates -- immediately inside the transaction, so the server repository
-translates at the ``update`` execute site.
+(re-port #311, slug rename #955, Bedrock allocation #1541, schedule rename
+#1837) executes -- and violates -- immediately inside the transaction, so the
+server and schedule repositories translate at their ``update`` execute sites.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from sqlalchemy.exc import IntegrityError
 
 from mc_server_dashboard_api.servers.domain.errors import (
     PortAlreadyTakenError,
+    ScheduleNameAlreadyExistsError,
     ServerNameAlreadyExistsError,
     SlugAlreadyTakenError,
 )
@@ -29,6 +31,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
 _SERVER_NAME_CONSTRAINTS = frozenset({"uq_server_community_name"})
 _PORT_CONSTRAINTS = frozenset({"uq_server_game_port", "uq_server_bedrock_port"})
 _SLUG_CONSTRAINTS = frozenset({"uq_server_slug"})
+_SCHEDULE_NAME_CONSTRAINTS = frozenset({"uq_schedule_server_id_name"})
 
 
 def translate_integrity_error(exc: IntegrityError) -> None:
@@ -41,6 +44,8 @@ def translate_integrity_error(exc: IntegrityError) -> None:
         raise PortAlreadyTakenError(str(constraint)) from exc
     if constraint in _SLUG_CONSTRAINTS:
         raise SlugAlreadyTakenError(str(constraint)) from exc
+    if constraint in _SCHEDULE_NAME_CONSTRAINTS:
+        raise ScheduleNameAlreadyExistsError(str(constraint)) from exc
 
 
 def _constraint_name(exc: IntegrityError) -> str | None:

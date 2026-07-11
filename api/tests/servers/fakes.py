@@ -94,6 +94,15 @@ from mc_server_dashboard_api.servers.domain.resource_pack_repository import (
 from mc_server_dashboard_api.servers.domain.resource_pack_store import (
     ResourcePackStore,
 )
+from mc_server_dashboard_api.servers.domain.schedule import (
+    Schedule,
+    ScheduleId,
+    ScheduleRun,
+)
+from mc_server_dashboard_api.servers.domain.schedule_repository import (
+    ScheduleRepository,
+    ScheduleRunRepository,
+)
 from mc_server_dashboard_api.servers.domain.store_generation import (
     StoreGenerationReader,
 )
@@ -874,6 +883,66 @@ class FakeResourcePackRepository(ResourcePackRepository):
         return [a for a in self.assignments.values() if a.resource_pack_id == pack_id]
 
 
+class FakeScheduleRepository(ScheduleRepository):
+    """In-memory schedule store (issue #1835/#1837).
+
+    Stored by id, returning detached copies so a use case mutating the loaded
+    entity does not silently mutate the "persisted" one until ``update``.
+    ``list_for_server`` mirrors the adapter's name ordering.
+    """
+
+    def __init__(self) -> None:
+        self.by_id: dict[ScheduleId, Schedule] = {}
+
+    def seed(self, schedule: Schedule) -> None:
+        self.by_id[schedule.id] = schedule
+
+    @staticmethod
+    def _copy(schedule: Schedule) -> Schedule:
+        return replace(schedule)
+
+    async def add(self, schedule: Schedule) -> None:
+        self.by_id[schedule.id] = self._copy(schedule)
+
+    async def get_by_id(self, schedule_id: ScheduleId) -> Schedule | None:
+        schedule = self.by_id.get(schedule_id)
+        return None if schedule is None else self._copy(schedule)
+
+    async def list_for_server(self, server_id: ServerId) -> list[Schedule]:
+        return sorted(
+            (self._copy(s) for s in self.by_id.values() if s.server_id == server_id),
+            key=lambda s: s.name,
+        )
+
+    async def update(self, schedule: Schedule) -> None:
+        # Mirror the adapter's staged UPDATE: a missing id matches no row.
+        if schedule.id in self.by_id:
+            self.by_id[schedule.id] = self._copy(schedule)
+
+    async def delete(self, schedule_id: ScheduleId) -> None:
+        self.by_id.pop(schedule_id, None)
+
+
+class FakeScheduleRunRepository(ScheduleRunRepository):
+    """In-memory schedule-run history store (issue #1835/#1837)."""
+
+    def __init__(self) -> None:
+        self.rows: list[ScheduleRun] = []
+
+    def seed(self, run: ScheduleRun) -> None:
+        self.rows.append(run)
+
+    async def add(self, run: ScheduleRun) -> None:
+        self.rows.append(run)
+
+    async def list_for_schedule(self, schedule_id: ScheduleId) -> list[ScheduleRun]:
+        return sorted(
+            (r for r in self.rows if r.schedule_id == schedule_id),
+            key=lambda r: (r.started_at, str(r.id.value)),
+            reverse=True,
+        )
+
+
 class FakeUnitOfWork(UnitOfWork):
     # Narrow the Port-declared attribute types to the concrete fakes so tests can
     # reach their inspection helpers without casts.
@@ -884,6 +953,8 @@ class FakeUnitOfWork(UnitOfWork):
     game_sessions: FakeGameSessionRepository
     plugins: FakePluginRepository
     resource_packs: FakeResourcePackRepository
+    schedules: FakeScheduleRepository
+    schedule_runs: FakeScheduleRunRepository
 
     def __init__(
         self,
@@ -894,6 +965,8 @@ class FakeUnitOfWork(UnitOfWork):
         game_sessions: FakeGameSessionRepository | None = None,
         plugins: FakePluginRepository | None = None,
         resource_packs: FakeResourcePackRepository | None = None,
+        schedules: FakeScheduleRepository | None = None,
+        schedule_runs: FakeScheduleRunRepository | None = None,
     ) -> None:
         self.servers = servers or FakeServerRepository()
         self.resource_grants = resource_grants or FakeResourceGrantSweeper()
@@ -902,6 +975,8 @@ class FakeUnitOfWork(UnitOfWork):
         self.game_sessions = game_sessions or FakeGameSessionRepository()
         self.plugins = plugins or FakePluginRepository()
         self.resource_packs = resource_packs or FakeResourcePackRepository()
+        self.schedules = schedules or FakeScheduleRepository()
+        self.schedule_runs = schedule_runs or FakeScheduleRunRepository()
         self.commits = 0
 
     async def __aenter__(self) -> "FakeUnitOfWork":

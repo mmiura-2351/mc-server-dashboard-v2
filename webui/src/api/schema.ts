@@ -1488,6 +1488,118 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/communities/{community_id}/servers/{server_id}/schedules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Schedules
+         * @description List a server's schedules, ordered by name.
+         *
+         *     Requires `schedule:read` (per-server: a resource grant on this server
+         *     suffices). A server outside the community 404s with no existence signal.
+         */
+        get: operations["list_schedules_api_communities__community_id__servers__server_id__schedules_get"];
+        put?: never;
+        /**
+         * Create Schedule
+         * @description Create a per-server schedule.
+         *
+         *     Requires `schedule:manage` **and** the action's own permission
+         *     (`command`→`server:command`, `start`→`server:start`, `stop`→`server:stop`,
+         *     `restart`→`server:restart`, `backup`→`backup:schedule`), so `schedule:manage`
+         *     alone cannot schedule an action the caller could not run directly. The
+         *     cadence is `cron` XOR `interval_seconds`; `timezone` is an IANA zone.
+         *     `command` is required for the `command` action; `warning_steps` (at most 5,
+         *     positive distinct offsets ≤ 120 minutes) only on `stop`/`restart` — they are
+         *     broadcast as a fixed `say` message, so they need no `server:command`.
+         *
+         *     Authorization is **write-time only**: the runner later executes each
+         *     occurrence as the system, so revoking a permission does not stop existing
+         *     schedules — they must be disabled or deleted (the same write gate).
+         *
+         *     `next_run_at` is computed from the cadence when `enabled`; `null` while
+         *     disabled. A missing permission is 403 with the code in the `permission`
+         *     member; a duplicate name is 409; validation failures are 422 with a typed
+         *     reason (`invalid_cron`, `invalid_cadence`, `invalid_timezone`,
+         *     `invalid_payload`, `invalid_schedule_name`).
+         */
+        post: operations["create_schedule_api_communities__community_id__servers__server_id__schedules_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/schedules/{schedule_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read Schedule
+         * @description Read one schedule.
+         *
+         *     Requires `schedule:read`. A schedule on another server (or a server outside
+         *     the community) 404s the same as a wholly unknown id — no existence signal.
+         *     `next_run_at` is `null` exactly while the schedule is disabled.
+         */
+        get: operations["read_schedule_api_communities__community_id__servers__server_id__schedules__schedule_id__get"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete Schedule
+         * @description Delete a schedule (its run history cascades away with it).
+         *
+         *     Requires `schedule:manage` **and** the schedule's action permission (the
+         *     same two-layer, write-time-only gate as create/update).
+         */
+        delete: operations["delete_schedule_api_communities__community_id__servers__server_id__schedules__schedule_id__delete"];
+        options?: never;
+        head?: never;
+        /**
+         * Update Schedule
+         * @description Edit a schedule (partial: omitted fields keep their value).
+         *
+         *     Requires `schedule:manage` **and** the (immutable) action's own permission —
+         *     the same two-layer, write-time-only gate as create; to run a different
+         *     action, delete and recreate. `warning_steps: []` clears the steps (distinct
+         *     from omitting the field). Supplying `cron` or `interval_seconds` replaces
+         *     the whole cadence (still XOR). `next_run_at` is recomputed when the result
+         *     is enabled and `null` when disabled — disabling is how a still-firing
+         *     schedule is stopped, since permission revocation alone does not stop it.
+         */
+        patch: operations["update_schedule_api_communities__community_id__servers__server_id__schedules__schedule_id__patch"];
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/schedules/{schedule_id}/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Schedule Runs
+         * @description List a schedule's recorded executions, newest first.
+         *
+         *     Requires `schedule:read`. Each run carries the outcome
+         *     (`success`/`failure`/`skipped`) and an optional sanitized `detail` note.
+         */
+        get: operations["list_schedule_runs_api_communities__community_id__servers__server_id__schedules__schedule_id__runs_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/communities/{community_id}/servers/{server_id}/sessions": {
         parameters: {
             query?: never;
@@ -2578,6 +2690,30 @@ export interface components {
             /** Permissions */
             permissions: string[];
         };
+        /** CreateScheduleRequest */
+        CreateScheduleRequest: {
+            action: components["schemas"]["ScheduleAction"];
+            /** Command */
+            command?: string | null;
+            /** Cron */
+            cron?: string | null;
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            /** Interval Seconds */
+            interval_seconds?: number | null;
+            /** Name */
+            name: string;
+            /**
+             * Timezone
+             * @default UTC
+             */
+            timezone: string;
+            /** Warning Steps */
+            warning_steps?: components["schemas"]["WarningStepBody"][] | null;
+        };
         /** CreateServerRequest */
         CreateServerRequest: {
             /**
@@ -3172,6 +3308,82 @@ export interface components {
             version_id: string;
         };
         /**
+         * ScheduleAction
+         * @description What a schedule does when it fires (``ck_schedule_action`` CHECK enum).
+         *
+         *     ``COMMAND`` sends a console command line; ``START`` / ``STOP`` / ``RESTART``
+         *     drive the server lifecycle; ``BACKUP`` takes a backup (the FR-BAK-3 cadence
+         *     folds into this action at #1840).
+         * @enum {string}
+         */
+        ScheduleAction: "command" | "start" | "stop" | "restart" | "backup";
+        /**
+         * ScheduleResponse
+         * @description Public view of a schedule (issue #1837).
+         */
+        ScheduleResponse: {
+            /** Action */
+            action: string;
+            /** Command */
+            command: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Created By */
+            created_by: string | null;
+            /** Cron */
+            cron: string | null;
+            /** Enabled */
+            enabled: boolean;
+            /** Id */
+            id: string;
+            /** Interval Seconds */
+            interval_seconds: number | null;
+            /** Last Run At */
+            last_run_at: string | null;
+            /** Name */
+            name: string;
+            /** Next Run At */
+            next_run_at: string | null;
+            /** Server Id */
+            server_id: string;
+            /** Timezone */
+            timezone: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Warning Steps */
+            warning_steps: components["schemas"]["WarningStepResponse"][];
+        };
+        /**
+         * ScheduleRunResponse
+         * @description Public view of one recorded schedule execution (issue #1837).
+         */
+        ScheduleRunResponse: {
+            /** Detail */
+            detail: string | null;
+            /**
+             * Finished At
+             * Format: date-time
+             */
+            finished_at: string;
+            /** Id */
+            id: string;
+            /** Outcome */
+            outcome: string;
+            /** Schedule Id */
+            schedule_id: string;
+            /**
+             * Started At
+             * Format: date-time
+             */
+            started_at: string;
+        };
+        /**
          * SearchRequest
          * @description A name/content search query with a result cap (issue #259).
          */
@@ -3322,6 +3534,27 @@ export interface components {
             /** Permissions */
             permissions?: string[] | null;
         };
+        /**
+         * UpdateScheduleRequest
+         * @description A partial edit. An omitted field keeps its value; ``warning_steps: []``
+         *     clears the steps (distinct from omitting it). The action is immutable.
+         */
+        UpdateScheduleRequest: {
+            /** Command */
+            command?: string | null;
+            /** Cron */
+            cron?: string | null;
+            /** Enabled */
+            enabled?: boolean | null;
+            /** Interval Seconds */
+            interval_seconds?: number | null;
+            /** Name */
+            name?: string | null;
+            /** Timezone */
+            timezone?: string | null;
+            /** Warning Steps */
+            warning_steps?: components["schemas"]["WarningStepBody"][] | null;
+        };
         /** UpdateServerRequest */
         UpdateServerRequest: {
             /** Config */
@@ -3389,6 +3622,23 @@ export interface components {
         VersionsResponse: {
             /** Versions */
             versions: string[];
+        };
+        /**
+         * WarningStepBody
+         * @description A pre-action player-warning step for a stop/restart schedule (#1839).
+         */
+        WarningStepBody: {
+            /** Message */
+            message: string;
+            /** Offset Minutes */
+            offset_minutes: number;
+        };
+        /** WarningStepResponse */
+        WarningStepResponse: {
+            /** Message */
+            message: string;
+            /** Offset Minutes */
+            offset_minutes: number;
         };
         /**
          * WillImportResponse
@@ -6467,6 +6717,208 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ServerResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_schedules_api_communities__community_id__servers__server_id__schedules_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScheduleResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_schedule_api_communities__community_id__servers__server_id__schedules_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateScheduleRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScheduleResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_schedule_api_communities__community_id__servers__server_id__schedules__schedule_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+                schedule_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScheduleResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_schedule_api_communities__community_id__servers__server_id__schedules__schedule_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+                schedule_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_schedule_api_communities__community_id__servers__server_id__schedules__schedule_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+                schedule_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateScheduleRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScheduleResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_schedule_runs_api_communities__community_id__servers__server_id__schedules__schedule_id__runs_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+                schedule_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScheduleRunResponse"][];
                 };
             };
             /** @description Validation Error */

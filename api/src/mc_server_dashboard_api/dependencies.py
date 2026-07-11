@@ -194,6 +194,9 @@ from mc_server_dashboard_api.servers.adapters.clock import (
 from mc_server_dashboard_api.servers.adapters.control_plane import (
     FleetControlPlaneAdapter,
 )
+from mc_server_dashboard_api.servers.adapters.cronsim_next_run_calculator import (
+    CronsimNextRunCalculator,
+)
 from mc_server_dashboard_api.servers.adapters.file_store import (
     StorageFileStoreAdapter,
 )
@@ -307,6 +310,14 @@ from mc_server_dashboard_api.servers.application.resource_packs import (
     ListResourcePacks,
     UnassignResourcePack,
     UploadResourcePack,
+)
+from mc_server_dashboard_api.servers.application.schedules import (
+    CreateSchedule,
+    DeleteSchedule,
+    ListScheduleRuns,
+    ListSchedules,
+    ReadSchedule,
+    UpdateSchedule,
 )
 from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
     SnapshotServer,
@@ -1490,6 +1501,60 @@ def get_list_server_groups(request: Request) -> ListServerGroups:
     return ListServerGroups(uow=ServersUnitOfWork(session_factory))
 
 
+def get_create_schedule(request: Request) -> CreateSchedule:
+    """Assemble the :class:`CreateSchedule` use case (schedule:manage, #1837).
+
+    Binds the clock (``next_run_at`` anchor) and the cronsim next-run calculator
+    (cron syntax validation + next-occurrence math).
+    """
+
+    session_factory = create_session_factory(get_engine(request))
+    return CreateSchedule(
+        uow=ServersUnitOfWork(session_factory),
+        clock=ServersSystemClock(),
+        calculator=CronsimNextRunCalculator(),
+    )
+
+
+def get_list_schedules(request: Request) -> ListSchedules:
+    """Assemble the :class:`ListSchedules` use case (schedule:read)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ListSchedules(uow=ServersUnitOfWork(session_factory))
+
+
+def get_read_schedule(request: Request) -> ReadSchedule:
+    """Assemble the :class:`ReadSchedule` use case (schedule:read)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ReadSchedule(uow=ServersUnitOfWork(session_factory))
+
+
+def get_update_schedule(request: Request) -> UpdateSchedule:
+    """Assemble the :class:`UpdateSchedule` use case (schedule:manage)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return UpdateSchedule(
+        uow=ServersUnitOfWork(session_factory),
+        clock=ServersSystemClock(),
+        calculator=CronsimNextRunCalculator(),
+    )
+
+
+def get_delete_schedule(request: Request) -> DeleteSchedule:
+    """Assemble the :class:`DeleteSchedule` use case (schedule:manage)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return DeleteSchedule(uow=ServersUnitOfWork(session_factory))
+
+
+def get_list_schedule_runs(request: Request) -> ListScheduleRuns:
+    """Assemble the :class:`ListScheduleRuns` use case (schedule:read)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ListScheduleRuns(uow=ServersUnitOfWork(session_factory))
+
+
 def _port_range(request: Request) -> PortRange:
     settings = get_settings(request)
     ports = settings.ports
@@ -2540,32 +2605,36 @@ def require_permission(
     return _dependency
 
 
-class ServerUpdateAuthz(NamedTuple):
-    """The server-PATCH gate's resources (issue #458).
+class DeferredAuthz(NamedTuple):
+    """A deferred per-resource authorization bundle (issues #458, #1837).
 
-    The update gate cannot be a fixed-operation :func:`require_permission`: the
-    required code depends on which keys the PATCH changes, which only the use case
-    (with the current config in hand) knows. So this dependency runs Layer-1
-    membership at the edge and hands the route the authorized :class:`AuthUser`
-    plus an ``authorize(code)`` callable bound to this server resource; the use
-    case calls it per required code and raises on the first the caller lacks.
+    Some write gates cannot be a fixed-operation :func:`require_permission`
+    because the required code depends on the request: the server PATCH gate
+    branches by the changed-key set (``server:update`` vs ``backup:schedule``,
+    issue #458), and the schedule write gate requires ``schedule:manage`` *plus*
+    the permission for the schedule's action (issue #1837) — both known only to
+    the use case. So the dependency runs Layer-1 membership at the edge and hands
+    the route the authorized :class:`AuthUser` plus an ``authorize(code)``
+    callable bound to the target resource; the use case calls it per required
+    code and raises on the first the caller lacks.
     """
 
     auth_user: AuthUser
     authorize: Callable[[str], Awaitable[bool]]
 
 
-def require_server_update_authz(
+def require_deferred_authz(
     *, resource_type: str, resource_id_param: str
-) -> Callable[..., Awaitable[ServerUpdateAuthz]]:
-    """Build the server-PATCH authorization dependency (issue #458).
+) -> Callable[..., Awaitable[DeferredAuthz]]:
+    """Build a deferred per-resource authorization dependency (#458, #1837).
 
     Runs the same Layer-1 membership check as :func:`require_permission`
     (non-member -> 404, no existence signal), then returns the
-    :class:`ServerUpdateAuthz` bundle. The per-operation Layer-2 ``can`` decision
-    is deferred to the bound ``authorize`` callable so the route's use case can
-    branch the gate by the changed-key set (``server:update`` vs
-    ``backup:schedule``).
+    :class:`DeferredAuthz` bundle. The per-operation Layer-2 ``can`` decision is
+    deferred to the bound ``authorize`` callable, scoped to the named resource so
+    a per-resource grant applies (FR-AUTHZ-2). The use case decides *which*
+    codes to require (see :class:`DeferredAuthz`); the edge maps its denial to a
+    403 carrying the missing code.
     """
 
     async def _dependency(
@@ -2573,7 +2642,7 @@ def require_server_update_authz(
         user: Annotated[User, Depends(get_current_user)],
         visibility: Annotated[MembershipVisibility, Depends(get_membership_visibility)],
         checker: Annotated[PermissionChecker, Depends(get_permission_checker)],
-    ) -> ServerUpdateAuthz:
+    ) -> DeferredAuthz:
         auth_user = _to_auth_user(user)
         community = CommunityId(_community_id_from_path(request))
         if not await visibility.is_member(
@@ -2592,7 +2661,7 @@ def require_server_update_authz(
                 user=auth_user, operation=Permission(code), resource=resource
             )
 
-        return ServerUpdateAuthz(auth_user=auth_user, authorize=authorize)
+        return DeferredAuthz(auth_user=auth_user, authorize=authorize)
 
     return _dependency
 

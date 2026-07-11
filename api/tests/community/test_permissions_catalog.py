@@ -59,6 +59,8 @@ def test_community_codes_match_appendix_a() -> None:
         "session:read",
         "plugin:read",
         "plugin:manage",
+        "schedule:read",
+        "schedule:manage",
     }
 
 
@@ -116,12 +118,21 @@ def test_require_community_permission_rejects_unknown_code() -> None:
 
 
 def test_grant_permissions_for_server_are_resource_scoped_families() -> None:
-    # A server grant may carry only server / file / backup / plugin operation codes.
+    # A server grant may carry only server / file / backup / plugin / schedule
+    # operation codes.
     assert {p.value for p in GRANT_PERMISSIONS_BY_RESOURCE_TYPE["server"]} == {
         p.value
         for p in COMMUNITY_PERMISSIONS
-        if p.value.split(":", 1)[0] in ("server", "file", "backup", "plugin")
+        if p.value.split(":", 1)[0]
+        in ("server", "file", "backup", "plugin", "schedule")
     }
+
+
+def test_grant_permissions_for_server_include_schedule_family() -> None:
+    # The schedule read/manage codes are per-server grantable (epic #649, #1837),
+    # so a resource grant on one server can carry them.
+    server_grants = {p.value for p in GRANT_PERMISSIONS_BY_RESOURCE_TYPE["server"]}
+    assert {"schedule:read", "schedule:manage"} <= server_grants
 
 
 def test_require_grant_permission_accepts_a_server_scoped_code() -> None:

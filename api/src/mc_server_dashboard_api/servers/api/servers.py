@@ -39,7 +39,7 @@ from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
 from mc_server_dashboard_api.community.domain.value_objects import AuthUser, Permission
 from mc_server_dashboard_api.config import Settings
 from mc_server_dashboard_api.dependencies import (
-    ServerUpdateAuthz,
+    DeferredAuthz,
     get_audit_recorder,
     get_bedrock_joinability,
     get_create_server,
@@ -55,8 +55,8 @@ from mc_server_dashboard_api.dependencies import (
     get_start_server,
     get_stop_server,
     get_update_server,
+    require_deferred_authz,
     require_permission,
-    require_server_update_authz,
 )
 from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_problem import ProblemException, problem
@@ -691,9 +691,9 @@ async def update_server(
     server_id: uuid.UUID,
     body: UpdateServerRequest,
     authz: Annotated[
-        ServerUpdateAuthz,
+        DeferredAuthz,
         Depends(
-            require_server_update_authz(
+            require_deferred_authz(
                 resource_type=_SERVER_RESOURCE_TYPE,
                 resource_id_param="server_id",
             )

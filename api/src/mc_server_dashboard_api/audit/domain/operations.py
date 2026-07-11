@@ -180,6 +180,14 @@ RESOURCE_PACK_DOWNLOAD: Final = "resource_pack:download"
 RESOURCE_PACK_ASSIGN: Final = "resource_pack:assign"
 RESOURCE_PACK_UNASSIGN: Final = "resource_pack:unassign"
 
+# General-scheduler CRUD (epic #649, issue #1837). Recorded under the
+# schedule:manage permission (plus the action's own permission) the mutating
+# routes require. (The runner's execution row, ``schedule:run``, lands with the
+# runner in issue #1838.)
+SCHEDULE_CREATE: Final = "schedule:create"
+SCHEDULE_UPDATE: Final = "schedule:update"
+SCHEDULE_DELETE: Final = "schedule:delete"
+
 # Target-type names (the ``target_type`` column).
 TARGET_PLUGIN: Final = "plugin"
 TARGET_COMMUNITY: Final = "community"
@@ -192,3 +200,4 @@ TARGET_WORKER: Final = "worker"
 TARGET_FILE: Final = "file"
 TARGET_GROUP: Final = "group"
 TARGET_RESOURCE_PACK: Final = "resource_pack"
+TARGET_SCHEDULE: Final = "schedule"

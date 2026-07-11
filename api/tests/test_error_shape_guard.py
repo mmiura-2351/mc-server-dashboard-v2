@@ -25,10 +25,14 @@ _SRC = Path(__file__).resolve().parent.parent / "src" / "mc_server_dashboard_api
 _ALLOWED = {_SRC / "http_problem.py"}
 
 # Modules whose ``detail=`` is a *data field*, not an HTTP error body: the
-# schedule repository maps the ``schedule_run.detail`` column (issue #1835).
+# schedule repository maps the ``schedule_run.detail`` column (issue #1835) and the
+# schedule router serialises it into the run-history response (issue #1837).
 # Exempt from the keyword scan only; the HTTPException-construction scan below
 # still covers them.
-_DETAIL_FIELD_ALLOWED = {_SRC / "servers" / "adapters" / "schedule_repository.py"}
+_DETAIL_FIELD_ALLOWED = {
+    _SRC / "servers" / "adapters" / "schedule_repository.py",
+    _SRC / "servers" / "api" / "schedules.py",
+}
 
 # Matches a ``detail=`` keyword argument (the HTTPException ad-hoc body shape).
 # A keyword argument has no spaces around ``=`` (PEP 8 / ruff format), which

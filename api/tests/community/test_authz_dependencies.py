@@ -28,13 +28,13 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     UserId,
 )
 from mc_server_dashboard_api.dependencies import (
-    ServerUpdateAuthz,
+    DeferredAuthz,
     get_current_user,
     get_membership_visibility,
     get_permission_checker,
+    require_deferred_authz,
     require_permission,
     require_platform_admin,
-    require_server_update_authz,
 )
 from mc_server_dashboard_api.http_problem import install_problem_handlers
 from tests.identity.fakes import make_user
@@ -357,7 +357,7 @@ def test_malformed_resource_id_param_returns_422() -> None:
     assert body["errors"][0]["type"] == "uuid_parsing"
 
 
-# --- require_server_update_authz (issue #458) ------------------------------
+# --- require_deferred_authz (issues #458, #1837) ----------------------------
 #
 # The server-PATCH gate cannot pin a single operation: the required code depends
 # on which keys the PATCH changes (server:update vs backup:schedule), known only
@@ -372,8 +372,8 @@ def _authz_app() -> tuple[FastAPI, _FakeChecker]:
 
     @app.patch("/api/communities/{community_id}/servers/{server_id}")
     async def _patch(
-        authz: ServerUpdateAuthz = Depends(
-            require_server_update_authz(
+        authz: DeferredAuthz = Depends(
+            require_deferred_authz(
                 resource_type="server", resource_id_param="server_id"
             )
         ),
