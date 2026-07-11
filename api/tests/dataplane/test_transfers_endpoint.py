@@ -1017,3 +1017,117 @@ def test_snapshot_requires_content_length(tmp_path: Path) -> None:
             _url(community, server, "snapshot"), content=_chunks(), headers=_auth()
         )
     assert resp.status_code == 411
+
+
+# --- per-chunk idle timeout (issue #1699) ------------------------------------
+
+
+def test_byte_counter_raises_on_chunk_idle_timeout() -> None:
+    """A stalling source triggers _ChunkIdleTimeout after the per-chunk deadline."""
+    from mc_server_dashboard_api.dataplane.api.transfers import (
+        _ByteCounter,
+        _ChunkIdleTimeout,
+    )
+
+    async def _stalling_source() -> object:
+        yield b"first-chunk"
+        # Hang forever on the second chunk — simulates a partitioned worker.
+        await asyncio.sleep(3600)
+        yield b"never-reached"  # pragma: no cover
+
+    counter = _ByteCounter(
+        _stalling_source(),  # type: ignore[arg-type]
+        declared=1024,
+        chunk_idle_timeout=0.05,
+    )
+
+    async def _consume() -> None:
+        async for _ in counter.stream():
+            pass
+
+    with pytest.raises(_ChunkIdleTimeout):
+        asyncio.run(_consume())
+
+
+def test_byte_counter_normal_stream_unaffected_by_idle_timeout() -> None:
+    """A stream that delivers chunks promptly is unaffected by the idle timeout."""
+    from mc_server_dashboard_api.dataplane.api.transfers import _ByteCounter
+
+    data = b"hello-world"
+
+    async def _fast_source() -> object:
+        yield data
+
+    counter = _ByteCounter(
+        _fast_source(),  # type: ignore[arg-type]
+        declared=len(data),
+        chunk_idle_timeout=5.0,
+    )
+    chunks: list[bytes] = []
+
+    async def _consume() -> list[bytes]:
+        async for chunk in counter.stream():
+            chunks.append(chunk)
+        return chunks
+
+    asyncio.run(_consume())
+    assert b"".join(chunks) == data
+    assert counter.count == len(data)
+
+
+def test_snapshot_chunk_idle_timeout_aborts_staging_and_returns_408(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The endpoint aborts the snapshot handle and returns 408 on chunk idle timeout."""
+    from mc_server_dashboard_api.dataplane.api import transfers
+
+    # Shrink the timeout so the test completes fast; the endpoint's body reader
+    # will time out on the stalling source injected below.
+    monkeypatch.setattr(transfers, "_CHUNK_IDLE_TIMEOUT", 0.05)
+
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    asyncio.run(_publish(storage, community, server, {"keep.txt": b"prior"}))
+
+    # Replace the request body stream with one that stalls after the first chunk.
+    # Since TestClient sends all content at once, we monkeypatch _ByteCounter to
+    # inject a stalling source regardless of the real request body.
+    real_init = transfers._ByteCounter.__init__
+
+    def _stalling_init(
+        self: transfers._ByteCounter,
+        source: object,
+        declared: int,
+        **kwargs: object,
+    ) -> None:
+        async def _stalling() -> object:
+            yield b"x" * 10
+            await asyncio.sleep(3600)
+            yield b"unreachable"  # pragma: no cover
+
+        real_init(self, _stalling(), declared=declared, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(transfers._ByteCounter, "__init__", _stalling_init)
+
+    body = _tar_bytes({"world/level.dat": b"new"})
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"), content=body, headers=_auth()
+        )
+    assert resp.status_code == 408
+    assert resp.json()["reason"] == "chunk_idle_timeout"
+
+    # The prior authoritative copy survives the aborted upload.
+    async def _read() -> bytes:
+        return b"".join(
+            [
+                chunk
+                async for chunk in storage.open_hydrate_source(
+                    CommunityId(community), ServerId(server)
+                )
+            ]
+        )
+
+    published = asyncio.run(_read())
+    assert _read_tar(published) == {"keep.txt": b"prior"}

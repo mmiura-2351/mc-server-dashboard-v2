@@ -26,6 +26,7 @@ The archive format is the stdlib tar stream Storage already produces/consumes
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import io
 import logging
@@ -114,6 +115,14 @@ _MISSING_REGION_NAME_CAP = 50
 # generous M1 ceiling (a Minecraft working set is well under this); a real-world
 # limit can be made configurable when a deployment needs it.
 _MAX_SNAPSHOT_BYTES = 50 * 1024 * 1024 * 1024  # 50 GiB
+
+# Per-chunk idle timeout for the snapshot upload stream (issue #1699). If no new
+# chunk arrives within this many seconds, the upload is treated as a silently
+# partitioned worker and the staging is aborted. Individual chunks should arrive
+# well within 120 s even on slow links; the timeout only fires when the TCP
+# connection is half-open and no data flows at all (the kernel's TCP keepalive
+# would eventually clean it up, but that can take hours).
+_CHUNK_IDLE_TIMEOUT: float = 120
 
 _BEARER_PREFIX = "Bearer "
 
@@ -433,6 +442,17 @@ async def publish_snapshot(
         # mid-stream rather than spooling the whole over-long body first.
         await storage.abort_snapshot(handle)
         raise problem(status.HTTP_400_BAD_REQUEST, "length_mismatch") from None
+    except _ChunkIdleTimeout:
+        # No new chunk arrived within the per-chunk idle deadline (issue #1699):
+        # the worker is likely silently partitioned. Abort the staging so it does
+        # not pin the staging directory (and block sweep reclamation) for hours.
+        _logger.warning(
+            "snapshot upload aborted: no chunk received within %ds for server %s",
+            _CHUNK_IDLE_TIMEOUT,
+            server_id,
+        )
+        await storage.abort_snapshot(handle)
+        raise problem(status.HTTP_408_REQUEST_TIMEOUT, "chunk_idle_timeout") from None
     except StaleGenerationError as exc:
         # The store advanced past the base the pre-stream guard validated against
         # DURING the upload window (issue #899): an at-rest edit or a backup restore
@@ -534,21 +554,50 @@ class _DeclaredLengthExceeded(Exception):
     """Counted bytes ran past the client's declared Content-Length mid-stream."""
 
 
+class _ChunkIdleTimeout(Exception):
+    """No new chunk arrived within the per-chunk idle deadline (issue #1699)."""
+
+
 class _ByteCounter:
     """Tee a request body stream, tallying the bytes that pass through.
 
     The tally is checked against the absolute cap and the client's declared length
     on every chunk: an under-declaring (or runaway) client is stopped as soon as it
     crosses a boundary, before the over-long body can be spooled to disk in full.
+
+    A per-chunk idle timeout (issue #1699) aborts the stream when no new chunk
+    arrives within ``chunk_idle_timeout`` seconds: a silently partitioned worker
+    leaves ``request.stream()`` awaiting the next chunk indefinitely (uvicorn/h11
+    has no mid-body read timeout), pinning the staging directory and the request
+    task until kernel TCP keepalive gives up (potentially hours).
     """
 
-    def __init__(self, source: AsyncIterator[bytes], declared: int) -> None:
+    def __init__(
+        self,
+        source: AsyncIterator[bytes],
+        declared: int,
+        chunk_idle_timeout: float | None = None,
+    ) -> None:
         self._source = source
         self._declared = declared
+        self._chunk_idle_timeout = (
+            chunk_idle_timeout
+            if chunk_idle_timeout is not None
+            else _CHUNK_IDLE_TIMEOUT
+        )
         self.count = 0
 
     async def stream(self) -> AsyncIterator[bytes]:
-        async for chunk in self._source:
+        iterator = self._source.__aiter__()
+        while True:
+            try:
+                chunk = await asyncio.wait_for(
+                    iterator.__anext__(), timeout=self._chunk_idle_timeout
+                )
+            except StopAsyncIteration:
+                break
+            except TimeoutError:
+                raise _ChunkIdleTimeout from None
             self.count += len(chunk)
             if self.count > _MAX_SNAPSHOT_BYTES:
                 raise _CapExceeded
