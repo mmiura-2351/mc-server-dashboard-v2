@@ -1,20 +1,20 @@
 """WebSocket relay of a server's real-time events (Section 6.13, FR-MON-1..4).
 
 ``GET /communities/{community_id}/servers/{server_id}/events?streams=...`` upgrades
-to a WebSocket that streams the server's status / log / metrics events as typed
-JSON frames. Authorization is the same two-layer gate as the REST server routes
-(``server:read``, per-resource), enforced *before* the upgrade is accepted so the
-Layer-1 no-existence-signal posture holds during the handshake (Section 6.4): a
-non-member, an unknown server, and a server in another community are all rejected
-with the same close code, indistinguishable from one another.
+to a WebSocket that streams the server's status / log / metrics / notification
+events as typed JSON frames. Authorization is the same two-layer gate as the REST
+server routes (``server:read``, per-resource), enforced *before* the upgrade is
+accepted so the Layer-1 no-existence-signal posture holds during the handshake
+(Section 6.4): a non-member, an unknown server, and a server in another community
+are all rejected with the same close code, indistinguishable from one another.
 
 Close codes (application range, RFC 6455 4000-4999) mirror the REST status the
 same condition would produce:
 
 - ``4400`` — a malformed request: ``?streams=`` is present but names an unknown
   stream (the REST 422-equivalent). An *omitted/blank* ``streams`` still means
-  "all three streams"; only a present-but-invalid token is rejected, so a typo
-  fails loudly instead of silently subscribing to everything;
+  "all subscribable streams"; only a present-but-invalid token is rejected, so a
+  typo fails loudly instead of silently subscribing to everything;
 - ``4401`` — unauthenticated (missing / invalid / expired token);
 - ``4403`` — authenticated member without ``server:read`` on the resource;
 - ``4404`` — not a member, or the server does not exist in this community.
@@ -111,6 +111,7 @@ _SUBSCRIBABLE: dict[str, EventStream] = {
     EventStream.STATUS.value: EventStream.STATUS,
     EventStream.LOG.value: EventStream.LOG,
     EventStream.METRICS.value: EventStream.METRICS,
+    EventStream.NOTIFICATION.value: EventStream.NOTIFICATION,
 }
 
 
@@ -121,9 +122,9 @@ class _UnknownStreamError(ValueError):
 def _parse_streams(raw: str | None) -> frozenset[EventStream]:
     """Map a comma-separated ``streams`` query to the subscribable set.
 
-    Omitted/blank means all three streams. A present token that names no known
-    stream raises :class:`_UnknownStreamError` so a typo is rejected rather than
-    silently widening the subscription to everything.
+    Omitted/blank means all subscribable streams. A present token that names no
+    known stream raises :class:`_UnknownStreamError` so a typo is rejected rather
+    than silently widening the subscription to everything.
     """
 
     if not raw:
@@ -208,13 +209,14 @@ async def community_events(
     lookup: Annotated[ServerCommunityLookup, Depends(get_server_community_lookup)],
     bus: Annotated[RealTimeEvents, Depends(get_real_time_events)],
 ) -> None:
-    """Stream status-change events for every server of one community (#288).
+    """Stream operator events for every server of one community (#288, #1836).
 
     The community-level analogue of :func:`server_events`: the two-layer gate is
     applied before accept (and re-applied mid-stream), but at community scope —
     ``server:read`` with no specific resource, the honest gate for a stream that
-    carries the lifecycle of all the community's servers. Only the STATUS stream
-    is forwarded; log/metrics are per-server detail, not operator notifications.
+    carries the lifecycle of all the community's servers. Only the STATUS and
+    NOTIFICATION streams are forwarded (lifecycle transitions and operator
+    notices); log/metrics are per-server detail.
 
     Fan-out is a firehose subscription over the relay filtered by community
     membership of each event's server. The server->community mapping is resolved
@@ -251,7 +253,9 @@ async def community_events(
         return
 
     await websocket.accept(subprotocol=ws_accept_subprotocol(websocket))
-    subscription = bus.subscribe_all(streams=frozenset({EventStream.STATUS}))
+    subscription = bus.subscribe_all(
+        streams=frozenset({EventStream.STATUS, EventStream.NOTIFICATION})
+    )
     # Per-connection server->community cache: each server id is looked up at most
     # once, bounding queries while the firehose may carry many servers' events.
     membership: dict[str, bool] = {}
