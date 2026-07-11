@@ -2381,3 +2381,37 @@ async def test_update_game_port_rewrites_properties_at_rest(tmp_path: Path) -> N
         )
     )
     assert read_tar(blob) == {"server.properties": expected}
+
+
+# --- Filesystem-driven backup prune in DeleteServer (#1707) -----------------
+
+
+async def test_delete_prunes_orphan_archives_without_db_rows() -> None:
+    """DeleteServer prunes archives via filesystem listing, not just DB rows (#1707).
+
+    An orphaned archive (one whose metadata row was never committed, e.g. due to
+    a crash between archive write and row commit in the old ordering) must be
+    cleaned up alongside the row-tracked archives.
+    """
+    uow = FakeUnitOfWork()
+    store = FakeBackupArchiveStore()
+    # Two row-tracked archives + one orphan (no DB row).
+    store.archives.update({"old", "new", "orphan"})
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    base = dt.datetime(2026, 6, 10, tzinfo=dt.timezone.utc)
+    uow.backups.seed(_backup(server.id, ref="old", created_at=base))
+    uow.backups.seed(
+        _backup(server.id, ref="new", created_at=base + dt.timedelta(hours=1))
+    )
+    # "orphan" has no DB row — only exists on the filesystem.
+
+    await DeleteServer(uow=uow, backup_store=store)(
+        community_id=community, server_id=server.id
+    )
+
+    # The newest DB row's archive ("new") is retained; "old" and the orphan
+    # "orphan" are both deleted by the filesystem-driven prune.
+    assert {ref for _, ref in store.deleted} == {"old", "orphan"}
+    assert store.archives == {"new"}

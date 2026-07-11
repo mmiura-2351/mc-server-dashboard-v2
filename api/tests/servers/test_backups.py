@@ -1149,3 +1149,135 @@ async def test_global_statistics_aggregates_across_servers() -> None:
     assert stats.count == 2
     assert stats.total_bytes == 15
     assert stats.unknown_size_count == 0
+
+
+def _valid_tar_gz() -> bytes:
+    """A tiny valid tar.gz for upload tests."""
+    return _targz({"server.properties": b"motd=test"})
+
+
+# --- Row-before-archive ordering (#1707) ------------------------------------
+
+
+async def test_create_commits_row_before_archive_write() -> None:
+    """The metadata row is committed BEFORE the archive is written (#1707).
+
+    The ordering prevents orphaned archives on crash: a crash between the row
+    commit and the archive write leaves a dangling row (detectable, self-healing),
+    never an orphaned archive with no row to find it by.
+    """
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    uow = FakeUnitOfWork(servers=repo)
+    archive = FakeBackupArchiveStore()
+    # Record the commit count at the moment create_from_current runs.
+    commits_at_archive_write: list[int] = []
+    _original_create = archive.create_from_current.__func__  # type: ignore[attr-defined]
+
+    async def _recording_create(
+        self: FakeBackupArchiveStore,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        storage_ref: str,
+    ) -> None:
+        commits_at_archive_write.append(uow.commits)
+        await _original_create(
+            self,
+            community_id=community_id,
+            server_id=server_id,
+            storage_ref=storage_ref,
+        )
+
+    import types
+
+    archive.create_from_current = types.MethodType(_recording_create, archive)  # type: ignore[method-assign]
+    create = _make_create(uow, FakeControlPlane(), archive)
+
+    await create(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        source=BackupSource.MANUAL,
+    )
+
+    # The row was committed (at least once) before the archive write.
+    assert commits_at_archive_write[0] >= 1
+
+
+async def test_create_failure_compensates_committed_row() -> None:
+    """A failed archive write deletes the committed row (#1707).
+
+    If create_from_current raises, the already-committed row is deleted so
+    repeated failures (e.g. scheduler retries) do not accumulate dangling rows.
+    """
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    uow = FakeUnitOfWork(servers=repo)
+    archive = FakeBackupArchiveStore(missing=True)
+    create = _make_create(uow, FakeControlPlane(), archive)
+
+    with pytest.raises(BackupNotFoundError):
+        await create(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            source=BackupSource.MANUAL,
+        )
+
+    # No dangling row left behind.
+    assert await uow.backups.list_for_server(server.id) == []
+
+
+async def test_upload_commits_row_before_archive_write() -> None:
+    """UploadBackup commits the metadata row BEFORE storing the archive (#1707)."""
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    uow = FakeUnitOfWork(servers=repo)
+    archive = FakeBackupArchiveStore()
+    commits_at_store: list[int] = []
+    _original_store = archive.store.__func__  # type: ignore[attr-defined]
+
+    async def _recording_store(self: FakeBackupArchiveStore, **kwargs: object) -> None:
+        commits_at_store.append(uow.commits)
+        await _original_store(self, **kwargs)
+
+    import types
+
+    archive.store = types.MethodType(_recording_store, archive)  # type: ignore[method-assign]
+    upload = UploadBackup(uow=uow, backup_store=archive, clock=FakeClock(_NOW))
+
+    await upload(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        content=_valid_tar_gz(),
+        created_by=uuid.uuid4(),
+    )
+
+    assert commits_at_store[0] >= 1
+
+
+async def test_upload_failure_compensates_committed_row() -> None:
+    """A failed store write deletes the committed row (#1707)."""
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    uow = FakeUnitOfWork(servers=repo)
+    archive = FakeBackupArchiveStore()
+
+    async def _failing_store(**_kwargs: object) -> None:
+        msg = "disk full"
+        raise OSError(msg)
+
+    archive.store = _failing_store  # type: ignore[method-assign]
+    upload = UploadBackup(uow=uow, backup_store=archive, clock=FakeClock(_NOW))
+
+    with pytest.raises(OSError, match="disk full"):
+        await upload(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            content=_valid_tar_gz(),
+        )
+
+    assert await uow.backups.list_for_server(server.id) == []

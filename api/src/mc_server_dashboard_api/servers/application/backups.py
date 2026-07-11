@@ -16,9 +16,12 @@ state per the 6.9 table:
 - **anything else** (starting/stopping/restarting/crashed, or a desired/observed
   mismatch) -> :class:`BackupUnsettledError` (409): neither source is well-defined.
 
-Each create records a :class:`Backup` metadata row (source manual or scheduled,
-the archive ref, the actor, and the archive size when cheap) — the row is the
-index into the Storage archive (DATABASE.md Section 8).
+Each create commits a :class:`Backup` metadata row (source manual or scheduled,
+the archive ref, the actor) **before** writing the archive (#1707) — a crash
+after the row commit but before the archive write leaves a dangling row
+(detectable via the lazy size backfill and health sweep), never an orphaned
+archive with no row to find it by.  The archive size is backfilled once the
+archive lands (the lazy path legacy rows already use, #661).
 
 Restore requires the server **at rest** (FR-BAK-4): a hot replacement of a live
 working set is unsafe, so a running server is 409. Restore republishes the
@@ -170,22 +173,19 @@ class CreateBackup:
                 # starting / stopping / restarting / crashed / mismatch: no source.
                 raise BackupUnsettledError(str(server_id.value))
 
-            # Both the at-rest path and the running path (after the snapshot just
-            # published) archive the authoritative copy (Section 6.9, FR-BAK-2).
-            storage_ref = await self.backup_store.create_from_current(
-                community_id=community_id, server_id=server_id
-            )
-            # Record the archive size now that it exists, so the row carries it
-            # (older rows predate this and stay NULL — reported as unknown in stats,
-            # #281).
-            size_bytes = await self.backup_store.size(
-                community_id=community_id, server_id=server_id, storage_ref=storage_ref
-            )
+            # Commit the metadata row BEFORE writing the archive (#1707): a crash
+            # after the row commit but before the archive write leaves a dangling
+            # row (detectable, self-healing via the lazy size backfill and health
+            # sweep), never an orphaned archive with no row to find it by. The
+            # storage_ref is pre-generated so the row can reference it before the
+            # archive exists; size_bytes starts NULL and is backfilled once the
+            # archive lands (the same lazy path legacy rows already use, #661).
+            storage_ref = uuid.uuid4().hex
             backup = Backup(
                 id=BackupId.new(),
                 server_id=server_id,
                 storage_ref=storage_ref,
-                size_bytes=size_bytes,
+                size_bytes=None,
                 source=source,
                 # Healthy by construction: ``create_from_current`` runs through the
                 # integrity gate (#749), which refuses to archive a corrupt working
@@ -197,6 +197,33 @@ class CreateBackup:
             )
             async with self.uow:
                 await self.uow.backups.add(backup)
+                await self.uow.commit()
+            # Both the at-rest path and the running path (after the snapshot just
+            # published) archive the authoritative copy (Section 6.9, FR-BAK-2).
+            # If the archive write fails, compensate by deleting the committed
+            # row so repeated failures (e.g. scheduler retries) do not accumulate
+            # dangling rows.
+            try:
+                await self.backup_store.create_from_current(
+                    community_id=community_id,
+                    server_id=server_id,
+                    storage_ref=storage_ref,
+                )
+            except Exception:
+                async with self.uow:
+                    await self.uow.backups.delete(backup.id)
+                    await self.uow.commit()
+                raise
+            # Record the archive size now that it exists (#281). The row was
+            # committed with NULL; update it in place.
+            size_bytes = await self.backup_store.size(
+                community_id=community_id,
+                server_id=server_id,
+                storage_ref=storage_ref,
+            )
+            backup.size_bytes = size_bytes
+            async with self.uow:
+                await self.uow.backups.update_size(backup.id, size_bytes)
                 await self.uow.commit()
             return backup
 
@@ -698,11 +725,10 @@ class UploadBackup:
             max_decompressed_bytes=self.max_decompressed_bytes,
         )
 
-        storage_ref = await self.backup_store.store(
-            community_id=community_id,
-            server_id=server_id,
-            stream=_chunked(content),
-        )
+        # Commit the metadata row BEFORE writing the archive (#1707): same
+        # ordering rationale as CreateBackup — a dangling row is detectable and
+        # self-healing, an orphaned archive is not.
+        storage_ref = uuid.uuid4().hex
         backup = Backup(
             id=BackupId.new(),
             server_id=server_id,
@@ -718,6 +744,19 @@ class UploadBackup:
         async with self.uow:
             await self.uow.backups.add(backup)
             await self.uow.commit()
+        # If the store write fails, compensate by deleting the committed row.
+        try:
+            await self.backup_store.store(
+                community_id=community_id,
+                server_id=server_id,
+                stream=_chunked(content),
+                storage_ref=storage_ref,
+            )
+        except Exception:
+            async with self.uow:
+                await self.uow.backups.delete(backup.id)
+                await self.uow.commit()
+            raise
         return backup
 
 

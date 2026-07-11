@@ -781,7 +781,10 @@ class FsStorage(Storage):
     # --- backup archive create / list / restore / delete (Section 3.3) -----
 
     async def create_backup_from_current(
-        self, community_id: CommunityId, server_id: ServerId
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        key: BackupKey | None = None,
     ) -> BackupKey:
         current = await asyncio.to_thread(self._current_dir, community_id, server_id)
         # Content-integrity gate (issue #739): never archive a known-corrupt world.
@@ -796,7 +799,8 @@ class FsStorage(Storage):
             raise IntegrityCheckError(report)
         backups = self._server_root(community_id, server_id) / "backups"
         await asyncio.to_thread(backups.mkdir, parents=True, exist_ok=True)
-        key = BackupKey(uuid.uuid4().hex)
+        if key is None:
+            key = BackupKey(uuid.uuid4().hex)
         archive = backups / f"{key.value}.tar.gz"
         await asyncio.to_thread(self._write_backup_archive, current, archive)
         return key
@@ -1079,16 +1083,22 @@ class FsStorage(Storage):
         return _file_stream(archive)
 
     async def put_backup(
-        self, community_id: CommunityId, server_id: ServerId, stream: ByteStream
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        stream: ByteStream,
+        key: BackupKey | None = None,
     ) -> BackupKey:
-        # Store the uploaded archive bytes verbatim under a fresh key (the caller
-        # already validated the archive). Stage to a temp file in backups/, then
-        # atomically rename to <key>.tar.gz so a partial upload never appears as a
-        # listable backup (issue #281). fsync the directory after the rename so the
-        # rename itself is durable (issue #859) — mirrors create_backup_from_current.
+        # Store the uploaded archive bytes verbatim under the provided (or fresh) key
+        # (the caller already validated the archive). Stage to a temp file in
+        # backups/, then atomically rename to <key>.tar.gz so a partial upload never
+        # appears as a listable backup (issue #281). fsync the directory after the
+        # rename so the rename itself is durable (issue #859) — mirrors
+        # create_backup_from_current.
         backups = self._server_root(community_id, server_id) / "backups"
         await asyncio.to_thread(backups.mkdir, parents=True, exist_ok=True)
-        key = BackupKey(uuid.uuid4().hex)
+        if key is None:
+            key = BackupKey(uuid.uuid4().hex)
         fd, tmp_name = await asyncio.to_thread(
             tempfile.mkstemp, dir=str(backups), prefix=".backup.", suffix=".tmp"
         )

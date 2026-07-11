@@ -55,11 +55,13 @@ class StorageBackupStoreAdapter(BackupArchiveStore):
         self._storage = storage
 
     async def create_from_current(
-        self, *, community_id: CommunityId, server_id: ServerId
-    ) -> str:
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> None:
         community, server = _scope(community_id, server_id)
         try:
-            key = await self._storage.create_backup_from_current(community, server)
+            await self._storage.create_backup_from_current(
+                community, server, key=BackupKey(storage_ref)
+            )
         except NotFoundError as exc:
             raise BackupNotFoundError(str(server_id.value)) from exc
         except IntegrityCheckError as exc:
@@ -69,7 +71,13 @@ class StorageBackupStoreAdapter(BackupArchiveStore):
             raise BackupCorruptError(
                 str(server_id.value), corrupt_count=len(exc.report.corrupt)
             ) from exc
-        return key.value
+
+    async def list_archive_refs(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> list[str]:
+        community, server = _scope(community_id, server_id)
+        keys = await self._storage.list_backups(community, server)
+        return [k.value for k in keys]
 
     async def restore(
         self,
@@ -170,10 +178,12 @@ class StorageBackupStoreAdapter(BackupArchiveStore):
         community_id: CommunityId,
         server_id: ServerId,
         stream: AsyncIterator[bytes],
-    ) -> str:
+        storage_ref: str,
+    ) -> None:
         community, server = _scope(community_id, server_id)
-        key = await self._storage.put_backup(community, server, stream)
-        return key.value
+        await self._storage.put_backup(
+            community, server, stream, key=BackupKey(storage_ref)
+        )
 
     async def size(
         self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str

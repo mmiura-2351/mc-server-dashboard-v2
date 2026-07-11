@@ -896,21 +896,24 @@ class DeleteServer:
                     raise ServerNotFoundError(str(server_id.value))
                 if not server.is_at_rest():
                     raise ServerNotStoppedError(str(server_id.value))
-                # Re-list backups HERE, not before the pack: a backup created during
-                # the (minutes-long) pack window would otherwise be neither the
-                # snapshotted head nor in the snapshotted tail, surviving as a third
-                # orphan archive (#777 review). The fresh list keeps the "latest
-                # existing at delete time" semantics — the head is the newest row at
-                # this point — and archive-first ordering holds because the tail is
-                # deleted before the row delete below cascades the rows away.
-                # Newest-first; head retained, tail deleted.
+                # Filesystem-driven archive prune (#1707): list every archive
+                # ref that physically exists on storage, regardless of whether a
+                # metadata row tracks it. This catches both row-tracked archives
+                # and orphans (archives written before their row committed, or
+                # whose row commit failed). The newest DB row's ref is the
+                # retained head; every other physical archive is deleted.
                 backups = await self.uow.backups.list_for_server(server_id)
-                for backup in backups[1:]:
-                    await self.backup_store.delete(
-                        community_id=community_id,
-                        server_id=server_id,
-                        storage_ref=backup.storage_ref,
-                    )
+                head_ref = backups[0].storage_ref if backups else None
+                all_refs = await self.backup_store.list_archive_refs(
+                    community_id=community_id, server_id=server_id
+                )
+                for ref in all_refs:
+                    if ref != head_ref:
+                        await self.backup_store.delete(
+                            community_id=community_id,
+                            server_id=server_id,
+                            storage_ref=ref,
+                        )
                 await self.uow.servers.delete(server_id)
                 # No FK on resource_grant.resource_id, so the server delete does not
                 # cascade; sweep the grants in the same transaction (Section 10).
