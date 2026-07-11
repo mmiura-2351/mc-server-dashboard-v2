@@ -10,6 +10,8 @@ interface UploadProgressProps {
   total: number;
   percent: number;
   elapsedMs: number;
+  /** When provided, a cancel button is rendered (issue #1780). */
+  onCancel?: () => void;
 }
 
 export function UploadProgress({
@@ -17,6 +19,7 @@ export function UploadProgress({
   total,
   percent,
   elapsedMs,
+  onCancel,
 }: UploadProgressProps) {
   const seconds = Math.round(elapsedMs / 1000);
   const bytes = t("upload.bytes", {
@@ -40,6 +43,11 @@ export function UploadProgress({
         <span>{t("upload.percent", { percent })}</span>
         {total > 0 && <span>{bytes}</span>}
         <span>{t("upload.elapsed", { seconds })}</span>
+        {onCancel !== undefined && (
+          <button type="button" className="btn ghost small" onClick={onCancel}>
+            {t("common.cancel")}
+          </button>
+        )}
       </div>
     </div>
   );

@@ -1,7 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
 import { type FormEvent, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router";
-import { ApiError, api, postFormWithProgress } from "../api/client.ts";
+import {
+  ApiError,
+  api,
+  isUploadAbortError,
+  postFormWithProgress,
+} from "../api/client.ts";
 import { apiPath } from "../api/path.ts";
 import { fieldErrorsFromValidation } from "../api/validationErrors.ts";
 import { FilePicker } from "../components/FilePicker.tsx";
@@ -813,10 +818,15 @@ function ImportForm({ communityId }: { communityId: string }) {
         }),
         form,
         progress.onProgress,
+        progress.signal,
       );
       navigate(`${dashboardPath(communityId)}/servers/${server.id}`);
     } catch (err) {
       progress.reset();
+      if (isUploadAbortError(err)) {
+        setSubmitting(false);
+        return;
+      }
       if (!handleImportError(err, showToast, setNameError)) {
         showToast(t("serverCreate.genericError"), "error");
       }
@@ -861,6 +871,7 @@ function ImportForm({ communityId }: { communityId: string }) {
           total={progress.total}
           percent={progress.percent}
           elapsedMs={progress.elapsedMs}
+          onCancel={progress.cancel}
         />
       )}
       <div className="wizard-foot">

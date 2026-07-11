@@ -2,7 +2,13 @@
 // DOM-free logic test; runs under Node to skip per-file jsdom setup (issue #1734).
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAccessToken, setAccessToken } from "../auth/tokenStore.ts";
-import { ApiError, api, postFormWithProgress, setRefresher } from "./client.ts";
+import {
+  ApiError,
+  api,
+  isUploadAbortError,
+  postFormWithProgress,
+  setRefresher,
+} from "./client.ts";
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(body === undefined ? "" : JSON.stringify(body), {
@@ -267,6 +273,7 @@ class MockXHR {
   upload = { onprogress: null as ((e: ProgressEvent) => void) | null };
   onload: (() => void) | null = null;
   onerror: (() => void) | null = null;
+  onabort: (() => void) | null = null;
   withCredentials = false;
   status = 0;
   responseText = "";
@@ -324,6 +331,11 @@ class MockXHR {
   /** Simulate a network-level failure. */
   fail(): void {
     this.onerror?.();
+  }
+
+  /** Simulate an abort. */
+  abort(): void {
+    this.onabort?.();
   }
 }
 
@@ -437,5 +449,54 @@ describe("postFormWithProgress", () => {
     expect(error).toBeInstanceOf(ApiError);
     expect(error.status).toBe(401);
     expect(MockXHR.instances).toHaveLength(1);
+  });
+
+  it("rejects with an abort error when the signal fires", async () => {
+    const controller = new AbortController();
+    const promise = postFormWithProgress(
+      "/api/resource-packs",
+      new FormData(),
+      undefined,
+      controller.signal,
+    ).catch((e) => e);
+
+    // Aborting the signal should trigger xhr.abort(), which fires onabort.
+    controller.abort();
+
+    const error = await promise;
+    expect(isUploadAbortError(error)).toBe(true);
+    expect(error).not.toBeInstanceOf(ApiError);
+  });
+
+  it("rejects immediately when the signal is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    const error = await postFormWithProgress(
+      "/api/resource-packs",
+      new FormData(),
+      undefined,
+      controller.signal,
+    ).catch((e) => e);
+
+    expect(isUploadAbortError(error)).toBe(true);
+    // No XHR should have been constructed.
+    expect(MockXHR.instances).toHaveLength(0);
+  });
+});
+
+describe("isUploadAbortError", () => {
+  it("returns true for a DOMException with name AbortError", () => {
+    expect(isUploadAbortError(new DOMException("aborted", "AbortError"))).toBe(
+      true,
+    );
+  });
+
+  it("returns false for an ApiError", () => {
+    expect(isUploadAbortError(new ApiError(0, undefined))).toBe(false);
+  });
+
+  it("returns false for a plain Error", () => {
+    expect(isUploadAbortError(new Error("oops"))).toBe(false);
   });
 });

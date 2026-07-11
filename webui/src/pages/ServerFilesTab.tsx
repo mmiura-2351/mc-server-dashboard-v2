@@ -30,7 +30,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { zip } from "fflate";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate as useRouterNavigate } from "react-router";
-import { ApiError, api, postFormWithProgress } from "../api/client.ts";
+import {
+  ApiError,
+  api,
+  isUploadAbortError,
+  postFormWithProgress,
+} from "../api/client.ts";
 import {
   DownloadTooLargeError,
   downloadFile,
@@ -550,6 +555,7 @@ export function ServerFilesTab({
         )}?path=${encodeURIComponent(dir)}&extract=false` as never,
         form,
         progress.onProgress,
+        progress.signal,
       );
     },
     onSuccess: () => {
@@ -559,6 +565,7 @@ export function ServerFilesTab({
     },
     onError: (error) => {
       progress.reset();
+      if (isUploadAbortError(error)) return;
       onError(error);
     },
   });
@@ -889,11 +896,13 @@ export function ServerFilesTab({
             (loaded) => {
               progress.onProgress(fileBaseLoaded + loaded, totalSize);
             },
+            progress.signal,
           );
           cumulativeLoaded += file.size;
           uploaded++;
         } catch (error) {
           progress.reset();
+          if (isUploadAbortError(error)) return;
           onErrorRef.current(error);
           return;
         }
@@ -1229,6 +1238,7 @@ export function ServerFilesTab({
           total={progress.total}
           percent={progress.percent}
           elapsedMs={progress.elapsedMs}
+          onCancel={progress.cancel}
         />
       )}
       <div className={`file-layout${openFile !== null ? " two-pane" : ""}`}>
@@ -1309,6 +1319,7 @@ export function ServerFilesTab({
                   )}?path=${encodeURIComponent(dir)}&extract=true` as never,
                   form,
                   progress.onProgress,
+                  progress.signal,
                 ).then(
                   () => {
                     progress.reset();
@@ -1317,6 +1328,7 @@ export function ServerFilesTab({
                   },
                   (error) => {
                     progress.reset();
+                    if (isUploadAbortError(error)) return;
                     onError(error);
                   },
                 );
