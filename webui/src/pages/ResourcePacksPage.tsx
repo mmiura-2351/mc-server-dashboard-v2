@@ -8,7 +8,12 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { ApiError, api, postFormWithProgress } from "../api/client.ts";
+import {
+  ApiError,
+  api,
+  isUploadAbortError,
+  postFormWithProgress,
+} from "../api/client.ts";
 import { downloadFile } from "../api/download.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
@@ -229,11 +234,13 @@ function UploadDialog({
         "/api/resource-packs",
         form,
         progress.onProgress,
+        progress.signal,
       );
     },
     onSuccess,
     onError: (error) => {
       progress.reset();
+      if (isUploadAbortError(error)) return;
       if (onForbidden(error)) return;
       showToast(t("resourcePacks.error.uploadFailed"), "error");
     },
@@ -295,6 +302,7 @@ function UploadDialog({
           total={progress.total}
           percent={progress.percent}
           elapsedMs={progress.elapsedMs}
+          onCancel={progress.cancel}
         />
       )}
     </Modal>

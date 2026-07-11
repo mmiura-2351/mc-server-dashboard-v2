@@ -10,7 +10,12 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
-import { ApiError, api, postFormWithProgress } from "../api/client.ts";
+import {
+  ApiError,
+  api,
+  isUploadAbortError,
+  postFormWithProgress,
+} from "../api/client.ts";
 import { downloadFile } from "../api/download.ts";
 import { apiPath } from "../api/path.ts";
 import {
@@ -365,6 +370,7 @@ export function ServerPluginsTab({
         }),
         form,
         progress.onProgress,
+        progress.signal,
       );
     },
     onSuccess: () => {
@@ -374,6 +380,7 @@ export function ServerPluginsTab({
     },
     onError: (error) => {
       progress.reset();
+      if (isUploadAbortError(error)) return;
       onError(error);
     },
   });
@@ -500,6 +507,7 @@ export function ServerPluginsTab({
           total={progress.total}
           percent={progress.percent}
           elapsedMs={progress.elapsedMs}
+          onCancel={progress.cancel}
         />
       )}
 
