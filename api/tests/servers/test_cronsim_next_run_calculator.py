@@ -44,6 +44,18 @@ def test_validate_rejects_malformed_expression(
         calculator.validate(bad)
 
 
+@pytest.mark.parametrize("bad", ["* * * * * *", "30 2 * * * *"])
+def test_validate_rejects_six_field_seconds_expression(
+    calculator: NextRunCalculator, bad: str
+) -> None:
+    # The Port contract is 5-field expressions only. cronsim would accept a
+    # 6-field (seconds-granularity) form, but applies its Debian-cron DST
+    # fixup only to 5-field expressions — a persisted 6-field expression
+    # would silently get different DST semantics.
+    with pytest.raises(InvalidCronExpressionError):
+        calculator.validate(bad)
+
+
 def test_next_after_returns_first_utc_occurrence(
     calculator: NextRunCalculator,
 ) -> None:
@@ -102,3 +114,26 @@ def test_fall_back_repeated_hour_fires_once(calculator: NextRunCalculator) -> No
     assert first == dt.datetime(2026, 10, 25, 0, 30, tzinfo=_UTC)
     second = calculator.next_after("30 2 * * *", "Europe/Berlin", first)
     assert second == dt.datetime(2026, 10, 26, 1, 30, tzinfo=_UTC)
+
+
+def test_fall_back_after_inside_repeated_hour_stays_strictly_after(
+    calculator: NextRunCalculator,
+) -> None:
+    # ``after`` = 01:00 UTC = 02:00 CET — the *second* (fold=1) pass of the
+    # repeated hour. cronsim's Debian fixup computes the day's occurrence on
+    # the first (fold=0) pass, 02:30 CEST = 00:30 UTC, which lies BEFORE
+    # ``after``; returning it would hand the runner (#1838) a past next_run_at
+    # and cause repeated immediate re-fires. The adapter must skip past it to
+    # the next day's occurrence.
+    after = dt.datetime(2026, 10, 25, 1, 0, tzinfo=_UTC)
+    occurrence = calculator.next_after("30 2 * * *", "Europe/Berlin", after)
+    assert occurrence > after
+    assert occurrence == dt.datetime(2026, 10, 26, 1, 30, tzinfo=_UTC)
+
+
+def test_next_after_rejects_naive_after(calculator: NextRunCalculator) -> None:
+    # The interval path (schedule.next_interval_run) fails loudly on a naive
+    # datetime (aware-minus-naive TypeError); the cron path must not silently
+    # reinterpret one as process-local time instead.
+    with pytest.raises(TypeError):
+        calculator.next_after("0 3 * * *", "UTC", dt.datetime(2026, 7, 1, 12, 0))
