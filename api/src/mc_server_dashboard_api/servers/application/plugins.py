@@ -351,13 +351,12 @@ class InstallPlugin:
                     port_range=self.bedrock_port_range,
                     now=now,
                 )
-                # Side-aware deploy (issue #1308): only a server-relevant, enabled
-                # jar goes into the working set; a client-only jar is tracked +
-                # cached but never written there. The write is the LAST step
-                # before commit: the file store is outside the SQL transaction,
-                # so any failure above (e.g. Bedrock-window exhaustion, #1541)
-                # must abort before the jar lands on disk — a write-then-fail
-                # would orphan a working-set jar with no DB row.
+                await self.uow.commit()
+                # Side-aware deploy (issue #1308): only a server-relevant,
+                # enabled jar goes into the working set; a client-only jar is
+                # tracked + cached but never written there. The write follows
+                # the commit so a commit failure cannot orphan a working-set
+                # jar with no DB row (issue #1706).
                 if working_set_present(enabled=True, side=side):
                     await self.file_store.write_file(
                         community_id=community_id,
@@ -365,7 +364,6 @@ class InstallPlugin:
                         rel_path=rel_path,
                         content=content,
                     )
-                await self.uow.commit()
                 return plugin
 
 
@@ -400,14 +398,7 @@ class RemovePlugin:
                 if plugin is None:
                     raise PluginNotFoundError(str(plugin_id.value))
 
-                try:
-                    await self.file_store.delete_file(
-                        community_id=community_id,
-                        server_id=server_id,
-                        rel_path=plugin.rel_path,
-                    )
-                except ServerFileNotFoundError:
-                    pass  # jar already gone; proceed with DB cleanup
+                rel_path = plugin.rel_path
                 await self.uow.plugins.delete(plugin_id)
                 # Release the Bedrock port when the last Geyser leaves (issue
                 # #1541). Unconditional on the deployment gate: a port allocated
@@ -419,6 +410,16 @@ class RemovePlugin:
                         server.updated_at = self.clock.now()
                         await self.uow.servers.update(server)
                 await self.uow.commit()
+                # Delete the working-set file after the DB commit so a commit
+                # failure does not leave a live row whose jar is gone (#1706).
+                try:
+                    await self.file_store.delete_file(
+                        community_id=community_id,
+                        server_id=server_id,
+                        rel_path=rel_path,
+                    )
+                except ServerFileNotFoundError:
+                    pass  # jar already gone
 
 
 @dataclass(frozen=True)
@@ -479,6 +480,13 @@ class TogglePlugin:
                     if existing is not None and existing.id != plugin.id:
                         raise PluginAlreadyExistsError(new_path)
 
+                plugin.enabled = enable
+                plugin.rel_path = new_path if new_path is not None else clean_path
+                plugin.updated_at = self.clock.now()
+                await self.uow.plugins.update(plugin)
+                await self.uow.commit()
+                # Reconcile the working-set file after the DB commit so a
+                # commit failure does not leave rel_path diverged (#1706).
                 await _reconcile_working_set(
                     file_store=self.file_store,
                     cache=self.cache,
@@ -488,12 +496,6 @@ class TogglePlugin:
                     current_path=current_path,
                     desired_path=new_path,
                 )
-
-                plugin.enabled = enable
-                plugin.rel_path = new_path if new_path is not None else clean_path
-                plugin.updated_at = self.clock.now()
-                await self.uow.plugins.update(plugin)
-                await self.uow.commit()
                 return plugin
 
 
@@ -566,6 +568,15 @@ class SetPluginSide:
                     if existing is not None and existing.id != plugin.id:
                         raise PluginAlreadyExistsError(desired_path)
 
+                plugin.side = new_side
+                plugin.rel_path = (
+                    desired_path if desired_path is not None else clean_path
+                )
+                plugin.updated_at = self.clock.now()
+                await self.uow.plugins.update(plugin)
+                await self.uow.commit()
+                # Reconcile the working-set file after the DB commit so a
+                # commit failure does not leave the file diverged (#1706).
                 await _reconcile_working_set(
                     file_store=self.file_store,
                     cache=self.cache,
@@ -575,12 +586,4 @@ class SetPluginSide:
                     current_path=current_path,
                     desired_path=desired_path,
                 )
-
-                plugin.side = new_side
-                plugin.rel_path = (
-                    desired_path if desired_path is not None else clean_path
-                )
-                plugin.updated_at = self.clock.now()
-                await self.uow.plugins.update(plugin)
-                await self.uow.commit()
                 return plugin
