@@ -2024,3 +2024,86 @@ async def test_install_from_catalog_geyser_exhausted_window_aborts_install() -> 
     # The file store is outside the SQL transaction: the failed install must not
     # leave an orphaned working-set jar behind (allocation runs before the write).
     assert fs.files == {}
+
+
+# -- Commit-before-file-ops ordering (issue #1826) --
+
+
+class _FailingCommitUoW(FakeUnitOfWork):
+    """A UoW whose commit always raises, simulating a DB commit failure."""
+
+    async def commit(self) -> None:
+        raise RuntimeError("simulated commit failure")
+
+
+async def test_install_from_catalog_failed_commit_leaves_no_orphan_jar() -> None:
+    """A failed DB commit must not leave a working-set jar behind (#1826)."""
+    uow = _FailingCommitUoW()
+    server = _server()
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+
+    project = _project()
+    version, content = _version()
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(project, [version])
+    catalog.seed_file(version.files[0].url, content)
+
+    uc = InstallFromCatalog(
+        uow=uow,
+        catalog=catalog,
+        file_store=fs,
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+    )
+    with pytest.raises(RuntimeError, match="simulated commit failure"):
+        await uc(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            project_id="proj-1",
+            version_id="ver-1",
+        )
+    # The jar must NOT have been written to the working set.
+    assert fs.files == {}
+
+
+async def test_update_plugin_failed_commit_leaves_files_unchanged() -> None:
+    """A failed DB commit must not write/delete working-set files (#1826)."""
+    uow = _FailingCommitUoW()
+    server = _server()
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+    fs.files["mods/fabric-api-0.92.0.jar"] = b"old"
+
+    plugin = _plugin(server_id=server.id, source_version_id="ver-1")
+    uow.plugins.seed(plugin)
+
+    project = _project()
+    new_content = b"new-jar-bytes-v2"
+    ver_new, _ = _version(
+        version_id="ver-2",
+        version_number="0.93.0",
+        filename="fabric-api-0.93.0.jar",  # different filename
+        file_content=new_content,
+    )
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(project, [ver_new])
+    catalog.seed_file(ver_new.files[0].url, new_content)
+
+    uc = UpdatePlugin(
+        uow=uow,
+        catalog=catalog,
+        file_store=fs,
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+    )
+    with pytest.raises(RuntimeError, match="simulated commit failure"):
+        await uc(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            plugin_id=plugin.id,
+            version_id="ver-2",
+        )
+    # The old jar must still exist and the new jar must NOT have been written.
+    assert "mods/fabric-api-0.92.0.jar" in fs.files
+    assert "mods/fabric-api-0.93.0.jar" not in fs.files
