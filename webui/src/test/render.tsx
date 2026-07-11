@@ -40,8 +40,9 @@ interface RenderAppOptions {
 
 /** Render `<App/>` under the same provider stack as `main.tsx`. */
 export function renderApp({ path = "/", extras }: RenderAppOptions = {}) {
-  return render(
-    <QueryClientProvider client={testQueryClient()}>
+  const queryClient = testQueryClient();
+  const result = render(
+    <QueryClientProvider client={queryClient}>
       <MemoryRouter initialEntries={[path]}>
         <SessionProvider>
           <ActiveCommunityProvider>
@@ -52,4 +53,5 @@ export function renderApp({ path = "/", extras }: RenderAppOptions = {}) {
       </MemoryRouter>
     </QueryClientProvider>,
   );
+  return { ...result, queryClient };
 }

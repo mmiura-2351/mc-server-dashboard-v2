@@ -1,5 +1,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client.ts";
@@ -82,7 +88,7 @@ function renderPage(path = `/communities/${CID}/servers/new`) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  return render(
+  const result = render(
     <MemoryRouter initialEntries={[path]}>
       <QueryClientProvider client={queryClient}>
         <ToastProvider>
@@ -97,6 +103,7 @@ function renderPage(path = `/communities/${CID}/servers/new`) {
       </QueryClientProvider>
     </MemoryRouter>,
   );
+  return { ...result, queryClient };
 }
 
 function activeTab(): string | null {
@@ -908,5 +915,32 @@ describe("create-vs-import tab in the URL (#540)", () => {
     });
     expect(newTab).toHaveAttribute("tabindex", "0");
     expect(importTab).toHaveAttribute("tabindex", "-1");
+  });
+});
+
+describe("ServerCreatePage refetch failure (#1805)", () => {
+  beforeEach(() => {
+    mockApi.get.mockReset();
+    mockApi.post.mockReset();
+    mockApi.get.mockImplementation(defaultGet);
+  });
+  afterEach(() => vi.clearAllMocks());
+
+  it("keeps rendering cached server types when a background refetch fails", async () => {
+    const { queryClient } = renderPage();
+    await screen.findByText(t("serverCreate.typeHeading"));
+
+    // Simulate a transient API outage: the next background refetch fails.
+    mockApi.get.mockRejectedValue(new ApiError(500, {}));
+    await act(() => queryClient.invalidateQueries());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // The cached type cards stay on screen instead of the error.
+    expect(screen.getByText(t("serverCreate.typeHeading"))).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("serverCreate.typeLoadError")),
+    ).not.toBeInTheDocument();
   });
 });

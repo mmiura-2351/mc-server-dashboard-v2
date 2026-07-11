@@ -392,7 +392,11 @@ function NewServerWizard({ communityId }: { communityId: string }) {
           <h2>{t("serverCreate.typeHeading")}</h2>
           {typesQuery.isPending ? (
             <p className="sub">{t("serverCreate.typeLoading")}</p>
-          ) : typesQuery.isError ? (
+          ) : /* Error only when there is nothing to show (initial load
+               failed). A failed background refetch retains `data`, so
+               the cached types keep rendering through transient API
+               blips (#1805). */
+          typesQuery.data === undefined ? (
             <p className="field-error">{t("serverCreate.typeLoadError")}</p>
           ) : (
             <>
@@ -427,7 +431,12 @@ function NewServerWizard({ communityId }: { communityId: string }) {
                   </label>
                   {versionsQuery.isPending ? (
                     <p className="sub">{t("serverCreate.versionLoading")}</p>
-                  ) : versionsQuery.isError ? (
+                  ) : /* Error only when there is nothing to show
+                       (initial load failed). A failed background
+                       refetch retains `data`, so the cached versions
+                       keep rendering through transient blips
+                       (#1805). */
+                  versionsQuery.data === undefined ? (
                     <p className="field-error">
                       {t("serverCreate.versionLoadError")}
                     </p>

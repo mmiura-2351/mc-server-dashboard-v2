@@ -389,7 +389,10 @@ export function ServerPluginsTab({
   if (listQuery.isPending) {
     return <p className="sub">{tn("plugins.loading")}</p>;
   }
-  if (listQuery.isError) {
+  // Error only when there is nothing to show (initial load failed). A failed
+  // background refetch retains `data`, so the cached list keeps rendering
+  // through transient API blips (#1805).
+  if (listQuery.data === undefined) {
     return <p className="field-error">{tn("plugins.loadError")}</p>;
   }
 
@@ -800,7 +803,10 @@ function DependenciesView({
   if (query.isPending) {
     return <p className="sub">{t("plugins.dependencies.loading")}</p>;
   }
-  if (query.isError) {
+  // Error only when there is nothing to show (initial load failed). A failed
+  // background refetch retains `data`, so the cached list keeps rendering
+  // through transient API blips (#1805).
+  if (query.data === undefined) {
     return <p className="field-error">{t("plugins.error.generic")}</p>;
   }
   const deps = query.data.dependencies;
@@ -1200,7 +1206,10 @@ function SearchResults({
   if (searchQuery.isPending) {
     return <p className="sub">{applyNoun(t("plugins.loading"), noun)}</p>;
   }
-  if (searchQuery.isError) {
+  // Error only when there is nothing to show (initial load failed). A failed
+  // background refetch retains `data`, so the cached list keeps rendering
+  // through transient API blips (#1805).
+  if (searchQuery.data === undefined) {
     return <p className="field-error">{t("plugins.error.generic")}</p>;
   }
   const hits = searchQuery.data.hits;
