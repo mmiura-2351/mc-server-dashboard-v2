@@ -5,9 +5,9 @@ How v2 takes on and updates third-party dependencies. This document fixes the
 configuration, the cooldown enforcement per tool) are set up as the toolchain
 lands and are marked *(forthcoming)*.
 
-> **Two ecosystems.** `api/` is Python and `worker/` is Go. The policy below
-> applies to both; where a rule is expressed per-tool, each ecosystem's section
-> states its own form.
+> **Two ecosystems.** `api/` is Python; `worker/` and `relay/` are Go. The
+> policy below applies to both; where a rule is expressed per-tool, each
+> ecosystem's section states its own form.
 
 ## 1. Pinning style
 
@@ -16,7 +16,7 @@ lands and are marked *(forthcoming)*.
   - Python (`api/`): a version range that admits minor/patch and caps the next
     major (for a `0.x` library, cap the next minor, since `0.x` may break on a
     minor bump).
-  - Go (`worker/`): a major version is part of the module import path, so a
+  - Go (`worker/`, `relay/`): a major version is part of the module import path, so a
     major bump is inherently a separate, explicit change; minor/patch updates
     are selected by the module graph.
 - **Dev / tooling dependencies** (linters, test runners, type checkers, build
@@ -31,11 +31,11 @@ lands and are marked *(forthcoming)*.
 
 ## 2. Lockfiles
 
-- Each ecosystem commits its lockfile (`api/`: the uv lockfile; `worker/`:
-  `go.sum` with `go.mod`). Lockfiles are the reproducibility boundary and must
-  be committed. (`worker/go.sum` is generated, and from then on committed, only
-  once the module has external dependencies; a dependency-free module has only
-  `go.mod`.)
+- Each ecosystem commits its lockfile (`api/`: the uv lockfile; `worker/` and
+  `relay/`: `go.sum` with `go.mod`). Lockfiles are the reproducibility boundary
+  and must be committed. (`go.sum` is generated, and from then on committed,
+  only once the module has external dependencies; a dependency-free module has
+  only `go.mod`.)
 - Reproducible installs resolve from the lockfile; routine updates regenerate it
   through the ecosystem's own command *(forthcoming)*.
 
