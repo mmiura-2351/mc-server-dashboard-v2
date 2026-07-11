@@ -16,9 +16,9 @@ lands and are marked *(forthcoming)*.
   - Python (`api/`): a version range that admits minor/patch and caps the next
     major (for a `0.x` library, cap the next minor, since `0.x` may break on a
     minor bump).
-  - Go (`worker/`, `relay/`): a major version is part of the module import path, so a
-    major bump is inherently a separate, explicit change; minor/patch updates
-    are selected by the module graph.
+  - Go (`worker/`, `relay/`): a major version is part of the module import
+    path, so a major bump is inherently a separate, explicit change;
+    minor/patch updates are selected by the module graph.
 - **Dev / tooling dependencies** (linters, test runners, type checkers, build
   helpers) are kept current with lower-bound-style ranges that still **cap the
   next major** (e.g. `mypy-protobuf<6`, `pytest-asyncio<2`, `pytest-timeout<3`):
