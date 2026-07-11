@@ -159,6 +159,43 @@ async def test_resolve_unknown_version_raises_on_upstream_404() -> None:
 
 
 @pytest.mark.asyncio
+async def test_list_raises_when_all_entries_malformed() -> None:
+    """A non-empty versions array where no entry is parseable raises rather than
+    returning an empty 200 — avoids silently hiding a format change (#1538)."""
+    payload = {"versions": [42, "not-a-dict", {"no_version_key": True}]}
+    fetcher = FakeJsonFetcher({f"{_BASE}/versions": payload})
+    catalog = PaperCatalog(fetcher=fetcher)
+    with pytest.raises(UnknownVersionError, match="malformed"):
+        await catalog.list_versions(ServerType.PAPER)
+
+
+@pytest.mark.asyncio
+async def test_list_returns_empty_when_versions_array_empty() -> None:
+    """A genuinely empty versions array is a valid state, not an error."""
+    payload: dict[str, list[object]] = {"versions": []}
+    fetcher = FakeJsonFetcher({f"{_BASE}/versions": payload})
+    catalog = PaperCatalog(fetcher=fetcher)
+    assert await catalog.list_versions(ServerType.PAPER) == []
+
+
+@pytest.mark.asyncio
+async def test_list_skips_malformed_entries_among_valid() -> None:
+    """Malformed entries are tolerated when at least one valid entry exists."""
+    payload = {
+        "versions": [
+            {"version": {"id": "1.21.4"}},
+            "garbage",
+            {"no_version_key": True},
+            {"version": {"id": "1.20.4"}},
+        ]
+    }
+    fetcher = FakeJsonFetcher({f"{_BASE}/versions": payload})
+    catalog = PaperCatalog(fetcher=fetcher)
+    versions = await catalog.list_versions(ServerType.PAPER)
+    assert [v.version for v in versions] == ["1.21.4", "1.20.4"]
+
+
+@pytest.mark.asyncio
 async def test_vanilla_request_rejected() -> None:
     catalog, _ = _catalog()
     with pytest.raises(UnknownVersionError):

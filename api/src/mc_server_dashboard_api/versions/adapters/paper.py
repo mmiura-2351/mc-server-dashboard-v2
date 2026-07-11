@@ -87,6 +87,8 @@ def _version_ids(payload: object) -> list[str]:
         version = entry.get("version")
         if isinstance(version, dict) and "id" in version:
             ids.append(str(version["id"]))
+    if not ids and versions:
+        raise UnknownVersionError("malformed paper response")
     return ids
 
 
