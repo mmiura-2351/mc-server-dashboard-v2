@@ -72,6 +72,12 @@ API_MATCH_SITES: tuple[tuple[str, CommandStatus], ...] = (
     # lifecycle.py: SendServerCommand -- the server stopped between the
     # observed-running check and dispatch; the Worker emits SERVER_NOT_FOUND.
     ("ServerCommand", CommandStatus.SERVER_NOT_FOUND),
+    # lifecycle.py: _is_working_set_absent_refusal (#1790) -- SERVER_NOT_FOUND on
+    # a final SnapshotTrigger is the Worker's working_set_absent refusal (#1713),
+    # a benign duplicate after a published final snapshot; _final_snapshot logs
+    # it at INFO instead of the data-loss ERROR (narrowed further by the pinned
+    # "working dir absent" message phrase).
+    ("SnapshotTrigger", CommandStatus.SERVER_NOT_FOUND),
     # files.py: _map_file_status (shared by all file commands).
     *((kind, CommandStatus.SERVER_NOT_FOUND) for kind in _FILE_READ_KINDS),
     *((kind, CommandStatus.FILE_ACCESS_DENIED) for kind in _FILE_KINDS),
@@ -116,19 +122,21 @@ def test_no_undeclared_match_sites() -> None:
         len(pattern.findall(path.read_text()))
         for path in (_LIFECYCLE, _FILES, _COMMAND_DISPATCH)
     )
-    # lifecycle.py has 8 CommandStatus.<NAME> references (redispatch_start and
+    # lifecycle.py has 9 CommandStatus.<NAME> references (redispatch_start and
     # __call__ both read an INVALID_STATE start as already-running (#773/#774) and
     # both special-case a BUSY start as retry-no-converge (#824), stop convergence,
     # graceful-stop "not SERVER_NOT_FOUND", redispatch_stop's snapshot-skip
-    # "not SERVER_NOT_FOUND" (#846), SendServerCommand); files.py has 2
-    # (_map_file_status); command_dispatch.py has 3 (the sanitized start-failure
-    # reason map: port_conflict, image_missing, worker_busy; issues #225/#867).
+    # "not SERVER_NOT_FOUND" (#846), SendServerCommand, and
+    # _is_working_set_absent_refusal's benign final-snapshot refusal (#1790));
+    # files.py has 2 (_map_file_status); command_dispatch.py has 3 (the sanitized
+    # start-failure reason map: port_conflict, image_missing, worker_busy; issues
+    # #225/#867).
     # Bump this with intent when a genuinely new convergence/special-case match is
     # added -- and add it to API_MATCH_SITES so it is checked against the contract
     # table.
-    assert found == 13, (
+    assert found == 14, (
         f"found {found} CommandStatus references in lifecycle.py/files.py/"
-        "command_dispatch.py, expected 13. A convergence/special-case match was "
+        "command_dispatch.py, expected 14. A convergence/special-case match was "
         "added or removed: update API_MATCH_SITES (so it is checked against the "
         "contract table) and this count."
     )

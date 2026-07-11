@@ -2078,6 +2078,114 @@ async def test_stop_final_snapshot_failure_logs_error(
     assert str(server_id) in record.getMessage()
 
 
+# The Worker's working_set_absent refusal message, verbatim (issue #1713,
+# worker/internal/application/instancemanager/instancemanager.go handleSnapshot).
+# The API discriminator matches the "working dir absent" phrase inside it.
+_WORKING_SET_ABSENT_MESSAGE = (
+    "instancemanager: snapshot refused: working dir absent (no working set held "
+    "for this id: scratch already GC'd after a published final snapshot, or "
+    "never hydrated)"
+)
+
+
+class _SnapshotServerNotFound(FakeControlPlane):
+    def __init__(self, message: str) -> None:
+        super().__init__()
+        self._message = message
+
+    async def snapshot(
+        self,
+        *,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+        final: bool = False,
+    ) -> CommandOutcome:
+        self.dispatched.append(("snapshot", worker_id, server_id))
+        return CommandOutcome(
+            status=CommandStatus.SERVER_NOT_FOUND, message=self._message
+        )
+
+
+async def test_stop_final_snapshot_benign_duplicate_refusal_logs_info_not_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Issue #1790: the Worker's working_set_absent refusal (issue #1713) means a
+    # prior final snapshot already published and its scratch was GC'd — a benign
+    # duplicate dispatch, not data loss. Logging the "progression ... is lost"
+    # ERROR for it is a false alarm that trains operators to ignore the line
+    # that matters, so it is downgraded to INFO. The stop still converges: the
+    # assignment is cleared exactly as on a successful snapshot.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    cp = _SnapshotServerNotFound(_WORKING_SET_ABSENT_MESSAGE)
+    use_case = StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+
+    with caplog.at_level(logging.INFO):
+        result = await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert not [
+        r
+        for r in caplog.records
+        if r.levelno == logging.ERROR and "final snapshot" in r.getMessage()
+    ]
+    record = next(
+        r
+        for r in caplog.records
+        if r.levelno == logging.INFO and "final snapshot" in r.getMessage()
+    )
+    assert str(server_id) in record.getMessage()
+    assert "duplicate" in record.getMessage()
+    # The refusal settles the snapshot (nothing is uploading), so the deferred
+    # unassign still runs.
+    assert result.assigned_worker_id is None
+
+
+async def test_stop_final_snapshot_genuine_server_not_found_still_logs_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Guard for issue #1790: ONLY the Worker's working_set_absent refusal is
+    # benign. A SERVER_NOT_FOUND that does not carry that pinned message (e.g. a
+    # future Worker path where the server was genuinely never held) must keep
+    # the loud data-loss ERROR (issue #841).
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    cp = _SnapshotServerNotFound("instancemanager: server unknown to this worker")
+    use_case = StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+
+    with caplog.at_level(logging.INFO):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    record = next(
+        r
+        for r in caplog.records
+        if r.levelno == logging.ERROR and "final snapshot" in r.getMessage()
+    )
+    assert str(server_id) in record.getMessage()
+
+
 async def test_stop_when_already_stopped_is_conflict() -> None:
     community, server_id, _ = _ids()
     uow = FakeUnitOfWork()
