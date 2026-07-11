@@ -220,11 +220,12 @@ type Manager struct {
 	// retry stop would otherwise find no tracked instance and return
 	// SERVER_NOT_FOUND, which the API's stop convergence reads as "no live process"
 	// and unassigns — over a process/container that may still be lingering (issue
-	// #251). Keeping the running Instance here lets a retry re-attempt the driver
-	// Stop against the same handle and report success only on confirmed
-	// termination; until then start/hydrate over the id are rejected as they are
-	// for a running server. The instance's status pump clears the record if the
-	// orphan finally exits on its own.
+	// #251). Keeping the Instance and its driver name here lets a retry re-attempt
+	// the driver Stop against the same handle and resolve RCON identically (issue
+	// #1712), reporting success only on confirmed termination; until then
+	// start/hydrate over the id are rejected as they are for a running server. The
+	// instance's status pump clears the record if the orphan finally exits on its
+	// own.
 	orphans map[string]orphanEntry
 	// reserved marks a server id as having a mutating lifecycle command in flight so
 	// a duplicate re-issued after a stream reconnect cannot overlap the original
