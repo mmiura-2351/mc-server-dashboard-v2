@@ -134,6 +134,30 @@ _LOG = logging.getLogger(__name__)
 # against this relpath once the working set is hydrated (see __call__).
 _DEFAULT_JAR_RELPATH = "server.jar"
 
+# The phrase identifying the Worker's working_set_absent snapshot refusal (issue
+# #1713) inside its SERVER_NOT_FOUND message. The wire result carries only a code
+# and a human-readable message, and the code alone must not discriminate: a
+# hypothetical OTHER SnapshotTrigger SERVER_NOT_FOUND must keep the data-loss
+# ERROR (issue #1790). The phrase is pinned on the Worker side
+# (worker/internal/application/instancemanager/instancemanager.go,
+# handleSnapshot) with a cross-reference to this constant — reword both together.
+_WORKING_SET_ABSENT_MARKER = "working dir absent"
+
+
+def _is_working_set_absent_refusal(outcome: CommandOutcome) -> bool:
+    """Whether a snapshot outcome is the Worker's benign working_set_absent refusal.
+
+    True exactly for the issue-#1713 refusal: a stopped-id SnapshotTrigger whose
+    scratch the Worker already GC'd after a PUBLISHED final snapshot — i.e. a
+    duplicate dispatch whose original result was lost, not a data-loss event
+    (issue #1790).
+    """
+
+    return (
+        outcome.status is CommandStatus.SERVER_NOT_FOUND
+        and _WORKING_SET_ABSENT_MARKER in outcome.message
+    )
+
 
 @dataclass
 class _Dispatch:
@@ -1100,9 +1124,12 @@ class StopServer:
         periodic-snapshot or reconciler retry to recover it — a failure here means
         the world progressed since the last periodic snapshot is permanently lost.
         A silent warning is exactly what hid the #841 regression (a worker-side
-        empty_snapshot 400 swallowed here), so it must be loud. (The Worker
-        self-addresses no Storage; the API drives the snapshot because only it knows
-        the (community, server) scope.)
+        empty_snapshot 400 swallowed here), so it must be loud. The ONE exception
+        is the Worker's working_set_absent refusal (issue #1713): the scratch is
+        GC'd only after a final snapshot PUBLISHED, so that refusal means a benign
+        duplicate dispatch, not loss — it logs at INFO instead (issue #1790). (The
+        Worker self-addresses no Storage; the API drives the snapshot because only
+        it knows the (community, server) scope.)
 
         Returns ``upload_may_be_live`` (issue #847): ``True`` only when the snapshot
         dispatch TIMED OUT — the worker session is healthy and the transfer is still
@@ -1119,13 +1146,32 @@ class StopServer:
                 final=True,
             )
             if not snapshot.success:
-                _LOG.error(
-                    "final snapshot on graceful stop FAILED for server %s: %s; "
-                    "the working set was NOT captured and progression since the last "
-                    "periodic snapshot is lost (no retry exists for a stopped server)",
-                    server_id.value,
-                    snapshot.message or snapshot.status.value,
-                )
+                if _is_working_set_absent_refusal(snapshot):
+                    # The Worker's working_set_absent refusal (issue #1713): the
+                    # scratch was already GC'd — which only happens AFTER a final
+                    # snapshot published — so this dispatch is a benign duplicate
+                    # (the earlier result was lost in flight) and the generation is
+                    # already captured. Logging the data-loss ERROR here is a false
+                    # alarm that trains operators to ignore the line that matters
+                    # (issue #1790). Any OTHER failure, including a SERVER_NOT_FOUND
+                    # without the pinned refusal message, still takes the ERROR
+                    # branch below.
+                    _LOG.info(
+                        "final snapshot on graceful stop for server %s was refused "
+                        "by the Worker as a benign duplicate: the working set was "
+                        "already captured by a prior final snapshot and its scratch "
+                        "GC'd — no progression was lost",
+                        server_id.value,
+                    )
+                else:
+                    _LOG.error(
+                        "final snapshot on graceful stop FAILED for server %s: %s; "
+                        "the working set was NOT captured and progression since the "
+                        "last periodic snapshot is lost (no retry exists for a "
+                        "stopped server)",
+                        server_id.value,
+                        snapshot.message or snapshot.status.value,
+                    )
         except WorkerUnavailableError as exc:
             if exc.upload_may_be_live:
                 # TIMEOUT, not disconnect: the worker is still uploading. Do NOT

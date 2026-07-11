@@ -117,6 +117,14 @@ func TestStoppedSnapshotAbsentWorkingDirRefusedWithoutTransfer(t *testing.T) {
 	if res.Success || res.ErrorCode != session.CommandErrorServerNotFound {
 		t.Fatalf("duplicate stopped-id snapshot after GC = %+v, want server-not-found refusal", res)
 	}
+	// The phrase is load-bearing (issue #1790): the API's final-snapshot path
+	// matches it (with the SERVER_NOT_FOUND code) to downgrade this refusal from
+	// its data-loss ERROR to a benign-duplicate INFO — _WORKING_SET_ABSENT_MARKER
+	// in api/src/mc_server_dashboard_api/servers/application/lifecycle.py. A
+	// reword here silently re-arms the false alarm unless done together.
+	if !strings.Contains(res.ErrorMessage, "working dir absent") {
+		t.Fatalf("refusal message = %q, want the API-pinned phrase \"working dir absent\"", res.ErrorMessage)
+	}
 	if len(tr.snapshots) != 1 {
 		t.Fatalf("the duplicate must not pack/upload the absent dir; snapshots = %v", tr.snapshots)
 	}
