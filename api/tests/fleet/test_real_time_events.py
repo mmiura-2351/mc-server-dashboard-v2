@@ -8,6 +8,7 @@ between subscribers, and cleanup on unsubscribe so no buffer leaks.
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 
 import pytest
 
@@ -17,6 +18,7 @@ from mc_server_dashboard_api.fleet.adapters.real_time_events import (
 from mc_server_dashboard_api.fleet.domain.real_time_events import (
     EventStream,
     RealTimeEvent,
+    notification_event,
 )
 
 _ALL = frozenset({EventStream.STATUS, EventStream.LOG, EventStream.METRICS})
@@ -175,6 +177,53 @@ async def test_firehose_respects_stream_filter() -> None:
     event = await asyncio.wait_for(sub.__anext__(), timeout=1)
     assert event.stream is EventStream.STATUS
     await sub.aclose()
+
+
+# --- notification stream (#1836) --------------------------------------------
+
+
+def test_notification_event_carries_the_canonical_payload_shape() -> None:
+    # The frame payload contract the first producer (the schedule runner) and a
+    # UI toast agree on: a stable machine-readable ``kind`` plus human-readable
+    # ``title``/``detail``. The server and the event time are not duplicated in
+    # the payload — they ride the existing transport (publish-time server_id,
+    # ``emitted_at`` -> frame ``ts``).
+    emitted = dt.datetime(2026, 7, 1, 12, 0, 0, tzinfo=dt.timezone.utc)
+    event = notification_event(
+        kind="schedule_failed",
+        title="Scheduled restart failed",
+        detail="worker unavailable",
+        emitted_at=emitted,
+    )
+    assert event.stream is EventStream.NOTIFICATION
+    assert event.payload == {
+        "kind": "schedule_failed",
+        "title": "Scheduled restart failed",
+        "detail": "worker unavailable",
+    }
+    assert event.emitted_at == emitted
+    assert event.server_id is None
+
+
+async def test_notification_flows_to_per_server_and_firehose_subscribers() -> None:
+    # The adapter is stream-agnostic pub/sub: NOTIFICATION needs no structural
+    # support — a per-server subscriber that selected it and the firehose (with
+    # its server_id tagging) both receive the event.
+    bus = InProcessRealTimeEvents()
+    per_server = bus.subscribe(
+        server_id="s1", streams=frozenset({EventStream.NOTIFICATION})
+    )
+    firehose = bus.subscribe_all(streams=frozenset({EventStream.NOTIFICATION}))
+
+    event = notification_event(kind="schedule_failed", title="Backup failed")
+    bus.publish(server_id="s1", event=event)
+
+    direct = await asyncio.wait_for(per_server.__anext__(), timeout=1)
+    tagged = await asyncio.wait_for(firehose.__anext__(), timeout=1)
+    assert direct == event
+    assert (tagged.server_id, tagged.payload) == ("s1", event.payload)
+    await per_server.aclose()
+    await firehose.aclose()
 
 
 async def test_firehose_unsubscribe_cleans_up_no_leak() -> None:

@@ -3,9 +3,12 @@
 ARCHITECTURE.md Section 5.1 places ``RealTimeEvents`` on the API side: the
 control-plane gRPC servicer publishes the status / log / metrics events a Worker
 reports (FR-MON-1..3), and a WebSocket subscription drains them to a client. The
-interface lives in the fleet domain (the worker-facing context that owns the
-session stream), mirroring :class:`ServerStateSink`; the in-process pub/sub
-adapter fulfils it at the edge.
+bus also carries API-originated operator notifications
+(:data:`EventStream.NOTIFICATION`) — the pub/sub is stream-agnostic, so a
+producer on either side publishes through the same Port. The interface lives in
+the fleet domain (the worker-facing context that owns the session stream),
+mirroring :class:`ServerStateSink`; the in-process pub/sub adapter fulfils it at
+the edge.
 
 Delivery is best-effort (FR-MON-4): a subscriber that cannot keep up loses its
 oldest buffered events and is told so by a :data:`EventStream.GAP` marker, but
@@ -27,14 +30,19 @@ class EventStream(enum.Enum):
     """The kind of a real-time event (FR-MON-1..3), plus the gap marker.
 
     ``STATUS`` / ``LOG`` / ``METRICS`` are the three Worker-reported streams a
-    client may subscribe to. ``GAP`` is an adapter-synthesised marker telling a
-    subscriber that buffered events were dropped because it fell behind
-    (best-effort delivery, FR-MON-4); it is never a subscribable stream.
+    client may subscribe to. ``NOTIFICATION`` is likewise subscribable but
+    API-originated: an operator-facing notice about a server (e.g. a scheduled
+    action failed), published by API-side producers rather than relayed from a
+    Worker; :func:`notification_event` builds its canonical payload. ``GAP`` is
+    an adapter-synthesised marker telling a subscriber that buffered events
+    were dropped because it fell behind (best-effort delivery, FR-MON-4); it is
+    never a subscribable stream.
     """
 
     STATUS = "status"
     LOG = "log"
     METRICS = "metrics"
+    NOTIFICATION = "notification"
     GAP = "gap"
 
 
@@ -62,6 +70,32 @@ class RealTimeEvent:
     payload: dict[str, object] = field(default_factory=dict)
     emitted_at: dt.datetime | None = None
     server_id: str | None = None
+
+
+def notification_event(
+    *,
+    kind: str,
+    title: str,
+    detail: str = "",
+    emitted_at: dt.datetime | None = None,
+) -> RealTimeEvent:
+    """Build a NOTIFICATION event with the canonical ``{kind, title, detail}`` payload.
+
+    ``kind`` is a stable machine-readable discriminator a client routes on
+    (e.g. ``schedule_failed``); ``title`` and ``detail`` are the human-readable
+    one-liner and longer text a UI renders. The server the notice is about is
+    publish-time context (:meth:`RealTimeEvents.publish`'s ``server_id``) and
+    the event time rides ``emitted_at`` — both reach the wire frame through the
+    existing transport (``server_id`` on the community frame, ``ts`` on every
+    frame), so neither is duplicated in the payload. Delivery is live-only and
+    best-effort like every stream; the audit log is the durable record.
+    """
+
+    return RealTimeEvent(
+        stream=EventStream.NOTIFICATION,
+        payload={"kind": kind, "title": title, "detail": detail},
+        emitted_at=emitted_at,
+    )
 
 
 class EventSubscription(AsyncIterator[RealTimeEvent], abc.ABC):

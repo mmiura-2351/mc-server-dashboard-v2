@@ -50,6 +50,7 @@ from mc_server_dashboard_api.fleet.domain.real_time_events import (
     EventStream,
     RealTimeEvent,
     RealTimeEvents,
+    notification_event,
 )
 from tests.identity.fakes import make_user
 
@@ -222,17 +223,21 @@ def test_other_communitys_server_never_appears() -> None:
     assert frame["payload"] == {"state": "a"}
 
 
-def test_only_status_events_are_streamed() -> None:
+def test_log_and_metrics_events_are_not_streamed() -> None:
     bus = InProcessRealTimeEvents()
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(bus=bus, lookup={str(server): community})
     client = next(_client(app))
     with client.websocket_connect(_url(community)) as ws:
-        # A log line for a community server is not an operator status transition;
+        # Log lines and metrics are per-server detail, not operator events;
         # only the following STATUS frame must be delivered.
         bus.publish(
             server_id=str(server),
             event=RealTimeEvent(stream=EventStream.LOG, payload={"line": "x"}),
+        )
+        bus.publish(
+            server_id=str(server),
+            event=RealTimeEvent(stream=EventStream.METRICS, payload={"cpu_millis": 1}),
         )
         bus.publish(
             server_id=str(server),
@@ -242,6 +247,59 @@ def test_only_status_events_are_streamed() -> None:
         )
         frame = ws.receive_json()
     assert frame["stream"] == "status"
+
+
+# --- notification stream (#1836) --------------------------------------------
+
+
+def test_notification_event_is_delivered_with_server_id() -> None:
+    bus = InProcessRealTimeEvents()
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(bus=bus, lookup={str(server): community})
+    client = next(_client(app))
+    with client.websocket_connect(_url(community)) as ws:
+        bus.publish(
+            server_id=str(server),
+            event=notification_event(
+                kind="schedule_failed",
+                title="Scheduled backup failed",
+                detail="exit status 1",
+            ),
+        )
+        frame = ws.receive_json()
+    assert frame["stream"] == "notification"
+    assert frame["server_id"] == str(server)
+    assert frame["payload"] == {
+        "kind": "schedule_failed",
+        "title": "Scheduled backup failed",
+        "detail": "exit status 1",
+    }
+    assert "ts" in frame
+
+
+def test_other_communitys_notification_never_appears() -> None:
+    bus = InProcessRealTimeEvents()
+    community_a, community_b = uuid.uuid4(), uuid.uuid4()
+    server_a, server_b = uuid.uuid4(), uuid.uuid4()
+    app = _app(
+        bus=bus,
+        lookup={str(server_a): community_a, str(server_b): community_b},
+    )
+    client = next(_client(app))
+    with client.websocket_connect(_url(community_a)) as ws:
+        # Community B's notification is published first; it must be filtered out
+        # so the only frame the A-stream sees is A's server's notification.
+        bus.publish(
+            server_id=str(server_b),
+            event=notification_event(kind="schedule_failed", title="b"),
+        )
+        bus.publish(
+            server_id=str(server_a),
+            event=notification_event(kind="schedule_failed", title="a"),
+        )
+        frame = ws.receive_json()
+    assert frame["server_id"] == str(server_a)
+    assert frame["payload"] == {"kind": "schedule_failed", "title": "a", "detail": ""}
 
 
 # --- frame encoding: exact wire bytes (#1701) -------------------------------
