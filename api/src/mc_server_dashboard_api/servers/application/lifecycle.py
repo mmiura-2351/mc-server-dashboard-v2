@@ -364,6 +364,7 @@ class StartServer:
                     server_id,
                     observed_state=ObservedState.RUNNING,
                     observed_at=observed_at,
+                    expected_worker=worker_id,
                 )
                 await self.uow.commit()
             # Keep the return honest (issue #292): reflect the observed state on the
@@ -599,6 +600,7 @@ class StartServer:
                     server_id,
                     observed_state=ObservedState.RUNNING,
                     observed_at=observed_at,
+                    expected_worker=worker_id,
                 )
                 await self.uow.commit()
             # Keep the return honest (issue #292): mutate the entity only when the
@@ -938,6 +940,7 @@ class StopServer:
                     observed_state=ObservedState.STOPPED,
                     observed_at=observed_at,
                     unassign=True,
+                    expected_worker=worker_id,
                 )
                 await self.uow.commit()
             # Keep the return honest (issue #292): mutate the entity only when the
@@ -1043,6 +1046,7 @@ class StopServer:
                 observed_state=ObservedState.STOPPED,
                 observed_at=observed_at,
                 unassign=False,
+                expected_worker=worker_id,
             )
             await self.uow.commit()
         # Keep the return honest (issue #292): mutate the entity only when the write
@@ -1244,6 +1248,7 @@ class StopServer:
                     observed_state=ObservedState.STOPPED,
                     observed_at=observed_at,
                     unassign=True,
+                    expected_worker=worker_id,
                 )
                 await self.uow.commit()
             # Keep the return honest (issue #292): mutate the entity only when the
