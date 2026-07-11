@@ -24,6 +24,12 @@ _SRC = Path(__file__).resolve().parent.parent / "src" / "mc_server_dashboard_api
 # The one module allowed to mention ``detail`` — it IS the central mechanism.
 _ALLOWED = {_SRC / "http_problem.py"}
 
+# Modules whose ``detail=`` is a *data field*, not an HTTP error body: the
+# schedule repository maps the ``schedule_run.detail`` column (issue #1835).
+# Exempt from the keyword scan only; the HTTPException-construction scan below
+# still covers them.
+_DETAIL_FIELD_ALLOWED = {_SRC / "servers" / "adapters" / "schedule_repository.py"}
+
 # Matches a ``detail=`` keyword argument (the HTTPException ad-hoc body shape).
 # A keyword argument has no spaces around ``=`` (PEP 8 / ruff format), which
 # distinguishes it from a ``detail = ...`` local-variable assignment.
@@ -39,7 +45,7 @@ _CONSTRUCT = re.compile(r"\b(?:Starlette)?HTTPException\(")
 def test_no_ad_hoc_detail_outside_central_module() -> None:
     offenders: list[str] = []
     for path in _SRC.rglob("*.py"):
-        if path in _ALLOWED:
+        if path in _ALLOWED | _DETAIL_FIELD_ALLOWED:
             continue
         for lineno, line in enumerate(
             path.read_text(encoding="utf-8").splitlines(), start=1

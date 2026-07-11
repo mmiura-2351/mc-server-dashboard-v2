@@ -71,6 +71,13 @@ dependencies = [
     # protocol the servers-by-state gauge uses. 0.25.0 (2026-04-09) is well outside
     # the 7-day cooldown (Section 3); cap the next minor (0.x, Section 1).
     "prometheus-client>=0.25.0,<0.26",  # 2026-04-09
+    # Cron-expression engine behind the scheduler's NextRunCalculator Port
+    # (epic #649, issue #1835): validates 5-field expressions and computes the
+    # next occurrence with Debian-cron DST semantics. Confined to
+    # servers/adapters/ (the domain stays stdlib-only; the import-linter
+    # contract below pins that). 2.7 (2025-10-21) is well outside the 7-day
+    # cooldown (Section 3); cap the next major.
+    "cronsim>=2.7,<3",                  # 2025-10-21
 ]
 
 [dependency-groups]
@@ -391,6 +398,10 @@ forbidden_modules = [
     "mc_server_dashboard_api.fleet",
     "mc_server_dashboard_api.storage",
     "mc_server_dashboard_api.core",
+    # The scheduler's cron engine (issue #1835) lives only in the adapter
+    # behind the NextRunCalculator Port; the domain stays stdlib-only (the
+    # fleet-domain grpc precedent).
+    "cronsim",
 ]
 
 # --- storage context -------------------------------------------------------

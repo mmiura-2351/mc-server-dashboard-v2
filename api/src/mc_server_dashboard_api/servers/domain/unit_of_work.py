@@ -28,6 +28,10 @@ from mc_server_dashboard_api.servers.domain.repositories import (
 from mc_server_dashboard_api.servers.domain.resource_pack_repository import (
     ResourcePackRepository,
 )
+from mc_server_dashboard_api.servers.domain.schedule_repository import (
+    ScheduleRepository,
+    ScheduleRunRepository,
+)
 
 
 class UnitOfWork(abc.ABC):
@@ -40,6 +44,8 @@ class UnitOfWork(abc.ABC):
     game_sessions: GameSessionRepository
     plugins: PluginRepository
     resource_packs: ResourcePackRepository
+    schedules: ScheduleRepository
+    schedule_runs: ScheduleRunRepository
 
     @abc.abstractmethod
     async def __aenter__(self) -> UnitOfWork:

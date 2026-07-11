@@ -27,7 +27,7 @@
 5. [Communities, membership & roles](#5-communities-membership--roles)
 6. [Authorization grants](#6-authorization-grants)
 7. [Servers & workers](#7-servers--workers)
-8. [Backups, file history, sessions & resource packs](#8-backups-file-history-sessions--resource-packs)
+8. [Backups, file history, sessions, resource packs & schedules](#8-backups-file-history-sessions-resource-packs--schedules)
 9. [Audit log](#9-audit-log)
 10. [Cascade behavior on member removal](#10-cascade-behavior-on-member-removal)
 11. [Related documents](#11-related-documents)
@@ -500,7 +500,7 @@ reload) is deferred.
 
 ---
 
-## 8. Backups, file history, sessions & resource packs
+## 8. Backups, file history, sessions, resource packs & schedules
 
 ### `backup`
 
@@ -617,6 +617,47 @@ reverse lookup (`list_assignments_for_pack`).
 | `resource_pack_prompt` | text nullable | optional prompt message shown to the player |
 | `assigned_by` | uuid | **soft reference** (no FK) |
 | `created_at` / `updated_at` | timestamptz | |
+
+### Schedules (epic #649)
+
+The general scheduler: per-server recurring actions and their execution
+history (migration 0029). A schedule fires on a **cron expression XOR a fixed
+interval**, evaluated in a per-schedule IANA timezone (cron) or as absolute
+elapsed time with a deterministic per-schedule jitter (interval). The runner
+(#1838) polls `next_run_at` over enabled schedules; the FR-BAK-3
+`backup_interval_hours` config cadence above is retired into `action = backup`
+schedules at #1840.
+
+#### `schedule`
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid PK | |
+| `server_id` | uuid FK → `server.id` | `ON DELETE CASCADE`; lookups ride the `UNIQUE(server_id, name)` index (leading column) |
+| `name` | text | operator-chosen; `UNIQUE(server_id, name)` |
+| `action` | text | `command` / `start` / `stop` / `restart` / `backup` (CHECK enum) |
+| `payload` | jsonb | per-action payload: `{"command": <line>}` for `command`; optional `{"warnings": [{offset_minutes, message}, …]}` for `stop`/`restart` (≤ 5 steps, offsets positive, distinct, ≤ 120 min); `{}` otherwise |
+| `cron` | text nullable | 5-field cron expression |
+| `interval_seconds` | int nullable | fixed interval; CHECK exactly one of `cron` / `interval_seconds` is non-NULL (`ck_schedule_cadence_xor`) |
+| `timezone` | text | IANA zone the cron cadence is evaluated in; NOT NULL, defaults `UTC` |
+| `enabled` | bool | NOT NULL |
+| `next_run_at` | timestamptz nullable | the due instant the runner polls on; NULL exactly while disabled. Partial index `ix_schedule_next_run_at` on `(next_run_at) WHERE enabled` |
+| `last_run_at` | timestamptz nullable | |
+| `created_by` | uuid nullable | **soft reference** (no FK) so the row survives the actor's deletion (Section 9) |
+| `created_at` / `updated_at` | timestamptz | |
+
+#### `schedule_run`
+
+One row per fired occurrence, written after it completes. History is capped at
+50 rows per schedule by the runner's prune (#1838), not by the schema.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid PK | |
+| `schedule_id` | uuid FK → `schedule.id` | `ON DELETE CASCADE`; indexed with `started_at` for the newest-first history listing |
+| `started_at` / `finished_at` | timestamptz | |
+| `outcome` | text | `success` / `failure` / `skipped` (CHECK enum); `skipped` records a fired occurrence whose precondition was unmet (e.g. stop while not running) |
+| `detail` | text nullable | sanitized outcome note (a failure category, a skip reason) — never a raw worker/OS message |
 
 ---
 

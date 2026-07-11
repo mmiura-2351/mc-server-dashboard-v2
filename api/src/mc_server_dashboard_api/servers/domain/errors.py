@@ -524,3 +524,48 @@ class ResourcePackInUseError(ServerError):
     Raised by delete when one or more servers still reference the pack. The
     caller must remove the assignments first. The edge maps this to 409.
     """
+
+
+class InvalidScheduleError(ServerError):
+    """A schedule violated a domain invariant (the general scheduler, epic #649).
+
+    Base class for the schedule validation failures below; also raised directly
+    for entity-state invariants (a disabled schedule carrying a ``next_run_at``).
+    The edge maps the family to 422.
+    """
+
+
+class InvalidScheduleNameError(InvalidScheduleError):
+    """A schedule name failed its validation rules (e.g. blank)."""
+
+
+class InvalidScheduleCadenceError(InvalidScheduleError):
+    """A cadence was not exactly one of cron / interval, or the value was invalid.
+
+    A schedule fires on a cron expression XOR a fixed positive interval
+    (DATABASE.md's ``ck_schedule_cadence_xor``); both, neither, a blank cron
+    string, or a non-positive interval are rejected here.
+    """
+
+
+class InvalidCronExpressionError(InvalidScheduleError):
+    """A cron expression failed the ``NextRunCalculator`` syntax validation.
+
+    Raised by the calculator adapter (cron parsing lives outside the stdlib-only
+    domain); distinct from :class:`InvalidScheduleCadenceError`, which covers
+    the cron-XOR-interval shape, not cron syntax.
+    """
+
+
+class InvalidScheduleTimezoneError(InvalidScheduleError):
+    """A schedule timezone is not a known IANA zone (zoneinfo-validated)."""
+
+
+class InvalidSchedulePayloadError(InvalidScheduleError):
+    """A schedule's payload does not fit its action (issue #1835).
+
+    ``command`` requires a non-blank single-line command and no warning steps;
+    ``stop`` / ``restart`` accept up to five ``{offset_minutes, message}``
+    warning steps (offsets positive, distinct, at most 120 minutes) and no
+    command; ``start`` / ``backup`` accept neither.
+    """

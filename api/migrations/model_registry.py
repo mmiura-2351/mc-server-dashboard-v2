@@ -26,6 +26,9 @@ from mc_server_dashboard_api.servers.adapters import plugin_models as _plugin_mo
 from mc_server_dashboard_api.servers.adapters import (
     resource_pack_models as _resource_pack_models,
 )
+from mc_server_dashboard_api.servers.adapters import (
+    schedule_models as _schedule_models,
+)
 
 # Importing the models registers their tables on ``Base.metadata`` for autogenerate.
 _ = (
@@ -37,6 +40,7 @@ _ = (
     _group_models,
     _plugin_models,
     _resource_pack_models,
+    _schedule_models,
     _audit_models,
 )
 
