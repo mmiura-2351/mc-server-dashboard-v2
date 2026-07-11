@@ -24,10 +24,13 @@ async def run_plugin_cache_gc_loop(
     """Run one GC pass every ``tick_seconds`` until cancelled."""
 
     while True:
+        # Sleep first so the initial tick is deferred by one full cadence.
+        # A transient DB/worker outage at boot no longer causes a ~90-line
+        # ERROR traceback on the very first tick (issue #1760).
+        await asyncio.sleep(tick_seconds)
         try:
             await gc()
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - one bad pass must not kill the loop
             _LOG.exception("plugin-cache GC pass failed; continuing")
-        await asyncio.sleep(tick_seconds)
