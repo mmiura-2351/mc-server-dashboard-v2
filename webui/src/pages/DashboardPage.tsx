@@ -575,24 +575,35 @@ function useLifecycle(server: ServerResponse, communityId: string) {
     // the pill transitions instantly, before the API responds (#1071).
     onMutate: (action: LifecycleAction) => {
       const key = serversKey(communityId);
-      const previous = queryClient.getQueryData<ServerResponse[]>(key);
+      const previousState = queryClient
+        .getQueryData<ServerResponse[]>(key)
+        ?.find((s) => s.id === server.id)?.observed_state;
+      const optimistic = requestedState(action);
       queryClient.setQueryData<ServerResponse[]>(key, (old) =>
         old?.map((s) =>
-          s.id === server.id
-            ? { ...s, observed_state: requestedState(action) }
-            : s,
+          s.id === server.id ? { ...s, observed_state: optimistic } : s,
         ),
       );
-      return { previous };
+      return { previousState, optimistic };
     },
     // Always re-fetch the list once the request settles (no polling loop here).
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: serversKey(communityId) });
     },
     onError: (error, _action, context) => {
-      // Rollback the optimistic cache update before showing the error toast.
-      if (context?.previous) {
-        queryClient.setQueryData(serversKey(communityId), context.previous);
+      // Surgically roll back only the mutated server's observed_state, and
+      // only if the cache still holds the optimistic value we wrote. A WS
+      // status frame that arrived mid-flight takes precedence (#1727).
+      if (context?.previousState !== undefined) {
+        const key = serversKey(communityId);
+        const prev = context.previousState;
+        queryClient.setQueryData<ServerResponse[]>(key, (old) =>
+          old?.map((s) =>
+            s.id === server.id && s.observed_state === context.optimistic
+              ? { ...s, observed_state: prev }
+              : s,
+          ),
+        );
       }
       // 403 → the permission glue (toast + capability refetch). Everything
       // else → the shared lifecycle mapping: known non-race 409 reasons get a
