@@ -27,6 +27,7 @@ import json
 import uuid
 import zipfile
 from collections.abc import AsyncIterator
+from dataclasses import replace
 
 import pytest
 
@@ -64,6 +65,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 from tests.servers.fakes import (
     FakeClock,
     FakeFileStore,
+    FakeLifecycleLock,
     FakeServerRepository,
     FakeUnitOfWork,
     FakeVersionValidator,
@@ -777,3 +779,85 @@ async def test_import_geyser_port_racer_is_seed_failed() -> None:
     # real UoW rolls back the staged plugin rows and the failed port UPDATE
     # together (the fake's staged in-memory state is not transactional).
     assert dst_uow.commits == 1
+
+
+# --- import: lost-update protection (issue #1587) ----------------------------
+
+
+async def test_import_geyser_does_not_clobber_concurrent_patch() -> None:
+    """A concurrent PATCH between create-commit and plugin-import must survive.
+
+    ``_import_plugins`` re-creates the exported Geyser plugin and calls
+    ``allocate_bedrock_port_if_geyser``, which writes the whole server entity
+    back to the DB. Without a re-fetch under the lifecycle lock, the stale
+    server snapshot from create time clobbers a concurrent PATCH's changes
+    to ``config`` or ``name``.
+    """
+
+    patched_config = {"memory": "4G", "patched": True}
+
+    class _ConcurrentPatchUoW(FakeUnitOfWork):
+        async def commit(self) -> None:
+            await super().commit()
+            if self.commits == 1:
+                # Simulate a concurrent PATCH landing after the create commit
+                # but before _import_plugins runs: overwrite the stored server's
+                # config with the PATCH's payload, using replace() so the held
+                # create-time snapshot stays stale.
+                for sid, stored in list(self.servers.by_id.items()):
+                    self.servers.by_id[sid] = replace(stored, config=patched_config)
+
+    community = uuid.uuid4()
+    archive = await _export_archive(community=community, mod_identifier="Geyser-Spigot")
+
+    dst_uow = _ConcurrentPatchUoW()
+    dst_store = FakeFileStore()
+    imp = ImportServer(
+        create_server=_create_server(dst_uow, dst_store),
+        file_store=dst_store,
+        bedrock_port_range=_BEDROCK_RANGE,
+    )
+    server = await imp(
+        community_id=CommunityId(community),
+        name="imported",
+        content=archive,
+    )
+
+    stored = dst_uow.servers.by_id[server.id]
+    # The concurrent PATCH's config must survive the plugin import.
+    assert stored.config == patched_config
+    # The Bedrock port must still be allocated.
+    assert stored.bedrock_port == 19132
+    # The returned server must carry the current state (API response fidelity):
+    # __call__ returns the re-fetched entity, not the stale create-time snapshot.
+    assert server.config == patched_config
+    assert server.bedrock_port == 19132
+
+
+async def test_import_plugins_takes_lifecycle_lock() -> None:
+    """_import_plugins acquires the per-server lifecycle lock around its work.
+
+    Mirrors the InstallPlugin / RemovePlugin lock-adoption tests: a recording
+    FakeLifecycleLock asserts the lock is acquired and released for the
+    imported server's id.
+    """
+
+    community = uuid.uuid4()
+    archive = await _export_archive(community=community, mod_identifier="Geyser-Spigot")
+
+    dst_uow = FakeUnitOfWork()
+    dst_store = FakeFileStore()
+    lock = FakeLifecycleLock()
+    imp = ImportServer(
+        create_server=_create_server(dst_uow, dst_store),
+        file_store=dst_store,
+        bedrock_port_range=_BEDROCK_RANGE,
+        lifecycle_lock=lock,
+    )
+    server = await imp(
+        community_id=CommunityId(community),
+        name="imported",
+        content=archive,
+    )
+
+    assert lock.events == [(server.id, "acquire"), (server.id, "release")]
