@@ -9310,6 +9310,7 @@
     },
     "/api/communities/{community_id}/servers/{server_id}/schedules": {
       "get": {
+        "description": "List a server's schedules, ordered by name.\n\nRequires `schedule:read` (per-server: a resource grant on this server\nsuffices). A server outside the community 404s with no existence signal.",
         "operationId": "list_schedules_api_communities__community_id__servers__server_id__schedules_get",
         "parameters": [
           {
@@ -9367,6 +9368,7 @@
         "summary": "List Schedules"
       },
       "post": {
+        "description": "Create a per-server schedule.\n\nRequires `schedule:manage` **and** the action's own permission\n(`command`\u2192`server:command`, `start`\u2192`server:start`, `stop`\u2192`server:stop`,\n`restart`\u2192`server:restart`, `backup`\u2192`backup:schedule`), so `schedule:manage`\nalone cannot schedule an action the caller could not run directly. The\ncadence is `cron` XOR `interval_seconds`; `timezone` is an IANA zone.\n`command` is required for the `command` action; `warning_steps` (at most 5,\npositive distinct offsets \u2264 120 minutes) only on `stop`/`restart` \u2014 they are\nbroadcast as a fixed `say` message, so they need no `server:command`.\n\nAuthorization is **write-time only**: the runner later executes each\noccurrence as the system, so revoking a permission does not stop existing\nschedules \u2014 they must be disabled or deleted (the same write gate).\n\n`next_run_at` is computed from the cadence when `enabled`; `null` while\ndisabled. A missing permission is 403 with the code in the `permission`\nmember; a duplicate name is 409; validation failures are 422 with a typed\nreason (`invalid_cron`, `invalid_cadence`, `invalid_timezone`,\n`invalid_payload`, `invalid_schedule_name`).",
         "operationId": "create_schedule_api_communities__community_id__servers__server_id__schedules_post",
         "parameters": [
           {
@@ -9432,6 +9434,7 @@
     },
     "/api/communities/{community_id}/servers/{server_id}/schedules/{schedule_id}": {
       "delete": {
+        "description": "Delete a schedule (its run history cascades away with it).\n\nRequires `schedule:manage` **and** the schedule's action permission (the\nsame two-layer, write-time-only gate as create/update).",
         "operationId": "delete_schedule_api_communities__community_id__servers__server_id__schedules__schedule_id__delete",
         "parameters": [
           {
@@ -9488,6 +9491,7 @@
         "summary": "Delete Schedule"
       },
       "get": {
+        "description": "Read one schedule.\n\nRequires `schedule:read`. A schedule on another server (or a server outside\nthe community) 404s the same as a wholly unknown id \u2014 no existence signal.\n`next_run_at` is `null` exactly while the schedule is disabled.",
         "operationId": "read_schedule_api_communities__community_id__servers__server_id__schedules__schedule_id__get",
         "parameters": [
           {
@@ -9551,6 +9555,7 @@
         "summary": "Read Schedule"
       },
       "patch": {
+        "description": "Edit a schedule (partial: omitted fields keep their value).\n\nRequires `schedule:manage` **and** the (immutable) action's own permission \u2014\nthe same two-layer, write-time-only gate as create; to run a different\naction, delete and recreate. `warning_steps: []` clears the steps (distinct\nfrom omitting the field). Supplying `cron` or `interval_seconds` replaces\nthe whole cadence (still XOR). `next_run_at` is recomputed when the result\nis enabled and `null` when disabled \u2014 disabling is how a still-firing\nschedule is stopped, since permission revocation alone does not stop it.",
         "operationId": "update_schedule_api_communities__community_id__servers__server_id__schedules__schedule_id__patch",
         "parameters": [
           {
@@ -9626,6 +9631,7 @@
     },
     "/api/communities/{community_id}/servers/{server_id}/schedules/{schedule_id}/runs": {
       "get": {
+        "description": "List a schedule's recorded executions, newest first.\n\nRequires `schedule:read`. Each run carries the outcome\n(`success`/`failure`/`skipped`) and an optional sanitized `detail` note.",
         "operationId": "list_schedule_runs_api_communities__community_id__servers__server_id__schedules__schedule_id__runs_get",
         "parameters": [
           {

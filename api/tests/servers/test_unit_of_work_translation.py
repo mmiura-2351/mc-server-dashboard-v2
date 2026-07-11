@@ -1,18 +1,20 @@
 """Unit tests for the servers adapters' integrity-error translation (no DB).
 
-A duplicate server name, game port, Bedrock port, or slug that races past the
-use-case pre-check surfaces as an IntegrityError; the adapters must translate
-the unique-violation to the matching domain error
+A duplicate server name, game port, Bedrock port, slug, or schedule name that
+races past the use-case pre-check surfaces as an IntegrityError; the adapters
+must translate the unique-violation to the matching domain error
 (``uq_server_community_name`` -> :class:`ServerNameAlreadyExistsError`,
 ``uq_server_game_port`` / ``uq_server_bedrock_port`` ->
 :class:`PortAlreadyTakenError`, ``uq_server_slug`` ->
-:class:`SlugAlreadyTakenError`) so the API returns 409, not 500. An unrelated
-violation is re-raised untranslated.
+:class:`SlugAlreadyTakenError`, ``uq_schedule_server_id_name`` ->
+:class:`ScheduleNameAlreadyExistsError`) so the API returns 409, not 500. An
+unrelated violation is re-raised untranslated.
 
-Two call sites share the translation (adapters/integrity.py): the UnitOfWork's
-``commit`` (an INSERT racer flushes at commit) and the server repository's
-``update`` (an UPDATE racer violates at execute time, inside the transaction —
-the re-port/slug-rename/Bedrock-allocation write path, issue #1541).
+The call sites share the translation (adapters/integrity.py): the UnitOfWork's
+``commit`` (an INSERT racer flushes at commit) and the server / schedule
+repositories' ``update`` (an UPDATE racer violates at execute time, inside the
+transaction — the re-port/slug-rename/Bedrock-allocation write path, issue
+#1541, and the schedule rename path, issue #1837).
 
 The asyncpg/SQLAlchemy stack is faked: a session whose ``commit`` (or
 ``execute``) raises a prebuilt IntegrityError carrying the violated constraint
@@ -30,12 +32,22 @@ from sqlalchemy.exc import IntegrityError
 from mc_server_dashboard_api.servers.adapters.repositories import (
     SqlAlchemyServerRepository,
 )
+from mc_server_dashboard_api.servers.adapters.schedule_repository import (
+    SqlAlchemyScheduleRepository,
+)
 from mc_server_dashboard_api.servers.adapters.unit_of_work import SqlAlchemyUnitOfWork
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     PortAlreadyTakenError,
+    ScheduleNameAlreadyExistsError,
     ServerNameAlreadyExistsError,
     SlugAlreadyTakenError,
+)
+from mc_server_dashboard_api.servers.domain.schedule import (
+    Cadence,
+    Schedule,
+    ScheduleAction,
+    ScheduleId,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -121,6 +133,14 @@ async def test_commit_translates_bedrock_port_violation() -> None:
     assert session.rolled_back is True
 
 
+async def test_commit_translates_schedule_name_violation() -> None:
+    # issue #1837: a schedule-create racer flushing at commit surfaces typed.
+    uow, session = _uow_with_commit_error("uq_schedule_server_id_name")
+    with pytest.raises(ScheduleNameAlreadyExistsError):
+        await uow.commit()
+    assert session.rolled_back is True
+
+
 # --- repository UPDATE path (issue #1541) ------------------------------------
 # An UPDATE violates its unique backstop at execute time, inside the
 # transaction, so the repository translates there (commit is never reached).
@@ -176,3 +196,32 @@ async def test_update_reraises_unknown_violation_untranslated() -> None:
     repo = _repo_with_execute_error("uq_some_other_constraint")
     with pytest.raises(IntegrityError):
         await repo.update(_server_entity())
+
+
+def _schedule_entity() -> Schedule:
+    now = dt.datetime(2026, 7, 11, 12, 0, tzinfo=dt.timezone.utc)
+    return Schedule(
+        id=ScheduleId(uuid.uuid4()),
+        server_id=ServerId(uuid.uuid4()),
+        name="nightly",
+        action=ScheduleAction.START,
+        cadence=Cadence.from_interval(3600),
+        enabled=False,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+async def test_schedule_update_translates_name_violation_at_execute() -> None:
+    # issue #1837: a schedule-rename racer violates at execute time.
+    session = _FakeExecuteSession(_integrity_error("uq_schedule_server_id_name"))
+    repo = SqlAlchemyScheduleRepository(session)  # type: ignore[arg-type]
+    with pytest.raises(ScheduleNameAlreadyExistsError):
+        await repo.update(_schedule_entity())
+
+
+async def test_schedule_update_reraises_unknown_violation_untranslated() -> None:
+    session = _FakeExecuteSession(_integrity_error("uq_some_other_constraint"))
+    repo = SqlAlchemyScheduleRepository(session)  # type: ignore[arg-type]
+    with pytest.raises(IntegrityError):
+        await repo.update(_schedule_entity())

@@ -37,25 +37,37 @@ _NEW_PERMS = ("schedule:read", "schedule:manage")
 
 
 async def _seed(conn: AsyncConnection, community_id: uuid.UUID) -> dict[str, uuid.UUID]:
-    await conn.execute(
-        text(
-            "INSERT INTO community (id, name, created_at, updated_at) "
-            "VALUES (:id, :name, :at, :at)"
-        ),
-        {"id": community_id, "name": "guild", "at": _NOW},
-    )
+    second_community_id = uuid.uuid4()
+    for cid, name in ((community_id, "guild"), (second_community_id, "clan")):
+        await conn.execute(
+            text(
+                "INSERT INTO community (id, name, created_at, updated_at) "
+                "VALUES (:id, :name, :at, :at)"
+            ),
+            {"id": cid, "name": name, "at": _NOW},
+        )
     owner_id = uuid.uuid4()
     custom_id = uuid.uuid4()
     other_preset_id = uuid.uuid4()
+    pregranted_id = uuid.uuid4()
     rows = [
         # The target: a preset Owner role missing the schedule codes.
-        (owner_id, "Owner", _OLD_OWNER_PERMS, True),
+        (owner_id, community_id, "Owner", _OLD_OWNER_PERMS, True),
         # A non-preset role named Owner: must be left untouched.
-        (custom_id, "CustomOwner", _OLD_OWNER_PERMS, False),
+        (custom_id, community_id, "CustomOwner", _OLD_OWNER_PERMS, False),
         # A preset role with a different name: must be left untouched.
-        (other_preset_id, "Moderator", _OLD_OWNER_PERMS, True),
+        (other_preset_id, community_id, "Moderator", _OLD_OWNER_PERMS, True),
+        # A preset Owner (second community) that already carries the codes:
+        # the backfill's NOT (perm = ANY(permissions)) guard must not duplicate.
+        (
+            pregranted_id,
+            second_community_id,
+            "Owner",
+            _OLD_OWNER_PERMS + list(_NEW_PERMS),
+            True,
+        ),
     ]
-    for role_id, name, perms, is_preset in rows:
+    for role_id, cid, name, perms, is_preset in rows:
         await conn.execute(
             text(
                 "INSERT INTO role "
@@ -65,14 +77,19 @@ async def _seed(conn: AsyncConnection, community_id: uuid.UUID) -> dict[str, uui
             ),
             {
                 "id": role_id,
-                "cid": community_id,
+                "cid": cid,
                 "name": name,
                 "perms": perms,
                 "preset": is_preset,
                 "at": _NOW,
             },
         )
-    return {"owner": owner_id, "custom": custom_id, "other_preset": other_preset_id}
+    return {
+        "owner": owner_id,
+        "custom": custom_id,
+        "other_preset": other_preset_id,
+        "pregranted": pregranted_id,
+    }
 
 
 async def _perms(conn: AsyncConnection, role_id: uuid.UUID) -> list[str]:
@@ -101,8 +118,13 @@ async def test_backfill_adds_schedule_codes_to_preset_owner_only() -> None:
             assert set(_NEW_PERMS) <= set(owner_perms)
             assert set(_NEW_PERMS).isdisjoint(await _perms(conn, ids["custom"]))
             assert set(_NEW_PERMS).isdisjoint(await _perms(conn, ids["other_preset"]))
+            # Idempotency guard: a preset Owner already carrying the codes is
+            # not appended to twice (the NOT (perm = ANY(permissions)) clause).
+            pregranted_perms = await _perms(conn, ids["pregranted"])
+            for perm in _NEW_PERMS:
+                assert pregranted_perms.count(perm) == 1
 
-        # Idempotent: re-running upgrade adds no duplicate.
+        # Downgrade -> upgrade round trip re-adds each code exactly once.
         await downgrade_to("0029_schedules", _DB_URL)
         await upgrade_to("0030_schedule_permissions", _DB_URL)
         async with engine.connect() as conn:

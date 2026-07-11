@@ -607,6 +607,7 @@ Authoritative codes are `<resource>:<action>`. Initial catalog to refine:
 | Audit | `audit:read` (community-scoped; the audit trail query for authorized members, FR-AUD-3) |
 | Session | `session:read` (community-scoped; the relay game-session moderation surface — player IPs are PII, RELAY.md Section 8) |
 | Plugin | `plugin:read`, `plugin:manage` (community-scoped; plugin/mod content management, issue #1150) |
+| Schedule | `schedule:read`, `schedule:manage` (per-server scheduler CRUD, epic #649; writes additionally require the scheduled action's own permission — `server:command` / `server:start` / `server:stop` / `server:restart` / `backup:schedule` — so `schedule:manage` alone cannot escalate) |
 | Platform (admin axis) | `worker:manage`, `community:provision`, `platform:monitor` |
 
 ## Appendix B — Core entities (sketch)

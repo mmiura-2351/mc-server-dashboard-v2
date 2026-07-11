@@ -2605,32 +2605,36 @@ def require_permission(
     return _dependency
 
 
-class ServerUpdateAuthz(NamedTuple):
-    """The server-PATCH gate's resources (issue #458).
+class DeferredAuthz(NamedTuple):
+    """A deferred per-resource authorization bundle (issues #458, #1837).
 
-    The update gate cannot be a fixed-operation :func:`require_permission`: the
-    required code depends on which keys the PATCH changes, which only the use case
-    (with the current config in hand) knows. So this dependency runs Layer-1
-    membership at the edge and hands the route the authorized :class:`AuthUser`
-    plus an ``authorize(code)`` callable bound to this server resource; the use
-    case calls it per required code and raises on the first the caller lacks.
+    Some write gates cannot be a fixed-operation :func:`require_permission`
+    because the required code depends on the request: the server PATCH gate
+    branches by the changed-key set (``server:update`` vs ``backup:schedule``,
+    issue #458), and the schedule write gate requires ``schedule:manage`` *plus*
+    the permission for the schedule's action (issue #1837) — both known only to
+    the use case. So the dependency runs Layer-1 membership at the edge and hands
+    the route the authorized :class:`AuthUser` plus an ``authorize(code)``
+    callable bound to the target resource; the use case calls it per required
+    code and raises on the first the caller lacks.
     """
 
     auth_user: AuthUser
     authorize: Callable[[str], Awaitable[bool]]
 
 
-def require_server_update_authz(
+def require_deferred_authz(
     *, resource_type: str, resource_id_param: str
-) -> Callable[..., Awaitable[ServerUpdateAuthz]]:
-    """Build the server-PATCH authorization dependency (issue #458).
+) -> Callable[..., Awaitable[DeferredAuthz]]:
+    """Build a deferred per-resource authorization dependency (#458, #1837).
 
     Runs the same Layer-1 membership check as :func:`require_permission`
     (non-member -> 404, no existence signal), then returns the
-    :class:`ServerUpdateAuthz` bundle. The per-operation Layer-2 ``can`` decision
-    is deferred to the bound ``authorize`` callable so the route's use case can
-    branch the gate by the changed-key set (``server:update`` vs
-    ``backup:schedule``).
+    :class:`DeferredAuthz` bundle. The per-operation Layer-2 ``can`` decision is
+    deferred to the bound ``authorize`` callable, scoped to the named resource so
+    a per-resource grant applies (FR-AUTHZ-2). The use case decides *which*
+    codes to require (see :class:`DeferredAuthz`); the edge maps its denial to a
+    403 carrying the missing code.
     """
 
     async def _dependency(
@@ -2638,7 +2642,7 @@ def require_server_update_authz(
         user: Annotated[User, Depends(get_current_user)],
         visibility: Annotated[MembershipVisibility, Depends(get_membership_visibility)],
         checker: Annotated[PermissionChecker, Depends(get_permission_checker)],
-    ) -> ServerUpdateAuthz:
+    ) -> DeferredAuthz:
         auth_user = _to_auth_user(user)
         community = CommunityId(_community_id_from_path(request))
         if not await visibility.is_member(
@@ -2657,65 +2661,7 @@ def require_server_update_authz(
                 user=auth_user, operation=Permission(code), resource=resource
             )
 
-        return ServerUpdateAuthz(auth_user=auth_user, authorize=authorize)
-
-    return _dependency
-
-
-class ScheduleWriteAuthz(NamedTuple):
-    """The schedule write gate's resources (issue #1837).
-
-    The schedule create/update/delete gate is two-layer and body-dependent: it
-    requires ``schedule:manage`` *and* the permission for the schedule's action,
-    which only the use case (with the action in hand) knows. So this dependency
-    runs Layer-1 membership at the edge and hands the route the authorized
-    :class:`AuthUser` plus an ``authorize(code)`` callable bound to the target
-    server resource; the use case calls it per required code and raises on the
-    first the caller lacks (the :class:`ServerUpdateAuthz` pattern, issue #458).
-    """
-
-    auth_user: AuthUser
-    authorize: Callable[[str], Awaitable[bool]]
-
-
-def require_schedule_write_authz(
-    *, resource_type: str, resource_id_param: str
-) -> Callable[..., Awaitable[ScheduleWriteAuthz]]:
-    """Build the schedule write-gate authorization dependency (issue #1837).
-
-    Runs the same Layer-1 membership check as :func:`require_permission`
-    (non-member -> 404, no existence signal), then returns the
-    :class:`ScheduleWriteAuthz` bundle. The two-layer Layer-2 decision
-    (``schedule:manage`` plus the action's own permission) is deferred to the
-    bound ``authorize`` callable, scoped to the target server so a per-server
-    grant applies (FR-AUTHZ-2).
-    """
-
-    async def _dependency(
-        request: Request,
-        user: Annotated[User, Depends(get_current_user)],
-        visibility: Annotated[MembershipVisibility, Depends(get_membership_visibility)],
-        checker: Annotated[PermissionChecker, Depends(get_permission_checker)],
-    ) -> ScheduleWriteAuthz:
-        auth_user = _to_auth_user(user)
-        community = CommunityId(_community_id_from_path(request))
-        if not await visibility.is_member(
-            user_id=auth_user.user_id, community_id=community
-        ):
-            raise _not_found()
-        resource_id = _resource_id_from_path(request, resource_id_param)
-        resource = ResourceRef(
-            community_id=community,
-            resource_type=resource_type,
-            resource_id=resource_id,
-        )
-
-        async def authorize(code: str) -> bool:
-            return await checker.can(
-                user=auth_user, operation=Permission(code), resource=resource
-            )
-
-        return ScheduleWriteAuthz(auth_user=auth_user, authorize=authorize)
+        return DeferredAuthz(auth_user=auth_user, authorize=authorize)
 
     return _dependency
 

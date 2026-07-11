@@ -19,7 +19,9 @@ member.
 **Authorization is write-time only (deliberate).** The gate is checked when a
 schedule is created or edited; the runner (#1838) later executes each occurrence
 as the *system*. Revoking a member's permission does not stop schedules they
-already created — a ``schedule:manage`` holder must disable or delete them.
+already created — a caller holding ``schedule:manage`` plus the schedule's action
+permission must disable or delete them (disable and delete are writes, so the
+same two-layer gate applies).
 
 The router is thin: it resolves use cases via dependency injection, runs them,
 serialises the result, translates domain errors to HTTP codes, and audits the
@@ -39,7 +41,7 @@ from mc_server_dashboard_api.audit.domain.events import AuditEvent, Outcome
 from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
 from mc_server_dashboard_api.community.domain.value_objects import AuthUser, Permission
 from mc_server_dashboard_api.dependencies import (
-    ScheduleWriteAuthz,
+    DeferredAuthz,
     get_audit_recorder,
     get_create_schedule,
     get_delete_schedule,
@@ -47,8 +49,8 @@ from mc_server_dashboard_api.dependencies import (
     get_list_schedules,
     get_read_schedule,
     get_update_schedule,
+    require_deferred_authz,
     require_permission,
-    require_schedule_write_authz,
 )
 from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_problem import ProblemException, problem
@@ -209,9 +211,9 @@ async def create_schedule(
     server_id: uuid.UUID,
     body: CreateScheduleRequest,
     authz: Annotated[
-        ScheduleWriteAuthz,
+        DeferredAuthz,
         Depends(
-            require_schedule_write_authz(
+            require_deferred_authz(
                 resource_type=_SERVER_RESOURCE_TYPE,
                 resource_id_param="server_id",
             )
@@ -220,6 +222,28 @@ async def create_schedule(
     use_case: Annotated[CreateSchedule, Depends(get_create_schedule)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> ScheduleResponse:
+    """Create a per-server schedule.
+
+    Requires `schedule:manage` **and** the action's own permission
+    (`command`→`server:command`, `start`→`server:start`, `stop`→`server:stop`,
+    `restart`→`server:restart`, `backup`→`backup:schedule`), so `schedule:manage`
+    alone cannot schedule an action the caller could not run directly. The
+    cadence is `cron` XOR `interval_seconds`; `timezone` is an IANA zone.
+    `command` is required for the `command` action; `warning_steps` (at most 5,
+    positive distinct offsets ≤ 120 minutes) only on `stop`/`restart` — they are
+    broadcast as a fixed `say` message, so they need no `server:command`.
+
+    Authorization is **write-time only**: the runner later executes each
+    occurrence as the system, so revoking a permission does not stop existing
+    schedules — they must be disabled or deleted (the same write gate).
+
+    `next_run_at` is computed from the cadence when `enabled`; `null` while
+    disabled. A missing permission is 403 with the code in the `permission`
+    member; a duplicate name is 409; validation failures are 422 with a typed
+    reason (`invalid_cron`, `invalid_cadence`, `invalid_timezone`,
+    `invalid_payload`, `invalid_schedule_name`).
+    """
+
     authorized = authz.auth_user
     try:
         schedule = await use_case(
@@ -266,6 +290,12 @@ async def list_schedules(
     ],
     use_case: Annotated[ListSchedules, Depends(get_list_schedules)],
 ) -> list[ScheduleResponse]:
+    """List a server's schedules, ordered by name.
+
+    Requires `schedule:read` (per-server: a resource grant on this server
+    suffices). A server outside the community 404s with no existence signal.
+    """
+
     try:
         schedules = await use_case(
             community_id=CommunityId(community_id), server_id=ServerId(server_id)
@@ -292,6 +322,13 @@ async def read_schedule(
     ],
     use_case: Annotated[ReadSchedule, Depends(get_read_schedule)],
 ) -> ScheduleResponse:
+    """Read one schedule.
+
+    Requires `schedule:read`. A schedule on another server (or a server outside
+    the community) 404s the same as a wholly unknown id — no existence signal.
+    `next_run_at` is `null` exactly while the schedule is disabled.
+    """
+
     try:
         schedule = await use_case(
             community_id=CommunityId(community_id),
@@ -310,9 +347,9 @@ async def update_schedule(
     schedule_id: uuid.UUID,
     body: UpdateScheduleRequest,
     authz: Annotated[
-        ScheduleWriteAuthz,
+        DeferredAuthz,
         Depends(
-            require_schedule_write_authz(
+            require_deferred_authz(
                 resource_type=_SERVER_RESOURCE_TYPE,
                 resource_id_param="server_id",
             )
@@ -321,6 +358,17 @@ async def update_schedule(
     use_case: Annotated[UpdateSchedule, Depends(get_update_schedule)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> ScheduleResponse:
+    """Edit a schedule (partial: omitted fields keep their value).
+
+    Requires `schedule:manage` **and** the (immutable) action's own permission —
+    the same two-layer, write-time-only gate as create; to run a different
+    action, delete and recreate. `warning_steps: []` clears the steps (distinct
+    from omitting the field). Supplying `cron` or `interval_seconds` replaces
+    the whole cadence (still XOR). `next_run_at` is recomputed when the result
+    is enabled and `null` when disabled — disabling is how a still-firing
+    schedule is stopped, since permission revocation alone does not stop it.
+    """
+
     authorized = authz.auth_user
     try:
         schedule = await use_case(
@@ -359,9 +407,9 @@ async def delete_schedule(
     server_id: uuid.UUID,
     schedule_id: uuid.UUID,
     authz: Annotated[
-        ScheduleWriteAuthz,
+        DeferredAuthz,
         Depends(
-            require_schedule_write_authz(
+            require_deferred_authz(
                 resource_type=_SERVER_RESOURCE_TYPE,
                 resource_id_param="server_id",
             )
@@ -370,6 +418,12 @@ async def delete_schedule(
     use_case: Annotated[DeleteSchedule, Depends(get_delete_schedule)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> None:
+    """Delete a schedule (its run history cascades away with it).
+
+    Requires `schedule:manage` **and** the schedule's action permission (the
+    same two-layer, write-time-only gate as create/update).
+    """
+
     authorized = authz.auth_user
     try:
         await use_case(
@@ -404,6 +458,12 @@ async def list_schedule_runs(
     ],
     use_case: Annotated[ListScheduleRuns, Depends(get_list_schedule_runs)],
 ) -> list[ScheduleRunResponse]:
+    """List a schedule's recorded executions, newest first.
+
+    Requires `schedule:read`. Each run carries the outcome
+    (`success`/`failure`/`skipped`) and an optional sanitized `detail` note.
+    """
+
     try:
         runs = await use_case(
             community_id=CommunityId(community_id),

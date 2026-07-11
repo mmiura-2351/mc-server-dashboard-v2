@@ -1495,10 +1495,38 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Schedules */
+        /**
+         * List Schedules
+         * @description List a server's schedules, ordered by name.
+         *
+         *     Requires `schedule:read` (per-server: a resource grant on this server
+         *     suffices). A server outside the community 404s with no existence signal.
+         */
         get: operations["list_schedules_api_communities__community_id__servers__server_id__schedules_get"];
         put?: never;
-        /** Create Schedule */
+        /**
+         * Create Schedule
+         * @description Create a per-server schedule.
+         *
+         *     Requires `schedule:manage` **and** the action's own permission
+         *     (`command`→`server:command`, `start`→`server:start`, `stop`→`server:stop`,
+         *     `restart`→`server:restart`, `backup`→`backup:schedule`), so `schedule:manage`
+         *     alone cannot schedule an action the caller could not run directly. The
+         *     cadence is `cron` XOR `interval_seconds`; `timezone` is an IANA zone.
+         *     `command` is required for the `command` action; `warning_steps` (at most 5,
+         *     positive distinct offsets ≤ 120 minutes) only on `stop`/`restart` — they are
+         *     broadcast as a fixed `say` message, so they need no `server:command`.
+         *
+         *     Authorization is **write-time only**: the runner later executes each
+         *     occurrence as the system, so revoking a permission does not stop existing
+         *     schedules — they must be disabled or deleted (the same write gate).
+         *
+         *     `next_run_at` is computed from the cadence when `enabled`; `null` while
+         *     disabled. A missing permission is 403 with the code in the `permission`
+         *     member; a duplicate name is 409; validation failures are 422 with a typed
+         *     reason (`invalid_cron`, `invalid_cadence`, `invalid_timezone`,
+         *     `invalid_payload`, `invalid_schedule_name`).
+         */
         post: operations["create_schedule_api_communities__community_id__servers__server_id__schedules_post"];
         delete?: never;
         options?: never;
@@ -1513,15 +1541,39 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Read Schedule */
+        /**
+         * Read Schedule
+         * @description Read one schedule.
+         *
+         *     Requires `schedule:read`. A schedule on another server (or a server outside
+         *     the community) 404s the same as a wholly unknown id — no existence signal.
+         *     `next_run_at` is `null` exactly while the schedule is disabled.
+         */
         get: operations["read_schedule_api_communities__community_id__servers__server_id__schedules__schedule_id__get"];
         put?: never;
         post?: never;
-        /** Delete Schedule */
+        /**
+         * Delete Schedule
+         * @description Delete a schedule (its run history cascades away with it).
+         *
+         *     Requires `schedule:manage` **and** the schedule's action permission (the
+         *     same two-layer, write-time-only gate as create/update).
+         */
         delete: operations["delete_schedule_api_communities__community_id__servers__server_id__schedules__schedule_id__delete"];
         options?: never;
         head?: never;
-        /** Update Schedule */
+        /**
+         * Update Schedule
+         * @description Edit a schedule (partial: omitted fields keep their value).
+         *
+         *     Requires `schedule:manage` **and** the (immutable) action's own permission —
+         *     the same two-layer, write-time-only gate as create; to run a different
+         *     action, delete and recreate. `warning_steps: []` clears the steps (distinct
+         *     from omitting the field). Supplying `cron` or `interval_seconds` replaces
+         *     the whole cadence (still XOR). `next_run_at` is recomputed when the result
+         *     is enabled and `null` when disabled — disabling is how a still-firing
+         *     schedule is stopped, since permission revocation alone does not stop it.
+         */
         patch: operations["update_schedule_api_communities__community_id__servers__server_id__schedules__schedule_id__patch"];
         trace?: never;
     };
@@ -1532,7 +1584,13 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Schedule Runs */
+        /**
+         * List Schedule Runs
+         * @description List a schedule's recorded executions, newest first.
+         *
+         *     Requires `schedule:read`. Each run carries the outcome
+         *     (`success`/`failure`/`skipped`) and an optional sanitized `detail` note.
+         */
         get: operations["list_schedule_runs_api_communities__community_id__servers__server_id__schedules__schedule_id__runs_get"];
         put?: never;
         post?: never;

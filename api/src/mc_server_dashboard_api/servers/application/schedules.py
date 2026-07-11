@@ -22,8 +22,10 @@ stop/restart permission, never ``server:command``.
 schedule is created or edited; the runner later executes each occurrence as the
 *system*, not as the creator. Revoking a member's permission (or deleting the
 member) does not stop schedules they already created — those keep firing until a
-holder of ``schedule:manage`` disables or deletes them. ``created_by`` is a soft
-actor reference for the audit trail, not a live authorization anchor.
+caller holding ``schedule:manage`` *plus the schedule's action permission*
+disables or deletes them (disable and delete are writes, so the same two-layer
+gate applies). ``created_by`` is a soft actor reference for the audit trail, not
+a live authorization anchor.
 
 Cross-scope safety mirrors the other servers use cases: a server outside the path
 community, or a schedule on a different server, is reported not-found

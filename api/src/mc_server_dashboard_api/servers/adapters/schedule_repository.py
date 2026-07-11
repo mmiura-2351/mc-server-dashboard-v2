@@ -13,8 +13,12 @@ from __future__ import annotations
 from typing import Any
 
 from sqlalchemy import delete, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from mc_server_dashboard_api.servers.adapters.integrity import (
+    translate_integrity_error,
+)
 from mc_server_dashboard_api.servers.adapters.schedule_models import (
     ScheduleModel,
     ScheduleRunModel,
@@ -133,7 +137,16 @@ class SqlAlchemyScheduleRepository(ScheduleRepository):
                 updated_at=schedule.updated_at,
             )
         )
-        await self._session.execute(stmt)
+        try:
+            await self._session.execute(stmt)
+        except IntegrityError as exc:
+            # A rename UPDATE violates ``uq_schedule_server_id_name`` at execute
+            # time, inside the transaction (unlike a staged INSERT, which flushes
+            # at commit), so the constraint -> domain-error translation must run
+            # here for a concurrent racer to surface typed (409) rather than as a
+            # raw 500. The enclosing UnitOfWork rolls the transaction back.
+            translate_integrity_error(exc)
+            raise
 
     async def delete(self, schedule_id: ScheduleId) -> None:
         stmt = delete(ScheduleModel).where(ScheduleModel.id == schedule_id.value)
