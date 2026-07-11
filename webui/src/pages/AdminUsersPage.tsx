@@ -226,7 +226,10 @@ export function AdminUsersPage() {
         <p className="sub" role="status">
           {t("admin.users.loading")}
         </p>
-      ) : usersQuery.isError ? (
+      ) : /* Error only when there is nothing to show (initial load failed).
+           A failed background refetch retains `data`, so the cached page
+           keeps rendering through transient API blips (#1805). */
+      usersQuery.data === undefined ? (
         <p className="field-error" role="alert">
           {t("admin.users.loadError")}
         </p>

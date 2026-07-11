@@ -1,4 +1,10 @@
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAccessToken } from "../auth/tokenStore.ts";
 import { t } from "../i18n/index.ts";
@@ -433,5 +439,36 @@ describe("admin communities provisioning", () => {
       await within(dialog).findByText(t("admin.communities.errNameTaken")),
     ).toBeInTheDocument();
     expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("keeps rendering cached communities when a background refetch fails (#1805)", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.startsWith("/api/admin/communities"))
+        return Promise.resolve(jsonResponse(ADMIN_COMMUNITIES));
+      return Promise.resolve(baseRoute(url) ?? tokenResponse());
+    });
+
+    const { queryClient } = renderApp({ path: "/admin/communities" });
+    const table = await screen.findByRole("table");
+    expect(within(table).getByText("Sakura SMP")).toBeInTheDocument();
+
+    // Simulate a transient API outage: communities endpoint fails.
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.startsWith("/api/admin/communities"))
+        return Promise.resolve(new Response("nope", { status: 503 }));
+      return Promise.resolve(baseRoute(url) ?? tokenResponse());
+    });
+    await act(() => queryClient.invalidateQueries());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // The cached list stays on screen instead of the error.
+    expect(within(table).getByText("Sakura SMP")).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("admin.communities.loadError")),
+    ).not.toBeInTheDocument();
   });
 });

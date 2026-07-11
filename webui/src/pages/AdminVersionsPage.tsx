@@ -40,7 +40,10 @@ export function AdminVersionsPage() {
         <p className="sub" role="status">
           {t("admin.versions.loading")}
         </p>
-      ) : typesQuery.isError ? (
+      ) : /* Error only when there is nothing to show (initial load failed).
+           A failed background refetch retains `data`, so the cached page
+           keeps rendering through transient API blips (#1805). */
+      typesQuery.data === undefined ? (
         <p className="field-error" role="alert">
           {t("admin.versions.loadError")}
         </p>
@@ -214,7 +217,10 @@ function JarPool() {
         <p className="sub" role="status">
           {t("admin.versions.loading")}
         </p>
-      ) : statsQuery.isError ? (
+      ) : /* Error only when there is nothing to show (initial load failed).
+           A failed background refetch retains `data`, so the cached page
+           keeps rendering through transient API blips (#1805). */
+      statsQuery.data === undefined ? (
         <p className="field-error" role="alert">
           {t("admin.versions.loadError")}
         </p>

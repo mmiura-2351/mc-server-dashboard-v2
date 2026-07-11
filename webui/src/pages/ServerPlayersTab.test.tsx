@@ -425,6 +425,24 @@ describe("ServerPlayersTab Sessions view (issue #961)", () => {
     expect(await screen.findByText(t("sessions.active"))).toBeInTheDocument();
   });
 
+  it("keeps rendering cached sessions when a background refetch fails (#1805)", async () => {
+    routeGet({ sessions: [session()] });
+    const { queryClient } = renderTab();
+    await openPlayers();
+    await screen.findByText("Alice");
+
+    // Simulate a transient API outage: the next background refetch fails.
+    mockApi.get.mockRejectedValue(new ApiError(500, {}));
+    await act(() => queryClient.invalidateQueries());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // The cached sessions stay on screen instead of the error.
+    expect(screen.getByText("Alice")).toBeInTheDocument();
+    expect(screen.queryByText(t("sessions.loadError"))).not.toBeInTheDocument();
+  });
+
   it("shows the unknown placeholder for null identity fields", async () => {
     routeGet({
       sessions: [

@@ -7,7 +7,13 @@
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client.ts";
@@ -106,18 +112,19 @@ function plugin(overrides: Record<string, unknown> = {}) {
 }
 
 function renderTab() {
-  const client = new QueryClient({
+  const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  return render(
+  const result = render(
     <MemoryRouter>
-      <QueryClientProvider client={client}>
+      <QueryClientProvider client={queryClient}>
         <ToastProvider>
           <ServerPluginsTab server={server()} communityId={CID} can={allow} />
         </ToastProvider>
       </QueryClientProvider>
     </MemoryRouter>,
   );
+  return { ...result, queryClient };
 }
 
 /** Route the tab's GET calls by URL suffix. */
@@ -1482,5 +1489,28 @@ describe("ServerPluginsTab Bedrock discovery hint (issue #1543)", () => {
       expect(screen.getByText("Geyser-Spigot")).toBeInTheDocument();
     });
     expect(screen.queryByText(HINT_TEXT)).not.toBeInTheDocument();
+  });
+});
+
+describe("ServerPluginsTab refetch failure (#1805)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("keeps rendering cached plugins when a background refetch fails", async () => {
+    mockGets({ plugins: [plugin()], validation: EMPTY_VALIDATION });
+    const { queryClient } = renderTab();
+    await screen.findByText("Sodium");
+
+    // Simulate a transient API outage: the next background refetch fails.
+    mockApi.get.mockRejectedValue(new ApiError(500, {}));
+    await act(() => queryClient.invalidateQueries());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // The cached list stays on screen instead of the error.
+    expect(screen.getByText("Sodium")).toBeInTheDocument();
+    expect(screen.queryByText(/Could not load mods/)).not.toBeInTheDocument();
   });
 });

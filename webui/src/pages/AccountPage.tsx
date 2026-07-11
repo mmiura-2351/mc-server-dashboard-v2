@@ -78,7 +78,9 @@ export function AccountPage() {
     <Loaded
       user={userQuery.data}
       communities={communitiesQuery.data ?? []}
-      communitiesError={communitiesQuery.isError}
+      communitiesError={
+        communitiesQuery.isError && communitiesQuery.data === undefined
+      }
       showToast={showToast}
     />
   );

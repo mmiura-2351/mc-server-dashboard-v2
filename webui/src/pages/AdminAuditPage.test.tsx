@@ -1,4 +1,10 @@
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAccessToken } from "../auth/tokenStore.ts";
 import { t } from "../i18n/index.ts";
@@ -399,6 +405,46 @@ describe("AdminAuditPage", () => {
         ) as HTMLSelectElement
       ).value,
     ).toBe(COMMUNITY.id);
+  });
+
+  it("keeps rendering cached audit records when a background refetch fails (#1805)", async () => {
+    signedInAs(ADMIN, [record()]);
+    const { queryClient } = renderApp({ path: "/admin/audit" });
+    await screen.findByText(t("communitySettings.audit.op.server:start"));
+
+    // Simulate a transient API outage: the audit endpoint fails.
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === "/api/users/me") return Promise.resolve(jsonResponse(ADMIN));
+      if (url === "/api/communities")
+        return Promise.resolve(jsonResponse([COMMUNITY]));
+      if (url.startsWith("/api/admin/communities"))
+        return Promise.resolve(
+          jsonResponse({
+            total: 1,
+            limit: 100,
+            offset: 0,
+            communities: [adminCommunity()],
+          }),
+        );
+      if (url.endsWith("/me/permissions"))
+        return Promise.resolve(jsonResponse({}));
+      if (url.startsWith("/api/audit"))
+        return Promise.resolve(new Response("nope", { status: 503 }));
+      return Promise.resolve(tokenResponse());
+    });
+    await act(() => queryClient.invalidateQueries());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // The cached records stay on screen instead of the error.
+    expect(
+      screen.getByText(t("communitySettings.audit.op.server:start")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("communitySettings.audit.loadError")),
+    ).not.toBeInTheDocument();
   });
 
   it("pages forward with an increased offset", async () => {
