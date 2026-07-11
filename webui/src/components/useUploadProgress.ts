@@ -17,9 +17,13 @@ export interface UploadProgressState {
   total: number;
   percent: number;
   elapsedMs: number;
+  /** The abort signal for the current upload; pass to `postFormWithProgress`. */
+  signal: AbortSignal;
   start: (total: number) => void;
   onProgress: UploadProgress;
   reset: () => void;
+  /** Abort the in-flight upload and reset the progress state (issue #1780). */
+  cancel: () => void;
 }
 
 interface UploadState {
@@ -40,6 +44,7 @@ const initialState: UploadState = {
 
 // Module-level singleton — survives component mount/unmount cycles.
 let state: UploadState = { ...initialState };
+let abortController = new AbortController();
 const listeners = new Set<() => void>();
 
 function emitChange() {
@@ -60,6 +65,8 @@ function getSnapshot(): UploadState {
 }
 
 function startUpload(total: number) {
+  // Each upload gets a fresh controller so a previous cancel does not affect it.
+  abortController = new AbortController();
   const t = Date.now();
   state = { active: true, loaded: 0, total, startedAt: t, now: t };
   emitChange();
@@ -82,9 +89,16 @@ function resetUpload() {
   emitChange();
 }
 
+/** Abort the in-flight XHR and reset progress (issue #1780). */
+function cancelUpload() {
+  abortController.abort();
+  resetUpload();
+}
+
 /** Reset module-level state. Exported only for tests. */
 export function _resetForTesting() {
   state = { ...initialState };
+  abortController = new AbortController();
 }
 
 export function useUploadProgress(): UploadProgressState {
@@ -102,8 +116,10 @@ export function useUploadProgress(): UploadProgressState {
     total: snapshot.total,
     percent,
     elapsedMs,
+    signal: abortController.signal,
     start: useCallback(startUpload, []),
     onProgress: useCallback(onUploadProgress, []),
     reset: useCallback(resetUpload, []),
+    cancel: useCallback(cancelUpload, []),
   };
 }

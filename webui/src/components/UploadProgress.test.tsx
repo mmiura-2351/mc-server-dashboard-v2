@@ -1,5 +1,5 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 import { UploadProgress } from "./UploadProgress.tsx";
 
 describe("UploadProgress", () => {
@@ -43,5 +43,49 @@ describe("UploadProgress", () => {
       .getByRole("progressbar")
       .querySelector(".upload-bar-fill");
     expect(fill).toHaveStyle({ width: "75%" });
+  });
+
+  it("renders a cancel button when onCancel is provided", () => {
+    render(
+      <UploadProgress
+        loaded={512}
+        total={1024}
+        percent={50}
+        elapsedMs={1000}
+        onCancel={() => {}}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeInTheDocument();
+  });
+
+  it("calls onCancel when the cancel button is clicked", () => {
+    const onCancel = vi.fn();
+    render(
+      <UploadProgress
+        loaded={512}
+        total={1024}
+        percent={50}
+        elapsedMs={1000}
+        onCancel={onCancel}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not render a cancel button when onCancel is omitted", () => {
+    render(
+      <UploadProgress
+        loaded={512}
+        total={1024}
+        percent={50}
+        elapsedMs={1000}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
   });
 });

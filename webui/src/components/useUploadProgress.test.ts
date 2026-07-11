@@ -83,4 +83,38 @@ describe("useUploadProgress", () => {
     expect(result.current.loaded).toBe(0);
     expect(result.current.total).toBe(0);
   });
+
+  it("exposes a signal that is not aborted while active", () => {
+    const { result } = renderHook(() => useUploadProgress());
+
+    act(() => result.current.start(2000));
+
+    expect(result.current.signal.aborted).toBe(false);
+  });
+
+  it("aborts the signal and resets state when cancel is called", () => {
+    const { result } = renderHook(() => useUploadProgress());
+
+    act(() => result.current.start(2000));
+    const signal = result.current.signal;
+    act(() => result.current.cancel());
+
+    expect(signal.aborted).toBe(true);
+    expect(result.current.active).toBe(false);
+  });
+
+  it("creates a fresh signal on each start", () => {
+    const { result } = renderHook(() => useUploadProgress());
+
+    act(() => result.current.start(1000));
+    const first = result.current.signal;
+    act(() => result.current.cancel());
+
+    act(() => result.current.start(2000));
+    const second = result.current.signal;
+
+    expect(second).not.toBe(first);
+    expect(second.aborted).toBe(false);
+    expect(first.aborted).toBe(true);
+  });
 });

@@ -210,17 +210,41 @@ async function request<P extends keyof paths, M extends string>(
 export type UploadProgress = (loaded: number, total: number) => void;
 
 /**
+ * True for the `AbortError` DOMException that {@link sendForm} rejects with
+ * when its signal fires (issue #1780). Callers use it to swallow intentional
+ * cancellations — an explicit cancel is not a user-visible error. Matches the
+ * same shape as the fetch-side {@link isAbortError} in `download.ts`.
+ */
+export function isUploadAbortError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { name?: unknown }).name === "AbortError"
+  );
+}
+
+/**
  * One XHR attempt: POST a FormData body, emitting upload progress through
  * `onProgress`. Resolves the raw {@link XMLHttpRequest} once it loads (any
  * status) and rejects only on a transport-level failure — the status branching
  * (JSON parse, refresh, ApiError) is the caller's job, mirroring how `request`
  * inspects a fetch `Response`.
+ *
+ * When `signal` is provided and fires, `xhr.abort()` is called and the
+ * promise rejects with an `AbortError` DOMException (issue #1780).
  */
 function sendForm(
   url: string,
   body: FormData,
   onProgress?: UploadProgress,
+  signal?: AbortSignal,
 ): Promise<XMLHttpRequest> {
+  // Fast-reject when the signal is already aborted — no XHR needed.
+  if (signal?.aborted) {
+    return Promise.reject(
+      new DOMException("The operation was aborted.", "AbortError"),
+    );
+  }
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", url);
@@ -240,6 +264,12 @@ function sendForm(
     }
     xhr.onload = () => resolve(xhr);
     xhr.onerror = () => reject(new ApiError(0, undefined));
+    xhr.onabort = () =>
+      reject(new DOMException("The operation was aborted.", "AbortError"));
+    // Wire the abort signal to the XHR (issue #1780).
+    if (signal !== undefined) {
+      signal.addEventListener("abort", () => xhr.abort(), { once: true });
+    }
     xhr.send(body);
   });
 }
@@ -254,16 +284,17 @@ export async function postFormWithProgress<P extends PathsWith<"post">>(
   path: P,
   body: FormData,
   onProgress?: UploadProgress,
+  signal?: AbortSignal,
 ): Promise<JsonResponse<Op<P, "post">>> {
   const url = path as string;
-  let xhr = await sendForm(url, body, onProgress);
+  let xhr = await sendForm(url, body, onProgress, signal);
 
   // Transparent refresh, mirroring `request`: a 401 from a non-auth endpoint
   // means the access token expired — refresh once and retry the upload.
   if (xhr.status === 401 && refresher !== null && !isAuthPath(url)) {
     const refreshed = await refresher();
     if (refreshed) {
-      xhr = await sendForm(url, body, onProgress);
+      xhr = await sendForm(url, body, onProgress, signal);
     }
   }
 

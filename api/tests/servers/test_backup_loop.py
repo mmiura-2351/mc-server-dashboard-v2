@@ -1,8 +1,8 @@
-"""Tests for the snapshot-scheduler lifespan loop driver (FR-DATA-7).
+"""Tests for the backup-scheduler lifespan loop driver (FR-BAK-3).
 
 The loop ticks on its cadence, survives a failing tick, and stops cleanly when
 its task is cancelled (the shutdown path). The scheduler is replaced with a tiny
-spy so these stay fast and deterministic (no real clock dependence on duration).
+spy so these stay fast and deterministic.
 """
 
 from __future__ import annotations
@@ -12,9 +12,9 @@ from typing import cast
 
 import pytest
 
-from mc_server_dashboard_api.servers.adapters.snapshot_loop import run_snapshot_loop
-from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
-    RunSnapshotCadenceTick,
+from mc_server_dashboard_api.servers.adapters.backup_loop import run_backup_loop
+from mc_server_dashboard_api.servers.application.backup_scheduler import (
+    RunBackupScheduleTick,
 )
 
 
@@ -31,9 +31,8 @@ class _SpyScheduler:
 
 async def _run_for_ticks(spy: _SpyScheduler, *, until: int) -> None:
     task = asyncio.create_task(
-        run_snapshot_loop(cast(RunSnapshotCadenceTick, spy), tick_seconds=0)
+        run_backup_loop(cast(RunBackupScheduleTick, spy), tick_seconds=0)
     )
-    # Yield control until the spy has ticked enough times, then cancel cleanly.
     for _ in range(10000):
         if spy.ticks >= until:
             break
@@ -58,7 +57,7 @@ async def test_loop_sleeps_before_first_tick(
 
     monkeypatch.setattr(asyncio, "sleep", _recording_sleep)
     task = asyncio.create_task(
-        run_snapshot_loop(cast(RunSnapshotCadenceTick, spy), tick_seconds=1)
+        run_backup_loop(cast(RunBackupScheduleTick, spy), tick_seconds=1)
     )
     for _ in range(10000):
         if ticks_at_first_sleep:
@@ -80,14 +79,13 @@ async def test_loop_ticks_repeatedly() -> None:
 async def test_loop_survives_a_failing_tick() -> None:
     spy = _SpyScheduler(fail_first=True)
     await _run_for_ticks(spy, until=3)
-    # The first tick raised; the loop kept going and ticked again.
     assert spy.ticks >= 3
 
 
 async def test_loop_stops_cleanly_on_cancel() -> None:
     spy = _SpyScheduler()
     task = asyncio.create_task(
-        run_snapshot_loop(cast(RunSnapshotCadenceTick, spy), tick_seconds=0)
+        run_backup_loop(cast(RunBackupScheduleTick, spy), tick_seconds=0)
     )
     await asyncio.sleep(0)
     task.cancel()
