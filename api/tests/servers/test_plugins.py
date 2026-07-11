@@ -12,6 +12,7 @@ from mc_server_dashboard_api.servers.application.plugins import (
     InstallPlugin,
     ListPlugins,
     RemovePlugin,
+    SetPluginSide,
     TogglePlugin,
     ValidatePluginSet,
 )
@@ -925,3 +926,103 @@ async def test_remove_geyser_keeps_port_while_another_geyser_remains() -> None:
     uc = RemovePlugin(uow=uow, file_store=FakeFileStore(), clock=FakeClock(_NOW))
     await uc(community_id=_COMMUNITY, server_id=server.id, plugin_id=first.id)
     assert uow.servers.by_id[server.id].bedrock_port == 19132
+
+
+# -- Commit-before-file-ops ordering (issue #1706) --
+
+
+class _FailingCommitUoW(FakeUnitOfWork):
+    """A UoW whose commit always raises, simulating a DB commit failure."""
+
+    async def commit(self) -> None:
+        raise RuntimeError("simulated commit failure")
+
+
+async def test_install_failed_commit_leaves_no_orphan_jar() -> None:
+    """A failed DB commit must not leave a working-set jar behind (#1706)."""
+    uow = _FailingCommitUoW()
+    server = _server()
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+    uc = InstallPlugin(
+        uow=uow, file_store=fs, cache=FakePluginCacheStore(), clock=FakeClock(_NOW)
+    )
+    with pytest.raises(RuntimeError, match="simulated commit failure"):
+        await uc(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            filename="fabric-api.jar",
+            display_name="Fabric API",
+            content=b"jar-bytes",
+        )
+    # The jar must NOT have been written to the working set.
+    assert fs.files == {}
+
+
+async def test_remove_failed_commit_leaves_jar_intact() -> None:
+    """A failed DB commit must not delete the working-set jar (#1706)."""
+    uow = _FailingCommitUoW()
+    server = _server()
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+    fs.files["mods/test.jar"] = b"jar"
+    p = _plugin(server_id=server.id)
+    uow.plugins.seed(p)
+    uc = RemovePlugin(uow=uow, file_store=fs, clock=FakeClock(_NOW))
+    with pytest.raises(RuntimeError, match="simulated commit failure"):
+        await uc(community_id=_COMMUNITY, server_id=server.id, plugin_id=p.id)
+    # The jar must still exist on disk.
+    assert "mods/test.jar" in fs.files
+
+
+async def test_toggle_failed_commit_leaves_file_unchanged() -> None:
+    """A failed DB commit must not rename the working-set jar (#1706)."""
+    uow = _FailingCommitUoW()
+    server = _server()
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+    fs.files["mods/test.jar"] = b"jar"
+    p = _plugin(server_id=server.id, enabled=True, rel_path="mods/test.jar")
+    uow.plugins.seed(p)
+    uc = TogglePlugin(
+        uow=uow, file_store=fs, cache=FakePluginCacheStore(), clock=FakeClock(_NOW)
+    )
+    with pytest.raises(RuntimeError, match="simulated commit failure"):
+        await uc(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            plugin_id=p.id,
+            enable=False,
+        )
+    # The file must remain at its original path (not renamed to .disabled).
+    assert "mods/test.jar" in fs.files
+    assert "mods/test.jar.disabled" not in fs.files
+
+
+async def test_set_side_failed_commit_leaves_file_unchanged() -> None:
+    """A failed DB commit must not materialize/remove the working-set jar (#1706)."""
+    import hashlib
+
+    uow = _FailingCommitUoW()
+    server = _server()
+    uow.servers.seed(server)
+    cache = FakePluginCacheStore()
+    content = b"the-jar-bytes"
+    sha256 = hashlib.sha256(content).hexdigest()
+    cache.blobs[sha256] = content
+    plugin = _plugin(server_id=server.id)
+    plugin.side = "client"
+    plugin.sha256 = sha256
+    uow.plugins.seed(plugin)
+    fs = FakeFileStore()  # working set empty (client not deployed)
+
+    uc = SetPluginSide(uow=uow, file_store=fs, cache=cache, clock=FakeClock(_NOW))
+    with pytest.raises(RuntimeError, match="simulated commit failure"):
+        await uc(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            plugin_id=plugin.id,
+            side="both",
+        )
+    # The jar must NOT have been materialized into the working set.
+    assert fs.files == {}
