@@ -184,6 +184,28 @@ def test_login_invalid_credentials_returns_401() -> None:
     assert resp.json()["type"] == "urn:mcsd:error:invalid_credentials"
 
 
+def test_login_locked_returns_retry_after_header() -> None:
+    # When the use case raises InvalidCredentialsError with a retry_after
+    # value, the endpoint must emit a Retry-After header (issue #637).
+    fake = _Fake(error=InvalidCredentialsError(retry_after=600))
+    client = next(_client(login=fake))
+    resp = client.post("/api/auth/login", json={"username": "alice", "password": "pw"})
+    assert resp.status_code == 401
+    assert resp.headers["retry-after"] == "600"
+    # The uniform 401 posture is preserved.
+    assert resp.json()["reason"] == "invalid_credentials"
+    assert resp.headers["www-authenticate"] == "Bearer"
+
+
+def test_login_plain_failure_has_no_retry_after_header() -> None:
+    # A normal failure (no lockout/throttle) must not emit Retry-After.
+    fake = _Fake(error=InvalidCredentialsError())
+    client = next(_client(login=fake))
+    resp = client.post("/api/auth/login", json={"username": "alice", "password": "bad"})
+    assert resp.status_code == 401
+    assert "retry-after" not in resp.headers
+
+
 def test_login_over_72_byte_password_under_bcrypt_returns_uniform_401() -> None:
     # Regression: a >72-byte login password under a bcrypt-configured hasher must
     # not 500 (the bcrypt adapter's verify() returns False instead of raising),
