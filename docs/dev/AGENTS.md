@@ -27,9 +27,9 @@ rebuild ships (issue #432).
   - **Dirty tree** — auto-restore is refused to protect the changes; a loud
     error is printed. Stash or commit, then `git checkout main` manually.
   - **Intentional inspection** — set `MCSD_ALLOW_PRIMARY_BRANCH=1` to suppress
-    auto-restore for a checkout. The variable persists for the shell's
-    lifetime — `unset MCSD_ALLOW_PRIMARY_BRANCH` when done, or subsequent
-    checkouts in the same shell are also permitted.
+    auto-restore for a checkout; a loud notice is still printed. The variable
+    persists for the shell's lifetime — `unset MCSD_ALLOW_PRIMARY_BRANCH` when
+    done, or subsequent checkouts in the same shell are also permitted.
   - **In-progress `git rebase` / `bisect` / `cherry-pick` / `merge`** — the
     hook exits silently (these invoke `post-checkout` internally; restoring
     mid-operation would corrupt them).
@@ -94,5 +94,6 @@ rebuild ships (issue #432).
 - A new Alembic migration chains off `main`'s current head at the final
   rebase before merge; expect a renumber whenever another open PR also
   touches `api/migrations/` (CONTRIBUTING.md Section 5).
-- Exactly one category label; `Resolves #N` on its own line; short imperative
-  title; everything in English.
+- Exactly one category label; `Resolves #N` on its own line when a related
+  issue exists (omit it when there is none); short imperative title; everything
+  in English.

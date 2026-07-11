@@ -6,12 +6,17 @@
  * accumulates a bounded log buffer and a windowed metrics buffer in React state,
  * and patches the server-detail query cache on each status frame so the header
  * pill updates live without a refetch. A `gap` frame is appended to the log
- * buffer as a marker so log views can render an inline "missed events" divider.
+ * buffer as a marker so log views can render an inline "missed events" divider;
+ * the hook appends the same marker itself when an open socket drops, because
+ * lines emitted while it is down are never replayed (#1726).
  *
  * Degraded handling follows SPEC 7.2: on socket loss the client reconnects with
  * backoff and the hook refetches the detail query once (status-only REST
  * fallback) and reports `degraded` for the banner; there is NO log/metrics
- * polling fallback — those streams resume when the socket reopens.
+ * polling fallback — those streams resume when the socket reopens. Because the
+ * API replays nothing on subscribe, every reconnect and every gap frame also
+ * refetches the detail query once, so a status transition from the missed
+ * window cannot leave the header pill stale forever (#1723).
  *
  * The client is recreated per (community, server) pair and torn down on unmount
  * / navigation, so a stale page's socket never patches another server's cache.
@@ -93,6 +98,9 @@ export function useServerEvents(
     setDegraded(false);
     setStatusDetail("");
 
+    const appendGap = () =>
+      setLogs((prev) => trim([...prev, { id: nextId.current++, kind: "gap" }]));
+
     const onFrame = (frame: ServerFrame) => {
       if (frame.kind === "status") {
         // Patch the detail query so the header pill updates live (no refetch).
@@ -139,14 +147,49 @@ export function useServerEvents(
         );
         return;
       }
-      // gap
-      setLogs((prev) => trim([...prev, { id: nextId.current++, kind: "gap" }]));
+      // gap: the stream dropped frames (slow-client overflow). Mark the log
+      // buffer and refetch the detail query once — a dropped status frame is
+      // never replayed (#1723).
+      appendGap();
+      queryClient.invalidateQueries({
+        queryKey: serverKey(communityId, serverId),
+      });
     };
+
+    // Lines emitted between a drop and the reconnect are lost for good (the
+    // API replays nothing on subscribe), so mark the drop point with the same
+    // gap marker. `wasOpen` gates it: no marker before the first open, and the
+    // failed reconnect attempts that follow a drop (each fires onDown again)
+    // do not stack markers.
+    let wasOpen = false;
+    // Resync gate (#1723): true only until the socket's first connect outcome.
+    // Any later open — drop→reopen, an open after failed initial connects, or
+    // a rotation reconnect (which `wasOpen` never sees: rotation tears down
+    // without onDown) — follows a window in which status frames may have been
+    // dropped, so it must refetch the detail query once. The pristine first
+    // open needs no refetch: the mount fetch covers it.
+    let pristine = true;
 
     const client = new ServerEventsClient(communityId, serverId, {
       onFrame,
-      onOpen: () => setDegraded(false),
+      onOpen: () => {
+        if (!pristine) {
+          // The onDown fallback refetched at drop time; transitions between
+          // that refetch and this reopen were lost for good, reconcile once.
+          queryClient.invalidateQueries({
+            queryKey: serverKey(communityId, serverId),
+          });
+        }
+        pristine = false;
+        wasOpen = true;
+        setDegraded(false);
+      },
       onDown: () => {
+        pristine = false;
+        if (wasOpen) {
+          wasOpen = false;
+          appendGap();
+        }
         setDegraded(true);
         // Status-only REST fallback: one refetch picks up the latest observed
         // state while the socket is down (no log/metrics polling, SPEC 7.2).

@@ -72,6 +72,10 @@ from mc_server_dashboard_api.servers.domain.errors import (
     WorkingSetSeedFailedError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileStore
+from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
+    LifecycleLock,
+    NullLifecycleLock,
+)
 from mc_server_dashboard_api.servers.domain.plugin import (
     LoaderType,
     PluginId,
@@ -209,6 +213,7 @@ class ImportServer:
     max_bytes: int = MAX_UPLOAD_BYTES
     max_entries: int = MAX_ARCHIVE_ENTRIES
     bedrock_port_range: PortRange | None = None
+    lifecycle_lock: LifecycleLock = NullLifecycleLock()
 
     async def __call__(
         self,
@@ -249,12 +254,11 @@ class ImportServer:
         await self._publish_working_set(
             community_id=community_id, server_id=server.id, content=content
         )
-        await self._import_plugins(
+        return await self._import_plugins(
             server=server,
             plugin_dicts=metadata.plugins,
             now=self.create_server.clock.now(),
         )
-        return server
 
     async def _publish_working_set(
         self, *, community_id: CommunityId, server_id: ServerId, content: bytes
@@ -324,40 +328,51 @@ class ImportServer:
         server: Server,
         plugin_dicts: list[dict[str, object]],
         now: dt.datetime,
-    ) -> None:
+    ) -> Server:
         """Re-create plugin rows from the exported metadata (issue #1335).
 
         Import is an enablement path like the two install paths (issue #1551): a
         Geyser row in the exported set runs the SAME detection and allocation as
         :class:`InstallPlugin` / :class:`InstallFromCatalog`
-        (``allocate_bedrock_port_if_geyser``), inside this same transaction so the
-        plugin rows and the port commit atomically. By this point the server row
-        and its working set are already committed (issue #274), so a Bedrock
-        window exhaustion -- or the ``UNIQUE(bedrock_port)`` backstop firing on a
-        concurrent allocation racer (:class:`PortAlreadyTakenError`, the #1550
-        race) -- is a post-commit failure here, not a clean abort with no row
-        created; both reuse the #243/#252 seed-failure posture --
+        (``allocate_bedrock_port_if_geyser``), inside the per-server lifecycle
+        lock (issue #1587) so a concurrent PATCH cannot be clobbered by the
+        whole-entity write-back. The server entity is re-fetched under the lock
+        so the allocation operates on the current row, not the stale create-time
+        snapshot. By this point the server row and its working set are already
+        committed (issue #274), so a Bedrock window exhaustion -- or the
+        ``UNIQUE(bedrock_port)`` backstop firing on a concurrent allocation racer
+        (:class:`PortAlreadyTakenError`, the #1550 race) -- is a post-commit
+        failure here, not a clean abort with no row created; both reuse the
+        #243/#252 seed-failure posture --
         :class:`WorkingSetSeedFailedError` (503 ``seed_failed``) -- rather than
         the install paths' distinct ``bedrock_port_range_exhausted`` / 409
         ``bedrock_port_taken`` (which imply nothing was created yet).
         """
 
         if not plugin_dicts:
-            return
+            return server
         uow = self.create_server.uow
         try:
-            async with uow:
-                for raw in plugin_dicts:
-                    plugin = _deserialize_plugin(raw, server_id=server.id, now=now)
-                    await uow.plugins.add(plugin)
-                    await allocate_bedrock_port_if_geyser(
-                        uow,
-                        server=server,
-                        plugin=plugin,
-                        port_range=self.bedrock_port_range,
-                        now=now,
-                    )
-                await uow.commit()
+            async with self.lifecycle_lock.hold(server.id):
+                async with uow:
+                    # Re-fetch the current row so the whole-entity write-back in
+                    # allocate_bedrock_port_if_geyser does not clobber a concurrent
+                    # PATCH that landed after the create commit (issue #1587).
+                    fresh = await uow.servers.get_by_id(server.id)
+                    if fresh is None:
+                        raise ServerNotFoundError(str(server.id.value))
+                    for raw in plugin_dicts:
+                        plugin = _deserialize_plugin(raw, server_id=server.id, now=now)
+                        await uow.plugins.add(plugin)
+                        await allocate_bedrock_port_if_geyser(
+                            uow,
+                            server=fresh,
+                            plugin=plugin,
+                            port_range=self.bedrock_port_range,
+                            now=now,
+                        )
+                    await uow.commit()
+            return fresh
         except (PortAlreadyTakenError, PortRangeExhaustedError) as exc:
             _logger.warning(
                 "import plugin metadata failed (Bedrock port allocation: %s); "

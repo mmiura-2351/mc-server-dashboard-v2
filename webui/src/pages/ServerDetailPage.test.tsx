@@ -216,6 +216,48 @@ describe("ServerDetailPage scaffold + header", () => {
       await screen.findByText(t("serverDetail.loadError")),
     ).toBeInTheDocument();
   });
+
+  it("keeps rendering cached data when a background refetch fails (#1724)", async () => {
+    mockApi.get.mockResolvedValue(server());
+    const { queryClient } = renderPage();
+    await screen.findByText("survival");
+
+    // Simulate a transient API outage: the next background refetch fails.
+    mockApi.get.mockRejectedValue(new ApiError(500, {}));
+    await act(() => queryClient.invalidateQueries());
+    // The query-state notification lands a task after invalidateQueries
+    // settles; flush it so the assertion sees the post-refetch render.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // The cached page stays on screen instead of a full-page error.
+    expect(screen.getByText("survival")).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("serverDetail.loadError")),
+    ).not.toBeInTheDocument();
+  });
+
+  it("recovers to fresh data once a refetch succeeds after a failure (#1724)", async () => {
+    mockApi.get.mockResolvedValue(server());
+    const { queryClient } = renderPage();
+    await screen.findByText("survival");
+
+    mockApi.get.mockRejectedValue(new ApiError(500, {}));
+    await act(() => queryClient.invalidateQueries());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // The API comes back: the next refetch replaces the stale data.
+    mockApi.get.mockResolvedValue(server({ name: "renamed" }));
+    await act(() => queryClient.invalidateQueries());
+
+    expect(await screen.findByText("renamed")).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("serverDetail.loadError")),
+    ).not.toBeInTheDocument();
+  });
 });
 
 describe("ServerDetailPage loader-aware content tab (#1320)", () => {
@@ -740,6 +782,61 @@ describe("ServerDetailPage lifecycle controls", () => {
       // After the error, the pill reverts to "Stopped".
       await waitFor(() =>
         expect(statePill()).toBe(t("dashboard.state.stopped")),
+      );
+    });
+
+    it("preserves a WS update that arrived mid-flight on rollback (#1727)", async () => {
+      // The server is stopped. We start it (→ "starting"), but a WS status
+      // frame pushes it to "running" before the POST rejects. The rollback
+      // must not clobber the WS-delivered state.
+      mockApi.get.mockResolvedValue(
+        server({ observed_state: "stopped", desired_state: "stopped" }),
+      );
+      let rejectPost!: (err: unknown) => void;
+      const postPromise = new Promise((_resolve, reject) => {
+        rejectPost = reject;
+      });
+      postPromise.catch(() => {}); // Prevent unhandled-rejection noise in tests.
+      mockApi.post.mockReturnValue(postPromise);
+      renderPage();
+
+      await screen.findByText("survival");
+      fireEvent.click(
+        screen.getByRole("button", { name: t("serverDetail.start") }),
+      );
+
+      // Optimistic update shows "starting".
+      await waitFor(() =>
+        expect(statePill()).toBe(t("dashboard.state.starting")),
+      );
+
+      // WS pushes the server → running while the POST is still in flight.
+      act(() => {
+        MockWebSocket.last().open();
+        MockWebSocket.last().message(
+          JSON.stringify({
+            stream: "status",
+            ts: "t",
+            payload: { state: "running", detail: "" },
+          }),
+        );
+      });
+
+      // Hang the refetch so we observe the rollback result.
+      mockApi.get.mockReturnValue(new Promise(() => {}));
+
+      rejectPost(new ApiError(409, { reason: "port_conflict" }));
+
+      // Wait for the error toast to confirm onError ran.
+      await waitFor(() =>
+        expect(
+          screen.queryByText(t("dashboard.lifecycle.portConflict")),
+        ).toBeInTheDocument(),
+      );
+
+      // The pill should show "running" (from WS), not "stopped" (rolled back).
+      await waitFor(() =>
+        expect(statePill()).toBe(t("dashboard.state.running")),
       );
     });
   });

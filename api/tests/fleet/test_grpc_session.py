@@ -287,6 +287,41 @@ async def test_non_register_first_message_is_rejected(harness: _Harness) -> None
     assert code == grpc.StatusCode.FAILED_PRECONDITION
 
 
+async def test_no_register_within_deadline_is_rejected(
+    harness: _Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A credentialed client that opens the stream and never sends Register must
+    # not hold the RPC forever (issue #1700): the pre-registration wait is
+    # bounded, and expiry aborts the stream with DEADLINE_EXCEEDED before any
+    # registration state exists.
+    import mc_server_dashboard_api.fleet.adapters.grpc_server as grpc_server_module
+
+    monkeypatch.setattr(grpc_server_module, "_REGISTRATION_TIMEOUT_SECONDS", 0.2)
+    stub = await harness.start()
+
+    call = stub.Session(metadata=_auth(_CREDENTIAL))
+    # Write nothing: the server's registration deadline must end the call.
+    code = await asyncio.wait_for(call.code(), timeout=5)
+
+    assert code == grpc.StatusCode.DEADLINE_EXCEEDED
+    assert harness.registry.list_workers() == []
+
+
+async def test_half_close_before_register_is_rejected(harness: _Harness) -> None:
+    # A client that half-closes without ever sending Register is rejected with
+    # FAILED_PRECONDITION ("stream closed before Register"). Pinned alongside
+    # issue #1700: the bounded pre-registration wait wraps the first __anext__
+    # in a task, and StopAsyncIteration must still propagate through it.
+    stub = await harness.start()
+
+    call = stub.Session(metadata=_auth(_CREDENTIAL))
+    await call.done_writing()
+    code = await asyncio.wait_for(call.code(), timeout=5)
+
+    assert code == grpc.StatusCode.FAILED_PRECONDITION
+    assert harness.registry.list_workers() == []
+
+
 async def test_non_uuid_worker_id_is_rejected(harness: _Harness) -> None:
     # assigned_worker_id is a UUID column, so a non-UUID worker id is rejected
     # at registration (issue #99) instead of silently breaking downstream.
@@ -952,6 +987,20 @@ def test_keepalive_options_derive_from_heartbeat_timeout() -> None:
     assert options_dict["grpc.keepalive_time_ms"] == 30_000
     assert options_dict["grpc.keepalive_timeout_ms"] == 20_000
     assert options_dict["grpc.http2.max_pings_without_data"] == 0
+
+
+def test_keepalive_options_permit_worker_client_pings() -> None:
+    """The server must permit the Worker's client-side keepalive cadence.
+
+    The Worker dials with keepalive Time=20s (issue #1709); C-core's default
+    ping-strike enforcement (min interval 5 min, 2 strikes) would answer that
+    cadence with GOAWAY ENHANCE_YOUR_CALM. The permitted floor stays at half
+    the Worker's cadence for timing-skew margin, and pings are permitted
+    without active calls (the Worker probes between Session streams).
+    """
+    options_dict = dict(_keepalive_options(dt.timedelta(seconds=30)))
+    assert options_dict["grpc.http2.min_ping_interval_without_data_ms"] == 10_000
+    assert options_dict["grpc.keepalive_permit_without_calls"] == 1
 
 
 # ---- unknown held server ids (issue #924) --------------------------------

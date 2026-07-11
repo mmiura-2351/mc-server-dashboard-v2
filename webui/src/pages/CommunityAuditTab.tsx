@@ -89,7 +89,8 @@ function Loaded({ communityId }: { communityId: string }) {
 
   const query = useQuery({
     queryKey: auditKey(communityId, filters, offset),
-    queryFn: () => api.get(auditUrl(communityId, filters, offset)),
+    queryFn: ({ signal }) =>
+      api.get(auditUrl(communityId, filters, offset), { signal }),
     placeholderData: keepPreviousData,
   });
 

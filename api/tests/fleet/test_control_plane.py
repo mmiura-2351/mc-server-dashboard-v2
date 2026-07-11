@@ -43,6 +43,7 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     ServerCommandCommand,
     SnapshotCommand,
     StartServerCommand,
+    TunnelDialCommand,
     WorkerNotConnectedError,
 )
 from mc_server_dashboard_api.fleet.domain.late_snapshot_sink import (
@@ -853,6 +854,97 @@ async def test_periodic_snapshot_timeout_does_not_clear_final_snapshot_hold() ->
         await call.done_writing()
     finally:
         await harness.stop()
+
+
+async def test_cancelled_final_snapshot_dispatch_clears_on_late_result() -> None:
+    # The CANCELLATION-held window (issue #901): a client disconnect cancels the
+    # HTTP-request task at the stop flow's final-snapshot await. The lifecycle
+    # holds the assignment exactly like the timeout case, so the cancelled
+    # dispatch must discard its pending future the same way — promoting the
+    # snapshot record — so the worker's late result is recognised as a held
+    # final-snapshot result and clears the assignment immediately, instead of
+    # being dropped on the matched path and waiting out the grace arm.
+    sink = _RecordingLateSnapshotSink()
+    state = ControlPlaneState(late_snapshot_sink=sink)
+    control_plane = GrpcControlPlane(state, timeout_seconds=5.0)
+    worker = WorkerId(_WORKER)
+    queue = state.open_session(worker, 1)
+
+    task = asyncio.create_task(
+        control_plane.dispatch(
+            worker_id=worker,
+            server_id=_SERVER,
+            command=SnapshotCommand(transfer_url="u", transfer_token="t"),
+            snapshot_is_final=True,
+        )
+    )
+    # Once the command is on the outbound queue, dispatch is parked awaiting the
+    # result future (queue.put on the unbounded queue never suspends).
+    command_id = (await queue.get()).api_command.command_id
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # The owning worker's late result clears the held assignment via the sink.
+    await state.resolve(command_id, worker, _failed_transfer_result())
+    assert sink.calls == [(_SERVER, worker.value, False)]
+
+
+async def test_cancelled_periodic_snapshot_dispatch_leaves_no_late_record() -> None:
+    # Round-2 scoping of #898 carried over to the cancellation window: only the
+    # stop-flow FINAL snapshot promotes a record. A cancelled PERIODIC snapshot
+    # dispatch is simply forgotten — its late result clears nothing.
+    sink = _RecordingLateSnapshotSink()
+    state = ControlPlaneState(late_snapshot_sink=sink)
+    control_plane = GrpcControlPlane(state, timeout_seconds=5.0)
+    worker = WorkerId(_WORKER)
+    queue = state.open_session(worker, 1)
+
+    task = asyncio.create_task(
+        control_plane.dispatch(
+            worker_id=worker,
+            server_id=_SERVER,
+            command=SnapshotCommand(transfer_url="u", transfer_token="t"),
+        )
+    )
+    command_id = (await queue.get()).api_command.command_id
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    await state.resolve(command_id, worker, _failed_transfer_result())
+    assert sink.calls == []
+
+
+async def test_cancelled_fire_and_forget_logger_discards_pending_entry() -> None:
+    # The fire-and-forget symmetry of the #901 cancellation arm (issue #1791):
+    # the detached logger task parked on the result future is cancelled (process
+    # shutdown). It must discard its correlation entry on the way out, like
+    # dispatch does, so _pending stays bounded. White-box on _pending /
+    # _background_tasks: a lingering non-snapshot entry has no behavioral
+    # surface — map boundedness IS the observable — and the shutdown scenario
+    # is precisely "the holder of the private task set cancels the task".
+    state = ControlPlaneState()
+    control_plane = GrpcControlPlane(state, timeout_seconds=5.0)
+    worker = WorkerId(_WORKER)
+    queue = state.open_session(worker, 1)
+
+    await control_plane.dispatch_fire_and_forget(
+        worker_id=worker,
+        server_id=_SERVER,
+        command=TunnelDialCommand(endpoint="relay:443", token="t", tls_ca_pem="ca"),
+    )
+    command_id = (await queue.get()).api_command.command_id
+    (task,) = control_plane._background_tasks
+    # queue.put/get on a non-empty unbounded queue never suspend, so the logger
+    # task has not started yet; yield once so it parks on the result future —
+    # cancelling a never-started task would skip its except arm entirely.
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert command_id not in state._pending
 
 
 async def test_reconnect_sweeps_promoted_late_snapshot_from_prior_session() -> None:

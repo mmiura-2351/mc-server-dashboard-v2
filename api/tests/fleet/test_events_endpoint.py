@@ -10,7 +10,9 @@ and that a client disconnect cleans up its subscription (no leak).
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
+import time
 import uuid
 from collections.abc import Iterator
 
@@ -281,6 +283,101 @@ def test_frame_ts_falls_back_to_receive_time_when_unset() -> None:
     assert before <= ts <= after
 
 
+# --- frame encoding: exact wire bytes, shared across subscribers (#1701) ---
+
+
+def test_frame_wire_text_is_the_exact_compact_json() -> None:
+    """Pins the wire bytes: key order, compact separators, unescaped non-ASCII.
+
+    The frame used to be serialized by Starlette's ``send_json``
+    (``json.dumps(..., separators=(",", ":"), ensure_ascii=False)``); encoding
+    once per event must keep the bytes identical for existing clients.
+    """
+
+    bus = InProcessRealTimeEvents()
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(bus=bus)
+    client = next(_client(app))
+    emitted = dt.datetime(2026, 6, 3, 12, 0, 0, tzinfo=dt.timezone.utc)
+    with client.websocket_connect(_url(community, server)) as ws:
+        bus.publish(
+            server_id=str(server),
+            event=RealTimeEvent(
+                stream=EventStream.LOG,
+                payload={"line": "héllo", "stream": "stdout"},
+                emitted_at=emitted,
+            ),
+        )
+        text = ws.receive_text()
+    assert text == (
+        '{"stream":"log","ts":"2026-06-03T12:00:00Z",'
+        '"payload":{"line":"héllo","stream":"stdout"}}'
+    )
+
+
+def test_frame_is_encoded_once_for_many_subscribers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One event fanned out to N subscribers builds its frame once (#1701)."""
+
+    from mc_server_dashboard_api.fleet.api import events as events_module
+
+    calls = 0
+    real_frame = events_module._frame
+
+    def _counting_frame(event: RealTimeEvent) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return real_frame(event)
+
+    monkeypatch.setattr(events_module, "_frame", _counting_frame)
+
+    bus = InProcessRealTimeEvents()
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(bus=bus)
+    client = next(_client(app))
+    with (
+        client.websocket_connect(_url(community, server)) as ws1,
+        client.websocket_connect(_url(community, server)) as ws2,
+        client.websocket_connect(_url(community, server)) as ws3,
+    ):
+        # All three subscriptions must be registered before the publish.
+        for _ in range(100):
+            if bus.subscriber_count(str(server)) == 3:
+                break
+            time.sleep(0.01)
+        assert bus.subscriber_count(str(server)) == 3
+        bus.publish(
+            server_id=str(server),
+            event=RealTimeEvent(
+                stream=EventStream.STATUS, payload={"state": "running"}
+            ),
+        )
+        frames = [ws.receive_json() for ws in (ws1, ws2, ws3)]
+    assert all(frame == frames[0] for frame in frames)
+    assert calls == 1
+
+
+def test_gap_marker_frame_is_never_cached() -> None:
+    """The adapter reuses one GAP instance across subscriptions and time; a
+    cached encoding would freeze its send-time ``ts`` at the first gap forever.
+    """
+
+    from mc_server_dashboard_api.fleet.api import events as events_module
+
+    gap = RealTimeEvent(stream=EventStream.GAP)
+    calls = 0
+
+    def _build(event: RealTimeEvent) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return events_module._frame(event)
+
+    events_module._encoded(gap, events_module._FRAME_SLOT, _build)
+    events_module._encoded(gap, events_module._FRAME_SLOT, _build)
+    assert calls == 2
+
+
 # --- streams parameter: omitted=all, present-but-invalid=rejected ----------
 
 
@@ -391,3 +488,145 @@ def test_disconnect_cleans_up_subscription() -> None:
 
         time.sleep(0.01)
     assert bus.subscriber_count(str(server)) == 0
+
+
+def test_disconnect_on_quiet_topic_releases_subscription() -> None:
+    """A client that vanishes from a topic with NO traffic is still cleaned up.
+
+    The TestClient context exit *cancels* the handler task outright, which would
+    run the cleanup regardless of the bug (#1695). So the disconnect is sent
+    while the session is still alive: exactly as under uvicorn, the handler can
+    only notice it by reading the socket — nothing else ever wakes it on a topic
+    that never publishes.
+    """
+
+    bus = InProcessRealTimeEvents()
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(bus=bus)
+    client = next(_client(app))
+    with client.websocket_connect(_url(community, server)) as ws:
+        assert bus.subscriber_count(str(server)) == 1
+        ws.close(1000)
+        for _ in range(100):
+            if bus.subscriber_count(str(server)) == 0:
+                break
+            time.sleep(0.01)
+        assert bus.subscriber_count(str(server)) == 0
+
+
+def test_no_reauthz_queries_after_disconnect_on_quiet_topic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A disconnected client's handler stops re-running the authz gate (#1695)."""
+
+    from mc_server_dashboard_api.fleet.api import events as events_module
+
+    monkeypatch.setattr(events_module, "_REAUTHZ_INTERVAL_SECONDS", 0.05)
+
+    class _CountingChecker(PermissionChecker):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def can(
+            self, *, user: AuthUser, operation: Permission, resource: ResourceRef
+        ) -> bool:
+            self.calls += 1
+            return True
+
+    bus = InProcessRealTimeEvents()
+    community, server = uuid.uuid4(), uuid.uuid4()
+    checker = _CountingChecker()
+    app = _shared_app
+    app.dependency_overrides.clear()
+    user = make_user()
+    app.dependency_overrides[get_current_user_ws] = lambda: user
+    app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(
+        member=True
+    )
+    app.dependency_overrides[get_permission_checker] = lambda: checker
+    app.dependency_overrides[get_read_server] = lambda: _FakeReadServer(found=True)
+    app.dependency_overrides[get_real_time_events] = lambda: bus
+    client = next(_client(app))
+
+    with client.websocket_connect(_url(community, server)) as ws:
+        ws.close(1000)
+        # Once the subscription is released the handler has exited its loop, so
+        # the call count observed afterwards can only change if a zombie re-authz
+        # survived the disconnect.
+        for _ in range(100):
+            if bus.subscriber_count(str(server)) == 0:
+                break
+            time.sleep(0.01)
+        assert bus.subscriber_count(str(server)) == 0
+        calls_after_release = checker.calls
+        time.sleep(0.2)  # several re-authz intervals
+        assert checker.calls == calls_after_release
+
+
+def test_client_sent_data_is_ignored_and_delivery_continues() -> None:
+    """The socket is send-only: client frames are read and discarded (#1695)."""
+
+    bus = InProcessRealTimeEvents()
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(bus=bus)
+    client = next(_client(app))
+    with client.websocket_connect(_url(community, server)) as ws:
+        ws.send_text("ping")
+        bus.publish(
+            server_id=str(server),
+            event=RealTimeEvent(
+                stream=EventStream.STATUS, payload={"state": "running"}
+            ),
+        )
+        frame = ws.receive_json()
+    assert frame["stream"] == "status"
+
+
+async def test_cancellation_while_parked_leaves_no_orphan_tasks() -> None:
+    """Server shutdown cancels a parked handler; its helper tasks die with it.
+
+    Drives the delivery loop directly: cancelled while idle (no events, client
+    still connected), it must tear down its companion reader and pending-event
+    tasks before the cancellation propagates — an orphaned reader would outlive
+    every connection parked at shutdown.
+    """
+
+    from mc_server_dashboard_api.fleet.api import events as events_module
+
+    class _ParkedSocket:
+        async def receive(self) -> dict[str, object]:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    bus = InProcessRealTimeEvents()
+    subscription = bus.subscribe(server_id="s", streams=frozenset({EventStream.STATUS}))
+
+    async def _reauthorize() -> int | None:
+        return None
+
+    async def _deliver(event: RealTimeEvent) -> None:
+        raise AssertionError("no events are published in this test")
+
+    task = asyncio.create_task(
+        events_module._relay(
+            _ParkedSocket(),  # type: ignore[arg-type]
+            subscription,
+            reauthorize=_reauthorize,
+            deliver=_deliver,
+        )
+    )
+    await asyncio.sleep(0.01)  # let the loop park on its helper tasks
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await subscription.aclose()
+    # The helpers are cancelled without being awaited (the teardown must not
+    # suspend); give the loop a few ticks to collect them, then require that
+    # nothing survived.
+    current = asyncio.current_task()
+    for _ in range(10):
+        leftovers = {t for t in asyncio.all_tasks() if t is not current}
+        if not leftovers:
+            break
+        await asyncio.wait(leftovers, timeout=1)
+    assert {t for t in asyncio.all_tasks() if t is not current} == set()

@@ -2078,6 +2078,114 @@ async def test_stop_final_snapshot_failure_logs_error(
     assert str(server_id) in record.getMessage()
 
 
+# The Worker's working_set_absent refusal message, verbatim (issue #1713,
+# worker/internal/application/instancemanager/instancemanager.go handleSnapshot).
+# The API discriminator matches the "working dir absent" phrase inside it.
+_WORKING_SET_ABSENT_MESSAGE = (
+    "instancemanager: snapshot refused: working dir absent (no working set held "
+    "for this id: scratch already GC'd after a published final snapshot, or "
+    "never hydrated)"
+)
+
+
+class _SnapshotServerNotFound(FakeControlPlane):
+    def __init__(self, message: str) -> None:
+        super().__init__()
+        self._message = message
+
+    async def snapshot(
+        self,
+        *,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+        final: bool = False,
+    ) -> CommandOutcome:
+        self.dispatched.append(("snapshot", worker_id, server_id))
+        return CommandOutcome(
+            status=CommandStatus.SERVER_NOT_FOUND, message=self._message
+        )
+
+
+async def test_stop_final_snapshot_benign_duplicate_refusal_logs_info_not_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Issue #1790: the Worker's working_set_absent refusal (issue #1713) means a
+    # prior final snapshot already published and its scratch was GC'd — a benign
+    # duplicate dispatch, not data loss. Logging the "progression ... is lost"
+    # ERROR for it is a false alarm that trains operators to ignore the line
+    # that matters, so it is downgraded to INFO. The stop still converges: the
+    # assignment is cleared exactly as on a successful snapshot.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    cp = _SnapshotServerNotFound(_WORKING_SET_ABSENT_MESSAGE)
+    use_case = StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+
+    with caplog.at_level(logging.INFO):
+        result = await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert not [
+        r
+        for r in caplog.records
+        if r.levelno == logging.ERROR and "final snapshot" in r.getMessage()
+    ]
+    record = next(
+        r
+        for r in caplog.records
+        if r.levelno == logging.INFO and "final snapshot" in r.getMessage()
+    )
+    assert str(server_id) in record.getMessage()
+    assert "duplicate" in record.getMessage()
+    # The refusal settles the snapshot (nothing is uploading), so the deferred
+    # unassign still runs.
+    assert result.assigned_worker_id is None
+
+
+async def test_stop_final_snapshot_genuine_server_not_found_still_logs_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Guard for issue #1790: ONLY the Worker's working_set_absent refusal is
+    # benign. A SERVER_NOT_FOUND that does not carry that pinned message (e.g. a
+    # future Worker path where the server was genuinely never held) must keep
+    # the loud data-loss ERROR (issue #841).
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    cp = _SnapshotServerNotFound("instancemanager: server unknown to this worker")
+    use_case = StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+
+    with caplog.at_level(logging.INFO):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    record = next(
+        r
+        for r in caplog.records
+        if r.levelno == logging.ERROR and "final snapshot" in r.getMessage()
+    )
+    assert str(server_id) in record.getMessage()
+
+
 async def test_stop_when_already_stopped_is_conflict() -> None:
     community, server_id, _ = _ids()
     uow = FakeUnitOfWork()
@@ -2238,6 +2346,60 @@ async def test_stop_server_not_found_then_start_succeeds() -> None:
 
     assert started.desired_state is DesiredState.RUNNING
     assert started.assigned_worker_id == WorkerId(next_worker)
+
+
+async def test_stop_server_not_found_does_not_unassign_re_placed_server() -> None:
+    # Issue #1779: the SERVER_NOT_FOUND convergence arm writes unassign=True via
+    # record_observed_state, but without an ownership assertion a reconciler
+    # stale-clear + re-placement committing between the stop dispatch and the
+    # convergence write could unassign the just-created new placement. The
+    # expected_worker CAS prevents this: when the server is no longer assigned
+    # to the original worker the convergence write is dropped (applied=False).
+    community, server_id, worker_a = _ids()
+    worker_b = uuid.uuid4()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.CRASHED,
+            worker_id=worker_a,
+        )
+    )
+
+    sid = ServerId(server_id)
+
+    class _ReplacingControlPlane(FakeControlPlane):
+        """Simulate a re-placement racing between stop dispatch and convergence."""
+
+        async def stop(
+            self, *, worker_id: WorkerId, server_id: ServerId, force: bool = False
+        ) -> CommandOutcome:
+            outcome = await super().stop(
+                worker_id=worker_id, server_id=server_id, force=force
+            )
+            # Between the dispatch and the convergence write, a reconciler
+            # clears the stale assignment and a new start re-places to worker B.
+            s = uow.servers.by_id[sid]
+            s.desired_state = DesiredState.RUNNING
+            s.assigned_worker_id = WorkerId(worker_b)
+            return outcome
+
+    cp = _ReplacingControlPlane(
+        outcomes={
+            "stop": CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND),
+        }
+    )
+    await StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))(
+        community_id=CommunityId(community), server_id=sid
+    )
+
+    stored = uow.servers.by_id[sid]
+    # The new placement to worker B must survive in the persisted row:
+    # the convergence write is dropped because expected_worker=worker_a
+    # no longer matches the row's current assignment.
+    assert stored.assigned_worker_id == WorkerId(worker_b)
 
 
 @pytest.mark.parametrize(
@@ -3028,6 +3190,58 @@ async def test_redispatch_stop_server_not_found_unassigns() -> None:
     # No live instance remained, so there is no working set to capture: no snapshot
     # is dispatched on the SERVER_NOT_FOUND path (issue #846).
     assert [k for k, _, _ in cp.dispatched] == ["stop"]
+
+
+async def test_redispatch_stop_snf_does_not_unassign_re_placed() -> None:
+    # Issue #1779: same race as the __call__ test above but on the
+    # redispatch_stop path. A re-placement committing between the stop
+    # dispatch and the convergence write must not be unassigned.
+    community, server_id, worker_a = _ids()
+    worker_b = uuid.uuid4()
+    sid = ServerId(server_id)
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.RUNNING,
+            worker_id=worker_a,
+        )
+    )
+
+    class _ReplacingControlPlane(FakeControlPlane):
+        async def stop(
+            self,
+            *,
+            worker_id: WorkerId,
+            server_id: ServerId,
+            force: bool = False,
+        ) -> CommandOutcome:
+            outcome = await super().stop(
+                worker_id=worker_id,
+                server_id=server_id,
+                force=force,
+            )
+            s = uow.servers.by_id[sid]
+            s.desired_state = DesiredState.RUNNING
+            s.assigned_worker_id = WorkerId(worker_b)
+            return outcome
+
+    cp = _ReplacingControlPlane(
+        outcomes={
+            "stop": CommandOutcome(
+                status=CommandStatus.SERVER_NOT_FOUND,
+            ),
+        }
+    )
+    await StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW)).redispatch_stop(
+        community_id=CommunityId(community), server_id=sid
+    )
+
+    stored = uow.servers.by_id[sid]
+    # The new placement to worker B must survive in the persisted row.
+    assert stored.assigned_worker_id == WorkerId(worker_b)
 
 
 async def test_redispatch_stop_takes_final_snapshot_on_success() -> None:

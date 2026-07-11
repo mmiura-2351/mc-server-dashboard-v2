@@ -17,6 +17,15 @@ function statusFrame(serverId: string, state: string) {
   });
 }
 
+function gapFrame() {
+  return JSON.stringify({
+    stream: "gap",
+    ts: "t",
+    payload: {},
+    server_id: null,
+  });
+}
+
 function serverRow(id: string, observed_state: string) {
   return { id, observed_state };
 }
@@ -42,11 +51,15 @@ function setup(seed: ReturnType<typeof serverRow>[] | undefined) {
       refetchSpy();
     }
   });
+  // Counts resync requests by call. (The cache-event spy undercounts repeats:
+  // with no observer to refetch and clear `isInvalidated`, only the first
+  // invalidation of a query emits an "invalidate" event.)
+  const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
   const wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
   );
   render(<Probe communityId={CID} />, { wrapper });
-  return { queryClient, refetchSpy };
+  return { queryClient, refetchSpy, invalidateSpy };
 }
 
 describe("useCommunityEvents", () => {
@@ -127,5 +140,60 @@ describe("useCommunityEvents", () => {
       vi.advanceTimersByTime(20000);
     });
     expect(refetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("does not refetch on the pristine initial open", () => {
+    const { invalidateSpy } = setup([serverRow("s1", "running")]);
+    act(() => {
+      MockWebSocket.last().open();
+    });
+    expect(invalidateSpy).not.toHaveBeenCalled();
+  });
+
+  it("refetches the list once on WS recovery", () => {
+    const { invalidateSpy } = setup([serverRow("s1", "running")]);
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().fail();
+    });
+    act(() => {
+      vi.advanceTimersByTime(30000); // poll ticks fire; reconnect timer fires
+    });
+    // Transitions between the last poll tick and the reopen would otherwise
+    // be lost for good: the reopen itself must reconcile once.
+    invalidateSpy.mockClear();
+    act(() => {
+      MockWebSocket.last().open();
+    });
+    expect(invalidateSpy).toHaveBeenCalledTimes(1);
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: serversKey(CID) });
+  });
+
+  it("refetches the list once on a rotation reconnect", () => {
+    const { invalidateSpy } = setup([serverRow("s1", "running")]);
+    act(() => {
+      MockWebSocket.last().open();
+    });
+    invalidateSpy.mockClear();
+    act(() => {
+      setAccessToken("tok-2");
+    });
+    act(() => {
+      MockWebSocket.last().open();
+    });
+    expect(invalidateSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("refetches the list on a gap frame (dropped status frames)", () => {
+    const { invalidateSpy } = setup([serverRow("s1", "running")]);
+    act(() => {
+      MockWebSocket.last().open();
+    });
+    invalidateSpy.mockClear();
+    act(() => {
+      MockWebSocket.last().message(gapFrame());
+    });
+    expect(invalidateSpy).toHaveBeenCalledTimes(1);
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: serversKey(CID) });
   });
 });

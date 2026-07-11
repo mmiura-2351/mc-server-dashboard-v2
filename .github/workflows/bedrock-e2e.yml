@@ -62,6 +62,9 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: worker/go.mod
+          cache-dependency-path: |
+            worker/go.sum
+            relay/go.sum
 
       - name: Run the Bedrock relay tunnel E2E suite
         # The GitHub-hosted runner ships a working Docker daemon (no compose

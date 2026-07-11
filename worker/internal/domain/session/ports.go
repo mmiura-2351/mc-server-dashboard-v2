@@ -375,6 +375,17 @@ type StatusResyncer interface {
 	ResyncStatus()
 }
 
+// HeldServerProvider is an optional CommandHandler capability: before each
+// registration the session asks the handler for the current held-server
+// inventory so re-registrations advertise fresh generations instead of the
+// stale boot-time snapshot (issue #1711). A handler that does not implement it
+// keeps the original caps unchanged (the prior behavior).
+type HeldServerProvider interface {
+	// HeldServers returns the working sets this Worker currently holds in its
+	// local scratch, each tagged with its recorded generation.
+	HeldServers() []HeldServer
+}
+
 // Transport is the Port over a single live control-plane stream. One Transport
 // value corresponds to one open Session stream; the run loop discards it on any
 // error and dials a fresh one to reconnect (CONTROL_PLANE.md Section 4.4). The

@@ -134,6 +134,30 @@ _LOG = logging.getLogger(__name__)
 # against this relpath once the working set is hydrated (see __call__).
 _DEFAULT_JAR_RELPATH = "server.jar"
 
+# The phrase identifying the Worker's working_set_absent snapshot refusal (issue
+# #1713) inside its SERVER_NOT_FOUND message. The wire result carries only a code
+# and a human-readable message, and the code alone must not discriminate: a
+# hypothetical OTHER SnapshotTrigger SERVER_NOT_FOUND must keep the data-loss
+# ERROR (issue #1790). The phrase is pinned on the Worker side
+# (worker/internal/application/instancemanager/instancemanager.go,
+# handleSnapshot) with a cross-reference to this constant — reword both together.
+_WORKING_SET_ABSENT_MARKER = "working dir absent"
+
+
+def _is_working_set_absent_refusal(outcome: CommandOutcome) -> bool:
+    """Whether a snapshot outcome is the Worker's benign working_set_absent refusal.
+
+    True exactly for the issue-#1713 refusal: a stopped-id SnapshotTrigger whose
+    scratch the Worker already GC'd after a PUBLISHED final snapshot — i.e. a
+    duplicate dispatch whose original result was lost, not a data-loss event
+    (issue #1790).
+    """
+
+    return (
+        outcome.status is CommandStatus.SERVER_NOT_FOUND
+        and _WORKING_SET_ABSENT_MARKER in outcome.message
+    )
+
 
 @dataclass
 class _Dispatch:
@@ -340,6 +364,7 @@ class StartServer:
                     server_id,
                     observed_state=ObservedState.RUNNING,
                     observed_at=observed_at,
+                    expected_worker=worker_id,
                 )
                 await self.uow.commit()
             # Keep the return honest (issue #292): reflect the observed state on the
@@ -575,6 +600,7 @@ class StartServer:
                     server_id,
                     observed_state=ObservedState.RUNNING,
                     observed_at=observed_at,
+                    expected_worker=worker_id,
                 )
                 await self.uow.commit()
             # Keep the return honest (issue #292): mutate the entity only when the
@@ -914,6 +940,7 @@ class StopServer:
                     observed_state=ObservedState.STOPPED,
                     observed_at=observed_at,
                     unassign=True,
+                    expected_worker=worker_id,
                 )
                 await self.uow.commit()
             # Keep the return honest (issue #292): mutate the entity only when the
@@ -1001,8 +1028,12 @@ class StopServer:
         CORRECT for the same reason as the timeout case. The ``CancelledError``
         propagates past the clear, leaving the row at (stopped, stopped, assigned).
 
-        In both held cases the reconciler's stale-stop arm (``clear_stale_assignment``)
-        recovers the row once the grace window lapses — grace-bounded. (Asymmetric
+        In both held cases the dispatch discarded its pending future, so the
+        worker's late ``CommandResult`` — once the upload settles — releases the
+        hold immediately via the late-snapshot sink (#891/#901); the reconciler's
+        stale-stop arm (``clear_stale_assignment``) is the backstop, recovering the
+        row once the grace window lapses if no late result arrives — grace-bounded.
+        (Asymmetric
         sub-case on disconnect: a worker that has not yet noticed the drop keeps its
         ``serveCtx`` alive and the upload running briefly after the clear; bounded by
         the worker's own stream/heartbeat failure detection — accepted.)
@@ -1015,6 +1046,7 @@ class StopServer:
                 observed_state=ObservedState.STOPPED,
                 observed_at=observed_at,
                 unassign=False,
+                expected_worker=worker_id,
             )
             await self.uow.commit()
         # Keep the return honest (issue #292): mutate the entity only when the write
@@ -1096,9 +1128,12 @@ class StopServer:
         periodic-snapshot or reconciler retry to recover it — a failure here means
         the world progressed since the last periodic snapshot is permanently lost.
         A silent warning is exactly what hid the #841 regression (a worker-side
-        empty_snapshot 400 swallowed here), so it must be loud. (The Worker
-        self-addresses no Storage; the API drives the snapshot because only it knows
-        the (community, server) scope.)
+        empty_snapshot 400 swallowed here), so it must be loud. The ONE exception
+        is the Worker's working_set_absent refusal (issue #1713): the scratch is
+        GC'd only after a final snapshot PUBLISHED, so that refusal means a benign
+        duplicate dispatch, not loss — it logs at INFO instead (issue #1790). (The
+        Worker self-addresses no Storage; the API drives the snapshot because only
+        it knows the (community, server) scope.)
 
         Returns ``upload_may_be_live`` (issue #847): ``True`` only when the snapshot
         dispatch TIMED OUT — the worker session is healthy and the transfer is still
@@ -1115,13 +1150,32 @@ class StopServer:
                 final=True,
             )
             if not snapshot.success:
-                _LOG.error(
-                    "final snapshot on graceful stop FAILED for server %s: %s; "
-                    "the working set was NOT captured and progression since the last "
-                    "periodic snapshot is lost (no retry exists for a stopped server)",
-                    server_id.value,
-                    snapshot.message or snapshot.status.value,
-                )
+                if _is_working_set_absent_refusal(snapshot):
+                    # The Worker's working_set_absent refusal (issue #1713): the
+                    # scratch was already GC'd — which only happens AFTER a final
+                    # snapshot published — so this dispatch is a benign duplicate
+                    # (the earlier result was lost in flight) and the generation is
+                    # already captured. Logging the data-loss ERROR here is a false
+                    # alarm that trains operators to ignore the line that matters
+                    # (issue #1790). Any OTHER failure, including a SERVER_NOT_FOUND
+                    # without the pinned refusal message, still takes the ERROR
+                    # branch below.
+                    _LOG.info(
+                        "final snapshot on graceful stop for server %s was refused "
+                        "by the Worker as a benign duplicate: the working set was "
+                        "already captured by a prior final snapshot and its scratch "
+                        "GC'd — no progression was lost",
+                        server_id.value,
+                    )
+                else:
+                    _LOG.error(
+                        "final snapshot on graceful stop FAILED for server %s: %s; "
+                        "the working set was NOT captured and progression since the "
+                        "last periodic snapshot is lost (no retry exists for a "
+                        "stopped server)",
+                        server_id.value,
+                        snapshot.message or snapshot.status.value,
+                    )
         except WorkerUnavailableError as exc:
             if exc.upload_may_be_live:
                 # TIMEOUT, not disconnect: the worker is still uploading. Do NOT
@@ -1194,6 +1248,7 @@ class StopServer:
                     observed_state=ObservedState.STOPPED,
                     observed_at=observed_at,
                     unassign=True,
+                    expected_worker=worker_id,
                 )
                 await self.uow.commit()
             # Keep the return honest (issue #292): mutate the entity only when the
@@ -1307,8 +1362,9 @@ class StopServer:
     ) -> None:
         """Release a held assignment on a late final-snapshot result (issue #891).
 
-        The held-snapshot timeout path (``_record_stopped_then_final_snapshot``)
-        HOLDS the row at (stopped, stopped, assigned) for the stale-stop arm to
+        The held-snapshot timeout and cancellation paths
+        (``_record_stopped_then_final_snapshot``, #847/#901)
+        HOLD the row at (stopped, stopped, assigned) for the stale-stop arm to
         clear once grace lapses, because the worker may still be uploading. When the
         worker instead reports the snapshot's outcome LATE — a ``TRANSFER_FAILED``
         once its transfer bound aborts the upload (#874/#890), or a SUCCESS whose
@@ -1352,8 +1408,9 @@ class StopServer:
             _LOG.info(
                 "released worker %s for server %s on a LATE successful final "
                 "snapshot: the publish landed but its result arrived after the "
-                "dispatch timed out, so the held assignment is cleared now instead "
-                "of waiting out the stale-stop arm (#891)",
+                "dispatch was abandoned (timed out or cancelled), so the held "
+                "assignment is cleared now instead of waiting out the stale-stop "
+                "arm (#891/#901)",
                 worker_id.value,
                 server_id.value,
             )

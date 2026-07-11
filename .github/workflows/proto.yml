@@ -47,9 +47,10 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: worker/go.mod
+          cache-dependency-path: worker/go.sum
 
       - name: Set up uv (for the pinned Python generators)
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        uses: astral-sh/setup-uv@f98e06938123ccabd21905ea5d0069192241f9f1 # v8.3.1
         with:
           enable-cache: true
           cache-dependency-glob: api/uv.lock

@@ -110,19 +110,24 @@ function Loaded({
   const events = useServerEvents(communityId, serverId);
   const query = useQuery({
     queryKey: serverKey(communityId, serverId),
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api.get(
         apiPath("/api/communities/{community_id}/servers/{server_id}", {
           community_id: communityId,
           server_id: serverId,
         }),
+        { signal },
       ),
   });
 
   if (query.isPending) {
     return <p className="sub">{t("serverDetail.loading")}</p>;
   }
-  if (query.isError || query.data === undefined) {
+  // Full-page error only when there is nothing to show (the initial load
+  // failed). A failed background refetch retains `data`, so the cached page
+  // keeps rendering through transient API blips; the WS-driven degraded pill
+  // already signals that live updates are down (#1724).
+  if (query.data === undefined) {
     return <p className="field-error">{t("serverDetail.loadError")}</p>;
   }
 
@@ -474,19 +479,25 @@ function Controls({
             ? "restarting"
             : "starting";
       const key = serverKey(communityId, server.id);
-      const previous = queryClient.getQueryData<ServerResponse>(key);
+      const previousState =
+        queryClient.getQueryData<ServerResponse>(key)?.observed_state;
       queryClient.setQueryData<ServerResponse>(key, (old) =>
         old ? { ...old, observed_state: transitional } : old,
       );
-      return { previous };
+      return { previousState, transitional };
     },
     onSettled: invalidate,
     onError: (error, _path, context) => {
-      // Rollback the optimistic cache update before showing the error toast.
-      if (context?.previous) {
-        queryClient.setQueryData(
-          serverKey(communityId, server.id),
-          context.previous,
+      // Surgically roll back only observed_state, and only if the cache still
+      // holds the transitional value we wrote. A WS status frame that arrived
+      // mid-flight takes precedence (#1727).
+      if (context?.previousState !== undefined) {
+        const key = serverKey(communityId, server.id);
+        const prev = context.previousState;
+        queryClient.setQueryData<ServerResponse>(key, (old) =>
+          old && old.observed_state === context.transitional
+            ? { ...old, observed_state: prev }
+            : old,
         );
       }
       if (onForbidden(error)) {
@@ -1448,7 +1459,7 @@ function Settings({
   // meta query is shared with the create page via react-query's cache.
   const metaQuery = useQuery({
     queryKey: ["meta"],
-    queryFn: () => api.get("/api/meta"),
+    queryFn: ({ signal }) => api.get("/api/meta", { signal }),
   });
   const maxMemoryLimitMb: number =
     typeof metaQuery.data?.max_memory_limit_mb === "number"

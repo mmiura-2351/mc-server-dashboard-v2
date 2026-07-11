@@ -73,9 +73,10 @@ export function AdminAuditPage() {
   // surface a hint below.
   const communitiesQuery = useQuery({
     queryKey: adminCommunitiesPickerKey(PICKER_PAGE_SIZE),
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api.get(
         `/api/admin/communities?limit=${PICKER_PAGE_SIZE}&offset=0` as "/api/admin/communities",
+        { signal },
       ),
   });
   const communities = communitiesQuery.data?.communities;
@@ -106,7 +107,7 @@ export function AdminAuditPage() {
 
   const query = useQuery({
     queryKey: ["admin", "audit", filters, offset],
-    queryFn: () => api.get(auditUrl(filters, offset)),
+    queryFn: ({ signal }) => api.get(auditUrl(filters, offset), { signal }),
     placeholderData: keepPreviousData,
   });
 

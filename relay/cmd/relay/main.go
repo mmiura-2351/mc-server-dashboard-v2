@@ -20,6 +20,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/adapters/apiclient"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/adapters/config"
@@ -212,6 +213,24 @@ func newLogger(cfg config.LogConfig) *slog.Logger {
 	return slog.New(handler)
 }
 
+// controlPlaneKeepalive is the client-side HTTP/2 keepalive for the control
+// plane connection: without it a silently dead path (NAT/proxy mapping dropped
+// with no FIN/RST — production sits behind cloudflared) blinds the Relay for
+// the kernel TCP retransmission timeout (~15 min on Linux defaults), during
+// which sends buffer "successfully" and no events arrive (issue #1808). A
+// PING fires after Time without inbound frames; no ACK within Timeout closes
+// the transport, which surfaces errors on the Relay's gRPC calls and lets it
+// reconnect. PermitWithoutStream keeps probing even when no RPC is in flight.
+// Contract: the API server permits this cadence (grpc_server.py
+// _keepalive_options sets min_ping_interval_without_data_ms to half of Time
+// and permits pings without calls); a faster cadence than the server's floor
+// is answered with GOAWAY ENHANCE_YOUR_CALM.
+var controlPlaneKeepalive = keepalive.ClientParameters{
+	Time:                20 * time.Second,
+	Timeout:             10 * time.Second,
+	PermitWithoutStream: true,
+}
+
 // dial opens the gRPC client connection to the API. A configured CA file
 // verifies the API's TLS; api.tls.insecure=true selects a plaintext dial for
 // local/dev with a loud warning. Config validation guarantees exactly one is set
@@ -233,7 +252,10 @@ func dial(api config.APIConfig, logger *slog.Logger) (*grpc.ClientConn, error) {
 		creds = credentials.NewTLS(&tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS13})
 	}
 
-	conn, err := grpc.NewClient(api.GRPCEndpoint, grpc.WithTransportCredentials(creds))
+	conn, err := grpc.NewClient(api.GRPCEndpoint,
+		grpc.WithTransportCredentials(creds),
+		grpc.WithKeepaliveParams(controlPlaneKeepalive),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("dial API %q: %w", api.GRPCEndpoint, err)
 	}

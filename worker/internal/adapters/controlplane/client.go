@@ -75,6 +75,15 @@ func (d *Dialer) Dial(ctx context.Context) (session.Transport, error) {
 }
 
 // transport adapts one open Session stream to session.Transport.
+//
+// The per-call ctx on the Send methods is deliberately unused (issue #1709):
+// in gRPC-Go a stream send's blocking is governed by the stream-lifetime
+// context fixed at Dial, not a per-send deadline, and a small send "succeeds"
+// locally once buffered into the HTTP/2 transport regardless of any deadline —
+// so a per-send timeout cannot detect a silently dead path. That is instead
+// the job of client-side keepalive on the underlying connection (cmd/worker
+// dial): it closes the dead transport, which errors the pending and subsequent
+// Send/Recv calls so the run loop tears down the stream and reconnects.
 type transport struct {
 	stream controlplanev1.WorkerService_SessionClient
 	clock  session.Clock
