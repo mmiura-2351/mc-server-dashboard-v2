@@ -227,7 +227,7 @@ async def community_events(
     Worker online/offline/draining transitions are *not* included: worker state
     changes never flow through this relay today (the registry mutates in place and
     publishes nothing), so there is no honest event source to fan out — only
-    server-status fan-out ships here.
+    the per-server STATUS and NOTIFICATION fan-out ships here.
     """
 
     if user is None:
