@@ -220,12 +220,13 @@ type Manager struct {
 	// retry stop would otherwise find no tracked instance and return
 	// SERVER_NOT_FOUND, which the API's stop convergence reads as "no live process"
 	// and unassigns — over a process/container that may still be lingering (issue
-	// #251). Keeping the running Instance here lets a retry re-attempt the driver
-	// Stop against the same handle and report success only on confirmed
-	// termination; until then start/hydrate over the id are rejected as they are
-	// for a running server. The instance's status pump clears the record if the
-	// orphan finally exits on its own.
-	orphans map[string]execution.Instance
+	// #251). Keeping the Instance and its driver name here lets a retry re-attempt
+	// the driver Stop against the same handle and resolve RCON identically (issue
+	// #1712), reporting success only on confirmed termination; until then
+	// start/hydrate over the id are rejected as they are for a running server. The
+	// instance's status pump clears the record if the orphan finally exits on its
+	// own.
+	orphans map[string]orphanEntry
 	// reserved marks a server id as having a mutating lifecycle command in flight so
 	// a duplicate re-issued after a stream reconnect cannot overlap the original
 	// (issue #780). It is claimed under mu and held across the long operation, then
@@ -294,7 +295,7 @@ func New(drivers map[string]execution.ExecutionDriver, scratchDir string, openCo
 		scanRegion:         scanRegionState,
 		instances:          map[string]execution.Instance{},
 		startCmds:          map[string]session.Command{},
-		orphans:            map[string]execution.Instance{},
+		orphans:            map[string]orphanEntry{},
 		reserved:           map[string]bool{},
 		events:             make(chan session.StatusEvent, 32),
 		logs:               make(chan session.LogEvent, 256),
@@ -1130,10 +1131,7 @@ func (m *Manager) startPumps(serverID string, inst execution.Instance) {
 }
 
 func (m *Manager) handleStop(ctx context.Context, cmd session.Command, graceful bool) session.CommandResult {
-	// Capture the driver name BEFORE takeStoppableReserve evicts the instance and
-	// deletes startCmds, so the pre-stop flush closure can open RCON using it.
-	driver := m.driverFor(cmd.ServerID)
-	inst, outcome := m.takeStoppableReserve(cmd.ServerID)
+	inst, driver, outcome := m.takeStoppableReserve(cmd.ServerID)
 	switch outcome {
 	case takeNotFound:
 		return fail(cmd.CommandID, session.CommandErrorServerNotFound,
@@ -1288,6 +1286,14 @@ func (m *Manager) ReclaimDeletedScratches(serverIDs []string) {
 	}()
 }
 
+// orphanEntry pairs a failed-stop orphan instance with the execution driver name
+// it was started under, so the retry stop can resolve the RCON dial host exactly
+// as stop #1 did (issue #1712).
+type orphanEntry struct {
+	inst   execution.Instance
+	driver string
+}
+
 // takeOutcome is the result of takeStoppableReserve: an instance to stop was
 // taken and reserved, no live instance exists (genuinely unknown -> SERVER_NOT_FOUND),
 // or a lifecycle command is already reserved in flight for the id (a detached stop
@@ -1312,14 +1318,21 @@ const (
 // lifecycle command — typically the original detached stop — is in flight) and
 // takeNotFound only for genuinely unknown ids. The caller must release on every
 // return path.
-func (m *Manager) takeStoppableReserve(serverID string) (execution.Instance, takeOutcome) {
+//
+// The returned driver is the execution driver name for the instance: read from
+// startCmds for a running instance (before deletion), or from the orphan entry
+// for a failed-stop orphan (issue #1712). This makes the driver capture atomic
+// with the take, eliminating the TOCTOU between a separate driverFor call and
+// the eviction.
+func (m *Manager) takeStoppableReserve(serverID string) (execution.Instance, string, takeOutcome) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if inst, ok := m.instances[serverID]; ok {
+		driver := m.startCmds[serverID].Driver
 		delete(m.instances, serverID)
 		delete(m.startCmds, serverID)
 		m.reserved[serverID] = true
-		return inst, takeFound
+		return inst, driver, takeFound
 	}
 	// Check the reservation BEFORE the orphan branch. A failed-stop orphan retains
 	// its instance record while a stop for the id is in flight (attemptStop deletes
@@ -1332,13 +1345,13 @@ func (m *Manager) takeStoppableReserve(serverID string) (execution.Instance, tak
 	// first rejects stop2 with takeInFlight (-> BUSY) instead, exactly as it
 	// already does for a detached running-instance stop (issue #780).
 	if m.reserved[serverID] {
-		return nil, takeInFlight
+		return nil, "", takeInFlight
 	}
-	if inst, ok := m.orphans[serverID]; ok {
+	if entry, ok := m.orphans[serverID]; ok {
 		m.reserved[serverID] = true
-		return inst, takeFound
+		return entry.inst, entry.driver, takeFound
 	}
-	return nil, takeNotFound
+	return nil, "", takeNotFound
 }
 
 // attemptStop runs the driver Stop for serverID's instance. On failure it
@@ -1354,12 +1367,13 @@ func (m *Manager) takeStoppableReserve(serverID string) (execution.Instance, tak
 // the tunnel — matching the API's own "any transition away from running closes
 // it" semantics (PR #1558).
 //
-// driverName is the driver that runs this server (captured BEFORE
-// takeStoppableReserve / takeRunningReserve evicts the instance and deletes
-// startCmds, so driverFor would return empty after eviction). On a graceful
-// stop, attemptStop passes a pre-fallback flush closure so the driver can flush
-// the live world (save-all + settle) before stop — the driver calls it always
-// before tryRCONStop on the graceful path (#1007).
+// driverName is the driver that runs this server (returned atomically by
+// takeStoppableReserve / takeRunningReserve alongside the instance). On a
+// graceful stop, attemptStop passes a pre-fallback flush closure so the driver
+// can flush the live world (save-all + settle) before stop — the driver calls it
+// always before tryRCONStop on the graceful path (#1007). On failure the driver
+// name is preserved on the orphan entry so a retry resolves RCON identically
+// (issue #1712).
 func (m *Manager) attemptStop(ctx context.Context, serverID string, inst execution.Instance, graceful bool, driverName string) error {
 	var preFallback func(context.Context) bool
 	if graceful {
@@ -1369,7 +1383,7 @@ func (m *Manager) attemptStop(ctx context.Context, serverID string, inst executi
 	}
 	if err := inst.Stop(ctx, graceful, preFallback); err != nil {
 		m.mu.Lock()
-		m.orphans[serverID] = inst
+		m.orphans[serverID] = orphanEntry{inst: inst, driver: driverName}
 		m.mu.Unlock()
 		return err
 	}
@@ -2069,7 +2083,7 @@ func (m *Manager) pump(serverID string, inst execution.Instance, done chan struc
 func (m *Manager) forgetOrphanIf(serverID string, inst execution.Instance) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.orphans[serverID] == inst {
+	if e, ok := m.orphans[serverID]; ok && e.inst == inst {
 		delete(m.orphans, serverID)
 	}
 }
