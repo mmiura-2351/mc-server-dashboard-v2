@@ -12,6 +12,8 @@ import inspect
 
 from fastapi import FastAPI
 
+from mc_server_dashboard_api.dependencies import get_audit_recorder
+
 
 def _marker() -> None:  # a stand-in dependency key to register as an override
     ...
@@ -43,8 +45,26 @@ def test_shared_app_clears_overrides_on_entry_and_exit() -> None:
     lifecycle = inspect.unwrap(shared_app)(app)
     entered = next(lifecycle)
     assert entered is app
-    assert entered.dependency_overrides == {}  # entry cleared the leftover
+    # Entry replaces the override dict with a _BaselineOverrides containing only
+    # the no-op audit recorder (issue #1758); the prior test's leftover is gone.
+    assert _marker not in entered.dependency_overrides
+    assert get_audit_recorder in entered.dependency_overrides
 
     entered.dependency_overrides[_marker] = _marker
     next(lifecycle, None)  # run past the yield to finalize the fixture
     assert app.dependency_overrides == {}  # exit cleared this test's addition
+
+
+def test_shared_app_baseline_survives_clear() -> None:
+    """The no-op audit recorder baseline re-applies after .clear() (#1758)."""
+    from tests.conftest import shared_app
+
+    app = FastAPI()
+    lifecycle = inspect.unwrap(shared_app)(app)
+    entered = next(lifecycle)
+
+    # Simulate what an endpoint test's _app() helper does.
+    entered.dependency_overrides.clear()
+    assert get_audit_recorder in entered.dependency_overrides
+
+    next(lifecycle, None)

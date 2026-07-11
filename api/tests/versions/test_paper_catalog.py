@@ -95,6 +95,58 @@ async def test_resolve_raises_when_no_server_default_download() -> None:
 
 
 @pytest.mark.asyncio
+async def test_resolve_raises_when_server_default_missing_url() -> None:
+    """Guard: server:default present but without a 'url' key."""
+    build = {
+        "downloads": {
+            "server:default": {
+                "name": "paper.jar",
+                "checksums": {"sha256": "a" * 64},
+            }
+        }
+    }
+    fetcher = FakeJsonFetcher({f"{_BASE}/versions/1.21.4/builds/latest": build})
+    catalog = PaperCatalog(fetcher=fetcher)
+    with pytest.raises(UnknownVersionError):
+        await catalog.resolve(ServerType.PAPER, "1.21.4")
+
+
+@pytest.mark.asyncio
+async def test_resolve_raises_when_checksums_missing() -> None:
+    """Guard: server:default has url but no 'checksums' key."""
+    build = {
+        "downloads": {
+            "server:default": {
+                "name": "paper.jar",
+                "url": "https://fill-data.papermc.io/v1/objects/a/paper.jar",
+            }
+        }
+    }
+    fetcher = FakeJsonFetcher({f"{_BASE}/versions/1.21.4/builds/latest": build})
+    catalog = PaperCatalog(fetcher=fetcher)
+    with pytest.raises(UnknownVersionError):
+        await catalog.resolve(ServerType.PAPER, "1.21.4")
+
+
+@pytest.mark.asyncio
+async def test_resolve_raises_when_checksums_missing_sha256() -> None:
+    """Guard: checksums is a dict but lacks 'sha256'."""
+    build = {
+        "downloads": {
+            "server:default": {
+                "name": "paper.jar",
+                "checksums": {"md5": "d" * 32},
+                "url": "https://fill-data.papermc.io/v1/objects/a/paper.jar",
+            }
+        }
+    }
+    fetcher = FakeJsonFetcher({f"{_BASE}/versions/1.21.4/builds/latest": build})
+    catalog = PaperCatalog(fetcher=fetcher)
+    with pytest.raises(UnknownVersionError):
+        await catalog.resolve(ServerType.PAPER, "1.21.4")
+
+
+@pytest.mark.asyncio
 async def test_resolve_unknown_version_raises_on_upstream_404() -> None:
     """An upstream 404 for a nonexistent version is UnknownVersionError, not
     CatalogUnavailableError (#1539)."""
