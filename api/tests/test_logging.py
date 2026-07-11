@@ -212,3 +212,47 @@ def test_exc_info_shapes_produce_valid_json(
     if ei is exc_with_tb:
         assert "instance-exc" in parsed["exception"]
         assert "Traceback" in parsed["exception"]
+
+
+# ---------------------------------------------------------------------------
+# Regression: configure_logging must not detach foreign handlers (#1759)
+# ---------------------------------------------------------------------------
+
+
+def test_configure_logging_preserves_foreign_handlers() -> None:
+    """Foreign handlers (e.g. pytest caplog) must survive configure_logging."""
+    root = logging.getLogger()
+    foreign = logging.StreamHandler()
+    root.addHandler(foreign)
+    try:
+        configure_logging("info", "json")
+        assert foreign in root.handlers, "foreign handler removed by configure_logging"
+    finally:
+        root.removeHandler(foreign)
+
+
+def test_configure_logging_is_idempotent() -> None:
+    """Repeated calls must not duplicate the application handler."""
+    root = logging.getLogger()
+    configure_logging("info", "json")
+    after_first = len(root.handlers)
+    configure_logging("debug", "text")
+    after_second = len(root.handlers)
+    # The second call replaces the handler, not adds a second one.
+    assert after_second == after_first
+
+
+def test_caplog_survives_multiple_create_app(caplog: pytest.LogCaptureFixture) -> None:
+    """caplog must still capture app logs after multiple create_app() builds."""
+    settings = Settings(
+        database=DatabaseSettings(url="postgresql+asyncpg://u:s@db/app")
+    )
+    # Build the app twice — the second build previously detached caplog.
+    create_app(settings)
+    create_app(settings)
+
+    logger = logging.getLogger("test.caplog.survival")
+    with caplog.at_level(logging.INFO, logger="test.caplog.survival"):
+        logger.info("visible-after-rebuild")
+
+    assert "visible-after-rebuild" in caplog.text
