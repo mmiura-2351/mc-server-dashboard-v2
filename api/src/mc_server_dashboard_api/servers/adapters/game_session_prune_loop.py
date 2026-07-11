@@ -26,10 +26,13 @@ async def run_game_session_prune_loop(
     """Run ``pruner.tick()`` every ``tick_seconds`` until cancelled."""
 
     while True:
+        # Sleep first so the initial tick is deferred by one full cadence.
+        # A transient DB/worker outage at boot no longer causes a ~90-line
+        # ERROR traceback on the very first tick (issue #1760).
+        await asyncio.sleep(tick_seconds)
         try:
             await pruner.tick()
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - one bad tick must not kill the loop
             _LOG.exception("game_session prune tick failed; continuing")
-        await asyncio.sleep(tick_seconds)
