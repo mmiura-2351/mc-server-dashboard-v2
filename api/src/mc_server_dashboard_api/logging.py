@@ -61,15 +61,24 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload)
 
 
+_TAG = "_mcsd_app_handler"
+
+
 def configure_logging(level: str, log_format: str) -> None:
-    """Install the root log handler for the configured level and format."""
+    """Install the root log handler for the configured level and format.
+
+    Idempotent: only manages its own tagged handler.  Foreign handlers (e.g.
+    pytest *caplog* / *log_cli*) are never removed.
+    """
 
     handler = logging.StreamHandler()
     if log_format == "json":
         handler.setFormatter(JsonFormatter())
     else:
         handler.setFormatter(logging.Formatter("%(levelname)s %(name)s %(message)s"))
+    setattr(handler, _TAG, True)
+
     root = logging.getLogger()
-    root.handlers.clear()
+    root.handlers[:] = [h for h in root.handlers if not getattr(h, _TAG, False)]
     root.addHandler(handler)
     root.setLevel(level.upper())
