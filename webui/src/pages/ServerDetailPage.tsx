@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type KeyboardEvent,
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -42,6 +43,7 @@ import {
   type MetricsSample,
   type ServerEventsState,
   TAIL_LINES,
+  useLogs,
   useServerEvents,
 } from "./useServerEvents.ts";
 
@@ -849,7 +851,8 @@ function Overview({
 }) {
   // Last ~200 lines of the live stream; local RCON echoes are console-only, so
   // the tail shows only real server output / gap markers (WEBUI_SPEC.md 6.4).
-  const tail = events.logs
+  const logs = useLogs(events.logStore);
+  const tail = logs
     .filter((e) => e.kind === "line" || e.kind === "gap")
     .slice(-TAIL_LINES);
   return (
@@ -1002,6 +1005,21 @@ export function sparklinePoints(
 
 // ── Shared log view + Console tab (WEBUI_SPEC.md 6.5) ────────────────────────
 
+// A single log row, memoized so that when a new entry is appended only the new
+// row renders — existing rows keep their referentially-stable entry objects and
+// skip reconciliation entirely (#1725).
+const LogRow = memo(function LogRow({ entry }: { entry: LogEntry }) {
+  if (entry.kind === "gap") {
+    return <div className="log-gap">{t("serverDetail.missedEvents")}</div>;
+  }
+  return (
+    <div className={`log-line ${entry.kind}`}>
+      {entry.kind === "command" ? "> " : ""}
+      {entry.stripped}
+    </div>
+  );
+});
+
 // The log stream renderer shared by the Overview tail and the Console. Each
 // entry is color-keyed by source (stdout/stderr) or echo kind (command/output);
 // a gap entry renders the inline "missed events" divider (WEBUI_SPEC.md 7.2).
@@ -1023,18 +1041,9 @@ function LogView({
   }, [follow, entries]);
   return (
     <div className="log-view" ref={ref}>
-      {entries.map((entry) =>
-        entry.kind === "gap" ? (
-          <div key={entry.id} className="log-gap">
-            {t("serverDetail.missedEvents")}
-          </div>
-        ) : (
-          <div key={entry.id} className={`log-line ${entry.kind}`}>
-            {entry.kind === "command" ? "> " : ""}
-            {stripMinecraftCodes(entry.line)}
-          </div>
-        ),
-      )}
+      {entries.map((entry) => (
+        <LogRow key={entry.id} entry={entry} />
+      ))}
     </div>
   );
 }
@@ -1129,15 +1138,16 @@ function Console({
     }
   };
 
+  const logs = useLogs(events.logStore);
   const needle = filter.trim().toLowerCase();
-  const visible = events.logs.filter((entry) => {
+  const visible = logs.filter((entry) => {
     if (entry.id <= clearedThrough) {
       return false;
     }
     if (needle.length === 0 || entry.kind === "gap") {
       return true;
     }
-    return stripMinecraftCodes(entry.line).toLowerCase().includes(needle);
+    return entry.stripped.toLowerCase().includes(needle);
   });
 
   return (
@@ -1161,9 +1171,7 @@ function Console({
         <button
           type="button"
           className="btn sm"
-          onClick={() =>
-            setClearedThrough(events.logs.at(-1)?.id ?? clearedThrough)
-          }
+          onClick={() => setClearedThrough(logs.at(-1)?.id ?? clearedThrough)}
         >
           {t("serverDetail.console.clear")}
         </button>

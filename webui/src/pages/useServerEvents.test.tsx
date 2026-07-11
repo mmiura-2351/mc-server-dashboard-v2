@@ -5,9 +5,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAccessToken, setAccessToken } from "../auth/tokenStore.ts";
 import { installMockWebSocket, MockWebSocket } from "../test/mockWebSocket.ts";
 import { serverKey } from "./serverKey.ts";
+import type { LogEntry } from "./useServerEvents.ts";
 import {
   METRICS_WINDOW,
   type ServerEventsState,
+  useLogs,
   useServerEvents,
 } from "./useServerEvents.ts";
 
@@ -19,9 +21,11 @@ function frame(stream: string, payload: unknown) {
 }
 
 let state: ServerEventsState;
+let logs: LogEntry[];
 
 function Probe() {
   state = useServerEvents(CID, SID);
+  logs = useLogs(state.logStore);
   return null;
 }
 
@@ -66,9 +70,40 @@ describe("useServerEvents", () => {
         frame("log", { line: "b", stream: "stderr" }),
       );
     });
-    expect(state.logs).toEqual([
-      { id: expect.any(Number), kind: "line", line: "a", stream: "stdout" },
-      { id: expect.any(Number), kind: "line", line: "b", stream: "stderr" },
+    expect(logs).toEqual([
+      {
+        id: expect.any(Number),
+        kind: "line",
+        line: "a",
+        stripped: "a",
+        stream: "stdout",
+      },
+      {
+        id: expect.any(Number),
+        kind: "line",
+        line: "b",
+        stripped: "b",
+        stream: "stderr",
+      },
+    ]);
+  });
+
+  it("strips Minecraft formatting codes once at append time", () => {
+    setup();
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        frame("log", { line: "§aGreen §cRed", stream: "stdout" }),
+      );
+    });
+    expect(logs).toEqual([
+      {
+        id: expect.any(Number),
+        kind: "line",
+        line: "§aGreen §cRed",
+        stripped: "Green Red",
+        stream: "stdout",
+      },
     ]);
   });
 
@@ -77,7 +112,7 @@ describe("useServerEvents", () => {
     act(() => {
       MockWebSocket.last().message(frame("gap", {}));
     });
-    expect(state.logs).toEqual([{ id: expect.any(Number), kind: "gap" }]);
+    expect(logs).toEqual([{ id: expect.any(Number), kind: "gap" }]);
   });
 
   it("does not append a gap marker on the initial open", () => {
@@ -85,7 +120,7 @@ describe("useServerEvents", () => {
     act(() => {
       MockWebSocket.last().open();
     });
-    expect(state.logs).toEqual([]);
+    expect(logs).toEqual([]);
   });
 
   it("does not append a gap marker when connects fail before any open", () => {
@@ -101,7 +136,7 @@ describe("useServerEvents", () => {
       vi.advanceTimersByTime(30000);
       MockWebSocket.last().open();
     });
-    expect(state.logs).toEqual([]);
+    expect(logs).toEqual([]);
   });
 
   it("marks a drop with one gap so lines lost while down are labeled", () => {
@@ -122,15 +157,22 @@ describe("useServerEvents", () => {
         frame("log", { line: "after", stream: "stdout" }),
       );
     });
-    expect(state.logs).toEqual([
+    expect(logs).toEqual([
       {
         id: expect.any(Number),
         kind: "line",
         line: "before",
+        stripped: "before",
         stream: "stdout",
       },
       { id: expect.any(Number), kind: "gap" },
-      { id: expect.any(Number), kind: "line", line: "after", stream: "stdout" },
+      {
+        id: expect.any(Number),
+        kind: "line",
+        line: "after",
+        stripped: "after",
+        stream: "stdout",
+      },
     ]);
   });
 
@@ -152,7 +194,7 @@ describe("useServerEvents", () => {
       vi.advanceTimersByTime(30000);
       MockWebSocket.last().open();
     });
-    expect(state.logs).toEqual([{ id: expect.any(Number), kind: "gap" }]);
+    expect(logs).toEqual([{ id: expect.any(Number), kind: "gap" }]);
   });
 
   it("does not append a gap marker on a rotation reconnect", () => {
@@ -166,7 +208,7 @@ describe("useServerEvents", () => {
     act(() => {
       MockWebSocket.last().open();
     });
-    expect(state.logs).toEqual([]);
+    expect(logs).toEqual([]);
   });
 
   it("windows metrics samples to the last N", () => {
@@ -384,9 +426,19 @@ describe("useServerEvents", () => {
         { kind: "output", line: "done" },
       ]);
     });
-    expect(state.logs).toEqual([
-      { id: expect.any(Number), kind: "command", line: "say hi" },
-      { id: expect.any(Number), kind: "output", line: "done" },
+    expect(logs).toEqual([
+      {
+        id: expect.any(Number),
+        kind: "command",
+        line: "say hi",
+        stripped: "say hi",
+      },
+      {
+        id: expect.any(Number),
+        kind: "output",
+        line: "done",
+        stripped: "done",
+      },
     ]);
   });
 
