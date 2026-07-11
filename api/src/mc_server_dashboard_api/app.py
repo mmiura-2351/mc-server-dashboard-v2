@@ -146,6 +146,9 @@ from mc_server_dashboard_api.servers.application.backup_scheduler import (
     RunBackupScheduleTick,
 )
 from mc_server_dashboard_api.servers.application.backups import CreateBackup
+from mc_server_dashboard_api.servers.application.bedrock_sweep import (
+    SweepBedrockPorts,
+)
 from mc_server_dashboard_api.servers.application.game_sessions import PruneGameSessions
 from mc_server_dashboard_api.servers.application.lifecycle import (
     StartServer,
@@ -165,6 +168,7 @@ from mc_server_dashboard_api.servers.application.startup_reset import (
 from mc_server_dashboard_api.servers.application.warn_missing_ports import (
     WarnLegacyMissingPorts,
 )
+from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from mc_server_dashboard_api.storage.adapters.object_client import (
     make_s3_client_factory,
@@ -614,6 +618,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await storage.sweep()
         else:
             await asyncio.to_thread(storage.sweep)
+        # Bedrock gate-flip sweep (issue #1588): when the Bedrock deployment
+        # gate is on, allocate bedrock_port for every server that already has
+        # an installed, enabled Geyser but no port (installed while the gate
+        # was off). Idempotent and runs once at startup; a no-op when every
+        # Geyser server already carries a port.
+        if settings.relay.enabled and settings.relay.bedrock_enabled:
+            bedrock_range = PortRange(
+                start=settings.ports.bedrock_range_start,
+                end=settings.ports.bedrock_range_end,
+                reserved=frozenset({settings.relay.bedrock_tunnel_port}),
+            )
+            await SweepBedrockPorts(
+                uow=ServersUnitOfWork(create_session_factory(engine)),
+                port_range=bedrock_range,
+                clock=ServersSystemClock(),
+            )()
         registry = InMemoryWorkerRegistry(
             clock=FleetSystemClock(), heartbeat_timeout=heartbeat_timeout
         )
