@@ -6,14 +6,18 @@ exercise the DB seam override the :class:`DatabasePing` Port with a fake, so the
 dummy URL is never dialed (NFR-TEST-1).
 """
 
+from __future__ import annotations
+
 import os
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
 
 from mc_server_dashboard_api.app import create_app
+from mc_server_dashboard_api.dependencies import get_audit_recorder
 
 _SCRATCH_DB_URL: str | None = None
 """The per-run scratch database created for this session, if any (issue #379)."""
@@ -141,6 +145,39 @@ def _session_app() -> FastAPI:
         return create_app()
 
 
+class _NoOpAuditRecorder:
+    """Silently discards audit events (issue #1758).
+
+    Injected as the default :class:`AuditRecorder` in endpoint tests so the
+    real :class:`LoggingAuditRecorder` never dials the dummy test DB.  Tests
+    that assert on audit events override this with
+    :class:`~tests.audit.fakes.RecordingAuditRecorder` themselves.
+    """
+
+    async def record(self, event: object) -> None:  # noqa: ARG002
+        pass
+
+
+class _BaselineOverrides(dict[Any, Any]):
+    """A dict that re-applies baseline entries after ``.clear()`` (#1758).
+
+    Endpoint-test ``_app()`` helpers call ``dependency_overrides.clear()`` to
+    prevent override leakage between tests.  The no-op audit recorder must
+    survive those clears so the real recorder never dials the dummy test DB.
+    """
+
+    def __init__(self, baseline: Mapping[Any, Any]) -> None:
+        super().__init__(baseline)
+        self._baseline = dict(baseline)
+
+    def clear(self) -> None:
+        super().clear()
+        self.update(self._baseline)
+
+
+_noop_audit_recorder = _NoOpAuditRecorder()
+
+
 @pytest.fixture
 def shared_app(_session_app: FastAPI) -> Iterator[FastAPI]:
     """The per-worker session app with ``dependency_overrides`` cleared each test.
@@ -149,7 +186,13 @@ def shared_app(_session_app: FastAPI) -> Iterator[FastAPI]:
     on entry and again on exit, so one test's fakes can never leak into another.
     Endpoint-test modules bind this (typically via a module-level ``autouse``
     fixture) and register their fakes on the yielded app.
+
+    The baseline includes a no-op :class:`AuditRecorder` so the real recorder
+    never dials the dummy test DB (issue #1758).  Tests that need to inspect
+    audit events override ``get_audit_recorder`` explicitly.
     """
-    _session_app.dependency_overrides.clear()
+    _session_app.dependency_overrides = _BaselineOverrides(
+        {get_audit_recorder: lambda: _noop_audit_recorder}
+    )
     yield _session_app
-    _session_app.dependency_overrides.clear()
+    _session_app.dependency_overrides = {}
