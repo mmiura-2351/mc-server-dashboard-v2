@@ -149,7 +149,7 @@ async def login(
         await recorder.record(
             AuditEvent(operation=ops.AUTH_LOGIN, outcome=Outcome.DENIED)
         )
-        raise _unauthorized() from exc
+        raise _unauthorized(retry_after=exc.retry_after) from exc
     await recorder.record(
         AuditEvent(
             operation=ops.AUTH_LOGIN,
@@ -285,9 +285,12 @@ async def logout(
     return response
 
 
-def _unauthorized() -> ProblemException:
+def _unauthorized(*, retry_after: int | None = None) -> ProblemException:
+    headers: dict[str, str] = {"WWW-Authenticate": "Bearer"}
+    if retry_after is not None:
+        headers["Retry-After"] = str(retry_after)
     return problem(
         status.HTTP_401_UNAUTHORIZED,
         "invalid_credentials",
-        headers={"WWW-Authenticate": "Bearer"},
+        headers=headers,
     )

@@ -352,3 +352,88 @@ async def test_unknown_user_and_wrong_password_both_verify() -> None:
 
     assert wrong_hasher.verify_calls == 1
     assert unknown_hasher.verify_calls == 1
+
+
+async def test_locked_account_raises_with_retry_after_seconds() -> None:
+    # A locked account should carry ``retry_after`` on the exception so the
+    # HTTP layer can emit a Retry-After header (RFC 6585, issue #637).
+    uow = FakeUnitOfWork()
+    uow.users.seed(make_user(password=_PASSWORD))
+    attempts = FakeLoginAttemptStore()
+    # Lock the account for 10 minutes from now.
+    await attempts.lock(
+        "alice", locked_until=_NOW + dt.timedelta(minutes=10), lockout_count=1
+    )
+
+    with pytest.raises(InvalidCredentialsError) as exc_info:
+        await _login(uow, RecordingFailureDelay(), attempts)(
+            username="alice", password=_PASSWORD, ip="198.51.100.1"
+        )
+
+    assert exc_info.value.retry_after == 600  # 10 minutes in seconds
+
+
+async def test_ip_throttled_raises_with_retry_after_window() -> None:
+    # When blocked by the IP threshold, ``retry_after`` is the IP window
+    # duration (the safe upper bound for when failures age out, issue #637).
+    uow = FakeUnitOfWork()
+    uow.users.seed(make_user(password=_PASSWORD))
+    attempts = FakeLoginAttemptStore()
+    for i in range(20):
+        await attempts.record_attempt(
+            username=f"victim{i}",
+            ip="198.51.100.9",
+            success=False,
+            failure_reason="wrong_password",
+            at=_NOW,
+        )
+
+    with pytest.raises(InvalidCredentialsError) as exc_info:
+        await _login(uow, RecordingFailureDelay(), attempts)(
+            username="alice", password=_PASSWORD, ip="198.51.100.9"
+        )
+
+    # Default IP window is 5 minutes = 300 seconds.
+    assert exc_info.value.retry_after == 300
+
+
+async def test_wrong_password_raises_without_retry_after() -> None:
+    # A plain wrong-password failure (not locked, not IP-throttled) carries no
+    # retry_after — there is no throttle in effect to report.
+    uow = FakeUnitOfWork()
+    uow.users.seed(make_user(password=_PASSWORD))
+
+    with pytest.raises(InvalidCredentialsError) as exc_info:
+        await _login(uow, RecordingFailureDelay())(username="alice", password="wrong")
+
+    assert exc_info.value.retry_after is None
+
+
+async def test_ip_throttle_checked_before_username_lockout() -> None:
+    # When both an IP throttle and a username lockout are active, the IP
+    # throttle takes precedence (IP-first ordering, issue #637). Verified by
+    # the retry_after value matching the IP window, not the lockout duration.
+    uow = FakeUnitOfWork()
+    uow.users.seed(make_user(password=_PASSWORD))
+    attempts = FakeLoginAttemptStore()
+    # Lock the account for 10 minutes.
+    await attempts.lock(
+        "alice", locked_until=_NOW + dt.timedelta(minutes=10), lockout_count=1
+    )
+    # Also push the IP over its threshold.
+    for i in range(20):
+        await attempts.record_attempt(
+            username=f"victim{i}",
+            ip="198.51.100.9",
+            success=False,
+            failure_reason="wrong_password",
+            at=_NOW,
+        )
+
+    with pytest.raises(InvalidCredentialsError) as exc_info:
+        await _login(uow, RecordingFailureDelay(), attempts)(
+            username="alice", password=_PASSWORD, ip="198.51.100.9"
+        )
+
+    # IP window (300s) wins over lockout duration (600s) — IP checked first.
+    assert exc_info.value.retry_after == 300

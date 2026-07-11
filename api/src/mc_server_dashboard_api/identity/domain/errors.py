@@ -63,7 +63,17 @@ class InvalidCredentialsError(IdentityError):
     Deliberately one error for both cases so the edge returns a uniform 401 and
     cannot be used to tell "no such user" from "wrong password" (SECURITY.md
     Section 2; username-enumeration defence).
+
+    ``retry_after`` optionally carries how many seconds until the client should
+    retry (RFC 6585 ``Retry-After``); set when the rejection is due to a lockout
+    or IP throttle, ``None`` for a plain wrong-password or unknown-user failure
+    (issue #637). The value never leaks the *reason* for the rejection — only the
+    timing hint.
     """
+
+    def __init__(self, retry_after: int | None = None) -> None:
+        super().__init__()
+        self.retry_after = retry_after
 
 
 class UserNotFoundError(IdentityError):

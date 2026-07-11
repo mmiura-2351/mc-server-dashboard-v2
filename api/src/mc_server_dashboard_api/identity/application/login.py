@@ -28,6 +28,7 @@ only; it is never surfaced to the caller.
 from __future__ import annotations
 
 import datetime as dt
+import math
 import uuid
 from dataclasses import dataclass
 from typing import NoReturn
@@ -106,7 +107,8 @@ class Login:
         if self.brute_force.enabled:
             blocked = await self._blocked_reason(key, ip, now=now)
             if blocked is not None:
-                await self._fail(key, ip, blocked, now=now)
+                reason, retry_after = blocked
+                await self._fail(key, ip, reason, now=now, retry_after=retry_after)
 
         async with self.uow:
             user = await self.uow.users.get_by_username(name)
@@ -143,28 +145,44 @@ class Login:
 
     async def _blocked_reason(
         self, username: str, ip: str | None, *, now: dt.datetime
-    ) -> str | None:
-        """Reason to reject before verifying, or ``None``: lockout / IP threshold."""
+    ) -> tuple[str, int] | None:
+        """Reason + Retry-After seconds to reject before verifying, or ``None``.
 
-        lockout = await self.attempts.get_lockout(username)
-        if lockout is not None and is_locked(lockout.locked_until, now=now):
-            return REASON_LOCKED
+        Checks the IP threshold *first* so an attacker from a single IP is
+        blocked before they can probe further usernames (issue #637).
+        """
+
         if ip is not None:
             ip_failures = await self.attempts.count_ip_failures(
                 ip, since=now - self.brute_force.ip_window
             )
             if ip_failures >= self.brute_force.ip_threshold:
-                return REASON_IP_THROTTLED
+                retry_after = int(self.brute_force.ip_window.total_seconds())
+                return REASON_IP_THROTTLED, retry_after
+        lockout = await self.attempts.get_lockout(username)
+        if lockout is not None and is_locked(lockout.locked_until, now=now):
+            assert lockout.locked_until is not None  # narrowed by is_locked
+            remaining = (lockout.locked_until - now).total_seconds()
+            retry_after = max(1, math.ceil(remaining))
+            return REASON_LOCKED, retry_after
         return None
 
     async def _fail(
-        self, username: str, ip: str | None, reason: str, *, now: dt.datetime
+        self,
+        username: str,
+        ip: str | None,
+        reason: str,
+        *,
+        now: dt.datetime,
+        retry_after: int | None = None,
     ) -> NoReturn:
         """Record the failure, lock the account if over threshold, delay, raise.
 
         The same exit for every failure path (locked, IP-throttled, unknown user,
         wrong password) so none is distinguishable by status or timing; the
         ``reason`` is persisted on the attempt row for forensics, never returned.
+        ``retry_after`` (seconds) is threaded to the exception for the HTTP layer
+        (issue #637).
         """
 
         if self.brute_force.enabled:
@@ -173,7 +191,7 @@ class Login:
             )
             await self._maybe_lock(username, now=now)
         await self.failure_delay.apply()
-        raise InvalidCredentialsError
+        raise InvalidCredentialsError(retry_after=retry_after)
 
     async def _maybe_lock(self, username: str, *, now: dt.datetime) -> None:
         """Lock the account once the per-username threshold is crossed.
