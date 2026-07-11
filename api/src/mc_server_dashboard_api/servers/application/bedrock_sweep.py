@@ -15,6 +15,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from mc_server_dashboard_api.servers.domain.clock import Clock
+from mc_server_dashboard_api.servers.domain.errors import PortRangeExhaustedError
 from mc_server_dashboard_api.servers.domain.ports import (
     PortRange,
     pick_lowest_free_port,
@@ -30,6 +32,7 @@ class SweepBedrockPorts:
 
     uow: UnitOfWork
     port_range: PortRange
+    clock: Clock
 
     async def __call__(self) -> int:
         async with self.uow as uow:
@@ -42,12 +45,22 @@ class SweepBedrockPorts:
             if not geyser_ids:
                 return 0
             taken = await uow.servers.list_bedrock_ports()
+            now = self.clock.now()
             count = 0
             for server in candidates:
                 if server.id not in geyser_ids:
                     continue
-                port = pick_lowest_free_port(self.port_range, taken=taken)
+                try:
+                    port = pick_lowest_free_port(self.port_range, taken=taken)
+                except PortRangeExhaustedError:
+                    _LOG.warning(
+                        "bedrock gate-flip sweep: port range exhausted after "
+                        "allocating %d server(s); remaining servers skipped",
+                        count,
+                    )
+                    break
                 server.bedrock_port = port
+                server.updated_at = now
                 await uow.servers.update(server)
                 taken.add(port)
                 count += 1

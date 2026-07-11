@@ -632,6 +632,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await SweepBedrockPorts(
                 uow=ServersUnitOfWork(create_session_factory(engine)),
                 port_range=bedrock_range,
+                clock=ServersSystemClock(),
             )()
         registry = InMemoryWorkerRegistry(
             clock=FleetSystemClock(), heartbeat_timeout=heartbeat_timeout
