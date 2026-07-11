@@ -667,6 +667,23 @@ describe("ServerBackupsTab permission gating", () => {
     ).toBeInTheDocument();
   });
 
+  it("keeps rendering cached backups when a background refetch fails (#1805)", async () => {
+    routeGet();
+    const { queryClient } = await openBackups();
+    await screen.findByText("manual");
+
+    // Simulate a transient API outage: the next background refetch fails.
+    mockApi.get.mockRejectedValue(new ApiError(500, {}));
+    await act(() => queryClient.invalidateQueries());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // The cached list stays on screen instead of the error.
+    expect(screen.getByText("manual")).toBeInTheDocument();
+    expect(screen.queryByText(t("backups.loadError"))).not.toBeInTheDocument();
+  });
+
   it("routes a create 403 through the permission glue", async () => {
     routeGet();
     mockApi.post.mockRejectedValue(

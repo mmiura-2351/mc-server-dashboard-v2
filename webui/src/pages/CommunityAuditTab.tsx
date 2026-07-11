@@ -139,7 +139,10 @@ function Loaded({ communityId }: { communityId: string }) {
 
       {query.isPending ? (
         <p className="sub">{t("communitySettings.audit.loading")}</p>
-      ) : query.isError ? (
+      ) : /* Error only when there is nothing to show (initial load failed).
+           A failed background refetch retains `data`, so the cached list
+           keeps rendering through transient API blips (#1805). */
+      query.data === undefined ? (
         <p className="field-error">{t("communitySettings.audit.loadError")}</p>
       ) : records.length === 0 ? (
         <p className="sub">{t("communitySettings.audit.empty")}</p>

@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAccessToken } from "../auth/tokenStore.ts";
 import { t } from "../i18n/index.ts";
@@ -276,6 +276,35 @@ describe("admin workers page", () => {
     expect(
       await screen.findByText(t("admin.workers.drainError")),
     ).toBeInTheDocument();
+  });
+
+  it("keeps rendering cached workers when a background refetch fails (#1805)", async () => {
+    signedIn();
+    const { queryClient } = renderApp({ path: "/admin/workers" });
+    await screen.findByText("worker-a");
+
+    // Simulate a transient API outage: workers endpoint fails.
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === "/api/users/me") return Promise.resolve(jsonResponse(ADMIN));
+      if (url === "/api/communities")
+        return Promise.resolve(jsonResponse([{ id: "c1", name: "Alpha" }]));
+      if (url.endsWith("/me/permissions"))
+        return Promise.resolve(jsonResponse({}));
+      if (url === "/api/workers")
+        return Promise.resolve(new Response("nope", { status: 503 }));
+      return Promise.resolve(tokenResponse());
+    });
+    await act(() => queryClient.invalidateQueries());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // The cached fleet stays on screen instead of the error.
+    expect(screen.getByText("worker-a")).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("admin.workers.loadError")),
+    ).not.toBeInTheDocument();
   });
 
   it("shows the error state when the fleet list fails", async () => {

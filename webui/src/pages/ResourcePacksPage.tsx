@@ -113,7 +113,10 @@ export function ResourcePacksPage() {
         <p className="sub" role="status">
           {t("resourcePacks.loading")}
         </p>
-      ) : listQuery.isError ? (
+      ) : /* Error only when there is nothing to show (initial load failed).
+           A failed background refetch retains `data`, so the cached page
+           keeps rendering through transient API blips (#1805). */
+      listQuery.data === undefined ? (
         <p className="field-error" role="alert">
           {t("resourcePacks.loadError")}
         </p>
