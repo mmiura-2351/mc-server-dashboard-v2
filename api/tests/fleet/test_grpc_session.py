@@ -989,6 +989,20 @@ def test_keepalive_options_derive_from_heartbeat_timeout() -> None:
     assert options_dict["grpc.http2.max_pings_without_data"] == 0
 
 
+def test_keepalive_options_permit_worker_client_pings() -> None:
+    """The server must permit the Worker's client-side keepalive cadence.
+
+    The Worker dials with keepalive Time=20s (issue #1709); C-core's default
+    ping-strike enforcement (min interval 5 min, 2 strikes) would answer that
+    cadence with GOAWAY ENHANCE_YOUR_CALM. The permitted floor stays at half
+    the Worker's cadence for timing-skew margin, and pings are permitted
+    without active calls (the Worker probes between Session streams).
+    """
+    options_dict = dict(_keepalive_options(dt.timedelta(seconds=30)))
+    assert options_dict["grpc.http2.min_ping_interval_without_data_ms"] == 10_000
+    assert options_dict["grpc.keepalive_permit_without_calls"] == 1
+
+
 # ---- unknown held server ids (issue #924) --------------------------------
 
 _SERVER_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"

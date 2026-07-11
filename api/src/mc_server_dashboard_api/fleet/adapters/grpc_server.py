@@ -133,6 +133,14 @@ _REGISTRATION_TIMEOUT_SECONDS = 10.0
 # fires mark_worker_servers_unknown (issue #1600).
 _KEEPALIVE_TIMEOUT_MS = 20_000
 
+# Floor on how often the server accepts client keepalive PINGs. The Worker
+# dials with client-side keepalive (Time=20s, worker/cmd/worker/main.go, issue
+# #1709), and C-core's default ping-strike enforcement (min interval 5 min,
+# max 2 strikes) would answer that cadence with GOAWAY ENHANCE_YOUR_CALM,
+# because the API->Worker direction is mostly idle so the pings arrive
+# "without data". Half the Worker's cadence leaves margin for timing skew.
+_MIN_PING_INTERVAL_MS = 10_000
+
 
 def _keepalive_options(heartbeat_timeout: dt.timedelta) -> list[tuple[str, int]]:
     """Derive server-side gRPC keepalive channel options from heartbeat_timeout."""
@@ -143,6 +151,11 @@ def _keepalive_options(heartbeat_timeout: dt.timedelta) -> list[tuple[str, int]]
         # Required: the default of 2 stops PINGs after 2 pings with no outbound
         # data, and the API->Worker direction is mostly idle.
         ("grpc.http2.max_pings_without_data", 0),
+        # Permit the Worker's client-side keepalive (issue #1709; see
+        # _MIN_PING_INTERVAL_MS). permit_without_calls covers the Worker's
+        # PermitWithoutStream pings between Session streams (reconnect backoff).
+        ("grpc.http2.min_ping_interval_without_data_ms", _MIN_PING_INTERVAL_MS),
+        ("grpc.keepalive_permit_without_calls", 1),
     ]
 
 
