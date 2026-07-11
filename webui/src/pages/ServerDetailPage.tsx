@@ -479,19 +479,25 @@ function Controls({
             ? "restarting"
             : "starting";
       const key = serverKey(communityId, server.id);
-      const previous = queryClient.getQueryData<ServerResponse>(key);
+      const previousState =
+        queryClient.getQueryData<ServerResponse>(key)?.observed_state;
       queryClient.setQueryData<ServerResponse>(key, (old) =>
         old ? { ...old, observed_state: transitional } : old,
       );
-      return { previous };
+      return { previousState, transitional };
     },
     onSettled: invalidate,
     onError: (error, _path, context) => {
-      // Rollback the optimistic cache update before showing the error toast.
-      if (context?.previous) {
-        queryClient.setQueryData(
-          serverKey(communityId, server.id),
-          context.previous,
+      // Surgically roll back only observed_state, and only if the cache still
+      // holds the transitional value we wrote. A WS status frame that arrived
+      // mid-flight takes precedence (#1727).
+      if (context?.previousState !== undefined) {
+        const key = serverKey(communityId, server.id);
+        const prev = context.previousState;
+        queryClient.setQueryData<ServerResponse>(key, (old) =>
+          old && old.observed_state === context.transitional
+            ? { ...old, observed_state: prev }
+            : old,
         );
       }
       if (onForbidden(error)) {

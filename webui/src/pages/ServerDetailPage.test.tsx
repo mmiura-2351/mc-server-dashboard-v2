@@ -784,6 +784,61 @@ describe("ServerDetailPage lifecycle controls", () => {
         expect(statePill()).toBe(t("dashboard.state.stopped")),
       );
     });
+
+    it("preserves a WS update that arrived mid-flight on rollback (#1727)", async () => {
+      // The server is stopped. We start it (→ "starting"), but a WS status
+      // frame pushes it to "running" before the POST rejects. The rollback
+      // must not clobber the WS-delivered state.
+      mockApi.get.mockResolvedValue(
+        server({ observed_state: "stopped", desired_state: "stopped" }),
+      );
+      let rejectPost!: (err: unknown) => void;
+      const postPromise = new Promise((_resolve, reject) => {
+        rejectPost = reject;
+      });
+      postPromise.catch(() => {}); // Prevent unhandled-rejection noise in tests.
+      mockApi.post.mockReturnValue(postPromise);
+      renderPage();
+
+      await screen.findByText("survival");
+      fireEvent.click(
+        screen.getByRole("button", { name: t("serverDetail.start") }),
+      );
+
+      // Optimistic update shows "starting".
+      await waitFor(() =>
+        expect(statePill()).toBe(t("dashboard.state.starting")),
+      );
+
+      // WS pushes the server → running while the POST is still in flight.
+      act(() => {
+        MockWebSocket.last().open();
+        MockWebSocket.last().message(
+          JSON.stringify({
+            stream: "status",
+            ts: "t",
+            payload: { state: "running", detail: "" },
+          }),
+        );
+      });
+
+      // Hang the refetch so we observe the rollback result.
+      mockApi.get.mockReturnValue(new Promise(() => {}));
+
+      rejectPost(new ApiError(409, { reason: "port_conflict" }));
+
+      // Wait for the error toast to confirm onError ran.
+      await waitFor(() =>
+        expect(
+          screen.queryByText(t("dashboard.lifecycle.portConflict")),
+        ).toBeInTheDocument(),
+      );
+
+      // The pill should show "running" (from WS), not "stopped" (rolled back).
+      await waitFor(() =>
+        expect(statePill()).toBe(t("dashboard.state.running")),
+      );
+    });
   });
 });
 
