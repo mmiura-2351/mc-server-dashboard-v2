@@ -649,6 +649,13 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// reservation above already holds off any hydrate/start that could create
 		// the dir concurrently. The running path needs no guard — a tracked
 		// instance's working dir was created by its start.
+		//
+		// The "working dir absent" phrase in the message is load-bearing (issue
+		// #1790): the API's final-snapshot path keys on it (together with the
+		// SERVER_NOT_FOUND code) to downgrade this refusal from its data-loss
+		// ERROR to a benign-duplicate INFO — see _WORKING_SET_ABSENT_MARKER in
+		// api/src/mc_server_dashboard_api/servers/application/lifecycle.py.
+		// Reword only together with that discriminator (and both sides' tests).
 		if _, err := os.Stat(workingDir); os.IsNotExist(err) {
 			m.logger.Warn("snapshot refused: working dir absent for stopped id",
 				"server_id", cmd.ServerID, "reason", "working_set_absent")
