@@ -393,13 +393,12 @@ class InstallFromCatalog:
                     port_range=self.bedrock_port_range,
                     now=now,
                 )
-                # Side-aware deploy: a client-only mod is cached + recorded but
-                # never placed in the running working set (issue #1308). The
-                # write is the LAST step before commit: the file store is
-                # outside the SQL transaction, so any failure above (e.g.
-                # Bedrock-window exhaustion, #1541) must abort before the jar
-                # lands on disk — a write-then-fail would orphan a working-set
-                # jar with no DB row.
+                await self.uow.commit()
+                # Side-aware deploy (issue #1308): only a server-relevant,
+                # enabled jar goes into the working set; a client-only jar is
+                # tracked + cached but never written there. The write follows
+                # the commit so a commit failure cannot orphan a working-set
+                # jar with no DB row (issue #1826).
                 if working_set_present(enabled=True, side=side):
                     await self.file_store.write_file(
                         community_id=community_id,
@@ -407,7 +406,6 @@ class InstallFromCatalog:
                         rel_path=rel_path,
                         content=content,
                     )
-                await self.uow.commit()
                 return plugin
 
 
@@ -627,26 +625,6 @@ class UpdatePlugin:
                     if existing is not None and existing.id != plugin_id:
                         raise PluginAlreadyExistsError(new_path)
 
-                # Write the fresh bytes at the desired path and remove the old file
-                # (also when only the side/enabled mapping leaves the new bytes at a
-                # different path). A client-only jar has no working-set file.
-                if new_path is not None:
-                    await self.file_store.write_file(
-                        community_id=community_id,
-                        server_id=server_id,
-                        rel_path=new_path,
-                        content=content,
-                    )
-                if old_path is not None and old_path != new_path:
-                    try:
-                        await self.file_store.delete_file(
-                            community_id=community_id,
-                            server_id=server_id,
-                            rel_path=old_path,
-                        )
-                    except ServerFileNotFoundError:
-                        pass
-
                 now = self.clock.now()
                 updated_plugin = ServerPlugin(
                     id=plugin.id,
@@ -676,6 +654,26 @@ class UpdatePlugin:
                 )
                 await self.uow.plugins.update(updated_plugin)
                 await self.uow.commit()
+                # Write the fresh bytes at the desired path and remove the old
+                # file after the DB commit so a commit failure does not leave
+                # diverged files (#1826). A client-only jar has no working-set
+                # file.
+                if new_path is not None:
+                    await self.file_store.write_file(
+                        community_id=community_id,
+                        server_id=server_id,
+                        rel_path=new_path,
+                        content=content,
+                    )
+                if old_path is not None and old_path != new_path:
+                    try:
+                        await self.file_store.delete_file(
+                            community_id=community_id,
+                            server_id=server_id,
+                            rel_path=old_path,
+                        )
+                    except ServerFileNotFoundError:
+                        pass
                 return updated_plugin
 
 
