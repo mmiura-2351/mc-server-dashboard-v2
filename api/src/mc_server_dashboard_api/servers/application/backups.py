@@ -49,6 +49,12 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import IO
 
+from mc_server_dashboard_api.audit.domain.events import AuditEvent, Outcome
+from mc_server_dashboard_api.audit.domain.operations import (
+    BACKUP_DELETE,
+    TARGET_BACKUP,
+)
+from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
 from mc_server_dashboard_api.servers.application.files import (
     MAX_ARCHIVE_ENTRIES,
     MAX_DECOMPRESSED_BYTES,
@@ -73,6 +79,10 @@ from mc_server_dashboard_api.servers.domain.backup import (
 from mc_server_dashboard_api.servers.domain.backup_author_directory import (
     BackupAuthorDirectory,
 )
+from mc_server_dashboard_api.servers.domain.backup_retention import (
+    RetentionPolicy,
+    backups_to_prune,
+)
 from mc_server_dashboard_api.servers.domain.backup_store import BackupArchiveStore
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.entities import Server
@@ -82,6 +92,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     BackupUnsettledError,
     FileTooLargeError,
     InvalidBackupArchiveError,
+    InvalidRetentionPolicyError,
     ServerNotFoundError,
     ServerNotStoppedError,
     UnsupportedPluginServerTypeError,
@@ -628,15 +639,179 @@ class DeleteBackup:
                 if backup is None or backup.server_id != server_id:
                     raise BackupNotFoundError(str(backup_id.value))
                 storage_ref = backup.storage_ref
-            # Delete the archive first (idempotent), then the metadata row last.
-            await self.backup_store.delete(
+            await _delete_archive_then_row(
+                self.uow,
+                self.backup_store,
                 community_id=community_id,
                 server_id=server_id,
+                backup_id=backup_id,
                 storage_ref=storage_ref,
             )
+
+
+async def _delete_archive_then_row(
+    uow: UnitOfWork,
+    backup_store: BackupArchiveStore,
+    *,
+    community_id: CommunityId,
+    server_id: ServerId,
+    backup_id: BackupId,
+    storage_ref: str,
+) -> None:
+    """Delete a backup's archive first, then its metadata row (module docstring).
+
+    The single delete path (epic #649 constraint): :class:`DeleteBackup` and the
+    retention prune (:class:`PruneScheduledBackups`, issue #1841) both run
+    through here, each under the per-server lifecycle lock it already holds.
+    The archive delete is idempotent, so a crash between the two leaves a
+    harmless re-deletable dangling row, never an orphaned archive.
+    """
+
+    await backup_store.delete(
+        community_id=community_id,
+        server_id=server_id,
+        storage_ref=storage_ref,
+    )
+    async with uow:
+        await uow.backups.delete(backup_id)
+        await uow.commit()
+
+
+@dataclass(frozen=True)
+class PruneScheduledBackups:
+    """Prune ``source=scheduled`` backups per the server's retention policy (#1841).
+
+    Loads the server's persisted ``backup_retention`` policy and deletes the
+    scheduled rows the pure :func:`backups_to_prune` selection names — manual /
+    uploaded / event rows are never candidates. A server without a policy (or,
+    defensively, with a malformed persisted one) is a no-op.
+
+    Runs under the same per-server :class:`LifecycleLock` that
+    :class:`RestoreBackup` / :class:`DeleteBackup` hold, so a backup can never
+    be deleted while a restore of it is in flight; each deletion reuses the
+    archive-first/row-last :func:`_delete_archive_then_row` core (no second
+    delete path). Each deletion is audited post-commit as ``backup:delete``
+    with actor ``None`` (no operator is behind a retention prune — the
+    integrity-sweep posture); the retention cause is logged. Prune emits
+    nothing on the notification stream (owner spec: notifications are for run
+    failures only), and its triggers (the schedule runner, the policy write)
+    isolate a prune failure so it never fails the operation that fired it.
+    """
+
+    uow: UnitOfWork
+    backup_store: BackupArchiveStore
+    audit: AuditRecorder
+    clock: Clock
+    lifecycle_lock: LifecycleLock = NullLifecycleLock()
+
+    async def __call__(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> list[Backup]:
+        async with self.lifecycle_lock.hold(server_id):
             async with self.uow:
-                await self.uow.backups.delete(backup_id)
-                await self.uow.commit()
+                server = await _load(self.uow, community_id, server_id)
+                rows = await self.uow.backups.list_for_server(server_id)
+            if server.backup_retention is None:
+                return []
+            try:
+                policy = RetentionPolicy.from_json(server.backup_retention)
+            except InvalidRetentionPolicyError:
+                # Should be impossible (the write path validates), but if a bad
+                # value slips in, skip rather than prune the wrong set; log it
+                # for an operator to fix (the schedule_from_config posture).
+                _LOG.warning(
+                    "server %s has an invalid backup retention policy; skipping prune",
+                    server_id.value,
+                )
+                return []
+            pruned = backups_to_prune(policy, rows, self.clock.now())
+            for backup in pruned:
+                await _delete_archive_then_row(
+                    self.uow,
+                    self.backup_store,
+                    community_id=community_id,
+                    server_id=server_id,
+                    backup_id=backup.id,
+                    storage_ref=backup.storage_ref,
+                )
+                _LOG.info(
+                    "retention prune: deleted scheduled backup %s of server %s "
+                    "(created %s, policy %s)",
+                    backup.id.value,
+                    server_id.value,
+                    backup.created_at.isoformat(),
+                    policy.to_json(),
+                )
+                await self.audit.record(
+                    AuditEvent(
+                        operation=BACKUP_DELETE,
+                        outcome=Outcome.SUCCESS,
+                        actor_id=None,
+                        community_id=community_id.value,
+                        target_type=TARGET_BACKUP,
+                        target_id=backup.id.value,
+                    )
+                )
+            return pruned
+
+
+@dataclass(frozen=True)
+class SetBackupRetention:
+    """Set a server's backup retention policy (backup:schedule, issue #1841).
+
+    Validates the policy fields into a :class:`RetentionPolicy`
+    (:class:`InvalidRetentionPolicyError` -> 422 at the edge), persists the
+    canonical JSON shape on the server row, then prunes immediately (owner
+    spec: prune on policy write). The prune is best-effort — the policy write
+    is the operation, so a prune failure is logged, not raised; the next
+    successful scheduled backup run re-prunes.
+    """
+
+    uow: UnitOfWork
+    prune: PruneScheduledBackups
+
+    async def __call__(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        keep_last: int | None = None,
+        daily: int | None = None,
+        weekly: int | None = None,
+        monthly: int | None = None,
+    ) -> RetentionPolicy:
+        policy = RetentionPolicy.from_fields(
+            keep_last=keep_last, daily=daily, weekly=weekly, monthly=monthly
+        )
+        async with self.uow:
+            await _load(self.uow, community_id, server_id)
+            await self.uow.servers.update_backup_retention(server_id, policy.to_json())
+            await self.uow.commit()
+        try:
+            await self.prune(community_id=community_id, server_id=server_id)
+        except Exception:  # noqa: BLE001 - best-effort: the policy write landed
+            _LOG.exception(
+                "retention prune after policy write failed for server %s",
+                server_id.value,
+            )
+        return policy
+
+
+@dataclass(frozen=True)
+class ClearBackupRetention:
+    """Clear a server's backup retention policy (backup:schedule, issue #1841).
+
+    Sets ``backup_retention`` back to ``NULL`` — scheduled backups then
+    accumulate unbounded again. Nothing to prune on clear.
+    """
+
+    uow: UnitOfWork
+
+    async def __call__(self, *, community_id: CommunityId, server_id: ServerId) -> None:
+        async with self.uow:
+            await _load(self.uow, community_id, server_id)
+            await self.uow.servers.update_backup_retention(server_id, None)
+            await self.uow.commit()
 
 
 async def _load_backup(

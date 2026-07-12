@@ -25,6 +25,7 @@ import pytest
 from mc_server_dashboard_api.servers.application.backups import (
     CreateBackup,
     DeleteBackup,
+    PruneScheduledBackups,
     RestoreBackup,
 )
 from mc_server_dashboard_api.servers.application.files import (
@@ -74,6 +75,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerType,
     WorkerId,
 )
+from tests.audit.fakes import RecordingAuditRecorder
 from tests.servers.fakes import (
     FakeBackupArchiveStore,
     FakeBackupRepository,
@@ -230,6 +232,44 @@ async def test_start_and_restore_take_the_same_keyed_lock() -> None:
         jar_provisioner=FakeJarProvisioner(),
         store_generation=FakeStoreGenerationReader(),
         file_store=FakeFileStore(seed_eula=True),
+        lifecycle_lock=lock,
+    )(community_id=_COMMUNITY, server_id=server.id)
+
+    assert lock.events == [
+        (server.id, "acquire"),
+        (server.id, "release"),
+        (server.id, "acquire"),
+        (server.id, "release"),
+    ]
+
+
+async def test_prune_and_restore_take_the_same_keyed_lock() -> None:
+    # The retention prune (issue #1841) must serialize with a restore of a
+    # candidate backup: both take the SAME per-server lock, so a backup can
+    # never be deleted while a restore of it is in flight. (The actual blocking
+    # is pinned against a real PostgreSQL advisory lock in
+    # tests/integration/test_lifecycle_lock_concurrency.py.)
+    server = _at_rest()
+    server.backup_retention = {"keep_last": 1}
+    repo = FakeServerRepository()
+    repo.seed(server)
+    backups = FakeBackupRepository()
+    backup = _backup(server.id)
+    backups.seed(backup)
+    archive = FakeBackupArchiveStore()
+    archive.archives.add("ref")
+    lock = FakeLifecycleLock()
+
+    await RestoreBackup(
+        uow=FakeUnitOfWork(servers=repo, backups=backups),
+        backup_store=archive,
+        lifecycle_lock=lock,
+    )(community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id)
+    await PruneScheduledBackups(
+        uow=FakeUnitOfWork(servers=repo, backups=backups),
+        backup_store=archive,
+        audit=RecordingAuditRecorder(),
+        clock=FakeClock(_NOW),
         lifecycle_lock=lock,
     )(community_id=_COMMUNITY, server_id=server.id)
 

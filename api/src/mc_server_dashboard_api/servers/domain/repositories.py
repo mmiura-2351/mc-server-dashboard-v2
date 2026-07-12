@@ -18,6 +18,7 @@ from __future__ import annotations
 import abc
 import datetime as dt
 import uuid
+from typing import Any
 
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.value_objects import (
@@ -107,6 +108,20 @@ class ServerRepository(abc.ABC):
 
         The game port is included so an at-rest re-port (issue #311) lands in the
         same write; a name/config-only edit leaves it unchanged.
+        """
+
+    @abc.abstractmethod
+    async def update_backup_retention(
+        self, server_id: ServerId, retention: dict[str, Any] | None
+    ) -> None:
+        """Set (or clear, with ``None``) a server's backup retention policy (#1841).
+
+        A narrow single-column write — deliberately not folded into
+        :meth:`update` so a concurrent name/config edit built from a stale
+        entity can never clobber the policy. ``retention`` is the canonical
+        jsonb shape produced by ``RetentionPolicy.to_json()``; the caller
+        validates before writing. A missing id matches no row (a no-op — the
+        caller has already loaded the community-checked server).
         """
 
     @abc.abstractmethod

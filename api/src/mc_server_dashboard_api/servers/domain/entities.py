@@ -62,6 +62,12 @@ class Server:
     # Defaults to empty string here so existing test constructions that predate
     # the slug column need not pass it; the create flow always assigns a real slug.
     slug: str = ""
+    # The scheduled-backup retention policy (issue #1841): the raw jsonb value
+    # (``{"keep_last": N}`` or ``{"daily": D, "weekly": W, "monthly": M}``), or
+    # ``None`` when no retention is configured. Kept raw here — like ``config`` —
+    # so a malformed persisted value cannot fail every entity load; consumers
+    # parse it via ``RetentionPolicy.from_json`` at the use site.
+    backup_retention: dict[str, Any] | None = None
 
     def is_at_rest(self) -> bool:
         """Return whether the server is fully stopped for edits/deletion.

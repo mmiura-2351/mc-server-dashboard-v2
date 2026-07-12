@@ -123,6 +123,7 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 | GET | `…/{sid}/backups/{bid}/download` | Download archive. |
 | POST | `…/{sid}/backups/{bid}/restore[?force=true]` | **Server must be stopped.** `?force=true` overrides the quarantine gate (#703). |
 | DELETE | `…/{sid}/backups/{bid}` | Delete. |
+| PUT / DELETE | `…/{sid}/backups/retention` | Set / clear the scheduled-backup retention policy (issue #1841): `{keep_last}` (≥ 1) XOR `{daily, weekly, monthly}` (each ≥ 0, one > 0); an invalid shape is 422 `invalid_retention_policy`. Gated by `backup:schedule`. Applies only to `source=scheduled` backups — manual/uploaded rows are never auto-deleted. Setting prunes immediately; thereafter each successful scheduled backup run prunes (each deletion audited as `backup:delete`, no actor). Policy readable as `backup_retention` on the server read; null while unconfigured. |
 | GET | `…/{sid}/groups` | Groups attached to this server. |
 | GET / POST | `/communities/{cid}/groups` | Player groups (`kind`: `op` \| `whitelist`). |
 | GET / PATCH / DELETE | `…/groups/{gid}` | Read / rename / delete. |
@@ -142,7 +143,8 @@ enabled, else null), `bedrock_address` / `bedrock_port` (Bedrock join address,
 epic #1540: non-null only while the deployment's Bedrock gate is on AND the
 server carries at least one *enabled* Geyser plugin copy — see `BEDROCK.md`;
 Paper only today), `desired_state`, `observed_state`, `observed_at`,
-`assigned_worker_id`.
+`assigned_worker_id`, `backup_retention` (the scheduled-backup retention
+policy, issue #1841; null while unconfigured).
 
 Server state model: `desired_state` ∈ {running, stopped};
 `observed_state` ∈ {starting, running, stopping, stopped, restarting, crashed,

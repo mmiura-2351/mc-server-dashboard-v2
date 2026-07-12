@@ -344,6 +344,7 @@ assigned Worker.
 | `game_port` | integer nullable | the Minecraft game port (issue #243), assigned at create from the configured range (CONFIGURATION.md Section 5.8) and **unique deployment-wide**. Nullable: legacy/imported rows predating port tracking carry none, and Postgres treats `NULL`s as distinct so they never collide |
 | `bedrock_port` | integer nullable | the server's public Bedrock **UDP** port (issue #1541), allocated from the dedicated UDP window (CONFIGURATION.md Section 5.8) when Geyser is detected among the server's plugins and released (`NULL`) on Geyser uninstall; a server delete drops the row and with it the port. **Unique deployment-wide.** Non-`NULL` *is* the Bedrock-enabled state — there is no separate boolean |
 | `slug` | text | the relay hostname prefix (RELAY.md Section 3, issue #955), e.g. `amber-falcon-42`. Auto-generated at create as `<word>-<word>-<NN>` and **unique deployment-wide** (the hostname namespace is global). Renameable via the server update PATCH; released slugs are immediately reusable (owner decision, RELAY.md Section 17). Validated as a lowercase DNS label (`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`) with a reserved-word list (`www`, `api`, `relay`, …). Pre-existing rows are backfilled by migration 0016. |
+| `backup_retention` | jsonb nullable | the scheduled-backup retention policy (issue #1841, migration 0032): `{"keep_last": N}` (keep the newest N, N ≥ 1) **or** `{"daily": D, "weekly": W, "monthly": M}` (keep the newest scheduled backup per UTC calendar day / ISO week / calendar month over those windows; each ≥ 0, at least one > 0). `NULL` means no retention — scheduled backups accumulate unbounded. Applies **only** to `source = scheduled` backup rows (Section 8); manual / uploaded / event rows are never auto-pruned. Validated in the domain (`RetentionPolicy`), not by a CHECK — the free-form `config` posture |
 | `desired_state` | text | what the operator wants: `running` / `stopped` (CHECK enum) |
 | `observed_state` | text | last state reported by the Worker: `starting` / `running` / `stopping` / `stopped` / `restarting` / `crashed` / `unknown` (CHECK enum) |
 | `observed_at` | timestamptz nullable | when `observed_state` was last updated |
@@ -535,11 +536,18 @@ statistics endpoints aggregate count / total known bytes / unknown-size count /
 newest+oldest from these rows.
 
 > **Scheduled backups (FR-BAK-3)** need a schedule (cron-like) and execution
-> history. The schedule belongs to the server (it can live in `server.config` as
-> a per-server setting), and each run produces a `backup` row with
-> `source = scheduled` — which *is* the execution history (a listing of scheduled
-> rows with their `created_at`). A separate `backup_schedule` table is only needed
-> if multiple named schedules per server are required; M1 does not.
+> history. The schedule is a first-class `backup`-action row of the `schedule`
+> table (this Section; issue #1840 retired the legacy `server.config` cadence
+> key), and each run produces a `backup` row with `source = scheduled` — which
+> *is* the archive history (a listing of scheduled rows with their
+> `created_at`), alongside the runner's `schedule_run` outcome rows.
+
+`source = scheduled` rows are additionally subject to the server's
+`backup_retention` policy (Section 7, issue #1841): after each successful
+scheduled backup run — and on every policy write — the rows the policy no
+longer keeps are pruned through the same archive-first/row-last delete path as
+a manual delete, each deletion audited as `backup:delete` with no actor.
+Manual / uploaded / event rows are never auto-pruned.
 
 ### `file_edit_history` — Storage-layer only (no DB table)
 

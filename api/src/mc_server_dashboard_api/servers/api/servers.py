@@ -285,6 +285,11 @@ class ServerResponse(BaseModel):
     observed_state: str
     observed_at: UtcDatetime | None
     assigned_worker_id: str | None
+    # The scheduled-backup retention policy (issue #1841): the raw stored shape
+    # (``{"keep_last": N}`` or ``{"daily": D, "weekly": W, "monthly": M}``), or
+    # ``None`` while unconfigured. Written via the backups retention endpoints
+    # (backup:schedule), surfaced here so the read path carries the policy.
+    backup_retention: dict[str, Any] | None = None
 
     @classmethod
     def from_entity(
@@ -322,6 +327,7 @@ class ServerResponse(BaseModel):
                 if server.assigned_worker_id is None
                 else str(server.assigned_worker_id.value)
             ),
+            backup_retention=server.backup_retention,
         )
 
 

@@ -2864,6 +2864,57 @@
         "title": "ResourcePackResponse",
         "type": "object"
       },
+      "RetentionPolicyBody": {
+        "description": "The scheduled-backup retention policy (issue #1841).\n\nExactly one form: keep-N (``keep_last`` >= 1, tiers omitted) or tiered\n(``daily`` / ``weekly`` / ``monthly`` each >= 0, at least one > 0,\n``keep_last`` omitted). The use case validates; a violation is 422\n``invalid_retention_policy``. The same shape is the response of a\nsuccessful PUT.",
+        "properties": {
+          "daily": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Daily"
+          },
+          "keep_last": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Keep Last"
+          },
+          "monthly": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Monthly"
+          },
+          "weekly": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weekly"
+          }
+        },
+        "title": "RetentionPolicyBody",
+        "type": "object"
+      },
       "RevokeOtherSessionsRequest": {
         "properties": {
           "keep_session_id": {
@@ -3219,6 +3270,18 @@
               }
             ],
             "title": "Assigned Worker Id"
+          },
+          "backup_retention": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Backup Retention"
           },
           "bedrock_address": {
             "anyOf": [
@@ -6639,6 +6702,119 @@
           }
         ],
         "summary": "Create Backup"
+      }
+    },
+    "/api/communities/{community_id}/servers/{server_id}/backups/retention": {
+      "delete": {
+        "description": "Clear the retention policy (backup:schedule): scheduled backups then\naccumulate unbounded again. Nothing is pruned on clear; the write is\naudited as `backup:clear_retention` with the acting user.",
+        "operationId": "clear_backup_retention_api_communities__community_id__servers__server_id__backups_retention_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Clear Backup Retention"
+      },
+      "put": {
+        "description": "Set the scheduled-backup retention policy (backup:schedule, issue #1841).\n\nThe policy is `{keep_last}` XOR `{daily, weekly, monthly}`; it applies only\nto `source=scheduled` backups \u2014 manual/uploaded rows are never auto-deleted.\nSetting it prunes immediately (best-effort), and every successful scheduled\nbackup run prunes thereafter; each pruned backup is audited as\n`backup:delete` with no actor. The write itself is audited as\n`backup:set_retention` with the acting user, so the causal actor behind\nthose actor-less prune rows stays recoverable. The policy is readable as\n`backup_retention` on the server read. An invalid shape is 422\n`invalid_retention_policy`.",
+        "operationId": "set_backup_retention_api_communities__community_id__servers__server_id__backups_retention_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RetentionPolicyBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetentionPolicyBody"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Set Backup Retention"
       }
     },
     "/api/communities/{community_id}/servers/{server_id}/backups/statistics": {

@@ -659,6 +659,42 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/communities/{community_id}/servers/{server_id}/backups/retention": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set Backup Retention
+         * @description Set the scheduled-backup retention policy (backup:schedule, issue #1841).
+         *
+         *     The policy is `{keep_last}` XOR `{daily, weekly, monthly}`; it applies only
+         *     to `source=scheduled` backups — manual/uploaded rows are never auto-deleted.
+         *     Setting it prunes immediately (best-effort), and every successful scheduled
+         *     backup run prunes thereafter; each pruned backup is audited as
+         *     `backup:delete` with no actor. The write itself is audited as
+         *     `backup:set_retention` with the acting user, so the causal actor behind
+         *     those actor-less prune rows stays recoverable. The policy is readable as
+         *     `backup_retention` on the server read. An invalid shape is 422
+         *     `invalid_retention_policy`.
+         */
+        put: operations["set_backup_retention_api_communities__community_id__servers__server_id__backups_retention_put"];
+        post?: never;
+        /**
+         * Clear Backup Retention
+         * @description Clear the retention policy (backup:schedule): scheduled backups then
+         *     accumulate unbounded again. Nothing is pruned on clear; the write is
+         *     audited as `backup:clear_retention` with the acting user.
+         */
+        delete: operations["clear_backup_retention_api_communities__community_id__servers__server_id__backups_retention_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/communities/{community_id}/servers/{server_id}/backups/statistics": {
         parameters: {
             query?: never;
@@ -3279,6 +3315,26 @@ export interface components {
              */
             uploaded_by: string;
         };
+        /**
+         * RetentionPolicyBody
+         * @description The scheduled-backup retention policy (issue #1841).
+         *
+         *     Exactly one form: keep-N (``keep_last`` >= 1, tiers omitted) or tiered
+         *     (``daily`` / ``weekly`` / ``monthly`` each >= 0, at least one > 0,
+         *     ``keep_last`` omitted). The use case validates; a violation is 422
+         *     ``invalid_retention_policy``. The same shape is the response of a
+         *     successful PUT.
+         */
+        RetentionPolicyBody: {
+            /** Daily */
+            daily?: number | null;
+            /** Keep Last */
+            keep_last?: number | null;
+            /** Monthly */
+            monthly?: number | null;
+            /** Weekly */
+            weekly?: number | null;
+        };
         /** RevokeOtherSessionsRequest */
         RevokeOtherSessionsRequest: {
             /** Keep Session Id */
@@ -3423,6 +3479,10 @@ export interface components {
         ServerResponse: {
             /** Assigned Worker Id */
             assigned_worker_id: string | null;
+            /** Backup Retention */
+            backup_retention?: {
+                [key: string]: unknown;
+            } | null;
             /** Bedrock Address */
             bedrock_address: string | null;
             /** Bedrock Port */
@@ -5305,6 +5365,72 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["BackupResponse"];
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_backup_retention_api_communities__community_id__servers__server_id__backups_retention_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RetentionPolicyBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RetentionPolicyBody"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    clear_backup_retention_api_communities__community_id__servers__server_id__backups_retention_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {

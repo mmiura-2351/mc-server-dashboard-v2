@@ -926,6 +926,29 @@ def test_delete_success_is_204() -> None:
     assert resp.status_code == 204
 
 
+def test_read_server_carries_backup_retention_policy() -> None:
+    # The scheduled-backup retention policy is readable on the server read
+    # path (issue #1841); null while unconfigured.
+    community = uuid.uuid4()
+    server = _server_entity(community_id=community)
+    server.backup_retention = {"keep_last": 3}
+    app = _app(member=True, allow=True, read=_FakeUseCase(result=server))
+    client = next(_client(app))
+    resp = client.get(f"/api/communities/{community}/servers/{uuid.uuid4()}")
+    assert resp.status_code == 200
+    assert resp.json()["backup_retention"] == {"keep_last": 3}
+
+
+def test_read_server_backup_retention_null_when_unconfigured() -> None:
+    community = uuid.uuid4()
+    server = _server_entity(community_id=community)
+    app = _app(member=True, allow=True, read=_FakeUseCase(result=server))
+    client = next(_client(app))
+    resp = client.get(f"/api/communities/{community}/servers/{uuid.uuid4()}")
+    assert resp.status_code == 200
+    assert resp.json()["backup_retention"] is None
+
+
 # --- config payload bounds (issue #94) -------------------------------------
 
 

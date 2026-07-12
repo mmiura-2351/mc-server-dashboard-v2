@@ -526,3 +526,53 @@ async def test_bedrock_port_unique_backstop_and_delete_release(
     await _set_port(second.id, 19132)
     async with ServersUnitOfWork(factory) as uow:
         assert await uow.servers.list_bedrock_ports() == {19132}
+
+
+async def test_backup_retention_round_trip_and_clear(engine: AsyncEngine) -> None:
+    # The nullable backup_retention jsonb column (issue #1841, migration 0032):
+    # NULL by default, set via the narrow update_backup_retention write, read
+    # back on the entity, and clearable back to NULL.
+    community_id = await _seed_community(engine)
+    factory = create_session_factory(engine)
+    create = CreateServer(
+        uow=ServersUnitOfWork(factory),
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=FakeFileStore(),
+        port_range=PortRange(start=25565, end=25664),
+    )
+    created = await create(
+        community_id=CommunityId(community_id),
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        config={},
+    )
+    assert created.backup_retention is None
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.servers.update_backup_retention(created.id, {"keep_last": 3})
+        await uow.commit()
+    async with ServersUnitOfWork(factory) as uow:
+        loaded = await uow.servers.get_by_id(created.id)
+    assert loaded is not None
+    assert loaded.backup_retention == {"keep_last": 3}
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.servers.update_backup_retention(
+            created.id, {"daily": 7, "weekly": 4, "monthly": 6}
+        )
+        await uow.commit()
+    async with ServersUnitOfWork(factory) as uow:
+        loaded = await uow.servers.get_by_id(created.id)
+    assert loaded is not None
+    assert loaded.backup_retention == {"daily": 7, "weekly": 4, "monthly": 6}
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.servers.update_backup_retention(created.id, None)
+        await uow.commit()
+    async with ServersUnitOfWork(factory) as uow:
+        loaded = await uow.servers.get_by_id(created.id)
+    assert loaded is not None
+    assert loaded.backup_retention is None

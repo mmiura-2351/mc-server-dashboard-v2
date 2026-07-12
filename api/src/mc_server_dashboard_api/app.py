@@ -152,7 +152,10 @@ from mc_server_dashboard_api.servers.api import ports as server_ports
 from mc_server_dashboard_api.servers.api import resource_packs as server_resource_packs
 from mc_server_dashboard_api.servers.api import schedules as server_schedules
 from mc_server_dashboard_api.servers.api import servers
-from mc_server_dashboard_api.servers.application.backups import CreateBackup
+from mc_server_dashboard_api.servers.application.backups import (
+    CreateBackup,
+    PruneScheduledBackups,
+)
 from mc_server_dashboard_api.servers.application.bedrock_sweep import (
     SweepBedrockPorts,
 )
@@ -934,6 +937,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 # A due warning stays sendable for at least one full tick, so a
                 # coarse loop cannot let a whole send window fall between wakes.
                 warning_grace=effective_warning_grace(settings.schedule.tick_seconds),
+                # Retention prune after each successful backup run (issue
+                # #1841): deletes the scheduled backups the server's
+                # ``backup_retention`` policy no longer keeps, under the same
+                # per-server lifecycle lock the backup/restore/delete paths
+                # hold. Failures are isolated inside the runner — a prune error
+                # never fails the successful backup run.
+                prune_backups=PruneScheduledBackups(
+                    uow=ServersUnitOfWork(create_session_factory(engine)),
+                    backup_store=StorageBackupStoreAdapter(storage=storage),
+                    audit=LoggingAuditRecorder(
+                        SqlAlchemyAuditWriter(
+                            create_session_factory(engine), clock=AuditSystemClock()
+                        )
+                    ),
+                    clock=ServersSystemClock(),
+                    lifecycle_lock=PgLifecycleLock(engine=engine),
+                ),
             )
             schedule_task = asyncio.create_task(
                 run_schedule_loop(

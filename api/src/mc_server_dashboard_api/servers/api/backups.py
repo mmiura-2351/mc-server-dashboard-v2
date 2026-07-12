@@ -31,6 +31,7 @@ from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
 from mc_server_dashboard_api.community.domain.value_objects import AuthUser, Permission
 from mc_server_dashboard_api.dependencies import (
     get_audit_recorder,
+    get_clear_backup_retention,
     get_create_backup,
     get_delete_backup,
     get_download_backup,
@@ -38,6 +39,7 @@ from mc_server_dashboard_api.dependencies import (
     get_list_backups,
     get_restore_backup,
     get_server_backup_statistics,
+    get_set_backup_retention,
     get_upload_backup,
     require_permission,
     require_platform_admin,
@@ -45,6 +47,7 @@ from mc_server_dashboard_api.dependencies import (
 from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.servers.application.backups import (
+    ClearBackupRetention,
     CreateBackup,
     DeleteBackup,
     DownloadBackup,
@@ -53,6 +56,7 @@ from mc_server_dashboard_api.servers.application.backups import (
     ListedBackup,
     RestoreBackup,
     ServerBackupStatistics,
+    SetBackupRetention,
     UploadBackup,
 )
 from mc_server_dashboard_api.servers.application.files import MAX_UPLOAD_BYTES
@@ -62,6 +66,7 @@ from mc_server_dashboard_api.servers.domain.backup import (
     BackupSource,
     BackupStatistics,
 )
+from mc_server_dashboard_api.servers.domain.backup_retention import RetentionPolicy
 from mc_server_dashboard_api.servers.domain.control_plane import (
     WorkerUnavailableError,
 )
@@ -72,6 +77,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     CommandDispatchError,
     FileTooLargeError,
     InvalidBackupArchiveError,
+    InvalidRetentionPolicyError,
     ServerBusyError,
     ServerNotFoundError,
     ServerNotStoppedError,
@@ -295,6 +301,129 @@ async def list_backups(
     except ServerNotFoundError as exc:
         raise _not_found() from exc
     return BackupListResponse(backups=[BackupResponse.from_listed(b) for b in backups])
+
+
+class RetentionPolicyBody(BaseModel):
+    """The scheduled-backup retention policy (issue #1841).
+
+    Exactly one form: keep-N (``keep_last`` >= 1, tiers omitted) or tiered
+    (``daily`` / ``weekly`` / ``monthly`` each >= 0, at least one > 0,
+    ``keep_last`` omitted). The use case validates; a violation is 422
+    ``invalid_retention_policy``. The same shape is the response of a
+    successful PUT.
+    """
+
+    keep_last: int | None = None
+    daily: int | None = None
+    weekly: int | None = None
+    monthly: int | None = None
+
+    @classmethod
+    def from_policy(cls, policy: RetentionPolicy) -> "RetentionPolicyBody":
+        if policy.keep_last is not None:
+            return cls(keep_last=policy.keep_last)
+        return cls(daily=policy.daily, weekly=policy.weekly, monthly=policy.monthly)
+
+
+# NOTE: the retention routes are registered BEFORE the ``/{backup_id}`` routes
+# so the literal ``retention`` segment is never captured by the UUID path
+# parameter (FastAPI matches in registration order).
+
+
+@router.put("/communities/{community_id}/servers/{server_id}/backups/retention")
+async def set_backup_retention(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    body: RetentionPolicyBody,
+    authorized: Annotated[
+        AuthUser,
+        Depends(
+            require_permission(
+                Permission("backup:schedule"),
+                resource_type=_SERVER_RESOURCE_TYPE,
+                resource_id_param="server_id",
+            )
+        ),
+    ],
+    use_case: Annotated[SetBackupRetention, Depends(get_set_backup_retention)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+) -> RetentionPolicyBody:
+    """Set the scheduled-backup retention policy (backup:schedule, issue #1841).
+
+    The policy is `{keep_last}` XOR `{daily, weekly, monthly}`; it applies only
+    to `source=scheduled` backups — manual/uploaded rows are never auto-deleted.
+    Setting it prunes immediately (best-effort), and every successful scheduled
+    backup run prunes thereafter; each pruned backup is audited as
+    `backup:delete` with no actor. The write itself is audited as
+    `backup:set_retention` with the acting user, so the causal actor behind
+    those actor-less prune rows stays recoverable. The policy is readable as
+    `backup_retention` on the server read. An invalid shape is 422
+    `invalid_retention_policy`.
+    """
+
+    try:
+        policy = await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+            keep_last=body.keep_last,
+            daily=body.daily,
+            weekly=body.weekly,
+            monthly=body.monthly,
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    except InvalidRetentionPolicyError as exc:
+        raise _unprocessable("invalid_retention_policy") from exc
+    await _record(
+        recorder,
+        ops.BACKUP_SET_RETENTION,
+        authorized,
+        community_id,
+        server_id,
+        target_type=ops.TARGET_SERVER,
+    )
+    return RetentionPolicyBody.from_policy(policy)
+
+
+@router.delete(
+    "/communities/{community_id}/servers/{server_id}/backups/retention",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def clear_backup_retention(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    authorized: Annotated[
+        AuthUser,
+        Depends(
+            require_permission(
+                Permission("backup:schedule"),
+                resource_type=_SERVER_RESOURCE_TYPE,
+                resource_id_param="server_id",
+            )
+        ),
+    ],
+    use_case: Annotated[ClearBackupRetention, Depends(get_clear_backup_retention)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+) -> None:
+    """Clear the retention policy (backup:schedule): scheduled backups then
+    accumulate unbounded again. Nothing is pruned on clear; the write is
+    audited as `backup:clear_retention` with the acting user."""
+
+    try:
+        await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    await _record(
+        recorder,
+        ops.BACKUP_CLEAR_RETENTION,
+        authorized,
+        community_id,
+        server_id,
+        target_type=ops.TARGET_SERVER,
+    )
 
 
 @router.post(
@@ -628,9 +757,15 @@ async def _record(
     operation: str,
     authorized: AuthUser,
     community_id: uuid.UUID,
-    backup_id: uuid.UUID,
+    target_id: uuid.UUID,
+    *,
+    target_type: str = ops.TARGET_BACKUP,
 ) -> None:
-    """Record a successful backup operation (FR-AUD-1), fire-after-commit."""
+    """Record a successful backup operation (FR-AUD-1), fire-after-commit.
+
+    Most operations target the backup; the retention policy writes (issue
+    #1841) target the server the policy hangs on.
+    """
 
     await recorder.record(
         AuditEvent(
@@ -638,8 +773,8 @@ async def _record(
             outcome=Outcome.SUCCESS,
             actor_id=authorized.user_id.value,
             community_id=community_id,
-            target_type=ops.TARGET_BACKUP,
-            target_id=backup_id,
+            target_type=target_type,
+            target_id=target_id,
         )
     )
 
