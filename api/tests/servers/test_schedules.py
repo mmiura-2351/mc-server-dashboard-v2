@@ -457,6 +457,106 @@ async def test_update_switches_cadence_from_interval_to_cron() -> None:
     assert updated.next_run_at == dt.datetime(2026, 7, 12, 3, 0, tzinfo=dt.timezone.utc)
 
 
+# --- warning offset vs interval cadence (issue #1852) -----------------------
+
+
+async def test_create_rejects_warning_offset_equal_to_interval() -> None:
+    # A 10-minute interval with a 10-minute warning offset: the warning instant
+    # coincides with the previous occurrence, so it can never fire on time.
+    uow, server = _uow()
+    with pytest.raises(InvalidSchedulePayloadError):
+        await _create(uow)(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            authorize=_allow,
+            name="evening stop",
+            action=ScheduleAction.STOP,
+            interval_seconds=600,
+            warning_steps=[(10, "Stopping soon")],
+        )
+    assert uow.commits == 0
+
+
+async def test_create_rejects_warning_offset_exceeding_interval() -> None:
+    # The issue's example: a 2-minute interval with a 5-minute warning offset.
+    uow, server = _uow()
+    with pytest.raises(InvalidSchedulePayloadError):
+        await _create(uow)(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            authorize=_allow,
+            name="evening stop",
+            action=ScheduleAction.STOP,
+            interval_seconds=120,
+            warning_steps=[(5, "Stopping soon")],
+        )
+
+
+async def test_create_accepts_warning_offset_shorter_than_interval() -> None:
+    uow, server = _uow()
+    schedule = await _create(uow)(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        authorize=_allow,
+        name="evening stop",
+        action=ScheduleAction.STOP,
+        interval_seconds=600,
+        warning_steps=[(9, "Stopping in 9 minutes"), (1, "Stopping now")],
+    )
+    assert len(schedule.warning_steps) == 2
+
+
+async def test_create_cron_cadence_skips_warning_offset_check() -> None:
+    # Cron cadences have no fixed period, so the offset-vs-interval check does
+    # not apply — a two-hour offset on a cron stop schedule is accepted.
+    uow, server = _uow()
+    schedule = await _create(uow)(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        authorize=_allow,
+        name="nightly stop",
+        action=ScheduleAction.STOP,
+        cron="0 3 * * *",
+        warning_steps=[(120, "Stopping in two hours")],
+    )
+    assert len(schedule.warning_steps) == 1
+
+
+async def test_update_rejects_shrinking_interval_below_warning_offset() -> None:
+    # Existing stop schedule: 1-hour interval, 10-minute warning. Shrinking the
+    # interval to 5 minutes makes the warning unreachable -> rejected.
+    uow, server = _uow()
+    seeded = _seed_schedule(
+        uow,
+        server.id,
+        action=ScheduleAction.STOP,
+        warning_steps=(WarningStep(offset_minutes=10, message="soon"),),
+    )
+    with pytest.raises(InvalidSchedulePayloadError):
+        await _update(uow)(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            schedule_id=seeded.id,
+            authorize=_allow,
+            interval_seconds=300,
+        )
+
+
+async def test_update_rejects_warning_offset_exceeding_existing_interval() -> None:
+    # Existing stop schedule on a 1-hour interval; adding a two-hour warning
+    # offset exceeds the interval -> rejected.
+    uow, server = _uow()
+    seeded = _seed_schedule(uow, server.id, action=ScheduleAction.STOP)
+    with pytest.raises(InvalidSchedulePayloadError):
+        await _update(uow)(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            schedule_id=seeded.id,
+            authorize=_allow,
+            warning_steps=[(120, "way too early")],
+        )
+
+
 # --- read / list / delete / runs -------------------------------------------
 
 
