@@ -58,7 +58,10 @@ from mc_server_dashboard_api.audit.domain.operations import (
     TARGET_SCHEDULE,
 )
 from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
-from mc_server_dashboard_api.servers.application.backups import CreateBackup
+from mc_server_dashboard_api.servers.application.backups import (
+    CreateBackup,
+    PruneScheduledBackups,
+)
 from mc_server_dashboard_api.servers.application.lifecycle import (
     RestartServer,
     SendServerCommand,
@@ -334,6 +337,12 @@ class RunScheduleTick:
     # from the loop's tick via effective_warning_grace so a send window can
     # never fall entirely between two healthy ticks.
     warning_grace: dt.timedelta = WARNING_GRACE_FLOOR
+    # Retention prune hook (issue #1841): fires after ANY successful
+    # backup-action execution — the regular occurrence and the one-shot retry.
+    # Optional so callers without retention wiring are unaffected. Isolated: a
+    # prune failure never turns the successful backup run into a failure (owner
+    # spec), and prune emits nothing on the notification stream.
+    prune_backups: PruneScheduledBackups | None = None
     # Per-schedule pending backup-retry instant; in-memory (lost on restart).
     _backup_retry: dict[ScheduleId, dt.datetime] = field(default_factory=dict)
     # Warnings already sent this process, keyed by (schedule, occurrence, offset):
@@ -393,6 +402,7 @@ class RunScheduleTick:
         await self._advance(schedule, last_run_at=started_at)
         if schedule.action is ScheduleAction.BACKUP:
             self._reschedule_retry(schedule.id, result.outcome, finished_at)
+        await self._prune_after_backup(schedule, result)
 
     async def _run_retry(self, schedule_id: ScheduleId, now: dt.datetime) -> None:
         # One-shot: the single retry is spent up front, REGARDLESS of its outcome
@@ -412,6 +422,37 @@ class RunScheduleTick:
         # The retry records (and notifies on failure) but never moves next_run_at:
         # it is a catch-up for the failed occurrence, not a new occurrence.
         await self._record(schedule, result, started_at, finished_at)
+        await self._prune_after_backup(schedule, result)
+
+    async def _prune_after_backup(
+        self, schedule: Schedule, result: ActionResult
+    ) -> None:
+        """Prune per the retention policy after a successful backup run (#1841).
+
+        Fires only for a ``backup`` action that succeeded (never on a skip or
+        failure — nothing new was archived). Isolated: a prune error is logged
+        and swallowed so it cannot turn the successful backup run into a
+        failure, and nothing is emitted on the notification stream for prune
+        (owner spec: notifications are for run failures only). What was pruned
+        is logged and audited inside :class:`PruneScheduledBackups`.
+        """
+
+        if (
+            self.prune_backups is None
+            or schedule.action is not ScheduleAction.BACKUP
+            or result.outcome is not ScheduleRunOutcome.SUCCESS
+            or result.community_id is None
+        ):
+            return
+        try:
+            await self.prune_backups(
+                community_id=result.community_id, server_id=schedule.server_id
+            )
+        except Exception:  # noqa: BLE001 - prune must not fail the backup run
+            _LOG.exception(
+                "retention prune after schedule %s failed; continuing",
+                schedule.id.value,
+            )
 
     async def _send_warnings(self, now: dt.datetime) -> None:
         """Broadcast due player warnings for still-upcoming stop/restart runs (#1839).

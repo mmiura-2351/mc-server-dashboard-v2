@@ -15,6 +15,7 @@ import zipfile
 from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from typing import Any
 
 from mc_server_dashboard_api.servers.domain.backup import (
     Backup,
@@ -438,6 +439,15 @@ class FakeServerRepository(ServerRepository):
 
     async def update(self, server: Server) -> None:
         self.by_id[server.id] = server
+
+    async def update_backup_retention(
+        self, server_id: ServerId, retention: dict[str, Any] | None
+    ) -> None:
+        # Mirror the real adapter's narrow single-column write (issue #1841):
+        # a missing id matches no row — a harmless no-op.
+        server = self.by_id.get(server_id)
+        if server is not None:
+            server.backup_retention = retention
 
     async def update_lifecycle(
         self,

@@ -114,3 +114,9 @@ class ServerModel(Base):
     # auto-generated at create and renameable. NOT NULL; the migration backfills
     # existing rows.
     slug: Mapped[str] = mapped_column(String, nullable=False)
+    # The scheduled-backup retention policy (issue #1841): ``{"keep_last": N}``
+    # or ``{"daily": D, "weekly": W, "monthly": M}``. Nullable: NULL means no
+    # retention is configured (scheduled backups accumulate unbounded).
+    backup_retention: Mapped[dict[str, object] | None] = mapped_column(
+        JSONB, nullable=True
+    )

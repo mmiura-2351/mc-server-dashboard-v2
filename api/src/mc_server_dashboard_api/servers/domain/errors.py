@@ -318,6 +318,16 @@ class BackupNotFoundError(ServerError):
     """
 
 
+class InvalidRetentionPolicyError(ServerError):
+    """A backup retention policy failed its validation rules (issue #1841).
+
+    A policy is **either** keep-N (``keep_last >= 1``) **or** tiered
+    (``daily`` / ``weekly`` / ``monthly`` each >= 0, at least one > 0) — never
+    both, never neither. Raised on construction from API fields and on parsing
+    a persisted JSON shape. The edge maps this to 422.
+    """
+
+
 class BackupUnsettledError(ServerError):
     """A create-backup hit a server in a transitional state (Section 6.9).
 

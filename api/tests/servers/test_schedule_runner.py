@@ -25,7 +25,10 @@ from mc_server_dashboard_api.audit.domain.operations import (
 from mc_server_dashboard_api.servers.adapters.cronsim_next_run_calculator import (
     CronsimNextRunCalculator,
 )
-from mc_server_dashboard_api.servers.application.backups import CreateBackup
+from mc_server_dashboard_api.servers.application.backups import (
+    CreateBackup,
+    PruneScheduledBackups,
+)
 from mc_server_dashboard_api.servers.application.lifecycle import (
     RestartServer,
     SendServerCommand,
@@ -41,6 +44,12 @@ from mc_server_dashboard_api.servers.application.schedule_runner import (
 )
 from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
     SnapshotServer,
+)
+from mc_server_dashboard_api.servers.domain.backup import (
+    Backup,
+    BackupHealth,
+    BackupId,
+    BackupSource,
 )
 from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandOutcome,
@@ -199,6 +208,14 @@ def _env(
         history_cap=history_cap,
         backup_retry_delay=backup_retry_delay,
         warning_grace=warning_grace,
+        # The retention prune hook (issue #1841): fires after any successful
+        # backup-action execution, isolated so its failure never fails the run.
+        prune_backups=PruneScheduledBackups(
+            uow=uow,
+            backup_store=store,
+            audit=audit,
+            clock=the_clock,
+        ),
     )
     return _Env(uow, runner, notifier, audit, cp, the_clock)
 
@@ -993,3 +1010,157 @@ async def test_sent_state_prunes_entries_for_past_occurrences() -> None:
 
 def _replace_next_run(schedule: Schedule, next_run_at: dt.datetime) -> Schedule:
     return replace(schedule, next_run_at=next_run_at)
+
+
+# --- retention prune after a successful backup run (issue #1841) ------------
+
+
+def _scheduled_backup(env: _Env, server: Server, created_at: dt.datetime) -> Backup:
+    backup = Backup(
+        id=BackupId.new(),
+        server_id=server.id,
+        storage_ref=f"ref-{uuid.uuid4().hex}",
+        size_bytes=1,
+        source=BackupSource.SCHEDULED,
+        health=BackupHealth.HEALTHY,
+        created_by=None,
+        created_at=created_at,
+    )
+    env.uow.backups.seed(backup)
+    return backup
+
+
+def _scheduled_rows(env: _Env, server: Server) -> list[Backup]:
+    return [
+        b
+        for b in env.uow.backups.by_id.values()
+        if b.server_id == server.id and b.source is BackupSource.SCHEDULED
+    ]
+
+
+async def test_successful_backup_run_prunes_per_retention_policy() -> None:
+    # With keep-1 configured, the backup the due occurrence just created is
+    # kept and the pre-existing scheduled backup is pruned — while a manual
+    # backup survives untouched.
+    env = _env()
+    server = _stopped_server()
+    server.backup_retention = {"keep_last": 1}
+    env.uow.servers.seed(server)
+    old = _scheduled_backup(env, server, _NOW - dt.timedelta(days=1))
+    manual = Backup(
+        id=BackupId.new(),
+        server_id=server.id,
+        storage_ref="manual-ref",
+        size_bytes=1,
+        source=BackupSource.MANUAL,
+        health=BackupHealth.HEALTHY,
+        created_by=uuid.uuid4(),
+        created_at=_NOW - dt.timedelta(days=30),
+    )
+    env.uow.backups.seed(manual)
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    assert _runs(env, schedule) == [ScheduleRunOutcome.SUCCESS]
+    remaining = _scheduled_rows(env, server)
+    assert len(remaining) == 1
+    assert remaining[0].id != old.id  # the fresh backup survived, the old went
+    assert manual.id in env.uow.backups.by_id
+    # No notification for the prune (owner spec: run failures only).
+    assert env.notifier.notifications == []
+
+
+async def test_prune_failure_does_not_fail_the_successful_backup_run() -> None:
+    class _FailingDeleteStore(FakeBackupArchiveStore):
+        async def delete(
+            self,
+            *,
+            community_id: CommunityId,
+            server_id: ServerId,
+            storage_ref: str,
+        ) -> None:
+            raise RuntimeError("storage down")
+
+    env = _env(backup_store=_FailingDeleteStore())
+    server = _stopped_server()
+    server.backup_retention = {"keep_last": 1}
+    env.uow.servers.seed(server)
+    _scheduled_backup(env, server, _NOW - dt.timedelta(days=1))
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    # The run stays a recorded SUCCESS and nothing is notified: the prune
+    # failure is isolated (owner spec).
+    assert _runs(env, schedule) == [ScheduleRunOutcome.SUCCESS]
+    assert env.notifier.notifications == []
+    # Nothing was pruned (the archive delete failed before the row delete).
+    assert len(_scheduled_rows(env, server)) == 2
+
+
+async def test_skipped_backup_run_does_not_prune() -> None:
+    env = _env()
+    server = _server(
+        desired=DesiredState.RUNNING, observed=ObservedState.STARTING, worker=_WORKER
+    )
+    server.backup_retention = {"keep_last": 1}
+    env.uow.servers.seed(server)
+    old = _scheduled_backup(env, server, _NOW - dt.timedelta(days=1))
+    extra = _scheduled_backup(env, server, _NOW - dt.timedelta(days=2))
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    assert _runs(env, schedule) == [ScheduleRunOutcome.SKIPPED]
+    assert {old.id, extra.id} <= set(env.uow.backups.by_id)
+
+
+async def test_successful_backup_retry_also_prunes() -> None:
+    store = FakeBackupArchiveStore(missing=True)
+    env = _env(backup_store=store)
+    server = _stopped_server()
+    server.backup_retention = {"keep_last": 1}
+    env.uow.servers.seed(server)
+    old = _scheduled_backup(env, server, _NOW - dt.timedelta(days=1))
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()  # fails, arms the one-shot retry; nothing pruned
+    assert old.id in env.uow.backups.by_id
+    store._missing = False  # the retry will now succeed
+    # Isolate the retry from the interval grid (see the retry tests above).
+    env.uow.schedules.by_id[schedule.id] = _replace_next_run(
+        env.uow.schedules.by_id[schedule.id], _NOW + dt.timedelta(days=1)
+    )
+
+    env.clock.set(_NOW + dt.timedelta(minutes=30))
+    await env.runner.tick()
+
+    assert _runs(env, schedule) == [
+        ScheduleRunOutcome.FAILURE,
+        ScheduleRunOutcome.SUCCESS,
+    ]
+    # The retry's successful backup triggered the prune of the older one.
+    remaining = _scheduled_rows(env, server)
+    assert len(remaining) == 1
+    assert remaining[0].id != old.id

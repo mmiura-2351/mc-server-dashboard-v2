@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import cast
 
 from sqlalchemy import CheckConstraint, Table, UniqueConstraint
+from sqlalchemy.dialects.postgresql import JSONB
 
 from mc_server_dashboard_api.servers.adapters.models import ServerModel
 
@@ -33,6 +34,13 @@ def test_game_port_is_nullable_and_unique() -> None:
     assert _TABLE.c.game_port.nullable is True
     names = {c.name for c in _TABLE.constraints if isinstance(c, UniqueConstraint)}
     assert "uq_server_game_port" in names
+
+
+def test_backup_retention_is_nullable_jsonb() -> None:
+    # The scheduled-backup retention policy (issue #1841): nullable jsonb; NULL
+    # means no retention is configured.
+    assert _TABLE.c.backup_retention.nullable is True
+    assert isinstance(_TABLE.c.backup_retention.type, JSONB)
 
 
 def test_check_constraints_present() -> None:

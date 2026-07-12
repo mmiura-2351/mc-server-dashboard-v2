@@ -45,6 +45,9 @@ def _to_server(row: ServerModel) -> Server:
         game_port=row.game_port,
         bedrock_port=row.bedrock_port,
         slug=row.slug,
+        backup_retention=(
+            None if row.backup_retention is None else dict(row.backup_retention)
+        ),
         desired_state=DesiredState(row.desired_state),
         observed_state=ObservedState(row.observed_state),
         observed_at=row.observed_at,
@@ -75,6 +78,7 @@ class SqlAlchemyServerRepository(ServerRepository):
                 game_port=server.game_port,
                 bedrock_port=server.bedrock_port,
                 slug=server.slug,
+                backup_retention=server.backup_retention,
                 desired_state=server.desired_state.value,
                 observed_state=server.observed_state.value,
                 observed_at=server.observed_at,
@@ -155,6 +159,20 @@ class SqlAlchemyServerRepository(ServerRepository):
             # The enclosing UnitOfWork rolls the transaction back on exit.
             translate_integrity_error(exc)
             raise
+
+    async def update_backup_retention(
+        self, server_id: ServerId, retention: dict[str, Any] | None
+    ) -> None:
+        # A narrow single-column write (issue #1841): the retention policy is
+        # deliberately not part of update() so a concurrent name/config edit
+        # built from a stale entity can never clobber it. A missing id matches
+        # no row — a harmless no-op.
+        stmt = (
+            update(ServerModel)
+            .where(ServerModel.id == server_id.value)
+            .values(backup_retention=retention)
+        )
+        await self._session.execute(stmt)
 
     async def list_slugs(self) -> set[str]:
         stmt = select(ServerModel.slug).where(ServerModel.slug != "")

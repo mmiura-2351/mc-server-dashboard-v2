@@ -36,6 +36,7 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 )
 from mc_server_dashboard_api.dependencies import (
     get_audit_recorder,
+    get_clear_backup_retention,
     get_create_backup,
     get_current_user,
     get_delete_backup,
@@ -46,6 +47,7 @@ from mc_server_dashboard_api.dependencies import (
     get_permission_checker,
     get_restore_backup,
     get_server_backup_statistics,
+    get_set_backup_retention,
     get_upload_backup,
 )
 from mc_server_dashboard_api.servers.application.backups import (
@@ -59,6 +61,7 @@ from mc_server_dashboard_api.servers.domain.backup import (
     BackupSource,
     BackupStatistics,
 )
+from mc_server_dashboard_api.servers.domain.backup_retention import RetentionPolicy
 from mc_server_dashboard_api.servers.domain.control_plane import (
     WorkerUnavailableError,
 )
@@ -68,6 +71,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     BackupUnsettledError,
     FileTooLargeError,
     InvalidBackupArchiveError,
+    InvalidRetentionPolicyError,
     ServerNotFoundError,
     ServerNotStoppedError,
 )
@@ -148,6 +152,8 @@ def _app(
     upload: _FakeUseCase | None = None,
     statistics: _FakeUseCase | None = None,
     global_statistics: _FakeUseCase | None = None,
+    set_retention: _FakeUseCase | None = None,
+    clear_retention: _FakeUseCase | None = None,
     recorder: RecordingAuditRecorder | None = None,
     is_admin: bool = False,
 ) -> object:
@@ -178,6 +184,10 @@ def _app(
         app.dependency_overrides[get_global_backup_statistics] = lambda: (
             global_statistics
         )
+    if set_retention is not None:
+        app.dependency_overrides[get_set_backup_retention] = lambda: set_retention
+    if clear_retention is not None:
+        app.dependency_overrides[get_clear_backup_retention] = lambda: clear_retention
     if recorder is not None:
         app.dependency_overrides[get_audit_recorder] = lambda: recorder
     return app
@@ -583,3 +593,102 @@ def test_global_statistics_admin_returns_aggregate() -> None:
     resp = client.get("/api/backups/statistics")
     assert resp.status_code == 200
     assert resp.json()["count"] == 2
+
+
+# --- retention policy (issue #1841) -----------------------------------------
+
+
+def test_put_retention_non_member_is_404() -> None:
+    app = _app(member=False, allow=True, set_retention=_FakeUseCase())
+    client = next(_client(app))
+    resp = client.put(
+        _url(uuid.uuid4(), uuid.uuid4(), "/retention"), json={"keep_last": 3}
+    )
+    assert resp.status_code == 404
+
+
+def test_put_retention_without_permission_is_403() -> None:
+    app = _app(member=True, allow=False, set_retention=_FakeUseCase())
+    client = next(_client(app))
+    resp = client.put(
+        _url(uuid.uuid4(), uuid.uuid4(), "/retention"), json={"keep_last": 3}
+    )
+    assert resp.status_code == 403
+
+
+def test_put_retention_returns_the_saved_policy() -> None:
+    use_case = _FakeUseCase(result=RetentionPolicy.from_fields(keep_last=3))
+    app = _app(member=True, allow=True, set_retention=use_case)
+    client = next(_client(app))
+    resp = client.put(
+        _url(uuid.uuid4(), uuid.uuid4(), "/retention"), json={"keep_last": 3}
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["keep_last"] == 3
+    assert (body["daily"], body["weekly"], body["monthly"]) == (None, None, None)
+    # The raw fields are forwarded to the use case (validation lives there).
+    assert use_case.calls[0]["keep_last"] == 3
+
+
+def test_put_retention_tiered_returns_the_saved_policy() -> None:
+    use_case = _FakeUseCase(
+        result=RetentionPolicy.from_fields(daily=7, weekly=4, monthly=6)
+    )
+    app = _app(member=True, allow=True, set_retention=use_case)
+    client = next(_client(app))
+    resp = client.put(
+        _url(uuid.uuid4(), uuid.uuid4(), "/retention"),
+        json={"daily": 7, "weekly": 4, "monthly": 6},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["keep_last"] is None
+    assert (body["daily"], body["weekly"], body["monthly"]) == (7, 4, 6)
+
+
+def test_put_retention_invalid_policy_is_422() -> None:
+    use_case = _FakeUseCase(error=InvalidRetentionPolicyError("x"))
+    app = _app(member=True, allow=True, set_retention=use_case)
+    client = next(_client(app))
+    resp = client.put(
+        _url(uuid.uuid4(), uuid.uuid4(), "/retention"), json={"keep_last": 0}
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_retention_policy"
+
+
+def test_put_retention_unknown_server_is_404() -> None:
+    use_case = _FakeUseCase(error=ServerNotFoundError("x"))
+    app = _app(member=True, allow=True, set_retention=use_case)
+    client = next(_client(app))
+    resp = client.put(
+        _url(uuid.uuid4(), uuid.uuid4(), "/retention"), json={"keep_last": 3}
+    )
+    assert resp.status_code == 404
+
+
+def test_delete_retention_is_204_and_not_parsed_as_backup_id() -> None:
+    # The literal "/backups/retention" path must route to the retention clear,
+    # never be captured by the DELETE /backups/{backup_id} UUID parameter.
+    use_case = _FakeUseCase()
+    app = _app(member=True, allow=True, clear_retention=use_case)
+    client = next(_client(app))
+    resp = client.delete(_url(uuid.uuid4(), uuid.uuid4(), "/retention"))
+    assert resp.status_code == 204
+    assert len(use_case.calls) == 1
+
+
+def test_delete_retention_without_permission_is_403() -> None:
+    app = _app(member=True, allow=False, clear_retention=_FakeUseCase())
+    client = next(_client(app))
+    resp = client.delete(_url(uuid.uuid4(), uuid.uuid4(), "/retention"))
+    assert resp.status_code == 403
+
+
+def test_delete_retention_unknown_server_is_404() -> None:
+    use_case = _FakeUseCase(error=ServerNotFoundError("x"))
+    app = _app(member=True, allow=True, clear_retention=use_case)
+    client = next(_client(app))
+    resp = client.delete(_url(uuid.uuid4(), uuid.uuid4(), "/retention"))
+    assert resp.status_code == 404

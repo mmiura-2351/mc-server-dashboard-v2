@@ -214,13 +214,16 @@ from mc_server_dashboard_api.servers.adapters.version_validator import (
     CatalogVersionValidator,
 )
 from mc_server_dashboard_api.servers.application.backups import (
+    ClearBackupRetention,
     CreateBackup,
     DeleteBackup,
     DownloadBackup,
     GlobalBackupStatistics,
     ListBackups,
+    PruneScheduledBackups,
     RestoreBackup,
     ServerBackupStatistics,
+    SetBackupRetention,
     UploadBackup,
 )
 from mc_server_dashboard_api.servers.application.catalog import (
@@ -2085,6 +2088,48 @@ def get_delete_backup(
         backup_store=backup_store,
         lifecycle_lock=get_lifecycle_lock(request),
     )
+
+
+def _prune_scheduled_backups(
+    request: Request, backup_store: BackupArchiveStore
+) -> PruneScheduledBackups:
+    """Assemble the :class:`PruneScheduledBackups` use case (issue #1841).
+
+    Not a route dependency itself: the policy-write trigger
+    (:func:`get_set_backup_retention`) embeds it, and the runner trigger is
+    wired in the app factory. Audits each pruned backup post-commit
+    (``backup:delete``, actor ``None``) and holds the per-server lifecycle
+    lock, so a candidate can never be deleted mid-restore.
+    """
+
+    session_factory = create_session_factory(get_engine(request))
+    return PruneScheduledBackups(
+        uow=ServersUnitOfWork(session_factory),
+        backup_store=backup_store,
+        audit=get_audit_recorder(request),
+        clock=ServersSystemClock(),
+        lifecycle_lock=get_lifecycle_lock(request),
+    )
+
+
+def get_set_backup_retention(
+    request: Request,
+    backup_store: Annotated[BackupArchiveStore, Depends(get_servers_backup_store)],
+) -> SetBackupRetention:
+    """Assemble the :class:`SetBackupRetention` use case (backup:schedule, #1841)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return SetBackupRetention(
+        uow=ServersUnitOfWork(session_factory),
+        prune=_prune_scheduled_backups(request, backup_store),
+    )
+
+
+def get_clear_backup_retention(request: Request) -> ClearBackupRetention:
+    """Assemble the :class:`ClearBackupRetention` use case (backup:schedule, #1841)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ClearBackupRetention(uow=ServersUnitOfWork(session_factory))
 
 
 def get_download_backup(
