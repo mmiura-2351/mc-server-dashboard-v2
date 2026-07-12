@@ -265,6 +265,124 @@ async def test_runs_round_trip_and_list_newest_first(engine: AsyncEngine) -> Non
     assert listed == [newer, older]
 
 
+async def test_list_due_returns_only_enabled_past_due(engine: AsyncEngine) -> None:
+    server_id = await _seed_server(engine)
+    factory = create_session_factory(engine)
+    due = _schedule(
+        server_id, name="due", enabled=True, next_run_at=_NOW - dt.timedelta(minutes=1)
+    )
+    future = _schedule(
+        server_id,
+        name="future",
+        enabled=True,
+        next_run_at=_NOW + dt.timedelta(minutes=1),
+    )
+    disabled = _schedule(server_id, name="disabled", enabled=False, next_run_at=None)
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.schedules.add(due)
+        await uow.schedules.add(future)
+        await uow.schedules.add(disabled)
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        listed = await uow.schedules.list_due(_NOW)
+    # Only the enabled, at-or-before-now row; the future and disabled ones excluded.
+    assert [s.id for s in listed] == [due.id]
+
+    # A row exactly at ``now`` is due (the ``<= now`` boundary).
+    async with ServersUnitOfWork(factory) as uow:
+        boundary = await uow.schedules.list_due(future.next_run_at)  # type: ignore[arg-type]
+    assert {s.id for s in boundary} == {due.id, future.id}
+
+
+async def test_advance_run_state_updates_only_bookkeeping(engine: AsyncEngine) -> None:
+    server_id = await _seed_server(engine)
+    factory = create_session_factory(engine)
+    schedule = _schedule(
+        server_id, enabled=True, next_run_at=_NOW - dt.timedelta(minutes=1)
+    )
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.schedules.add(schedule)
+        await uow.commit()
+
+    next_run = _NOW + dt.timedelta(hours=1)
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.schedules.advance_run_state(
+            schedule.id, next_run_at=next_run, last_run_at=_NOW
+        )
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        fetched = await uow.schedules.get_by_id(schedule.id)
+    assert fetched is not None
+    assert fetched.next_run_at == next_run
+    assert fetched.last_run_at == _NOW
+    # Everything else is untouched (only the bookkeeping columns are written).
+    assert fetched.name == schedule.name
+    assert fetched.enabled is True
+    assert fetched.updated_at == schedule.updated_at
+
+
+async def test_advance_run_state_skips_a_disabled_schedule(
+    engine: AsyncEngine,
+) -> None:
+    server_id = await _seed_server(engine)
+    factory = create_session_factory(engine)
+    schedule = _schedule(server_id, enabled=False, next_run_at=None)
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.schedules.add(schedule)
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.schedules.advance_run_state(
+            schedule.id, next_run_at=_NOW + dt.timedelta(hours=1), last_run_at=_NOW
+        )
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        fetched = await uow.schedules.get_by_id(schedule.id)
+    # The guarded UPDATE matched no row: the disabled schedule is not resurrected.
+    assert fetched is not None
+    assert fetched.enabled is False
+    assert fetched.next_run_at is None
+    assert fetched.last_run_at is None
+
+
+async def test_prune_keeps_only_the_newest_runs(engine: AsyncEngine) -> None:
+    server_id = await _seed_server(engine)
+    factory = create_session_factory(engine)
+    schedule = _schedule(server_id)
+    runs = [
+        ScheduleRun(
+            id=ScheduleRunId.new(),
+            schedule_id=schedule.id,
+            started_at=_NOW + dt.timedelta(minutes=i),
+            finished_at=_NOW + dt.timedelta(minutes=i, seconds=1),
+            outcome=ScheduleRunOutcome.SUCCESS,
+            detail=None,
+        )
+        for i in range(5)
+    ]
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.schedules.add(schedule)
+        for run in runs:
+            await uow.schedule_runs.add(run)
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.schedule_runs.prune_for_schedule(schedule.id, keep=2)
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        remaining = await uow.schedule_runs.list_for_schedule(schedule.id)
+    # The two newest survive (started_at descending); the three oldest are gone.
+    assert [r.id for r in remaining] == [runs[4].id, runs[3].id]
+
+
 async def test_deleting_server_cascades_to_schedules_and_runs(
     engine: AsyncEngine,
 ) -> None:

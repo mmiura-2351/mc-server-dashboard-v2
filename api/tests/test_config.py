@@ -268,6 +268,10 @@ def test_token_ttl_must_be_positive(
         ("snapshot", "default_interval_seconds", 0),
         ("snapshot", "min_interval_seconds", 0),
         ("backup", "schedule_tick_seconds", 0),
+        ("schedule", "tick_seconds", 0),
+        # Above the runner's fixed 300 s late-run grace every non-backup
+        # occurrence would be judged stale before the loop ever saw it (#1838).
+        ("schedule", "tick_seconds", 301),
         ("reconciler", "interval_seconds", 0),
         ("reconciler", "grace_seconds", 0),
         ("reconciler", "held_start_grace_seconds", 0),

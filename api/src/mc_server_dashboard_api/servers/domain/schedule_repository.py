@@ -9,6 +9,7 @@ raising, so callers decide policy (mirroring :class:`BackupRepository`).
 from __future__ import annotations
 
 import abc
+import datetime as dt
 
 from mc_server_dashboard_api.servers.domain.schedule import (
     Schedule,
@@ -30,6 +31,16 @@ class ScheduleRepository(abc.ABC):
         """Return the schedule with ``schedule_id``, or ``None`` if absent."""
 
     @abc.abstractmethod
+    async def list_due(self, now: dt.datetime) -> list[Schedule]:
+        """Return enabled schedules whose ``next_run_at`` is at or before ``now``.
+
+        The runner's due poll (issue #1838), backed by the partial index
+        ``ix_schedule_next_run_at`` on ``(next_run_at) WHERE enabled``. A disabled
+        schedule carries no ``next_run_at`` and is never returned. Ordered by
+        ``next_run_at`` (id tie-break) so the poll is deterministic.
+        """
+
+    @abc.abstractmethod
     async def list_for_server(self, server_id: ServerId) -> list[Schedule]:
         """Return a server's schedules ordered by name.
 
@@ -45,6 +56,26 @@ class ScheduleRepository(abc.ABC):
         A staged UPDATE within the enclosing unit of work; a missing id matches
         no row — a harmless no-op (the caller has already loaded the row).
         ``id`` / ``server_id`` / ``created_at`` / ``created_by`` never change.
+        """
+
+    @abc.abstractmethod
+    async def advance_run_state(
+        self,
+        schedule_id: ScheduleId,
+        *,
+        next_run_at: dt.datetime,
+        last_run_at: dt.datetime | None,
+    ) -> None:
+        """Persist only the runner's bookkeeping columns (issue #1838).
+
+        A staged UPDATE of ``next_run_at`` / ``last_run_at`` guarded ``WHERE
+        enabled``: the runner works on a row read before a possibly long
+        execution, so writing the whole entity back would clobber a concurrent
+        CRUD edit — and re-setting ``next_run_at`` on a concurrently *disabled*
+        schedule would resurrect it (a disabled row keeps ``next_run_at`` NULL,
+        the domain invariant). Zero rows affected means the schedule was
+        disabled or deleted concurrently; the advance is silently skipped.
+        Never writes name/action/payload/cadence/enabled.
         """
 
     @abc.abstractmethod
@@ -66,4 +97,14 @@ class ScheduleRunRepository(abc.ABC):
         Backed by the ``(schedule_id, started_at)`` index; the history cap
         (50 per schedule, epic #649) is the runner's pruning concern, not a
         query limit here.
+        """
+
+    @abc.abstractmethod
+    async def prune_for_schedule(self, schedule_id: ScheduleId, *, keep: int) -> None:
+        """Delete all but the newest ``keep`` runs of ``schedule_id``.
+
+        The runner's history cap (issue #1838): run after each insert so a
+        schedule's run history stays bounded. Newest is by ``started_at`` (id
+        tie-break), matching :meth:`list_for_schedule`. A no-op when the schedule
+        has at most ``keep`` runs.
         """

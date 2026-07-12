@@ -404,6 +404,19 @@ missing, per the secret-blank rule above).
 | `relay.bedrock_tunnel_port` | `25675` | | The relay container's published Bedrock tunnel (QUIC) **UDP** listener host port (epic #1540). When the Bedrock gate is on, the allocator excludes it from the assignable Bedrock window like `relay.game_port` / `relay.tunnel_port`. Must be 1..65535. |
 | `relay.session_retention_days` | `90` | | `game_session` prune window in days (RELAY.md Section 8; consumed by issue #957). Must be positive. |
 
+### 5.14 General scheduler
+
+The API runs the general-scheduler runner (epic #649, issue #1838), which polls
+the `schedule` table for due per-server actions (console command / start / stop /
+restart / backup) and dispatches them through the existing lifecycle, command,
+and backup use cases. Like the snapshot/backup loops it is gated on the control
+plane (`control.enabled`) — a scheduled action needs a Worker channel. This only
+tunes the poll cadence; the schedules themselves are per-server rows.
+
+| Key | Default | Secret | Meaning |
+|---|---|---|---|
+| `schedule.tick_seconds` | `20` | | Loop resolution of the scheduler runner: how often it wakes to poll `next_run_at` over enabled schedules. Finer than the backup loop's cadence since a schedule can fire as often as every minute (the domain interval floor), and it must stay well under the runner's fixed 300 s late-run grace so an on-time occurrence is never judged stale. Must be positive and at most 300 (the grace itself): a coarser tick would render every non-backup occurrence perpetually stale, never executed. |
+
 ---
 
 ## 6. Worker configuration

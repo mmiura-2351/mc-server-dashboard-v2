@@ -10,6 +10,7 @@ serialize to ``{"command": ...}`` / ``{"warnings": [...]}`` / ``{}``.
 
 from __future__ import annotations
 
+import datetime as dt
 from typing import Any
 
 from sqlalchemy import delete, select, update
@@ -109,6 +110,18 @@ class SqlAlchemyScheduleRepository(ScheduleRepository):
         row = await self._session.get(ScheduleModel, schedule_id.value)
         return _to_schedule(row) if row is not None else None
 
+    async def list_due(self, now: dt.datetime) -> list[Schedule]:
+        # The runner's due poll over the partial index ``ix_schedule_next_run_at``
+        # (enabled rows only); a NULL next_run_at (a disabled schedule) fails the
+        # ``<= now`` predicate and is excluded.
+        stmt = (
+            select(ScheduleModel)
+            .where(ScheduleModel.enabled, ScheduleModel.next_run_at <= now)
+            .order_by(ScheduleModel.next_run_at, ScheduleModel.id)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_schedule(row) for row in rows]
+
     async def list_for_server(self, server_id: ServerId) -> list[Schedule]:
         stmt = (
             select(ScheduleModel)
@@ -147,6 +160,23 @@ class SqlAlchemyScheduleRepository(ScheduleRepository):
             # raw 500. The enclosing UnitOfWork rolls the transaction back.
             translate_integrity_error(exc)
             raise
+
+    async def advance_run_state(
+        self,
+        schedule_id: ScheduleId,
+        *,
+        next_run_at: dt.datetime,
+        last_run_at: dt.datetime | None,
+    ) -> None:
+        # Only the runner's bookkeeping columns, guarded ``WHERE enabled`` so a
+        # concurrently disabled/deleted schedule matches no row (the Port's
+        # silent-skip contract) and a concurrent CRUD edit is never clobbered.
+        stmt = (
+            update(ScheduleModel)
+            .where(ScheduleModel.id == schedule_id.value, ScheduleModel.enabled)
+            .values(next_run_at=next_run_at, last_run_at=last_run_at)
+        )
+        await self._session.execute(stmt)
 
     async def delete(self, schedule_id: ScheduleId) -> None:
         stmt = delete(ScheduleModel).where(ScheduleModel.id == schedule_id.value)
@@ -190,3 +220,19 @@ class SqlAlchemyScheduleRunRepository(ScheduleRunRepository):
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_run(row) for row in rows]
+
+    async def prune_for_schedule(self, schedule_id: ScheduleId, *, keep: int) -> None:
+        # Select the ids past the newest ``keep`` (same newest-first order as the
+        # history listing) and delete them. A two-step delete keeps the statement
+        # portable rather than relying on a DELETE ... USING a LIMIT subquery.
+        stale = (
+            select(ScheduleRunModel.id)
+            .where(ScheduleRunModel.schedule_id == schedule_id.value)
+            .order_by(ScheduleRunModel.started_at.desc(), ScheduleRunModel.id.desc())
+            .offset(keep)
+        )
+        ids = (await self._session.execute(stale)).scalars().all()
+        if ids:
+            await self._session.execute(
+                delete(ScheduleRunModel).where(ScheduleRunModel.id.in_(ids))
+            )
