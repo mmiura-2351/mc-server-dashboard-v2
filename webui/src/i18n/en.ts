@@ -574,7 +574,7 @@ export const en = {
   "schedules.error.nameExists": "A schedule with that name already exists.",
   "schedules.error.invalidCommand": "Enter a command line to run.",
   "schedules.error.invalidWarnings":
-    "Warnings need distinct offsets of 1–120 minutes with a message.",
+    "Warnings need distinct offsets of 1–120 minutes (shorter than the interval) with a message.",
   "schedules.error.generic": "Something went wrong. Please try again.",
   "schedules.deleteDialog.title": "Delete schedule",
   "schedules.deleteDialog.body":

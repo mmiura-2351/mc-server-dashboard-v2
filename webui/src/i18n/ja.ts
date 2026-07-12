@@ -576,7 +576,7 @@ export const ja: Record<TranslationKey, string> = {
   "schedules.error.nameExists": "その名前のスケジュールは既に存在します。",
   "schedules.error.invalidCommand": "実行するコマンドを入力してください。",
   "schedules.error.invalidWarnings":
-    "警告は1〜120分の重複しないオフセットとメッセージが必要です。",
+    "警告は1〜120分（間隔より短い）の重複しないオフセットとメッセージが必要です。",
   "schedules.error.generic": "問題が発生しました。もう一度お試しください。",
   "schedules.deleteDialog.title": "スケジュールを削除",
   "schedules.deleteDialog.body":
