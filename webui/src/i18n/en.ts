@@ -396,6 +396,8 @@ export const en = {
     "That game port is outside the allowed range.",
   "serverDetail.error.invalidSnapshotInterval":
     "snapshot_interval_seconds must be a whole number of seconds at or above the configured floor.",
+  "serverDetail.error.retiredConfigKey":
+    "backup_interval_hours is no longer supported — configure scheduled backups under Schedules.",
   "serverDetail.error.invalidMemoryLimit":
     "The memory limit must be a whole number between 512 and 1048576 MiB.",
   "serverDetail.error.invalidCpuAllocation":

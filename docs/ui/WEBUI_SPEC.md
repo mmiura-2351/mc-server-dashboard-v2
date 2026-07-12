@@ -370,7 +370,7 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   upload backup (file picker).
 - Schedule: the inline "every N hours" cadence field is **retired** (issue
   #1840). Scheduled backups are now a first-class `backup` schedule on the
-  general scheduler (the `…/{sid}/schedules` surface, 7.x); the Backups tab only
+  general scheduler (the `…/{sid}/schedules` surface); the Backups tab only
   shows a short note pointing `backup:schedule` holders there. No PATCH of a
   `backup_interval_hours` key remains (the API 422s it as `retired_config_key`).
 

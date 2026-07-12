@@ -5,7 +5,9 @@ skipped otherwise (TESTING.md Section 5). Proves 0031 converts each server's
 ``backup_interval_hours`` config key into an equivalent enabled ``backup``
 schedule (setting ``next_run_at`` within roughly an hour so the runner picks it
 up), strips the key, is collision-safe against a schedule the operator already
-named ``"Scheduled backup"``, and reverses cleanly on downgrade.
+named ``"Scheduled backup"``, strips a historically-invalid value (zero /
+non-integer — the legacy CREATE path never validated the key) WITHOUT creating
+a schedule, and reverses cleanly on downgrade.
 """
 
 from __future__ import annotations
@@ -84,6 +86,10 @@ async def test_upgrade_converts_key_into_schedule_then_downgrade_restores() -> N
         # Server B carries it AND already has a schedule named "Scheduled backup"
         # (a non-backup one, so downgrade leaves it alone) — the collision case.
         # Server C carries an ordinary override and must be untouched.
+        # Servers D and E carry historically-invalid values the legacy CREATE
+        # path never validated (a zero and a non-integer): the migration must
+        # strip the key WITHOUT creating a schedule (a converted invalid value
+        # would fail domain hydration on every runner tick).
         async with engine.begin() as conn:
             server_a = await _seed_server(
                 conn, name="alpha", config='{"backup_interval_hours": 6}'
@@ -92,6 +98,12 @@ async def test_upgrade_converts_key_into_schedule_then_downgrade_restores() -> N
                 conn, name="bravo", config='{"backup_interval_hours": 3, "motd": "hi"}'
             )
             server_c = await _seed_server(conn, name="charlie", config='{"motd": "hi"}')
+            server_d = await _seed_server(
+                conn, name="delta", config='{"backup_interval_hours": 0, "motd": "x"}'
+            )
+            server_e = await _seed_server(
+                conn, name="echo", config='{"backup_interval_hours": 1.5, "motd": "y"}'
+            )
             await conn.execute(
                 text(
                     "INSERT INTO schedule (id, server_id, name, action, payload, "
@@ -168,6 +180,22 @@ async def test_upgrade_converts_key_into_schedule_then_downgrade_restores() -> N
                 )
             ).scalar_one()
             assert count_c == 0
+
+            # Servers D and E: the historically-invalid values (0 / non-integer)
+            # are stripped WITHOUT creating a schedule; the rest of the config
+            # survives.
+            for server_id, rest in (
+                (server_d, {"motd": "x"}),
+                (server_e, {"motd": "y"}),
+            ):
+                assert await _config(conn, server_id) == rest
+                count = (
+                    await conn.execute(
+                        text("SELECT count(*) FROM schedule WHERE server_id = :sid"),
+                        {"sid": server_id},
+                    )
+                ).scalar_one()
+                assert count == 0
     finally:
         await engine.dispose()
 
@@ -181,6 +209,9 @@ async def test_upgrade_converts_key_into_schedule_then_downgrade_restores() -> N
             assert (await _config(conn, server_a))["backup_interval_hours"] == 6
             assert (await _config(conn, server_b))["backup_interval_hours"] == 3
             assert await _config(conn, server_c) == {"motd": "hi"}
+            # The stripped invalid values are NOT resurrected (documented lossy).
+            assert await _config(conn, server_d) == {"motd": "x"}
+            assert await _config(conn, server_e) == {"motd": "y"}
             remaining = {
                 r.name: r.action
                 for r in await conn.execute(

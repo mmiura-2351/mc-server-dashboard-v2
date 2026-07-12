@@ -286,6 +286,11 @@ now a first-class `backup` schedule on the general scheduler, so its
 `schedule.tick_seconds` (Section 5.14) is the only cadence knob. This section has
 no keys.
 
+**Migration note:** remove any `[backup]` section (`backup.schedule_tick_seconds`)
+from the config file when upgrading — an unknown TOML key fails the load
+(Section 2 fail-fast) and the API will not boot. A stale `MCD_API_BACKUP__*`
+environment variable is silently ignored.
+
 ### 5.6 Divergence reconciler
 
 The API runs a background reconciler that re-dispatches durable-but-unsent

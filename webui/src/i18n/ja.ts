@@ -395,6 +395,8 @@ export const ja: Record<TranslationKey, string> = {
     "そのゲームポートは許可された範囲外です。",
   "serverDetail.error.invalidSnapshotInterval":
     "snapshot_interval_seconds は、設定された下限以上の整数の秒数である必要があります。",
+  "serverDetail.error.retiredConfigKey":
+    "backup_interval_hours は廃止されました。定期バックアップは「スケジュール」で設定してください。",
   "serverDetail.error.invalidMemoryLimit":
     "メモリ上限は 512〜1048576 MiB の整数である必要があります。",
   "serverDetail.error.invalidCpuAllocation":
