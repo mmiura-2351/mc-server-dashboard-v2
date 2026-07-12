@@ -904,6 +904,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             schedule_runner = RunScheduleTick(
                 uow=ServersUnitOfWork(create_session_factory(engine)),
+                # Player warnings broadcast a fixed ``say <message>`` before a
+                # stop/restart occurrence — its own SendServerCommand (fresh UoW),
+                # kept out of the trigger-agnostic ExecuteScheduleAction (#653).
+                send_command=SendServerCommand(
+                    uow=ServersUnitOfWork(create_session_factory(engine)),
+                    control_plane=schedule_control_plane,
+                ),
                 execute=ExecuteScheduleAction(
                     uow=ServersUnitOfWork(create_session_factory(engine)),
                     send_command=SendServerCommand(

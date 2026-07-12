@@ -97,6 +97,7 @@ from mc_server_dashboard_api.servers.domain.resource_pack_store import (
 )
 from mc_server_dashboard_api.servers.domain.schedule import (
     Schedule,
+    ScheduleAction,
     ScheduleId,
     ScheduleRun,
 )
@@ -917,6 +918,21 @@ class FakeScheduleRepository(ScheduleRepository):
         ]
         return sorted(due, key=lambda s: (s.next_run_at or now, s.id.value))
 
+    async def list_warning_candidates(
+        self, now: dt.datetime, until: dt.datetime
+    ) -> list[Schedule]:
+        # Mirror the adapter's look-ahead: enabled stop/restart rows whose
+        # occurrence is still ahead but within the max warning offset.
+        hits = [
+            self._copy(s)
+            for s in self.by_id.values()
+            if s.enabled
+            and s.action in (ScheduleAction.STOP, ScheduleAction.RESTART)
+            and s.next_run_at is not None
+            and now < s.next_run_at <= until
+        ]
+        return sorted(hits, key=lambda s: (s.next_run_at or until, s.id.value))
+
     async def list_for_server(self, server_id: ServerId) -> list[Schedule]:
         return sorted(
             (self._copy(s) for s in self.by_id.values() if s.server_id == server_id),
@@ -1092,6 +1108,9 @@ class FakeControlPlane(ControlPlane):
         # is to hydrate.
         self._held = held or {}
         self.dispatched: list[tuple[str, WorkerId, ServerId]] = []
+        # Command lines forwarded through command() — (server, line) — so a test
+        # can assert the exact broadcast a scheduled warning sends (issue #1839).
+        self.commands: list[tuple[ServerId, str]] = []
         self.incremented: list[WorkerId] = []
         self.decremented: list[WorkerId] = []
         # The (worker, server) placements reserved by place() and the reservations
@@ -1189,6 +1208,7 @@ class FakeControlPlane(ControlPlane):
     async def command(
         self, *, worker_id: WorkerId, server_id: ServerId, line: str
     ) -> CommandOutcome:
+        self.commands.append((server_id, line))
         return await self._record("command", worker_id, server_id)
 
     async def hydrate(

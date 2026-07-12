@@ -122,6 +122,28 @@ class SqlAlchemyScheduleRepository(ScheduleRepository):
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_schedule(row) for row in rows]
 
+    async def list_warning_candidates(
+        self, now: dt.datetime, until: dt.datetime
+    ) -> list[Schedule]:
+        # The warning look-ahead over the same partial index as list_due: enabled
+        # stop/restart rows whose occurrence is still ahead but within the maximum
+        # warning offset (now < next_run_at <= until). Only stop/restart carry
+        # warnings (the entity invariant), so other actions are excluded here.
+        stmt = (
+            select(ScheduleModel)
+            .where(
+                ScheduleModel.enabled,
+                ScheduleModel.action.in_(
+                    (ScheduleAction.STOP.value, ScheduleAction.RESTART.value)
+                ),
+                ScheduleModel.next_run_at > now,
+                ScheduleModel.next_run_at <= until,
+            )
+            .order_by(ScheduleModel.next_run_at, ScheduleModel.id)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_schedule(row) for row in rows]
+
     async def list_for_server(self, server_id: ServerId) -> list[Schedule]:
         stmt = (
             select(ScheduleModel)
