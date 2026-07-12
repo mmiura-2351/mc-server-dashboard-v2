@@ -29,6 +29,7 @@ import { ServerFilesTab } from "./ServerFilesTab.tsx";
 import { ServerPlayersTab } from "./ServerPlayersTab.tsx";
 import { ServerPluginsTab } from "./ServerPluginsTab.tsx";
 import { ServerResourcePackSection } from "./ServerResourcePackSection.tsx";
+import { ServerSchedulesTab } from "./ServerSchedulesTab.tsx";
 import { serverKey } from "./serverKey.ts";
 import {
   actionApplies,
@@ -56,6 +57,7 @@ const TABS = [
   "console",
   "files",
   "backups",
+  "schedules",
   "plugins",
   "players",
   "settings",
@@ -67,6 +69,7 @@ const TAB_LABEL: Record<Tab, TranslationKey> = {
   console: "serverDetail.tab.console",
   files: "serverDetail.tab.files",
   backups: "serverDetail.tab.backups",
+  schedules: "serverDetail.tab.schedules",
   plugins: "serverDetail.tab.plugins",
   players: "serverDetail.tab.players",
   settings: "serverDetail.tab.settings",
@@ -213,6 +216,19 @@ function Loaded({
           aria-labelledby={tabId("sd", "backups")}
         >
           <ServerBackupsTab
+            server={server}
+            communityId={communityId}
+            can={can}
+          />
+        </div>
+      )}
+      {tab === "schedules" && (
+        <div
+          role="tabpanel"
+          id={panelId("sd", "schedules")}
+          aria-labelledby={tabId("sd", "schedules")}
+        >
+          <ServerSchedulesTab
             server={server}
             communityId={communityId}
             can={can}

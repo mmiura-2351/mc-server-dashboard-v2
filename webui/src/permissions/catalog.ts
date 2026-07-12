@@ -1,7 +1,7 @@
 /**
  * Permission code catalog (WEBUI_SPEC.md 2.2).
  *
- * The community axis is the 33-code set assignable to roles / grants. The
+ * The community axis is the 35-code set assignable to roles / grants. The
  * platform axis is flag-driven (not assignable to roles) but is still part of
  * the caller's effective set the API returns, so it is included in the union
  * so `can()` can be typed against every code the UI may check.
@@ -17,9 +17,9 @@
 /**
  * Community-axis codes grouped by family, in the order the role matrix renders
  * them (WEBUI_SPEC.md 2.2 — the 9 families, 30 codes, plus the plugin family
- * with plugin:read/manage, and the session family with session:read). This is
- * the single source of truth: the
- * `CommunityPermissionCode` union is derived from it.
+ * with plugin:read/manage, the session family with session:read, and the
+ * schedule family with schedule:read/manage). This is the single source of
+ * truth: the `CommunityPermissionCode` union is derived from it.
  */
 export const COMMUNITY_PERMISSION_FAMILIES = [
   {
@@ -48,6 +48,10 @@ export const COMMUNITY_PERMISSION_FAMILIES = [
       "backup:delete",
       "backup:schedule",
     ],
+  },
+  {
+    family: "schedule",
+    codes: ["schedule:read", "schedule:manage"],
   },
   {
     family: "member",
@@ -83,7 +87,7 @@ export const COMMUNITY_PERMISSION_FAMILIES = [
   },
 ] as const;
 
-/** Community-axis codes (33) — the role/grant editor's source of truth. */
+/** Community-axis codes (35) — the role/grant editor's source of truth. */
 export type CommunityPermissionCode =
   (typeof COMMUNITY_PERMISSION_FAMILIES)[number]["codes"][number];
 
@@ -121,6 +125,8 @@ export const COMMUNITY_PERMISSION_CODES: readonly CommunityPermissionCode[] = [
   "backup:restore",
   "backup:delete",
   "backup:schedule",
+  "schedule:read",
+  "schedule:manage",
   "member:read",
   "member:add",
   "member:remove",
