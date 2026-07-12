@@ -81,10 +81,10 @@ Complete endpoint list as of `main` (dumped from the FastAPI OpenAPI schema).
 | POST / DELETE | `/communities/{cid}/members/{uid}/roles[/{rid}]` | Assign / unassign a role. |
 | GET / POST | `/communities/{cid}/roles` | List / create custom role (name + permission codes). |
 | GET / PATCH / DELETE | `/communities/{cid}/roles/{rid}` | Read / update / delete. Preset `Owner` role is `is_preset`. |
-| GET / POST | `/communities/{cid}/grants` | List (`?user_id=` filter) / create per-resource grant. `resource_type` = `server` only; permission families `server:*`, `file:*`, `backup:*`, `plugin:*`. |
+| GET / POST | `/communities/{cid}/grants` | List (`?user_id=` filter) / create per-resource grant. `resource_type` = `server` only; permission families `server:*`, `file:*`, `backup:*`, `plugin:*`, `schedule:*`. |
 | DELETE | `/communities/{cid}/grants/{gid}` | Revoke. |
 
-Permission catalog (community axis, 33 codes — the role/grant editor's source
+Permission catalog (community axis, 35 codes — the role/grant editor's source
 of truth): `server:{create,read,update,delete,start,stop,restart,command}`,
 `file:{read,edit,history,rollback}`, `backup:{create,read,restore,delete,schedule}`,
 `member:{read,add,remove}`, `role:{read,manage}`, `grant:{read,manage}`,
@@ -92,7 +92,9 @@ of truth): `server:{create,read,update,delete,start,stop,restart,command}`,
 `session:read` (relay game-session moderation surface — player IPs are PII,
 RELAY.md Section 8; seeded on the Owner role by migration 0017),
 `plugin:{read,manage}` (plugin/mod content management, issue #1150;
-seeded on the Owner role by migration 0019).
+seeded on the Owner role by migration 0019),
+`schedule:{read,manage}` (general scheduler CRUD, issue #1837;
+seeded on the Owner role by migration 0030).
 Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 `community:provision`, `platform:monitor`.
 
@@ -235,6 +237,11 @@ per-file version history + rollback.
 **Backups** — on-demand create, list w/ statistics, download, upload,
 restore (stopped-only, guarded confirm), delete.
 
+**Schedules** — per-server scheduled actions (command/start/stop/restart/
+backup) on a cron or interval cadence with timezone; enable/disable, run
+history, pre-action player warnings for stop/restart, failure toasts via the
+NOTIFICATION stream.
+
 **Player groups** — op/whitelist groups, player add/remove, attach/detach
 to servers, per-server attached-group view.
 
@@ -265,6 +272,7 @@ version catalog refresh, JAR pool stats/GC, global backup statistics.
    #console    RCON console + full log stream
    #files      file browser / editor / history
    #backups    backups + statistics
+   #schedules  scheduled actions + run history
    #players    attached op/whitelist groups
    #settings   name / config / port / export / danger zone
 /communities/:cid/settings            Community settings
@@ -390,10 +398,11 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   409 `already_member`); role chips editable inline; remove with confirm
   (explains grant/role revocation).
 - **Roles**: list (preset Owner locked); editor = name + permission-matrix
-  grouped by family (server/file/backup/member/role/grant/group/community/
-  audit/plugin) with select-all per family.
+  grouped by family (server/file/backup/schedule/member/role/grant/group/
+  community/audit/plugin) with select-all per family.
 - **Grants**: per-user list (user filter); create = pick member → pick server
-  → pick permissions (restricted to server/file/backup/plugin families).
+  → pick permissions (restricted to the per-server resource families:
+  server/file/backup/schedule).
 - **Groups**: op/whitelist groups; player list (uuid + name) with add/remove;
   attached-servers list with attach/detach.
 - **Audit**: filterable table (operation, actor, since/until, paging).
@@ -417,6 +426,36 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 - **Versions**: per-type catalog freshness, refresh button (all or one type);
   JAR pool stats + GC trigger showing reclaimed bytes.
 - **Audit**: global log with community filter added.
+
+### 6.13 Server detail — Schedules
+
+The `#schedules` tab (issue #1842; numbered out of tab order to avoid
+renumbering 6.8–6.12): the UI for the general scheduler (#1837).
+
+- Table: name, action, human-readable cadence ("Every N min/h" or the cron
+  expression), timezone, enabled toggle, last-run and next-run timestamps
+  (`next_run_at` is null — shown as "—" — while disabled).
+- Create/edit dialog: name; action select (create only — the action is
+  immutable; the edit dialog disables it and points at delete + recreate);
+  cadence = interval (minutes/hours) XOR cron expression; IANA timezone select
+  (`Intl.supportedValuesOf("timeZone")`, default UTC); command-line field only
+  for the `command` action; warning-steps editor (≤5 `{offset_minutes 1–120,
+  message}` rows) only for `stop`/`restart`. API validation failures map to
+  inline field errors via their typed 422 reasons (`invalid_cron`,
+  `invalid_cadence`, `invalid_timezone`, `invalid_schedule_name`,
+  `invalid_payload`) and the 409 duplicate name (`schedule_name_exists`).
+- Delete: confirm dialog (run history cascades away with the schedule).
+- Run history: per-schedule dialog, newest first — outcome badge
+  (`success`/`failure`/`skipped`), sanitized detail, started/finished
+  timestamps. Capped at 50 rows per schedule server-side.
+- Permission gating (7.3): the tab body needs `schedule:read`; writes are
+  two-layer — `schedule:manage` **and** the action's own permission gates the
+  create button's action options and each row's edit/toggle/delete
+  (anti-escalation, write-time only). A `schedule:read`-only member gets a
+  read-only view (run history stays available).
+- Failure surfacing: `schedule_failed` NOTIFICATION frames from the community
+  events socket (7.2) render as error toasts (title + sanitized detail) while
+  the dashboard is open.
 
 ## 7. Cross-cutting concerns
 
