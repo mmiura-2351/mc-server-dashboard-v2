@@ -456,6 +456,28 @@ export const en = {
   // Scheduled backups moved to the general scheduler (#1840); point users there.
   "backups.schedule.movedNote":
     "Scheduled backups are now configured under Schedules.",
+  // Scheduled-backup retention policy editor (issue #1841 API / #1843 UI). The
+  // policy prunes ONLY scheduled backups; manual/uploaded/event backups are
+  // never auto-deleted (the source badge distinguishes the rows).
+  "backups.retention.modeLabel": "Scheduled-backup retention",
+  "backups.retention.mode.none": "Keep all",
+  "backups.retention.mode.keepLast": "Keep the last N",
+  "backups.retention.mode.tiered": "Keep daily / weekly / monthly",
+  "backups.retention.keepLastLabel": "Number to keep",
+  "backups.retention.dailyLabel": "Daily",
+  "backups.retention.weeklyLabel": "Weekly",
+  "backups.retention.monthlyLabel": "Monthly",
+  "backups.retention.hint":
+    "Applies only to scheduled backups — manual, uploaded, and event backups are never auto-deleted.",
+  "backups.retention.tieredHint":
+    "Keeps the newest scheduled backup for each of the most recent days, weeks, and months you set; older scheduled backups are pruned.",
+  "backups.retention.save": "Save retention",
+  "backups.retention.saved": "Retention policy saved.",
+  "backups.retention.cleared": "Retention policy cleared.",
+  "backups.retention.error.keepLast": "Enter a whole number of 1 or more.",
+  "backups.retention.error.tiered":
+    "Enter whole numbers (0 or more), with at least one above 0.",
+  "backups.retention.error.invalid": "That retention policy is not valid.",
   // Restore dialog (stopped-only; two-step stop-then-restore).
   "backups.restoreDialog.title": "Restore backup",
   "backups.restoreDialog.blocked":

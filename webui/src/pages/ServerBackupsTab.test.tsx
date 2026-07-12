@@ -24,6 +24,7 @@ const BID = "b9";
 const mockApi = vi.hoisted(() => ({
   get: vi.fn(),
   post: vi.fn(),
+  put: vi.fn(),
   patch: vi.fn(),
   delete: vi.fn(),
 }));
@@ -154,6 +155,7 @@ beforeEach(() => {
   setAccessToken("tok-1");
   mockApi.get.mockReset();
   mockApi.post.mockReset();
+  mockApi.put.mockReset();
   mockApi.patch.mockReset();
   mockApi.delete.mockReset();
   mockPostFormWithProgress.mockReset();
@@ -635,6 +637,229 @@ describe("ServerBackupsTab permission gating", () => {
       await screen.findByText(
         t("permissions.deniedNamed", { permission: "backup:create" }),
       ),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("ServerBackupsTab retention editor (#1843)", () => {
+  // The first retention PUT (path + init), or undefined if never called.
+  function retentionPut(): [string, RequestInit] | undefined {
+    return mockApi.put.mock.calls.find((call) =>
+      String(call[0]).endsWith("/backups/retention"),
+    ) as [string, RequestInit] | undefined;
+  }
+  function retentionDeleted(): boolean {
+    return mockApi.delete.mock.calls.some((call) =>
+      String(call[0]).endsWith("/backups/retention"),
+    );
+  }
+  const modeSelect = () =>
+    screen.findByLabelText(t("backups.retention.modeLabel"));
+  const saveButton = () =>
+    screen.getByRole("button", { name: t("backups.retention.save") });
+
+  it("shows the editor for a backup:schedule holder, defaulting to no policy", async () => {
+    routeGet();
+    await openBackups();
+
+    const mode = (await modeSelect()) as HTMLSelectElement;
+    expect(mode.value).toBe("none");
+    // No numeric fields until a keep/tiered mode is chosen.
+    expect(
+      screen.queryByLabelText(t("backups.retention.keepLastLabel")),
+    ).not.toBeInTheDocument();
+  });
+
+  it("hides the editor without backup:schedule", async () => {
+    mockCan = (code) => code !== "backup:schedule";
+    routeGet();
+    await openBackups();
+
+    await screen.findByText(t("backups.col.created"));
+    expect(
+      screen.queryByLabelText(t("backups.retention.modeLabel")),
+    ).not.toBeInTheDocument();
+  });
+
+  it("sets a keep-last policy via PUT", async () => {
+    mockApi.put.mockResolvedValue({ keep_last: 7 });
+    routeGet();
+    await openBackups();
+
+    fireEvent.change(await modeSelect(), { target: { value: "keepLast" } });
+    fireEvent.change(
+      screen.getByLabelText(t("backups.retention.keepLastLabel")),
+      { target: { value: "7" } },
+    );
+    fireEvent.click(saveButton());
+
+    await waitFor(() => expect(retentionPut()).toBeDefined());
+    const [path, init] = retentionPut() as [string, RequestInit];
+    expect(path.endsWith(`/servers/${SID}/backups/retention`)).toBe(true);
+    expect(JSON.parse(init.body as string)).toEqual({ keep_last: 7 });
+    expect(
+      await screen.findByText(t("backups.retention.saved")),
+    ).toBeInTheDocument();
+  });
+
+  it("refreshes backups and stats after a pruning save", async () => {
+    // A PUT that prunes deletes rows server-side before responding; the table
+    // and stats must refetch so stale deleted rows don't linger (#1865 review).
+    mockApi.put.mockResolvedValue({ keep_last: 1 });
+    routeGet();
+    const { queryClient } = await openBackups();
+
+    // Spy on queryClient.invalidateQueries after the editor renders.
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+
+    fireEvent.change(await modeSelect(), { target: { value: "keepLast" } });
+    fireEvent.change(
+      screen.getByLabelText(t("backups.retention.keepLastLabel")),
+      { target: { value: "1" } },
+    );
+    fireEvent.click(saveButton());
+
+    await waitFor(() => expect(retentionPut()).toBeDefined());
+
+    const invalidatedKeys = invalidateSpy.mock.calls.map(
+      (call) => (call[0] as { queryKey: readonly unknown[] }).queryKey,
+    );
+    expect(invalidatedKeys).toContainEqual(["backups", CID, SID]);
+    expect(invalidatedKeys).toContainEqual(["backups", CID, SID, "statistics"]);
+  });
+
+  it("sets a tiered policy via PUT (empty tier fields count as 0)", async () => {
+    mockApi.put.mockResolvedValue({ daily: 7, weekly: 0, monthly: 6 });
+    routeGet();
+    await openBackups();
+
+    fireEvent.change(await modeSelect(), { target: { value: "tiered" } });
+    fireEvent.change(screen.getByLabelText(t("backups.retention.dailyLabel")), {
+      target: { value: "7" },
+    });
+    fireEvent.change(
+      screen.getByLabelText(t("backups.retention.monthlyLabel")),
+      {
+        target: { value: "6" },
+      },
+    );
+    fireEvent.click(saveButton());
+
+    await waitFor(() => expect(retentionPut()).toBeDefined());
+    const [, init] = retentionPut() as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({
+      daily: 7,
+      weekly: 0,
+      monthly: 6,
+    });
+  });
+
+  it("prefills an existing keep-last policy", async () => {
+    routeGet({ srv: { backup_retention: { keep_last: 5 } } });
+    await openBackups();
+
+    const mode = (await modeSelect()) as HTMLSelectElement;
+    expect(mode.value).toBe("keepLast");
+    expect(
+      (
+        screen.getByLabelText(
+          t("backups.retention.keepLastLabel"),
+        ) as HTMLInputElement
+      ).value,
+    ).toBe("5");
+  });
+
+  it("prefills an existing tiered policy", async () => {
+    routeGet({
+      srv: { backup_retention: { daily: 7, weekly: 0, monthly: 3 } },
+    });
+    await openBackups();
+
+    const mode = (await modeSelect()) as HTMLSelectElement;
+    expect(mode.value).toBe("tiered");
+    expect(
+      (
+        screen.getByLabelText(
+          t("backups.retention.monthlyLabel"),
+        ) as HTMLInputElement
+      ).value,
+    ).toBe("3");
+  });
+
+  it("edits an existing keep-last policy via PUT", async () => {
+    mockApi.put.mockResolvedValue({ keep_last: 9 });
+    routeGet({ srv: { backup_retention: { keep_last: 5 } } });
+    await openBackups();
+
+    await modeSelect();
+    fireEvent.change(
+      screen.getByLabelText(t("backups.retention.keepLastLabel")),
+      { target: { value: "9" } },
+    );
+    fireEvent.click(saveButton());
+
+    await waitFor(() => expect(retentionPut()).toBeDefined());
+    const [, init] = retentionPut() as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({ keep_last: 9 });
+  });
+
+  it("clears an existing policy via DELETE", async () => {
+    mockApi.delete.mockResolvedValue(undefined);
+    routeGet({ srv: { backup_retention: { keep_last: 5 } } });
+    await openBackups();
+
+    fireEvent.change(await modeSelect(), { target: { value: "none" } });
+    fireEvent.click(saveButton());
+
+    await waitFor(() => expect(retentionDeleted()).toBe(true));
+    expect(
+      await screen.findByText(t("backups.retention.cleared")),
+    ).toBeInTheDocument();
+  });
+
+  it("rejects an empty keep-last inline without calling the API", async () => {
+    routeGet();
+    await openBackups();
+
+    fireEvent.change(await modeSelect(), { target: { value: "keepLast" } });
+    fireEvent.click(saveButton());
+
+    expect(
+      await screen.findByText(t("backups.retention.error.keepLast")),
+    ).toBeInTheDocument();
+    expect(mockApi.put).not.toHaveBeenCalled();
+  });
+
+  it("rejects an all-zero tiered policy inline without calling the API", async () => {
+    routeGet();
+    await openBackups();
+
+    fireEvent.change(await modeSelect(), { target: { value: "tiered" } });
+    // Leave every tier empty (each counts as 0).
+    fireEvent.click(saveButton());
+
+    expect(
+      await screen.findByText(t("backups.retention.error.tiered")),
+    ).toBeInTheDocument();
+    expect(mockApi.put).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a server invalid_retention_policy as an inline error", async () => {
+    mockApi.put.mockRejectedValue(
+      new ApiError(422, { reason: "invalid_retention_policy" }),
+    );
+    routeGet();
+    await openBackups();
+
+    fireEvent.change(await modeSelect(), { target: { value: "keepLast" } });
+    fireEvent.change(
+      screen.getByLabelText(t("backups.retention.keepLastLabel")),
+      { target: { value: "5" } },
+    );
+    fireEvent.click(saveButton());
+
+    expect(
+      await screen.findByText(t("backups.retention.error.invalid")),
     ).toBeInTheDocument();
   });
 });

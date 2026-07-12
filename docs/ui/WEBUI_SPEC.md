@@ -383,6 +383,17 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   general scheduler (the `…/{sid}/schedules` surface); the Backups tab only
   shows a short note pointing `backup:schedule` holders there. No PATCH of a
   `backup_interval_hours` key remains (the API 422s it as `retired_config_key`).
+- Retention (issue #1843; `backup:schedule` only — hidden otherwise): a policy
+  editor beside the schedule note, prefilled from `backup_retention` on the
+  server read. Mode select = keep-all (no policy) / keep-last-N / tiered
+  (daily / weekly / monthly buckets); Save `PUT`s `…/{sid}/backups/retention`
+  (`{keep_last}` XOR `{daily, weekly, monthly}`), or `DELETE`s it when the
+  mode is keep-all and a policy exists. Client-side validation mirrors the API
+  rule (`keep_last` ≥ 1; tiers each ≥ 0, at least one > 0) inline; a server
+  422 `invalid_retention_policy` maps to the same inline error. A hint states
+  the policy prunes **only** scheduled backups (the table's source badge
+  distinguishes the rows); manual / uploaded / event backups are never
+  auto-deleted.
 
 ### 6.8 Server detail — Players
 - Attached groups (`GET …/{sid}/groups`) with kind badges; attach/detach

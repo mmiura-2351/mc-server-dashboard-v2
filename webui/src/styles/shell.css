@@ -1226,6 +1226,58 @@ button.link:focus-visible {
   border-radius: var(--radius-sm);
   padding: 4px 6px;
 }
+/* Scheduled-backup settings card: the moved-to-Schedules note plus the
+ * retention policy editor (#1843), both backup:schedule-gated. */
+.backups-retention {
+  margin-bottom: 14px;
+}
+.backups-retention .backups-schedule-note {
+  margin: 0 0 8px;
+}
+.backups-retention-editor {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+.backups-retention-editor .field-inline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.backups-retention-tiers {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.backups-retention-editor input {
+  width: 60px;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 4px 6px;
+}
+.backups-retention-editor select {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 4px 6px;
+}
+.backups-retention-hint {
+  flex-basis: 100%;
+  margin: 0;
+}
+.backups-retention-error {
+  flex-basis: 100%;
+  font-size: 12px;
+  color: var(--red);
+}
 .backups-table {
   padding: 0;
 }

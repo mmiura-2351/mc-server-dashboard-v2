@@ -6,7 +6,9 @@
  * the API takes the save-all + snapshot path), and an upload picker. Scheduled
  * backups are no longer configured here: the FR-BAK-3 cadence moved to the
  * general scheduler (a first-class `backup` schedule, #1840), so the tab only
- * points `backup:schedule` holders at the Schedules surface.
+ * points `backup:schedule` holders at the Schedules surface. Those same holders
+ * also get the scheduled-backup retention editor (keep-N / tiered / clear, the
+ * #1841 API), which prunes only `scheduled` backups (#1843).
  *
  * Restore requires the server stopped (the API answers 409 `server_not_stopped`
  * otherwise). Rather than a fragile auto-chain, the restore dialog explains the
@@ -41,6 +43,7 @@ import { serversKey } from "./useCommunityEvents.ts";
 
 type ServerResponse = components["schemas"]["ServerResponse"];
 type BackupResponse = components["schemas"]["BackupResponse"];
+type RetentionPolicyBody = components["schemas"]["RetentionPolicyBody"];
 
 /** Backups list query key — scoped to the server, invalidated on every change. */
 function backupsKey(communityId: string, serverId: string) {
@@ -325,12 +328,21 @@ export function ServerBackupsTab({
             />
           </>
         )}
-        {canSchedule && (
+      </div>
+
+      {canSchedule && (
+        <div className="card backups-retention">
           <p className="sub backups-schedule-note">
             {t("backups.schedule.movedNote")}
           </p>
-        )}
-      </div>
+          <RetentionEditor
+            key={retentionKey(server.backup_retention)}
+            server={server}
+            communityId={communityId}
+            onError={onError}
+          />
+        </div>
+      )}
 
       {progress.active && (
         <UploadProgress
@@ -487,6 +499,253 @@ function Stat({
         {value}
         {hint !== undefined && <span className="metric-unit"> ({hint})</span>}
       </div>
+    </div>
+  );
+}
+
+type RetentionMode = "none" | "keepLast" | "tiered";
+
+/** Remount key: give the editor fresh state whenever the persisted policy changes. */
+function retentionKey(policy: ServerResponse["backup_retention"]): string {
+  return JSON.stringify(policy ?? null);
+}
+
+/** Read the persisted (loosely typed) policy into an editor mode + field strings. */
+function readRetention(policy: ServerResponse["backup_retention"]): {
+  mode: RetentionMode;
+  keepLast: string;
+  daily: string;
+  weekly: string;
+  monthly: string;
+} {
+  const p = (policy ?? {}) as RetentionPolicyBody;
+  const str = (v: number | null | undefined) =>
+    typeof v === "number" ? String(v) : "";
+  if (typeof p.keep_last === "number") {
+    return {
+      mode: "keepLast",
+      keepLast: String(p.keep_last),
+      daily: "",
+      weekly: "",
+      monthly: "",
+    };
+  }
+  if (
+    typeof p.daily === "number" ||
+    typeof p.weekly === "number" ||
+    typeof p.monthly === "number"
+  ) {
+    return {
+      mode: "tiered",
+      keepLast: "",
+      daily: str(p.daily),
+      weekly: str(p.weekly),
+      monthly: str(p.monthly),
+    };
+  }
+  return { mode: "none", keepLast: "", daily: "", weekly: "", monthly: "" };
+}
+
+/** Parse a tier field: blank counts as 0; a non-integer or negative is invalid. */
+function tierValue(raw: string): number | null {
+  if (raw.trim() === "") return 0;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 0 ? n : null;
+}
+
+// The scheduled-backup retention policy (#1841 API / #1843 UI), gated on
+// backup:schedule. Three shapes: none (Save clears via DELETE), keep-N (PUT
+// {keep_last}), and tiered (PUT {daily, weekly, monthly}). It prunes ONLY
+// `scheduled` backups. The editor is keyed on the persisted policy so a save's
+// refetch remounts it with the stored value; nothing mutates on mount. The
+// client-side check mirrors the API's keep_last >= 1 XOR (each tier >= 0, at
+// least one > 0) rule, with the server's invalid_retention_policy as a backstop.
+function RetentionEditor({
+  server,
+  communityId,
+  onError,
+}: {
+  server: ServerResponse;
+  communityId: string;
+  onError: (error: unknown) => void;
+}) {
+  const { showToast } = useToast();
+  const queryClient = useQueryClient();
+  const initial = readRetention(server.backup_retention);
+  const hasPolicy = server.backup_retention != null;
+  const [mode, setMode] = useState<RetentionMode>(initial.mode);
+  const [keepLast, setKeepLast] = useState(initial.keepLast);
+  const [daily, setDaily] = useState(initial.daily);
+  const [weekly, setWeekly] = useState(initial.weekly);
+  const [monthly, setMonthly] = useState(initial.monthly);
+  const [error, setError] = useState<string | null>(null);
+
+  const retentionPath = apiPath(
+    "/api/communities/{community_id}/servers/{server_id}/backups/retention",
+    { community_id: communityId, server_id: server.id },
+  );
+
+  const invalidate = () => {
+    queryClient.invalidateQueries({
+      queryKey: serverKey(communityId, server.id),
+    });
+    queryClient.invalidateQueries({ queryKey: serversKey(communityId) });
+  };
+
+  const onMutationError = (err: unknown) => {
+    if (err instanceof ApiError && err.reason === "invalid_retention_policy") {
+      setError(t("backups.retention.error.invalid"));
+      return;
+    }
+    onError(err);
+  };
+
+  const save = useMutation({
+    mutationFn: (body: RetentionPolicyBody) =>
+      api.put(retentionPath, { body: JSON.stringify(body) }),
+    onSuccess: () => {
+      showToast(t("backups.retention.saved"), "success");
+      invalidate();
+      // A pruning PUT deletes scheduled-backup rows synchronously before
+      // responding, so the backups table and stats strip must refetch too —
+      // otherwise stale deleted rows remain visible until a manual refresh.
+      queryClient.invalidateQueries({
+        queryKey: backupsKey(communityId, server.id),
+      });
+      queryClient.invalidateQueries({
+        queryKey: statsKey(communityId, server.id),
+      });
+    },
+    onError: onMutationError,
+  });
+
+  const clear = useMutation({
+    mutationFn: () => api.delete(retentionPath),
+    onSuccess: () => {
+      showToast(t("backups.retention.cleared"), "success");
+      invalidate();
+    },
+    onError: onMutationError,
+  });
+
+  const submit = () => {
+    setError(null);
+    if (mode === "none") {
+      clear.mutate();
+      return;
+    }
+    if (mode === "keepLast") {
+      const n = Number(keepLast);
+      if (keepLast.trim() === "" || !Number.isInteger(n) || n < 1) {
+        setError(t("backups.retention.error.keepLast"));
+        return;
+      }
+      save.mutate({ keep_last: n });
+      return;
+    }
+    const d = tierValue(daily);
+    const w = tierValue(weekly);
+    const m = tierValue(monthly);
+    if (d === null || w === null || m === null || d + w + m === 0) {
+      setError(t("backups.retention.error.tiered"));
+      return;
+    }
+    save.mutate({ daily: d, weekly: w, monthly: m });
+  };
+
+  const busy = save.isPending || clear.isPending;
+  // "none" with no stored policy is a no-op — skip the pointless DELETE.
+  const disabled = busy || (mode === "none" && !hasPolicy);
+
+  return (
+    <div className="backups-retention-editor">
+      <span className="field-inline">
+        {t("backups.retention.modeLabel")}
+        {/* aria-label: a select wrapped by its label text would fold the option
+            texts into the accessible name — set it explicitly instead. */}
+        <select
+          aria-label={t("backups.retention.modeLabel")}
+          value={mode}
+          onChange={(e) => {
+            setMode(e.target.value as RetentionMode);
+            setError(null);
+          }}
+        >
+          <option value="none">{t("backups.retention.mode.none")}</option>
+          <option value="keepLast">
+            {t("backups.retention.mode.keepLast")}
+          </option>
+          <option value="tiered">{t("backups.retention.mode.tiered")}</option>
+        </select>
+      </span>
+
+      {mode === "keepLast" && (
+        <span className="field-inline">
+          {t("backups.retention.keepLastLabel")}
+          <input
+            type="number"
+            min={1}
+            aria-label={t("backups.retention.keepLastLabel")}
+            value={keepLast}
+            onChange={(e) => setKeepLast(e.target.value)}
+          />
+        </span>
+      )}
+
+      {mode === "tiered" && (
+        <span className="backups-retention-tiers">
+          <span className="field-inline">
+            {t("backups.retention.dailyLabel")}
+            <input
+              type="number"
+              min={0}
+              aria-label={t("backups.retention.dailyLabel")}
+              value={daily}
+              onChange={(e) => setDaily(e.target.value)}
+            />
+          </span>
+          <span className="field-inline">
+            {t("backups.retention.weeklyLabel")}
+            <input
+              type="number"
+              min={0}
+              aria-label={t("backups.retention.weeklyLabel")}
+              value={weekly}
+              onChange={(e) => setWeekly(e.target.value)}
+            />
+          </span>
+          <span className="field-inline">
+            {t("backups.retention.monthlyLabel")}
+            <input
+              type="number"
+              min={0}
+              aria-label={t("backups.retention.monthlyLabel")}
+              value={monthly}
+              onChange={(e) => setMonthly(e.target.value)}
+            />
+          </span>
+        </span>
+      )}
+
+      <button
+        type="button"
+        className="btn sm"
+        disabled={disabled}
+        onClick={submit}
+      >
+        {t("backups.retention.save")}
+      </button>
+
+      <p className="sub backups-retention-hint">
+        {t(
+          mode === "tiered"
+            ? "backups.retention.tieredHint"
+            : "backups.retention.hint",
+        )}
+      </p>
+      {error !== null && (
+        <span className="field-error backups-retention-error">{error}</span>
+      )}
     </div>
   );
 }
