@@ -642,7 +642,7 @@ describe("ServerBackupsTab permission gating", () => {
 });
 
 describe("ServerBackupsTab retention editor (#1843)", () => {
-  // The last retention PUT (path + init), or undefined if never called.
+  // The first retention PUT (path + init), or undefined if never called.
   function retentionPut(): [string, RequestInit] | undefined {
     return mockApi.put.mock.calls.find((call) =>
       String(call[0]).endsWith("/backups/retention"),
@@ -700,6 +700,32 @@ describe("ServerBackupsTab retention editor (#1843)", () => {
     expect(
       await screen.findByText(t("backups.retention.saved")),
     ).toBeInTheDocument();
+  });
+
+  it("refreshes backups and stats after a pruning save", async () => {
+    // A PUT that prunes deletes rows server-side before responding; the table
+    // and stats must refetch so stale deleted rows don't linger (#1865 review).
+    mockApi.put.mockResolvedValue({ keep_last: 1 });
+    routeGet();
+    const { queryClient } = await openBackups();
+
+    // Spy on queryClient.invalidateQueries after the editor renders.
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+
+    fireEvent.change(await modeSelect(), { target: { value: "keepLast" } });
+    fireEvent.change(
+      screen.getByLabelText(t("backups.retention.keepLastLabel")),
+      { target: { value: "1" } },
+    );
+    fireEvent.click(saveButton());
+
+    await waitFor(() => expect(retentionPut()).toBeDefined());
+
+    const invalidatedKeys = invalidateSpy.mock.calls.map(
+      (call) => (call[0] as { queryKey: readonly unknown[] }).queryKey,
+    );
+    expect(invalidatedKeys).toContainEqual(["backups", CID, SID]);
+    expect(invalidatedKeys).toContainEqual(["backups", CID, SID, "statistics"]);
   });
 
   it("sets a tiered policy via PUT (empty tier fields count as 0)", async () => {

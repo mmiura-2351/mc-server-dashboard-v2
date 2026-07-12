@@ -606,6 +606,15 @@ function RetentionEditor({
     onSuccess: () => {
       showToast(t("backups.retention.saved"), "success");
       invalidate();
+      // A pruning PUT deletes scheduled-backup rows synchronously before
+      // responding, so the backups table and stats strip must refetch too —
+      // otherwise stale deleted rows remain visible until a manual refresh.
+      queryClient.invalidateQueries({
+        queryKey: backupsKey(communityId, server.id),
+      });
+      queryClient.invalidateQueries({
+        queryKey: statsKey(communityId, server.id),
+      });
     },
     onError: onMutationError,
   });

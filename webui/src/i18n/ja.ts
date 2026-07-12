@@ -469,7 +469,7 @@ export const ja: Record<TranslationKey, string> = {
   "backups.retention.hint":
     "定期バックアップにのみ適用されます。手動・アップロード・イベントのバックアップが自動削除されることはありません。",
   "backups.retention.tieredHint":
-    "設定した日数・週数・月数のそれぞれについて最新の定期バックアップを保持し、それ以外は削除します。",
+    "設定した日数・週数・月数のそれぞれについて最新の定期バックアップを保持し、それ以外の定期バックアップは削除されます。",
   "backups.retention.save": "保持設定を保存",
   "backups.retention.saved": "保持ポリシーを保存しました。",
   "backups.retention.cleared": "保持ポリシーを解除しました。",
