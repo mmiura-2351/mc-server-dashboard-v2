@@ -296,6 +296,67 @@ async def test_list_due_returns_only_enabled_past_due(engine: AsyncEngine) -> No
     assert {s.id for s in boundary} == {due.id, future.id}
 
 
+async def test_list_warning_candidates_returns_upcoming_stop_restart(
+    engine: AsyncEngine,
+) -> None:
+    server_id = await _seed_server(engine)
+    factory = create_session_factory(engine)
+    until = _NOW + dt.timedelta(minutes=120)
+    ahead = _schedule(
+        server_id,
+        name="ahead",
+        action=ScheduleAction.STOP,
+        enabled=True,
+        next_run_at=_NOW + dt.timedelta(minutes=30),
+    )
+    restart = _schedule(
+        server_id,
+        name="restart",
+        action=ScheduleAction.RESTART,
+        enabled=True,
+        next_run_at=until,  # exactly the horizon boundary is included
+    )
+    due = _schedule(
+        server_id,
+        name="due",
+        action=ScheduleAction.STOP,
+        enabled=True,
+        next_run_at=_NOW,  # at-or-before now: the due poll's job, not a warning
+    )
+    beyond = _schedule(
+        server_id,
+        name="beyond",
+        action=ScheduleAction.STOP,
+        enabled=True,
+        next_run_at=until + dt.timedelta(minutes=1),  # past the horizon
+    )
+    other_action = _schedule(
+        server_id,
+        name="other",
+        action=ScheduleAction.BACKUP,
+        enabled=True,
+        next_run_at=_NOW + dt.timedelta(minutes=30),  # backup carries no warnings
+    )
+    disabled = _schedule(
+        server_id,
+        name="disabled",
+        action=ScheduleAction.STOP,
+        enabled=False,
+        next_run_at=None,
+    )
+
+    async with ServersUnitOfWork(factory) as uow:
+        for schedule in (ahead, restart, due, beyond, other_action, disabled):
+            await uow.schedules.add(schedule)
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        listed = await uow.schedules.list_warning_candidates(_NOW, until)
+    # Only the enabled stop/restart rows strictly ahead of now and within the
+    # horizon, ordered by next_run_at.
+    assert [s.id for s in listed] == [ahead.id, restart.id]
+
+
 async def test_advance_run_state_updates_only_bookkeeping(engine: AsyncEngine) -> None:
     server_id = await _seed_server(engine)
     factory = create_session_factory(engine)

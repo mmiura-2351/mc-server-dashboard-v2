@@ -11,8 +11,11 @@ notification emission, and per-schedule tick isolation.
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import uuid
 from dataclasses import dataclass, replace
+
+import pytest
 
 from mc_server_dashboard_api.audit.domain.events import Outcome
 from mc_server_dashboard_api.audit.domain.operations import (
@@ -31,6 +34,7 @@ from mc_server_dashboard_api.servers.application.lifecycle import (
 )
 from mc_server_dashboard_api.servers.application.schedule_runner import (
     LATE_RUN_GRACE,
+    WARNING_GRACE_FLOOR,
     ActionResult,
     ExecuteScheduleAction,
     RunScheduleTick,
@@ -49,6 +53,7 @@ from mc_server_dashboard_api.servers.domain.schedule import (
     ScheduleAction,
     ScheduleId,
     ScheduleRunOutcome,
+    WarningStep,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -117,6 +122,7 @@ def _schedule(
     action: ScheduleAction,
     cadence: Cadence | None = None,
     command: str | None = None,
+    warning_steps: tuple[WarningStep, ...] = (),
     next_run_at: dt.datetime,
     last_run_at: dt.datetime | None = None,
     enabled: bool = True,
@@ -131,6 +137,7 @@ def _schedule(
         created_at=_NOW,
         updated_at=_NOW,
         command=command,
+        warning_steps=warning_steps,
         next_run_at=next_run_at,
         last_run_at=last_run_at,
     )
@@ -153,6 +160,7 @@ def _env(
     clock: FakeClock | None = None,
     history_cap: int = 50,
     backup_retry_delay: dt.timedelta = dt.timedelta(minutes=30),
+    warning_grace: dt.timedelta = WARNING_GRACE_FLOOR,
 ) -> _Env:
     uow = FakeUnitOfWork()
     cp = control_plane or FakeControlPlane()
@@ -183,12 +191,14 @@ def _env(
     runner = RunScheduleTick(
         uow=uow,
         execute=execute,
+        send_command=SendServerCommand(uow=uow, control_plane=cp),
         calculator=CronsimNextRunCalculator(),
         audit=audit,
         notifier=notifier,
         clock=the_clock,
         history_cap=history_cap,
         backup_retry_delay=backup_retry_delay,
+        warning_grace=warning_grace,
     )
     return _Env(uow, runner, notifier, audit, cp, the_clock)
 
@@ -668,6 +678,317 @@ async def test_one_schedule_exception_does_not_stop_the_tick() -> None:
     assert _runs(env, ok) == [ScheduleRunOutcome.SUCCESS]
     advanced = env.uow.schedules.by_id[ok.id].next_run_at
     assert advanced is not None and advanced > _NOW
+
+
+# --- player warnings (issue #1839) ----------------------------------------
+
+
+def _warned_lines(env: _Env) -> list[str]:
+    return [line for _server_id, line in env.control_plane.commands]
+
+
+async def test_due_warning_broadcasts_say_message_without_a_run_row() -> None:
+    env = _env()
+    server = _running_server()
+    occurrence = _NOW + dt.timedelta(minutes=5)
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.STOP,
+        next_run_at=occurrence,
+        warning_steps=(WarningStep(offset_minutes=5, message="stopping in 5"),),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()  # now == occurrence - 5min: the 5-minute warn is due
+
+    # Fixed ``say <message>`` broadcast; a warning is best-effort chatter, so no
+    # run row, no audit, no notification, and the occurrence itself has not fired.
+    assert _warned_lines(env) == ["say stopping in 5"]
+    assert _runs(env, schedule) == []
+    assert env.audit.events == []
+    assert env.notifier.notifications == []
+    assert env.uow.schedules.by_id[schedule.id].next_run_at == occurrence
+
+
+async def test_each_warning_step_broadcasts_once_at_its_offset() -> None:
+    env = _env()
+    server = _running_server()
+    occurrence = _NOW + dt.timedelta(minutes=10)
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.STOP,
+        next_run_at=occurrence,
+        warning_steps=(
+            WarningStep(offset_minutes=10, message="10"),
+            WarningStep(offset_minutes=5, message="5"),
+            WarningStep(offset_minutes=1, message="1"),
+        ),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()  # T-10
+    env.clock.set(occurrence - dt.timedelta(minutes=5))
+    await env.runner.tick()  # T-5
+    env.clock.set(occurrence - dt.timedelta(minutes=1))
+    await env.runner.tick()  # T-1
+
+    assert _warned_lines(env) == ["say 10", "say 5", "say 1"]
+    assert _runs(env, schedule) == []
+
+
+async def test_warning_not_rebroadcast_on_a_later_tick() -> None:
+    env = _env()
+    server = _running_server()
+    occurrence = _NOW + dt.timedelta(minutes=5)
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.STOP,
+        next_run_at=occurrence,
+        warning_steps=(WarningStep(offset_minutes=5, message="soon"),),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()  # T-5: broadcast once
+    env.clock.set(occurrence - dt.timedelta(minutes=4))
+    await env.runner.tick()  # still within grace, but already sent
+
+    assert _warned_lines(env) == ["say soon"]
+
+
+async def test_warnings_broadcast_then_the_occurrence_stops_the_server() -> None:
+    env = _env()
+    server = _running_server()
+    occurrence = _NOW + dt.timedelta(minutes=5)
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.STOP,
+        next_run_at=occurrence,
+        warning_steps=(
+            WarningStep(offset_minutes=5, message="5"),
+            WarningStep(offset_minutes=1, message="1"),
+        ),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()  # T-5
+    env.clock.set(occurrence - dt.timedelta(minutes=1))
+    await env.runner.tick()  # T-1
+    env.clock.set(occurrence)
+    await env.runner.tick()  # T: the stop occurrence fires
+
+    assert _warned_lines(env) == ["say 5", "say 1"]
+    # The occurrence executed exactly once as a stop and recorded success.
+    assert [k for k, *_ in env.control_plane.dispatched].count("stop") == 1
+    assert _runs(env, schedule) == [ScheduleRunOutcome.SUCCESS]
+
+
+async def test_warning_skipped_when_server_offline_does_not_affect_the_run() -> None:
+    env = _env()
+    server = _stopped_server()
+    occurrence = _NOW + dt.timedelta(minutes=5)
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.STOP,
+        next_run_at=occurrence,
+        warning_steps=(WarningStep(offset_minutes=5, message="soon"),),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()  # server offline at warn time
+
+    # Nothing broadcast, and no run row / audit / notification; the occurrence
+    # is untouched (its next_run_at unchanged).
+    assert _warned_lines(env) == []
+    assert env.control_plane.dispatched == []
+    assert _runs(env, schedule) == []
+    assert env.notifier.notifications == []
+    assert env.uow.schedules.by_id[schedule.id].next_run_at == occurrence
+
+
+async def test_warning_dispatch_failure_is_swallowed() -> None:
+    refuse = FakeControlPlane(
+        outcomes={"command": CommandOutcome(status=CommandStatus.INTERNAL)}
+    )
+    env = _env(control_plane=refuse)
+    server = _running_server()
+    occurrence = _NOW + dt.timedelta(minutes=5)
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.STOP,
+        next_run_at=occurrence,
+        warning_steps=(WarningStep(offset_minutes=5, message="soon"),),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()  # the warn dispatch is refused by the worker
+
+    # A send failure is logged and skipped: no run row, no notification, and the
+    # occurrence is untouched. The failed step is consumed (not retried forever).
+    assert _runs(env, schedule) == []
+    assert env.notifier.notifications == []
+    assert env.uow.schedules.by_id[schedule.id].next_run_at == occurrence
+
+
+async def test_schedule_enabled_inside_window_sends_only_steps_still_ahead() -> None:
+    env = _env()
+    server = _running_server()
+    # First seen ~3 minutes before T: the 5-minute warn instant is already two
+    # minutes past (dropped), the 1-minute warn is still two minutes ahead (fires).
+    occurrence = _NOW + dt.timedelta(minutes=3)
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.STOP,
+        next_run_at=occurrence,
+        warning_steps=(
+            WarningStep(offset_minutes=5, message="5"),
+            WarningStep(offset_minutes=1, message="1"),
+        ),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()  # T-3: the 5-minute warn is stale, the 1-minute not yet due
+    assert _warned_lines(env) == []
+
+    env.clock.set(occurrence - dt.timedelta(minutes=1))
+    await env.runner.tick()  # T-1: only the 1-minute warning
+    assert _warned_lines(env) == ["say 1"]
+
+
+async def test_no_warning_for_a_past_due_occurrence() -> None:
+    env = _env()
+    server = _running_server()
+    # The occurrence is already due — handled by the due poll, not the look-ahead —
+    # so its warnings are in the past and must not fire late.
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.STOP,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+        warning_steps=(WarningStep(offset_minutes=5, message="5"),),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    assert _warned_lines(env) == []
+
+
+def _missed_logs(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if "missed its send window" in r.message]
+
+
+async def test_warning_window_between_coarse_ticks_is_logged_not_silent(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The review repro: a 120 s tick (effective grace 120 s) and a 1-minute
+    # warning whose whole send window [T-60, T) falls between two ticks. The
+    # step cannot broadcast, but it must be observable — logged once at warning
+    # level — and the stop at T must be unaffected.
+    env = _env(warning_grace=dt.timedelta(seconds=120))
+    server = _running_server()
+    occurrence = _NOW + dt.timedelta(seconds=120)
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.STOP,
+        next_run_at=occurrence,
+        warning_steps=(WarningStep(offset_minutes=1, message="soon"),),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()  # T-120: the warn instant (T-60) has not arrived
+    env.clock.set(occurrence)
+    await env.runner.tick()  # T: the occurrence fires; the window was skipped
+
+    assert _warned_lines(env) == []
+    assert _runs(env, schedule) == [ScheduleRunOutcome.SUCCESS]
+    missed = _missed_logs(caplog)
+    assert len(missed) == 1
+    assert missed[0].levelno == logging.WARNING
+    assert str(schedule.id.value) in missed[0].getMessage()
+    assert "1-minute" in missed[0].getMessage()
+
+
+async def test_warning_offset_above_coarse_tick_fires_late_but_before_t() -> None:
+    # With the effective grace matching a coarse tick, a warn instant that fell
+    # between ticks still broadcasts on the next tick — late, but strictly
+    # before the occurrence.
+    env = _env(warning_grace=dt.timedelta(seconds=120))
+    server = _running_server()
+    occurrence = _NOW + dt.timedelta(seconds=200)
+    # 5-minute warning: its warn instant (T-300) is 100 s past at this tick —
+    # beyond the 60 s floor, within the derived 120 s grace.
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.STOP,
+        next_run_at=occurrence,
+        warning_steps=(WarningStep(offset_minutes=5, message="soon"),),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    assert _warned_lines(env) == ["say soon"]
+    # Only the warning broadcast — the stop itself has not fired yet.
+    assert [k for k, *_ in env.control_plane.dispatched] == ["command"]
+    assert _runs(env, schedule) == []
+
+
+async def test_stale_step_of_late_enabled_schedule_logs_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    env = _env()
+    server = _running_server()
+    # First seen 3 minutes before T: the 5-minute step's window ended at T-4.
+    occurrence = _NOW + dt.timedelta(minutes=3)
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.STOP,
+        next_run_at=occurrence,
+        warning_steps=(
+            WarningStep(offset_minutes=5, message="5"),
+            WarningStep(offset_minutes=1, message="1"),
+        ),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()  # T-3: the 5-minute step is already unsendable
+    env.clock.set(occurrence - dt.timedelta(minutes=2))
+    await env.runner.tick()  # T-2: consumed — must not log again
+
+    assert _warned_lines(env) == []
+    missed = _missed_logs(caplog)
+    assert len(missed) == 1
+    assert "5-minute" in missed[0].getMessage()
+
+    env.clock.set(occurrence - dt.timedelta(minutes=1))
+    await env.runner.tick()  # T-1: the still-ahead step fires normally
+
+    assert _warned_lines(env) == ["say 1"]
+    assert len(_missed_logs(caplog)) == 1
+
+
+async def test_sent_state_prunes_entries_for_past_occurrences() -> None:
+    env = _env()
+    schedule_id = ScheduleId.new()
+    past = (schedule_id, _NOW - dt.timedelta(minutes=1), 5)
+    future = (schedule_id, _NOW + dt.timedelta(minutes=10), 5)
+    env.runner._warned = {past, future}
+
+    await env.runner.tick()
+
+    # Entries for past occurrences are dropped each tick so the in-memory
+    # sent-state stays bounded; still-future ones survive.
+    assert env.runner._warned == {future}
 
 
 def _replace_next_run(schedule: Schedule, next_run_at: dt.datetime) -> Schedule:

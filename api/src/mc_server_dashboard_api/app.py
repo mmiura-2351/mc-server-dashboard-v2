@@ -174,6 +174,7 @@ from mc_server_dashboard_api.servers.application.reconciler import RunReconciler
 from mc_server_dashboard_api.servers.application.schedule_runner import (
     ExecuteScheduleAction,
     RunScheduleTick,
+    effective_warning_grace,
 )
 from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
     RunSnapshotCadenceTick,
@@ -904,6 +905,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             schedule_runner = RunScheduleTick(
                 uow=ServersUnitOfWork(create_session_factory(engine)),
+                # Player warnings broadcast a fixed ``say <message>`` before a
+                # stop/restart occurrence — its own SendServerCommand (fresh UoW),
+                # kept out of the trigger-agnostic ExecuteScheduleAction (#653).
+                send_command=SendServerCommand(
+                    uow=ServersUnitOfWork(create_session_factory(engine)),
+                    control_plane=schedule_control_plane,
+                ),
                 execute=ExecuteScheduleAction(
                     uow=ServersUnitOfWork(create_session_factory(engine)),
                     send_command=SendServerCommand(
@@ -960,6 +968,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ),
                 notifier=RealTimeEventsNotifier(real_time_events),
                 clock=ServersSystemClock(),
+                # A due warning stays sendable for at least one full tick, so a
+                # coarse loop cannot let a whole send window fall between wakes.
+                warning_grace=effective_warning_grace(settings.schedule.tick_seconds),
             )
             schedule_task = asyncio.create_task(
                 run_schedule_loop(

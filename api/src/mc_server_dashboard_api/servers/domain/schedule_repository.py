@@ -41,6 +41,24 @@ class ScheduleRepository(abc.ABC):
         """
 
     @abc.abstractmethod
+    async def list_warning_candidates(
+        self, now: dt.datetime, until: dt.datetime
+    ) -> list[Schedule]:
+        """Return enabled stop/restart schedules whose occurrence is still ahead.
+
+        The runner's warning look-ahead (issue #1839): schedules whose next
+        occurrence falls in ``(now, until]`` and whose action can carry player
+        warnings (``stop`` / ``restart``). ``until`` is ``now`` plus the maximum
+        warning offset, so a step's warn instant (``next_run_at - offset``) can
+        only have arrived for a returned row; the runner filters to the rows
+        actually carrying warning steps and decides which steps are due. Rides
+        the same ``ix_schedule_next_run_at`` partial index as :meth:`list_due`.
+        A past-or-present occurrence (``next_run_at <= now``) is excluded — that
+        is the due poll's job, and its warnings would be firing late. Ordered by
+        ``next_run_at`` (id tie-break) so the poll is deterministic.
+        """
+
+    @abc.abstractmethod
     async def list_for_server(self, server_id: ServerId) -> list[Schedule]:
         """Return a server's schedules ordered by name.
 

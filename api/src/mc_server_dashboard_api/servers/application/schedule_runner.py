@@ -81,12 +81,14 @@ from mc_server_dashboard_api.servers.domain.errors import (
 from mc_server_dashboard_api.servers.domain.next_run_calculator import NextRunCalculator
 from mc_server_dashboard_api.servers.domain.notifier import ServerNotifier
 from mc_server_dashboard_api.servers.domain.schedule import (
+    MAX_WARNING_OFFSET_MINUTES,
     Schedule,
     ScheduleAction,
     ScheduleId,
     ScheduleRun,
     ScheduleRunId,
     ScheduleRunOutcome,
+    WarningStep,
     next_interval_run,
 )
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
@@ -113,6 +115,30 @@ _NOTIFY_KIND = "schedule_failed"
 # fires hours late — a daily 04:00 stop must not stop the evening's players.
 # Anything staler advances without executing (no run row).
 LATE_RUN_GRACE = dt.timedelta(seconds=300)
+
+# The floor of the warning-send grace: how late a due player warning may still
+# broadcast (issue #1839). The effective grace is derived at wiring time as
+# max(floor, tick_seconds) — see :func:`effective_warning_grace` — so a step
+# whose offset exceeds the tick always fires: at worst one tick late, and always
+# strictly before the occurrence (the look-ahead only surfaces still-future
+# occurrences). A step whose whole send window nonetheless passes unsent — an
+# offset smaller than a coarse tick, or a schedule created/enabled after the
+# warn instant — is consumed and logged instead of broadcast late: a warning
+# that missed its moment is worthless, unlike the occurrence it heralds
+# (LATE_RUN_GRACE). The in-memory sent-state makes each step fire once.
+WARNING_GRACE_FLOOR = dt.timedelta(seconds=60)
+
+
+def effective_warning_grace(tick_seconds: float) -> dt.timedelta:
+    """The warning-send grace for a runner loop ticking every ``tick_seconds``.
+
+    At least one tick wide, so a warn instant landing anywhere between two
+    healthy ticks is still within its send window at the next one; floored at
+    :data:`WARNING_GRACE_FLOOR` for finer ticks.
+    """
+
+    return max(WARNING_GRACE_FLOOR, dt.timedelta(seconds=tick_seconds))
+
 
 # Use-case exceptions that mean the action's precondition was unmet at dispatch
 # time (a state change raced the runner's pre-check): classified as a skip, not a
@@ -297,14 +323,23 @@ class RunScheduleTick:
 
     uow: UnitOfWork
     execute: ExecuteScheduleAction
+    send_command: SendServerCommand
     calculator: NextRunCalculator
     audit: AuditRecorder
     notifier: ServerNotifier
     clock: Clock
     history_cap: int = _HISTORY_CAP
     backup_retry_delay: dt.timedelta = _BACKUP_RETRY_DELAY
+    # How late a due player warning may still broadcast; the wiring derives it
+    # from the loop's tick via effective_warning_grace so a send window can
+    # never fall entirely between two healthy ticks.
+    warning_grace: dt.timedelta = WARNING_GRACE_FLOOR
     # Per-schedule pending backup-retry instant; in-memory (lost on restart).
     _backup_retry: dict[ScheduleId, dt.datetime] = field(default_factory=dict)
+    # Warnings already sent this process, keyed by (schedule, occurrence, offset):
+    # each step fires once (issue #1839). In-memory — a restart may re-send a step
+    # still within its grace window at most once. Pruned as occurrences pass.
+    _warned: set[tuple[ScheduleId, dt.datetime, int]] = field(default_factory=set)
 
     async def tick(self) -> None:
         now = self.clock.now()
@@ -330,6 +365,11 @@ class RunScheduleTick:
                 _LOG.exception(
                     "schedule %s retry failed; continuing", schedule_id.value
                 )
+        # Broadcast any player warnings whose moment has arrived for still-upcoming
+        # stop/restart occurrences. Independent of the due poll above: the two
+        # never overlap (a warning fires while now < T, the occurrence while
+        # now >= T), so ordering does not matter.
+        await self._send_warnings(now)
 
     async def _run_due(self, schedule: Schedule, now: dt.datetime) -> None:
         if schedule.action is not ScheduleAction.BACKUP and self._is_stale(
@@ -339,6 +379,15 @@ class RunScheduleTick:
             # advance past now with no run row and no last_run_at change.
             await self._advance(schedule, last_run_at=schedule.last_run_at)
             return
+        # A warning step still unsent now can never fire (a warning broadcasts
+        # only strictly before its occurrence): its window fell between two
+        # coarse ticks, or a restart lost the sent-state. Best-effort means
+        # observable — name each such step before the action runs.
+        occurrence = schedule.next_run_at
+        if occurrence is not None:
+            for step in schedule.warning_steps:
+                if (schedule.id, occurrence, step.offset_minutes) not in self._warned:
+                    self._log_missed_step(schedule, step)
         result, started_at, finished_at = await self._execute(schedule)
         await self._record(schedule, result, started_at, finished_at)
         await self._advance(schedule, last_run_at=started_at)
@@ -363,6 +412,85 @@ class RunScheduleTick:
         # The retry records (and notifies on failure) but never moves next_run_at:
         # it is a catch-up for the failed occurrence, not a new occurrence.
         await self._record(schedule, result, started_at, finished_at)
+
+    async def _send_warnings(self, now: dt.datetime) -> None:
+        """Broadcast due player warnings for still-upcoming stop/restart runs (#1839).
+
+        The look-ahead sibling of the due poll: for each enabled stop/restart
+        schedule whose occurrence T is ahead but within the maximum warning
+        offset, broadcast every step whose warn instant (``T - offset``) has just
+        arrived, as the fixed ``say <message>`` form through
+        :class:`SendServerCommand`. Best-effort — an offline server or a failed
+        dispatch is logged and skipped, never a run row and never touching the
+        occurrence at T. The in-memory sent-state fires each step once; stale
+        entries (occurrences now in the past) are pruned so it stays bounded.
+        """
+
+        self._warned = {key for key in self._warned if key[1] > now}
+        until = now + dt.timedelta(minutes=MAX_WARNING_OFFSET_MINUTES)
+        async with self.uow:
+            candidates = await self.uow.schedules.list_warning_candidates(now, until)
+        for schedule in candidates:
+            try:
+                await self._warn_schedule(schedule, now)
+            except Exception:  # noqa: BLE001 - one schedule must not stop the tick
+                _LOG.exception(
+                    "warnings for schedule %s failed; continuing", schedule.id.value
+                )
+
+    async def _warn_schedule(self, schedule: Schedule, now: dt.datetime) -> None:
+        occurrence = schedule.next_run_at
+        assert occurrence is not None  # the look-ahead window guarantees it
+        due: list[WarningStep] = []
+        for step in schedule.warning_steps:
+            key = (schedule.id, occurrence, step.offset_minutes)
+            if key in self._warned:
+                continue
+            warn_at = occurrence - dt.timedelta(minutes=step.offset_minutes)
+            if warn_at > now:
+                continue  # not yet due
+            if now - warn_at > self.warning_grace:
+                # The whole send window passed unsent — the schedule was created
+                # or enabled after the warn instant, or the runner was down
+                # across the window. Consume the step and log once: best-effort
+                # means observable, and a warning never broadcasts this late.
+                self._warned.add(key)
+                self._log_missed_step(schedule, step)
+                continue
+            due.append(step)
+        if not due:
+            return
+        async with self.uow:
+            server = await self.uow.servers.get_by_id(schedule.server_id)
+        # Consume each due step up front (whether it broadcasts or is skipped) so a
+        # transient offline server or a failed dispatch is never retried — a warning
+        # that missed its moment is worthless.
+        for step in due:
+            self._warned.add((schedule.id, occurrence, step.offset_minutes))
+        if server is None or not _is_running(server):
+            _LOG.debug(
+                "schedule %s warnings skipped: server not running",
+                schedule.id.value,
+            )
+            return
+        for step in due:
+            try:
+                await self.send_command(
+                    community_id=server.community_id,
+                    server_id=schedule.server_id,
+                    line=f"say {step.message}",
+                )
+            except ServerError as exc:
+                # Offline/refused between the pre-check and dispatch: log and move
+                # on — a warning never fails the run it heralds.
+                _LOG.info("schedule %s warning skipped: %r", schedule.id.value, exc)
+
+    def _log_missed_step(self, schedule: Schedule, step: WarningStep) -> None:
+        _LOG.warning(
+            "schedule %s: %d-minute warning missed its send window; not sent",
+            schedule.id.value,
+            step.offset_minutes,
+        )
 
     async def _execute(
         self, schedule: Schedule

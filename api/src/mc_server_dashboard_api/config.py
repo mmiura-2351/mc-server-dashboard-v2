@@ -329,6 +329,13 @@ class ScheduleSettings(_Section):
     occurrence is never judged stale; it defaults to twenty seconds. Capped at
     that grace: a coarser tick would land every non-backup occurrence beyond
     the grace before the loop ever saw it — perpetually stale, never executed.
+
+    Player warnings on stop/restart schedules (issue #1839) key off this
+    cadence too: their send grace is derived as ``max(60 s, tick_seconds)``, so
+    warnings are reliable whenever ``tick_seconds <= 60``. With a coarser tick
+    a warning fires up to one tick late (always strictly before the action),
+    and a step whose offset is smaller than the tick can be skipped entirely —
+    logged, never silent.
     """
 
     tick_seconds: int = Field(default=20, gt=0, le=300)
