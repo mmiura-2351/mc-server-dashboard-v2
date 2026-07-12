@@ -3,8 +3,10 @@
  *
  * Stats header (count / total size / newest / oldest), a backups table with
  * per-row download / restore / delete, a create button (works while running —
- * the API takes the save-all + snapshot path), an upload picker, and the
- * per-server schedule field backed by the `backup_interval_hours` config key.
+ * the API takes the save-all + snapshot path), and an upload picker. Scheduled
+ * backups are no longer configured here: the FR-BAK-3 cadence moved to the
+ * general scheduler (a first-class `backup` schedule, #1840), so the tab only
+ * points `backup:schedule` holders at the Schedules surface.
  *
  * Restore requires the server stopped (the API answers 409 `server_not_stopped`
  * otherwise). Rather than a fragile auto-chain, the restore dialog explains the
@@ -13,7 +15,7 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import {
   ApiError,
   api,
@@ -39,8 +41,6 @@ import { serversKey } from "./useCommunityEvents.ts";
 
 type ServerResponse = components["schemas"]["ServerResponse"];
 type BackupResponse = components["schemas"]["BackupResponse"];
-
-const BACKUP_INTERVAL_KEY = "backup_interval_hours";
 
 /** Backups list query key — scoped to the server, invalidated on every change. */
 function backupsKey(communityId: string, serverId: string) {
@@ -106,12 +106,11 @@ export function ServerBackupsTab({
   const canCreate = can("backup:create", { serverId });
   const canRestore = can("backup:restore", { serverId });
   const canDelete = can("backup:delete", { serverId });
+  // The FR-BAK-3 inline cadence field is retired (#1840): scheduled backups are
+  // now a first-class `backup` schedule managed on the Schedules surface. Those
+  // who used to hold `backup:schedule` are pointed there instead of editing a
+  // config key here.
   const canSchedule = can("backup:schedule", { serverId });
-  // The schedule is saved through the shared server PATCH, but the API branches
-  // the gate by the changed-key set: a PATCH touching only the
-  // backup_interval_hours key requires backup:schedule, not server:update
-  // (issue #458). So a backup:schedule holder can edit and save the field on its
-  // own — the field is editable whenever canSchedule is true.
   // The restore dialog's one-click stop hits the lifecycle stop endpoint, gated
   // on server:stop. Without it the user must ask an operator to stop the server.
   const canStop = can("server:stop", { serverId });
@@ -327,11 +326,9 @@ export function ServerBackupsTab({
           </>
         )}
         {canSchedule && (
-          <ScheduleField
-            server={server}
-            communityId={communityId}
-            onError={onError}
-          />
+          <p className="sub backups-schedule-note">
+            {t("backups.schedule.movedNote")}
+          </p>
         )}
       </div>
 
@@ -491,92 +488,6 @@ function Stat({
         {hint !== undefined && <span className="metric-unit"> ({hint})</span>}
       </div>
     </div>
-  );
-}
-
-// The schedule is one config key (`backup_interval_hours`) saved through the
-// shared server PATCH, reusing the type-preserving rule: a value is sent as a
-// NUMBER so the API's non-bool-int validation accepts it; a blank field omits
-// the key (no schedule). The rest of the config blob round-trips untouched.
-function ScheduleField({
-  server,
-  communityId,
-  onError,
-}: {
-  server: ServerResponse;
-  communityId: string;
-  onError: (error: unknown) => void;
-}) {
-  const { showToast } = useToast();
-  const queryClient = useQueryClient();
-  const config = server.config as Record<string, unknown>;
-  const current = config[BACKUP_INTERVAL_KEY];
-  const [hours, setHours] = useState(
-    typeof current === "number" ? String(current) : "",
-  );
-
-  // Re-sync when the server config changes externally (#1212).
-  useEffect(() => {
-    setHours(typeof current === "number" ? String(current) : "");
-  }, [current]);
-
-  const save = useMutation({
-    mutationFn: () => {
-      const next: Record<string, unknown> = { ...config };
-      if (hours.trim() === "") {
-        delete next[BACKUP_INTERVAL_KEY];
-      } else {
-        next[BACKUP_INTERVAL_KEY] = Number(hours);
-      }
-      return api.patch(
-        apiPath("/api/communities/{community_id}/servers/{server_id}", {
-          community_id: communityId,
-          server_id: server.id,
-        }),
-        { body: JSON.stringify({ config: next }) },
-      );
-    },
-    onSuccess: () => {
-      showToast(t("backups.schedule.saved"), "success");
-      queryClient.invalidateQueries({
-        queryKey: serverKey(communityId, server.id),
-      });
-      queryClient.invalidateQueries({ queryKey: serversKey(communityId) });
-    },
-    onError: (error) => {
-      if (
-        error instanceof ApiError &&
-        error.reason === "invalid_backup_schedule"
-      ) {
-        showToast(t("backups.error.invalidSchedule"), "error");
-        return;
-      }
-      onError(error);
-    },
-  });
-
-  return (
-    <span className="backups-schedule">
-      <span className="field-inline">
-        {t("backups.schedule.label")}
-        <input
-          type="number"
-          min={1}
-          aria-label={t("backups.schedule.label")}
-          value={hours}
-          onChange={(e) => setHours(e.target.value)}
-        />
-        {t("backups.schedule.unit")}
-      </span>
-      <button
-        type="button"
-        className="btn sm"
-        disabled={save.isPending}
-        onClick={() => save.mutate()}
-      >
-        {t("backups.schedule.save")}
-      </button>
-    </span>
   );
 }
 

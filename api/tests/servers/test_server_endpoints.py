@@ -66,7 +66,6 @@ from mc_server_dashboard_api.servers.domain.cpu_allocation import (
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
-    InvalidBackupScheduleError,
     InvalidCpuAllocationError,
     InvalidMemoryLimitError,
     InvalidSnapshotIntervalError,
@@ -74,6 +73,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PortAlreadyTakenError,
     PortOutOfRangeError,
     PortRangeExhaustedError,
+    RetiredConfigKeyError,
     ServerNotFoundError,
     ServerNotStoppedError,
     UnknownServerTypeError,
@@ -632,19 +632,21 @@ def test_update_snapshot_interval_below_floor_is_422() -> None:
     assert resp.json()["reason"] == "invalid_snapshot_interval"
 
 
-def test_update_backup_interval_invalid_is_422() -> None:
+def test_update_retired_backup_interval_key_is_422() -> None:
+    # The FR-BAK-3 cadence moved to the general scheduler (#1840): a PATCH still
+    # carrying ``backup_interval_hours`` is a 422 ``retired_config_key``.
     app = _app(
         member=True,
         allow=True,
-        update=_FakeUseCase(error=InvalidBackupScheduleError("0")),
+        update=_FakeUseCase(error=RetiredConfigKeyError("backup_interval_hours")),
     )
     client = next(_client(app))
     resp = client.patch(
         f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
-        json={"config": {"backup_interval_hours": 0}},
+        json={"config": {"backup_interval_hours": 6}},
     )
     assert resp.status_code == 422
-    assert resp.json()["reason"] == "invalid_backup_schedule"
+    assert resp.json()["reason"] == "retired_config_key"
 
 
 def test_update_invalid_memory_limit_is_422() -> None:
@@ -801,7 +803,7 @@ def test_update_game_port_out_of_schema_bound_is_422() -> None:
 
 def test_update_forwards_authorize_callable() -> None:
     # The route hands the use case an ``authorize`` callable so the use case can
-    # branch the permission gate by the changed-key set (issue #458).
+    # enforce the ``server:update`` permission gate.
     update = _FakeUseCase(result=_server_entity(community_id=uuid.uuid4()))
     app = _app(member=True, allow=True, update=update)
     client = next(_client(app))
@@ -814,22 +816,22 @@ def test_update_forwards_authorize_callable() -> None:
 
 
 def test_update_permission_denied_is_403_with_permission_member() -> None:
-    # A changed-key-set denial (issue #458) surfaces as 403 carrying the missing
-    # permission code in the ``permission`` member (#425/#555).
+    # A permission denial surfaces as 403 carrying the missing permission code in
+    # the ``permission`` member (#425/#555).
     app = _app(
         member=True,
         allow=True,
-        update=_FakeUseCase(error=PermissionDeniedError("backup:schedule")),
+        update=_FakeUseCase(error=PermissionDeniedError("server:update")),
     )
     client = next(_client(app))
     resp = client.patch(
         f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
-        json={"config": {"backup_interval_hours": 6}},
+        json={"config": {"motd": "hi"}},
     )
     assert resp.status_code == 403
     body = resp.json()
     assert body["reason"] == "forbidden"
-    assert body["permission"] == "backup:schedule"
+    assert body["permission"] == "server:update"
 
 
 def _real_update(uow: FakeUnitOfWork) -> UpdateServer:

@@ -462,10 +462,17 @@ branch on server state. This policy is shared by 6.10 (File Management) and
   Storage copy when stopped, or via on-demand snapshot (worker quiesces via
   save-off → save-all → settle-wait) → archive when running. A backup is effectively a retained snapshot and does not depend
   on a specific Worker.
-- FR-BAK-3: Scheduled backups are supported. The M1 schedule is a per-server
-  `backup_interval_hours` integer (stored in `server.config`; absent = no scheduled
-  backups); a cron-style expression is a follow-on (epic #649). Execution history
-  is the ordered set of `backup` rows with `source = scheduled`.
+- FR-BAK-3: Scheduled backups are supported as a first-class `backup` schedule on
+  the general scheduler (epic #649): a per-server `schedule` row with
+  `action = backup` firing on a cron expression or a fixed interval (DATABASE.md
+  Section 8), driven by the one scheduler runner. The legacy per-server
+  `backup_interval_hours` config-key cadence is **retired** (owner decision D1,
+  issue #1840): existing keys are migrated to equivalent enabled `backup`
+  schedules and the key is stripped, so a create/update still carrying it is a
+  `422` (`retired_config_key`). Execution history is the ordered set of `backup`
+  rows with `source = scheduled`. A scheduled backup that fails no longer retries
+  on every scheduler tick: it gets the runner's bounded retry (one, ~30 minutes
+  later) plus an operator notification, then waits for the next occurrence.
 - FR-BAK-4: Restore replaces a server's authoritative working set and **requires
   the server to be stopped** (per the 6.9 policy); hot-restore of a running
   server is not supported.

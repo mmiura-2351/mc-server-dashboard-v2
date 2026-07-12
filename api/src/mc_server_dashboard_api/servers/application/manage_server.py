@@ -25,10 +25,6 @@ from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from typing import Any
 
-from mc_server_dashboard_api.servers.domain.backup_schedule import (
-    BACKUP_INTERVAL_CONFIG_KEY,
-    schedule_from_config,
-)
 from mc_server_dashboard_api.servers.domain.backup_store import BackupArchiveStore
 from mc_server_dashboard_api.servers.domain.bedrock_tunnel import (
     BedrockTunnelCredentials,
@@ -44,6 +40,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PermissionDeniedError,
     PortAlreadyTakenError,
     PortOutOfRangeError,
+    RetiredConfigKeyError,
     ServerFileNotFoundError,
     ServerNameAlreadyExistsError,
     ServerNotFoundError,
@@ -136,19 +133,16 @@ _logger = logging.getLogger(__name__)
 # Worker materialises into the live server) are NOT safe and keep the at-rest
 # requirement. Keep this set minimal; add a key only when it provably meets the
 # criterion.
-_SAFE_CONFIG_KEYS = frozenset(
-    {SNAPSHOT_INTERVAL_CONFIG_KEY, BACKUP_INTERVAL_CONFIG_KEY}
-)
+_SAFE_CONFIG_KEYS = frozenset({SNAPSHOT_INTERVAL_CONFIG_KEY})
 
-# Config keys whose edit is gated by ``backup:schedule`` rather than
-# ``server:update`` (issue #458). Backup scheduling has no dedicated endpoint —
-# it rides the ``backup_interval_hours`` key on the config blob — so the gate
-# branches by the changed-key set: a config edit that touches only this key
-# requires ``backup:schedule``; any other change requires ``server:update``; a
-# mixed edit requires both. ``server:update`` no longer implies scheduling. Note
-# the snapshot cadence key is NOT here: it has no dedicated permission code and
-# stays under ``server:update``.
-_SCHEDULING_CONFIG_KEYS = frozenset({BACKUP_INTERVAL_CONFIG_KEY})
+# Config keys retired by the general-scheduler cutover (epic #649, issue #1840).
+# The FR-BAK-3 per-server backup cadence is now a first-class ``backup`` schedule
+# (``schedule`` table, DATABASE.md Section 8), so the legacy
+# ``backup_interval_hours`` config key carries no meaning. A create/update still
+# sending it is rejected (422) rather than silently written into
+# ``server.properties`` as a bogus override — the deliberate breaking change that
+# tells a client the key is gone.
+_RETIRED_CONFIG_KEYS = frozenset({"backup_interval_hours"})
 
 # Config keys consumed by the platform (resource limits, scheduler cadences)
 # that are NOT server.properties overrides (issue #1209). Everything else in the
@@ -159,7 +153,6 @@ _RESERVED_CONFIG_KEYS = frozenset(
         MEMORY_LIMIT_CONFIG_KEY,
         CPU_ALLOCATION_CONFIG_KEY,
         SNAPSHOT_INTERVAL_CONFIG_KEY,
-        BACKUP_INTERVAL_CONFIG_KEY,
         # System-written JAR keys (issues #118, #1676). Written by the start
         # path; never operator-settable, hidden from the overrides editor.
         JAR_KEY_CONFIG_FIELD,
@@ -181,11 +174,23 @@ _RESERVED_CONFIG_KEYS = frozenset(
     }
 )
 
-# The permission codes the update gate evaluates (issue #458). Kept as bare
-# strings so this application module stays free of community-context value
-# objects; the edge maps a denial to the 403 ``permission`` member.
+# The permission code the update gate evaluates. Kept as a bare string so this
+# application module stays free of community-context value objects; the edge maps
+# a denial to the 403 ``permission`` member.
 _SERVER_UPDATE_PERMISSION = "server:update"
-_BACKUP_SCHEDULE_PERMISSION = "backup:schedule"
+
+
+def _reject_retired_config_keys(config: dict[str, Any]) -> None:
+    """Reject a config that still carries a retired platform key (issue #1840).
+
+    Raises :class:`RetiredConfigKeyError` naming the first offending key so a
+    create/update carrying ``backup_interval_hours`` 422s instead of writing the
+    dead key into ``server.properties``.
+    """
+
+    retired = sorted(_RETIRED_CONFIG_KEYS & config.keys())
+    if retired:
+        raise RetiredConfigKeyError(retired[0])
 
 
 def _changed_config_keys(current: dict[str, Any], incoming: dict[str, Any]) -> set[str]:
@@ -286,6 +291,10 @@ class CreateServer:
             # before staging the row so an unprovisionable server is never created.
             raise UnsupportedEditionError(mc_edition)
         parsed_type = _parse_server_type(server_type)
+        # A retired platform key (``backup_interval_hours``, #1840) 422s before
+        # the row is staged, so it is never written into server.properties as a
+        # bogus override.
+        _reject_retired_config_keys(config)
         # Apply the operator-configurable default when the request omits the key
         # (issue #1069). The default is injected into the config so it persists on
         # the row and is visible in responses. An explicit value takes precedence.
@@ -558,11 +567,13 @@ class UpdateServer:
             validate_slug(slug)
         new_name = None if name is None else ServerName(name)
         if config is not None:
+            # A retired platform key (``backup_interval_hours``, #1840) 422s
+            # before any write, so it is never written into server.properties.
+            _reject_retired_config_keys(config)
             # Validate the overrides carried on config before any write; each
-            # raises on a bad value. The snapshot interval (FR-DATA-7) and the
-            # backup schedule (FR-BAK-3) are validated the same way.
+            # raises on a bad value. The snapshot interval (FR-DATA-7) is
+            # validated the same way.
             override_from_config(config, floor=self.min_interval_seconds)
-            schedule_from_config(config)
             # The per-server memory limit (#705) is validated the same way: a
             # bad shape/range 422s before any write. The ceiling is overridden
             # by the operator-configurable max (issue #1069). Range only — host
@@ -586,27 +597,25 @@ class UpdateServer:
                 server = await self.uow.servers.get_by_id(server_id)
                 if server is None or server.community_id != community_id:
                     raise ServerNotFoundError(str(server_id.value))
-                # The config diff drives two gates. The at-rest gate (issue #115)
-                # applies unless this is a safe-keys-only config edit: a config update
+                # The config diff drives the at-rest gate (issue #115): it applies
+                # unless this is a safe-keys-only config edit — a config update
                 # whose changed keys are all in ``_SAFE_CONFIG_KEYS``, with no name
-                # change and no port change, may run in any state. The permission gate
-                # (issue #458) branches by the same changed-key set: scheduling-only
-                # edits need ``backup:schedule``; any other change needs
-                # ``server:update``; a mixed edit needs both. The permission gate runs
-                # after existence (a missing server is 404, no existence signal) and
-                # before the at-rest gate.
+                # change and no port change, may run in any state. Every edit is
+                # gated by ``server:update`` (checked after existence — a missing
+                # server is 404, no existence signal — and before the at-rest
+                # gate).
                 changed_keys = (
                     set()
                     if config is None
                     else _changed_config_keys(server.config, config)
                 )
-                await self._authorize_update(
-                    authorize=authorize,
-                    new_name=new_name,
-                    game_port=game_port,
-                    slug=slug,
-                    changed_keys=changed_keys,
-                )
+                # Every edit — including a no-op PATCH that touches nothing —
+                # requires ``server:update`` (the conservative default, so a PATCH
+                # cannot leak server detail or act as a state oracle without any
+                # permission). The per-key ``backup:schedule`` branch (#458) is
+                # gone: the backup cadence moved to the general scheduler (#1840).
+                if not await authorize(_SERVER_UPDATE_PERMISSION):
+                    raise PermissionDeniedError(_SERVER_UPDATE_PERMISSION)
                 # Slug rename is safe while running (routing is consulted only at
                 # join time; RELAY.md Section 3). The at-rest gate fires only for
                 # name/port changes and unsafe-key config edits.
@@ -684,46 +693,6 @@ class UpdateServer:
                     port=pending_port,
                 )
             return server
-
-    async def _authorize_update(
-        self,
-        *,
-        authorize: Callable[[str], Awaitable[bool]],
-        new_name: ServerName | None,
-        game_port: int | None,
-        slug: str | None,
-        changed_keys: set[str],
-    ) -> None:
-        """Enforce the per-update permission gate (issue #458).
-
-        Computes the required permission codes from what the edit touches and
-        denies on the first the caller is missing. ``backup:schedule`` is required
-        when the edit changes a scheduling key; ``server:update`` when it changes
-        anything else (a name, port, backend, or any non-scheduling config key). A
-        mixed edit requires both. ``server:update`` is checked first so a wholly
-        unauthorized caller is denied on the broad code. A no-op PATCH that touches
-        nothing (empty body, or a config that round-trips identical) still requires
-        ``server:update`` — the conservative pre-#458 default, so a PATCH cannot
-        leak server detail or act as a state oracle without any permission.
-        """
-
-        scheduling_change = bool(changed_keys & _SCHEDULING_CONFIG_KEYS)
-        other_change = (
-            new_name is not None
-            or game_port is not None
-            or slug is not None
-            or bool(changed_keys - _SCHEDULING_CONFIG_KEYS)
-        )
-        required: list[str] = []
-        if other_change:
-            required.append(_SERVER_UPDATE_PERMISSION)
-        if scheduling_change:
-            required.append(_BACKUP_SCHEDULE_PERMISSION)
-        if not required:
-            required.append(_SERVER_UPDATE_PERMISSION)
-        for code in required:
-            if not await authorize(code):
-                raise PermissionDeniedError(code)
 
     async def _rewrite_server_port(
         self,

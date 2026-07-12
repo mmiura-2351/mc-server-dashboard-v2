@@ -2606,17 +2606,18 @@ def require_permission(
 
 
 class DeferredAuthz(NamedTuple):
-    """A deferred per-resource authorization bundle (issues #458, #1837).
+    """A deferred per-resource authorization bundle (issue #1837).
 
     Some write gates cannot be a fixed-operation :func:`require_permission`
-    because the required code depends on the request: the server PATCH gate
-    branches by the changed-key set (``server:update`` vs ``backup:schedule``,
-    issue #458), and the schedule write gate requires ``schedule:manage`` *plus*
-    the permission for the schedule's action (issue #1837) — both known only to
-    the use case. So the dependency runs Layer-1 membership at the edge and hands
-    the route the authorized :class:`AuthUser` plus an ``authorize(code)``
-    callable bound to the target resource; the use case calls it per required
-    code and raises on the first the caller lacks.
+    because the required code depends on the request: the schedule write gate
+    requires ``schedule:manage`` *plus* the permission for the schedule's action
+    (issue #1837) — known only to the use case. So the dependency runs Layer-1
+    membership at the edge and hands the route the authorized :class:`AuthUser`
+    plus an ``authorize(code)`` callable bound to the target resource; the use
+    case calls it per required code and raises on the first the caller lacks.
+    (The pattern originated with the server PATCH's changed-key branch, issue
+    #458, retired at #1840; the server PATCH still uses the bundle to check the
+    single ``server:update`` code inside the use case.)
     """
 
     auth_user: AuthUser
@@ -2626,7 +2627,7 @@ class DeferredAuthz(NamedTuple):
 def require_deferred_authz(
     *, resource_type: str, resource_id_param: str
 ) -> Callable[..., Awaitable[DeferredAuthz]]:
-    """Build a deferred per-resource authorization dependency (#458, #1837).
+    """Build a deferred per-resource authorization dependency (#1837).
 
     Runs the same Layer-1 membership check as :func:`require_permission`
     (non-member -> 404, no existence signal), then returns the

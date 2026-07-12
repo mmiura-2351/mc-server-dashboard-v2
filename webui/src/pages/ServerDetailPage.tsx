@@ -1336,8 +1336,8 @@ function systemManagedConfig(
 // Parse a value-input string with JSON-value semantics: a valid JSON literal
 // (number / boolean / null / object / array) keeps that type, anything else
 // (including a bare word like `hard`) stays a string. So `12` round-trips as a
-// number and the API's non-bool-int cadence keys (snapshot_interval_seconds,
-// backup_interval_hours) are not sent as strings → no spurious 422.
+// number and the API's non-bool-int cadence key (snapshot_interval_seconds) is
+// not sent as a string → no spurious 422.
 function parseConfigValue(value: string): unknown {
   try {
     return JSON.parse(value);
@@ -1364,9 +1364,9 @@ function fromRows(rows: ConfigRow[]): Record<string, unknown> {
 }
 
 // Map a settings save/delete error reason to a specific message; otherwise the
-// generic toast. 422 carries a port reason (port_out_of_range) or a cadence
-// reason (invalid_snapshot_interval / invalid_backup_schedule), 409 the at-rest
-// gate (server_not_stopped) and export the unsettled gate.
+// generic toast. 422 carries a port reason (port_out_of_range) or the snapshot
+// cadence reason (invalid_snapshot_interval), 409 the at-rest gate
+// (server_not_stopped) and export the unsettled gate.
 function settingsErrorMessage(error: unknown): TranslationKey {
   if (error instanceof ApiError) {
     switch (error.reason) {
@@ -1380,8 +1380,8 @@ function settingsErrorMessage(error: unknown): TranslationKey {
         return "serverDetail.error.portOutOfRange";
       case "invalid_snapshot_interval":
         return "serverDetail.error.invalidSnapshotInterval";
-      case "invalid_backup_schedule":
-        return "serverDetail.error.invalidBackupSchedule";
+      case "retired_config_key":
+        return "serverDetail.error.retiredConfigKey";
       case "invalid_memory_limit":
         return "serverDetail.error.invalidMemoryLimit";
       case "invalid_cpu_allocation":

@@ -304,19 +304,6 @@ class SnapshotSettings(_Section):
         return self
 
 
-class BackupSettings(_Section):
-    """Scheduled-backup cadence (FR-BAK-3).
-
-    The per-server schedule itself lives on the ``Server`` config blob as an
-    interval in hours (DATABASE.md Section 8); this only tunes how often the
-    background scheduler *wakes* to check which servers are due.
-    ``schedule_tick_seconds`` is the loop resolution — coarse, since backup
-    cadence is measured in hours; it defaults to five minutes.
-    """
-
-    schedule_tick_seconds: int = Field(default=300, gt=0)
-
-
 class ScheduleSettings(_Section):
     """General-scheduler tick cadence (epic #649, issue #1838).
 
@@ -782,7 +769,6 @@ class Settings(BaseSettings):
     database: DatabaseSettings
     storage: StorageSettings = Field(default_factory=StorageSettings)
     snapshot: SnapshotSettings = Field(default_factory=SnapshotSettings)
-    backup: BackupSettings = Field(default_factory=BackupSettings)
     schedule: ScheduleSettings = Field(default_factory=ScheduleSettings)
     reconciler: ReconcilerSettings = Field(default_factory=ReconcilerSettings)
     jar_gc: JarGcSettings = Field(default_factory=JarGcSettings)
@@ -841,7 +827,6 @@ class Settings(BaseSettings):
             "database": {"url": _MASK},
             "storage": storage,
             "snapshot": self.snapshot.model_dump(),
-            "backup": self.backup.model_dump(),
             "reconciler": self.reconciler.model_dump(),
             "ports": self.ports.model_dump(),
             "memory_limit": self.memory_limit.model_dump(),

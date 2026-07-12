@@ -84,7 +84,6 @@ from mc_server_dashboard_api.middleware import (
     security_headers_middleware,
     strip_no_content_body_headers_middleware,
 )
-from mc_server_dashboard_api.servers.adapters.backup_loop import run_backup_loop
 from mc_server_dashboard_api.servers.adapters.backup_store import (
     StorageBackupStoreAdapter,
 )
@@ -153,9 +152,6 @@ from mc_server_dashboard_api.servers.api import ports as server_ports
 from mc_server_dashboard_api.servers.api import resource_packs as server_resource_packs
 from mc_server_dashboard_api.servers.api import schedules as server_schedules
 from mc_server_dashboard_api.servers.api import servers
-from mc_server_dashboard_api.servers.application.backup_scheduler import (
-    RunBackupScheduleTick,
-)
 from mc_server_dashboard_api.servers.application.backups import CreateBackup
 from mc_server_dashboard_api.servers.application.bedrock_sweep import (
     SweepBedrockPorts,
@@ -728,7 +724,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         grpc_server = None
         snapshot_task: asyncio.Task[None] | None = None
-        backup_task: asyncio.Task[None] | None = None
         schedule_task: asyncio.Task[None] | None = None
         reconciler_task: asyncio.Task[None] | None = None
         jar_gc_task: asyncio.Task[None] | None = None
@@ -850,45 +845,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
             )
             logging.getLogger(__name__).info("snapshot scheduler started")
-            # Run the periodic scheduled-backup scheduler as a lifespan task
-            # (FR-BAK-3), alongside the snapshot scheduler. Gated on the control
-            # plane like the snapshot loop: the running-server backup path needs a
-            # worker (save-all -> snapshot), and an at-rest server cannot have been
-            # started without the control plane, so a backup loop with no control
-            # plane has nothing to act on. The CreateBackup it drives reuses the
-            # same control-plane adapter + Storage backup seam as the HTTP path.
-            backup_control_plane = FleetControlPlaneAdapter(
-                registry=registry,
-                control_plane=app.state.control_plane,
-                data_plane_base_url=settings.server.effective_data_plane_base_url,
-                worker_credential=settings.control.worker_credential,
-                snapshot_timeout_seconds=settings.control.snapshot_timeout_seconds,
-            )
-            backup_scheduler = RunBackupScheduleTick(
-                uow=ServersUnitOfWork(create_session_factory(engine)),
-                create_backup=CreateBackup(
-                    uow=ServersUnitOfWork(create_session_factory(engine)),
-                    backup_store=StorageBackupStoreAdapter(storage=storage),
-                    snapshot_server=SnapshotServer(
-                        uow=ServersUnitOfWork(create_session_factory(engine)),
-                        control_plane=backup_control_plane,
-                    ),
-                    clock=ServersSystemClock(),
-                ),
-                clock=ServersSystemClock(),
-            )
-            backup_task = asyncio.create_task(
-                run_backup_loop(
-                    backup_scheduler,
-                    tick_seconds=settings.backup.schedule_tick_seconds,
-                )
-            )
-            logging.getLogger(__name__).info("backup scheduler started")
             # Run the general scheduler runner as a lifespan task (epic #649,
-            # issue #1838), alongside the snapshot/backup schedulers. Gated on the
-            # control plane like them: it dispatches only through the existing
-            # lifecycle/command/backup use cases, which need a Worker channel. Each
-            # use case gets its own UnitOfWork (fresh session) so concurrent
+            # issue #1838), alongside the snapshot scheduler. It subsumes the
+            # retired FR-BAK-3 backup cadence, now a first-class ``backup``
+            # schedule (#1840). Gated on the control plane like the snapshot loop:
+            # it dispatches only through the existing lifecycle/command/backup use
+            # cases, which need a Worker channel. Each use case gets its own
+            # UnitOfWork (fresh session) so concurrent
             # actions never share a session (the reconciler's #871 pattern); the
             # control-plane adapter, clock, JAR, and Storage seams are stateless
             # and reused. Failure notifications go through the servers ServerNotifier
@@ -1135,10 +1098,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 schedule_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await schedule_task
-            if backup_task is not None:
-                backup_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await backup_task
             if snapshot_task is not None:
                 snapshot_task.cancel()
                 with suppress(asyncio.CancelledError):

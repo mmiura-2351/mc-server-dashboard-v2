@@ -396,8 +396,8 @@ export const en = {
     "That game port is outside the allowed range.",
   "serverDetail.error.invalidSnapshotInterval":
     "snapshot_interval_seconds must be a whole number of seconds at or above the configured floor.",
-  "serverDetail.error.invalidBackupSchedule":
-    "backup_interval_hours must be a whole number of hours of at least 1.",
+  "serverDetail.error.retiredConfigKey":
+    "backup_interval_hours is no longer supported — configure scheduled backups under Schedules.",
   "serverDetail.error.invalidMemoryLimit":
     "The memory limit must be a whole number between 512 and 1048576 MiB.",
   "serverDetail.error.invalidCpuAllocation":
@@ -452,11 +452,9 @@ export const en = {
   "backups.download": "Download",
   "backups.restore": "Restore",
   "backups.delete": "Delete",
-  // Schedule field (backup_interval_hours on the server config blob).
-  "backups.schedule.label": "Schedule: every",
-  "backups.schedule.unit": "hours",
-  "backups.schedule.save": "Save",
-  "backups.schedule.saved": "Backup schedule saved.",
+  // Scheduled backups moved to the general scheduler (#1840); point users there.
+  "backups.schedule.movedNote":
+    "Scheduled backups are now configured under Schedules.",
   // Restore dialog (stopped-only; two-step stop-then-restore).
   "backups.restoreDialog.title": "Restore backup",
   "backups.restoreDialog.blocked":
@@ -500,8 +498,6 @@ export const en = {
   "backups.error.invalidArchive": "That file is not a valid backup archive.",
   "backups.error.workerUnavailable":
     "No server host is available to take the backup right now.",
-  "backups.error.invalidSchedule":
-    "backup_interval_hours must be a whole number of hours of at least 1.",
   "backups.error.serverMustBeStopped":
     "The server must be stopped for this operation.",
   "backups.error.serverBusy": "Another operation is in progress. Please wait.",

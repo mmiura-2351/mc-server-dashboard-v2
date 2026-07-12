@@ -395,8 +395,8 @@ export const ja: Record<TranslationKey, string> = {
     "そのゲームポートは許可された範囲外です。",
   "serverDetail.error.invalidSnapshotInterval":
     "snapshot_interval_seconds は、設定された下限以上の整数の秒数である必要があります。",
-  "serverDetail.error.invalidBackupSchedule":
-    "backup_interval_hours は1以上の整数の時間数である必要があります。",
+  "serverDetail.error.retiredConfigKey":
+    "backup_interval_hours は廃止されました。定期バックアップは「スケジュール」で設定してください。",
   "serverDetail.error.invalidMemoryLimit":
     "メモリ上限は 512〜1048576 MiB の整数である必要があります。",
   "serverDetail.error.invalidCpuAllocation":
@@ -451,11 +451,9 @@ export const ja: Record<TranslationKey, string> = {
   "backups.download": "ダウンロード",
   "backups.restore": "復元",
   "backups.delete": "削除",
-  // Schedule field (backup_interval_hours on the server config blob).
-  "backups.schedule.label": "スケジュール: 毎",
-  "backups.schedule.unit": "時間",
-  "backups.schedule.save": "保存",
-  "backups.schedule.saved": "バックアップスケジュールを保存しました。",
+  // Scheduled backups moved to the general scheduler (#1840); point users there.
+  "backups.schedule.movedNote":
+    "定期バックアップは「スケジュール」で設定するようになりました。",
   // Restore dialog (stopped-only; two-step stop-then-restore).
   "backups.restoreDialog.title": "バックアップを復元",
   "backups.restoreDialog.blocked":
@@ -501,8 +499,6 @@ export const ja: Record<TranslationKey, string> = {
     "そのファイルは有効なバックアップアーカイブではありません。",
   "backups.error.workerUnavailable":
     "現在、バックアップを取得できるサーバーホストがありません。",
-  "backups.error.invalidSchedule":
-    "backup_interval_hours は1以上の整数の時間数である必要があります。",
   "backups.error.serverMustBeStopped": "この操作にはサーバーの停止が必要です。",
   "backups.error.serverBusy":
     "別の操作が進行中です。完了するまでお待ちください。",

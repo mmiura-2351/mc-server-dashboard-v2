@@ -366,15 +366,16 @@ here when it is added, so the blob does not accumulate undocumented keys.
 | `resolved_jar_sha256` | string (JAR content hash) | **system** — written by the start use case when a JAR is resolved; hidden from the config-overrides editor (issue #701) and never operator-settable | issue #118 |
 | `resolved_jar_source` | string (source fingerprint) | **system** — written by the start use case alongside `resolved_jar_sha256`; records the catalog's published digest or URL so a subsequent start can detect upstream updates without re-downloading (issue #1676). Format: `"{algorithm}:{hash}"` (e.g. `sha1:ab…`, `sha256:cd…`) or `"url:{download_url}"` (Fabric) | issue #1676 |
 | `snapshot_interval_seconds` | integer seconds | **operator** — per-server snapshot-cadence override (FR-DATA-7), clamped up to the configured floor | issue #107 |
-| `backup_interval_hours` | integer hours | **operator** — per-server backup-schedule interval (Section 8); absent means no scheduled backups | issue #117 |
 | `memory_limit_mb` | integer mebibytes (MiB) | **operator** — per-server memory limit; absent means no limit (the JVM heap stays at its default). The worker derives the JVM heap from it; the `container` driver also enforces it as a *hard* ceiling (see [`CONFIGURATION.md`](CONFIGURATION.md) Section 6.3) | issue #705 |
 | `cpu_millis` | integer millicores (1000 = one core) | **operator** — per-server CPU allocation; absent means no allocation (the driver's default share). A **soft, rough relative share** (owner decision), not a hard cap; the `container` driver translates it to a relative weight `CPUShares` that bites only under contention (see [`CONFIGURATION.md`](CONFIGURATION.md) Section 6.3) | issue #722 |
 
-The operator-settable keys are validated on write (a bad value is `422`), and the
-update permission gate branches on the changed-key set: an edit that touches only
-`backup_interval_hours` needs `backup:schedule`, any other config key needs
-`server:update` (issue #458). The system-written `resolved_jar_sha256` is not
-editable through the config-overrides surface.
+The operator-settable keys are validated on write (a bad value is `422`), and
+every edit — a name, port, or any config key — is gated by `server:update`. The
+system-written `resolved_jar_sha256` is not editable through the config-overrides
+surface. `backup_interval_hours` was retired at the general-scheduler cutover
+(issue #1840): it is no longer a reserved key, and a create/update still carrying
+it is a `422` (`retired_config_key`) — the backup cadence is now a first-class
+`backup` schedule (Section 8).
 
 **Desired / observed split (FR-SRV-3, FR-SRV-4).** The two state columns are the
 heart of the model. `desired_state` is the **source of truth for intent**, mutated
@@ -624,9 +625,14 @@ The general scheduler: per-server recurring actions and their execution
 history (migration 0029). A schedule fires on a **cron expression XOR a fixed
 interval**, evaluated in a per-schedule IANA timezone (cron) or as absolute
 elapsed time with a deterministic per-schedule jitter (interval). The runner
-(#1838) polls `next_run_at` over enabled schedules; the FR-BAK-3
-`backup_interval_hours` config cadence above is retired into `action = backup`
-schedules at #1840.
+(#1838) polls `next_run_at` over enabled schedules. The legacy FR-BAK-3
+`backup_interval_hours` config cadence is retired into `action = backup`
+schedules (issue #1840): migration 0031 converts each server that carries the key
+into an equivalent enabled interval `backup` schedule (named "Scheduled backup",
+`next_run_at` staggered within ~1 hour so the runner picks it up soon without a
+fleet-wide thundering herd) and strips the key. A failed scheduled backup no
+longer retries every tick — it gets the runner's bounded retry (one, ~30 minutes)
+plus a notification, then waits for the next occurrence.
 
 #### `schedule`
 
