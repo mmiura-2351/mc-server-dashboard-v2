@@ -647,6 +647,59 @@ def test_put_retention_tiered_returns_the_saved_policy() -> None:
     assert (body["daily"], body["weekly"], body["monthly"]) == (7, 4, 6)
 
 
+def test_put_retention_records_set_retention_audit() -> None:
+    # A retention policy write is a privileged mutation: it is audited with the
+    # acting user and targets the server, so the causal actor behind the
+    # actor-None backup:delete prune rows stays recoverable (issue #1841).
+    server_id = uuid.uuid4()
+    community_id = uuid.uuid4()
+    use_case = _FakeUseCase(result=RetentionPolicy.from_fields(keep_last=3))
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, set_retention=use_case, recorder=recorder)
+    client = next(_client(app))
+    resp = client.put(
+        _url(community_id, server_id, "/retention"), json={"keep_last": 3}
+    )
+    assert resp.status_code == 200
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_SET_RETENTION]
+    event = recorder.events[0]
+    assert event.outcome is Outcome.SUCCESS
+    assert isinstance(event.actor_id, uuid.UUID)
+    assert event.community_id == community_id
+    assert event.target_type == ops.TARGET_SERVER
+    assert event.target_id == server_id
+
+
+def test_put_retention_failure_is_not_audited() -> None:
+    use_case = _FakeUseCase(error=InvalidRetentionPolicyError("x"))
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, set_retention=use_case, recorder=recorder)
+    client = next(_client(app))
+    resp = client.put(
+        _url(uuid.uuid4(), uuid.uuid4(), "/retention"), json={"keep_last": 0}
+    )
+    assert resp.status_code == 422
+    assert recorder.events == []
+
+
+def test_delete_retention_records_clear_retention_audit() -> None:
+    server_id = uuid.uuid4()
+    community_id = uuid.uuid4()
+    use_case = _FakeUseCase()
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, clear_retention=use_case, recorder=recorder)
+    client = next(_client(app))
+    resp = client.delete(_url(community_id, server_id, "/retention"))
+    assert resp.status_code == 204
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_CLEAR_RETENTION]
+    event = recorder.events[0]
+    assert event.outcome is Outcome.SUCCESS
+    assert isinstance(event.actor_id, uuid.UUID)
+    assert event.community_id == community_id
+    assert event.target_type == ops.TARGET_SERVER
+    assert event.target_id == server_id
+
+
 def test_put_retention_invalid_policy_is_422() -> None:
     use_case = _FakeUseCase(error=InvalidRetentionPolicyError("x"))
     app = _app(member=True, allow=True, set_retention=use_case)

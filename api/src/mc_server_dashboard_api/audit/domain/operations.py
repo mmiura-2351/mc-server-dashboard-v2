@@ -100,6 +100,14 @@ BACKUP_DOWNLOAD: Final = "backup:download"
 # permission, so it names the operation, not a permission (free-text column, see
 # module docstring).
 BACKUP_FORCE_RESTORE: Final = "backup:force_restore"
+# Setting / clearing a server's scheduled-backup retention policy (issue #1841).
+# Gated by backup:schedule, so these name the operation, not a permission
+# (free-text column, see module docstring). Recorded with the acting user and
+# targeting the server: the retention prune's own backup:delete rows carry
+# actor None (no operator is behind a prune), so these rows are what keep the
+# causal actor behind a retention-driven mass deletion recoverable.
+BACKUP_SET_RETENTION: Final = "backup:set_retention"
+BACKUP_CLEAR_RETENTION: Final = "backup:clear_retention"
 # The one-shot fsck/quarantine sweep marking an existing artifact corrupt (issue
 # #744): a backup re-checked and found structurally corrupt is quarantined, and a
 # published snapshot's ``current`` found corrupt is flagged (snapshots are

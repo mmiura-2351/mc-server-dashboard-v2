@@ -536,11 +536,11 @@ statistics endpoints aggregate count / total known bytes / unknown-size count /
 newest+oldest from these rows.
 
 > **Scheduled backups (FR-BAK-3)** need a schedule (cron-like) and execution
-> history. The schedule belongs to the server (it can live in `server.config` as
-> a per-server setting), and each run produces a `backup` row with
-> `source = scheduled` — which *is* the execution history (a listing of scheduled
-> rows with their `created_at`). A separate `backup_schedule` table is only needed
-> if multiple named schedules per server are required; M1 does not.
+> history. The schedule is a first-class `backup`-action row of the `schedule`
+> table (this Section; issue #1840 retired the legacy `server.config` cadence
+> key), and each run produces a `backup` row with `source = scheduled` — which
+> *is* the archive history (a listing of scheduled rows with their
+> `created_at`), alongside the runner's `schedule_run` outcome rows.
 
 `source = scheduled` rows are additionally subject to the server's
 `backup_retention` policy (Section 7, issue #1841): after each successful

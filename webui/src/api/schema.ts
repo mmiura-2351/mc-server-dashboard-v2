@@ -675,15 +675,19 @@ export interface paths {
          *     to `source=scheduled` backups — manual/uploaded rows are never auto-deleted.
          *     Setting it prunes immediately (best-effort), and every successful scheduled
          *     backup run prunes thereafter; each pruned backup is audited as
-         *     `backup:delete` with no actor. The policy is readable as `backup_retention`
-         *     on the server read. An invalid shape is 422 `invalid_retention_policy`.
+         *     `backup:delete` with no actor. The write itself is audited as
+         *     `backup:set_retention` with the acting user, so the causal actor behind
+         *     those actor-less prune rows stays recoverable. The policy is readable as
+         *     `backup_retention` on the server read. An invalid shape is 422
+         *     `invalid_retention_policy`.
          */
         put: operations["set_backup_retention_api_communities__community_id__servers__server_id__backups_retention_put"];
         post?: never;
         /**
          * Clear Backup Retention
          * @description Clear the retention policy (backup:schedule): scheduled backups then
-         *     accumulate unbounded again. Nothing is pruned on clear.
+         *     accumulate unbounded again. Nothing is pruned on clear; the write is
+         *     audited as `backup:clear_retention` with the acting user.
          */
         delete: operations["clear_backup_retention_api_communities__community_id__servers__server_id__backups_retention_delete"];
         options?: never;

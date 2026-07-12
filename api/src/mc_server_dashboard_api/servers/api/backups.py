@@ -335,8 +335,8 @@ async def set_backup_retention(
     community_id: uuid.UUID,
     server_id: uuid.UUID,
     body: RetentionPolicyBody,
-    _authorized: Annotated[
-        object,
+    authorized: Annotated[
+        AuthUser,
         Depends(
             require_permission(
                 Permission("backup:schedule"),
@@ -346,6 +346,7 @@ async def set_backup_retention(
         ),
     ],
     use_case: Annotated[SetBackupRetention, Depends(get_set_backup_retention)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> RetentionPolicyBody:
     """Set the scheduled-backup retention policy (backup:schedule, issue #1841).
 
@@ -353,8 +354,11 @@ async def set_backup_retention(
     to `source=scheduled` backups — manual/uploaded rows are never auto-deleted.
     Setting it prunes immediately (best-effort), and every successful scheduled
     backup run prunes thereafter; each pruned backup is audited as
-    `backup:delete` with no actor. The policy is readable as `backup_retention`
-    on the server read. An invalid shape is 422 `invalid_retention_policy`.
+    `backup:delete` with no actor. The write itself is audited as
+    `backup:set_retention` with the acting user, so the causal actor behind
+    those actor-less prune rows stays recoverable. The policy is readable as
+    `backup_retention` on the server read. An invalid shape is 422
+    `invalid_retention_policy`.
     """
 
     try:
@@ -370,6 +374,14 @@ async def set_backup_retention(
         raise _not_found() from exc
     except InvalidRetentionPolicyError as exc:
         raise _unprocessable("invalid_retention_policy") from exc
+    await _record(
+        recorder,
+        ops.BACKUP_SET_RETENTION,
+        authorized,
+        community_id,
+        server_id,
+        target_type=ops.TARGET_SERVER,
+    )
     return RetentionPolicyBody.from_policy(policy)
 
 
@@ -380,8 +392,8 @@ async def set_backup_retention(
 async def clear_backup_retention(
     community_id: uuid.UUID,
     server_id: uuid.UUID,
-    _authorized: Annotated[
-        object,
+    authorized: Annotated[
+        AuthUser,
         Depends(
             require_permission(
                 Permission("backup:schedule"),
@@ -391,9 +403,11 @@ async def clear_backup_retention(
         ),
     ],
     use_case: Annotated[ClearBackupRetention, Depends(get_clear_backup_retention)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> None:
     """Clear the retention policy (backup:schedule): scheduled backups then
-    accumulate unbounded again. Nothing is pruned on clear."""
+    accumulate unbounded again. Nothing is pruned on clear; the write is
+    audited as `backup:clear_retention` with the acting user."""
 
     try:
         await use_case(
@@ -402,6 +416,14 @@ async def clear_backup_retention(
         )
     except ServerNotFoundError as exc:
         raise _not_found() from exc
+    await _record(
+        recorder,
+        ops.BACKUP_CLEAR_RETENTION,
+        authorized,
+        community_id,
+        server_id,
+        target_type=ops.TARGET_SERVER,
+    )
 
 
 @router.post(
@@ -735,9 +757,15 @@ async def _record(
     operation: str,
     authorized: AuthUser,
     community_id: uuid.UUID,
-    backup_id: uuid.UUID,
+    target_id: uuid.UUID,
+    *,
+    target_type: str = ops.TARGET_BACKUP,
 ) -> None:
-    """Record a successful backup operation (FR-AUD-1), fire-after-commit."""
+    """Record a successful backup operation (FR-AUD-1), fire-after-commit.
+
+    Most operations target the backup; the retention policy writes (issue
+    #1841) target the server the policy hangs on.
+    """
 
     await recorder.record(
         AuditEvent(
@@ -745,8 +773,8 @@ async def _record(
             outcome=Outcome.SUCCESS,
             actor_id=authorized.user_id.value,
             community_id=community_id,
-            target_type=ops.TARGET_BACKUP,
-            target_id=backup_id,
+            target_type=target_type,
+            target_id=target_id,
         )
     )
 
