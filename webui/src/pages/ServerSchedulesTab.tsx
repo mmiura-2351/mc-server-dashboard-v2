@@ -658,9 +658,13 @@ function ScheduleDialog({
 
       <label className="field">
         {t("schedules.dialog.actionLabel")}
+        {/* aria-label: a select wrapped in a label otherwise computes its
+            accessible name from the label's text content INCLUDING its own
+            option texts — an unusable name for AT and tests alike. */}
         <select
           value={action}
           disabled={editing}
+          aria-label={t("schedules.dialog.actionLabel")}
           onChange={(e) => setAction(e.target.value as ScheduleAction)}
         >
           {(editing ? [action] : permittedActions).map((a) => (
@@ -732,7 +736,13 @@ function ScheduleDialog({
 
       <label className="field">
         {t("schedules.dialog.timezoneLabel")}
-        <select value={timezone} onChange={(e) => setTimezone(e.target.value)}>
+        {/* aria-label: see the action select — hundreds of zone options would
+            otherwise pollute the computed accessible name. */}
+        <select
+          value={timezone}
+          aria-label={t("schedules.dialog.timezoneLabel")}
+          onChange={(e) => setTimezone(e.target.value)}
+        >
           {tzOptions.map((zone) => (
             <option key={zone} value={zone}>
               {zone}

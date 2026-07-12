@@ -38,7 +38,8 @@ async function setupServer(
         server_type: "vanilla",
         mc_edition: "java",
         mc_version: "1.21.6",
-        game_port: 25565,
+        // game_port omitted: the API auto-allocates a free in-range port, so
+        // parallel/sequential setups never collide on the global port space.
       },
     },
   );
@@ -75,16 +76,20 @@ test("owner creates, toggles, and deletes a schedule", async ({
   await page.getByRole("tab", { name: "Schedules" }).click();
 
   // Create via the dialog: backup action on the default 60-minute interval.
+  // The timezone select's accessible name concatenates every zone option, so
+  // substring label matching collides ("…San_Jua-n Ame-rica…" contains "name");
+  // match roles/exact labels instead.
   await page.getByRole("button", { name: "+ Create schedule" }).click();
   const dialog = page.getByRole("dialog", { name: "Create schedule" });
-  await dialog.getByLabel("Name").fill(scheduleName);
-  await dialog.getByLabel("Action").selectOption("backup");
+  await dialog.getByRole("textbox", { name: "Name" }).fill(scheduleName);
+  await dialog.getByLabel("Action", { exact: true }).selectOption("backup");
   await dialog.getByRole("button", { name: "Create schedule" }).click();
 
-  // The row renders with the humanized cadence and an enabled toggle.
+  // The row renders with the humanized cadence and an enabled toggle. The
+  // default 60-minute interval (3600s) humanizes to whole hours.
   const row = page.getByRole("row", { name: new RegExp(scheduleName) });
   await expect(row).toBeVisible();
-  await expect(row.getByText("Every 60 min")).toBeVisible();
+  await expect(row.getByText("Every 1 h")).toBeVisible();
   const toggle = row.getByRole("checkbox");
   await expect(toggle).toBeChecked();
 
