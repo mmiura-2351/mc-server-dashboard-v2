@@ -415,7 +415,7 @@ tunes the poll cadence; the schedules themselves are per-server rows.
 
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
-| `schedule.tick_seconds` | `20` | | Loop resolution of the scheduler runner: how often it wakes to poll `next_run_at` over enabled schedules. Finer than the backup loop's cadence since a schedule can fire as often as every minute (the domain interval floor), and it must stay well under the runner's fixed 300 s late-run grace so an on-time occurrence is never judged stale. Must be positive and at most 300 (the grace itself): a coarser tick would render every non-backup occurrence perpetually stale, never executed. |
+| `schedule.tick_seconds` | `20` | | Loop resolution of the scheduler runner: how often it wakes to poll `next_run_at` over enabled schedules. Finer than the backup loop's cadence since a schedule can fire as often as every minute (the domain interval floor), and it must stay well under the runner's fixed 300 s late-run grace so an on-time occurrence is never judged stale. Must be positive and at most 300 (the grace itself): a coarser tick would render every non-backup occurrence perpetually stale, never executed. Player warnings on stop/restart schedules (issue #1839) key off this cadence too: their send grace is derived as max(60 s, `tick_seconds`), so warnings are reliable whenever the tick is at most 60. With a coarser tick a warning fires up to one tick late (always strictly before the action), and a warning offset smaller than the tick may be skipped entirely — logged, never silent. |
 
 ---
 

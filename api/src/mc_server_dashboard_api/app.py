@@ -174,6 +174,7 @@ from mc_server_dashboard_api.servers.application.reconciler import RunReconciler
 from mc_server_dashboard_api.servers.application.schedule_runner import (
     ExecuteScheduleAction,
     RunScheduleTick,
+    effective_warning_grace,
 )
 from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
     RunSnapshotCadenceTick,
@@ -967,6 +968,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ),
                 notifier=RealTimeEventsNotifier(real_time_events),
                 clock=ServersSystemClock(),
+                # A due warning stays sendable for at least one full tick, so a
+                # coarse loop cannot let a whole send window fall between wakes.
+                warning_grace=effective_warning_grace(settings.schedule.tick_seconds),
             )
             schedule_task = asyncio.create_task(
                 run_schedule_loop(

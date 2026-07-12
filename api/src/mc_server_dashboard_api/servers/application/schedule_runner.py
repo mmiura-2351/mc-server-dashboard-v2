@@ -88,6 +88,7 @@ from mc_server_dashboard_api.servers.domain.schedule import (
     ScheduleRun,
     ScheduleRunId,
     ScheduleRunOutcome,
+    WarningStep,
     next_interval_run,
 )
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
@@ -115,14 +116,29 @@ _NOTIFY_KIND = "schedule_failed"
 # Anything staler advances without executing (no run row).
 LATE_RUN_GRACE = dt.timedelta(seconds=300)
 
-# How late a due player warning may still broadcast (issue #1839). Above the ~20 s
-# tick so an on-time warning is never missed between ticks, yet well under a
-# whole minute — the finest warning-offset granularity — so a schedule enabled
-# *after* a step's warn instant drops that step (its offset is already behind)
-# rather than blasting it late; the still-ahead steps fire on time. Smaller than
-# LATE_RUN_GRACE because a warning that missed its moment is worthless, unlike the
-# occurrence it heralds. The in-memory sent-state makes each step fire once.
-WARNING_GRACE = dt.timedelta(seconds=60)
+# The floor of the warning-send grace: how late a due player warning may still
+# broadcast (issue #1839). The effective grace is derived at wiring time as
+# max(floor, tick_seconds) — see :func:`effective_warning_grace` — so a step
+# whose offset exceeds the tick always fires: at worst one tick late, and always
+# strictly before the occurrence (the look-ahead only surfaces still-future
+# occurrences). A step whose whole send window nonetheless passes unsent — an
+# offset smaller than a coarse tick, or a schedule created/enabled after the
+# warn instant — is consumed and logged instead of broadcast late: a warning
+# that missed its moment is worthless, unlike the occurrence it heralds
+# (LATE_RUN_GRACE). The in-memory sent-state makes each step fire once.
+WARNING_GRACE_FLOOR = dt.timedelta(seconds=60)
+
+
+def effective_warning_grace(tick_seconds: float) -> dt.timedelta:
+    """The warning-send grace for a runner loop ticking every ``tick_seconds``.
+
+    At least one tick wide, so a warn instant landing anywhere between two
+    healthy ticks is still within its send window at the next one; floored at
+    :data:`WARNING_GRACE_FLOOR` for finer ticks.
+    """
+
+    return max(WARNING_GRACE_FLOOR, dt.timedelta(seconds=tick_seconds))
+
 
 # Use-case exceptions that mean the action's precondition was unmet at dispatch
 # time (a state change raced the runner's pre-check): classified as a skip, not a
@@ -314,6 +330,10 @@ class RunScheduleTick:
     clock: Clock
     history_cap: int = _HISTORY_CAP
     backup_retry_delay: dt.timedelta = _BACKUP_RETRY_DELAY
+    # How late a due player warning may still broadcast; the wiring derives it
+    # from the loop's tick via effective_warning_grace so a send window can
+    # never fall entirely between two healthy ticks.
+    warning_grace: dt.timedelta = WARNING_GRACE_FLOOR
     # Per-schedule pending backup-retry instant; in-memory (lost on restart).
     _backup_retry: dict[ScheduleId, dt.datetime] = field(default_factory=dict)
     # Warnings already sent this process, keyed by (schedule, occurrence, offset):
@@ -359,6 +379,15 @@ class RunScheduleTick:
             # advance past now with no run row and no last_run_at change.
             await self._advance(schedule, last_run_at=schedule.last_run_at)
             return
+        # A warning step still unsent now can never fire (a warning broadcasts
+        # only strictly before its occurrence): its window fell between two
+        # coarse ticks, or a restart lost the sent-state. Best-effort means
+        # observable — name each such step before the action runs.
+        occurrence = schedule.next_run_at
+        if occurrence is not None:
+            for step in schedule.warning_steps:
+                if (schedule.id, occurrence, step.offset_minutes) not in self._warned:
+                    self._log_missed_step(schedule, step)
         result, started_at, finished_at = await self._execute(schedule)
         await self._record(schedule, result, started_at, finished_at)
         await self._advance(schedule, last_run_at=started_at)
@@ -412,12 +441,23 @@ class RunScheduleTick:
     async def _warn_schedule(self, schedule: Schedule, now: dt.datetime) -> None:
         occurrence = schedule.next_run_at
         assert occurrence is not None  # the look-ahead window guarantees it
-        due = [
-            step
-            for step in schedule.warning_steps
-            if (schedule.id, occurrence, step.offset_minutes) not in self._warned
-            and self._warning_due(occurrence, step.offset_minutes, now)
-        ]
+        due: list[WarningStep] = []
+        for step in schedule.warning_steps:
+            key = (schedule.id, occurrence, step.offset_minutes)
+            if key in self._warned:
+                continue
+            warn_at = occurrence - dt.timedelta(minutes=step.offset_minutes)
+            if warn_at > now:
+                continue  # not yet due
+            if now - warn_at > self.warning_grace:
+                # The whole send window passed unsent — the schedule was created
+                # or enabled after the warn instant, or the runner was down
+                # across the window. Consume the step and log once: best-effort
+                # means observable, and a warning never broadcasts this late.
+                self._warned.add(key)
+                self._log_missed_step(schedule, step)
+                continue
+            due.append(step)
         if not due:
             return
         async with self.uow:
@@ -445,13 +485,12 @@ class RunScheduleTick:
                 # on — a warning never fails the run it heralds.
                 _LOG.info("schedule %s warning skipped: %r", schedule.id.value, exc)
 
-    def _warning_due(
-        self, occurrence: dt.datetime, offset_minutes: int, now: dt.datetime
-    ) -> bool:
-        """Whether a step's warn instant has just arrived (within the grace)."""
-
-        warn_at = occurrence - dt.timedelta(minutes=offset_minutes)
-        return warn_at <= now and now - warn_at <= WARNING_GRACE
+    def _log_missed_step(self, schedule: Schedule, step: WarningStep) -> None:
+        _LOG.warning(
+            "schedule %s: %d-minute warning missed its send window; not sent",
+            schedule.id.value,
+            step.offset_minutes,
+        )
 
     async def _execute(
         self, schedule: Schedule
