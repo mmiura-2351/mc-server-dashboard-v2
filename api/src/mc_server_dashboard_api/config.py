@@ -325,11 +325,13 @@ class ScheduleSettings(_Section):
     ``tick_seconds`` is the loop resolution — finer than the backup loop's
     cadence since a schedule can fire as often as every minute (the domain
     interval floor, matching cron's granularity), and it must stay well under
-    the runner's fixed late-run grace (300 s) so an on-time occurrence is never
-    judged stale; it defaults to twenty seconds.
+    the runner's fixed late-run grace (``LATE_RUN_GRACE``, 300 s) so an on-time
+    occurrence is never judged stale; it defaults to twenty seconds. Capped at
+    that grace: a coarser tick would land every non-backup occurrence beyond
+    the grace before the loop ever saw it — perpetually stale, never executed.
     """
 
-    tick_seconds: int = Field(default=20, gt=0)
+    tick_seconds: int = Field(default=20, gt=0, le=300)
 
 
 class ReconcilerSettings(_Section):

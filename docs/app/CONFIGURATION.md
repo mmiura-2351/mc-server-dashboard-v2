@@ -415,7 +415,7 @@ tunes the poll cadence; the schedules themselves are per-server rows.
 
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
-| `schedule.tick_seconds` | `20` | | Loop resolution of the scheduler runner: how often it wakes to poll `next_run_at` over enabled schedules. Finer than the backup loop's cadence since a schedule can fire as often as every minute (the domain interval floor), and it must stay well under the runner's fixed 300 s late-run grace so an on-time occurrence is never judged stale. Must be positive. |
+| `schedule.tick_seconds` | `20` | | Loop resolution of the scheduler runner: how often it wakes to poll `next_run_at` over enabled schedules. Finer than the backup loop's cadence since a schedule can fire as often as every minute (the domain interval floor), and it must stay well under the runner's fixed 300 s late-run grace so an on-time occurrence is never judged stale. Must be positive and at most 300 (the grace itself): a coarser tick would render every non-backup occurrence perpetually stale, never executed. |
 
 ---
 
