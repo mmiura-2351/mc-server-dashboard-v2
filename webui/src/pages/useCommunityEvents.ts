@@ -20,7 +20,12 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import type { components } from "../api/schema";
-import { CommunityEventsClient, type StatusEvent } from "./communityEvents.ts";
+import { useToast } from "../components/Toast.tsx";
+import {
+  CommunityEventsClient,
+  type NotificationEvent,
+  type StatusEvent,
+} from "./communityEvents.ts";
 
 type ServerResponse = components["schemas"]["ServerResponse"];
 
@@ -38,6 +43,7 @@ export function serversKey(communityId: string) {
  */
 export function useCommunityEvents(communityId: string): boolean {
   const queryClient = useQueryClient();
+  const { showToast } = useToast();
   const [degraded, setDegraded] = useState(false);
 
   useEffect(() => {
@@ -87,8 +93,18 @@ export function useCommunityEvents(communityId: string): boolean {
     // The pristine first open needs no refetch: the mount fetch covers it.
     let pristine = true;
 
+    // An operator notice (today only `schedule_failed`, #1838) is a failure
+    // toast: the payload's title/detail are the human-readable message the API
+    // already localized to English, surfaced verbatim like an API error string.
+    const notify = (event: NotificationEvent) => {
+      const message =
+        event.detail !== "" ? `${event.title} — ${event.detail}` : event.title;
+      showToast(message, "error");
+    };
+
     const client = new CommunityEventsClient(communityId, {
       onStatus: applyStatus,
+      onNotification: notify,
       onGap: () => {
         // The stream fell behind and dropped status frames for an unknown set
         // of servers: one list refetch reconciles them (#1723).
@@ -118,7 +134,7 @@ export function useCommunityEvents(communityId: string): boolean {
       client.close();
       stopPolling();
     };
-  }, [communityId, queryClient]);
+  }, [communityId, queryClient, showToast]);
 
   return degraded;
 }

@@ -28,14 +28,34 @@ export interface StatusEvent {
   state: string;
 }
 
-/** A parsed community-stream frame: a routable STATUS or the GAP marker. */
+/**
+ * A NOTIFICATION frame from the community stream (`EventStream.NOTIFICATION`,
+ * issue #1836). Its payload is the canonical `{kind, title, detail}` operator
+ * notice; `server_id` rides the community frame (null for a server-agnostic
+ * notice). Today the only kind is `schedule_failed` (#1838).
+ */
+export interface NotificationEvent {
+  serverId: string | null;
+  /** The `payload.kind` discriminator, e.g. `schedule_failed`. */
+  notificationKind: string;
+  title: string;
+  detail: string;
+}
+
+/**
+ * A parsed community-stream frame: a routable STATUS, a NOTIFICATION, or the
+ * GAP marker.
+ */
 export type CommunityFrame =
   | ({ kind: "status" } & StatusEvent)
+  | ({ kind: "notification" } & NotificationEvent)
   | { kind: "gap" };
 
 export interface CommunityEventsCallbacks {
   /** A parsed STATUS frame for a known server in this community. */
   onStatus: (event: StatusEvent) => void;
+  /** A parsed NOTIFICATION frame (operator notice, e.g. a schedule failure). */
+  onNotification: (event: NotificationEvent) => void;
   /** The stream fell behind and dropped frames (slow-client overflow). */
   onGap: () => void;
   /** The connection opened (resubscribe / clear degraded). */
@@ -51,8 +71,8 @@ function eventsUrl(communityId: string): string {
 
 /**
  * Parse a wire frame into a {@link CommunityFrame}, or null when it is neither
- * a routable STATUS frame nor the GAP marker (a non-status stream or a
- * malformed body). The GAP marker is server-agnostic (`server_id` is null): it
+ * a routable STATUS/NOTIFICATION frame nor the GAP marker (an unknown stream or
+ * a malformed body). The GAP marker is server-agnostic (`server_id` is null): it
  * means frames were dropped for an unknown set of servers, so the caller must
  * reconcile the whole list.
  */
@@ -74,6 +94,9 @@ export function parseCommunityFrame(raw: string): CommunityFrame | null {
   if (stream === "gap") {
     return { kind: "gap" };
   }
+  if (stream === "notification") {
+    return parseNotification(server_id, payload);
+  }
   if (stream !== "status" || typeof server_id !== "string") {
     return null;
   }
@@ -85,6 +108,38 @@ export function parseCommunityFrame(raw: string): CommunityFrame | null {
     return null;
   }
   return { kind: "status", serverId: server_id, state };
+}
+
+/**
+ * Parse a NOTIFICATION frame. `server_id` may be null (a server-agnostic
+ * notice); the payload must carry a string `kind` and `title`. `detail` is
+ * optional and defaults to the empty string.
+ */
+function parseNotification(
+  serverId: unknown,
+  payload: unknown,
+): CommunityFrame | null {
+  if (serverId !== null && typeof serverId !== "string") {
+    return null;
+  }
+  if (typeof payload !== "object" || payload === null) {
+    return null;
+  }
+  const { kind, title, detail } = payload as {
+    kind?: unknown;
+    title?: unknown;
+    detail?: unknown;
+  };
+  if (typeof kind !== "string" || typeof title !== "string") {
+    return null;
+  }
+  return {
+    kind: "notification",
+    serverId,
+    notificationKind: kind,
+    title,
+    detail: typeof detail === "string" ? detail : "",
+  };
 }
 
 /**
@@ -110,6 +165,15 @@ export class CommunityEventsClient {
           }
           if (frame.kind === "gap") {
             callbacks.onGap();
+            return;
+          }
+          if (frame.kind === "notification") {
+            callbacks.onNotification({
+              serverId: frame.serverId,
+              notificationKind: frame.notificationKind,
+              title: frame.title,
+              detail: frame.detail,
+            });
             return;
           }
           callbacks.onStatus({ serverId: frame.serverId, state: frame.state });
