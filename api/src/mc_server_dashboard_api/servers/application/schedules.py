@@ -44,6 +44,7 @@ from dataclasses import dataclass, replace
 
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.errors import (
+    InvalidSchedulePayloadError,
     PermissionDeniedError,
     ScheduleNameAlreadyExistsError,
     ScheduleNotFoundError,
@@ -145,6 +146,29 @@ def _warning_steps(steps: Sequence[WarningStepInput] | None) -> tuple[WarningSte
     )
 
 
+def _validate_warning_offsets(schedule: Schedule) -> None:
+    """Reject an interval schedule whose warning cannot precede its own cadence.
+
+    A warning ``offset_minutes`` before the action can only be sent if that
+    offset is shorter than the interval; at ``offset_minutes * 60 >=
+    interval_seconds`` the warning instant falls on or before the previous
+    occurrence, so the runner can never send it on time and logs a missed
+    warning on every occurrence (issue #1852). Cron cadences have no fixed
+    period, so the check does not apply to them. This is enforced here, at
+    create/update, rather than as a :class:`Schedule` invariant, so the runner
+    can still load — and keep logging (#1850) — any pre-existing row that
+    violates it (the domain entity is reconstructed from every persisted row).
+    """
+
+    interval = schedule.cadence.interval_seconds
+    if interval is None:
+        return
+    if any(step.offset_minutes * 60 >= interval for step in schedule.warning_steps):
+        raise InvalidSchedulePayloadError(
+            "warning offset must be shorter than the interval cadence"
+        )
+
+
 def _next_run_at(
     schedule: Schedule, now: dt.datetime, calculator: NextRunCalculator
 ) -> dt.datetime:
@@ -211,6 +235,7 @@ class CreateSchedule:
                 last_run_at=None,
                 created_by=created_by,
             )
+            _validate_warning_offsets(schedule)
             await _ensure_unique_name(self.uow, server_id, schedule.name)
             if enabled:
                 schedule = replace(
@@ -311,6 +336,7 @@ class UpdateSchedule:
                 next_run_at=None,
                 updated_at=now,
             )
+            _validate_warning_offsets(updated)
             if updated.name != existing.name:
                 await _ensure_unique_name(
                     self.uow, server_id, updated.name, exclude_id=schedule_id
