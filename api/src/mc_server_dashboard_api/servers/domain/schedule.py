@@ -155,7 +155,9 @@ class WarningStep:
 
     Broadcast as a fixed ``say <message>`` ``offset_minutes`` before the main
     action fires. Offsets are positive whole minutes of at most
-    ``MAX_WARNING_OFFSET_MINUTES``; the message is non-blank.
+    ``MAX_WARNING_OFFSET_MINUTES``; the message is a non-blank single line — the
+    runner turns it into a console line, so a newline must never smuggle a
+    second command (the ``command`` payload's posture).
     """
 
     offset_minutes: int
@@ -172,6 +174,8 @@ class WarningStep:
             )
         if not self.message.strip():
             raise InvalidSchedulePayloadError("warning message must not be blank")
+        if "\n" in self.message or "\r" in self.message:
+            raise InvalidSchedulePayloadError("warning message must be a single line")
 
 
 @dataclass

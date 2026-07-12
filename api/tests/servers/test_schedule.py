@@ -262,6 +262,14 @@ def test_blank_warning_message_rejected() -> None:
         WarningStep(offset_minutes=5, message="   ")
 
 
+@pytest.mark.parametrize("bad", ["stop\nsay op", "stop\rsay op"])
+def test_multiline_warning_message_rejected(bad: str) -> None:
+    # The runner turns the message into a console line (``say <message>``), so a
+    # newline must never smuggle a second command — same posture as ``command``.
+    with pytest.raises(InvalidSchedulePayloadError):
+        WarningStep(offset_minutes=5, message=bad)
+
+
 # --- schedule runs ---------------------------------------------------------------
 
 
