@@ -1276,24 +1276,6 @@ describe("ServerDetailPage settings", () => {
     ).toBeInTheDocument();
   });
 
-  it("surfaces a 422 invalid_backup_schedule specifically on save", async () => {
-    mockApi.get.mockResolvedValue(server({ observed_state: "stopped" }));
-    mockApi.patch.mockRejectedValue(
-      new ApiError(422, { reason: "invalid_backup_schedule" }),
-    );
-    renderPage();
-
-    await screen.findByText("survival");
-    openSettings();
-    fireEvent.click(
-      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
-    );
-
-    expect(
-      await screen.findByText(t("serverDetail.error.invalidBackupSchedule")),
-    ).toBeInTheDocument();
-  });
-
   it("surfaces a 409 server_not_stopped specifically on save", async () => {
     mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
     mockApi.patch.mockRejectedValue(

@@ -103,7 +103,7 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 | GET / POST | `/communities/{cid}/servers` | List / create (`name`, `mc_edition`, `mc_version`, `server_type`, `config`, `accept_eula`, optional `game_port`). |
 | POST | `/communities/{cid}/servers/import` | ZIP import (multipart). |
 | GET | `…/{sid}/export` | ZIP export (download). |
-| GET / PATCH / DELETE | `…/{sid}` | Read / update (name, config, game_port) / delete. PATCH gate branches by changed-key set (#458): a cadence-only edit (`backup_interval_hours`) needs `backup:schedule`; any other change needs `server:update`; a mixed edit needs both. |
+| GET / PATCH / DELETE | `…/{sid}` | Read / update (name, config, game_port) / delete. Every PATCH edit needs `server:update`. The retired `backup_interval_hours` key is a `422` (`retired_config_key`, #1840) — backup cadence is a `backup` schedule now. |
 | POST | `…/{sid}/start` · `/stop?force=` · `/restart` | Lifecycle. Stop supports force. |
 | POST | `…/{sid}/command` | RCON line → `{output}`. |
 | GET | `…/{sid}/files?path=&list=` | Read file (base64) or list directory (entries + `truncated`). |
@@ -368,15 +368,11 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   issued.
 - Create backup button (works on running servers — on-demand snapshot path);
   upload backup (file picker).
-- Schedule: per-server interval via the `backup_interval_hours` key on the
-  server `config` blob (`PATCH …/servers/{sid}`) — no dedicated endpoint; the
-  UI exposes it as an "every N hours" field (absent = no scheduled backups).
-  Gated by `backup:schedule`, not `server:update`: the PATCH gate branches by
-  the changed-key set (#458), so a PATCH that changes only `backup_interval_hours`
-  requires `backup:schedule`; any other change requires `server:update`; a mixed
-  PATCH requires both. `server:update` does **not** imply scheduling. The UI
-  shows the schedule field (editable) exactly when the caller holds
-  `backup:schedule`.
+- Schedule: the inline "every N hours" cadence field is **retired** (issue
+  #1840). Scheduled backups are now a first-class `backup` schedule on the
+  general scheduler (the `…/{sid}/schedules` surface, 7.x); the Backups tab only
+  shows a short note pointing `backup:schedule` holders there. No PATCH of a
+  `backup_interval_hours` key remains (the API 422s it as `retired_config_key`).
 
 ### 6.8 Server detail — Players
 - Attached groups (`GET …/{sid}/groups`) with kind badges; attach/detach

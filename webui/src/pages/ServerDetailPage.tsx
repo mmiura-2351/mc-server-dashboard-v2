@@ -1364,9 +1364,9 @@ function fromRows(rows: ConfigRow[]): Record<string, unknown> {
 }
 
 // Map a settings save/delete error reason to a specific message; otherwise the
-// generic toast. 422 carries a port reason (port_out_of_range) or a cadence
-// reason (invalid_snapshot_interval / invalid_backup_schedule), 409 the at-rest
-// gate (server_not_stopped) and export the unsettled gate.
+// generic toast. 422 carries a port reason (port_out_of_range) or the snapshot
+// cadence reason (invalid_snapshot_interval), 409 the at-rest gate
+// (server_not_stopped) and export the unsettled gate.
 function settingsErrorMessage(error: unknown): TranslationKey {
   if (error instanceof ApiError) {
     switch (error.reason) {
@@ -1380,8 +1380,6 @@ function settingsErrorMessage(error: unknown): TranslationKey {
         return "serverDetail.error.portOutOfRange";
       case "invalid_snapshot_interval":
         return "serverDetail.error.invalidSnapshotInterval";
-      case "invalid_backup_schedule":
-        return "serverDetail.error.invalidBackupSchedule";
       case "invalid_memory_limit":
         return "serverDetail.error.invalidMemoryLimit";
       case "invalid_cpu_allocation":

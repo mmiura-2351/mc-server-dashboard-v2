@@ -601,32 +601,30 @@ export interface paths {
          * Update Server
          * @description Edit a server's name/config/game port.
          *
-         *     **Permission gate (issue #458).** The required permission branches by the
-         *     changed-key set rather than a single fixed code: an edit that changes only the
-         *     backup-scheduling key (``backup_interval_hours``) requires ``backup:schedule``;
-         *     any other change (name, game port, or any non-scheduling config key) requires
-         *     ``server:update``; a mixed edit requires both. ``server:update`` no longer
-         *     implies scheduling — a ``backup:schedule``-only holder may set the cadence, and
-         *     a ``server:update``-only holder may not. A missing required permission is 403
-         *     carrying it in the ``permission`` member (#425/#555). Layer-1 membership is
-         *     checked at the edge (non-member -> 404); the changed-key decision runs in the
-         *     use case, which has the current config in hand.
+         *     **Permission gate.** Every edit requires ``server:update`` (a missing
+         *     permission is 403 carrying it in the ``permission`` member, #425/#555;
+         *     Layer-1 membership is checked at the edge — non-member -> 404). The former
+         *     per-key branch (issue #458) that routed a ``backup_interval_hours`` edit to
+         *     ``backup:schedule`` is gone: the backup cadence moved to the general
+         *     scheduler (its own ``schedule:*`` surface), so that config key is retired
+         *     (#1840).
          *
          *     **Error precedence (issue #115).** Validation runs first: config-bounds
-         *     (``config_too_large`` / ``config_invalid_shape``), the cadence-override
-         *     floor/shape (``invalid_snapshot_interval`` / ``invalid_backup_schedule``), and
-         *     the game-port range (``port_out_of_range``) are 422 and are evaluated before
-         *     any state gating. Only then does the state gate apply: an edit that requires
-         *     the server to be at rest but finds it running is 409 (``server_not_stopped``).
-         *     So a below-floor override (or an out-of-range port) on a running server is a
-         *     422, not a 409.
+         *     (``config_too_large`` / ``config_invalid_shape``), a retired config key
+         *     (``retired_config_key``), the cadence-override floor/shape
+         *     (``invalid_snapshot_interval``), and the game-port range
+         *     (``port_out_of_range``) are 422 and are evaluated before any state gating.
+         *     Only then does the state gate apply: an edit that requires the server to be at
+         *     rest but finds it running is 409 (``server_not_stopped``). So a below-floor
+         *     override (or an out-of-range port) on a running server is a 422, not a 409. A
+         *     PATCH still carrying the retired ``backup_interval_hours`` key is
+         *     ``retired_config_key`` (422).
          *
          *     **Cadence-knob split (issue #115).** A config update that touches only the
-         *     operationally-safe keys (``snapshot_interval_seconds``,
-         *     ``backup_interval_hours``) bypasses the at-rest gate and is accepted while the
-         *     server runs; the schedulers pick up the new value on their next tick. Any
-         *     other config change — a name change, or a game-port change — keeps the at-rest
-         *     requirement.
+         *     operationally-safe ``snapshot_interval_seconds`` key bypasses the at-rest gate
+         *     and is accepted while the server runs; the snapshot scheduler picks up the new
+         *     value on its next tick. Any other config change — a name change, or a
+         *     game-port change — keeps the at-rest requirement.
          *
          *     **Game port (issue #311).** A new ``game_port`` is at rest only, validated
          *     like create (422 ``port_out_of_range`` / 409 ``port_taken``), and rewrites

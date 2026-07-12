@@ -536,92 +536,29 @@ describe("ServerBackupsTab restore (stopped-only two-step)", () => {
   });
 });
 
-describe("ServerBackupsTab schedule field", () => {
-  it("PATCHes backup_interval_hours as a NUMBER", async () => {
+describe("ServerBackupsTab schedule note", () => {
+  it("points a backup:schedule holder at the Schedules surface (#1840)", async () => {
+    // The FR-BAK-3 inline cadence field is retired: the tab now only shows a
+    // note pointing at Schedules, and never PATCHes a backup_interval_hours key.
     routeGet({ srv: { config: { motd: "hi" } } });
-    mockApi.patch.mockResolvedValue(server());
     await openBackups();
 
-    const input = (await screen.findByLabelText(
-      t("backups.schedule.label"),
-    )) as HTMLInputElement;
-    fireEvent.change(input, { target: { value: "24" } });
-    fireEvent.click(
-      screen.getByRole("button", { name: t("backups.schedule.save") }),
-    );
-
-    await waitFor(() => expect(mockApi.patch).toHaveBeenCalled());
-    const [path, init] = mockApi.patch.mock.calls[0];
-    expect(path).toBe(`/api/communities/${CID}/servers/${SID}`);
-    const config = JSON.parse(init.body).config;
-    // Existing keys round-trip; the new key saves as a number, not "24".
-    expect(config).toEqual({ motd: "hi", backup_interval_hours: 24 });
-    expect(typeof config.backup_interval_hours).toBe("number");
+    expect(
+      await screen.findByText(t("backups.schedule.movedNote")),
+    ).toBeInTheDocument();
+    expect(mockApi.patch).not.toHaveBeenCalled();
   });
 
-  it("removes the key when the field is cleared", async () => {
-    routeGet({ srv: { config: { backup_interval_hours: 12, motd: "hi" } } });
-    mockApi.patch.mockResolvedValue(server());
-    await openBackups();
-
-    const input = (await screen.findByDisplayValue("12")) as HTMLInputElement;
-    fireEvent.change(input, { target: { value: "" } });
-    fireEvent.click(
-      screen.getByRole("button", { name: t("backups.schedule.save") }),
-    );
-
-    await waitFor(() => expect(mockApi.patch).toHaveBeenCalled());
-    const config = JSON.parse(mockApi.patch.mock.calls[0][1].body).config;
-    expect(config).toEqual({ motd: "hi" });
-  });
-
-  it("lets a backup:schedule-only user edit and save (no server:update)", async () => {
-    // The API branches the PATCH gate by the changed-key set: a cadence-only edit
-    // needs backup:schedule, not server:update (issue #458). So a holder of only
-    // backup:schedule gets an editable field and a live Save control.
-    mockCan = (code) => code !== "server:update";
-    routeGet({ srv: { config: { backup_interval_hours: 12 } } });
-    mockApi.patch.mockResolvedValue(server());
-    await openBackups();
-
-    const input = (await screen.findByLabelText(
-      t("backups.schedule.label"),
-    )) as HTMLInputElement;
-    expect(input).not.toBeDisabled();
-    fireEvent.change(input, { target: { value: "24" } });
-    fireEvent.click(
-      screen.getByRole("button", { name: t("backups.schedule.save") }),
-    );
-
-    await waitFor(() => expect(mockApi.patch).toHaveBeenCalled());
-    const config = JSON.parse(mockApi.patch.mock.calls[0][1].body).config;
-    expect(config).toEqual({ backup_interval_hours: 24 });
-  });
-
-  it("hides the field without backup:schedule", async () => {
+  it("hides the note without backup:schedule", async () => {
     mockCan = (code) => code !== "backup:schedule";
-    routeGet({ srv: { config: { backup_interval_hours: 12 } } });
+    routeGet();
     await openBackups();
 
-    // Wait for the tab to settle, then assert the schedule field is absent.
+    // Wait for the tab to settle, then assert the note is absent.
     await screen.findByText(t("backups.col.created"));
     expect(
-      screen.queryByLabelText(t("backups.schedule.label")),
+      screen.queryByText(t("backups.schedule.movedNote")),
     ).not.toBeInTheDocument();
-  });
-
-  it("re-syncs the hours field when the server config changes (#1212)", async () => {
-    routeGet({ srv: { config: { backup_interval_hours: 12 } } });
-    const { queryClient } = await openBackups();
-
-    const input = (await screen.findByDisplayValue("12")) as HTMLInputElement;
-    expect(input.value).toBe("12");
-
-    // Simulate a react-query refetch returning a changed schedule.
-    routeGet({ srv: { config: { backup_interval_hours: 48 } } });
-    await act(() => queryClient.invalidateQueries());
-
-    await waitFor(() => expect(input.value).toBe("48"));
   });
 });
 

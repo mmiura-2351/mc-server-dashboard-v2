@@ -49,11 +49,9 @@ class ServerNameAlreadyExistsError(ServerError):
 class PermissionDeniedError(ServerError):
     """A server update was denied because the caller lacks a required permission.
 
-    ``UpdateServer`` gates by the changed-key set (issue #458): a config edit that
-    touches only the backup-scheduling key (``backup_interval_hours``) requires
-    ``backup:schedule``; any other change requires ``server:update``; a mixed edit
-    requires both. Whichever required permission the caller is missing is named in
-    :attr:`permission` so the edge can carry it in the 403 ``permission`` member.
+    ``UpdateServer`` gates every edit — a name, port, slug, or any config key — on
+    ``server:update``. The missing permission is named in :attr:`permission` so
+    the edge can carry it in the 403 ``permission`` member.
     """
 
     def __init__(self, permission: str) -> None:
@@ -128,6 +126,18 @@ class InvalidCpuAllocationError(ServerError):
     ``CPU_ALLOCATION_FLOOR_MILLIS`` (below it the server's main tick thread cannot
     make progress) and no more than ``CPU_ALLOCATION_CEILING_MILLIS`` (an absurd
     value is a typo, not an intent). The edge maps this to 422.
+    """
+
+
+class RetiredConfigKeyError(ServerError):
+    """A create/update carried a config key retired by a later cutover (#1840).
+
+    The FR-BAK-3 per-server backup cadence is retired into a first-class
+    ``backup`` schedule (DATABASE.md Section 8): the legacy
+    ``backup_interval_hours`` key no longer has any meaning, so a request still
+    carrying it is rejected rather than silently written into ``server.properties``
+    as a bogus override. The exception message carries the offending key. The edge
+    maps this to 422.
     """
 
 
@@ -335,15 +345,6 @@ class BackupCorruptError(ServerError):
     def __init__(self, identifier: str, *, corrupt_count: int) -> None:
         super().__init__(identifier)
         self.corrupt_count = corrupt_count
-
-
-class InvalidBackupScheduleError(ServerError):
-    """A per-server backup-schedule override was invalid (FR-BAK-3).
-
-    The schedule (``config['backup_interval_hours']``) must be a positive integer
-    when present; a non-integer or non-positive value is rejected. The edge maps
-    this to 422.
-    """
 
 
 class InvalidBackupArchiveError(ServerError):

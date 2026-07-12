@@ -279,14 +279,12 @@ for the full cadence model.
 
 ### 5.5 Backup cadence
 
-The API drives scheduled backups (REQUIREMENTS.md FR-BAK-3). The per-server
-schedule itself is a server-config key edited through the server-configuration
-API (`backup_interval_hours`, see Section 8); this only tunes how often the
-background scheduler wakes to check which servers are due.
-
-| Key | Default | Secret | Meaning |
-|---|---|---|---|
-| `backup.schedule_tick_seconds` | `300` | | Loop resolution of the scheduled-backup scheduler: how often it wakes to check which servers are due. Coarse, since backup cadence is measured in hours. Must be positive. |
+Scheduled backups (REQUIREMENTS.md FR-BAK-3) are no longer a standalone loop.
+The legacy `backup_interval_hours` config-key cadence and its dedicated
+`backup.schedule_tick_seconds` tick are **retired** (issue #1840): backups are
+now a first-class `backup` schedule on the general scheduler, so its
+`schedule.tick_seconds` (Section 5.14) is the only cadence knob. This section has
+no keys.
 
 ### 5.6 Divergence reconciler
 
@@ -295,7 +293,7 @@ lifecycle intent so a desired/observed divergence converges (REQUIREMENTS.md
 FR-SRV-3/4). Two windows the in-line lifecycle path leaves open are closed here:
 a start/stop committed just before a crash (never dispatched) and a
 compensation-failure orphan (`desired=running` with no assigned Worker). The loop
-is gated on the control plane like the snapshot/backup schedulers — with no Worker
+is gated on the control plane like the snapshot scheduler — with no Worker
 channel there is nothing to re-dispatch.
 
 | Key | Default | Secret | Meaning |
@@ -310,7 +308,7 @@ channel there is nothing to re-dispatch.
 
 The API runs a background reference-counted GC that reclaims pooled server JARs
 no live server row references (STORAGE.md Section 3.2). It is gated on the control
-plane like the snapshot/backup/reconciler loops, and a platform admin can also
+plane like the snapshot/reconciler loops, and a platform admin can also
 trigger a sweep on demand (`POST /versions/jar-pool/gc`).
 
 | Key | Default | Secret | Meaning |
@@ -409,13 +407,13 @@ missing, per the secret-blank rule above).
 The API runs the general-scheduler runner (epic #649, issue #1838), which polls
 the `schedule` table for due per-server actions (console command / start / stop /
 restart / backup) and dispatches them through the existing lifecycle, command,
-and backup use cases. Like the snapshot/backup loops it is gated on the control
-plane (`control.enabled`) — a scheduled action needs a Worker channel. This only
-tunes the poll cadence; the schedules themselves are per-server rows.
+and backup use cases. Like the snapshot loop it is gated on the control plane
+(`control.enabled`) — a scheduled action needs a Worker channel. This only tunes
+the poll cadence; the schedules themselves are per-server rows.
 
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
-| `schedule.tick_seconds` | `20` | | Loop resolution of the scheduler runner: how often it wakes to poll `next_run_at` over enabled schedules. Finer than the backup loop's cadence since a schedule can fire as often as every minute (the domain interval floor), and it must stay well under the runner's fixed 300 s late-run grace so an on-time occurrence is never judged stale. Must be positive and at most 300 (the grace itself): a coarser tick would render every non-backup occurrence perpetually stale, never executed. Player warnings on stop/restart schedules (issue #1839) key off this cadence too: their send grace is derived as max(60 s, `tick_seconds`), so warnings are reliable whenever the tick is at most 60. With a coarser tick a warning fires up to one tick late (always strictly before the action), and a warning offset smaller than the tick may be skipped entirely — logged, never silent. |
+| `schedule.tick_seconds` | `20` | | Loop resolution of the scheduler runner: how often it wakes to poll `next_run_at` over enabled schedules. Fine because a schedule can fire as often as every minute (the domain interval floor), and it must stay well under the runner's fixed 300 s late-run grace so an on-time occurrence is never judged stale. Must be positive and at most 300 (the grace itself): a coarser tick would render every non-backup occurrence perpetually stale, never executed. Player warnings on stop/restart schedules (issue #1839) key off this cadence too: their send grace is derived as max(60 s, `tick_seconds`), so warnings are reliable whenever the tick is at most 60. With a coarser tick a warning fires up to one tick late (always strictly before the action), and a warning offset smaller than the tick may be skipped entirely — logged, never silent. |
 
 ---
 
@@ -678,12 +676,10 @@ The effective periodic interval for a running server is its per-server override
 if set, otherwise the global default. The interval bounds the RPO: a crash may
 lose up to one interval of changes (REQUIREMENTS.md FR-DATA-5).
 
-Scheduled backups follow the same per-server pattern: each server may carry a
-`backup_interval_hours` schedule on its `Server` config blob (DATABASE.md
-Section 8), edited through the server-configuration API rather than this static
-file. It must be a positive integer; the scheduler wakes every
-`backup.schedule_tick_seconds` (Section 5.5) to back up servers whose schedule
-is due.
+Scheduled backups no longer follow this config-key pattern: the legacy
+`backup_interval_hours` cadence is retired (issue #1840). A backup is now a
+first-class `backup` schedule on the general scheduler (DATABASE.md Section 8),
+polled at `schedule.tick_seconds` (Section 5.14) like every other schedule.
 
 ---
 

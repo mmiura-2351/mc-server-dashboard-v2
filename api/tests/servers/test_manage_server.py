@@ -38,7 +38,6 @@ from mc_server_dashboard_api.servers.domain.cpu_allocation import (
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
-    InvalidBackupScheduleError,
     InvalidCpuAllocationError,
     InvalidMemoryLimitError,
     InvalidSnapshotIntervalError,
@@ -46,6 +45,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PortAlreadyTakenError,
     PortOutOfRangeError,
     PortRangeExhaustedError,
+    RetiredConfigKeyError,
     ServerFileNotFoundError,
     ServerNameAlreadyExistsError,
     ServerNotFoundError,
@@ -211,6 +211,29 @@ async def test_create_rejects_invalid_memory_limit() -> None:
             mc_version="1.21.1",
             server_type="vanilla",
             config={MEMORY_LIMIT_CONFIG_KEY: 1},
+        )
+    assert uow.commits == 0
+
+
+async def test_create_rejects_retired_backup_interval_key() -> None:
+    # The FR-BAK-3 backup cadence is retired into the general scheduler (#1840):
+    # a create still carrying ``backup_interval_hours`` 422s before the row is
+    # staged rather than persisting the dead key as a server.properties override.
+    uow = FakeUnitOfWork()
+    with pytest.raises(RetiredConfigKeyError):
+        await CreateServer(
+            uow=uow,
+            clock=FakeClock(_NOW),
+            version_validator=FakeVersionValidator(),
+            file_store=FakeFileStore(),
+            port_range=_PORTS,
+        )(
+            community_id=CommunityId(uuid.uuid4()),
+            name="survival",
+            mc_edition="java",
+            mc_version="1.21.1",
+            server_type="vanilla",
+            config={"backup_interval_hours": 6},
         )
     assert uow.commits == 0
 
@@ -1084,30 +1107,19 @@ async def test_update_rejects_snapshot_interval_override_below_floor() -> None:
     assert uow.commits == 0
 
 
-async def test_update_accepts_backup_schedule_override() -> None:
+async def test_update_rejects_retired_backup_interval_key() -> None:
+    # The FR-BAK-3 backup cadence is retired into the general scheduler (#1840):
+    # a PATCH still carrying ``backup_interval_hours`` is rejected before any
+    # write rather than silently persisted as a server.properties override.
     uow = FakeUnitOfWork()
     community = CommunityId(uuid.uuid4())
     server = _server(community_id=community)
     uow.servers.seed(server)
-    updated = await _updater(uow)(
-        community_id=community,
-        server_id=server.id,
-        config={"backup_interval_hours": 6},
-    )
-    assert updated.config["backup_interval_hours"] == 6
-    assert uow.commits == 1
-
-
-async def test_update_rejects_invalid_backup_schedule_override() -> None:
-    uow = FakeUnitOfWork()
-    community = CommunityId(uuid.uuid4())
-    server = _server(community_id=community)
-    uow.servers.seed(server)
-    with pytest.raises(InvalidBackupScheduleError):
+    with pytest.raises(RetiredConfigKeyError):
         await _updater(uow)(
             community_id=community,
             server_id=server.id,
-            config={"backup_interval_hours": 0},
+            config={"backup_interval_hours": 6},
         )
     assert uow.commits == 0
 
@@ -1191,20 +1203,19 @@ async def test_update_rejects_invalid_cpu_allocation() -> None:
     assert uow.commits == 0
 
 
-# --- update permission gate (issue #458) -----------------------------------
+# --- update permission gate --------------------------------------------------
 #
-# A config edit that touches only the backup-scheduling key
-# (``backup_interval_hours``) requires ``backup:schedule``; any other change
-# requires ``server:update``; a mixed edit requires both. ``server:update`` no
-# longer implies scheduling. The gate keys off the *changed* set vs the current
-# config, so it sees what the edit actually alters (not the round-tripped blob).
+# Every edit — a name, port, slug, or any config key — requires ``server:update``.
+# The per-key branch (issue #458) that routed a ``backup_interval_hours`` edit to
+# ``backup:schedule`` is gone: the backup cadence moved to the general scheduler
+# and that config key is retired (#1840).
 
 
 class _Grant:
     """An ``authorize`` callback granting exactly ``codes`` (denying anything else).
 
     Records the codes it was asked about in ``seen`` so tests can assert the gate
-    queried only the permissions the changed-key set requires.
+    queried only the permission the edit requires.
     """
 
     def __init__(self, *codes: str) -> None:
@@ -1220,24 +1231,24 @@ def _grant(*codes: str) -> _Grant:
     return _Grant(*codes)
 
 
-async def test_update_scheduling_only_requires_backup_schedule() -> None:
+async def test_update_config_change_requires_server_update() -> None:
     uow = FakeUnitOfWork()
     community = CommunityId(uuid.uuid4())
     server = _server(community_id=community)
     uow.servers.seed(server)
-    authorize = _grant("backup:schedule")
+    authorize = _grant("server:update")
     updated = await _updater(uow)(
         community_id=community,
         server_id=server.id,
-        config={"motd": "hi", "backup_interval_hours": 6},
+        config={"motd": "hi"},
         authorize=authorize,
     )
-    assert updated.config["backup_interval_hours"] == 6
-    assert authorize.seen == ["backup:schedule"]
+    assert updated.config["motd"] == "hi"
+    assert authorize.seen == ["server:update"]
     assert uow.commits == 1
 
 
-async def test_update_scheduling_only_denied_without_backup_schedule() -> None:
+async def test_update_config_change_denied_without_server_update() -> None:
     uow = FakeUnitOfWork()
     community = CommunityId(uuid.uuid4())
     server = _server(community_id=community)
@@ -1246,14 +1257,14 @@ async def test_update_scheduling_only_denied_without_backup_schedule() -> None:
         await _updater(uow)(
             community_id=community,
             server_id=server.id,
-            config={"motd": "hi", "backup_interval_hours": 6},
-            authorize=_grant("server:update"),
+            config={"motd": "hi"},
+            authorize=_grant(),
         )
-    assert exc.value.permission == "backup:schedule"
+    assert exc.value.permission == "server:update"
     assert uow.commits == 0
 
 
-async def test_update_non_scheduling_change_requires_server_update() -> None:
+async def test_update_name_change_requires_server_update() -> None:
     uow = FakeUnitOfWork()
     community = CommunityId(uuid.uuid4())
     server = _server(community_id=community)
@@ -1270,7 +1281,7 @@ async def test_update_non_scheduling_change_requires_server_update() -> None:
     assert uow.commits == 1
 
 
-async def test_update_non_scheduling_change_denied_without_server_update() -> None:
+async def test_update_name_change_denied_without_server_update() -> None:
     uow = FakeUnitOfWork()
     community = CommunityId(uuid.uuid4())
     server = _server(community_id=community)
@@ -1280,66 +1291,15 @@ async def test_update_non_scheduling_change_denied_without_server_update() -> No
             community_id=community,
             server_id=server.id,
             name="creative",
-            authorize=_grant("backup:schedule"),
+            authorize=_grant(),
         )
     assert exc.value.permission == "server:update"
-    assert uow.commits == 0
-
-
-async def test_update_mixed_change_requires_both_permissions() -> None:
-    uow = FakeUnitOfWork()
-    community = CommunityId(uuid.uuid4())
-    server = _server(community_id=community)
-    uow.servers.seed(server)
-    updated = await _updater(uow)(
-        community_id=community,
-        server_id=server.id,
-        name="creative",
-        config={"motd": "hi", "backup_interval_hours": 6},
-        authorize=_grant("server:update", "backup:schedule"),
-    )
-    assert updated.name == ServerName("creative")
-    assert updated.config["backup_interval_hours"] == 6
-    assert uow.commits == 1
-
-
-async def test_update_mixed_change_denied_missing_server_update() -> None:
-    uow = FakeUnitOfWork()
-    community = CommunityId(uuid.uuid4())
-    server = _server(community_id=community)
-    uow.servers.seed(server)
-    with pytest.raises(PermissionDeniedError) as exc:
-        await _updater(uow)(
-            community_id=community,
-            server_id=server.id,
-            name="creative",
-            config={"motd": "hi", "backup_interval_hours": 6},
-            authorize=_grant("backup:schedule"),
-        )
-    assert exc.value.permission == "server:update"
-    assert uow.commits == 0
-
-
-async def test_update_mixed_change_denied_missing_backup_schedule() -> None:
-    uow = FakeUnitOfWork()
-    community = CommunityId(uuid.uuid4())
-    server = _server(community_id=community)
-    uow.servers.seed(server)
-    with pytest.raises(PermissionDeniedError) as exc:
-        await _updater(uow)(
-            community_id=community,
-            server_id=server.id,
-            name="creative",
-            config={"motd": "hi", "backup_interval_hours": 6},
-            authorize=_grant("server:update"),
-        )
-    assert exc.value.permission == "backup:schedule"
     assert uow.commits == 0
 
 
 async def test_update_snapshot_interval_change_requires_server_update() -> None:
-    # snapshot_interval_seconds has no dedicated permission code; it stays under
-    # server:update (only the backup-scheduling key maps to backup:schedule).
+    # snapshot_interval_seconds has no dedicated permission code; like any config
+    # key it is gated by server:update.
     uow = FakeUnitOfWork()
     community = CommunityId(uuid.uuid4())
     server = _server(community_id=community)
@@ -1349,15 +1309,15 @@ async def test_update_snapshot_interval_change_requires_server_update() -> None:
             community_id=community,
             server_id=server.id,
             config={"motd": "hi", "snapshot_interval_seconds": 600},
-            authorize=_grant("backup:schedule"),
+            authorize=_grant(),
         )
     assert exc.value.permission == "server:update"
     assert uow.commits == 0
 
 
 async def test_update_memory_limit_change_requires_server_update() -> None:
-    # memory_limit_mb has no dedicated permission code; like any non-scheduling
-    # config key it is gated by server:update (#705 reuses the existing gate).
+    # memory_limit_mb has no dedicated permission code; like any config key it is
+    # gated by server:update (#705 reuses the existing gate).
     uow = FakeUnitOfWork()
     community = CommunityId(uuid.uuid4())
     server = _server(community_id=community)
@@ -1367,15 +1327,15 @@ async def test_update_memory_limit_change_requires_server_update() -> None:
             community_id=community,
             server_id=server.id,
             config={"motd": "hi", MEMORY_LIMIT_CONFIG_KEY: 2048},
-            authorize=_grant("backup:schedule"),
+            authorize=_grant(),
         )
     assert exc.value.permission == "server:update"
     assert uow.commits == 0
 
 
 async def test_update_cpu_allocation_change_requires_server_update() -> None:
-    # cpu_millis has no dedicated permission code; like any non-scheduling config
-    # key it is gated by server:update (#722 reuses the existing gate).
+    # cpu_millis has no dedicated permission code; like any config key it is gated
+    # by server:update (#722 reuses the existing gate).
     uow = FakeUnitOfWork()
     community = CommunityId(uuid.uuid4())
     server = _server(community_id=community)
@@ -1385,7 +1345,7 @@ async def test_update_cpu_allocation_change_requires_server_update() -> None:
             community_id=community,
             server_id=server.id,
             config={"motd": "hi", CPU_ALLOCATION_CONFIG_KEY: 2000},
-            authorize=_grant("backup:schedule"),
+            authorize=_grant(),
         )
     assert exc.value.permission == "server:update"
     assert uow.commits == 0
@@ -1393,8 +1353,8 @@ async def test_update_cpu_allocation_change_requires_server_update() -> None:
 
 async def test_update_empty_body_requires_server_update() -> None:
     # A PATCH that asserts an edit but touches nothing (empty body) must still
-    # require server:update — the conservative pre-#458 default. Otherwise a caller
-    # with no permissions could use the 200 as an info leak / state oracle.
+    # require server:update — the conservative default. Otherwise a caller with no
+    # permissions could use the 200 as an info leak / state oracle.
     uow = FakeUnitOfWork()
     community = CommunityId(uuid.uuid4())
     server = _server(community_id=community)
@@ -1403,7 +1363,7 @@ async def test_update_empty_body_requires_server_update() -> None:
         await _updater(uow)(
             community_id=community,
             server_id=server.id,
-            authorize=_grant("backup:schedule"),
+            authorize=_grant(),
         )
     assert exc.value.permission == "server:update"
     assert uow.commits == 0
@@ -1421,7 +1381,7 @@ async def test_update_no_op_config_requires_server_update() -> None:
             community_id=community,
             server_id=server.id,
             config=dict(server.config),
-            authorize=_grant("backup:schedule"),
+            authorize=_grant(),
         )
     assert exc.value.permission == "server:update"
     assert uow.commits == 0
@@ -1439,7 +1399,6 @@ async def test_update_empty_body_succeeds_with_server_update() -> None:
         authorize=authorize,
     )
     assert authorize.seen == ["server:update"]
-    assert uow.commits == 1
     assert uow.commits == 1
 
 
@@ -1462,9 +1421,9 @@ async def test_update_rejects_while_running() -> None:
 
 
 async def test_update_safe_key_only_succeeds_while_running() -> None:
-    # Cadence knobs (snapshot_interval_seconds, backup_interval_hours) are
-    # operationally safe: a change touching only them bypasses the at-rest gate
-    # (issue #115). The incoming config must preserve the existing unsafe keys.
+    # The snapshot-cadence knob (snapshot_interval_seconds) is operationally
+    # safe: a change touching only it bypasses the at-rest gate (issue #115). The
+    # incoming config must preserve the existing unsafe keys.
     uow = FakeUnitOfWork()
     community = CommunityId(uuid.uuid4())
     server = _server(
