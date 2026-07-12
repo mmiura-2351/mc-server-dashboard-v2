@@ -455,6 +455,28 @@ export const ja: Record<TranslationKey, string> = {
   // Scheduled backups moved to the general scheduler (#1840); point users there.
   "backups.schedule.movedNote":
     "定期バックアップは「スケジュール」で設定するようになりました。",
+  // Scheduled-backup retention policy editor (issue #1841 API / #1843 UI). The
+  // policy prunes ONLY scheduled backups; manual/uploaded/event backups are
+  // never auto-deleted (the source badge distinguishes the rows).
+  "backups.retention.modeLabel": "定期バックアップの保持",
+  "backups.retention.mode.none": "すべて保持",
+  "backups.retention.mode.keepLast": "最新のN件を保持",
+  "backups.retention.mode.tiered": "日次／週次／月次で保持",
+  "backups.retention.keepLastLabel": "保持する件数",
+  "backups.retention.dailyLabel": "日次",
+  "backups.retention.weeklyLabel": "週次",
+  "backups.retention.monthlyLabel": "月次",
+  "backups.retention.hint":
+    "定期バックアップにのみ適用されます。手動・アップロード・イベントのバックアップが自動削除されることはありません。",
+  "backups.retention.tieredHint":
+    "設定した日数・週数・月数のそれぞれについて最新の定期バックアップを保持し、それ以外は削除します。",
+  "backups.retention.save": "保持設定を保存",
+  "backups.retention.saved": "保持ポリシーを保存しました。",
+  "backups.retention.cleared": "保持ポリシーを解除しました。",
+  "backups.retention.error.keepLast": "1以上の整数を入力してください。",
+  "backups.retention.error.tiered":
+    "0以上の整数を入力し、少なくとも1つは0より大きい値にしてください。",
+  "backups.retention.error.invalid": "その保持ポリシーは無効です。",
   // Restore dialog (stopped-only; two-step stop-then-restore).
   "backups.restoreDialog.title": "バックアップを復元",
   "backups.restoreDialog.blocked":
