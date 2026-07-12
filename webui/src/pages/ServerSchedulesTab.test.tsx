@@ -459,6 +459,32 @@ describe("ServerSchedulesTab create/edit dialog", () => {
       await screen.findByText(t("schedules.error.nameExists")),
     ).toBeInTheDocument();
   });
+
+  it("rejects a sub-60-second interval client-side without a request", async () => {
+    routeGet({ schedules: [] });
+    renderTab(canFor(ALL_CODES));
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: t("schedules.create") }),
+    );
+    fireEvent.change(screen.getByLabelText(t("schedules.dialog.nameLabel")), {
+      target: { value: "too fast" },
+    });
+    // The number input's min does not block a typed fractional value: 0.5
+    // minutes is 30s, below the API's 60s floor.
+    fireEvent.change(
+      screen.getByLabelText(t("schedules.dialog.intervalLabel")),
+      { target: { value: "0.5" } },
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: t("schedules.dialog.create") }),
+    );
+
+    expect(
+      await screen.findByText(t("schedules.error.intervalTooShort")),
+    ).toBeInTheDocument();
+    expect(mockApi.post).not.toHaveBeenCalled();
+  });
 });
 
 describe("ServerSchedulesTab toggle/delete/history", () => {

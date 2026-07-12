@@ -277,11 +277,18 @@ export function ServerSchedulesTab({
               schedules.map((schedule) => {
                 const action = schedule.action as ScheduleAction;
                 const canWrite = canManage && canAction(action);
+                // Fall back to the raw value for an action outside the known
+                // enum, mirroring the run-outcome badge.
+                const actionLabel = ACTION_LABEL[action];
                 return (
                   <tr key={schedule.id}>
                     <td>{schedule.name}</td>
                     <td>
-                      <span className="badge">{t(ACTION_LABEL[action])}</span>
+                      <span className="badge">
+                        {actionLabel !== undefined
+                          ? t(actionLabel)
+                          : schedule.action}
+                      </span>
                     </td>
                     <td>{humanizeCadence(schedule)}</td>
                     <td>{schedule.timezone}</td>
@@ -528,10 +535,15 @@ function ScheduleDialog({
       case "invalid_payload":
         if (showWarnings) {
           setWarningError(t("schedules.error.invalidWarnings"));
-        } else {
-          setCommandError(t("schedules.error.invalidCommand"));
+          return;
         }
-        return;
+        if (action === "command") {
+          setCommandError(t("schedules.error.invalidCommand"));
+          return;
+        }
+        // Neither payload field is rendered for this action (start/backup):
+        // fall through to the generic toast rather than an invisible error.
+        break;
       case "validation_error": {
         const fields = fieldErrorsFromValidation(error.body, [
           "name",
@@ -607,6 +619,16 @@ function ScheduleDialog({
 
   const submit = () => {
     clearErrors();
+    // Client-side floor: the API rejects interval_seconds < 60 (as a generic
+    // invalid_cadence), and the number input's min does not block a typed
+    // fractional/zero value — catch it here with a specific message.
+    if (cadenceMode === "interval") {
+      const seconds = buildCadence().interval_seconds;
+      if (seconds === null || !Number.isFinite(seconds) || seconds < 60) {
+        setCadenceError(t("schedules.error.intervalTooShort"));
+        return;
+      }
+    }
     save.mutate();
   };
 
@@ -916,7 +938,7 @@ function RunHistoryBody({
                   {label !== undefined ? t(label) : run.outcome}
                 </span>
               </td>
-              <td>{run.detail ?? "—"}</td>
+              <td>{run.detail ?? t("schedules.none")}</td>
               <td>{formatDateTime(run.started_at)}</td>
               <td>{formatDateTime(run.finished_at)}</td>
             </tr>

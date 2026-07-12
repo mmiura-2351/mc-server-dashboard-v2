@@ -246,7 +246,7 @@ NOTIFICATION stream.
 to servers, per-server attached-group view.
 
 **Membership & access** — members list/add/remove, role assign/unassign,
-role editor over the 31-code catalog, per-server grants editor.
+role editor over the 35-code catalog, per-server grants editor.
 
 **Audit** — community audit log w/ filters; global audit (admin).
 

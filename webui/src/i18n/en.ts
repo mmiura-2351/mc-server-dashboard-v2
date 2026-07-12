@@ -569,6 +569,8 @@ export const en = {
   "schedules.error.invalidCron": "That cron expression is not valid.",
   "schedules.error.invalidCadence":
     "Set exactly one cadence: an interval or a cron expression.",
+  "schedules.error.intervalTooShort":
+    "The interval must be at least 60 seconds.",
   "schedules.error.invalidTimezone": "That time zone is not valid.",
   "schedules.error.invalidName": "That name is not valid.",
   "schedules.error.nameExists": "A schedule with that name already exists.",

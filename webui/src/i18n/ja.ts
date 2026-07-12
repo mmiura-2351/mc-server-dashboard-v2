@@ -571,6 +571,7 @@ export const ja: Record<TranslationKey, string> = {
   "schedules.error.invalidCron": "Cron式が正しくありません。",
   "schedules.error.invalidCadence":
     "周期は間隔かCron式のどちらか一方のみを指定してください。",
+  "schedules.error.intervalTooShort": "間隔は60秒以上にしてください。",
   "schedules.error.invalidTimezone": "タイムゾーンが正しくありません。",
   "schedules.error.invalidName": "名前が正しくありません。",
   "schedules.error.nameExists": "その名前のスケジュールは既に存在します。",
