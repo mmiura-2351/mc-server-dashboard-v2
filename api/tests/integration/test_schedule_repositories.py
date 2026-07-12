@@ -296,6 +296,61 @@ async def test_list_due_returns_only_enabled_past_due(engine: AsyncEngine) -> No
     assert {s.id for s in boundary} == {due.id, future.id}
 
 
+async def test_advance_run_state_updates_only_bookkeeping(engine: AsyncEngine) -> None:
+    server_id = await _seed_server(engine)
+    factory = create_session_factory(engine)
+    schedule = _schedule(
+        server_id, enabled=True, next_run_at=_NOW - dt.timedelta(minutes=1)
+    )
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.schedules.add(schedule)
+        await uow.commit()
+
+    next_run = _NOW + dt.timedelta(hours=1)
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.schedules.advance_run_state(
+            schedule.id, next_run_at=next_run, last_run_at=_NOW
+        )
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        fetched = await uow.schedules.get_by_id(schedule.id)
+    assert fetched is not None
+    assert fetched.next_run_at == next_run
+    assert fetched.last_run_at == _NOW
+    # Everything else is untouched (only the bookkeeping columns are written).
+    assert fetched.name == schedule.name
+    assert fetched.enabled is True
+    assert fetched.updated_at == schedule.updated_at
+
+
+async def test_advance_run_state_skips_a_disabled_schedule(
+    engine: AsyncEngine,
+) -> None:
+    server_id = await _seed_server(engine)
+    factory = create_session_factory(engine)
+    schedule = _schedule(server_id, enabled=False, next_run_at=None)
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.schedules.add(schedule)
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.schedules.advance_run_state(
+            schedule.id, next_run_at=_NOW + dt.timedelta(hours=1), last_run_at=_NOW
+        )
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        fetched = await uow.schedules.get_by_id(schedule.id)
+    # The guarded UPDATE matched no row: the disabled schedule is not resurrected.
+    assert fetched is not None
+    assert fetched.enabled is False
+    assert fetched.next_run_at is None
+    assert fetched.last_run_at is None
+
+
 async def test_prune_keeps_only_the_newest_runs(engine: AsyncEngine) -> None:
     server_id = await _seed_server(engine)
     factory = create_session_factory(engine)

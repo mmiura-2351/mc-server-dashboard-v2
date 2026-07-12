@@ -119,6 +119,18 @@ def test_cadence_rejects_non_positive_interval(bad: int) -> None:
         Cadence.from_interval(bad)
 
 
+@pytest.mark.parametrize("bad", [1, 59])
+def test_cadence_rejects_sub_minute_interval(bad: int) -> None:
+    # The 60-second floor (issue #1838 review): a sub-tick interval would never
+    # fire (the runner's staleness gate) and cron is minute-granular anyway.
+    with pytest.raises(InvalidScheduleCadenceError):
+        Cadence.from_interval(bad)
+
+
+def test_cadence_accepts_the_minimum_interval() -> None:
+    assert Cadence.from_interval(60).interval_seconds == 60
+
+
 # --- schedule invariants -------------------------------------------------------
 
 

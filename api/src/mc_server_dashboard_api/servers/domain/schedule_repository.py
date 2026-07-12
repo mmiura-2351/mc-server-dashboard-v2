@@ -59,6 +59,26 @@ class ScheduleRepository(abc.ABC):
         """
 
     @abc.abstractmethod
+    async def advance_run_state(
+        self,
+        schedule_id: ScheduleId,
+        *,
+        next_run_at: dt.datetime,
+        last_run_at: dt.datetime | None,
+    ) -> None:
+        """Persist only the runner's bookkeeping columns (issue #1838).
+
+        A staged UPDATE of ``next_run_at`` / ``last_run_at`` guarded ``WHERE
+        enabled``: the runner works on a row read before a possibly long
+        execution, so writing the whole entity back would clobber a concurrent
+        CRUD edit — and re-setting ``next_run_at`` on a concurrently *disabled*
+        schedule would resurrect it (a disabled row keeps ``next_run_at`` NULL,
+        the domain invariant). Zero rows affected means the schedule was
+        disabled or deleted concurrently; the advance is silently skipped.
+        Never writes name/action/payload/cadence/enabled.
+        """
+
+    @abc.abstractmethod
     async def delete(self, schedule_id: ScheduleId) -> None:
         """Delete the schedule row (its runs go with it via the FK cascade)."""
 

@@ -20,20 +20,28 @@ Outcome taxonomy (owner-confirmed):
   Worker was unavailable. Recorded, audited, and notified.
 * **success** — otherwise.
 
-``next_run_at`` advances to the first occurrence strictly after ``now`` on every
-fired occurrence (success, failure, or skip) — there is no tick-level retry.
+``next_run_at`` advances to the first occurrence strictly after the advance
+instant on every fired occurrence (success, failure, or skip) — there is no
+tick-level retry.
 
-Missed-run semantics: a due occurrence is *overdue* when the occurrence strictly
-after its stored ``next_run_at`` is itself already past — i.e. a whole further
-period elapsed while the loop was down (an API restart). A ``backup`` still fires
-exactly once (advancing past ``now`` coalesces the missed occurrences into one
-catch-up); ``command`` / ``start`` / ``stop`` / ``restart`` do *not* fire late —
-``next_run_at`` is advanced past ``now`` with no execution and no run row.
+Missed-run semantics: a non-``backup`` occurrence executes only while it is at
+most :data:`LATE_RUN_GRACE` past its due instant; a staler occurrence does *not*
+fire late — ``next_run_at`` is advanced past ``now`` with no execution and no
+run row (a stop that was due hours ago must not stop tonight's players). A
+``backup`` has no staleness cut-off: however late, it fires exactly once —
+advancing past ``now`` coalesces every missed occurrence into that one catch-up.
 
 Backup-only bounded retry: a failed ``backup`` occurrence arms one in-memory
 retry ~30 minutes later (lost on restart — accepted). The retry records (and, on
 failure, notifies) but never moves ``next_run_at``; it fires at most once, then
 the schedule waits for its next occurrence.
+
+Delivery is at-least-once across a crash: the run executes before ``next_run_at``
+advances, so an API crash in the window between the two replays the occurrence
+on restart. Accepted — a replayed ``backup`` is a harmless duplicate archive, and
+a replayed lifecycle/command occurrence is bounded by the same
+:data:`LATE_RUN_GRACE` staleness gate (a restart later than the grace advances
+without executing).
 
 One schedule's exception never stops the tick — each is isolated and logged.
 """
@@ -42,7 +50,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 
 from mc_server_dashboard_api.audit.domain.events import AuditEvent, Outcome
 from mc_server_dashboard_api.audit.domain.operations import (
@@ -97,6 +105,14 @@ _HISTORY_CAP = 50
 _BACKUP_RETRY_DELAY = dt.timedelta(minutes=30)
 # The notification discriminator a client routes on (issue #1836 payload).
 _NOTIFY_KIND = "schedule_failed"
+
+# How late a non-backup occurrence may still execute. Generous against the
+# runner's tick resolution (~20 s) and a brief API restart, yet small against any
+# human-meaningful cadence (the interval floor is one minute; cron is
+# minute-granular), so a lifecycle/command occurrence missed by an outage never
+# fires hours late — a daily 04:00 stop must not stop the evening's players.
+# Anything staler advances without executing (no run row).
+LATE_RUN_GRACE = dt.timedelta(seconds=300)
 
 # Use-case exceptions that mean the action's precondition was unmet at dispatch
 # time (a state change raced the runner's pre-check): classified as a skip, not a
@@ -226,6 +242,22 @@ class ExecuteScheduleAction:
             return ActionResult(
                 ScheduleRunOutcome.FAILURE, _failure_detail(exc), community_id
             )
+        except Exception:  # noqa: BLE001 - every execution error is a run outcome
+            # An unexpected error (a Storage/OS failure mid-archive, a DB error
+            # inside the use case) is still a *failure of this occurrence*: it
+            # must produce a run row + audit + notification and let next_run_at
+            # advance like any other failure. Letting it escape would bypass the
+            # taxonomy and re-execute the occurrence every tick (no tick-level
+            # retry exists by design). The traceback is logged here; the recorded
+            # detail stays a sanitized category.
+            _LOG.exception(
+                "scheduled %s for server %s raised unexpectedly",
+                action.value,
+                server_id.value,
+            )
+            return ActionResult(
+                ScheduleRunOutcome.FAILURE, "action failed", community_id
+            )
         return ActionResult(ScheduleRunOutcome.SUCCESS, None, community_id)
 
     async def _dispatch(
@@ -300,21 +332,24 @@ class RunScheduleTick:
                 )
 
     async def _run_due(self, schedule: Schedule, now: dt.datetime) -> None:
-        if schedule.action is not ScheduleAction.BACKUP and self._is_missed(
+        if schedule.action is not ScheduleAction.BACKUP and self._is_stale(
             schedule, now
         ):
-            # Overdue non-backup: do not fire late. Advance past now with no run row
-            # and no last_run_at change (nothing executed).
-            await self._advance(schedule, now, last_run_at=schedule.last_run_at)
+            # A stale non-backup occurrence does not fire late (module docstring):
+            # advance past now with no run row and no last_run_at change.
+            await self._advance(schedule, last_run_at=schedule.last_run_at)
             return
         result, started_at, finished_at = await self._execute(schedule)
         await self._record(schedule, result, started_at, finished_at)
-        await self._advance(schedule, now, last_run_at=now)
+        await self._advance(schedule, last_run_at=started_at)
         if schedule.action is ScheduleAction.BACKUP:
-            self._reschedule_retry(schedule.id, result.outcome, now)
+            self._reschedule_retry(schedule.id, result.outcome, finished_at)
 
     async def _run_retry(self, schedule_id: ScheduleId, now: dt.datetime) -> None:
-        # One-shot: drop the retry state up front, whatever the outcome.
+        # One-shot: the single retry is spent up front, REGARDLESS of its outcome
+        # (even a skip on a transitional server consumes it) — the next regular
+        # occurrence takes over. A retry-of-the-retry chain is exactly the
+        # unbounded tail the owner-confirmed "retry once" bound excludes.
         self._backup_retry.pop(schedule_id, None)
         async with self.uow:
             schedule = await self.uow.schedules.get_by_id(schedule_id)
@@ -374,18 +409,21 @@ class RunScheduleTick:
             )
 
     async def _advance(
-        self, schedule: Schedule, now: dt.datetime, *, last_run_at: dt.datetime | None
+        self, schedule: Schedule, *, last_run_at: dt.datetime | None
     ) -> None:
-        # Rebuild via ``replace`` so the entity re-runs its invariants (PR #1845),
-        # rather than mutating a loaded row in place.
-        updated = replace(
-            schedule,
-            next_run_at=self._next_after(schedule, now),
-            last_run_at=last_run_at,
-            updated_at=now,
-        )
+        # Recompute now HERE, not at tick start: after a long execution the next
+        # occurrence must be strictly in the future of the advance instant, or a
+        # slow run could land next_run_at already in the past. The write goes
+        # through the narrow bookkeeping UPDATE (guarded WHERE enabled) so a
+        # concurrent CRUD edit is never clobbered and a concurrently disabled
+        # schedule stays disabled — 0 rows matched is the silent-skip contract.
+        now = self.clock.now()
         async with self.uow:
-            await self.uow.schedules.update(updated)
+            await self.uow.schedules.advance_run_state(
+                schedule.id,
+                next_run_at=self._next_after(schedule, now),
+                last_run_at=last_run_at,
+            )
             await self.uow.commit()
 
     async def _audit(
@@ -414,10 +452,12 @@ class RunScheduleTick:
             self._backup_retry.pop(schedule_id, None)
         # SKIPPED: leave any pending retry untouched (a skip is not a fresh failure).
 
-    def _is_missed(self, schedule: Schedule, now: dt.datetime) -> bool:
+    def _is_stale(self, schedule: Schedule, now: dt.datetime) -> bool:
+        """Whether the due occurrence is too old to still execute (non-backup)."""
+
         if schedule.next_run_at is None:
             return False
-        return self._next_after(schedule, schedule.next_run_at) <= now
+        return now - schedule.next_run_at > LATE_RUN_GRACE
 
     def _next_after(self, schedule: Schedule, after: dt.datetime) -> dt.datetime:
         interval = schedule.cadence.interval_seconds

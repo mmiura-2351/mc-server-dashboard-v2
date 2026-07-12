@@ -638,7 +638,7 @@ schedules at #1840.
 | `action` | text | `command` / `start` / `stop` / `restart` / `backup` (CHECK enum) |
 | `payload` | jsonb | per-action payload: `{"command": <line>}` for `command`; optional `{"warnings": [{offset_minutes, message}, …]}` for `stop`/`restart` (≤ 5 steps, offsets positive, distinct, ≤ 120 min); `{}` otherwise |
 | `cron` | text nullable | 5-field cron expression |
-| `interval_seconds` | int nullable | fixed interval; CHECK exactly one of `cron` / `interval_seconds` is non-NULL (`ck_schedule_cadence_xor`) |
+| `interval_seconds` | int nullable | fixed interval, minimum 60 s (domain-validated, matching cron's minute granularity); CHECK exactly one of `cron` / `interval_seconds` is non-NULL (`ck_schedule_cadence_xor`) |
 | `timezone` | text | IANA zone the cron cadence is evaluated in; NOT NULL, defaults `UTC` |
 | `enabled` | bool | NOT NULL |
 | `next_run_at` | timestamptz nullable | the due instant the runner polls on; NULL exactly while disabled. Partial index `ix_schedule_next_run_at` on `(next_run_at) WHERE enabled` |

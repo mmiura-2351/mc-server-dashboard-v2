@@ -39,6 +39,14 @@ DEFAULT_TIMEZONE = "UTC"
 MAX_WARNING_STEPS = 5
 MAX_WARNING_OFFSET_MINUTES = 120
 
+# The interval-cadence floor (issue #1838 review): one minute, matching cron's
+# granularity (the other cadence form cannot go finer either). A sub-minute
+# interval would also undercut the runner's tick resolution and its fixed
+# late-run staleness gate, so occurrences could be judged stale before the loop
+# ever saw them. Validated here as the single source of truth; the CRUD layer
+# surfaces it as a 422 automatically.
+MIN_INTERVAL_SECONDS = 60
+
 # The interval jitter is at most this fraction of the interval, so it staggers
 # schedules sharing a cadence without meaningfully changing that cadence (the
 # ``backup_schedule.JITTER_FRACTION`` pattern).
@@ -106,8 +114,8 @@ class Cadence:
     Exactly one of ``cron`` / ``interval_seconds`` is set (the table's
     ``ck_schedule_cadence_xor`` CHECK). Cron *syntax* is validated by the
     ``NextRunCalculator`` Port (the cron engine lives in adapters); here the
-    expression is only required to be non-blank. An interval is a positive
-    whole number of seconds.
+    expression is only required to be non-blank. An interval is a whole number
+    of seconds of at least :data:`MIN_INTERVAL_SECONDS`.
     """
 
     cron: str | None
@@ -121,9 +129,12 @@ class Cadence:
         if self.cron is not None and not self.cron.strip():
             raise InvalidScheduleCadenceError("cron expression must not be blank")
         if self.interval_seconds is not None and (
-            isinstance(self.interval_seconds, bool) or self.interval_seconds < 1
+            isinstance(self.interval_seconds, bool)
+            or self.interval_seconds < MIN_INTERVAL_SECONDS
         ):
-            raise InvalidScheduleCadenceError(str(self.interval_seconds))
+            raise InvalidScheduleCadenceError(
+                f"interval must be at least {MIN_INTERVAL_SECONDS} seconds"
+            )
 
     @classmethod
     def from_cron(cls, expr: str) -> Cadence:
@@ -133,7 +144,7 @@ class Cadence:
 
     @classmethod
     def from_interval(cls, seconds: int) -> Cadence:
-        """A fixed-interval cadence of ``seconds`` (positive)."""
+        """A fixed-interval cadence of ``seconds`` (>= ``MIN_INTERVAL_SECONDS``)."""
 
         return cls(cron=None, interval_seconds=seconds)
 

@@ -161,6 +161,23 @@ class SqlAlchemyScheduleRepository(ScheduleRepository):
             translate_integrity_error(exc)
             raise
 
+    async def advance_run_state(
+        self,
+        schedule_id: ScheduleId,
+        *,
+        next_run_at: dt.datetime,
+        last_run_at: dt.datetime | None,
+    ) -> None:
+        # Only the runner's bookkeeping columns, guarded ``WHERE enabled`` so a
+        # concurrently disabled/deleted schedule matches no row (the Port's
+        # silent-skip contract) and a concurrent CRUD edit is never clobbered.
+        stmt = (
+            update(ScheduleModel)
+            .where(ScheduleModel.id == schedule_id.value, ScheduleModel.enabled)
+            .values(next_run_at=next_run_at, last_run_at=last_run_at)
+        )
+        await self._session.execute(stmt)
+
     async def delete(self, schedule_id: ScheduleId) -> None:
         stmt = delete(ScheduleModel).where(ScheduleModel.id == schedule_id.value)
         await self._session.execute(stmt)

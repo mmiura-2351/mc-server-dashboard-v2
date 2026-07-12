@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from mc_server_dashboard_api.audit.domain.events import Outcome
 from mc_server_dashboard_api.audit.domain.operations import (
@@ -30,6 +30,7 @@ from mc_server_dashboard_api.servers.application.lifecycle import (
     StopServer,
 )
 from mc_server_dashboard_api.servers.application.schedule_runner import (
+    LATE_RUN_GRACE,
     ActionResult,
     ExecuteScheduleAction,
     RunScheduleTick,
@@ -352,6 +353,84 @@ async def test_dispatch_failure_records_failure_notifies_and_advances() -> None:
     assert stored.next_run_at is not None and stored.next_run_at > _NOW
 
 
+class _DiskFullBackupStore(FakeBackupArchiveStore):
+    """Raises a non-ServerError mid-archive (the disk-full case)."""
+
+    async def create_from_current(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> None:
+        raise OSError("disk full")
+
+
+async def test_unexpected_exception_is_classified_as_failure() -> None:
+    env = _env(backup_store=_DiskFullBackupStore())
+    server = _stopped_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    # A non-ServerError still lands in the taxonomy: run row + audit +
+    # notification, and next_run advances — no every-tick re-execution.
+    assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
+    assert [e.outcome for e in env.audit.events] == [Outcome.ERROR]
+    assert len(env.notifier.notifications) == 1
+    stored = env.uow.schedules.by_id[schedule.id]
+    assert stored.next_run_at is not None and stored.next_run_at > _NOW
+
+
+async def test_advance_does_not_resurrect_a_concurrently_disabled_schedule() -> None:
+    env = _env()
+    server = _running_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.COMMAND,
+        command="say hi",
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+    base = env.runner.execute
+
+    class _DisableDuringRun(ExecuteScheduleAction):
+        """Simulates a CRUD disable landing while the action executes."""
+
+        async def __call__(
+            self, *, server_id: ServerId, action: ScheduleAction, command: str | None
+        ) -> ActionResult:
+            env.uow.schedules.by_id[schedule.id] = replace(
+                env.uow.schedules.by_id[schedule.id],
+                enabled=False,
+                next_run_at=None,
+            )
+            return await ExecuteScheduleAction.__call__(
+                self, server_id=server_id, action=action, command=command
+            )
+
+    env.runner.execute = _DisableDuringRun(
+        uow=base.uow,
+        send_command=base.send_command,
+        start_server=base.start_server,
+        stop_server=base.stop_server,
+        restart_server=base.restart_server,
+        create_backup=base.create_backup,
+    )
+
+    await env.runner.tick()
+
+    # The run itself completed and is recorded, but the bookkeeping advance
+    # matched no enabled row: the schedule stays disabled, next_run_at NULL.
+    assert _runs(env, schedule) == [ScheduleRunOutcome.SUCCESS]
+    stored = env.uow.schedules.by_id[schedule.id]
+    assert stored.enabled is False
+    assert stored.next_run_at is None
+
+
 # --- missed-run semantics --------------------------------------------------
 
 
@@ -381,7 +460,7 @@ async def test_overdue_lifecycle_schedule_does_not_fire_late() -> None:
     schedule = _schedule(
         server,
         action=ScheduleAction.STOP,
-        next_run_at=_NOW - dt.timedelta(seconds=2 * _HOUR),  # two periods overdue
+        next_run_at=_NOW - dt.timedelta(seconds=2 * _HOUR),  # hours past the grace
     )
     env.uow.servers.seed(server)
     env.uow.schedules.seed(schedule)
@@ -393,6 +472,44 @@ async def test_overdue_lifecycle_schedule_does_not_fire_late() -> None:
     assert _runs(env, schedule) == []
     stored = env.uow.schedules.by_id[schedule.id]
     assert stored.last_run_at is None
+    assert stored.next_run_at is not None and stored.next_run_at > _NOW
+
+
+async def test_lifecycle_schedule_at_the_grace_boundary_still_fires() -> None:
+    env = _env()
+    server = _running_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.COMMAND,
+        command="say hi",
+        next_run_at=_NOW - LATE_RUN_GRACE,  # exactly at the staleness boundary
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    assert [k for k, *_ in env.control_plane.dispatched] == ["command"]
+    assert _runs(env, schedule) == [ScheduleRunOutcome.SUCCESS]
+
+
+async def test_lifecycle_schedule_just_past_the_grace_does_not_fire() -> None:
+    env = _env()
+    server = _running_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.COMMAND,
+        command="say hi",
+        next_run_at=_NOW - LATE_RUN_GRACE - dt.timedelta(seconds=1),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    assert env.control_plane.dispatched == []
+    assert _runs(env, schedule) == []
+    stored = env.uow.schedules.by_id[schedule.id]
     assert stored.next_run_at is not None and stored.next_run_at > _NOW
 
 
@@ -554,6 +671,4 @@ async def test_one_schedule_exception_does_not_stop_the_tick() -> None:
 
 
 def _replace_next_run(schedule: Schedule, next_run_at: dt.datetime) -> Schedule:
-    from dataclasses import replace
-
     return replace(schedule, next_run_at=next_run_at)
