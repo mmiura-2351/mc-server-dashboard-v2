@@ -1,8 +1,9 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAccessToken, setAccessToken } from "../auth/tokenStore.ts";
+import { ToastProvider } from "../components/Toast.tsx";
 import { installMockWebSocket, MockWebSocket } from "../test/mockWebSocket.ts";
 import { serversKey, useCommunityEvents } from "./useCommunityEvents.ts";
 
@@ -23,6 +24,15 @@ function gapFrame() {
     ts: "t",
     payload: {},
     server_id: null,
+  });
+}
+
+function notificationFrame(serverId: string, title: string, detail: string) {
+  return JSON.stringify({
+    stream: "notification",
+    ts: "t",
+    payload: { kind: "schedule_failed", title, detail },
+    server_id: serverId,
   });
 }
 
@@ -56,7 +66,9 @@ function setup(seed: ReturnType<typeof serverRow>[] | undefined) {
   // invalidation of a query emits an "invalidate" event.)
   const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
   const wrapper = ({ children }: { children: ReactNode }) => (
-    <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    <QueryClientProvider client={queryClient}>
+      <ToastProvider>{children}</ToastProvider>
+    </QueryClientProvider>
   );
   render(<Probe communityId={CID} />, { wrapper });
   return { queryClient, refetchSpy, invalidateSpy };
@@ -182,6 +194,34 @@ describe("useCommunityEvents", () => {
       MockWebSocket.last().open();
     });
     expect(invalidateSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces a notification frame as a failure toast", () => {
+    setup([serverRow("s1", "running")]);
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        notificationFrame("s1", "Scheduled stop failed", "worker_unavailable"),
+      );
+    });
+    const toast = screen.getByRole("status");
+    expect(toast).toHaveTextContent("Scheduled stop failed");
+    expect(toast).toHaveTextContent("worker_unavailable");
+    expect(toast.className).toContain("error");
+  });
+
+  it("does not patch the servers cache for a notification frame", () => {
+    const { queryClient } = setup([serverRow("s1", "running")]);
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        notificationFrame("s1", "Scheduled stop failed", ""),
+      );
+    });
+    // A notification is not a status change: the cached row is untouched.
+    expect(queryClient.getQueryData(serversKey(CID))).toEqual([
+      { id: "s1", observed_state: "running" },
+    ]);
   });
 
   it("refetches the list on a gap frame (dropped status frames)", () => {

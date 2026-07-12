@@ -166,6 +166,23 @@ describe("ServerDetailPage scaffold + header", () => {
     ).toBeInTheDocument();
   });
 
+  it("renders the Schedules tab and opens the schedules panel", async () => {
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.endsWith("/schedules")) {
+        return Promise.resolve([]);
+      }
+      return Promise.resolve(server());
+    });
+    renderPage();
+
+    await screen.findByText("survival");
+    fireEvent.click(
+      screen.getByRole("tab", { name: t("serverDetail.tab.schedules") }),
+    );
+    // The schedules panel loads and shows its empty state.
+    expect(await screen.findByText(t("schedules.empty"))).toBeInTheDocument();
+  });
+
   it("names the h1 by the server alone, not the status pill (a11y; #647)", async () => {
     mockApi.get.mockResolvedValue(server());
     renderPage();

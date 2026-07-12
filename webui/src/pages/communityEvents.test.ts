@@ -27,6 +27,20 @@ function gapFrame() {
   });
 }
 
+function notificationFrame(
+  serverId: string | null,
+  kind: string,
+  title: string,
+  detail: string,
+) {
+  return JSON.stringify({
+    stream: "notification",
+    ts: "2026-06-06T00:00:00Z",
+    payload: { kind, title, detail },
+    server_id: serverId,
+  });
+}
+
 describe("backoffDelayMs", () => {
   it("doubles the cap each attempt, capped at 30s", () => {
     // random()=1 would be the open upper bound; use just-below-1 to read the
@@ -61,7 +75,39 @@ describe("parseCommunityFrame", () => {
     expect(parseCommunityFrame(gapFrame())).toEqual({ kind: "gap" });
   });
 
-  it("drops a non-status stream and malformed input", () => {
+  it("parses a notification frame to {kind, serverId, notificationKind, title, detail}", () => {
+    expect(
+      parseCommunityFrame(
+        notificationFrame(
+          "s1",
+          "schedule_failed",
+          "Scheduled stop failed",
+          "worker_unavailable",
+        ),
+      ),
+    ).toEqual({
+      kind: "notification",
+      serverId: "s1",
+      notificationKind: "schedule_failed",
+      title: "Scheduled stop failed",
+      detail: "worker_unavailable",
+    });
+  });
+
+  it("drops a notification frame missing a payload title", () => {
+    expect(
+      parseCommunityFrame(
+        JSON.stringify({
+          stream: "notification",
+          ts: "t",
+          payload: { kind: "schedule_failed" },
+          server_id: "s1",
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it("drops a non-status/non-notification stream and malformed input", () => {
     expect(
       parseCommunityFrame(JSON.stringify({ stream: "log", server_id: "s1" })),
     ).toBeNull();
@@ -104,12 +150,14 @@ describe("CommunityEventsClient", () => {
   ) {
     const onStatus = vi.fn(overrides.onStatus);
     const onGap = vi.fn();
+    const onNotification = vi.fn();
     const onOpen = vi.fn();
     const onDown = vi.fn();
     return {
-      callbacks: { onStatus, onGap, onOpen, onDown },
+      callbacks: { onStatus, onGap, onNotification, onOpen, onDown },
       onStatus,
       onGap,
+      onNotification,
       onOpen,
       onDown,
     };
@@ -144,6 +192,33 @@ describe("CommunityEventsClient", () => {
 
     MockWebSocket.last().message(gapFrame());
     expect(onGap).toHaveBeenCalledTimes(1);
+    expect(onStatus).not.toHaveBeenCalled();
+    client.close();
+  });
+
+  it("fires onNotification on a notification frame, not onStatus", () => {
+    const { client, onNotification, onStatus } = makeClient();
+    client.start();
+    MockWebSocket.last().open();
+
+    MockWebSocket.last().message(
+      JSON.stringify({
+        stream: "notification",
+        ts: "t",
+        payload: {
+          kind: "schedule_failed",
+          title: "Scheduled restart failed",
+          detail: "worker_unavailable",
+        },
+        server_id: "s1",
+      }),
+    );
+    expect(onNotification).toHaveBeenCalledWith({
+      serverId: "s1",
+      notificationKind: "schedule_failed",
+      title: "Scheduled restart failed",
+      detail: "worker_unavailable",
+    });
     expect(onStatus).not.toHaveBeenCalled();
     client.close();
   });

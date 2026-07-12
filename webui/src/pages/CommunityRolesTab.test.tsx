@@ -144,14 +144,14 @@ describe("CommunityRolesTab", () => {
     expect(modRow.querySelector("button")).not.toBeNull();
   });
 
-  it("renders the full 33-code matrix grouped by family, derived from the catalog", async () => {
+  it("renders the full 35-code matrix grouped by family, derived from the catalog", async () => {
     await openEditor([]);
 
     // Every family has a select-all checkbox labelled from its family label,
     // and every one of the catalog codes renders as a checkbox.
     // Count tracks the catalog size; update when new families are added.
     const total = ALL_CODES.length;
-    expect(total).toBe(33); // 30 original + session:read (#961) + plugin:read/manage (#1153)
+    expect(total).toBe(35); // 30 original + session:read (#961) + plugin:read/manage (#1153) + schedule:read/manage (#1842)
     const checkboxes = await screen.findAllByRole("checkbox");
     // One per code + one select-all per family.
     expect(checkboxes).toHaveLength(

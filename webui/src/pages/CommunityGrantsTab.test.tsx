@@ -233,7 +233,7 @@ describe("CommunityGrantsTab", () => {
     });
   });
 
-  it("only offers server/file/backup permission codes in the create picker", async () => {
+  it("only offers server/file/backup/schedule permission codes in the create picker", async () => {
     routeGet({
       members: [member()],
       servers: [server()],
@@ -248,10 +248,11 @@ describe("CommunityGrantsTab", () => {
       }),
     );
 
-    // Grantable families are offered…
+    // Grantable (per-server resource) families are offered…
     expect(screen.getByLabelText("server:start")).toBeInTheDocument();
     expect(screen.getByLabelText("file:read")).toBeInTheDocument();
     expect(screen.getByLabelText("backup:create")).toBeInTheDocument();
+    expect(screen.getByLabelText("schedule:manage")).toBeInTheDocument();
     // …a non-grantable family code is not.
     expect(screen.queryByLabelText("member:add")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("role:manage")).not.toBeInTheDocument();
