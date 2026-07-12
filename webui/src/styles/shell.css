@@ -1280,8 +1280,23 @@ button.link:focus-visible {
   padding: 8px 12px;
   border-bottom: 1px solid var(--border-subtle);
 }
+/* Default column widths. ResizableTable renders table-layout: fixed with
+   equal auto columns; the actions column's three buttons (~230px) then
+   overflow their eighth of the width and occlude the next-run cell. Size the
+   two known-width columns here — a user drag writes an inline width on the
+   <col> (which wins over these), and a double-click reset falls back here.
+   Columns: 1 name / 2 action / 3 cadence / 4 timezone / 5 enabled /
+   6 last run / 7 next run / 8 actions. */
+.schedules-table table.data col:nth-child(5) {
+  width: 90px;
+}
+.schedules-table table.data col:nth-child(8) {
+  width: 240px;
+}
 .schedules-table .row-actions {
   display: flex;
+  /* Wrap instead of overflowing the cell if the user drags it narrow. */
+  flex-wrap: wrap;
   gap: 6px;
   justify-content: flex-end;
 }
