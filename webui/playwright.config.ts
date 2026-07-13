@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { defineConfig, devices } from "@playwright/test";
 
 // Playwright E2E config (issue #491). The suite drives the real UI against a
@@ -20,7 +21,23 @@ import { defineConfig, devices } from "@playwright/test";
 
 const API_URL = process.env.MCD_E2E_API_URL ?? "http://127.0.0.1:8000";
 const UI_HOST = "127.0.0.1";
-const UI_PORT = Number(process.env.MCD_E2E_UI_PORT ?? 5173);
+// Default the dev-server port to a value derived from this worktree's absolute
+// path, so concurrent worktrees on a shared host never share the default port
+// (issue #1861). `reuseExistingServer` (local dev) reuses whatever server
+// already answers on `url`; with a fixed 5173 default it silently latched onto
+// a CONCURRENT worktree's dev server — which proxied to that worktree's own API
+// — and tested the wrong stack. A per-worktree default means it only ever
+// reuses THIS worktree's own server. The 20000-29999 band stays clear of the
+// API (8000/18000), Postgres (5544), Vite's own 5173, and the Linux ephemeral
+// range (32768+). MCD_E2E_UI_PORT still overrides it explicitly.
+const defaultUiPort =
+  20000 +
+  (createHash("sha256")
+    .update(import.meta.dirname)
+    .digest()
+    .readUInt32BE(0) %
+    10000);
+const UI_PORT = Number(process.env.MCD_E2E_UI_PORT ?? defaultUiPort);
 const UI_URL = `http://${UI_HOST}:${UI_PORT}`;
 
 export default defineConfig({
