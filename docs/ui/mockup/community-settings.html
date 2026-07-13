@@ -14,8 +14,7 @@
     <main class="content">
       <div class="page-head">
         <div>
-          <h1>Community settings</h1>
-          <div class="sub">Sakura SMP · 4 members · 4 roles</div>
+          <h1>Sakura SMP</h1>
         </div>
       </div>
 
@@ -30,13 +29,13 @@
 
       <!-- ============ MEMBERS ============ -->
       <section class="tabpane" id="pane-members">
-        <div class="toolbar-row">
-          <input type="text" placeholder="filter members…" style="width:240px">
-          <div class="right"><button class="btn primary sm" onclick="openModal('add-member-modal')">+ Add member</button></div>
+        <div class="page-head">
+          <h2>Members</h2>
+          <button class="btn primary sm" onclick="openModal('add-member-modal')">Add member…</button>
         </div>
-        <div class="card" style="padding:0">
+        <div class="table-wrap">
           <table class="data">
-            <thead><tr><th>User</th><th>Roles</th><th></th></tr></thead>
+            <thead><tr><th>Username</th><th>Roles</th><th></th></tr></thead>
             <tbody id="member-rows"></tbody>
           </table>
         </div>
@@ -44,35 +43,27 @@
 
       <!-- ============ ROLES ============ -->
       <section class="tabpane" id="pane-roles">
-        <div class="grid" style="grid-template-columns:260px 1fr;align-items:start">
-          <div class="card" style="padding:8px">
-            <div id="role-list"></div>
-            <button class="btn sm" style="width:100%;justify-content:center;margin-top:8px" onclick="mockToast('New role editor')">+ New role</button>
-          </div>
-          <div class="card">
-            <h2 style="display:flex;align-items:center;gap:10px">Moderator
-              <span style="margin-left:auto;display:flex;gap:6px">
-                <button class="btn sm danger" onclick="mockToast('DELETE …/roles/r-2 — fails 409 if assigned', 'err')">Delete</button>
-                <button class="btn sm primary" onclick="mockToast('PATCH …/roles/r-2')">Save</button>
-              </span>
-            </h2>
-            <div class="field" style="max-width:280px">
-              <label>Role name</label>
-              <input type="text" value="Moderator">
-            </div>
-            <div id="perm-matrix"></div>
-          </div>
+        <div class="page-head">
+          <h2>Roles</h2>
+          <button class="btn primary sm" onclick="mockToast('Create role dialog')">New role…</button>
+        </div>
+        <div class="table-wrap">
+          <table class="data">
+            <tbody id="role-rows"></tbody>
+          </table>
         </div>
       </section>
 
       <!-- ============ GRANTS ============ -->
       <section class="tabpane" id="pane-grants">
-        <div class="notice info">Grants give one member extra permissions on a single server, on top of their roles. Only server / file / backup permissions can be granted per-resource.</div>
-        <div class="toolbar-row">
-          <select style="width:200px"><option>All members</option><option>steve_99</option><option>enderchan</option></select>
-          <div class="right"><button class="btn primary sm" onclick="mockToast('Create grant: member → server → permissions')">+ New grant</button></div>
+        <div class="page-head">
+          <h2>Grants</h2>
+          <button class="btn primary sm" onclick="mockToast('Create grant: member → server → permissions')">Grant access…</button>
         </div>
-        <div class="card" style="padding:0">
+        <label class="field grants-filter">Filter by member
+          <select><option>All members</option><option>steve_99</option><option>enderchan</option></select>
+        </label>
+        <div class="table-wrap">
           <table class="data">
             <thead><tr><th>Member</th><th>Server</th><th>Permissions</th><th></th></tr></thead>
             <tbody id="grant-rows"></tbody>
@@ -82,44 +73,54 @@
 
       <!-- ============ GROUPS ============ -->
       <section class="tabpane" id="pane-groups">
-        <div class="toolbar-row">
-          <span style="font-size:13px;color:var(--text-dim)">Player groups sync OP / whitelist lists to every applied server.</span>
-          <div class="right"><button class="btn primary sm" onclick="mockToast('Create group: name + kind (op | whitelist)')">+ New group</button></div>
+        <div class="page-head">
+          <h2>Player groups</h2>
+          <button class="btn primary sm" onclick="mockToast('Create group: name + kind (op | whitelist)')">New group…</button>
         </div>
-        <div class="grid cols-2" id="group-cards"></div>
+        <ul class="group-list" id="group-list"></ul>
       </section>
 
       <!-- ============ AUDIT ============ -->
       <section class="tabpane" id="pane-audit">
-        <div class="toolbar-row">
-          <select style="width:170px"><option>All operations</option><option>server:*</option><option>file:*</option><option>backup:*</option><option>member:*</option></select>
-          <select style="width:150px"><option>All actors</option><option>miura</option><option>alex_dig</option></select>
-          <input type="text" placeholder="since (ISO)" style="width:140px">
-          <input type="text" placeholder="until (ISO)" style="width:140px">
-          <button class="btn sm">Filter</button>
+        <div class="page-head">
+          <h2>Audit log</h2>
         </div>
-        <div class="card" style="padding:0">
+        <div class="audit-filters">
+          <label class="field">Operation
+            <input type="text" placeholder="e.g. server:start">
+          </label>
+          <label class="field">Actor ID
+            <input type="text" placeholder="user id">
+          </label>
+          <label class="field">Since
+            <input type="datetime-local">
+          </label>
+          <label class="field">Until
+            <input type="datetime-local">
+          </label>
+          <button class="btn sm primary">Apply filters</button>
+        </div>
+        <div class="table-wrap">
           <table class="data">
-            <thead><tr><th>Time</th><th>Operation</th><th>Actor</th><th>Target</th><th>Outcome</th></tr></thead>
+            <thead><tr><th>Time</th><th>Actor</th><th>Operation</th><th>Outcome</th><th>Target</th></tr></thead>
             <tbody id="audit-rows"></tbody>
           </table>
         </div>
-        <div class="pagination">
-          <button class="btn sm ghost" disabled>‹ prev</button>
-          <span>1–8 of 214</span>
-          <button class="btn sm ghost">next ›</button>
+        <div class="audit-paging">
+          <button class="btn sm ghost" disabled>Previous</button>
+          <button class="btn sm ghost">Next</button>
         </div>
       </section>
 
       <!-- ============ GENERAL ============ -->
       <section class="tabpane" id="pane-general">
         <div class="card" style="max-width:560px;margin-bottom:14px">
-          <h2>Community</h2>
+          <h2>General</h2>
           <div class="field" style="max-width:300px">
-            <label>Name</label>
+            <label>Community name</label>
             <input type="text" value="Sakura SMP">
           </div>
-          <button class="btn primary" onclick="mockToast('PATCH /communities/c-1')">Save</button>
+          <button class="btn primary" onclick="mockToast('PATCH /communities/c-1')">Save name</button>
         </div>
         <div class="card danger-zone" style="max-width:560px">
           <h2>Danger zone</h2>
@@ -140,19 +141,15 @@
 <!-- add member modal -->
 <div class="modal-backdrop" id="add-member-modal">
   <div class="card modal">
-    <h2>Add member</h2>
+    <h2>Add a member</h2>
+    <p>Add an existing user to this community by their exact username.</p>
     <div class="field">
       <label>Username</label>
-      <input type="text" placeholder="exact username of an existing account">
-      <div class="hint">The account must already exist — there are no invitations. Sent as POST …/members {username} (#355).</div>
-    </div>
-    <div class="field">
-      <label>Initial role</label>
-      <select><option>Builder</option><option>Moderator</option><option>Backup-op</option><option>— none —</option></select>
+      <input type="text" placeholder="username">
     </div>
     <div class="modal-foot">
       <button class="btn" onclick="closeModal('add-member-modal')">Cancel</button>
-      <button class="btn primary" onclick="mockToast('POST …/members {username} + role assign'); closeModal('add-member-modal')">Add member</button>
+      <button class="btn primary" onclick="mockToast('POST …/members {username}'); closeModal('add-member-modal')">Add member</button>
     </div>
   </div>
 </div>
@@ -172,30 +169,17 @@ document.addEventListener("DOMContentLoaded", () => {
       </td>
     </tr>`).join("");
 
-  // role list
-  document.getElementById("role-list").innerHTML = MOCK.roles.map((r) => `
-    <div class="nav-item ${r.name === "Moderator" ? "active" : ""}" style="cursor:pointer" onclick="mockToast('Load role ${r.name}')">
-      ${r.name}
-      ${r.is_preset ? '<span class="badge" style="margin-left:auto">preset</span>' : `<span style="margin-left:auto;color:var(--text-faint);font-size:11px">${r.permissions.length}</span>`}
-    </div>`).join("");
-
-  // permission matrix for the selected role (Moderator)
-  const modPerms = new Set(MOCK.roles[1].permissions);
-  document.getElementById("perm-matrix").innerHTML =
-    Object.entries(MOCK.permissionCatalog).map(([fam, actions]) => {
-      const allOn = actions.every((a) => modPerms.has(fam + ":" + a));
-      return `
-      <div class="perm-family">
-        <div class="fam-head">${fam}
-          <label class="all"><input type="checkbox" ${allOn ? "checked" : ""} onclick="mockToast('Toggle all ${fam}:*')"> all</label>
-        </div>
-        <div class="fam-body">
-          ${actions.map((a) => `
-            <label class="perm"><input type="checkbox" ${modPerms.has(fam + ":" + a) ? "checked" : ""}> ${fam}:${a}</label>
-          `).join("")}
-        </div>
-      </div>`;
-    }).join("");
+  // roles — flat table with actions
+  document.getElementById("role-rows").innerHTML = MOCK.roles.map((r) => `
+    <tr>
+      <td>${r.name}${r.is_preset ? ' <span class="badge">Preset</span>' : ""}</td>
+      <td class="row-actions">
+        ${r.is_preset ? "" : `
+          <button class="btn sm" onclick="mockToast('Edit role ${r.name}')">Edit</button>
+          <button class="btn sm danger" onclick="mockToast('DELETE …/roles/${r.id}')">Delete</button>
+        `}
+      </td>
+    </tr>`).join("");
 
   // grants
   document.getElementById("grant-rows").innerHTML = MOCK.grants.map((g) => `
@@ -206,43 +190,56 @@ document.addEventListener("DOMContentLoaded", () => {
       <td class="row-actions"><button class="btn sm danger" onclick="mockToast('DELETE …/grants/${g.id}')">Revoke</button></td>
     </tr>`).join("");
 
-  // groups
-  document.getElementById("group-cards").innerHTML = MOCK.groups.map((g) => `
-    <div class="card">
-      <h2 style="display:flex;gap:8px;align-items:center">${g.name}
+  // groups — list with expandable detail
+  const groupList = document.getElementById("group-list");
+  groupList.innerHTML = MOCK.groups.map((g, i) => {
+    const expanded = i === 0; // first group expanded by default
+    return `
+    <li class="group-item">
+      <div class="group-row">
+        <span class="group-name">${g.name}</span>
         <span class="badge kind-${g.kind}">${g.kind}</span>
-        <span style="margin-left:auto;display:flex;gap:6px">
-          <button class="btn sm ghost" onclick="mockToast('Rename group')">Rename</button>
-          <button class="btn sm danger" onclick="mockToast('DELETE …/groups/${g.id}')">Delete</button>
-        </span>
-      </h2>
-      <table class="data" style="margin-bottom:10px">
-        <tbody>
-          ${g.players.map((p) => `
-            <tr><td>${p.username}</td><td class="num" style="color:var(--text-faint)">${p.uuid}</td>
-            <td class="row-actions"><button class="btn sm ghost" onclick="mockToast('Remove player')">×</button></td></tr>`).join("")}
-        </tbody>
-      </table>
-      <div class="toolbar-row" style="margin-bottom:8px">
-        <input type="text" placeholder="player name or uuid" style="flex:1">
-        <button class="btn sm" onclick="mockToast('POST …/groups/${g.id}/players')">Add</button>
+        <span class="group-members">${g.players.length} players</span>
+        <button class="btn sm" onclick="mockToast('${expanded ? "Collapse" : "Expand"} group')">${expanded ? "Close" : "Manage"}</button>
+        <button class="btn sm ghost" onclick="mockToast('Rename group')">Rename…</button>
+        <button class="btn sm danger" onclick="mockToast('DELETE …/groups/${g.id}')">Delete</button>
       </div>
-      <div style="font-size:12px;color:var(--text-dim)">Applied to:
-        ${g.servers.map((s) => `<span class="chip">${s} <span class="x" onclick="mockToast('Remove from ${s}')">×</span></span>`).join(" ")}
-        <button class="btn sm ghost" onclick="mockToast('Apply to server picker')">+</button>
-      </div>
-    </div>`).join("");
+      ${expanded ? `
+      <div class="group-detail">
+        <div class="card">
+          <h3>Players</h3>
+          <div class="table-wrap">
+            <table class="data">
+              <thead><tr><th>Username</th><th>UUID</th><th></th></tr></thead>
+              <tbody>
+                ${g.players.map((p) => `
+                  <tr>
+                    <td>${p.username}</td>
+                    <td class="num" style="color:var(--text-faint)">${p.uuid}</td>
+                    <td class="row-actions"><button class="btn sm danger" onclick="mockToast('Remove player')">Remove</button></td>
+                  </tr>`).join("")}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div>
+          <span style="font-size:13px;color:var(--text-dim)">Applied to:</span>
+          ${g.servers.map((s) => `<span class="chip">${s}</span>`).join(" ")}
+        </div>
+      </div>` : ""}
+    </li>`;
+  }).join("");
 
   // audit
   document.getElementById("audit-rows").innerHTML = MOCK.auditRecords.map((a) => `
     <tr>
       <td class="num">${a.created_at}</td>
-      <td class="num">${a.operation}</td>
       <td title="${a.actor}">${a.actor_username}</td>
-      <td class="num" style="color:var(--text-dim)" title="${a.target}">${a.target_name}</td>
+      <td class="num">${a.operation}</td>
       <td>${a.outcome === "success"
         ? '<span class="pill running" style="font-size:11px">success</span>'
         : '<span class="pill crashed" style="font-size:11px">failure</span>'}</td>
+      <td class="num" style="color:var(--text-dim)" title="${a.target}">${a.target_name}</td>
     </tr>`).join("");
 });
 </script>

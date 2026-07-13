@@ -21,8 +21,6 @@
       "nav.adminVersions": "Versions & JARs",
       "nav.adminAudit": "Global audit",
       "nav.account": "Account",
-      "conn.live": "live",
-      "conn.degraded": "Reconnecting — updates may lag",
       "toast.mock": "Mockup: no real API call was made.",
     },
   };
@@ -50,6 +48,10 @@
         ${navItem("community-settings.html", "⚙", t("nav.settings"), page === "community-settings")}
       </div>
       <div class="nav-group">
+        <div class="nav-label">Shared resources</div>
+        ${navItem("#", "📦", "Resource packs", false)}
+      </div>
+      <div class="nav-group">
         <div class="nav-label">${t("nav.admin")}</div>
         ${navItem("admin-overview.html", "◎", t("nav.adminOverview"), page === "admin-overview")}
         ${navItem("admin-users.html", "👤", t("nav.adminUsers"), page === "admin-users")}
@@ -57,23 +59,45 @@
         ${navItem("admin-workers.html", "🖧", t("nav.adminWorkers"), page === "admin-workers")}
         ${navItem("admin-versions.html", "⬇", t("nav.adminVersions"), page === "admin-versions")}
         ${navItem("admin-audit.html", "≡", t("nav.adminAudit"), page === "admin-audit")}
-      </div>
-      <div class="sidebar-foot">api v1.0 · ui mockup</div>`;
+      </div>`;
 
-    const degraded = document.body.dataset.conn === "degraded";
+
     topbar.innerHTML = `
-      <div class="community-switcher" onclick="mockToast()">
-        ${MOCK.currentCommunity.name} <span class="chev">▼</span>
-      </div>
+      <button class="menu-toggle" aria-label="Open menu">☰</button>
+      <select class="community-switcher" onchange="mockToast()">
+        ${MOCK.communities.map((c) => `<option${c.id === MOCK.currentCommunity.id ? " selected" : ""}>${c.name}</option>`).join("")}
+      </select>
       <div class="spacer"></div>
-      <div class="conn-indicator${degraded ? " degraded" : ""}">
-        <span class="dot"></span>${degraded ? t("conn.degraded") : t("conn.live")}
-      </div>
-      <span class="lang-switcher" style="font-size:12px;color:var(--text-dim);cursor:pointer" onclick="mockToast('Language toggled')" title="Language"><strong>EN</strong> / JA</span>
+      <select class="lang-switcher" style="font-size:12px;width:auto;padding:4px 8px" onchange="mockToast('Language toggled')">
+        <option selected>English</option>
+        <option>日本語</option>
+      </select>
       <a class="user-menu" href="account.html" title="${t("nav.account")}">
-        <span class="avatar">${MOCK.me.username.slice(0, 1).toUpperCase()}</span>
-        ${MOCK.me.username}
+        <span class="avatar">A</span>
+        <span class="user-label">${t("nav.account")}</span>
       </a>`;
+
+    // Drawer backdrop (inserted after sidebar for mobile drawer)
+    const backdrop = document.createElement("div");
+    backdrop.className = "drawer-backdrop";
+    sidebar.parentNode.insertBefore(backdrop, sidebar.nextSibling);
+
+    // Drawer toggle handlers
+    function openDrawer() {
+      sidebar.classList.add("open");
+      backdrop.classList.add("open");
+    }
+    function closeDrawer() {
+      sidebar.classList.remove("open");
+      backdrop.classList.remove("open");
+    }
+    topbar.querySelector(".menu-toggle").addEventListener("click", function () {
+      if (sidebar.classList.contains("open")) { closeDrawer(); } else { openDrawer(); }
+    });
+    backdrop.addEventListener("click", closeDrawer);
+    sidebar.querySelectorAll(".nav-item").forEach(function (item) {
+      item.addEventListener("click", closeDrawer);
+    });
 
     const banner = document.createElement("div");
     banner.className = "mock-banner";
@@ -210,8 +234,20 @@
     }, 7000);
   };
 
+  // ---------- responsive table wrapping ----------
+  function wrapTables() {
+    document.querySelectorAll("table.data").forEach(function (tbl) {
+      if (tbl.parentNode.classList.contains("table-wrap")) return;
+      var wrap = document.createElement("div");
+      wrap.className = "table-wrap";
+      tbl.parentNode.insertBefore(wrap, tbl);
+      wrap.appendChild(tbl);
+    });
+  }
+
   document.addEventListener("DOMContentLoaded", () => {
     if (document.getElementById("sidebar")) buildShell();
     initTabs();
+    wrapTables();
   });
 })();

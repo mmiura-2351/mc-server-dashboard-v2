@@ -15,22 +15,21 @@
       <div class="page-head">
         <div>
           <h1>Global audit log</h1>
-          <div class="sub">All communities · platform operations included</div>
         </div>
       </div>
 
       <div class="toolbar-row">
-        <select style="width:180px"><option>All communities</option><option>Sakura SMP</option><option>Dev Playground</option><option>— platform —</option></select>
-        <select style="width:170px"><option>All operations</option><option>auth:*</option><option>server:*</option><option>worker:manage</option><option>community:provision</option></select>
-        <select style="width:150px"><option>All actors</option><option>miura</option><option>system</option></select>
-        <input type="text" placeholder="since (ISO)" style="width:140px">
-        <input type="text" placeholder="until (ISO)" style="width:140px">
+        <select><option>All communities</option><option>Sakura SMP</option><option>Dev Playground</option><option>— platform —</option></select>
+        <input type="text" placeholder="e.g. server:start">
+        <input type="text" placeholder="user id">
+        <input type="text" placeholder="since (ISO)">
+        <input type="text" placeholder="until (ISO)">
         <button class="btn sm">Filter</button>
       </div>
 
       <div class="card" style="padding:0">
         <table class="data">
-          <thead><tr><th>Time</th><th>Community</th><th>Operation</th><th>Actor</th><th>Target</th><th>Outcome</th></tr></thead>
+          <thead><tr><th>Time</th><th>Actor</th><th>Operation</th><th>Outcome</th><th>Target</th><th>Community</th></tr></thead>
           <tbody id="audit-rows"></tbody>
         </table>
       </div>
@@ -49,13 +48,13 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("audit-rows").innerHTML = MOCK.auditRecords.map((a) => `
     <tr>
       <td class="num">${a.created_at}</td>
-      <td>${a.community_name === "—" ? "—" : a.community_name}</td>
-      <td class="num">${a.operation}</td>
       <td title="${a.actor}">${a.actor_username}</td>
-      <td class="num" style="color:var(--text-dim)" title="${a.target}">${a.target_name}</td>
+      <td class="num">${a.operation}</td>
       <td>${a.outcome === "success"
         ? '<span class="pill running" style="font-size:11px">success</span>'
         : '<span class="pill crashed" style="font-size:11px">failure</span>'}</td>
+      <td class="num" style="color:var(--text-dim)" title="${a.target}">${a.target_name}</td>
+      <td>${a.community_name === "—" ? "—" : a.community_name}</td>
     </tr>`).join("");
 });
 </script>
