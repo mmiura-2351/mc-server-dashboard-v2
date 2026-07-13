@@ -1364,6 +1364,63 @@ button.link:focus-visible {
 .schedules-warning-row input[type="text"] {
   flex: 1;
 }
+/* Schedule create/edit dialog — cadence section (portaled modal, so page-scope
+   .field-inline / .field-error don't reach here; see shell.css:707). */
+.schedule-cadence {
+  margin-bottom: 12px;
+}
+.schedule-cadence .field-error {
+  font-size: 12px;
+  color: var(--red);
+}
+.schedule-interval-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.schedule-day-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.schedule-time-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.schedule-time-row input[type="number"] {
+  width: 56px;
+}
+.schedule-time-separator {
+  font-weight: 600;
+  padding: 0 2px;
+}
+.schedule-cron-help {
+  font-size: 12px;
+  color: var(--text-faint);
+  margin: 4px 0 0;
+}
+/* Next-runs preview (also inside the portaled modal). */
+.schedule-preview {
+  margin-bottom: 12px;
+}
+.schedule-preview .field-error {
+  font-size: 12px;
+  color: var(--red);
+}
+.schedule-preview-list {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  list-style: none;
+  padding: 0;
+  margin: 4px 0 0;
+}
+.schedule-preview-approx {
+  font-size: 11px;
+  color: var(--text-faint);
+  margin: 4px 0 0;
+}
 .schedules-runs {
   width: 100%;
   border-collapse: collapse;

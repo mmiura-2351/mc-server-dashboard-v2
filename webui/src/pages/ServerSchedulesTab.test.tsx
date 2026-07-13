@@ -437,7 +437,10 @@ describe("ServerSchedulesTab create/edit dialog", () => {
     fireEvent.change(screen.getByLabelText(t("schedules.dialog.nameLabel")), {
       target: { value: "cronny" },
     });
-    fireEvent.click(screen.getByLabelText(t("schedules.dialog.cadence.cron")));
+    fireEvent.change(
+      screen.getByLabelText(t("schedules.dialog.cadenceLabel")),
+      { target: { value: "cron" } },
+    );
     fireEvent.change(screen.getByLabelText(t("schedules.dialog.cronLabel")), {
       target: { value: "not a cron" },
     });
@@ -586,9 +589,10 @@ describe("ServerSchedulesTab daily/weekly builder", () => {
     fireEvent.change(screen.getByLabelText(t("schedules.dialog.nameLabel")), {
       target: { value: "daily test" },
     });
-    // Switch to Daily/Weekly mode.
-    fireEvent.click(
-      screen.getByLabelText(t("schedules.dialog.cadence.dailyWeekly")),
+    // Switch to "Daily at a specific time".
+    fireEvent.change(
+      screen.getByLabelText(t("schedules.dialog.cadenceLabel")),
+      { target: { value: "daily" } },
     );
     // Set hour=4, minute=0 (defaults).
     fireEvent.change(screen.getByLabelText(t("schedules.dialog.hourLabel")), {
@@ -626,13 +630,11 @@ describe("ServerSchedulesTab daily/weekly builder", () => {
     fireEvent.change(screen.getByLabelText(t("schedules.dialog.nameLabel")), {
       target: { value: "weekday test" },
     });
-    fireEvent.click(
-      screen.getByLabelText(t("schedules.dialog.cadence.dailyWeekly")),
+    // Switch to "Specific days of the week".
+    fireEvent.change(
+      screen.getByLabelText(t("schedules.dialog.cadenceLabel")),
+      { target: { value: "weekly" } },
     );
-    // Select "Specific days".
-    fireEvent.change(screen.getByLabelText(t("schedules.dialog.repeatLabel")), {
-      target: { value: "specificDays" },
-    });
     // Check Mon (1), Wed (3), Fri (5) via their label text.
     fireEvent.click(screen.getByLabelText(t("schedules.dialog.day.mon")));
     fireEvent.click(screen.getByLabelText(t("schedules.dialog.day.wed")));
@@ -660,7 +662,35 @@ describe("ServerSchedulesTab daily/weekly builder", () => {
     expect(body.cron).toBe("30 18 * * 1,3,5");
   });
 
-  it("auto-detects daily/weekly mode when editing a matching cron schedule", async () => {
+  it("auto-detects daily mode when editing an every-day cron schedule", async () => {
+    routeGet({
+      schedules: [
+        schedule({
+          interval_seconds: null,
+          cron: "0 4 * * *",
+        }),
+      ],
+    });
+    routePost();
+    renderTab(canFor(ALL_CODES));
+
+    await screen.findByText("nightly backup");
+    fireEvent.click(screen.getByRole("button", { name: t("schedules.edit") }));
+
+    // The cadence select should show "daily" (every-day cron detected).
+    expect(
+      screen.getByLabelText(t("schedules.dialog.cadenceLabel")),
+    ).toHaveValue("daily");
+    // The time fields should be prefilled from the parsed cron.
+    expect(screen.getByLabelText(t("schedules.dialog.hourLabel"))).toHaveValue(
+      4,
+    );
+    expect(
+      screen.getByLabelText(t("schedules.dialog.minuteLabel")),
+    ).toHaveValue(0);
+  });
+
+  it("auto-detects weekly mode when editing a specific-days cron schedule", async () => {
     routeGet({
       schedules: [
         schedule({
@@ -675,11 +705,10 @@ describe("ServerSchedulesTab daily/weekly builder", () => {
     await screen.findByText("nightly backup");
     fireEvent.click(screen.getByRole("button", { name: t("schedules.edit") }));
 
-    // The Daily/Weekly radio should be selected.
-    const dwRadio = screen.getByLabelText(
-      t("schedules.dialog.cadence.dailyWeekly"),
-    );
-    expect(dwRadio).toBeChecked();
+    // The cadence select should show "weekly" (specific days detected).
+    expect(
+      screen.getByLabelText(t("schedules.dialog.cadenceLabel")),
+    ).toHaveValue("weekly");
     // The builder fields should be prefilled from the parsed cron.
     expect(screen.getByLabelText(t("schedules.dialog.hourLabel"))).toHaveValue(
       18,
@@ -710,9 +739,10 @@ describe("ServerSchedulesTab daily/weekly builder", () => {
     await screen.findByText("nightly backup");
     fireEvent.click(screen.getByRole("button", { name: t("schedules.edit") }));
 
-    // The Cron (advanced) radio should be selected.
-    const cronRadio = screen.getByLabelText(t("schedules.dialog.cadence.cron"));
-    expect(cronRadio).toBeChecked();
+    // The cadence select should show "cron".
+    expect(
+      screen.getByLabelText(t("schedules.dialog.cadenceLabel")),
+    ).toHaveValue("cron");
   });
 
   it("emits canonical * when all 7 days are checked", async () => {
@@ -726,12 +756,11 @@ describe("ServerSchedulesTab daily/weekly builder", () => {
     fireEvent.change(screen.getByLabelText(t("schedules.dialog.nameLabel")), {
       target: { value: "all days" },
     });
-    fireEvent.click(
-      screen.getByLabelText(t("schedules.dialog.cadence.dailyWeekly")),
+    // Switch to "Specific days of the week".
+    fireEvent.change(
+      screen.getByLabelText(t("schedules.dialog.cadenceLabel")),
+      { target: { value: "weekly" } },
     );
-    fireEvent.change(screen.getByLabelText(t("schedules.dialog.repeatLabel")), {
-      target: { value: "specificDays" },
-    });
     // Check all 7 days.
     for (const key of DAY_LABEL_KEYS) {
       fireEvent.click(screen.getByLabelText(t(key)));
@@ -767,13 +796,11 @@ describe("ServerSchedulesTab daily/weekly builder", () => {
     fireEvent.click(
       await screen.findByRole("button", { name: t("schedules.create") }),
     );
-    fireEvent.click(
-      screen.getByLabelText(t("schedules.dialog.cadence.dailyWeekly")),
+    // Switch to "Specific days of the week" — zero days checked.
+    fireEvent.change(
+      screen.getByLabelText(t("schedules.dialog.cadenceLabel")),
+      { target: { value: "weekly" } },
     );
-    fireEvent.change(screen.getByLabelText(t("schedules.dialog.repeatLabel")), {
-      target: { value: "specificDays" },
-    });
-    // Zero days checked — Save should be disabled and hint shown.
     expect(
       screen.getByRole("button", {
         name: t("schedules.dialog.create"),
@@ -884,7 +911,10 @@ describe("ServerSchedulesTab next-runs preview", () => {
       await screen.findByRole("button", { name: t("schedules.create") }),
     );
     // Switch to cron mode and enter an invalid expression.
-    fireEvent.click(screen.getByLabelText(t("schedules.dialog.cadence.cron")));
+    fireEvent.change(
+      screen.getByLabelText(t("schedules.dialog.cadenceLabel")),
+      { target: { value: "cron" } },
+    );
     fireEvent.change(screen.getByLabelText(t("schedules.dialog.cronLabel")), {
       target: { value: "bad cron" },
     });
