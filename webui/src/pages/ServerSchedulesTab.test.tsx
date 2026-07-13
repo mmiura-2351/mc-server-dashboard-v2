@@ -171,13 +171,13 @@ describe("ServerSchedulesTab table", () => {
 
   it("humanizes a cron cadence", async () => {
     routeGet({
-      schedules: [schedule({ interval_seconds: null, cron: "0 4 * * *" })],
+      schedules: [schedule({ interval_seconds: null, cron: "*/5 * * * *" })],
     });
     renderTab(canFor(ALL_CODES));
 
     expect(
       await screen.findByText(
-        t("schedules.cadence.cron", { cron: "0 4 * * *" }),
+        t("schedules.cadence.cron", { cron: "*/5 * * * *" }),
       ),
     ).toBeInTheDocument();
   });
@@ -536,5 +536,263 @@ describe("ServerSchedulesTab toggle/delete/history", () => {
       await screen.findByText(t("schedules.runs.outcome.failure")),
     ).toBeInTheDocument();
     expect(screen.getByText("worker_unavailable")).toBeInTheDocument();
+  });
+});
+
+// Route api.post by path: preview vs. create.
+function routePost(
+  opts: { create?: object; preview?: object; previewError?: unknown } = {},
+) {
+  mockApi.post.mockImplementation((path: string) => {
+    if (path.includes("/preview")) {
+      if (opts.previewError) return Promise.reject(opts.previewError);
+      return Promise.resolve(
+        opts.preview ?? {
+          next_runs: [
+            "2026-07-12T04:00:00Z",
+            "2026-07-13T04:00:00Z",
+            "2026-07-14T04:00:00Z",
+            "2026-07-15T04:00:00Z",
+            "2026-07-16T04:00:00Z",
+          ],
+        },
+      );
+    }
+    return Promise.resolve(opts.create ?? schedule());
+  });
+}
+
+describe("ServerSchedulesTab daily/weekly builder", () => {
+  it("composes a daily cron expression when every-day is selected", async () => {
+    routeGet({ schedules: [] });
+    routePost({ create: schedule() });
+    renderTab(canFor(ALL_CODES));
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: t("schedules.create") }),
+    );
+    fireEvent.change(screen.getByLabelText(t("schedules.dialog.nameLabel")), {
+      target: { value: "daily test" },
+    });
+    // Switch to Daily/Weekly mode.
+    fireEvent.click(
+      screen.getByLabelText(t("schedules.dialog.cadence.dailyWeekly")),
+    );
+    // Set hour=4, minute=0 (defaults).
+    fireEvent.change(screen.getByLabelText(t("schedules.dialog.hourLabel")), {
+      target: { value: "4" },
+    });
+    fireEvent.change(screen.getByLabelText(t("schedules.dialog.minuteLabel")), {
+      target: { value: "0" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("schedules.dialog.create") }),
+    );
+
+    await waitFor(() => {
+      const postCalls = mockApi.post.mock.calls.filter(
+        (call) => !(call[0] as string).includes("/preview"),
+      );
+      expect(postCalls.length).toBe(1);
+    });
+    const createCalls = mockApi.post.mock.calls.filter(
+      (call) => !(call[0] as string).includes("/preview"),
+    );
+    const body = JSON.parse(createCalls[0][1].body);
+    expect(body.cron).toBe("0 4 * * *");
+    expect(body.interval_seconds).toBeNull();
+  });
+
+  it("composes a specific-days cron expression", async () => {
+    routeGet({ schedules: [] });
+    routePost({ create: schedule() });
+    renderTab(canFor(ALL_CODES));
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: t("schedules.create") }),
+    );
+    fireEvent.change(screen.getByLabelText(t("schedules.dialog.nameLabel")), {
+      target: { value: "weekday test" },
+    });
+    fireEvent.click(
+      screen.getByLabelText(t("schedules.dialog.cadence.dailyWeekly")),
+    );
+    // Select "Specific days".
+    fireEvent.change(screen.getByLabelText(t("schedules.dialog.repeatLabel")), {
+      target: { value: "specificDays" },
+    });
+    // Check Mon (1), Wed (3), Fri (5) via their label text.
+    fireEvent.click(screen.getByLabelText(t("schedules.dialog.day.mon")));
+    fireEvent.click(screen.getByLabelText(t("schedules.dialog.day.wed")));
+    fireEvent.click(screen.getByLabelText(t("schedules.dialog.day.fri")));
+    fireEvent.change(screen.getByLabelText(t("schedules.dialog.hourLabel")), {
+      target: { value: "18" },
+    });
+    fireEvent.change(screen.getByLabelText(t("schedules.dialog.minuteLabel")), {
+      target: { value: "30" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("schedules.dialog.create") }),
+    );
+
+    await waitFor(() => {
+      const postCalls = mockApi.post.mock.calls.filter(
+        (call) => !(call[0] as string).includes("/preview"),
+      );
+      expect(postCalls.length).toBe(1);
+    });
+    const createCalls = mockApi.post.mock.calls.filter(
+      (call) => !(call[0] as string).includes("/preview"),
+    );
+    const body = JSON.parse(createCalls[0][1].body);
+    expect(body.cron).toBe("30 18 * * 1,3,5");
+  });
+
+  it("auto-detects daily/weekly mode when editing a matching cron schedule", async () => {
+    routeGet({
+      schedules: [
+        schedule({
+          interval_seconds: null,
+          cron: "30 18 * * 1,3,5",
+        }),
+      ],
+    });
+    routePost();
+    renderTab(canFor(ALL_CODES));
+
+    await screen.findByText("nightly backup");
+    fireEvent.click(screen.getByRole("button", { name: t("schedules.edit") }));
+
+    // The Daily/Weekly radio should be selected.
+    const dwRadio = screen.getByLabelText(
+      t("schedules.dialog.cadence.dailyWeekly"),
+    );
+    expect(dwRadio).toBeChecked();
+    // The builder fields should be prefilled from the parsed cron.
+    expect(screen.getByLabelText(t("schedules.dialog.hourLabel"))).toHaveValue(
+      18,
+    );
+    expect(
+      screen.getByLabelText(t("schedules.dialog.minuteLabel")),
+    ).toHaveValue(30);
+    expect(screen.getByLabelText(t("schedules.dialog.day.mon"))).toBeChecked();
+    expect(screen.getByLabelText(t("schedules.dialog.day.wed"))).toBeChecked();
+    expect(screen.getByLabelText(t("schedules.dialog.day.fri"))).toBeChecked();
+    expect(
+      screen.getByLabelText(t("schedules.dialog.day.tue")),
+    ).not.toBeChecked();
+  });
+
+  it("falls back to raw cron mode for unrecognized patterns", async () => {
+    routeGet({
+      schedules: [
+        schedule({
+          interval_seconds: null,
+          cron: "*/5 * * * *",
+        }),
+      ],
+    });
+    routePost();
+    renderTab(canFor(ALL_CODES));
+
+    await screen.findByText("nightly backup");
+    fireEvent.click(screen.getByRole("button", { name: t("schedules.edit") }));
+
+    // The Cron (advanced) radio should be selected.
+    const cronRadio = screen.getByLabelText(t("schedules.dialog.cadence.cron"));
+    expect(cronRadio).toBeChecked();
+  });
+});
+
+describe("ServerSchedulesTab humanized cadence", () => {
+  it("shows 'Daily at HH:MM' for a daily cron pattern", async () => {
+    routeGet({
+      schedules: [schedule({ interval_seconds: null, cron: "0 4 * * *" })],
+    });
+    renderTab(canFor(ALL_CODES));
+
+    expect(
+      await screen.findByText(
+        t("schedules.cadence.dailyAt", { time: "04:00" }),
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("shows 'Mon, Wed, Fri at HH:MM' for a specific-days cron pattern", async () => {
+    routeGet({
+      schedules: [
+        schedule({ interval_seconds: null, cron: "30 18 * * 1,3,5" }),
+      ],
+    });
+    renderTab(canFor(ALL_CODES));
+
+    const mon = t("schedules.dialog.day.mon");
+    const wed = t("schedules.dialog.day.wed");
+    const fri = t("schedules.dialog.day.fri");
+    expect(
+      await screen.findByText(
+        t("schedules.cadence.daysAt", {
+          days: `${mon}, ${wed}, ${fri}`,
+          time: "18:30",
+        }),
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps raw cron fallback for unrecognized patterns", async () => {
+    routeGet({
+      schedules: [schedule({ interval_seconds: null, cron: "*/5 * * * *" })],
+    });
+    renderTab(canFor(ALL_CODES));
+
+    expect(
+      await screen.findByText(
+        t("schedules.cadence.cron", { cron: "*/5 * * * *" }),
+      ),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("ServerSchedulesTab next-runs preview", () => {
+  it("shows 5 next runs in the create dialog", async () => {
+    routeGet({ schedules: [] });
+    routePost();
+    renderTab(canFor(ALL_CODES));
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: t("schedules.create") }),
+    );
+
+    // Wait for the preview to render (debounced).
+    const preview = await screen.findByTestId("next-runs-preview");
+    await waitFor(() => {
+      const items = within(preview).getAllByRole("listitem");
+      expect(items.length).toBe(5);
+    });
+  });
+
+  it("shows preview validation errors inline", async () => {
+    routeGet({ schedules: [] });
+    routePost({
+      previewError: new ApiError(422, { reason: "invalid_cron" }),
+    });
+    renderTab(canFor(ALL_CODES));
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: t("schedules.create") }),
+    );
+    // Switch to cron mode and enter an invalid expression.
+    fireEvent.click(screen.getByLabelText(t("schedules.dialog.cadence.cron")));
+    fireEvent.change(screen.getByLabelText(t("schedules.dialog.cronLabel")), {
+      target: { value: "bad cron" },
+    });
+
+    // Wait for the debounced preview error.
+    const preview = await screen.findByTestId("next-runs-preview");
+    await waitFor(() => {
+      expect(
+        within(preview).getByText(t("schedules.error.invalidCron")),
+      ).toBeInTheDocument();
+    });
   });
 });

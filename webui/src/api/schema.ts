@@ -1568,6 +1568,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/communities/{community_id}/servers/{server_id}/schedules/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview Schedule
+         * @description Preview the next 5 occurrences of a cadence without creating a schedule.
+         *
+         *     Validates the cron expression and timezone using the same domain rules as
+         *     create — a 422 with the same typed reasons (``invalid_cron``,
+         *     ``invalid_cadence``, ``invalid_timezone``).  Requires ``schedule:read``.
+         */
+        post: operations["preview_schedule_api_communities__community_id__servers__server_id__schedules_preview_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/communities/{community_id}/servers/{server_id}/schedules/{schedule_id}": {
         parameters: {
             query?: never;
@@ -3165,6 +3189,26 @@ export interface components {
             in_range: boolean;
             /** Port */
             port: number;
+        };
+        /**
+         * PreviewScheduleRequest
+         * @description Cadence + timezone for a dry-run next-runs computation (issue #1867).
+         */
+        PreviewScheduleRequest: {
+            /** Cron */
+            cron?: string | null;
+            /** Interval Seconds */
+            interval_seconds?: number | null;
+            /**
+             * Timezone
+             * @default UTC
+             */
+            timezone: string;
+        };
+        /** PreviewScheduleResponse */
+        PreviewScheduleResponse: {
+            /** Next Runs */
+            next_runs: string[];
         };
         /** ProvisionCommunityRequest */
         ProvisionCommunityRequest: {
@@ -6909,6 +6953,42 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ScheduleResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    preview_schedule_api_communities__community_id__servers__server_id__schedules_preview_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PreviewScheduleRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PreviewScheduleResponse"];
                 };
             };
             /** @description Validation Error */

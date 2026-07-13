@@ -47,6 +47,7 @@ from mc_server_dashboard_api.dependencies import (
     get_delete_schedule,
     get_list_schedule_runs,
     get_list_schedules,
+    get_preview_schedule,
     get_read_schedule,
     get_update_schedule,
     require_deferred_authz,
@@ -59,6 +60,7 @@ from mc_server_dashboard_api.servers.application.schedules import (
     DeleteSchedule,
     ListScheduleRuns,
     ListSchedules,
+    PreviewSchedule,
     ReadSchedule,
     UpdateSchedule,
     WarningStepInput,
@@ -303,6 +305,56 @@ async def list_schedules(
     except ServerNotFoundError as exc:
         raise _not_found() from exc
     return [ScheduleResponse.from_entity(schedule) for schedule in schedules]
+
+
+class PreviewScheduleRequest(BaseModel):
+    """Cadence + timezone for a dry-run next-runs computation (issue #1867)."""
+
+    cron: str | None = None
+    interval_seconds: int | None = None
+    timezone: str = DEFAULT_TIMEZONE
+
+
+class PreviewScheduleResponse(BaseModel):
+    next_runs: list[UtcDatetime]
+
+
+# NOTE: the preview route is registered BEFORE the ``/{schedule_id}`` routes
+# so the literal ``preview`` segment is never captured by the UUID path
+# parameter (FastAPI matches in registration order).
+@router.post("/communities/{community_id}/servers/{server_id}/schedules/preview")
+async def preview_schedule(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    body: PreviewScheduleRequest,
+    _authorized: Annotated[
+        object,
+        Depends(
+            require_permission(
+                Permission("schedule:read"),
+                resource_type=_SERVER_RESOURCE_TYPE,
+                resource_id_param="server_id",
+            )
+        ),
+    ],
+    use_case: Annotated[PreviewSchedule, Depends(get_preview_schedule)],
+) -> PreviewScheduleResponse:
+    """Preview the next 5 occurrences of a cadence without creating a schedule.
+
+    Validates the cron expression and timezone using the same domain rules as
+    create — a 422 with the same typed reasons (``invalid_cron``,
+    ``invalid_cadence``, ``invalid_timezone``).  Requires ``schedule:read``.
+    """
+
+    try:
+        runs = use_case(
+            cron=body.cron,
+            interval_seconds=body.interval_seconds,
+            timezone=body.timezone,
+        )
+    except InvalidScheduleError as exc:
+        raise _schedule_unprocessable(exc) from exc
+    return PreviewScheduleResponse(next_runs=runs)
 
 
 @router.get("/communities/{community_id}/servers/{server_id}/schedules/{schedule_id}")

@@ -2502,6 +2502,57 @@
         "title": "PortCheckResponse",
         "type": "object"
       },
+      "PreviewScheduleRequest": {
+        "description": "Cadence + timezone for a dry-run next-runs computation (issue #1867).",
+        "properties": {
+          "cron": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cron"
+          },
+          "interval_seconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Interval Seconds"
+          },
+          "timezone": {
+            "default": "UTC",
+            "title": "Timezone",
+            "type": "string"
+          }
+        },
+        "title": "PreviewScheduleRequest",
+        "type": "object"
+      },
+      "PreviewScheduleResponse": {
+        "properties": {
+          "next_runs": {
+            "items": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "title": "Next Runs",
+            "type": "array"
+          }
+        },
+        "required": [
+          "next_runs"
+        ],
+        "title": "PreviewScheduleResponse",
+        "type": "object"
+      },
       "ProvisionCommunityRequest": {
         "properties": {
           "name": {
@@ -9606,6 +9657,72 @@
           }
         ],
         "summary": "Create Schedule"
+      }
+    },
+    "/api/communities/{community_id}/servers/{server_id}/schedules/preview": {
+      "post": {
+        "description": "Preview the next 5 occurrences of a cadence without creating a schedule.\n\nValidates the cron expression and timezone using the same domain rules as\ncreate \u2014 a 422 with the same typed reasons (``invalid_cron``,\n``invalid_cadence``, ``invalid_timezone``).  Requires ``schedule:read``.",
+        "operationId": "preview_schedule_api_communities__community_id__servers__server_id__schedules_preview_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreviewScheduleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreviewScheduleResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Preview Schedule"
       }
     },
     "/api/communities/{community_id}/servers/{server_id}/schedules/{schedule_id}": {

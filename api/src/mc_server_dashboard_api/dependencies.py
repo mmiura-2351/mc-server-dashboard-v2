@@ -319,6 +319,7 @@ from mc_server_dashboard_api.servers.application.schedules import (
     DeleteSchedule,
     ListScheduleRuns,
     ListSchedules,
+    PreviewSchedule,
     ReadSchedule,
     UpdateSchedule,
 )
@@ -1556,6 +1557,14 @@ def get_list_schedule_runs(request: Request) -> ListScheduleRuns:
 
     session_factory = create_session_factory(get_engine(request))
     return ListScheduleRuns(uow=ServersUnitOfWork(session_factory))
+
+
+def get_preview_schedule() -> PreviewSchedule:
+    """Assemble the :class:`PreviewSchedule` use case (schedule:read, #1867)."""
+
+    return PreviewSchedule(
+        clock=ServersSystemClock(), calculator=CronsimNextRunCalculator()
+    )
 
 
 def _port_range(request: Request) -> PortRange:

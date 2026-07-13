@@ -39,13 +39,17 @@ from mc_server_dashboard_api.dependencies import (
     get_list_schedules,
     get_membership_visibility,
     get_permission_checker,
+    get_preview_schedule,
     get_read_schedule,
     get_update_schedule,
 )
 from mc_server_dashboard_api.servers.adapters.cronsim_next_run_calculator import (
     CronsimNextRunCalculator,
 )
-from mc_server_dashboard_api.servers.application.schedules import CreateSchedule
+from mc_server_dashboard_api.servers.application.schedules import (
+    CreateSchedule,
+    PreviewSchedule,
+)
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     InvalidCronExpressionError,
@@ -168,6 +172,7 @@ def _app(
     update: _FakeUseCase | None = None,
     delete: _FakeUseCase | None = None,
     runs: _FakeUseCase | None = None,
+    preview: object | None = None,
     recorder: _RecordingRecorder | None = None,
 ) -> FastAPI:
     app = _shared_app
@@ -189,6 +194,8 @@ def _app(
         app.dependency_overrides[get_delete_schedule] = lambda: delete
     if runs is not None:
         app.dependency_overrides[get_list_schedule_runs] = lambda: runs
+    if preview is not None:
+        app.dependency_overrides[get_preview_schedule] = lambda: preview
     if recorder is not None:
         app.dependency_overrides[get_audit_recorder] = lambda: recorder
     return app
@@ -471,3 +478,88 @@ def test_full_authorization_creates_command_schedule() -> None:
     assert body["command"] == "say hi"
     assert body["next_run_at"] is not None
     assert len(recorder.events) == 1
+
+
+# --- preview endpoint (issue #1867) ------------------------------------------
+
+_PREVIEW_URL_TEMPLATE = (
+    "/api/communities/{community}/servers/{server}/schedules/preview"
+)
+
+
+def _preview_url(community: uuid.UUID, server: uuid.UUID) -> str:
+    return _PREVIEW_URL_TEMPLATE.format(community=community, server=server)
+
+
+def _preview_use_case() -> PreviewSchedule:
+    return PreviewSchedule(clock=FakeClock(_NOW), calculator=CronsimNextRunCalculator())
+
+
+def test_preview_cron_returns_5_datetimes() -> None:
+    app = _app(member=True, allow=True, preview=_preview_use_case())
+    client = next(_client(app))
+    resp = client.post(
+        _preview_url(uuid.uuid4(), uuid.uuid4()),
+        json={"cron": "0 4 * * *", "timezone": "UTC"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["next_runs"]) == 5
+    # All entries must be ISO datetime strings.
+    for entry in body["next_runs"]:
+        assert isinstance(entry, str)
+        assert "T" in entry
+
+
+def test_preview_interval_returns_5_datetimes() -> None:
+    app = _app(member=True, allow=True, preview=_preview_use_case())
+    client = next(_client(app))
+    resp = client.post(
+        _preview_url(uuid.uuid4(), uuid.uuid4()),
+        json={"interval_seconds": 3600},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["next_runs"]) == 5
+
+
+def test_preview_invalid_cron_is_422() -> None:
+    app = _app(member=True, allow=True, preview=_preview_use_case())
+    client = next(_client(app))
+    resp = client.post(
+        _preview_url(uuid.uuid4(), uuid.uuid4()),
+        json={"cron": "not valid"},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_cron"
+
+
+def test_preview_no_cadence_is_422() -> None:
+    app = _app(member=True, allow=True, preview=_preview_use_case())
+    client = next(_client(app))
+    resp = client.post(
+        _preview_url(uuid.uuid4(), uuid.uuid4()),
+        json={},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_cadence"
+
+
+def test_preview_non_member_gets_404() -> None:
+    app = _app(member=False, allow=True, preview=_preview_use_case())
+    client = next(_client(app))
+    resp = client.post(
+        _preview_url(uuid.uuid4(), uuid.uuid4()),
+        json={"cron": "0 4 * * *"},
+    )
+    assert resp.status_code == 404
+
+
+def test_preview_member_without_read_permission_gets_403() -> None:
+    app = _app(member=True, allow=False, preview=_preview_use_case())
+    client = next(_client(app))
+    resp = client.post(
+        _preview_url(uuid.uuid4(), uuid.uuid4()),
+        json={"cron": "0 4 * * *"},
+    )
+    assert resp.status_code == 403

@@ -16,7 +16,7 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ApiError, api } from "../api/client.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
@@ -102,9 +102,83 @@ function runsKey(communityId: string, serverId: string, scheduleId: string) {
   return ["schedules", communityId, serverId, scheduleId, "runs"] as const;
 }
 
+/**
+ * Day-of-week labels keyed by ISO number (1=Mon, 7=Sun) for both the builder
+ * UI and the humanized cadence display.
+ */
+const DAY_LABELS: Record<number, TranslationKey> = {
+  1: "schedules.dialog.day.mon",
+  2: "schedules.dialog.day.tue",
+  3: "schedules.dialog.day.wed",
+  4: "schedules.dialog.day.thu",
+  5: "schedules.dialog.day.fri",
+  6: "schedules.dialog.day.sat",
+  7: "schedules.dialog.day.sun",
+};
+
+/** ISO day numbers in display order (Mon–Sun). */
+const DAY_NUMBERS: readonly number[] = [1, 2, 3, 4, 5, 6, 7];
+
+/**
+ * Parse a cron expression that matches the Daily/Weekly pattern (`M H * * D`
+ * where D is `*` or a comma-separated list of 0–7 day numbers). Returns null
+ * for unrecognized patterns. Handles both 0 and 7 as Sunday.
+ */
+function parseDailyWeeklyCron(
+  expr: string,
+): { minute: number; hour: number; days: number[] | null } | null {
+  const parts = expr.trim().split(/\s+/);
+  if (parts.length !== 5) return null;
+  const [minuteStr, hourStr, dom, month, dow] = parts;
+  if (dom !== "*" || month !== "*") return null;
+  const minute = Number(minuteStr);
+  const hour = Number(hourStr);
+  if (!Number.isInteger(minute) || minute < 0 || minute > 59) return null;
+  if (!Number.isInteger(hour) || hour < 0 || hour > 23) return null;
+  if (dow === "*") {
+    return { minute, hour, days: null }; // every day
+  }
+  // Parse comma-separated day numbers (0–7, where 0 and 7 are Sunday).
+  const dayStrs = dow.split(",");
+  const days: number[] = [];
+  for (const d of dayStrs) {
+    const n = Number(d);
+    if (!Number.isInteger(n) || n < 0 || n > 7) return null;
+    // Normalize: 0 → 7 (Sunday in ISO)
+    days.push(n === 0 ? 7 : n);
+  }
+  // Deduplicate and sort (ISO order).
+  const unique = [...new Set(days)].sort((a, b) => a - b);
+  return { minute, hour, days: unique };
+}
+
+/** Compose a cron expression from the Daily/Weekly builder state. */
+function composeDailyWeeklyCron(
+  hour: number,
+  minute: number,
+  days: number[] | null,
+): string {
+  const dow = days === null ? "*" : days.join(",");
+  return `${minute} ${hour} * * ${dow}`;
+}
+
+/** Format hour:minute as HH:MM. */
+function formatTime(hour: number, minute: number): string {
+  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+}
+
 /** Human-readable cadence: an interval as "every N …", or the cron expression. */
 function humanizeCadence(schedule: ScheduleResponse): string {
   if (schedule.cron !== null) {
+    const parsed = parseDailyWeeklyCron(schedule.cron);
+    if (parsed !== null) {
+      const time = formatTime(parsed.hour, parsed.minute);
+      if (parsed.days === null) {
+        return t("schedules.cadence.dailyAt", { time });
+      }
+      const dayNames = parsed.days.map((d) => t(DAY_LABELS[d])).join(", ");
+      return t("schedules.cadence.daysAt", { days: dayNames, time });
+    }
     return t("schedules.cadence.cron", { cron: schedule.cron });
   }
   if (schedule.interval_seconds !== null) {
@@ -442,10 +516,18 @@ function ScheduleDialog({
     : (permittedActions[0] ?? "backup");
   const [action, setAction] = useState<ScheduleAction>(initialAction);
   const [name, setName] = useState(existing?.name ?? "");
-  const [cadenceMode, setCadenceMode] = useState<"interval" | "cron">(
-    existing?.cron !== null && existing?.cron !== undefined
-      ? "cron"
-      : "interval",
+  // Detect the initial cadence mode: if the existing cron matches the
+  // Daily/Weekly pattern, open in that mode; otherwise raw cron or interval.
+  const existingParsed =
+    existing?.cron != null ? parseDailyWeeklyCron(existing.cron) : null;
+  const [cadenceMode, setCadenceMode] = useState<
+    "interval" | "dailyWeekly" | "cron"
+  >(
+    existingParsed !== null
+      ? "dailyWeekly"
+      : existing?.cron !== null && existing?.cron !== undefined
+        ? "cron"
+        : "interval",
   );
   const initialInterval =
     existing?.interval_seconds != null
@@ -456,6 +538,15 @@ function ScheduleDialog({
     initialInterval.unit,
   );
   const [cron, setCron] = useState(existing?.cron ?? "");
+  // Daily/Weekly builder state.
+  const [dwRepeat, setDwRepeat] = useState<"everyDay" | "specificDays">(
+    existingParsed?.days != null ? "specificDays" : "everyDay",
+  );
+  const [dwDays, setDwDays] = useState<Set<number>>(
+    new Set(existingParsed?.days ?? []),
+  );
+  const [dwHour, setDwHour] = useState(String(existingParsed?.hour ?? 0));
+  const [dwMinute, setDwMinute] = useState(String(existingParsed?.minute ?? 0));
   const [timezone, setTimezone] = useState(existing?.timezone ?? "UTC");
   const [enabled, setEnabled] = useState(existing?.enabled ?? true);
   const [command, setCommand] = useState(existing?.command ?? "");
@@ -493,6 +584,16 @@ function ScheduleDialog({
   } => {
     if (cadenceMode === "cron") {
       return { cron: cron.trim(), interval_seconds: null };
+    }
+    if (cadenceMode === "dailyWeekly") {
+      const h = Number(dwHour);
+      const m = Number(dwMinute);
+      const days =
+        dwRepeat === "everyDay" ? null : [...dwDays].sort((a, b) => a - b);
+      return {
+        cron: composeDailyWeeklyCron(h, m, days),
+        interval_seconds: null,
+      };
     }
     const factor = intervalUnit === "hours" ? 3600 : 60;
     return {
@@ -737,6 +838,81 @@ function ScheduleDialog({
           <input
             type="radio"
             name="cadence-mode"
+            checked={cadenceMode === "dailyWeekly"}
+            onChange={() => setCadenceMode("dailyWeekly")}
+          />
+          {t("schedules.dialog.cadence.dailyWeekly")}
+        </label>
+        {cadenceMode === "dailyWeekly" && (
+          <div className="schedules-daily-weekly">
+            <label className="field">
+              {t("schedules.dialog.repeatLabel")}
+              <select
+                aria-label={t("schedules.dialog.repeatLabel")}
+                value={dwRepeat}
+                onChange={(e) =>
+                  setDwRepeat(e.target.value as "everyDay" | "specificDays")
+                }
+              >
+                <option value="everyDay">
+                  {t("schedules.dialog.repeat.everyDay")}
+                </option>
+                <option value="specificDays">
+                  {t("schedules.dialog.repeat.specificDays")}
+                </option>
+              </select>
+            </label>
+            {dwRepeat === "specificDays" && (
+              <div className="schedules-day-checkboxes">
+                {DAY_NUMBERS.map((d) => (
+                  <label key={d} className="checkbox">
+                    <input
+                      type="checkbox"
+                      checked={dwDays.has(d)}
+                      onChange={() => {
+                        setDwDays((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(d)) next.delete(d);
+                          else next.add(d);
+                          return next;
+                        });
+                      }}
+                    />
+                    {t(DAY_LABELS[d])}
+                  </label>
+                ))}
+              </div>
+            )}
+            <span className="field-inline">
+              <label>
+                {t("schedules.dialog.hourLabel")}
+                <input
+                  type="number"
+                  min={0}
+                  max={23}
+                  aria-label={t("schedules.dialog.hourLabel")}
+                  value={dwHour}
+                  onChange={(e) => setDwHour(e.target.value)}
+                />
+              </label>
+              <label>
+                {t("schedules.dialog.minuteLabel")}
+                <input
+                  type="number"
+                  min={0}
+                  max={59}
+                  aria-label={t("schedules.dialog.minuteLabel")}
+                  value={dwMinute}
+                  onChange={(e) => setDwMinute(e.target.value)}
+                />
+              </label>
+            </span>
+          </div>
+        )}
+        <label className="checkbox">
+          <input
+            type="radio"
+            name="cadence-mode"
             checked={cadenceMode === "cron"}
             onChange={() => setCadenceMode("cron")}
           />
@@ -755,6 +931,16 @@ function ScheduleDialog({
           <span className="field-error">{cadenceError}</span>
         )}
       </fieldset>
+
+      <NextRunsPreview
+        communityId={communityId}
+        serverId={serverId}
+        cadenceBody={JSON.stringify({
+          ...buildCadence(),
+          timezone,
+        })}
+        timezone={timezone}
+      />
 
       <label className="field">
         {t("schedules.dialog.timezoneLabel")}
@@ -958,4 +1144,110 @@ function intervalToForm(seconds: number): {
     return { value: String(seconds / 3600), unit: "hours" };
   }
   return { value: String(seconds / 60), unit: "minutes" };
+}
+
+/**
+ * Debounced preview of the next 5 schedule occurrences (issue #1867).
+ *
+ * Fetches from the preview API endpoint on cadence/timezone changes with a
+ * 500ms debounce. Shows validation errors inline (reuses the cadenceError
+ * pattern). The cadenceDeps array is used as the useEffect dependency to
+ * trigger re-fetches.
+ */
+/** Format an ISO datetime in the given IANA timezone (the schedule's zone). */
+function formatInTimezone(iso: string, tz: string): string {
+  try {
+    return new Date(iso).toLocaleString(undefined, { timeZone: tz });
+  } catch {
+    // Invalid zone (shouldn't happen, but fall back to browser-local).
+    return new Date(iso).toLocaleString();
+  }
+}
+
+function NextRunsPreview({
+  communityId,
+  serverId,
+  cadenceBody,
+  timezone,
+}: {
+  communityId: string;
+  serverId: string;
+  /** Pre-serialized JSON body for the preview request. Changes trigger a
+   *  debounced re-fetch. */
+  cadenceBody: string;
+  /** The schedule's IANA timezone, for formatting the preview datetimes. */
+  timezone: string;
+}) {
+  const [runs, setRuns] = useState<string[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    if (timerRef.current !== null) {
+      clearTimeout(timerRef.current);
+    }
+    timerRef.current = setTimeout(() => {
+      setLoading(true);
+      setError(null);
+      api
+        .post(
+          apiPath(
+            "/api/communities/{community_id}/servers/{server_id}/schedules/preview",
+            { community_id: communityId, server_id: serverId },
+          ),
+          {
+            body: cadenceBody,
+            signal: controller.signal,
+          },
+        )
+        .then((data) => {
+          setRuns((data as { next_runs: string[] }).next_runs);
+          setLoading(false);
+        })
+        .catch((err: unknown) => {
+          if (err instanceof DOMException && err.name === "AbortError") return;
+          setLoading(false);
+          if (err instanceof ApiError) {
+            switch (err.reason) {
+              case "invalid_cron":
+                setError(t("schedules.error.invalidCron"));
+                return;
+              case "invalid_cadence":
+                setError(t("schedules.error.invalidCadence"));
+                return;
+              case "invalid_timezone":
+                setError(t("schedules.error.invalidTimezone"));
+                return;
+            }
+          }
+          setRuns(null);
+        });
+    }, 500);
+
+    return () => {
+      if (timerRef.current !== null) {
+        clearTimeout(timerRef.current);
+      }
+      controller.abort();
+    };
+  }, [communityId, serverId, cadenceBody]);
+
+  return (
+    <div className="schedules-preview" data-testid="next-runs-preview">
+      <strong>{t("schedules.dialog.nextRuns")}</strong>
+      {loading && (
+        <p className="sub">{t("schedules.dialog.nextRunsLoading")}</p>
+      )}
+      {error !== null && <span className="field-error">{error}</span>}
+      {runs !== null && !loading && error === null && (
+        <ul>
+          {runs.map((run) => (
+            <li key={run}>{formatInTimezone(run, timezone)}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
 }
