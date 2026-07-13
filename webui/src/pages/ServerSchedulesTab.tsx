@@ -970,8 +970,8 @@ function ScheduleDialog({
 
       <label className="field">
         {t("schedules.dialog.timezoneLabel")}
-        {/* aria-label: see the action select — hundreds of zone options would
-            otherwise pollute the computed accessible name. */}
+        {/* aria-label: see the action select — zone options would otherwise
+            pollute the computed accessible name. */}
         <select
           value={timezone}
           aria-label={t("schedules.dialog.timezoneLabel")}
