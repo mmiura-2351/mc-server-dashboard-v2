@@ -25,7 +25,7 @@ import { Modal } from "../components/Modal.tsx";
 import { ResizableTable } from "../components/ResizableColumns.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { formatDateTime } from "../format.ts";
-import { type TranslationKey, t } from "../i18n/index.ts";
+import { getLanguage, type TranslationKey, t } from "../i18n/index.ts";
 import type { PermissionCode } from "../permissions/catalog.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
@@ -158,8 +158,19 @@ function composeDailyWeeklyCron(
   minute: number,
   days: number[] | null,
 ): string {
-  const dow = days === null ? "*" : days.join(",");
+  const dow = days === null || days.length === 7 ? "*" : days.join(",");
   return `${minute} ${hour} * * ${dow}`;
+}
+
+/** Join a list of strings with locale-aware separators (e.g. ", " for en, "、" for ja). */
+function joinDayNames(names: string[]): string {
+  try {
+    return new Intl.ListFormat(getLanguage(), { type: "conjunction" }).format(
+      names,
+    );
+  } catch {
+    return names.join(", ");
+  }
 }
 
 /** Format hour:minute as HH:MM. */
@@ -176,7 +187,7 @@ function humanizeCadence(schedule: ScheduleResponse): string {
       if (parsed.days === null) {
         return t("schedules.cadence.dailyAt", { time });
       }
-      const dayNames = parsed.days.map((d) => t(DAY_LABELS[d])).join(", ");
+      const dayNames = joinDayNames(parsed.days.map((d) => t(DAY_LABELS[d])));
       return t("schedules.cadence.daysAt", { days: dayNames, time });
     }
     return t("schedules.cadence.cron", { cron: schedule.cron });
@@ -564,6 +575,10 @@ function ScheduleDialog({
   const [warningError, setWarningError] = useState<string | null>(null);
 
   const showWarnings = WARNING_ACTIONS.has(action);
+  const noDaysSelected =
+    cadenceMode === "dailyWeekly" &&
+    dwRepeat === "specificDays" &&
+    dwDays.size === 0;
   // On create an unusual existing timezone can never occur; on edit surface the
   // stored value even if the runtime zone list omits it.
   const tzOptions = TIMEZONES.includes(timezone)
@@ -761,7 +776,7 @@ function ScheduleDialog({
           <button
             type="button"
             className="btn primary"
-            disabled={save.isPending}
+            disabled={save.isPending || noDaysSelected}
             onClick={submit}
           >
             {t(editing ? "schedules.dialog.save" : "schedules.dialog.create")}
@@ -863,25 +878,32 @@ function ScheduleDialog({
               </select>
             </label>
             {dwRepeat === "specificDays" && (
-              <div className="schedules-day-checkboxes">
-                {DAY_NUMBERS.map((d) => (
-                  <label key={d} className="checkbox">
-                    <input
-                      type="checkbox"
-                      checked={dwDays.has(d)}
-                      onChange={() => {
-                        setDwDays((prev) => {
-                          const next = new Set(prev);
-                          if (next.has(d)) next.delete(d);
-                          else next.add(d);
-                          return next;
-                        });
-                      }}
-                    />
-                    {t(DAY_LABELS[d])}
-                  </label>
-                ))}
-              </div>
+              <>
+                <div className="schedules-day-checkboxes">
+                  {DAY_NUMBERS.map((d) => (
+                    <label key={d} className="checkbox">
+                      <input
+                        type="checkbox"
+                        checked={dwDays.has(d)}
+                        onChange={() => {
+                          setDwDays((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(d)) next.delete(d);
+                            else next.add(d);
+                            return next;
+                          });
+                        }}
+                      />
+                      {t(DAY_LABELS[d])}
+                    </label>
+                  ))}
+                </div>
+                {noDaysSelected && (
+                  <span className="field-error">
+                    {t("schedules.dialog.noDaysSelected")}
+                  </span>
+                )}
+              </>
             )}
             <span className="field-inline">
               <label>
@@ -940,6 +962,7 @@ function ScheduleDialog({
           timezone,
         })}
         timezone={timezone}
+        isInterval={cadenceMode === "interval"}
       />
 
       <label className="field">
@@ -1169,6 +1192,7 @@ function NextRunsPreview({
   serverId,
   cadenceBody,
   timezone,
+  isInterval,
 }: {
   communityId: string;
   serverId: string;
@@ -1177,6 +1201,8 @@ function NextRunsPreview({
   cadenceBody: string;
   /** The schedule's IANA timezone, for formatting the preview datetimes. */
   timezone: string;
+  /** Whether the cadence is interval (shows approximation note). */
+  isInterval: boolean;
 }) {
   const [runs, setRuns] = useState<string[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1242,11 +1268,16 @@ function NextRunsPreview({
       )}
       {error !== null && <span className="field-error">{error}</span>}
       {runs !== null && !loading && error === null && (
-        <ul>
-          {runs.map((run) => (
-            <li key={run}>{formatInTimezone(run, timezone)}</li>
-          ))}
-        </ul>
+        <>
+          <ul>
+            {runs.map((run) => (
+              <li key={run}>{formatInTimezone(run, timezone)}</li>
+            ))}
+          </ul>
+          {isInterval && (
+            <p className="sub">{t("schedules.dialog.nextRunsApproximate")}</p>
+          )}
+        </>
       )}
     </div>
   );

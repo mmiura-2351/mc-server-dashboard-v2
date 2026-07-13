@@ -585,8 +585,11 @@ export const ja: Record<TranslationKey, string> = {
   "schedules.dialog.day.sun": "日",
   "schedules.dialog.hourLabel": "時",
   "schedules.dialog.minuteLabel": "分",
+  "schedules.dialog.noDaysSelected": "曜日を1つ以上選択してください。",
   "schedules.dialog.nextRuns": "次回の実行予定",
   "schedules.dialog.nextRunsLoading": "計算中…",
+  "schedules.dialog.nextRunsApproximate":
+    "概算値です。実際の時刻はスケジュールごとのジッターにより多少異なる場合があります。",
   "schedules.dialog.intervalLabel": "実行間隔",
   "schedules.dialog.intervalUnitLabel": "間隔の単位",
   "schedules.dialog.unit.minutes": "分",

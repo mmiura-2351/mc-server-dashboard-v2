@@ -42,6 +42,18 @@ vi.mock("../permissions/ActiveCommunityProvider.tsx", () => ({
   }),
 }));
 
+import type { TranslationKey } from "../i18n/index.ts";
+
+const DAY_LABEL_KEYS: TranslationKey[] = [
+  "schedules.dialog.day.mon",
+  "schedules.dialog.day.tue",
+  "schedules.dialog.day.wed",
+  "schedules.dialog.day.thu",
+  "schedules.dialog.day.fri",
+  "schedules.dialog.day.sat",
+  "schedules.dialog.day.sun",
+];
+
 const ALL_CODES: PermissionCode[] = [
   "schedule:read",
   "schedule:manage",
@@ -702,6 +714,75 @@ describe("ServerSchedulesTab daily/weekly builder", () => {
     const cronRadio = screen.getByLabelText(t("schedules.dialog.cadence.cron"));
     expect(cronRadio).toBeChecked();
   });
+
+  it("emits canonical * when all 7 days are checked", async () => {
+    routeGet({ schedules: [] });
+    routePost({ create: schedule() });
+    renderTab(canFor(ALL_CODES));
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: t("schedules.create") }),
+    );
+    fireEvent.change(screen.getByLabelText(t("schedules.dialog.nameLabel")), {
+      target: { value: "all days" },
+    });
+    fireEvent.click(
+      screen.getByLabelText(t("schedules.dialog.cadence.dailyWeekly")),
+    );
+    fireEvent.change(screen.getByLabelText(t("schedules.dialog.repeatLabel")), {
+      target: { value: "specificDays" },
+    });
+    // Check all 7 days.
+    for (const key of DAY_LABEL_KEYS) {
+      fireEvent.click(screen.getByLabelText(t(key)));
+    }
+    fireEvent.change(screen.getByLabelText(t("schedules.dialog.hourLabel")), {
+      target: { value: "6" },
+    });
+    fireEvent.change(screen.getByLabelText(t("schedules.dialog.minuteLabel")), {
+      target: { value: "0" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("schedules.dialog.create") }),
+    );
+
+    await waitFor(() => {
+      const postCalls = mockApi.post.mock.calls.filter(
+        (call) => !(call[0] as string).includes("/preview"),
+      );
+      expect(postCalls.length).toBe(1);
+    });
+    const createCalls = mockApi.post.mock.calls.filter(
+      (call) => !(call[0] as string).includes("/preview"),
+    );
+    const body = JSON.parse(createCalls[0][1].body);
+    expect(body.cron).toBe("0 6 * * *");
+  });
+
+  it("disables Save and shows hint when specific-days mode has zero days", async () => {
+    routeGet({ schedules: [] });
+    routePost();
+    renderTab(canFor(ALL_CODES));
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: t("schedules.create") }),
+    );
+    fireEvent.click(
+      screen.getByLabelText(t("schedules.dialog.cadence.dailyWeekly")),
+    );
+    fireEvent.change(screen.getByLabelText(t("schedules.dialog.repeatLabel")), {
+      target: { value: "specificDays" },
+    });
+    // Zero days checked — Save should be disabled and hint shown.
+    expect(
+      screen.getByRole("button", {
+        name: t("schedules.dialog.create"),
+      }),
+    ).toBeDisabled();
+    expect(
+      screen.getByText(t("schedules.dialog.noDaysSelected")),
+    ).toBeInTheDocument();
+  });
 });
 
 describe("ServerSchedulesTab humanized cadence", () => {
@@ -729,12 +810,15 @@ describe("ServerSchedulesTab humanized cadence", () => {
     const mon = t("schedules.dialog.day.mon");
     const wed = t("schedules.dialog.day.wed");
     const fri = t("schedules.dialog.day.fri");
+    // Intl.ListFormat produces locale-aware joins (e.g. "Mon, Wed, and Fri").
+    const days = new Intl.ListFormat("en", { type: "conjunction" }).format([
+      mon,
+      wed,
+      fri,
+    ]);
     expect(
       await screen.findByText(
-        t("schedules.cadence.daysAt", {
-          days: `${mon}, ${wed}, ${fri}`,
-          time: "18:30",
-        }),
+        t("schedules.cadence.daysAt", { days, time: "18:30" }),
       ),
     ).toBeInTheDocument();
   });
@@ -768,6 +852,24 @@ describe("ServerSchedulesTab next-runs preview", () => {
     await waitFor(() => {
       const items = within(preview).getAllByRole("listitem");
       expect(items.length).toBe(5);
+    });
+  });
+
+  it("shows approximation note for interval preview", async () => {
+    routeGet({ schedules: [] });
+    routePost();
+    renderTab(canFor(ALL_CODES));
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: t("schedules.create") }),
+    );
+
+    // Default mode is interval — wait for preview to render.
+    const preview = await screen.findByTestId("next-runs-preview");
+    await waitFor(() => {
+      expect(
+        within(preview).getByText(t("schedules.dialog.nextRunsApproximate")),
+      ).toBeInTheDocument();
     });
   });
 

@@ -584,8 +584,11 @@ export const en = {
   "schedules.dialog.day.sun": "Sun",
   "schedules.dialog.hourLabel": "Hour",
   "schedules.dialog.minuteLabel": "Minute",
+  "schedules.dialog.noDaysSelected": "Select at least one day.",
   "schedules.dialog.nextRuns": "Next runs",
   "schedules.dialog.nextRunsLoading": "Computing…",
+  "schedules.dialog.nextRunsApproximate":
+    "Approximate — actual times may vary slightly due to per-schedule jitter.",
   "schedules.dialog.intervalLabel": "Run every",
   "schedules.dialog.intervalUnitLabel": "Interval unit",
   "schedules.dialog.unit.minutes": "minutes",
