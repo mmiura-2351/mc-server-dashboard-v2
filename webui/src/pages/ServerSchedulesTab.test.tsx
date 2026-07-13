@@ -945,6 +945,9 @@ describe("ServerSchedulesTab timezone select", () => {
     expect(options.length).toBeLessThanOrEqual(10);
     expect(options).toContain("UTC");
     expect(options).toContain("Asia/Tokyo");
+    expect(options).toContain("America/New_York");
+    expect(options).toContain("America/Los_Angeles");
+    expect(options).toContain("Europe/London");
   });
 
   it("prepends an unlisted timezone when editing a schedule that uses it", async () => {
