@@ -22,11 +22,16 @@ type ServerResponse = components["schemas"]["ServerResponse"];
 
 // Grants are per-resource and resource_type is always `server` (WEBUI_SPEC.md
 // 2.2), so the permission picker is restricted to the per-server resource
-// families — server/file/backup/schedule. The API's grantable set
-// (GRANT_PERMISSIONS_BY_RESOURCE_TYPE) additionally allows `plugin`, which the
-// picker does not offer yet (#1858). Derived from the typed catalog so the
-// offered codes can never drift from it.
-const GRANTABLE_FAMILIES = ["server", "file", "backup", "schedule"] as const;
+// families the API's grantable set (GRANT_PERMISSIONS_BY_RESOURCE_TYPE) allows —
+// server/file/backup/plugin/schedule (#1858). Derived from the typed catalog so
+// the offered codes can never drift from it.
+const GRANTABLE_FAMILIES = [
+  "server",
+  "file",
+  "backup",
+  "plugin",
+  "schedule",
+] as const;
 const GRANTABLE_CODES: readonly CommunityPermissionCode[] =
   COMMUNITY_PERMISSION_CODES.filter((code) =>
     (GRANTABLE_FAMILIES as readonly string[]).includes(code.split(":")[0]),
