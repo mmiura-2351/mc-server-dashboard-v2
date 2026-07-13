@@ -569,12 +569,12 @@ export const en = {
   "schedules.dialog.actionLocked":
     "The action can't be changed. Delete and recreate to change it.",
   "schedules.dialog.cadenceLabel": "Cadence",
-  "schedules.dialog.cadence.interval": "Interval",
-  "schedules.dialog.cadence.dailyWeekly": "Daily / Weekly",
-  "schedules.dialog.cadence.cron": "Cron (advanced)",
-  "schedules.dialog.repeatLabel": "Repeat",
-  "schedules.dialog.repeat.everyDay": "Every day",
-  "schedules.dialog.repeat.specificDays": "Specific days",
+  "schedules.dialog.cadence.interval": "Every X minutes/hours",
+  "schedules.dialog.cadence.daily": "Daily at a specific time",
+  "schedules.dialog.cadence.weekly": "Specific days of the week",
+  "schedules.dialog.cadence.cron": "Cron expression (advanced)",
+  "schedules.dialog.cronHelp":
+    "Standard 5-field cron expression (minute hour day month weekday)",
   "schedules.dialog.day.mon": "Mon",
   "schedules.dialog.day.tue": "Tue",
   "schedules.dialog.day.wed": "Wed",

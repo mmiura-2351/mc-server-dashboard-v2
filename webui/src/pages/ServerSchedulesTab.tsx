@@ -814,19 +814,48 @@ function ScheduleDialog({
       </label>
       {editing && <p className="sub">{t("schedules.dialog.actionLocked")}</p>}
 
-      <fieldset className="field">
-        <legend>{t("schedules.dialog.cadenceLabel")}</legend>
-        <label className="checkbox">
-          <input
-            type="radio"
-            name="cadence-mode"
-            checked={cadenceMode === "interval"}
-            onChange={() => setCadenceMode("interval")}
-          />
-          {t("schedules.dialog.cadence.interval")}
+      <div className="schedule-cadence">
+        <label className="field">
+          {t("schedules.dialog.cadenceLabel")}
+          <select
+            aria-label={t("schedules.dialog.cadenceLabel")}
+            value={
+              cadenceMode === "interval"
+                ? "interval"
+                : cadenceMode === "cron"
+                  ? "cron"
+                  : dwRepeat === "everyDay"
+                    ? "daily"
+                    : "weekly"
+            }
+            onChange={(e) => {
+              const v = e.target.value;
+              if (v === "interval") {
+                setCadenceMode("interval");
+              } else if (v === "daily") {
+                setCadenceMode("dailyWeekly");
+                setDwRepeat("everyDay");
+              } else if (v === "weekly") {
+                setCadenceMode("dailyWeekly");
+                setDwRepeat("specificDays");
+              } else {
+                setCadenceMode("cron");
+              }
+            }}
+          >
+            <option value="interval">
+              {t("schedules.dialog.cadence.interval")}
+            </option>
+            <option value="daily">{t("schedules.dialog.cadence.daily")}</option>
+            <option value="weekly">
+              {t("schedules.dialog.cadence.weekly")}
+            </option>
+            <option value="cron">{t("schedules.dialog.cadence.cron")}</option>
+          </select>
         </label>
+
         {cadenceMode === "interval" && (
-          <span className="field-inline">
+          <span className="schedule-interval-row">
             {t("schedules.dialog.intervalLabel")}
             <input
               type="number"
@@ -849,110 +878,83 @@ function ScheduleDialog({
             </select>
           </span>
         )}
-        <label className="checkbox">
-          <input
-            type="radio"
-            name="cadence-mode"
-            checked={cadenceMode === "dailyWeekly"}
-            onChange={() => setCadenceMode("dailyWeekly")}
-          />
-          {t("schedules.dialog.cadence.dailyWeekly")}
-        </label>
-        {cadenceMode === "dailyWeekly" && (
-          <div className="schedules-daily-weekly">
-            <label className="field">
-              {t("schedules.dialog.repeatLabel")}
-              <select
-                aria-label={t("schedules.dialog.repeatLabel")}
-                value={dwRepeat}
-                onChange={(e) =>
-                  setDwRepeat(e.target.value as "everyDay" | "specificDays")
-                }
-              >
-                <option value="everyDay">
-                  {t("schedules.dialog.repeat.everyDay")}
-                </option>
-                <option value="specificDays">
-                  {t("schedules.dialog.repeat.specificDays")}
-                </option>
-              </select>
-            </label>
-            {dwRepeat === "specificDays" && (
-              <>
-                <div className="schedules-day-checkboxes">
-                  {DAY_NUMBERS.map((d) => (
-                    <label key={d} className="checkbox">
-                      <input
-                        type="checkbox"
-                        checked={dwDays.has(d)}
-                        onChange={() => {
-                          setDwDays((prev) => {
-                            const next = new Set(prev);
-                            if (next.has(d)) next.delete(d);
-                            else next.add(d);
-                            return next;
-                          });
-                        }}
-                      />
-                      {t(DAY_LABELS[d])}
-                    </label>
-                  ))}
-                </div>
-                {noDaysSelected && (
-                  <span className="field-error">
-                    {t("schedules.dialog.noDaysSelected")}
-                  </span>
-                )}
-              </>
+
+        {cadenceMode === "dailyWeekly" && dwRepeat === "specificDays" && (
+          <>
+            <div className="schedule-day-picker">
+              {DAY_NUMBERS.map((d) => (
+                <label key={d} className="checkbox">
+                  <input
+                    type="checkbox"
+                    checked={dwDays.has(d)}
+                    onChange={() => {
+                      setDwDays((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(d)) next.delete(d);
+                        else next.add(d);
+                        return next;
+                      });
+                    }}
+                  />
+                  {t(DAY_LABELS[d])}
+                </label>
+              ))}
+            </div>
+            {noDaysSelected && (
+              <span className="field-error">
+                {t("schedules.dialog.noDaysSelected")}
+              </span>
             )}
-            <span className="field-inline">
-              <label>
-                {t("schedules.dialog.hourLabel")}
-                <input
-                  type="number"
-                  min={0}
-                  max={23}
-                  aria-label={t("schedules.dialog.hourLabel")}
-                  value={dwHour}
-                  onChange={(e) => setDwHour(e.target.value)}
-                />
-              </label>
-              <label>
-                {t("schedules.dialog.minuteLabel")}
-                <input
-                  type="number"
-                  min={0}
-                  max={59}
-                  aria-label={t("schedules.dialog.minuteLabel")}
-                  value={dwMinute}
-                  onChange={(e) => setDwMinute(e.target.value)}
-                />
-              </label>
-            </span>
+          </>
+        )}
+
+        {cadenceMode === "dailyWeekly" && (
+          <div className="schedule-time-row">
+            <label>
+              {t("schedules.dialog.hourLabel")}
+              <input
+                type="number"
+                min={0}
+                max={23}
+                aria-label={t("schedules.dialog.hourLabel")}
+                value={dwHour}
+                onChange={(e) => setDwHour(e.target.value)}
+              />
+            </label>
+            <span className="schedule-time-separator">:</span>
+            <label>
+              {t("schedules.dialog.minuteLabel")}
+              <input
+                type="number"
+                min={0}
+                max={59}
+                aria-label={t("schedules.dialog.minuteLabel")}
+                value={dwMinute}
+                onChange={(e) => setDwMinute(e.target.value)}
+              />
+            </label>
           </div>
         )}
-        <label className="checkbox">
-          <input
-            type="radio"
-            name="cadence-mode"
-            checked={cadenceMode === "cron"}
-            onChange={() => setCadenceMode("cron")}
-          />
-          {t("schedules.dialog.cadence.cron")}
-        </label>
+
         {cadenceMode === "cron" && (
-          <input
-            type="text"
-            aria-label={t("schedules.dialog.cronLabel")}
-            placeholder={t("schedules.dialog.cronPlaceholder")}
-            value={cron}
-            onChange={(e) => setCron(e.target.value)}
-          />
+          <>
+            <input
+              type="text"
+              aria-label={t("schedules.dialog.cronLabel")}
+              placeholder={t("schedules.dialog.cronPlaceholder")}
+              value={cron}
+              onChange={(e) => setCron(e.target.value)}
+            />
+            <p className="schedule-cron-help">
+              {t("schedules.dialog.cronHelp")}
+            </p>
+          </>
         )}
+
         {cadenceError !== null && (
           <span className="field-error">{cadenceError}</span>
         )}
-      </fieldset>
+      </div>
 
       <NextRunsPreview
         communityId={communityId}
@@ -1261,7 +1263,7 @@ function NextRunsPreview({
   }, [communityId, serverId, cadenceBody]);
 
   return (
-    <div className="schedules-preview" data-testid="next-runs-preview">
+    <div className="schedule-preview" data-testid="next-runs-preview">
       <strong>{t("schedules.dialog.nextRuns")}</strong>
       {loading && (
         <p className="sub">{t("schedules.dialog.nextRunsLoading")}</p>
@@ -1269,13 +1271,15 @@ function NextRunsPreview({
       {error !== null && <span className="field-error">{error}</span>}
       {runs !== null && !loading && error === null && (
         <>
-          <ul>
+          <ul className="schedule-preview-list">
             {runs.map((run) => (
               <li key={run}>{formatInTimezone(run, timezone)}</li>
             ))}
           </ul>
           {isInterval && (
-            <p className="sub">{t("schedules.dialog.nextRunsApproximate")}</p>
+            <p className="schedule-preview-approx">
+              {t("schedules.dialog.nextRunsApproximate")}
+            </p>
           )}
         </>
       )}
