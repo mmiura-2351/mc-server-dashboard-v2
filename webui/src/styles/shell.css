@@ -1369,27 +1369,51 @@ button.link:focus-visible {
 .schedule-cadence {
   margin-bottom: 12px;
 }
+.schedule-cadence select,
+.schedule-cadence input[type="text"],
+.schedule-cadence input[type="number"] {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+}
+.schedule-cadence select:focus,
+.schedule-cadence input[type="text"]:focus,
+.schedule-cadence input[type="number"]:focus {
+  outline: none;
+  border-color: var(--accent);
+}
 .schedule-cadence .field-error {
   font-size: 12px;
   color: var(--red);
+  margin-top: 4px;
 }
 .schedule-interval-row {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
+  margin-top: 10px;
+}
+.schedule-interval-row select {
+  padding: 6px 8px;
 }
 .schedule-day-picker {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: 6px 10px;
+  margin-top: 10px;
 }
 .schedule-time-row {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
+  margin-top: 10px;
 }
 .schedule-time-row input[type="number"] {
   width: 56px;
+  padding: 6px 8px;
 }
 .schedule-time-separator {
   font-weight: 600;
@@ -1398,15 +1422,21 @@ button.link:focus-visible {
 .schedule-cron-help {
   font-size: 12px;
   color: var(--text-faint);
-  margin: 4px 0 0;
+  margin: 6px 0 0;
 }
 /* Next-runs preview (also inside the portaled modal). */
 .schedule-preview {
+  margin-top: 4px;
   margin-bottom: 12px;
+}
+.schedule-preview strong {
+  display: block;
+  margin-bottom: 4px;
 }
 .schedule-preview .field-error {
   font-size: 12px;
   color: var(--red);
+  margin-top: 4px;
 }
 .schedule-preview-list {
   font-size: 12px;
