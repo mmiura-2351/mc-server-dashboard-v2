@@ -41,7 +41,8 @@ async function setupServer(
         mc_edition: "java",
         mc_version: "1.21.6",
         execution_backend: "container",
-        game_port: 25565,
+        // game_port omitted: the API auto-allocates a free in-range port, so
+        // parallel/sequential setups never collide on the global port space.
         eula_accepted: true,
       },
     },
