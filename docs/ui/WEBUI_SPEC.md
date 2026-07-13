@@ -275,6 +275,7 @@ version catalog refresh, JAR pool stats/GC, global backup statistics.
    #files      file browser / editor / history
    #backups    backups + statistics
    #schedules  scheduled actions + run history
+   #plugins    installed plugins/mods + Modrinth catalog (hidden for vanilla)
    #players    attached op/whitelist groups
    #settings   name / config / port / export / danger zone
 /communities/:cid/settings            Community settings
