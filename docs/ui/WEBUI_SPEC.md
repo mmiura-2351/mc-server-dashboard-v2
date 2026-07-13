@@ -415,7 +415,7 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   community/audit/plugin) with select-all per family.
 - **Grants**: per-user list (user filter); create = pick member → pick server
   → pick permissions (restricted to the per-server resource families:
-  server/file/backup/schedule).
+  server/file/backup/plugin/schedule).
 - **Groups**: op/whitelist groups; player list (uuid + name) with add/remove;
   attached-servers list with attach/detach.
 - **Audit**: filterable table (operation, actor, since/until, paging).
