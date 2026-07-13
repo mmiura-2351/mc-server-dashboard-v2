@@ -247,6 +247,7 @@ describe("ServerSchedulesTab permissions", () => {
 
   it("offers only the permitted actions in the create dialog", async () => {
     routeGet({ schedules: [] });
+    routePost();
     renderTab(canFor(["schedule:read", "schedule:manage", "server:start"]));
 
     fireEvent.click(
@@ -279,6 +280,7 @@ describe("ServerSchedulesTab permissions", () => {
 describe("ServerSchedulesTab create/edit dialog", () => {
   it("shows the warning editor only for stop/restart actions", async () => {
     routeGet({ schedules: [] });
+    routePost();
     renderTab(canFor(ALL_CODES));
 
     fireEvent.click(
@@ -312,7 +314,7 @@ describe("ServerSchedulesTab create/edit dialog", () => {
 
   it("creates an interval schedule with the composed request body", async () => {
     routeGet({ schedules: [] });
-    mockApi.post.mockResolvedValue(schedule());
+    routePost({ create: schedule() });
     renderTab(canFor(ALL_CODES));
 
     fireEvent.click(
@@ -334,8 +336,12 @@ describe("ServerSchedulesTab create/edit dialog", () => {
       screen.getByRole("button", { name: t("schedules.dialog.create") }),
     );
 
-    await waitFor(() => expect(mockApi.post).toHaveBeenCalledTimes(1));
-    const [path, init] = mockApi.post.mock.calls[0];
+    const createCalls = () =>
+      mockApi.post.mock.calls.filter(
+        (call) => !(call[0] as string).includes("/preview"),
+      );
+    await waitFor(() => expect(createCalls().length).toBe(1));
+    const [path, init] = createCalls()[0];
     expect(path).toContain(`/communities/${CID}/servers/${SID}/schedules`);
     expect(JSON.parse(init.body)).toEqual({
       name: "evening restart",
@@ -351,7 +357,7 @@ describe("ServerSchedulesTab create/edit dialog", () => {
 
   it("creates a stop schedule carrying warning steps", async () => {
     routeGet({ schedules: [] });
-    mockApi.post.mockResolvedValue(schedule());
+    routePost({ create: schedule() });
     renderTab(canFor(ALL_CODES));
 
     fireEvent.click(
@@ -378,8 +384,12 @@ describe("ServerSchedulesTab create/edit dialog", () => {
       screen.getByRole("button", { name: t("schedules.dialog.create") }),
     );
 
-    await waitFor(() => expect(mockApi.post).toHaveBeenCalledTimes(1));
-    const body = JSON.parse(mockApi.post.mock.calls[0][1].body);
+    const createCalls = () =>
+      mockApi.post.mock.calls.filter(
+        (call) => !(call[0] as string).includes("/preview"),
+      );
+    await waitFor(() => expect(createCalls().length).toBe(1));
+    const body = JSON.parse(createCalls()[0][1].body);
     expect(body.action).toBe("stop");
     expect(body.warning_steps).toEqual([
       { offset_minutes: 5, message: "Stopping in 5 minutes" },
@@ -388,6 +398,7 @@ describe("ServerSchedulesTab create/edit dialog", () => {
 
   it("caps the warning editor at five steps", async () => {
     routeGet({ schedules: [] });
+    routePost();
     renderTab(canFor(ALL_CODES));
 
     fireEvent.click(
@@ -411,6 +422,7 @@ describe("ServerSchedulesTab create/edit dialog", () => {
 
   it("disables the action select when editing (action is immutable)", async () => {
     routeGet();
+    routePost();
     renderTab(canFor(ALL_CODES));
 
     fireEvent.click(await screen.findByText("nightly backup"));
@@ -426,9 +438,9 @@ describe("ServerSchedulesTab create/edit dialog", () => {
 
   it("maps a 422 invalid_cron reason to a cadence field error", async () => {
     routeGet({ schedules: [] });
-    mockApi.post.mockRejectedValue(
-      new ApiError(422, { reason: "invalid_cron" }),
-    );
+    routePost({
+      createError: new ApiError(422, { reason: "invalid_cron" }),
+    });
     renderTab(canFor(ALL_CODES));
 
     fireEvent.click(
@@ -477,6 +489,7 @@ describe("ServerSchedulesTab create/edit dialog", () => {
 
   it("rejects a sub-60-second interval client-side without a request", async () => {
     routeGet({ schedules: [] });
+    routePost();
     renderTab(canFor(ALL_CODES));
 
     fireEvent.click(
@@ -498,7 +511,11 @@ describe("ServerSchedulesTab create/edit dialog", () => {
     expect(
       await screen.findByText(t("schedules.error.intervalTooShort")),
     ).toBeInTheDocument();
-    expect(mockApi.post).not.toHaveBeenCalled();
+    // Preview POSTs are expected; no create POST should have been made.
+    const createCalls = mockApi.post.mock.calls.filter(
+      (call) => !(call[0] as string).includes("/preview"),
+    );
+    expect(createCalls.length).toBe(0);
   });
 });
 
@@ -556,7 +573,12 @@ describe("ServerSchedulesTab toggle/delete/history", () => {
 
 // Route api.post by path: preview vs. create.
 function routePost(
-  opts: { create?: object; preview?: object; previewError?: unknown } = {},
+  opts: {
+    create?: object;
+    createError?: unknown;
+    preview?: object;
+    previewError?: unknown;
+  } = {},
 ) {
   mockApi.post.mockImplementation((path: string) => {
     if (path.includes("/preview")) {
@@ -573,6 +595,7 @@ function routePost(
         },
       );
     }
+    if (opts.createError) return Promise.reject(opts.createError);
     return Promise.resolve(opts.create ?? schedule());
   });
 }
@@ -898,6 +921,52 @@ describe("ServerSchedulesTab next-runs preview", () => {
         within(preview).getByText(t("schedules.dialog.nextRunsApproximate")),
       ).toBeInTheDocument();
     });
+  });
+
+  it("shows loading indicator immediately on dialog open", async () => {
+    routeGet({ schedules: [] });
+    // Return a promise that never resolves so loading stays true.
+    mockApi.post.mockReturnValue(new Promise(() => {}));
+    renderTab(canFor(ALL_CODES));
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: t("schedules.create") }),
+    );
+
+    // Loading indicator should be visible synchronously — no blank gap.
+    const preview = screen.getByTestId("next-runs-preview");
+    expect(
+      within(preview).getByText(t("schedules.dialog.nextRunsLoading")),
+    ).toBeInTheDocument();
+  });
+
+  it("fetches preview immediately on mount, debounces subsequent changes", async () => {
+    routeGet({ schedules: [] });
+    routePost();
+    renderTab(canFor(ALL_CODES));
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: t("schedules.create") }),
+    );
+
+    // The preview POST should fire immediately on mount (not after 500ms).
+    const previewCalls = () =>
+      mockApi.post.mock.calls.filter((call) =>
+        (call[0] as string).includes("/preview"),
+      );
+    await waitFor(() => expect(previewCalls().length).toBe(1));
+
+    // A subsequent cadence change should NOT fire immediately (debounced).
+    fireEvent.change(
+      screen.getByLabelText(t("schedules.dialog.cadenceLabel")),
+      { target: { value: "daily" } },
+    );
+    const countAfterChange = previewCalls().length;
+
+    // After debounce, a second call arrives.
+    await waitFor(() =>
+      expect(previewCalls().length).toBe(countAfterChange + 1),
+    );
   });
 
   it("shows preview validation errors inline", async () => {
