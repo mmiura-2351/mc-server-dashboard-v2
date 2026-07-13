@@ -662,7 +662,35 @@ describe("ServerSchedulesTab daily/weekly builder", () => {
     expect(body.cron).toBe("30 18 * * 1,3,5");
   });
 
-  it("auto-detects daily/weekly mode when editing a matching cron schedule", async () => {
+  it("auto-detects daily mode when editing an every-day cron schedule", async () => {
+    routeGet({
+      schedules: [
+        schedule({
+          interval_seconds: null,
+          cron: "0 4 * * *",
+        }),
+      ],
+    });
+    routePost();
+    renderTab(canFor(ALL_CODES));
+
+    await screen.findByText("nightly backup");
+    fireEvent.click(screen.getByRole("button", { name: t("schedules.edit") }));
+
+    // The cadence select should show "daily" (every-day cron detected).
+    expect(
+      screen.getByLabelText(t("schedules.dialog.cadenceLabel")),
+    ).toHaveValue("daily");
+    // The time fields should be prefilled from the parsed cron.
+    expect(screen.getByLabelText(t("schedules.dialog.hourLabel"))).toHaveValue(
+      4,
+    );
+    expect(
+      screen.getByLabelText(t("schedules.dialog.minuteLabel")),
+    ).toHaveValue(0);
+  });
+
+  it("auto-detects weekly mode when editing a specific-days cron schedule", async () => {
     routeGet({
       schedules: [
         schedule({
