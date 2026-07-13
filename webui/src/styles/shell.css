@@ -1380,7 +1380,8 @@ button.link:focus-visible {
   padding: 8px 10px;
 }
 .schedule-cadence select:focus,
-.schedule-cadence input:focus {
+.schedule-cadence input[type="text"]:focus,
+.schedule-cadence input[type="number"]:focus {
   outline: none;
   border-color: var(--accent);
 }
