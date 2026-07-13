@@ -78,16 +78,17 @@ const OUTCOME_LABEL: Record<string, TranslationKey> = {
   skipped: "schedules.runs.outcome.skipped",
 };
 
-/** IANA zones for the timezone select, with UTC (the default) always present. */
+/** Curated short list of major IANA zones for the timezone select. */
 function supportedTimeZones(): readonly string[] {
-  const intl = Intl as unknown as {
-    supportedValuesOf?: (key: "timeZone") => string[];
-  };
-  if (typeof intl.supportedValuesOf !== "function") {
-    return ["UTC"];
-  }
-  const zones = intl.supportedValuesOf("timeZone");
-  return zones.includes("UTC") ? zones : ["UTC", ...zones];
+  return [
+    "UTC",
+    "Asia/Tokyo",
+    "America/New_York",
+    "America/Chicago",
+    "America/Los_Angeles",
+    "Europe/London",
+    "Europe/Berlin",
+  ];
 }
 
 const TIMEZONES = supportedTimeZones();
@@ -969,8 +970,8 @@ function ScheduleDialog({
 
       <label className="field">
         {t("schedules.dialog.timezoneLabel")}
-        {/* aria-label: see the action select — hundreds of zone options would
-            otherwise pollute the computed accessible name. */}
+        {/* aria-label: see the action select — zone options would otherwise
+            pollute the computed accessible name. */}
         <select
           value={timezone}
           aria-label={t("schedules.dialog.timezoneLabel")}

@@ -928,3 +928,43 @@ describe("ServerSchedulesTab next-runs preview", () => {
     });
   });
 });
+
+describe("ServerSchedulesTab timezone select", () => {
+  it("offers only a short curated list of major timezones", async () => {
+    routeGet({ schedules: [] });
+    routePost();
+    renderTab(canFor(ALL_CODES));
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: t("schedules.create") }),
+    );
+    const tzSelect = screen.getByLabelText(t("schedules.dialog.timezoneLabel"));
+    const options = within(tzSelect)
+      .getAllByRole("option")
+      .map((o) => o.textContent);
+    expect(options.length).toBeLessThanOrEqual(10);
+    expect(options).toContain("UTC");
+    expect(options).toContain("Asia/Tokyo");
+    expect(options).toContain("America/New_York");
+    expect(options).toContain("America/Los_Angeles");
+    expect(options).toContain("Europe/London");
+  });
+
+  it("prepends an unlisted timezone when editing a schedule that uses it", async () => {
+    routeGet({
+      schedules: [schedule({ timezone: "Pacific/Auckland" })],
+    });
+    routePost();
+    renderTab(canFor(ALL_CODES));
+
+    await screen.findByText("nightly backup");
+    fireEvent.click(screen.getByRole("button", { name: t("schedules.edit") }));
+
+    const tzSelect = screen.getByLabelText(t("schedules.dialog.timezoneLabel"));
+    const options = within(tzSelect)
+      .getAllByRole("option")
+      .map((o) => o.textContent);
+    expect(options).toContain("Pacific/Auckland");
+    expect(tzSelect).toHaveValue("Pacific/Auckland");
+  });
+});
