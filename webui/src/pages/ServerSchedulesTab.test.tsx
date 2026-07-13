@@ -949,24 +949,23 @@ describe("ServerSchedulesTab next-runs preview", () => {
       await screen.findByRole("button", { name: t("schedules.create") }),
     );
 
-    // The preview POST should fire immediately on mount (not after 500ms).
+    // The preview POST should fire synchronously on mount — not behind
+    // a 500ms setTimeout. A synchronous assertion discriminates the fix.
     const previewCalls = () =>
       mockApi.post.mock.calls.filter((call) =>
         (call[0] as string).includes("/preview"),
       );
-    await waitFor(() => expect(previewCalls().length).toBe(1));
+    expect(previewCalls().length).toBe(1);
 
     // A subsequent cadence change should NOT fire immediately (debounced).
     fireEvent.change(
       screen.getByLabelText(t("schedules.dialog.cadenceLabel")),
       { target: { value: "daily" } },
     );
-    const countAfterChange = previewCalls().length;
+    expect(previewCalls().length).toBe(1);
 
     // After debounce, a second call arrives.
-    await waitFor(() =>
-      expect(previewCalls().length).toBe(countAfterChange + 1),
-    );
+    await waitFor(() => expect(previewCalls().length).toBe(2));
   });
 
   it("shows preview validation errors inline", async () => {
