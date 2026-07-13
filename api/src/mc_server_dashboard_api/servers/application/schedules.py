@@ -39,12 +39,14 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+import zoneinfo
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.errors import (
     InvalidSchedulePayloadError,
+    InvalidScheduleTimezoneError,
     PermissionDeniedError,
     ScheduleNameAlreadyExistsError,
     ScheduleNotFoundError,
@@ -389,3 +391,46 @@ class ListScheduleRuns:
         async with self.uow:
             await _load_schedule(self.uow, community_id, server_id, schedule_id)
             return await self.uow.schedule_runs.list_for_schedule(schedule_id)
+
+
+_PREVIEW_COUNT = 5
+
+
+@dataclass(frozen=True)
+class PreviewSchedule:
+    """Compute the next N occurrences for a cadence without persisting (schedule:read).
+
+    Validates the cadence and timezone using the same domain rules as create,
+    so its 422 reasons match exactly. Returns UTC datetimes.
+    """
+
+    clock: Clock
+    calculator: NextRunCalculator
+
+    def __call__(
+        self,
+        *,
+        cron: str | None = None,
+        interval_seconds: int | None = None,
+        timezone: str = DEFAULT_TIMEZONE,
+    ) -> list[dt.datetime]:
+        cadence = Cadence(cron=cron, interval_seconds=interval_seconds)
+        if cadence.cron is not None:
+            self.calculator.validate(cadence.cron)
+        try:
+            zoneinfo.ZoneInfo(timezone)
+        except (ValueError, zoneinfo.ZoneInfoNotFoundError):
+            raise InvalidScheduleTimezoneError(timezone)
+        now = self.clock.now()
+        runs: list[dt.datetime] = []
+        after = now
+        for _ in range(_PREVIEW_COUNT):
+            if cadence.cron is not None:
+                nxt = self.calculator.next_after(cadence.cron, timezone, after)
+            else:
+                assert cadence.interval_seconds is not None
+                # For preview, use simple arithmetic (no jitter — no schedule id).
+                nxt = after + dt.timedelta(seconds=cadence.interval_seconds)
+            runs.append(nxt)
+            after = nxt
+        return runs
