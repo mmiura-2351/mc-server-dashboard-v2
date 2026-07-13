@@ -1209,15 +1209,17 @@ function NextRunsPreview({
 }) {
   const [runs, setRuns] = useState<string[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mountRef = useRef(true);
 
   useEffect(() => {
     const controller = new AbortController();
     if (timerRef.current !== null) {
       clearTimeout(timerRef.current);
     }
-    timerRef.current = setTimeout(() => {
+
+    const doFetch = () => {
       setLoading(true);
       setError(null);
       api
@@ -1253,7 +1255,14 @@ function NextRunsPreview({
           }
           setRuns(null);
         });
-    }, 500);
+    };
+
+    if (mountRef.current) {
+      mountRef.current = false;
+      doFetch();
+    } else {
+      timerRef.current = setTimeout(doFetch, 500);
+    }
 
     return () => {
       if (timerRef.current !== null) {
