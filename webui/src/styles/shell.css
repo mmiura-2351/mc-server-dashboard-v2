@@ -1204,28 +1204,6 @@ button.link:focus-visible {
   gap: 10px;
   margin-bottom: 14px;
 }
-.backups-schedule {
-  margin-left: auto;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  color: var(--text-dim);
-}
-.backups-schedule .field-inline {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.backups-schedule input {
-  width: 60px;
-  font: inherit;
-  color: var(--text);
-  background: var(--bg-inset);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 4px 6px;
-}
 /* Scheduled-backup settings card: the moved-to-Schedules note plus the
  * retention policy editor (#1843), both backup:schedule-gated. */
 .backups-retention {
