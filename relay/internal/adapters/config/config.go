@@ -34,6 +34,7 @@ type Config struct {
 	Game    GameConfig
 	Tunnel  TunnelConfig
 	Bedrock BedrockConfig
+	Metrics MetricsConfig
 	Log     LogConfig
 }
 
@@ -144,6 +145,19 @@ type TunnelTLSConfig struct {
 // advertises an empty CA bundle (Workers fall back to system roots).
 const SystemRootsCA = "system"
 
+// MetricsConfig is the Prometheus metrics / health endpoint surface (RELAY.md
+// Section 17). Default off and bound to loopback: the relay is an edge process,
+// so the metrics endpoint is opt-in and never exposed to the public interface
+// by default.
+type MetricsConfig struct {
+	// Enabled toggles the metrics/health HTTP listener (default false). When
+	// off, no port is bound.
+	Enabled bool
+	// Listen is the metrics/health listener address (default 127.0.0.1:9090),
+	// serving /metrics (Prometheus) and /healthz.
+	Listen string
+}
+
 // LogConfig is the observability surface, identical to the Worker's.
 type LogConfig struct {
 	Level  string
@@ -186,6 +200,10 @@ type fileConfig struct {
 		MaxFlowsPerIP          *uint32 `toml:"max_flows_per_ip"`
 		NewFlowsPerIPPerSecond *uint32 `toml:"new_flows_per_ip_per_second"`
 	} `toml:"bedrock"`
+	Metrics struct {
+		Enabled *bool   `toml:"enabled"`
+		Listen  *string `toml:"listen"`
+	} `toml:"metrics"`
 	Log struct {
 		Level  *string `toml:"level"`
 		Format *string `toml:"format"`
@@ -212,6 +230,10 @@ func defaults() Config {
 			TunnelMaxConnsPerIP:    64,
 			MaxFlowsPerIP:          32,
 			NewFlowsPerIPPerSecond: 10,
+		},
+		Metrics: MetricsConfig{
+			Enabled: false,
+			Listen:  "127.0.0.1:9090",
 		},
 		Log: LogConfig{
 			Level:  "info",
@@ -281,6 +303,10 @@ func applyFile(cfg *Config, path string) error {
 	setUint32(&cfg.Bedrock.TunnelMaxConnsPerIP, fc.Bedrock.TunnelMaxConnsPerIP)
 	setUint32(&cfg.Bedrock.MaxFlowsPerIP, fc.Bedrock.MaxFlowsPerIP)
 	setUint32(&cfg.Bedrock.NewFlowsPerIPPerSecond, fc.Bedrock.NewFlowsPerIPPerSecond)
+	if fc.Metrics.Enabled != nil {
+		cfg.Metrics.Enabled = *fc.Metrics.Enabled
+	}
+	setString(&cfg.Metrics.Listen, fc.Metrics.Listen)
 	setString(&cfg.Log.Level, fc.Log.Level)
 	setString(&cfg.Log.Format, fc.Log.Format)
 
@@ -338,6 +364,14 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 	if err := setEnvUint32(&cfg.Bedrock.NewFlowsPerIPPerSecond, getenv, "BEDROCK_NEW_FLOWS_PER_IP_PER_SECOND"); err != nil {
 		return err
 	}
+	if v := getenv(EnvPrefix + "METRICS_ENABLED"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("config: %sMETRICS_ENABLED: %w", EnvPrefix, err)
+		}
+		cfg.Metrics.Enabled = b
+	}
+	setEnvString(&cfg.Metrics.Listen, getenv, "METRICS_LISTEN")
 	setEnvString(&cfg.Log.Level, getenv, "LOG_LEVEL")
 	setEnvString(&cfg.Log.Format, getenv, "LOG_FORMAT")
 
@@ -370,6 +404,10 @@ func (c Config) validate() error {
 
 	if c.API.TLS.CAFile == "" && !c.API.TLS.Insecure {
 		return fmt.Errorf("config: api.tls.ca_file is required (or set api.tls.insecure=true for a plaintext dev dial)")
+	}
+
+	if c.Metrics.Enabled && c.Metrics.Listen == "" {
+		return fmt.Errorf("config: metrics.listen is required when metrics.enabled=true")
 	}
 
 	switch c.Log.Format {

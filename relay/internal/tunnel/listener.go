@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/ipcaps"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/metrics"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/netutil"
 )
 
@@ -35,21 +36,23 @@ const handshakePrefix = "MCSD-TUNNEL/1"
 // against the table of waiting player connections, and hands the connection to
 // the waiter (RELAY.md Section 5).
 type Listener struct {
-	ln     net.Listener
-	tokens *TokenTable
-	caps   *ipcaps.IPCaps
-	logger *slog.Logger
+	ln      net.Listener
+	tokens  *TokenTable
+	caps    *ipcaps.IPCaps
+	metrics *metrics.Metrics
+	logger  *slog.Logger
 }
 
 // NewListener binds the tunnel listener on addr with the given TLS config. caps
 // enforces the per-IP concurrent-connection cap (RELAY.md Section 11); only its
-// connection cap is used, since the tunnel has no join concept.
-func NewListener(addr string, tlsCfg *tls.Config, tokens *TokenTable, caps *ipcaps.IPCaps, logger *slog.Logger) (*Listener, error) {
+// connection cap is used, since the tunnel has no join concept. m carries the
+// relay's metric handles (nil is a no-op).
+func NewListener(addr string, tlsCfg *tls.Config, tokens *TokenTable, caps *ipcaps.IPCaps, m *metrics.Metrics, logger *slog.Logger) (*Listener, error) {
 	ln, err := tls.Listen("tcp", addr, tlsCfg)
 	if err != nil {
 		return nil, err
 	}
-	return &Listener{ln: ln, tokens: tokens, caps: caps, logger: logger}, nil
+	return &Listener{ln: ln, tokens: tokens, caps: caps, metrics: m, logger: logger}, nil
 }
 
 // Addr returns the listener's bound address.
@@ -85,6 +88,7 @@ func (l *Listener) handle(conn net.Conn) {
 	// is delivered to a waiter, the slot is released, since a delivered
 	// connection is authenticated and accounted on the game side.
 	if !l.caps.Acquire(ip) {
+		l.metrics.IPCapsReject(metrics.ListenerTunnel, metrics.CapKindConn)
 		_ = conn.Close()
 		return
 	}
@@ -92,16 +96,20 @@ func (l *Listener) handle(conn net.Conn) {
 
 	token, ok := readHandshake(conn)
 	if !ok {
+		l.metrics.TunnelDialback(metrics.DialbackHandshakeInvalid)
 		_ = conn.Close()
 		return
 	}
 	if !l.tokens.Deliver(token, conn) {
 		// Unknown, expired, or reused token: close without a response.
+		l.metrics.TunnelDialback(metrics.DialbackNoWaiter)
 		l.logger.Debug("tunnel dial-back rejected: no waiter for token")
 		_ = conn.Close()
+		return
 	}
 	// On a successful Deliver the waiter owns conn and closes it when the splice
 	// ends.
+	l.metrics.TunnelDialback(metrics.DialbackDelivered)
 }
 
 // readHandshake parses the "MCSD-TUNNEL/1\n<token>\n" handshake within the

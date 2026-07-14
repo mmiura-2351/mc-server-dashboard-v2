@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/adapters/apiclient"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/metrics"
 )
 
 // Flush triggers: the reporter flushes the buffer when it reaches FlushMaxEvents
@@ -54,6 +55,7 @@ type reportClient interface {
 type Reporter struct {
 	client          reportClient
 	logger          *slog.Logger
+	metrics         *metrics.Metrics
 	now             func() time.Time
 	interval        time.Duration
 	flushTimeout    time.Duration
@@ -66,14 +68,16 @@ type Reporter struct {
 	flushSignal chan struct{}
 }
 
-// NewReporter builds a reporter over the API client.
-func NewReporter(client reportClient, logger *slog.Logger, now func() time.Time) *Reporter {
+// NewReporter builds a reporter over the API client. m carries the relay's
+// metric handles (nil is a no-op).
+func NewReporter(client reportClient, logger *slog.Logger, now func() time.Time, m *metrics.Metrics) *Reporter {
 	if now == nil {
 		now = time.Now
 	}
 	return &Reporter{
 		client:          client,
 		logger:          logger,
+		metrics:         m,
 		now:             now,
 		interval:        DefaultFlushInterval,
 		flushTimeout:    DefaultFlushTimeout,
@@ -204,6 +208,7 @@ func (r *Reporter) flush(ctx context.Context) {
 	rctx, cancel := context.WithTimeout(ctx, r.flushTimeout)
 	defer cancel()
 	if err := r.client.ReportSessions(rctx, starts, ends); err != nil {
+		r.metrics.SessionFlushFailure()
 		r.logger.Warn("session report failed; will retry", "error", err, "starts", len(starts), "ends", len(ends))
 		r.mu.Lock()
 		r.pendStarts = capOldest(append(starts, r.pendStarts...), "start", r.logger)
