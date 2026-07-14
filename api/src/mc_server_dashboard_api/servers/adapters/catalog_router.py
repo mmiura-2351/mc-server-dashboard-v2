@@ -38,25 +38,50 @@ class RoutingCatalog(CatalogProvider):
         limit: int = 20,
         offset: int = 0,
     ) -> CatalogSearchResponse:
-        default_resp = await self._default.search(
-            query=query,
-            loader=loader,
-            game_versions=game_versions,
-            limit=limit,
-            offset=offset,
-        )
+        # Probe GeyserMC at offset 0 to learn whether its single Floodgate hit
+        # matches this query/loader -- it only surfaces the hit on the first
+        # page, but the hit belongs to every page's view of the combined total.
         geyser_resp = await self._geyser.search(
             query=query,
             loader=loader,
             game_versions=game_versions,
             limit=limit,
-            offset=offset,
+            offset=0,
         )
-        # GeyserMC returns its single Floodgate hit only on the first page and
-        # only when it matches; surface it ahead of the Modrinth hits.
+        if not geyser_resp.hits:
+            # No Floodgate hit: forward the default catalog's page unchanged.
+            return await self._default.search(
+                query=query,
+                loader=loader,
+                game_versions=game_versions,
+                limit=limit,
+                offset=offset,
+            )
+        # Floodgate occupies index 0 of the combined [Floodgate, *Modrinth]
+        # list, so the Modrinth window shifts by one and its total gains one on
+        # every page. On the first page Floodgate takes one slot; later pages
+        # are all Modrinth, read from one offset earlier.
+        if offset == 0:
+            default_resp = await self._default.search(
+                query=query,
+                loader=loader,
+                game_versions=game_versions,
+                limit=limit - 1,
+                offset=0,
+            )
+            hits = geyser_resp.hits + default_resp.hits
+        else:
+            default_resp = await self._default.search(
+                query=query,
+                loader=loader,
+                game_versions=game_versions,
+                limit=limit,
+                offset=offset - 1,
+            )
+            hits = default_resp.hits
         return CatalogSearchResponse(
-            hits=geyser_resp.hits + default_resp.hits,
-            total_hits=default_resp.total_hits + geyser_resp.total_hits,
+            hits=hits,
+            total_hits=default_resp.total_hits + 1,
             offset=offset,
             limit=limit,
         )
