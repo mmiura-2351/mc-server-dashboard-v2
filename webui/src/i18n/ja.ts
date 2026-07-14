@@ -1535,7 +1535,7 @@ export const ja: Record<TranslationKey, string> = {
     "{nouns}を管理するにはサーバーを停止してください。",
   // Bedrock companion hint (issue #1543).
   "plugins.bedrockHint.text":
-    "Bedrock 版のプレイヤーを参加させるには Floodgate も必要です。Modrinth に Spigot 版がないため、jar は以下からアップロードしてください:",
+    "Bedrock 版のプレイヤーを参加させるには Floodgate も必要です。Floodgate-Spigot はプラグインカタログからワンクリックでインストールできます。jar を手動で入れる場合は以下からダウンロードしてください:",
   "plugins.bedrockHint.link": "GeyserMC ダウンロードページ",
   "plugins.col.name": "名前",
   "plugins.col.version": "バージョン",

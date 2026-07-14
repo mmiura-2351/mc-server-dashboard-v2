@@ -339,6 +339,20 @@ lever, in the flow table itself, closes this:
   traffic (first byte `0x80`+, ACK/NAK `0xc0`/`0xa0`) is never throttled. Only
   the first byte is inspected; the relay never tracks RakNet connection state.
 
+The cap targets `0x01` because unconnected-ping is the only *amplifying* offline
+packet -- it is what elicits Geyser's larger unconnected-pong. The remaining
+offline-handshake packets are forwarded per-flow-uncapped by design: `0x05`
+(ID_OPEN_CONNECTION_REQUEST_1) is MTU-padded and therefore de-amplifying, and
+`0x07` (ID_OPEN_CONNECTION_REQUEST_2) is cookie-gated with a small reply, so
+neither is a reflection vector. On an already-established flow they also mint no
+session and allocate no new relay- or worker-side flow state -- the worker
+reuses the existing flow socket. Their aggregate is instead bounded per tunnel
+by the single UDP reader feeding the bounded send-channel with per-datagram drop
+(the decoupled pump, #1721) plus the per-IP new-flow caps above -- the same
+bound that governs the `0x80`+ connected/gameplay traffic the relay must forward
+uncapped. An attacker could flood that traffic instead for identical cost, so a
+`0x05`/`0x07`-specific cap would not lower the worst case.
+
 All of this is hygiene, not volumetric DDoS protection, matching the posture
 RELAY.md already documents for the Java listeners (Section 16 there).
 

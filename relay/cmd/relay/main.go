@@ -166,6 +166,12 @@ func run(ctx context.Context) error {
 	}
 	logger.Info("relay starting", startArgs...)
 
+	// bedrockDrained is closed once the Bedrock listener has drained its
+	// in-flight tunnel handlers, so their teardown session End events are
+	// buffered before the reporter is stopped (issue #1926). It is pre-closed
+	// when Bedrock is disabled, making the game goroutine's wait below a no-op.
+	bedrockDrained := make(chan struct{})
+
 	var wg sync.WaitGroup
 	wg.Add(4)
 	go func() { defer wg.Done(); svc.Run(svcCtx) }()
@@ -181,11 +187,23 @@ func run(ctx context.Context) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer close(bedrockDrained)
 			if err := bedrockLn.Serve(sigCtx); err != nil {
 				logger.Error("bedrock tunnel listener stopped", "error", err)
 				stop()
 			}
+
+			// The listener is closed; wait for in-flight tunnel handlers to tear
+			// down their flows and flush their promoted sessions' End events
+			// before the reporter shuts down, mirroring the Java gameLn.Drain
+			// barrier below (issue #1926). Serve returned first, so every
+			// handler was counted on the listener's WaitGroup before Drain waits.
+			if !bedrockLn.Drain(drainTimeout) {
+				logger.Warn("bedrock drain timeout; some sessions may not report End events", "timeout", drainTimeout)
+			}
 		}()
+	} else {
+		close(bedrockDrained)
 	}
 	go func() {
 		defer wg.Done()
@@ -200,6 +218,10 @@ func run(ctx context.Context) error {
 		if !gameLn.Drain(drainTimeout) {
 			logger.Warn("drain timeout; some sessions may not report End events", "timeout", drainTimeout)
 		}
+
+		// Both listeners must drain before the reporter stops, so the Bedrock
+		// listener's teardown End events are buffered too (issue #1926).
+		<-bedrockDrained
 
 		// All handles drained (or timed out); now stop the reporter so it
 		// flushes any remaining End events.
