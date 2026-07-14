@@ -183,6 +183,7 @@ class TestIsGeyserPlugin:
         *,
         mod_identifier: str | None = None,
         source_project_id: str | None = None,
+        loader_type: LoaderType = LoaderType.PLUGIN,
     ) -> ServerPlugin:
         now = dt.datetime.now(tz=dt.timezone.utc)
         return ServerPlugin(
@@ -192,7 +193,7 @@ class TestIsGeyserPlugin:
             filename="test.jar",
             display_name="Test Plugin",
             description=None,
-            loader_type=LoaderType.PLUGIN,
+            loader_type=loader_type,
             source=PluginSource.LOCAL,
             source_project_id=source_project_id,
             source_version_id=None,
@@ -218,6 +219,14 @@ class TestIsGeyserPlugin:
 
     def test_modrinth_slug_matches(self) -> None:
         assert is_geyser_plugin(self._plugin(source_project_id="geyser"))
+
+    def test_modrinth_signal_is_loader_agnostic(self) -> None:
+        # Detection is loader-independent by design (issue #1589): the one
+        # Modrinth Geyser project serves every loader, so a mod-loader install
+        # is still detected. Guards against a future "scope to Paper" regression.
+        assert is_geyser_plugin(
+            self._plugin(source_project_id="geyser", loader_type=LoaderType.MOD)
+        )
 
     def test_other_plugin_does_not_match(self) -> None:
         assert not is_geyser_plugin(

@@ -99,3 +99,11 @@ next to the Java `join_hostname` badge (see `../ui/WEBUI_SPEC.md`).
   client's join needs the two protocol versions to line up — either update
   the server or install ViaVersion on it to bridge the gap. Observed live
   against a Paper 1.21.1 server (epic #1540 issue #1542).
+- **Detection trusts jar-declared identity.** Geyser detection keys on the
+  jar's declared manifest id (`plugin.yml` `name`) or Modrinth project id
+  (`is_geyser_plugin`), so a hostile locally-uploaded jar that merely names
+  itself `Geyser-Spigot` can self-allocate a Bedrock UDP port and open a tunnel
+  to its container port whenever the deployment gate is on. Accepted without a
+  code guard: uploading any plugin already grants in-container code execution,
+  and the `relay.bedrock_enabled` gate bounds the exposure to a single inbound
+  public UDP port on the uploader's own container (issue #1589).
