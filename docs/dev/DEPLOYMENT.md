@@ -992,6 +992,33 @@ Floodgate (jar upload — no Spigot build on Modrinth, issue #1548) on a Paper
 server through the normal plugin flow is what allocates its `bedrock_port` and
 opens the tunnel on start (`docs/app/BEDROCK.md` "Activation").
 
+#### UDP receive buffer (`net.core.rmem_max`)
+
+For a Bedrock-enabled relay expecting load, raise the host's maximum UDP socket
+receive buffer. On each bound Bedrock UDP port the relay requests a 4 MiB
+receive buffer (`SO_RCVBUF`) so it can keep draining inbound RakNet datagrams
+across a transient stall in its outbound QUIC send path, instead of letting the
+kernel drop a burst for every flow on that port (issue #1721). On a default
+Linux host `net.core.rmem_max` is ~208 KiB, so the kernel silently clamps the
+4 MiB request and the enlargement has little effect — the relay logs a
+`UDP receive buffer clamped below requested size` warning when this happens
+(quic-go logs the same for the Bedrock QUIC tunnel socket). Mirroring quic-go's
+[UDP Buffer Sizes](https://github.com/quic-go/quic-go/wiki/UDP-Buffer-Sizes)
+guidance, raise the ceiling `net.core.rmem_max` (and the per-socket default
+`net.core.rmem_default`) on the relay host:
+
+```sh
+sysctl -w net.core.rmem_max=7500000
+sysctl -w net.core.rmem_default=7500000
+```
+
+Persist it across reboots with a drop-in such as
+`/etc/sysctl.d/99-mcsd-relay.conf`. This only matters for Bedrock-enabled
+relays under load: the reader/sender decoupling from #1721 already keeps one
+congested flow from stalling the others regardless of buffer size, so leaving
+`rmem_max` at its default is safe — just less resilient to inbound datagram
+bursts.
+
 #### Manual verification (real Bedrock client)
 
 The e2e suite (`make bedrock-e2e`, `.github/workflows/bedrock-e2e.yml`) covers

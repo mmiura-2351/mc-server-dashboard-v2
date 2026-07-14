@@ -48,6 +48,7 @@ from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
     NullLifecycleLock,
 )
 from mc_server_dashboard_api.servers.domain.plugin import (
+    CATALOG_SOURCES,
     PluginId,
     PluginSide,
     PluginSource,
@@ -517,7 +518,11 @@ async def _check_one(
 
 @dataclass(frozen=True)
 class CheckUpdates:
-    """Batch check for newer Modrinth versions of all Modrinth-sourced plugins."""
+    """Batch check for newer catalog versions of all catalog-sourced plugins.
+
+    Covers both Modrinth- and GeyserMC-sourced plugins (issue #1916): each
+    resolves its latest version through the routing catalog.
+    """
 
     uow: UnitOfWork
     catalog: CatalogProvider
@@ -531,7 +536,7 @@ class CheckUpdates:
         async with self.uow:
             server = await _load(self.uow, community_id, server_id)
             loader = modrinth_loader_for_server_type(server.server_type)
-            plugins = await self.uow.plugins.list_modrinth_plugins(server_id)
+            plugins = await self.uow.plugins.list_catalog_plugins(server_id)
 
         sem = asyncio.Semaphore(_CATALOG_CONCURRENCY)
         results = await asyncio.gather(
@@ -562,7 +567,9 @@ class CheckPluginUpdate:
             plugin = await self.uow.plugins.get_by_id(server_id, plugin_id)
         if plugin is None:
             raise PluginNotFoundError(str(plugin_id.value))
-        if plugin.source is not PluginSource.MODRINTH:
+        # Only a catalog-sourced plugin (Modrinth or GeyserMC) has an upstream to
+        # re-resolve; a LOCAL upload never does (issue #1916).
+        if plugin.source not in CATALOG_SOURCES:
             return PluginUpdateInfo(plugin=plugin, latest_version=None)
 
         loader = modrinth_loader_for_server_type(server.server_type)
@@ -605,7 +612,9 @@ class UpdatePlugin:
             plugin = await self.uow.plugins.get_by_id(server_id, plugin_id)
         if plugin is None:
             raise PluginNotFoundError(str(plugin_id.value))
-        if plugin.source is not PluginSource.MODRINTH:
+        # Only a catalog-sourced plugin (Modrinth or GeyserMC) can be updated in
+        # place; a LOCAL upload has no upstream version to fetch (issue #1916).
+        if plugin.source not in CATALOG_SOURCES:
             raise PluginNotFoundError(str(plugin_id.value))
 
         content_dir = content_dir_for_server_type(server.server_type)
@@ -693,7 +702,9 @@ class UpdatePlugin:
                     source_project_id=plugin.source_project_id,
                     source_version_id=version_id,
                     version_number=version.version_number,
-                    checksum_sha512=file.sha512,
+                    # GeyserMC files publish no SHA-512 (empty string); store None
+                    # so the row matches the install path (issue #1916).
+                    checksum_sha512=file.sha512 or None,
                     sha256=sha256,
                     size_bytes=len(content),
                     enabled=plugin.enabled,
@@ -749,9 +760,11 @@ class ListPluginDependencies:
         async with self.uow:
             await _load(self.uow, community_id, server_id)
             plugin = await self.uow.plugins.get_by_id(server_id, plugin_id)
-            all_plugins = await self.uow.plugins.list_modrinth_plugins(server_id)
+            all_plugins = await self.uow.plugins.list_catalog_plugins(server_id)
         if plugin is None:
             raise PluginNotFoundError(str(plugin_id.value))
+        # Dependency listing stays Modrinth-only: GeyserMC's Floodgate declares no
+        # catalog dependencies, so there is nothing to resolve for a GEYSER plugin.
         if plugin.source is not PluginSource.MODRINTH:
             return []
 
