@@ -34,6 +34,17 @@ const flowSweepInterval = 15 * time.Second
 // (connected RakNet packets, first byte 0x80+).
 const flowPingsPerSecond = 5
 
+// flowPromoteThreshold is the number of CONNECTED (RakNet FLAG_VALID, first byte
+// >= 0x80) client->worker datagrams a Bedrock flow must send before the relay
+// reports it to the API as a live player session (issue #1904). The relay never
+// parses RakNet, so a UDP flow -- not an authenticated player -- is the only
+// unit it can observe; counting only connected datagrams (never offline
+// unconnected-ping / server-scan / handshake packets, all first byte < 0x80)
+// separates a real connection -- which sends many connected datagrams within
+// ~1s -- from a client re-pinging a pinned server, which must not mint a session
+// row. It is a fixed const, not a config knob, mirroring flowPingsPerSecond.
+const flowPromoteThreshold = 5
+
 // udpReadBufferSize is sized generously above maxDatagramPayload so an
 // oversized inbound UDP datagram is read in full (and then dropped by the MTU
 // gate in pumpUDPToQueue) rather than silently truncated by a too-small buffer.
@@ -67,6 +78,8 @@ type Tunnel struct {
 	quicConn *quic.Conn
 	flows    *FlowTable
 	caps     *ipcaps.IPCaps
+	serverID string
+	sessions SessionRecorder
 	logger   *slog.Logger
 
 	// framePool recycles the flow-id-prefixed frame buffers that cross the
@@ -85,7 +98,7 @@ type Tunnel struct {
 // connection for the same server, e.g. a Worker redial racing its old QUIC
 // connection's idle timeout -- docs/app/BEDROCK_TUNNEL.md) is returned as-is
 // for the caller to treat as a handshake rejection.
-func bind(bedrockPort uint32, quicConn *quic.Conn, caps *ipcaps.IPCaps, logger *slog.Logger) (*Tunnel, error) {
+func bind(bedrockPort uint32, serverID string, quicConn *quic.Conn, caps *ipcaps.IPCaps, sessions SessionRecorder, logger *slog.Logger) (*Tunnel, error) {
 	udpConn, err := net.ListenPacket("udp", fmt.Sprintf(":%d", bedrockPort))
 	if err != nil {
 		return nil, err
@@ -98,6 +111,8 @@ func bind(bedrockPort uint32, quicConn *quic.Conn, caps *ipcaps.IPCaps, logger *
 		quicConn: quicConn,
 		flows:    NewFlowTable(flowIdleTimeout, nil),
 		caps:     caps,
+		serverID: serverID,
+		sessions: sessions,
 		logger:   logger,
 	}
 	t.framePool.New = func() any {
@@ -200,6 +215,16 @@ func (t *Tunnel) run(ctx context.Context) {
 	// socket (which unblocks pumpUDPToQueue's blocking ReadFrom).
 	t.close("tunnel closing")
 	udpDone.Wait()
+
+	// End any sessions still open when the tunnel tears down (Worker disconnect,
+	// takeover, or relay shutdown) so promoted Bedrock flows do not strand
+	// (issue #1904). The reader has stopped (udpDone), so no new promotion can
+	// race this; the sweep may still run until the deferred cancel fires, but it
+	// and DrainPromoted both go through the FlowTable under its lock and
+	// DrainPromoted clears the flag, so each session is Ended exactly once.
+	for _, sid := range t.flows.DrainPromoted() {
+		t.sessions.End(sid)
+	}
 }
 
 // close force-closes the QUIC connection and unbinds the UDP port. It is
@@ -273,7 +298,15 @@ func (t *Tunnel) pumpUDPToQueue(sendCh chan<- *[]byte) {
 			continue
 		}
 
-		id, ok := t.flows.Lookup(udpAddr)
+		// Only connected RakNet datagrams (FLAG_VALID, first byte >= 0x80) advance
+		// session promotion; offline packets (unconnected ping 0x01, pong, the
+		// connection handshake) refresh the flow but must not promote it, so a
+		// client re-pinging a pinned server from a stable source port never mints
+		// a phantom session (issue #1904). buf[0] is read here, before the frame
+		// is copied out below; the n > 0 guard keeps a zero-length datagram from
+		// indexing buf[0].
+		connected := n > 0 && buf[0] >= 0x80
+		id, ok, promote := t.flows.Lookup(udpAddr, connected)
 		if !ok {
 			ip := netutil.HostOf(udpAddr)
 			// New-flow rate cap, then the concurrent-flow cap -- both per
@@ -284,7 +317,20 @@ func (t *Tunnel) pumpUDPToQueue(sendCh chan<- *[]byte) {
 			if !t.caps.AllowJoin(ip) || !t.caps.Acquire(ip) {
 				continue
 			}
-			id = t.flows.Create(udpAddr)
+			id = t.flows.Create(udpAddr, connected)
+		}
+
+		// Promote the flow to a reported session once it crosses
+		// flowPromoteThreshold client->worker datagrams: it is a real RakNet
+		// connection, not ping/scan churn (issue #1904). The promotion decision
+		// was made under the FlowTable lock inside Lookup; Start is called here,
+		// outside that lock (it only buffers the event -- session/reporter.go),
+		// and the minted id is stored back on the flow for the matching End on
+		// eviction / teardown. The relay cannot see Floodgate identity, so the
+		// username/uuid are empty; playerIP is the client's true UDP source.
+		if promote {
+			sid := t.sessions.Start(t.serverID, "", netutil.HostOf(udpAddr), "", "")
+			t.flows.Promote(id, sid)
 		}
 
 		// Rate-limit forwarded RakNet unconnected-ping (first byte 0x01) per
@@ -349,9 +395,20 @@ func (t *Tunnel) sweepLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			for _, addr := range t.flows.Evict() {
-				t.caps.Release(netutil.HostOf(addr))
-			}
+			t.sweepOnce()
 		}
+	}
+}
+
+// sweepOnce evicts every idle flow, releasing its ipcaps slot and Ending its
+// reported session, if any (issue #1904). reporter.End is called outside the
+// FlowTable lock, matching the promotion path.
+func (t *Tunnel) sweepOnce() {
+	addrs, endedSessions := t.flows.Evict()
+	for _, addr := range addrs {
+		t.caps.Release(netutil.HostOf(addr))
+	}
+	for _, sid := range endedSessions {
+		t.sessions.End(sid)
 	}
 }

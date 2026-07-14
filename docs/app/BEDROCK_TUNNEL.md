@@ -284,6 +284,12 @@ NAT-style address<->flow-id map, one instance per bound `bedrock_port`
 - Idle entries (default 60 s, `flowIdleTimeout`) are evicted by a periodic
   sweep (`flowSweepInterval`, 15 s) tied to the tunnel's own lifetime; eviction
   also releases the entry's `ipcaps` slot (Section 8).
+- Session reporting hangs off this same flow lifecycle (issue #1904): `Lookup` /
+  `Create` count each *connected* client->worker datagram (RakNet FLAG_VALID,
+  first byte >= 0x80; offline ping/handshake packets refresh the flow but do not
+  count), and once a flow crosses `flowPromoteThreshold` (a fixed const) it is
+  reported to the API as a live session; idle eviction and tunnel teardown End
+  it. See RELAY.md Section 8 for the full semantics and the accepted caveats.
 
 There is deliberately no cross-tunnel flow table: a `Tunnel` (one per bound
 `bedrock_port`) owns its own `FlowTable` and its own `ipcaps.IPCaps` instance,
@@ -417,8 +423,15 @@ redesign.
   Section 3.1.
 - **Real-client-IP passthrough** -- deferred beyond this initial scope per
   epic #1540; Geyser and the server see the Worker's forwarder IP.
-- **Bedrock session reporting** -- the Java tunnel batches `SessionStart` /
-  `SessionEnd` to the API (RELAY.md Section 8); no analogous reporting exists
-  for Bedrock flows yet.
+- ~~**Bedrock session reporting** (issue #1904)~~ **Landed with #1904**: a
+  Bedrock flow that crosses `flowPromoteThreshold` *connected* client->worker
+  datagrams (offline ping/handshake packets do not count) is reported to the API
+  through the shared `session.Reporter` (RELAY.md Section 8), landing a
+  `game_session` row like a Java login. Identity is null
+  (the relay cannot see Floodgate username/UUID) but `player_ip` is the client's
+  true UDP source, and the promotion gate keeps unconnected-ping / scan churn
+  out of the history. Honest Java-vs-Bedrock labelling (a `SessionStart.source`
+  discriminator, which needs a proto + migration change) is the deferred
+  follow-up #1912.
 - **Metrics** -- no Prometheus metrics for flow counts, drop counts, or bind
   failures yet (RELAY.md Section 17 notes the same gap for the Java path).
