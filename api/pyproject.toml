@@ -126,6 +126,14 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.uv]
+# Security override: force setuptools past PYSEC-2026-3447 (fixed in 83.0.0).
+# setuptools is transitive (via grpcio-tools), so it is pinned here as a
+# resolution constraint rather than a direct dependency. Security fixes bypass
+# the 7-day cooldown (docs/dev/DEPENDENCIES.md Section 3 / Section 4). Advisory:
+# https://osv.dev/vulnerability/PYSEC-2026-3447.
+constraint-dependencies = ["setuptools>=83.0.0"]
+
 # The generated control-plane stubs live in the top-level `mcsd` package
 # (mirroring the proto package `mcsd.controlplane.v1`); ship both packages.
 [tool.hatch.build.targets.wheel]
