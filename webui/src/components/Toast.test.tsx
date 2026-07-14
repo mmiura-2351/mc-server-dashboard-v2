@@ -70,4 +70,20 @@ describe("Toast", () => {
 
     expect(vi.getTimerCount()).toBe(0);
   });
+
+  it("clears the auto-dismiss timer when a toast is dismissed early", () => {
+    render(
+      <ToastProvider>
+        <Harness />
+      </ToastProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "ok" }));
+    expect(vi.getTimerCount()).toBe(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });
