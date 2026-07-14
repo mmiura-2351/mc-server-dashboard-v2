@@ -317,6 +317,100 @@ func TestPumpNewFlowRateCapEnforced(t *testing.T) {
 	}
 }
 
+// TestPumpRateLimitsUnconnectedPingPerFlow proves the per-flow forward cap on
+// RakNet unconnected-ping (first byte 0x01): once a flow is established, a burst
+// of unconnected-pings from the same source within one second is forwarded at
+// most flowPingsPerSecond times. This bounds the relay's exposure as a
+// reflection/amplification source even for a single continuously-refreshed flow,
+// which the per-IP caps -- gating only new-flow creation -- do not (issue #1604).
+func TestPumpRateLimitsUnconnectedPingPerFlow(t *testing.T) {
+	server, client := quicConnPair(t)
+	// Generous ipcaps (concurrent-flow + new-flow rate) so only the per-flow
+	// unconnected-ping cap is under test.
+	caps := ipcaps.NewIPCaps(100, 100, -1, nil, nil)
+	udpAddr, stop := runTunnel(t, server, caps)
+	defer stop()
+
+	fakeClient, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenPacket: %v", err)
+	}
+	defer func() { _ = fakeClient.Close() }()
+
+	ping := []byte{0x01, 0xaa, 0xbb}
+
+	// First unconnected-ping establishes the flow and is forwarded.
+	if _, err := fakeClient.WriteTo(ping, udpAddr); err != nil {
+		t.Fatalf("WriteTo: %v", err)
+	}
+	rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer rcancel()
+	if _, err := client.ReceiveDatagram(rctx); err != nil {
+		t.Fatalf("first unconnected-ping should be forwarded: %v", err)
+	}
+	forwarded := 1
+
+	// A burst of further unconnected-pings from the SAME source within the same
+	// one-second window: the per-flow cap must gate all but flowPingsPerSecond
+	// of them (counting the first, already forwarded above).
+	const burst = 50
+	for i := 0; i < burst; i++ {
+		if _, err := fakeClient.WriteTo(ping, udpAddr); err != nil {
+			t.Fatalf("WriteTo: %v", err)
+		}
+	}
+
+	// Drain whatever the relay forwarded; count until the QUIC side goes quiet.
+	for {
+		dctx, dcancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		_, err := client.ReceiveDatagram(dctx)
+		dcancel()
+		if err != nil {
+			break
+		}
+		forwarded++
+	}
+
+	if forwarded > flowPingsPerSecond {
+		t.Errorf("forwarded %d unconnected-pings, want at most %d (per-flow cap)", forwarded, flowPingsPerSecond)
+	}
+}
+
+// TestPumpForwardsAllGameplayDatagramsPerFlow is the control for the per-flow
+// unconnected-ping cap: connected RakNet gameplay traffic (first byte 0x80+,
+// here 0x84) is not rate-limited, so a burst well above flowPingsPerSecond from
+// one flow is forwarded in full -- the cap must neuter reflection without
+// throttling gameplay (issue #1604).
+func TestPumpForwardsAllGameplayDatagramsPerFlow(t *testing.T) {
+	server, client := quicConnPair(t)
+	caps := ipcaps.NewIPCaps(100, 100, -1, nil, nil)
+	udpAddr, stop := runTunnel(t, server, caps)
+	defer stop()
+
+	fakeClient, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenPacket: %v", err)
+	}
+	defer func() { _ = fakeClient.Close() }()
+
+	// Well above the unconnected-ping cap, all from the same flow. Send and
+	// receive one at a time: connected packets carry no rate window, so this is
+	// deterministic regardless of timing.
+	const burst = 4 * flowPingsPerSecond
+	gameplay := []byte{0x84, 0x00, 0x01}
+	for i := 0; i < burst; i++ {
+		if _, err := fakeClient.WriteTo(gameplay, udpAddr); err != nil {
+			t.Fatalf("WriteTo: %v", err)
+		}
+		rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_, err := client.ReceiveDatagram(rctx)
+		rcancel()
+		if err != nil {
+			t.Fatalf("gameplay datagram %d/%d should be forwarded, not rate-limited: %v", i+1, burst, err)
+		}
+	}
+}
+
 // TestFlowEvictionRacesPumps drives flow eviction concurrently with the
 // datagram pumps so the race detector actually covers Evict against
 // Lookup/Create/AddrByID -- the production sweep fires only every

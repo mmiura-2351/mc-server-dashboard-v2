@@ -31,6 +31,15 @@ type flowEntry struct {
 	id       uint32
 	addr     *net.UDPAddr
 	lastSeen time.Time
+
+	// pingWindowStart / pingCount rate-limit forwarded RakNet unconnected-pings
+	// on this flow within a fixed one-second window (AllowPing), mirroring the
+	// per-IP rate window in relay/internal/ipcaps. This bounds the relay's
+	// reflection/amplification exposure on a single continuously-refreshed flow
+	// (issue #1604), which the per-IP caps -- gating only new-flow creation --
+	// do not.
+	pingWindowStart time.Time
+	pingCount       uint32
 }
 
 // NewFlowTable builds a table whose entries are evicted once idle for idleTTL.
@@ -77,6 +86,32 @@ func (t *FlowTable) Create(addr *net.UDPAddr) uint32 {
 	t.byAddr[addr.String()] = e
 	t.byID[id] = e
 	return id
+}
+
+// AllowPing reports whether a RakNet unconnected-ping on flow id may be
+// forwarded under a fixed one-second window (flowPingsPerSecond), counting this
+// attempt. It returns false for an unknown id. This caps the relay's
+// reflection/amplification exposure on a single continuously-refreshed flow --
+// which the per-IP caps, gating only new-flow creation, do not bound (issue
+// #1604). The window mirrors ipcaps.AllowJoin's per-IP rate window.
+func (t *FlowTable) AllowPing(id uint32) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	e, ok := t.byID[id]
+	if !ok {
+		return false
+	}
+	now := t.now()
+	if now.Sub(e.pingWindowStart) >= time.Second {
+		e.pingWindowStart = now
+		e.pingCount = 1
+		return true
+	}
+	if e.pingCount >= flowPingsPerSecond {
+		return false
+	}
+	e.pingCount++
+	return true
 }
 
 // AddrByID returns the source address for a flow id and refreshes its idle

@@ -293,23 +293,48 @@ are freed together when the tunnel unbinds.
 ## 8. Abuse protection
 
 A public UDP port with no per-packet authentication invites RakNet
-unconnected-ping amplification/spam (an attacker who spoofs a victim's source
-IP can make the relay reply toward that victim). The relay reuses
-`relay/internal/ipcaps` -- the same per-IP hygiene package the Java game and
-tunnel listeners already use -- applied per bound `bedrock_port`:
+unconnected-ping amplification/spam: an attacker who spoofs a victim's source
+IP can make the relay reflect Geyser's larger unconnected-pong replies toward
+that victim. Two kinds of lever apply -- per-IP caps bound flow *churn* (how
+fast new flows appear), and a per-flow cap bounds *sustained* reflection on an
+already-established flow.
+
+The relay reuses `relay/internal/ipcaps` -- the same per-IP hygiene package the
+Java game and tunnel listeners already use -- applied per bound `bedrock_port`:
 
 - **New-flow rate cap** (`AllowJoin`): bounds how many *new* distinct clients
-  (by source address) one source IP may start per second. Checked once, when a
-  UDP datagram arrives from an address with no existing flow.
+  (by source address) one source IP may start per second -- i.e. flow *churn*.
+  Checked once, when a UDP datagram arrives from an address with no existing
+  flow. It does **not** bound traffic on an already-established flow: a single
+  continuously-refreshed flow (e.g. one spoofed victim endpoint) passes this
+  check once and is never re-checked by it.
 - **Concurrent-flow cap** (`Acquire` / `Release`): bounds how many flows one
   source IP may hold at once on a bound port. `Acquire` is called alongside the
   rate check when a flow is created; `Release` is called when the flow table's
   sweep evicts an idle flow.
 
 Both caps are per source **IP** (not `ip:port`), matching how `ipcaps` already
-treats the Java listeners, and both are configurable (Section 9). This is
-hygiene, not volumetric DDoS protection, matching the posture RELAY.md already
-documents for the Java listeners (Section 16 there).
+treats the Java listeners, and both are configurable (Section 9).
+
+Because those caps bound only churn, a single established flow would otherwise
+reflect Geyser's amplifying unconnected-pong replies at line rate. A third
+lever, in the flow table itself, closes this:
+
+- **Per-flow unconnected-ping rate cap** (`FlowTable.AllowPing`,
+  `flowPingsPerSecond`, a fixed const at 5/s -- not configurable): on the
+  ingress/forward direction the relay forwards at most `flowPingsPerSecond`
+  RakNet unconnected-pings (first byte `0x01`) per flow per second, counting
+  each attempt. This bounds reflection/amplification exposure even for a single
+  continuously-refreshed flow. Capping the forwarded ping transitively bounds
+  Geyser's pong (Geyser emits an unconnected-pong only in response to a ping)
+  and also saves relay-to-worker QUIC bandwidth and worker CPU. It is a *rate*
+  limit, not a refusal -- legitimate clients send a few unconnected-pings for
+  the server-list MOTD -- and it targets `0x01` only, so connected gameplay
+  traffic (first byte `0x80`+, ACK/NAK `0xc0`/`0xa0`) is never throttled. Only
+  the first byte is inspected; the relay never tracks RakNet connection state.
+
+All of this is hygiene, not volumetric DDoS protection, matching the posture
+RELAY.md already documents for the Java listeners (Section 16 there).
 
 The **QUIC tunnel listener itself** carries a separate per-IP cap on
 concurrent unauthenticated handshake windows
