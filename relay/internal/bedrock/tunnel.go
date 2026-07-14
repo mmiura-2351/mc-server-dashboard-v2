@@ -23,6 +23,16 @@ const flowIdleTimeout = 60 * time.Second
 // flowSweepInterval is how often a Tunnel checks for idle flows to evict.
 const flowSweepInterval = 15 * time.Second
 
+// flowPingsPerSecond caps how many RakNet unconnected-pings (first byte 0x01)
+// the relay forwards per flow per second (FlowTable.AllowPing). It is a fixed
+// const, not a config knob: legitimate Bedrock clients send only a few
+// unconnected-pings for the server-list MOTD, far below this, while a
+// reflection source must sustain them -- so the cap bounds the relay's
+// amplification exposure for a single continuously-refreshed spoofed-victim
+// flow (issue #1604) without breaking the ping/MOTD or touching gameplay
+// (connected RakNet packets, first byte 0x80+).
+const flowPingsPerSecond = 5
+
 // udpReadBufferSize is sized generously above maxDatagramPayload so an
 // oversized inbound UDP datagram is read in full (and then dropped by the MTU
 // gate in pumpUDPToQUIC) rather than silently truncated by a too-small buffer.
@@ -185,6 +195,16 @@ func (t *Tunnel) pumpUDPToQUIC() {
 				continue
 			}
 			id = t.flows.Create(udpAddr)
+		}
+
+		// Rate-limit forwarded RakNet unconnected-ping (first byte 0x01) per
+		// flow so a single continuously-refreshed flow cannot drive Geyser's
+		// amplifying unconnected-pong replies at line rate, turning the relay
+		// into a reflection source (issue #1604). Only buf[0] is inspected --
+		// the relay never parses RakNet beyond the first byte; the n > 0 guard
+		// keeps a zero-length datagram from indexing buf[0].
+		if n > 0 && buf[0] == 0x01 && !t.flows.AllowPing(id) {
+			continue
 		}
 
 		frame := make([]byte, FlowIDSize+n)
