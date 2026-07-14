@@ -411,6 +411,82 @@ func TestPumpForwardsAllGameplayDatagramsPerFlow(t *testing.T) {
 	}
 }
 
+// TestReaderDoesNotStallWhenSendQueueFull proves the ingress fix (issue #1721):
+// the UDP reader must never block on the relay->Worker QUIC send path. It drives
+// the reader with a tiny, undrained send channel -- modelling a fully congested
+// or blocked sender (the guardrail's "channel full" case) -- and datagrams from
+// many distinct source flows. Because the reader creates each flow before the
+// non-blocking enqueue and drops (never blocks) when the channel is full, every
+// flow is still read and registered even though only a handful of frames fit the
+// queue. A synchronous send in the read loop, by contrast, would wedge on the
+// first frame and starve every later flow's ingress.
+func TestReaderDoesNotStallWhenSendQueueFull(t *testing.T) {
+	server, _ := quicConnPair(t)
+	// Disable the per-IP caps so many distinct 127.0.0.1 source ports (one flow
+	// each) are admitted; only the reader's non-blocking behaviour is under test.
+	caps := ipcaps.NewIPCaps(0, 0, 0, nil, nil)
+	tun, err := bind(0, server, caps, testLogger())
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	bound, ok := tun.Addr().(*net.UDPAddr)
+	if !ok {
+		t.Fatalf("Addr() = %T, want *net.UDPAddr", tun.Addr())
+	}
+	dialAddr := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: bound.Port}
+
+	// A tiny channel that nothing drains: after a few frames it is permanently
+	// full, so every subsequent enqueue must take the drop path.
+	sendCh := make(chan *[]byte, 4)
+	readerDone := make(chan struct{})
+	go func() {
+		tun.pumpUDPToQueue(sendCh)
+		close(readerDone)
+	}()
+
+	const flows = 50
+	sources := make([]net.PacketConn, flows)
+	for i := range sources {
+		c, err := net.ListenPacket("udp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("ListenPacket: %v", err)
+		}
+		defer func() { _ = c.Close() }()
+		sources[i] = c
+	}
+
+	// Resend from every source until all flows are registered or we time out.
+	// Resends from an already-registered source only refresh its flow (a Lookup
+	// hit), so the count converges on the number of distinct sources; loopback
+	// UDP loss (rare) is absorbed by the retry.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		for _, src := range sources {
+			// First byte 0x84 (connected gameplay), not 0x01, so the per-flow
+			// ping cap does not interfere with flow registration.
+			if _, err := src.WriteTo([]byte{0x84, 0x00}, dialAddr); err != nil {
+				t.Fatalf("WriteTo: %v", err)
+			}
+		}
+		if tun.flows.Len() == flows || !time.Now().Before(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if got := tun.flows.Len(); got != flows {
+		t.Fatalf("reader registered %d flows, want %d -- the read loop stalled on the full send queue", got, flows)
+	}
+
+	// Stop the reader: closing the socket unblocks its ReadFrom.
+	tun.unbind()
+	select {
+	case <-readerDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("pumpUDPToQueue did not return after the socket was closed")
+	}
+}
+
 // TestFlowEvictionRacesPumps drives flow eviction concurrently with the
 // datagram pumps so the race detector actually covers Evict against
 // Lookup/Create/AddrByID -- the production sweep fires only every

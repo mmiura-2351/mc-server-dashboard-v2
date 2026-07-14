@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -35,8 +36,26 @@ const flowPingsPerSecond = 5
 
 // udpReadBufferSize is sized generously above maxDatagramPayload so an
 // oversized inbound UDP datagram is read in full (and then dropped by the MTU
-// gate in pumpUDPToQUIC) rather than silently truncated by a too-small buffer.
+// gate in pumpUDPToQueue) rather than silently truncated by a too-small buffer.
 const udpReadBufferSize = 2048
+
+// udpRecvBufferBytes is the socket receive buffer (SO_RCVBUF) the relay requests
+// for each bound Bedrock port. The default socket buffer (~208 KiB) holds only a
+// couple hundred max-size datagrams, so a brief stall in the relay->Worker QUIC
+// send path lets the kernel drop inbound datagrams for every flow on the port
+// (issue #1721). A few MiB gives the reader headroom to keep draining the socket
+// across a transient stall. The OS may clamp this to its own maximum
+// (net.core.rmem_max on Linux); setUDPRecvBuffer logs but does not fail then.
+const udpRecvBufferBytes = 4 << 20 // 4 MiB
+
+// sendQueueDepth bounds the buffered channel that decouples the UDP reader
+// (pumpUDPToQueue) from the QUIC sender (pumpQueueToQUIC). A congested tunnel
+// backs the channel up to this depth and then the reader drops -- explicitly and
+// per-datagram -- instead of blocking, so one congested flow cannot stall the
+// shared reader for every other flow on the port (issue #1721). A single shared
+// queue is sufficient: the QUIC connection is one serialization point anyway,
+// and the per-flow ping cap (issue #1604) already bounds the amplifying ping.
+const sendQueueDepth = 1024
 
 // Tunnel is one bound Bedrock server: a public UDP port mapped to a Worker's
 // authenticated QUIC connection, with a per-client flow table and per-IP abuse
@@ -49,6 +68,14 @@ type Tunnel struct {
 	flows    *FlowTable
 	caps     *ipcaps.IPCaps
 	logger   *slog.Logger
+
+	// framePool recycles the flow-id-prefixed frame buffers that cross the
+	// reader->sender channel, removing the per-datagram allocation on the ingress
+	// hot path. Each buffer holds one full-size frame (FlowIDSize + a max-size
+	// payload); the reader gets one, and the sender returns it after
+	// SendDatagram (which copies the payload synchronously) returns, or the
+	// reader returns it directly on the drop path (issue #1721).
+	framePool sync.Pool
 
 	closeOnce sync.Once
 }
@@ -63,13 +90,61 @@ func bind(bedrockPort uint32, quicConn *quic.Conn, caps *ipcaps.IPCaps, logger *
 	if err != nil {
 		return nil, err
 	}
-	return &Tunnel{
+	if uc, ok := udpConn.(*net.UDPConn); ok {
+		setUDPRecvBuffer(uc, logger)
+	}
+	t := &Tunnel{
 		udpConn:  udpConn,
 		quicConn: quicConn,
 		flows:    NewFlowTable(flowIdleTimeout, nil),
 		caps:     caps,
 		logger:   logger,
-	}, nil
+	}
+	t.framePool.New = func() any {
+		b := make([]byte, FlowIDSize+maxDatagramPayload)
+		return &b
+	}
+	return t, nil
+}
+
+// setUDPRecvBuffer enlarges the socket receive buffer to udpRecvBufferBytes so
+// the reader has kernel headroom to keep draining inbound datagrams across a
+// transient stall in the QUIC send path (issue #1721). Failure is not fatal: if
+// SetReadBuffer errors, or the OS clamped the request below what we asked for
+// (net.core.rmem_max on Linux), we log and carry on with whatever the kernel
+// granted. The read-back value is the kernel's doubled bookkeeping size on
+// Linux, so a smaller-than-requested read-back reliably flags a genuine clamp.
+func setUDPRecvBuffer(conn *net.UDPConn, logger *slog.Logger) {
+	if err := conn.SetReadBuffer(udpRecvBufferBytes); err != nil {
+		logger.Warn("bedrock: could not enlarge UDP receive buffer", "want", udpRecvBufferBytes, "error", err)
+		return
+	}
+	effective, err := readUDPRecvBuffer(conn)
+	if err != nil {
+		// Best-effort diagnostics only: SetReadBuffer above already succeeded.
+		return
+	}
+	if effective < udpRecvBufferBytes {
+		logger.Warn("bedrock: UDP receive buffer clamped below requested size",
+			"want", udpRecvBufferBytes, "effective", effective)
+	}
+}
+
+// readUDPRecvBuffer queries the socket's effective receive buffer size
+// (SO_RCVBUF) so setUDPRecvBuffer can detect an OS clamp.
+func readUDPRecvBuffer(conn *net.UDPConn) (int, error) {
+	raw, err := conn.SyscallConn()
+	if err != nil {
+		return 0, err
+	}
+	var size int
+	var sockErr error
+	if err := raw.Control(func(fd uintptr) {
+		size, sockErr = syscall.GetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF)
+	}); err != nil {
+		return 0, err
+	}
+	return size, sockErr
 }
 
 // Addr returns the bound public UDP address (test/diagnostic use).
@@ -95,11 +170,22 @@ func (t *Tunnel) run(ctx context.Context) {
 
 	go t.sweepLoop(runCtx)
 
+	// Ingress is split across two goroutines joined by a bounded channel so the
+	// UDP reader never blocks on the QUIC send path (issue #1721): the reader
+	// drains the socket and enqueues, the sender drains the channel into the
+	// QUIC connection. The reader closes sendCh on return so the sender then
+	// drains what is left and exits.
+	sendCh := make(chan *[]byte, sendQueueDepth)
 	var udpDone sync.WaitGroup
-	udpDone.Add(1)
+	udpDone.Add(2)
 	go func() {
 		defer udpDone.Done()
-		t.pumpUDPToQUIC()
+		defer close(sendCh)
+		t.pumpUDPToQueue(sendCh)
+	}()
+	go func() {
+		defer udpDone.Done()
+		t.pumpQueueToQUIC(sendCh)
 	}()
 
 	// Blocks until runCtx is cancelled, ReceiveDatagram reports the
@@ -111,7 +197,7 @@ func (t *Tunnel) run(ctx context.Context) {
 	// tunnel concurrently, this is a no-op; otherwise it is this tunnel's own
 	// natural teardown, closing the QUIC connection (visible to the Worker
 	// immediately rather than waiting out its idle timeout) and the UDP
-	// socket (which unblocks pumpUDPToQUIC's blocking ReadFrom).
+	// socket (which unblocks pumpUDPToQueue's blocking ReadFrom).
 	t.close("tunnel closing")
 	udpDone.Wait()
 }
@@ -160,11 +246,15 @@ func (t *Tunnel) pumpQUICToUDP(ctx context.Context) {
 	}
 }
 
-// pumpUDPToQUIC reads RakNet datagrams from Bedrock clients on the bound
-// public UDP port, assigns/reuses a flow id per source address, and forwards
-// them to the Worker as QUIC DATAGRAM frames. It returns once the UDP socket
-// is closed (unbind, called after pumpQUICToUDP ends).
-func (t *Tunnel) pumpUDPToQUIC() {
+// pumpUDPToQueue reads RakNet datagrams from Bedrock clients on the bound public
+// UDP port, assigns/reuses a flow id per source address, applies the ingress
+// admission checks, and hands each flow-id-prefixed frame to the sender via
+// sendCh. It never blocks on the QUIC send path: when sendCh is full (a
+// congested tunnel), it drops the datagram explicitly rather than stalling, so
+// one congested flow cannot starve the shared reader for every other flow on the
+// port (issue #1721). It returns once the UDP socket is closed (unbind, called
+// after pumpQUICToUDP ends).
+func (t *Tunnel) pumpUDPToQueue(sendCh chan<- *[]byte) {
 	buf := make([]byte, udpReadBufferSize)
 	for {
 		n, addr, err := t.udpConn.ReadFrom(buf)
@@ -200,19 +290,52 @@ func (t *Tunnel) pumpUDPToQUIC() {
 		// Rate-limit forwarded RakNet unconnected-ping (first byte 0x01) per
 		// flow so a single continuously-refreshed flow cannot drive Geyser's
 		// amplifying unconnected-pong replies at line rate, turning the relay
-		// into a reflection source (issue #1604). Only buf[0] is inspected --
-		// the relay never parses RakNet beyond the first byte; the n > 0 guard
-		// keeps a zero-length datagram from indexing buf[0].
+		// into a reflection source (issue #1604). This stays on the ingress side,
+		// before the enqueue, so ping-flood drops never consume a channel slot.
+		// Only buf[0] is inspected -- the relay never parses RakNet beyond the
+		// first byte; the n > 0 guard keeps a zero-length datagram from indexing
+		// buf[0]. buf[0] is read here, before the frame is copied out below, so a
+		// later read cannot overwrite it first.
 		if n > 0 && buf[0] == 0x01 && !t.flows.AllowPing(id) {
 			continue
 		}
 
-		frame := make([]byte, FlowIDSize+n)
+		// Copy the frame out of the shared read buffer into a pooled buffer so it
+		// can cross to the sender without sharing mutable state with the next
+		// read.
+		bufp := t.framePool.Get().(*[]byte)
+		frame := (*bufp)[:FlowIDSize+n]
 		binary.BigEndian.PutUint32(frame[:FlowIDSize], id)
 		copy(frame[FlowIDSize:], buf[:n])
-		if err := t.quicConn.SendDatagram(frame); err != nil {
+		*bufp = frame
+		select {
+		case sendCh <- bufp:
+		default:
+			// Single, per-datagram drop site: the tunnel is congestion-limited
+			// or in loss recovery and the send queue is full. Dropping here
+			// (rather than blocking the reader) is what keeps one congested flow
+			// from stalling ingress for every flow on the port (issue #1721). A
+			// drop-count metric hangs off exactly this point (issue #1909).
+			*bufp = (*bufp)[:cap(*bufp)]
+			t.framePool.Put(bufp)
+		}
+	}
+}
+
+// pumpQueueToQUIC drains the frames pumpUDPToQueue enqueues and forwards each to
+// the Worker as a QUIC DATAGRAM frame. It runs in its own goroutine so a stalled
+// SendDatagram (a congestion-limited or loss-recovering tunnel) backs pressure up
+// through the channel to the reader's drop path instead of blocking the reader
+// itself. It returns once sendCh is closed (the reader has stopped).
+func (t *Tunnel) pumpQueueToQUIC(sendCh <-chan *[]byte) {
+	for bufp := range sendCh {
+		if err := t.quicConn.SendDatagram(*bufp); err != nil {
 			t.logger.Debug("bedrock: SendDatagram failed", "error", err)
 		}
+		// SendDatagram copied the payload synchronously, so the buffer is free to
+		// recycle for the next read.
+		*bufp = (*bufp)[:cap(*bufp)]
+		t.framePool.Put(bufp)
 	}
 }
 
