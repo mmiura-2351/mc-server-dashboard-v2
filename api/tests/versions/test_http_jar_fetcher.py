@@ -77,3 +77,28 @@ async def test_private_ip_is_download_error(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(ssrf_guard, "_resolve_host", lambda _host: ["10.0.0.1"])
     with pytest.raises(JarDownloadError, match="private"):
         await HttpxJarFetcher().fetch(_URL)
+
+
+@pytest.mark.asyncio
+async def test_does_not_follow_redirect(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 3xx redirect is surfaced, never transparently followed (#1903).
+
+    Pins the SSRF no-redirect invariant independently of the httpx2 default: the
+    redirect target must never be streamed. A future httpx2 default flip or an
+    accidental ``follow_redirects=True`` would issue a second request to the
+    ``Location`` target through the same transport, which the handler would see.
+    """
+
+    requested: list[str] = []
+    redirect_target = "https://redirect-target.test/internal"
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requested.append(str(request.url))
+        if str(request.url) == _URL:
+            return httpx2.Response(302, headers={"Location": redirect_target})
+        return httpx2.Response(200, content=b"PK\x03\x04 redirect target jar")
+
+    _install_transport(monkeypatch, handler)
+    with pytest.raises(JarDownloadError):
+        await HttpxJarFetcher().fetch(_URL)
+    assert requested == [_URL]
