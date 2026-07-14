@@ -56,6 +56,16 @@ type Validator interface {
 	ValidateBedrockTunnel(ctx context.Context, serverID string, bedrockPort uint32, token string) (bool, error)
 }
 
+// SessionRecorder records Bedrock flow sessions to the API, mirroring the Java
+// game listener's SessionRecorder (relay/internal/game). A flow is reported once
+// it crosses flowPromoteThreshold client->worker datagrams (issue #1904); the
+// relay cannot see Floodgate identity, so username/uuid are empty and only
+// player_ip (the true UDP source) is populated. *session.Reporter satisfies it.
+type SessionRecorder interface {
+	Start(serverID, slug, playerIP, username, playerUUID string) string
+	End(id string)
+}
+
 // Listener accepts Worker QUIC dial-outs, authenticates each one via the
 // TunnelHello/TunnelHelloAck handshake, and on acceptance binds a per-server
 // Tunnel (docs/app/BEDROCK_TUNNEL.md).
@@ -64,6 +74,7 @@ type Listener struct {
 	validator Validator
 	caps      *ipcaps.IPCaps
 	newIPCaps func() *ipcaps.IPCaps
+	sessions  SessionRecorder
 	logger    *slog.Logger
 
 	// handshakeDeadline bounds each phase of a dial-out's pre-auth window
@@ -90,14 +101,15 @@ type Listener struct {
 // IP (the #968 posture the TCP tunnel listener already has; only its
 // connection cap is used). newIPCaps builds a fresh per-server IPCaps for each
 // accepted Tunnel (the public UDP ingress hygiene caps); its lifetime matches
-// the Tunnel's.
-func NewListener(addr string, tlsConf *tls.Config, validator Validator, caps *ipcaps.IPCaps, newIPCaps func() *ipcaps.IPCaps, logger *slog.Logger) (*Listener, error) {
+// the Tunnel's. sessions records promoted Bedrock flows as game_session rows
+// (issue #1904); it is the same reporter the Java game listener uses.
+func NewListener(addr string, tlsConf *tls.Config, validator Validator, caps *ipcaps.IPCaps, newIPCaps func() *ipcaps.IPCaps, sessions SessionRecorder, logger *slog.Logger) (*Listener, error) {
 	quicConf := &quic.Config{EnableDatagrams: true, MaxIdleTimeout: maxIdleTimeout}
 	ln, err := quic.ListenAddr(addr, tlsConf, quicConf)
 	if err != nil {
 		return nil, err
 	}
-	return &Listener{ln: ln, validator: validator, caps: caps, newIPCaps: newIPCaps, logger: logger, handshakeDeadline: handshakeDeadline, tunnels: make(map[uint32]*Tunnel)}, nil
+	return &Listener{ln: ln, validator: validator, caps: caps, newIPCaps: newIPCaps, sessions: sessions, logger: logger, handshakeDeadline: handshakeDeadline, tunnels: make(map[uint32]*Tunnel)}, nil
 }
 
 // Addr returns the listener's bound address.
@@ -192,7 +204,7 @@ func (l *Listener) handshake(ctx context.Context, conn *quic.Conn) (*Tunnel, *be
 		return nil, nil
 	}
 
-	tun, err := l.bindOrTakeover(hello.GetBedrockPort(), conn, l.newIPCaps())
+	tun, err := l.bindOrTakeover(hello.GetBedrockPort(), hello.GetServerId(), conn, l.newIPCaps())
 	if err != nil {
 		l.logger.Warn("bedrock: bind failed", "bedrock_port", hello.GetBedrockPort(), "error", err)
 		l.reject(conn, stream, "bind failed")
@@ -221,7 +233,7 @@ func (l *Listener) handshake(ctx context.Context, conn *quic.Conn) (*Tunnel, *be
 // once. The second blocks on l.mu, then when it proceeds it sees the first's
 // tunnel as the current occupant and displaces it in turn -- one takeover
 // after another, never both binding the port simultaneously.
-func (l *Listener) bindOrTakeover(bedrockPort uint32, conn *quic.Conn, caps *ipcaps.IPCaps) (*Tunnel, error) {
+func (l *Listener) bindOrTakeover(bedrockPort uint32, serverID string, conn *quic.Conn, caps *ipcaps.IPCaps) (*Tunnel, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -239,7 +251,7 @@ func (l *Listener) bindOrTakeover(bedrockPort uint32, conn *quic.Conn, caps *ipc
 		displaced = true
 	}
 
-	tun, err := bind(bedrockPort, conn, caps, l.logger)
+	tun, err := bind(bedrockPort, serverID, conn, caps, l.sessions, l.logger)
 	if err != nil {
 		delete(l.tunnels, bedrockPort)
 		return nil, err

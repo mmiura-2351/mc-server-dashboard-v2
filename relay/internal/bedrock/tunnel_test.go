@@ -29,7 +29,14 @@ func testLogger() *slog.Logger {
 // for run() to return.
 func runTunnel(t *testing.T, server *quic.Conn, caps *ipcaps.IPCaps) (*net.UDPAddr, func()) {
 	t.Helper()
-	tun, err := bind(0, server, caps, testLogger())
+	return runTunnelRec(t, server, caps, testServerID, noopRecorder{})
+}
+
+// runTunnelRec is runTunnel with an explicit server id and session recorder, for
+// the session-reporting tests (issue #1904).
+func runTunnelRec(t *testing.T, server *quic.Conn, caps *ipcaps.IPCaps, serverID string, sessions SessionRecorder) (*net.UDPAddr, func()) {
+	t.Helper()
+	tun, err := bind(0, serverID, server, caps, sessions, testLogger())
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
@@ -92,7 +99,7 @@ func TestTunnelCloseUnblocksRunAndFreesPort(t *testing.T) {
 	server, client := quicConnPair(t)
 	caps := ipcaps.NewIPCaps(0, 0, 0, nil, nil)
 
-	tun, err := bind(0, server, caps, testLogger())
+	tun, err := bind(0, testServerID, server, caps, noopRecorder{}, testLogger())
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
@@ -425,7 +432,7 @@ func TestReaderDoesNotStallWhenSendQueueFull(t *testing.T) {
 	// Disable the per-IP caps so many distinct 127.0.0.1 source ports (one flow
 	// each) are admitted; only the reader's non-blocking behaviour is under test.
 	caps := ipcaps.NewIPCaps(0, 0, 0, nil, nil)
-	tun, err := bind(0, server, caps, testLogger())
+	tun, err := bind(0, testServerID, server, caps, noopRecorder{}, testLogger())
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
@@ -494,7 +501,7 @@ func TestReaderDoesNotStallWhenSendQueueFull(t *testing.T) {
 func TestFlowEvictionRacesPumps(t *testing.T) {
 	server, client := quicConnPair(t)
 	caps := ipcaps.NewIPCaps(100, 0, -1, nil, nil)
-	tun, err := bind(0, server, caps, testLogger())
+	tun, err := bind(0, testServerID, server, caps, noopRecorder{}, testLogger())
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
@@ -523,7 +530,8 @@ func TestFlowEvictionRacesPumps(t *testing.T) {
 	go func() {
 		defer evictDone.Done()
 		for evictCtx.Err() == nil {
-			for _, addr := range tun.flows.Evict() {
+			addrs, _ := tun.flows.Evict()
+			for _, addr := range addrs {
 				caps.Release(netutil.HostOf(addr))
 			}
 		}

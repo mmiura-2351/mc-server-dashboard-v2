@@ -94,6 +94,14 @@ func (v stubValidator) ValidateBedrockTunnel(_ context.Context, serverID string,
 	return valid, nil
 }
 
+// noopSessionRecorder stands in for the API session reporter (issue #1904): this
+// suite drives the wire path, not session reporting, so promoted flows are
+// recorded nowhere.
+type noopSessionRecorder struct{}
+
+func (noopSessionRecorder) Start(_, _, _, _, _ string) string { return "" }
+func (noopSessionRecorder) End(_ string)                      {}
+
 // TestServeBedrockTunnelForE2E runs the real Bedrock tunnel listener until
 // MCD_BEDROCK_E2E_STOP_FILE appears or bedrockE2EMaxServe elapses, whichever is
 // first. scripts/run_bedrock_e2e.sh runs this in the background, waits for the
@@ -124,7 +132,7 @@ func TestServeBedrockTunnelForE2E(t *testing.T) {
 	preAuthCaps := ipcaps.NewIPCaps(0, 0, 0, nil, logger)
 	newIPCaps := func() *ipcaps.IPCaps { return ipcaps.NewIPCaps(0, 0, 0, nil, logger) }
 
-	ln, err := bedrock.NewListener(addr, tlsConf, stubValidator{bedrockPort: bedrockE2EPort(t)}, preAuthCaps, newIPCaps, logger)
+	ln, err := bedrock.NewListener(addr, tlsConf, stubValidator{bedrockPort: bedrockE2EPort(t)}, preAuthCaps, newIPCaps, noopSessionRecorder{}, logger)
 	if err != nil {
 		t.Fatalf("bedrock.NewListener(%q): %v", addr, err)
 	}

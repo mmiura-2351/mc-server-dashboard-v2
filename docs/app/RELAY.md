@@ -389,6 +389,19 @@ auth seconds later, so a session of meaningful duration implies a verified
 identity; the docs and UI should still label the column "claimed identity"
 honestly.
 
+**Bedrock flows** (issue #1904) are reported through the same `ReportSessions`
+path and `session.Reporter`, but the unit is a UDP flow, not an authenticated
+login: the relay never parses RakNet, so a flow becomes a session only once it
+crosses a client→worker datagram threshold (`flowPromoteThreshold`,
+`docs/app/BEDROCK_TUNNEL.md` Section 7), which keeps unconnected-ping /
+server-scan churn out of the history. Two caveats are inherent to a thin UDP
+forwarder and accepted: `player_uuid` / `username` are null (Floodgate identity
+is Geyser-side, invisible to the relay) while `player_ip` is the client's true
+UDP source; and `started_at` is the promotion time (~≤1 s after connect) while
+`ended_at` lags the true disconnect by up to `flowIdleTimeout` (60 s, the
+idle-eviction window). Honest Java-vs-Bedrock labelling is a deferred follow-up
+(#1912, which needs a proto + migration change).
+
 **Access control** (owner decision): a new permission **`session:read`**,
 granted to the seeded Owner role by default (DATABASE.md role seeding). The
 sessions endpoint (Section 15) requires it; members with only `server:read`
