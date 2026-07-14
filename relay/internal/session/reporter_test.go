@@ -3,13 +3,19 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/adapters/apiclient"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/metrics"
 )
 
 type fakeReportClient struct {
@@ -42,7 +48,7 @@ func discardLogger() *slog.Logger {
 }
 
 func TestReporterStartEndTracksActive(t *testing.T) {
-	r := NewReporter(&fakeReportClient{}, discardLogger(), func() time.Time { return time.Unix(0, 0) })
+	r := NewReporter(&fakeReportClient{}, discardLogger(), func() time.Time { return time.Unix(0, 0) }, nil)
 
 	id := r.Start("srv", "amber", "1.2.3.4", "Steve", "uuid")
 	if got := r.ActiveSessionIDs(); len(got) != 1 || got[0] != id {
@@ -56,7 +62,7 @@ func TestReporterStartEndTracksActive(t *testing.T) {
 
 func TestReporterFlushDeliversBatch(t *testing.T) {
 	fake := &fakeReportClient{}
-	r := NewReporter(fake, discardLogger(), nil)
+	r := NewReporter(fake, discardLogger(), nil, nil)
 	id := r.Start("srv", "amber", "1.2.3.4", "Steve", "")
 	r.End(id)
 
@@ -69,7 +75,7 @@ func TestReporterFlushDeliversBatch(t *testing.T) {
 
 func TestReporterRetriesOnError(t *testing.T) {
 	fake := &fakeReportClient{failN: 1}
-	r := NewReporter(fake, discardLogger(), nil)
+	r := NewReporter(fake, discardLogger(), nil, nil)
 	r.Start("srv", "amber", "1.2.3.4", "Steve", "")
 
 	// First flush fails; events are restored.
@@ -90,7 +96,7 @@ func TestReporterRetriesOnError(t *testing.T) {
 func TestReporterRetryBufferBounded(t *testing.T) {
 	// Always-failing client so events are restored on every flush.
 	fake := &fakeReportClient{failN: 1 << 30}
-	r := NewReporter(fake, discardLogger(), nil)
+	r := NewReporter(fake, discardLogger(), nil, nil)
 
 	// Buffer more starts than the cap, flushing between batches so capOldest runs
 	// on the restore path.
@@ -128,6 +134,37 @@ func TestCapOldestDropsFront(t *testing.T) {
 	}
 }
 
+// TestReporterFlushFailureIncrementsMetric asserts a failed ReportSessions flush
+// increments relay_session_report_flush_failures_total, and a successful flush
+// leaves it untouched.
+func TestReporterFlushFailureIncrementsMetric(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := metrics.New(reg, "test")
+	fake := &fakeReportClient{failN: 1}
+	r := NewReporter(fake, discardLogger(), nil, m)
+	r.Start("srv", "amber", "1.2.3.4", "Steve", "")
+
+	// First flush fails → counter goes to 1.
+	r.flush(context.Background())
+	assertFlushFailures(t, reg, 1)
+
+	// Second flush succeeds → counter stays at 1.
+	r.flush(context.Background())
+	assertFlushFailures(t, reg, 1)
+}
+
+func assertFlushFailures(t *testing.T, reg *prometheus.Registry, want int) {
+	t.Helper()
+	expected := fmt.Sprintf(`
+# HELP relay_session_report_flush_failures_total Failed ReportSessions flushes in the session reporter.
+# TYPE relay_session_report_flush_failures_total counter
+relay_session_report_flush_failures_total %d
+`, want)
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(expected), "relay_session_report_flush_failures_total"); err != nil {
+		t.Error(err)
+	}
+}
+
 // blockingClient blocks until its context is cancelled, simulating an
 // unreachable API.
 type blockingClient struct{}
@@ -143,7 +180,7 @@ func (blockingClient) ReportSessions(ctx context.Context, _ []apiclient.SessionS
 // The timed-out batch must take the error-restore path so it is retried and
 // capOldest can bound the buffer during the outage.
 func TestReporterFlushBoundedByTimeout(t *testing.T) {
-	r := NewReporter(blockingClient{}, discardLogger(), nil)
+	r := NewReporter(blockingClient{}, discardLogger(), nil, nil)
 	r.flushTimeout = 50 * time.Millisecond
 	r.Start("srv", "amber", "1.2.3.4", "Steve", "")
 
@@ -166,7 +203,7 @@ func TestReporterFlushBoundedByTimeout(t *testing.T) {
 }
 
 func TestReporterShutdownFlushTimesOut(t *testing.T) {
-	r := NewReporter(blockingClient{}, discardLogger(), nil)
+	r := NewReporter(blockingClient{}, discardLogger(), nil, nil)
 	r.shutdownTimeout = 50 * time.Millisecond
 	r.WithFlushInterval(time.Hour) // prevent periodic flushes
 	r.Start("srv", "amber", "1.2.3.4", "Steve", "")
@@ -186,7 +223,7 @@ func TestReporterShutdownFlushTimesOut(t *testing.T) {
 
 func TestReporterRunFlushesOnShutdown(t *testing.T) {
 	fake := &fakeReportClient{}
-	r := NewReporter(fake, discardLogger(), nil)
+	r := NewReporter(fake, discardLogger(), nil, nil)
 	r.Start("srv", "amber", "1.2.3.4", "Steve", "")
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -207,7 +244,7 @@ func TestReporterRunDrainsPostShutdownEvents(t *testing.T) {
 	// slowClient blocks the first call (the primary shutdown flush) long enough
 	// for a concurrent End to enqueue after shutdown.
 	fake := &slowClient{delay: 50 * time.Millisecond, inner: &fakeReportClient{}}
-	r := NewReporter(fake, discardLogger(), nil)
+	r := NewReporter(fake, discardLogger(), nil, nil)
 	r.shutdownTimeout = 2 * time.Second
 	r.WithFlushInterval(time.Hour) // no periodic flushes
 

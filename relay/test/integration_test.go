@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
@@ -35,6 +36,7 @@ import (
 	relayv1 "github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/genproto/mcsd/relay/v1"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/ipcaps"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/mc"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/metrics"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/relaysvc"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/session"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/tunnel"
@@ -133,7 +135,8 @@ func newHarness(t *testing.T) *harness {
 	}
 
 	apiClient := apiclient.New(conn, "relay-cred")
-	reporter := session.NewReporter(apiClient, logger, time.Now).WithFlushInterval(50 * time.Millisecond)
+	m := metrics.New(prometheus.NewRegistry(), "test")
+	reporter := session.NewReporter(apiClient, logger, time.Now, m).WithFlushInterval(50 * time.Millisecond)
 	svc := relaysvc.New(apiClient, conn, reporter, "relay:25665", "", logger)
 
 	tokens := tunnel.NewTokenTable(10*time.Second, time.Now)
@@ -141,11 +144,11 @@ func newHarness(t *testing.T) *harness {
 	caps := ipcaps.NewIPCaps(32, 10, 0, time.Now, logger)
 	tunnelCaps := ipcaps.NewIPCaps(64, 0, 0, time.Now, logger)
 
-	tunnelLn, err := tunnel.NewListener("127.0.0.1:0", selfSignedTLS(t), tokens, tunnelCaps, logger)
+	tunnelLn, err := tunnel.NewListener("127.0.0.1:0", selfSignedTLS(t), tokens, tunnelCaps, m, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
-	gameLn, err := game.NewListener("127.0.0.1:0", svc, tokens, cache, caps, reporter, logger)
+	gameLn, err := game.NewListener("127.0.0.1:0", svc, tokens, cache, caps, reporter, m, logger)
 	if err != nil {
 		t.Fatal(err)
 	}

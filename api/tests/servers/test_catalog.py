@@ -501,6 +501,117 @@ async def test_install_from_catalog_paper_server() -> None:
     assert plugin.loader_type is LoaderType.PLUGIN
 
 
+def _geyser_project() -> CatalogProject:
+    """A GeyserMC-sourced Floodgate project (issue #1905)."""
+    return CatalogProject(
+        project_id="floodgate",
+        slug="floodgate",
+        title="Floodgate",
+        description="Bedrock auth companion",
+        body="Floodgate",
+        author="GeyserMC",
+        icon_url=None,
+        downloads=0,
+        categories=["bedrock"],
+        game_versions=[],
+        loaders=["paper"],
+        source="geyser",
+    )
+
+
+def _geyser_version(
+    *, content: bytes = b"floodgate-jar", sha256: str | None = None
+) -> tuple[CatalogVersion, bytes]:
+    computed = sha256 or hashlib.sha256(content).hexdigest()
+    url = (
+        "https://download.geysermc.org/v2/projects/floodgate"
+        "/versions/2.2.5/builds/138/downloads/spigot"
+    )
+    version = CatalogVersion(
+        version_id="2.2.5-138",
+        version_number="2.2.5",
+        name="Floodgate 2.2.5 (build 138)",
+        game_versions=[],
+        loaders=["paper"],
+        files=[
+            CatalogFile(
+                url=url,
+                filename="floodgate-spigot.jar",
+                size=0,
+                sha512="",
+                primary=True,
+                sha256=computed,
+            ),
+        ],
+        date_published="2026-06-29T18:24:08.000Z",
+    )
+    return version, content
+
+
+async def test_install_from_catalog_geyser_source_stores_provenance() -> None:
+    # A Floodgate install from GeyserMC records the GEYSER source and verifies
+    # the sha256 (Modrinth's sha512 is absent for this artifact) (issue #1905).
+    uow = FakeUnitOfWork()
+    server = _server(server_type=ServerType.PAPER)
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+    cache = FakePluginCacheStore()
+
+    project = _geyser_project()
+    version, content = _geyser_version()
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(project, [version])
+    catalog.seed_file(version.files[0].url, content)
+
+    uc = InstallFromCatalog(
+        uow=uow,
+        catalog=catalog,
+        file_store=fs,
+        cache=cache,
+        clock=FakeClock(_NOW),
+    )
+    plugin = await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        project_id="floodgate",
+        version_id="2.2.5-138",
+    )
+    assert plugin.source is PluginSource.GEYSER
+    assert plugin.source_project_id == "floodgate"
+    assert plugin.checksum_sha512 is None
+    assert plugin.sha256 == hashlib.sha256(content).hexdigest()
+    assert plugin.rel_path == "plugins/floodgate-spigot.jar"
+    assert plugin.size_bytes == len(content)
+    assert await cache.has(plugin.sha256)
+
+
+async def test_install_from_catalog_geyser_sha256_mismatch() -> None:
+    uow = FakeUnitOfWork()
+    server = _server(server_type=ServerType.PAPER)
+    uow.servers.seed(server)
+
+    project = _geyser_project()
+    version, _ = _geyser_version(sha256="0" * 64)  # Wrong checksum
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(project, [version])
+    catalog.seed_file(version.files[0].url, b"floodgate-jar")
+
+    uc = InstallFromCatalog(
+        uow=uow,
+        catalog=catalog,
+        file_store=FakeFileStore(),
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+    )
+    with pytest.raises(CatalogChecksumMismatchError):
+        await uc(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            project_id="floodgate",
+            version_id="2.2.5-138",
+        )
+
+
 async def test_install_from_catalog_checksum_mismatch() -> None:
     uow = FakeUnitOfWork()
     server = _server()

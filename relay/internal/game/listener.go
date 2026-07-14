@@ -16,6 +16,7 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/adapters/apiclient"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/ipcaps"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/mc"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/metrics"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/netutil"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/splice"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/tunnel"
@@ -66,6 +67,7 @@ type Listener struct {
 	cache    *StatusCache
 	caps     *ipcaps.IPCaps
 	sessions SessionRecorder
+	metrics  *metrics.Metrics
 	logger   *slog.Logger
 
 	// flights coalesces concurrent status-cache misses per slug (issue #1720).
@@ -75,8 +77,9 @@ type Listener struct {
 	inflight sync.WaitGroup
 }
 
-// NewListener binds the game listener on addr.
-func NewListener(addr string, resolver Resolver, tokens *tunnel.TokenTable, cache *StatusCache, caps *ipcaps.IPCaps, sessions SessionRecorder, logger *slog.Logger) (*Listener, error) {
+// NewListener binds the game listener on addr. m carries the relay's metric
+// handles (nil is a no-op).
+func NewListener(addr string, resolver Resolver, tokens *tunnel.TokenTable, cache *StatusCache, caps *ipcaps.IPCaps, sessions SessionRecorder, m *metrics.Metrics, logger *slog.Logger) (*Listener, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
@@ -88,6 +91,7 @@ func NewListener(addr string, resolver Resolver, tokens *tunnel.TokenTable, cach
 		cache:    cache,
 		caps:     caps,
 		sessions: sessions,
+		metrics:  m,
 		logger:   logger,
 	}, nil
 }
@@ -141,6 +145,7 @@ func (l *Listener) handle(ctx context.Context, conn net.Conn) {
 	ip := netutil.HostOf(conn.RemoteAddr())
 
 	if !l.caps.Acquire(ip) {
+		l.metrics.IPCapsReject(metrics.ListenerGame, metrics.CapKindConn)
 		_ = conn.Close()
 		return
 	}
@@ -152,6 +157,7 @@ func (l *Listener) handle(ctx context.Context, conn net.Conn) {
 	r := bufio.NewReaderSize(conn, mc.MaxPreRouteBytes)
 	hs, err := mc.ReadHandshake(r)
 	if err != nil {
+		l.metrics.GameDrop(metrics.DropHandshakeInvalid)
 		l.logger.Debug("handshake parse failed; dropping", "ip", ip, "error", err)
 		_ = conn.Close()
 		return
@@ -160,6 +166,7 @@ func (l *Listener) handle(ctx context.Context, conn net.Conn) {
 	slug, ok := MatchSlug(hs.ServerAddress, l.resolver.BaseDomain())
 	if !ok {
 		// Unknown hostname: silent drop, no protocol response (RELAY.md Section 3).
+		l.metrics.GameDrop(metrics.DropUnknownHost)
 		_ = conn.Close()
 		return
 	}
@@ -187,6 +194,7 @@ func (l *Listener) handleStatus(ctx context.Context, conn net.Conn, r *bufio.Rea
 		// Per-IP join-rate cap: cache misses trigger a ResolveJoin RPC, so
 		// they share the login path's rate budget (RELAY.md Section 11).
 		if !l.caps.AllowJoin(ip) {
+			l.metrics.IPCapsReject(metrics.ListenerGame, metrics.CapKindRate)
 			return
 		}
 		statusJSON = l.coalesceStatus(ctx, hs, slug, ip)
@@ -316,6 +324,7 @@ func (l *Listener) fetchStatusThroughTunnel(ctx context.Context, hs mc.Handshake
 func (l *Listener) handleLogin(ctx context.Context, conn net.Conn, r *bufio.Reader, hs mc.Handshake, slug, ip string) {
 	// Per-IP join-rate cap (RELAY.md Section 11).
 	if !l.caps.AllowJoin(ip) {
+		l.metrics.IPCapsReject(metrics.ListenerGame, metrics.CapKindRate)
 		_ = conn.Close()
 		return
 	}
@@ -335,6 +344,7 @@ func (l *Listener) handleLogin(ctx context.Context, conn net.Conn, r *bufio.Read
 	res, err := l.resolver.ResolveJoin(rctx, slug, ip, apiclient.IntentLogin)
 	cancel()
 	if err != nil {
+		l.metrics.GameDrop(metrics.DropResolveUnavailable)
 		l.disconnect(conn, "Dashboard unavailable — please try again shortly.")
 		return
 	}
@@ -346,6 +356,7 @@ func (l *Listener) handleLogin(ctx context.Context, conn net.Conn, r *bufio.Read
 		l.disconnect(conn, mc.StoppedMOTD(res.DisplayName))
 	default:
 		// NOT_FOUND or unknown: drop silently.
+		l.metrics.GameDrop(metrics.DropNotFound)
 		_ = conn.Close()
 	}
 }
@@ -394,6 +405,12 @@ func (l *Listener) spliceLogin(ctx context.Context, conn net.Conn, r *bufio.Read
 	// Section 8).
 	sessionID := l.sessions.Start(serverID, slug, ip, login.Name, login.UUID)
 	defer l.sessions.End(sessionID)
+
+	// A login has spliced: count it and hold the active-sessions gauge at +1 for
+	// the lifetime of the splice (paired Dec on return).
+	l.metrics.GameSessionAccepted()
+	l.metrics.GameActiveSessionBegin()
+	defer l.metrics.GameActiveSessionEnd()
 
 	splice.Splice(conn, tconn)
 }

@@ -152,14 +152,67 @@ def side_from_modrinth(client_side: str, server_side: str) -> PluginSide:
     return "both"
 
 
-async def _resolve_modrinth_content(
+async def _resolve_catalog_content(
     *,
     uow: UnitOfWork,
     catalog: CatalogProvider,
     cache: PluginCacheStore,
     file: CatalogFile,
 ) -> tuple[bytes, str]:
-    """Return ``(jar bytes, sha256)`` for a Modrinth ``file``, using the cache.
+    """Return ``(jar bytes, sha256)`` for a catalog ``file``, using the cache.
+
+    Verifies the downloaded bytes against whichever integrity hash the source
+    catalog publishes: Modrinth's SHA-512 or GeyserMC's SHA-256 (issue #1905).
+    Both paths reuse the content-addressed cache when the blob is present.
+    """
+
+    if file.sha256:
+        return await _resolve_sha256_content(catalog=catalog, cache=cache, file=file)
+    return await _resolve_sha512_content(
+        uow=uow, catalog=catalog, cache=cache, file=file
+    )
+
+
+async def _resolve_sha256_content(
+    *,
+    catalog: CatalogProvider,
+    cache: PluginCacheStore,
+    file: CatalogFile,
+) -> tuple[bytes, str]:
+    """Resolve a file whose published integrity hash is SHA-256 (GeyserMC, #1905).
+
+    The published SHA-256 *is* the content-cache key, so the cache lookup needs no
+    SHA-512 indirection: a present blob is served (and re-verified against the
+    published hash, guarding storage tampering per #1402); otherwise the jar is
+    downloaded, its SHA-256 verified, and the blob stored once (dedup-on-ingest).
+    """
+
+    if await cache.has(file.sha256):
+        content = b"".join([chunk async for chunk in cache.open(file.sha256)])
+        if hashlib.sha256(content).hexdigest() != file.sha256:
+            raise CatalogChecksumMismatchError(
+                f"cached blob {file.sha256} failed SHA-256 re-verification"
+            )
+        return content, file.sha256
+
+    content = await catalog.download_file(file.url)
+    computed_hash = hashlib.sha256(content).hexdigest()
+    if computed_hash != file.sha256:
+        raise CatalogChecksumMismatchError(
+            f"expected {file.sha256}, got {computed_hash}"
+        )
+    sha256 = await ingest_into_cache(cache, content)
+    return content, sha256
+
+
+async def _resolve_sha512_content(
+    *,
+    uow: UnitOfWork,
+    catalog: CatalogProvider,
+    cache: PluginCacheStore,
+    file: CatalogFile,
+) -> tuple[bytes, str]:
+    """Resolve a file whose published integrity hash is SHA-512 (Modrinth).
 
     Download cache (issue #1306): if a prior install recorded this version's
     published SHA-512 against a cached SHA-256 whose blob still exists, the bytes
@@ -309,7 +362,7 @@ class InstallFromCatalog:
 
         # Phase 3: Resolve bytes from the cache or download + verify (no lock).
         # The download cache skips the HTTP fetch when this version is cached.
-        content, sha256 = await _resolve_modrinth_content(
+        content, sha256 = await _resolve_catalog_content(
             uow=self.uow,
             catalog=self.catalog,
             cache=self.cache,
@@ -364,11 +417,13 @@ class InstallFromCatalog:
                     display_name=project.title,
                     description=project.description,
                     loader_type=loader_type,
-                    source=PluginSource.MODRINTH,
+                    # Provenance follows the catalog that served the project:
+                    # Modrinth or GeyserMC (Floodgate-Spigot, issue #1905).
+                    source=PluginSource(project.source),
                     source_project_id=project_id,
                     source_version_id=version_id,
                     version_number=version.version_number,
-                    checksum_sha512=file.sha512,
+                    checksum_sha512=file.sha512 or None,
                     sha256=sha256,
                     size_bytes=len(content),
                     enabled=True,
@@ -581,7 +636,7 @@ class UpdatePlugin:
 
         # Phase 3: Resolve bytes from the cache or download + verify (no lock).
         # The download cache skips the HTTP fetch when this version is cached.
-        content, sha256 = await _resolve_modrinth_content(
+        content, sha256 = await _resolve_catalog_content(
             uow=self.uow,
             catalog=self.catalog,
             cache=self.cache,
