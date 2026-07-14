@@ -260,9 +260,9 @@ fragmented at all, so "conservative" is the only lever available.
   packet sizes to that value for the rest of the session (fragmenting larger
   reliable messages itself), so the cap is enforced once at connection time in
   practice, not per-packet in steady state -- the drop path in
-  `pumpUDPToQUIC` is a safety net, not the common case.
+  `pumpUDPToQueue` is a safety net, not the common case.
 
-The gate is enforced on the client-to-Worker direction only (`pumpUDPToQUIC`
+The gate is enforced on the client-to-Worker direction only (`pumpUDPToQueue`
 drops an oversized client datagram); the Worker-to-client direction is not
 size-checked at the relay -- an oversized Worker frame is refused at the
 Worker's own QUIC datagram-size limit when sending, and post-convergence the
