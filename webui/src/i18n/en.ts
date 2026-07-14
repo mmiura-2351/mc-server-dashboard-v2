@@ -836,6 +836,7 @@ export const en = {
   "sessions.loading": "Loading sessions…",
   "sessions.loadError": "Could not load sessions. Try refreshing.",
   "sessions.empty": "No sessions recorded yet.",
+  "sessions.col.source": "Source",
   "sessions.col.hostname": "Hostname",
   "sessions.col.playerIp": "IP (claimed)",
   "sessions.col.username": "Username (claimed)",
@@ -843,6 +844,14 @@ export const en = {
   "sessions.col.end": "End",
   "sessions.valueUnknown": "—",
   "sessions.active": "active",
+  // Session source — the relay ingress path (issues #1912, #1904). Java carries
+  // the claimed Login Start identity; Bedrock is a Floodgate flow-session that
+  // records only the player's IP (username/UUID unavailable), so its badge says
+  // so honestly. Legacy rows are `unspecified` and render the neutral dash.
+  "sessions.source.java": "Java",
+  "sessions.source.bedrock": "Bedrock",
+  "sessions.source.bedrockHint":
+    "Flow-based Bedrock session: the player's identity (username and UUID) is unavailable — only their IP address is recorded.",
   // Pagination controls.
   "sessions.prev": "Previous",
   "sessions.next": "Next",
