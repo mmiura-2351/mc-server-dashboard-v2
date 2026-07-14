@@ -44,6 +44,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/adapters/apiclient"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/bedrock"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/ipcaps"
 )
@@ -99,8 +100,8 @@ func (v stubValidator) ValidateBedrockTunnel(_ context.Context, serverID string,
 // recorded nowhere.
 type noopSessionRecorder struct{}
 
-func (noopSessionRecorder) Start(_, _, _, _, _ string) string { return "" }
-func (noopSessionRecorder) End(_ string)                      {}
+func (noopSessionRecorder) Start(_, _, _, _, _ string, _ apiclient.Source) string { return "" }
+func (noopSessionRecorder) End(_ string)                                          {}
 
 // TestServeBedrockTunnelForE2E runs the real Bedrock tunnel listener until
 // MCD_BEDROCK_E2E_STOP_FILE appears or bedrockE2EMaxServe elapses, whichever is

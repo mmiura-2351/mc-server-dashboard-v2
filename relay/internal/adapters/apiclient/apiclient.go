@@ -48,6 +48,20 @@ const (
 	IntentLogin
 )
 
+// Source mirrors relayv1.SessionSource in a transport-neutral form: the relay
+// ingress path a session was accepted on, so the API can label the history
+// row honestly (issue #1912).
+type Source int
+
+const (
+	// SourceUnspecified is the zero value; the API stores it as legacy.
+	SourceUnspecified Source = iota
+	// SourceJava is a Java Edition login-session from the game listener.
+	SourceJava
+	// SourceBedrock is a Bedrock (Geyser) flow-session from the tunnel path.
+	SourceBedrock
+)
+
 // ResolveResult is the outcome of a ResolveJoin call.
 type ResolveResult struct {
 	Decision Decision
@@ -70,6 +84,7 @@ type SessionStart struct {
 	Username  string
 	PlayerUID string
 	StartedAt time.Time
+	Source    Source
 }
 
 // SessionEnd is the closing of a player session (RELAY.md Section 8).
@@ -142,6 +157,7 @@ func (c *Client) ReportSessions(ctx context.Context, starts []SessionStart, ends
 				Username:   s.Username,
 				PlayerUuid: s.PlayerUID,
 				StartedAt:  timestamppb.New(s.StartedAt),
+				Source:     toProtoSource(s.Source),
 			}},
 		})
 	}
@@ -186,6 +202,17 @@ func toProtoIntent(intent Intent) relayv1.JoinIntent {
 		return relayv1.JoinIntent_JOIN_INTENT_LOGIN
 	}
 	return relayv1.JoinIntent_JOIN_INTENT_STATUS
+}
+
+func toProtoSource(source Source) relayv1.SessionSource {
+	switch source {
+	case SourceJava:
+		return relayv1.SessionSource_SESSION_SOURCE_JAVA
+	case SourceBedrock:
+		return relayv1.SessionSource_SESSION_SOURCE_BEDROCK
+	default:
+		return relayv1.SessionSource_SESSION_SOURCE_UNSPECIFIED
+	}
 }
 
 func fromProtoDecision(d relayv1.JoinDecision) Decision {

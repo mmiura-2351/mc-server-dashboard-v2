@@ -85,6 +85,7 @@ func TestReportSessionsProtoConstruction(t *testing.T) {
 			Username:  "Steve",
 			PlayerUID: "uuid-1",
 			StartedAt: now,
+			Source:    SourceJava,
 		},
 	}
 	ends := []SessionEnd{
@@ -125,6 +126,9 @@ func TestReportSessionsProtoConstruction(t *testing.T) {
 	}
 	if s.GetPlayerUuid() != "uuid-1" {
 		t.Errorf("player_uuid = %q, want uuid-1", s.GetPlayerUuid())
+	}
+	if s.GetSource() != relayv1.SessionSource_SESSION_SOURCE_JAVA {
+		t.Errorf("source = %v, want SESSION_SOURCE_JAVA", s.GetSource())
 	}
 	wantTS := timestamppb.New(now)
 	if s.GetStartedAt().GetSeconds() != wantTS.GetSeconds() || s.GetStartedAt().GetNanos() != wantTS.GetNanos() {

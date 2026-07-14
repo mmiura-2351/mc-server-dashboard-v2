@@ -1643,6 +1643,10 @@
             ],
             "title": "Player Uuid"
           },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
           "started_at": {
             "anyOf": [
               {
@@ -1674,7 +1678,8 @@
           "username",
           "player_uuid",
           "started_at",
-          "ended_at"
+          "ended_at",
+          "source"
         ],
         "title": "GameSessionResponse",
         "type": "object"

@@ -18,7 +18,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from mc_server_dashboard_api.servers.adapters.game_session_models import (
     GameSessionModel,
 )
-from mc_server_dashboard_api.servers.domain.game_session import GameSession
+from mc_server_dashboard_api.servers.domain.game_session import (
+    GameSession,
+    GameSessionSource,
+)
 from mc_server_dashboard_api.servers.domain.game_session_repository import (
     GameSessionRepository,
 )
@@ -37,6 +40,13 @@ def _to_game_session(row: GameSessionModel) -> GameSession:
         player_uuid=row.player_uuid,
         started_at=row.started_at,
         ended_at=row.ended_at,
+        # A NULL source column is a legacy row (recorded before the
+        # discriminator existed); it reads back as UNSPECIFIED (issue #1912).
+        source=(
+            GameSessionSource.UNSPECIFIED
+            if row.source is None
+            else GameSessionSource(row.source)
+        ),
     )
 
 

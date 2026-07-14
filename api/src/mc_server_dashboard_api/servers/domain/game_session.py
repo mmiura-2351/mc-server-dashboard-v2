@@ -15,10 +15,25 @@ separate context would only re-import that scope across a boundary.
 from __future__ import annotations
 
 import datetime as dt
+import enum
 import uuid
 from dataclasses import dataclass
 
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
+
+
+class GameSessionSource(enum.Enum):
+    """The relay ingress path a session was accepted on (issue #1912).
+
+    Lets the history distinguish a Bedrock flow-session from a Java
+    login-session whose claimed identity was unparseable. ``UNSPECIFIED`` is the
+    legacy value: a pre-migration row, or a session an older relay reported
+    before the ``SessionStart.source`` field existed.
+    """
+
+    UNSPECIFIED = "unspecified"
+    JAVA = "java"
+    BEDROCK = "bedrock"
 
 
 @dataclass(frozen=True)
@@ -41,3 +56,6 @@ class GameSession:
     player_uuid: uuid.UUID | None
     started_at: dt.datetime | None
     ended_at: dt.datetime | None
+    # The relay ingress path (issue #1912); UNSPECIFIED for legacy rows whose
+    # ``source`` column is NULL.
+    source: GameSessionSource = GameSessionSource.UNSPECIFIED

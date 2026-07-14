@@ -256,6 +256,30 @@ function sessionsUrl(
   return `${base}?${params.toString()}` as "/api/communities/{community_id}/servers/{server_id}/sessions";
 }
 
+// Source badge for a session row (issue #1928). `source` is a free-form string
+// on the wire (`java` / `bedrock` / `unspecified`). Java and Bedrock get a
+// labeled badge; Bedrock's tooltip flags it as a flow-session that records only
+// the player's IP — the claimed username/UUID are unavailable (issues #1912,
+// #1904). Legacy `unspecified` rows (and any unexpected value) stay neutral.
+function sourceCell(source: string): ReactNode {
+  if (source === "java") {
+    return (
+      <span className="badge source java">{t("sessions.source.java")}</span>
+    );
+  }
+  if (source === "bedrock") {
+    return (
+      <span
+        className="badge source bedrock"
+        title={t("sessions.source.bedrockHint")}
+      >
+        {t("sessions.source.bedrock")}
+      </span>
+    );
+  }
+  return t("sessions.valueUnknown");
+}
+
 function SessionsView({
   communityId,
   serverId,
@@ -292,6 +316,7 @@ function SessionsView({
           <table className="sessions-table">
             <thead>
               <tr>
+                <th>{t("sessions.col.source")}</th>
                 <th>{t("sessions.col.hostname")}</th>
                 <th>{t("sessions.col.playerIp")}</th>
                 <th>{t("sessions.col.username")}</th>
@@ -302,6 +327,7 @@ function SessionsView({
             <tbody>
               {sessions.map((s) => (
                 <tr key={s.id}>
+                  <td>{sourceCell(s.source)}</td>
                   <td>{s.hostname ?? t("sessions.valueUnknown")}</td>
                   <td>{s.player_ip ?? t("sessions.valueUnknown")}</td>
                   <td>{s.username ?? t("sessions.valueUnknown")}</td>

@@ -602,6 +602,11 @@ class GameSessionResponse(BaseModel):
     player_uuid: uuid.UUID | None
     started_at: UtcDatetime | None
     ended_at: UtcDatetime | None
+    # The relay ingress path: ``"java"`` / ``"bedrock"``, or ``"unspecified"`` for a
+    # legacy row recorded before the discriminator existed (issue #1912). Lets the
+    # UI label a Bedrock flow-session honestly rather than as an identity-less Java
+    # row.
+    source: str
 
     @classmethod
     def from_entity(cls, session: GameSession) -> "GameSessionResponse":
@@ -613,6 +618,7 @@ class GameSessionResponse(BaseModel):
             player_uuid=session.player_uuid,
             started_at=session.started_at,
             ended_at=session.ended_at,
+            source=session.source.value,
         )
 
 

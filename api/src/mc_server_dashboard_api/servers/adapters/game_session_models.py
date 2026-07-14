@@ -62,3 +62,6 @@ class GameSessionModel(Base):
     ended_at: Mapped[dt.datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # The relay ingress path: ``'java'`` / ``'bedrock'``, or NULL for a legacy row
+    # recorded before the discriminator existed (issue #1912).
+    source: Mapped[str | None] = mapped_column(String, nullable=True)

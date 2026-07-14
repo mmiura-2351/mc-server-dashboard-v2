@@ -34,6 +34,7 @@ from mc_server_dashboard_api.servers.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as ServersUnitOfWork,
 )
 from mc_server_dashboard_api.servers.application.manage_server import CreateServer
+from mc_server_dashboard_api.servers.domain.game_session import GameSessionSource
 from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId as ServersCommunityId,
@@ -99,6 +100,7 @@ def _start(
     started_at: dt.datetime,
     username: str | None = "steve",
     player_uuid: str | None = "66666666-6666-6666-6666-666666666666",
+    source: str | None = None,
 ) -> SessionStart:
     return SessionStart(
         session_id=session_id,
@@ -108,6 +110,7 @@ def _start(
         username=username,
         player_uuid=player_uuid,
         started_at=started_at,
+        source=source,
     )
 
 
@@ -136,6 +139,37 @@ async def test_record_start_is_idempotent(engine: AsyncEngine) -> None:
     assert rows[0].started_at == _NOW
     assert rows[0].username == "steve"
     assert rows[0].ended_at is None
+
+
+async def test_record_start_persists_source(engine: AsyncEngine) -> None:
+    # A Bedrock-sourced start persists "bedrock" and reads back as BEDROCK; a
+    # start with no source stores NULL and reads back as UNSPECIFIED — the
+    # legacy value for rows recorded before the discriminator (issue #1912).
+    server_id = await _seed_server(engine)
+    sink = ServersSessionSink(create_session_factory(engine))
+    bedrock = str(uuid.uuid4())
+    legacy = str(uuid.uuid4())
+    await sink.record_start(
+        _start(server_id, session_id=bedrock, started_at=_NOW, source="bedrock")
+    )
+    await sink.record_start(
+        _start(
+            server_id,
+            session_id=legacy,
+            started_at=_NOW + dt.timedelta(minutes=1),
+            source=None,
+        )
+    )
+    factory = create_session_factory(engine)
+    async with ServersUnitOfWork(factory) as uow:
+        rows = {
+            str(r.id): r
+            for r in await uow.game_sessions.list_for_server(
+                ServerId(server_id), limit=10, offset=0
+            )
+        }
+    assert rows[bedrock].source is GameSessionSource.BEDROCK
+    assert rows[legacy].source is GameSessionSource.UNSPECIFIED
 
 
 async def test_record_end_then_dup_end_is_idempotent(engine: AsyncEngine) -> None:

@@ -2882,6 +2882,8 @@ export interface components {
             player_ip: string | null;
             /** Player Uuid */
             player_uuid: string | null;
+            /** Source */
+            source: string;
             /** Started At */
             started_at: string | null;
             /** Username */
