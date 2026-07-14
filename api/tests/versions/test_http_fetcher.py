@@ -119,3 +119,30 @@ async def test_get_json_non_https_is_fetch_error(
     monkeypatch.setattr(ssrf_guard, "_resolve_host", lambda _host: ["93.184.216.34"])
     with pytest.raises(FetchError, match="HTTPS"):
         await HttpxJsonFetcher().get_json("http://example.test/manifest.json")
+
+
+@pytest.mark.asyncio
+async def test_get_json_does_not_follow_redirect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 3xx redirect is surfaced, never transparently followed (#1903).
+
+    Pins the SSRF no-redirect invariant independently of the httpx2 default: the
+    redirect target must never be requested. A future httpx2 default flip or an
+    accidental ``follow_redirects=True`` would issue a second request to the
+    ``Location`` target through the same transport, which the handler would see.
+    """
+
+    requested: list[str] = []
+    redirect_target = "https://redirect-target.test/internal"
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requested.append(str(request.url))
+        if str(request.url) == _URL:
+            return httpx2.Response(302, headers={"Location": redirect_target})
+        return httpx2.Response(200, json={"followed": True})
+
+    _install_transport(monkeypatch, handler)
+    with pytest.raises(FetchError):
+        await HttpxJsonFetcher().get_json(_URL)
+    assert requested == [_URL]
