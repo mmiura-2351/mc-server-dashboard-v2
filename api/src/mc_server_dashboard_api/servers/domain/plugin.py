@@ -146,12 +146,17 @@ class ServerPlugin:
 # Geyser detection (issue #1541): installing Geyser as a normal plugin IS the
 # Bedrock enablement switch, so ingest recognizes it by the identity the jar
 # declares. The manifest id parsed at ingest is the primary signal, compared
-# case-insensitively. ``_GEYSER_MOD_IDENTIFIERS`` holds only the Paper build's
-# id (``geyser-spigot``, from ``plugin.yml`` ``name``) today, because that is
-# the sole Geyser build in this deployment's install paths; add the Fabric/Forge
-# Geyser manifest ids here when those loaders' local-upload detection is wanted
-# (epic #1540, asymmetry tracked in #1910).
-_GEYSER_MOD_IDENTIFIERS = frozenset({"geyser-spigot"})
+# case-insensitively. ``_GEYSER_MOD_IDENTIFIERS`` holds the GeyserMC build's
+# manifest id on each loader this deployment installs -- ``geyser-spigot`` (Paper
+# ``plugin.yml`` ``name``), ``geyser-fabric`` (Fabric ``fabric.mod.json`` ``id``),
+# and ``geyser_neoforge`` (NeoForge ``neoforge.mods.toml`` ``modId``, which also
+# serves the Forge server family, whose parser reads the NeoForge descriptor) --
+# so local-upload detection is loader-complete (issue #1910), symmetric with the
+# loader-agnostic Modrinth-project-id signal below. GeyserMC ships no separate
+# legacy-Forge build, so there is no ``geyser_forge`` id.
+_GEYSER_MOD_IDENTIFIERS = frozenset(
+    {"geyser-spigot", "geyser-fabric", "geyser_neoforge"}
+)
 # Secondary signal for catalog installs whose jar carried no readable manifest:
 # the Modrinth Geyser project (https://modrinth.com/plugin/geyser). Installs may
 # reference the project by its immutable id or its slug, and the plugin row

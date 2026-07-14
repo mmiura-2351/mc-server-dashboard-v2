@@ -100,10 +100,13 @@ next to the Java `join_hostname` badge (see `../ui/WEBUI_SPEC.md`).
   the server or install ViaVersion on it to bridge the gap. Observed live
   against a Paper 1.21.1 server (epic #1540 issue #1542).
 - **Detection trusts jar-declared identity.** Geyser detection keys on the
-  jar's declared manifest id (`plugin.yml` `name`) or Modrinth project id
-  (`is_geyser_plugin`), so a hostile locally-uploaded jar that merely names
-  itself `Geyser-Spigot` can self-allocate a Bedrock UDP port and open a tunnel
-  to its container port whenever the deployment gate is on. Accepted without a
-  code guard: uploading any plugin already grants in-container code execution,
-  and the `relay.bedrock_enabled` gate bounds the exposure to a single inbound
-  public UDP port on the uploader's own container (issue #1589).
+  jar's declared manifest id — `Geyser-Spigot` (Paper `plugin.yml` `name`),
+  `geyser-fabric` (Fabric `fabric.mod.json` `id`), or `geyser_neoforge`
+  (Forge/NeoForge `neoforge.mods.toml` `modId`) — or the Modrinth project id
+  (`is_geyser_plugin`), so a hostile locally-uploaded jar that merely declares
+  one of those identities self-allocates a Bedrock UDP port on install and,
+  once the server is running, opens a relay tunnel to its container port — both
+  only while the deployment gate (`relay.enabled` AND `relay.bedrock_enabled`,
+  Section 2) is on. Accepted without a code guard: uploading any plugin already
+  grants in-container code execution, and the gate bounds the exposure to a
+  single inbound public UDP port on the uploader's own container (issue #1589).
