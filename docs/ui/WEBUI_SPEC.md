@@ -508,13 +508,17 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   (`/meta`'s `bedrock_enabled`, Section 2.4) and a Geyser plugin is installed, an
   inline note links to Floodgate setup (epic #1540).
 - Server-state gating: reads render anytime, but **every mutation requires the
-  server at rest** (observed and desired both stopped). While not at rest a
+  server at rest** (`desired_state` stopped and `observed_state` one of
+  stopped / crashed / unknown). While not at rest a
   notice shows and all install / enable / disable / update / remove / side /
   resolve controls are disabled; a server-busy API reason (e.g.
   `server_not_stopped`) surfaces as an error toast.
 - Permission gating (7.3): the tab body needs `plugin:read` (a member without it
-  sees a short notice); every mutation needs `plugin:manage`, which also gates
-  whether the toolbar and the per-row action buttons render at all.
+  sees a short notice); every mutation control — install, enable / disable,
+  update, remove, side, and Resolve — needs `plugin:manage`, and the per-row
+  action buttons render only with it. The **Download client modpack** button is
+  a read-only action and renders independently of `plugin:manage` (any reader on
+  a mod-loader server with an enabled client-relevant mod sees it).
 
 ## 7. Cross-cutting concerns
 
