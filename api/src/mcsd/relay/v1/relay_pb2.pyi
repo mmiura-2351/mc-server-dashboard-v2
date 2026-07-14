@@ -113,6 +113,41 @@ drops the connection silently. RELAY.md Section 7.
 """
 Global___JoinDecision: _TypeAlias = JoinDecision  # noqa: Y015
 
+class _SessionSource:
+    ValueType = _typing.NewType("ValueType", _builtins.int)
+    V: _TypeAlias = ValueType  # noqa: Y015
+
+class _SessionSourceEnumTypeWrapper(_enum_type_wrapper._EnumTypeWrapper[_SessionSource.ValueType], _builtins.type):
+    DESCRIPTOR: _descriptor.EnumDescriptor
+    SESSION_SOURCE_UNSPECIFIED: _SessionSource.ValueType  # 0
+    SESSION_SOURCE_JAVA: _SessionSource.ValueType  # 1
+    """JAVA is a Minecraft Java Edition login-session from the game listener
+    (RELAY.md Section 8).
+    """
+    SESSION_SOURCE_BEDROCK: _SessionSource.ValueType  # 2
+    """BEDROCK is a Bedrock (Geyser) flow-session from the Bedrock tunnel path
+    (epic #1540, issue #1904).
+    """
+
+class SessionSource(_SessionSource, metaclass=_SessionSourceEnumTypeWrapper):
+    """SessionSource is the relay ingress path a session was accepted on, so the
+    session history can label Java and Bedrock rows honestly (issue #1912). A
+    Bedrock flow-session carries no claimed identity (the relay never sees
+    Floodgate username/UUID), which without this discriminator is
+    indistinguishable from a Java login-session whose identity was unparseable.
+    """
+
+SESSION_SOURCE_UNSPECIFIED: SessionSource.ValueType  # 0
+SESSION_SOURCE_JAVA: SessionSource.ValueType  # 1
+"""JAVA is a Minecraft Java Edition login-session from the game listener
+(RELAY.md Section 8).
+"""
+SESSION_SOURCE_BEDROCK: SessionSource.ValueType  # 2
+"""BEDROCK is a Bedrock (Geyser) flow-session from the Bedrock tunnel path
+(epic #1540, issue #1904).
+"""
+Global___SessionSource: _TypeAlias = SessionSource  # noqa: Y015
+
 @_typing.final
 class RegisterRequest(_message.Message):
     """---------------------------------------------------------------------------
@@ -367,6 +402,7 @@ class SessionStart(_message.Message):
     USERNAME_FIELD_NUMBER: _builtins.int
     PLAYER_UUID_FIELD_NUMBER: _builtins.int
     STARTED_AT_FIELD_NUMBER: _builtins.int
+    SOURCE_FIELD_NUMBER: _builtins.int
     session_id: _builtins.str
     """session_id is the relay-minted UUID, the idempotency key for upserts."""
     server_id: _builtins.str
@@ -392,6 +428,12 @@ class SessionStart(_message.Message):
     means absent or unparseable (maps to NULL in the game_session table —
     RELAY.md Sections 7 and 14).
     """
+    source: Global___SessionSource.ValueType
+    """source is the relay ingress path (Java game listener vs Bedrock tunnel) the
+    session was accepted on, so the history can label the row honestly
+    (issue #1912). Unset means an older relay that predates the field; the API
+    stores it as the legacy/unspecified source.
+    """
     @_builtins.property
     def started_at(self) -> _timestamp_pb2.Timestamp:
         """started_at is when the relay accepted the session (relay clock)."""
@@ -406,10 +448,11 @@ class SessionStart(_message.Message):
         username: _builtins.str = ...,
         player_uuid: _builtins.str = ...,
         started_at: _timestamp_pb2.Timestamp | None = ...,
+        source: Global___SessionSource.ValueType = ...,
     ) -> None: ...
     _HasFieldArgType: _TypeAlias = _typing.Literal["started_at", b"started_at"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["player_ip", b"player_ip", "player_uuid", b"player_uuid", "server_id", b"server_id", "session_id", b"session_id", "slug", b"slug", "started_at", b"started_at", "username", b"username"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["player_ip", b"player_ip", "player_uuid", b"player_uuid", "server_id", b"server_id", "session_id", b"session_id", "slug", b"slug", "source", b"source", "started_at", b"started_at", "username", b"username"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     def WhichOneof(self, oneof_group: _Never) -> None: ...
 

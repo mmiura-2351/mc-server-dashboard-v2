@@ -284,6 +284,10 @@ func TestLoginSplice(t *testing.T) {
 		if start.GetServerId() == start.GetSlug() {
 			t.Errorf("server_id must not duplicate the slug (%q)", start.GetSlug())
 		}
+		// The game listener labels its sessions as Java-sourced (issue #1912).
+		if start.GetSource() != relayv1.SessionSource_SESSION_SOURCE_JAVA {
+			t.Errorf("reported source = %v, want SESSION_SOURCE_JAVA", start.GetSource())
+		}
 	}
 	h.api.mu.Unlock()
 }

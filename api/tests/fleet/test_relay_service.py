@@ -507,6 +507,7 @@ async def test_report_sessions_persists_start_and_end(
                             username="steve",
                             player_uuid="66666666-6666-6666-6666-666666666666",
                             started_at=_timestamp(_T0),
+                            source=pb.SESSION_SOURCE_JAVA,
                         )
                     ),
                     pb.SessionEvent(
@@ -528,6 +529,7 @@ async def test_report_sessions_persists_start_and_end(
         assert start.username == "steve"
         assert start.player_uuid == "66666666-6666-6666-6666-666666666666"
         assert start.started_at == _T0
+        assert start.source == "java"
         assert sink.ends == [(_SESSION_ID, _T0 + dt.timedelta(minutes=5))]
     finally:
         await harness.stop()
@@ -561,6 +563,41 @@ async def test_report_sessions_omits_blank_claimed_identity(
         )
         assert sink.starts[0].username is None
         assert sink.starts[0].player_uuid is None
+        # An unset proto source (SESSION_SOURCE_UNSPECIFIED, e.g. an older relay)
+        # maps to None — stored as the legacy/unspecified source (issue #1912).
+        assert sink.starts[0].source is None
+    finally:
+        await harness.stop()
+
+
+async def test_report_sessions_maps_bedrock_source(
+    registry: InMemoryWorkerRegistry,
+) -> None:
+    # A Bedrock flow-session (SESSION_SOURCE_BEDROCK) is threaded to the sink as
+    # "bedrock" so the history can label it honestly (issue #1912).
+    sink = _RecordingSessionSink()
+    harness, stub = await _make_harness(
+        resolver=FakeResolver(), registry=registry, session_sink=sink
+    )
+    try:
+        await stub.ReportSessions(
+            pb.ReportSessionsRequest(
+                events=[
+                    pb.SessionEvent(
+                        start=pb.SessionStart(
+                            session_id=_SESSION_ID,
+                            server_id=_SERVER_ID,
+                            slug="amber-falcon-42",
+                            player_ip="203.0.113.7",
+                            started_at=_timestamp(_T0),
+                            source=pb.SESSION_SOURCE_BEDROCK,
+                        )
+                    )
+                ]
+            ),
+            metadata=_auth(),
+        )
+        assert sink.starts[0].source == "bedrock"
     finally:
         await harness.stop()
 

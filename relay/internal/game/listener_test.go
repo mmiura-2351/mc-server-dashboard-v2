@@ -219,8 +219,11 @@ type fakeSessionRecorder struct {
 	ended   int
 }
 
-func (f *fakeSessionRecorder) Start(_, _, _, _, _ string) string { f.started++; return "sess-1" }
-func (f *fakeSessionRecorder) End(_ string)                      { f.ended++ }
+func (f *fakeSessionRecorder) Start(_, _, _, _, _ string, _ apiclient.Source) string {
+	f.started++
+	return "sess-1"
+}
+func (f *fakeSessionRecorder) End(_ string) { f.ended++ }
 
 // --- test helpers ---
 

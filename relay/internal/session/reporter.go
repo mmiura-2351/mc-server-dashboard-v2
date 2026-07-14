@@ -97,7 +97,7 @@ func (r *Reporter) WithFlushInterval(d time.Duration) *Reporter {
 // Start records a new accepted login session and returns its minted id. The
 // SessionStart event is buffered for the next flush; the id is tracked as open
 // until End is called.
-func (r *Reporter) Start(serverID, slug, playerIP, username, playerUUID string) string {
+func (r *Reporter) Start(serverID, slug, playerIP, username, playerUUID string, source apiclient.Source) string {
 	id := uuid.NewString()
 	r.mu.Lock()
 	r.pendStarts = append(r.pendStarts, apiclient.SessionStart{
@@ -108,6 +108,7 @@ func (r *Reporter) Start(serverID, slug, playerIP, username, playerUUID string) 
 		Username:  username,
 		PlayerUID: playerUUID,
 		StartedAt: r.now(),
+		Source:    source,
 	})
 	r.openIDs[id] = struct{}{}
 	over := len(r.pendStarts)+len(r.pendEnds) >= FlushMaxEvents

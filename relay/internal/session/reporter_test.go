@@ -50,7 +50,7 @@ func discardLogger() *slog.Logger {
 func TestReporterStartEndTracksActive(t *testing.T) {
 	r := NewReporter(&fakeReportClient{}, discardLogger(), func() time.Time { return time.Unix(0, 0) }, nil)
 
-	id := r.Start("srv", "amber", "1.2.3.4", "Steve", "uuid")
+	id := r.Start("srv", "amber", "1.2.3.4", "Steve", "uuid", apiclient.SourceJava)
 	if got := r.ActiveSessionIDs(); len(got) != 1 || got[0] != id {
 		t.Fatalf("active = %v, want [%s]", got, id)
 	}
@@ -60,10 +60,25 @@ func TestReporterStartEndTracksActive(t *testing.T) {
 	}
 }
 
+func TestReporterStartThreadsSource(t *testing.T) {
+	r := NewReporter(&fakeReportClient{}, discardLogger(), func() time.Time { return time.Unix(0, 0) }, nil)
+
+	r.Start("srv", "amber", "1.2.3.4", "Steve", "uuid", apiclient.SourceBedrock)
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.pendStarts) != 1 {
+		t.Fatalf("pendStarts = %d, want 1", len(r.pendStarts))
+	}
+	if r.pendStarts[0].Source != apiclient.SourceBedrock {
+		t.Errorf("Source = %v, want SourceBedrock", r.pendStarts[0].Source)
+	}
+}
+
 func TestReporterFlushDeliversBatch(t *testing.T) {
 	fake := &fakeReportClient{}
 	r := NewReporter(fake, discardLogger(), nil, nil)
-	id := r.Start("srv", "amber", "1.2.3.4", "Steve", "")
+	id := r.Start("srv", "amber", "1.2.3.4", "Steve", "", apiclient.SourceJava)
 	r.End(id)
 
 	r.flush(context.Background())
@@ -76,7 +91,7 @@ func TestReporterFlushDeliversBatch(t *testing.T) {
 func TestReporterRetriesOnError(t *testing.T) {
 	fake := &fakeReportClient{failN: 1}
 	r := NewReporter(fake, discardLogger(), nil, nil)
-	r.Start("srv", "amber", "1.2.3.4", "Steve", "")
+	r.Start("srv", "amber", "1.2.3.4", "Steve", "", apiclient.SourceJava)
 
 	// First flush fails; events are restored.
 	r.flush(context.Background())
@@ -101,7 +116,7 @@ func TestReporterRetryBufferBounded(t *testing.T) {
 	// Buffer more starts than the cap, flushing between batches so capOldest runs
 	// on the restore path.
 	for i := 0; i < MaxBufferedEvents+500; i++ {
-		r.Start("srv", "amber", "1.2.3.4", "Steve", "")
+		r.Start("srv", "amber", "1.2.3.4", "Steve", "", apiclient.SourceJava)
 		if i%100 == 0 {
 			r.flush(context.Background())
 		}
@@ -142,7 +157,7 @@ func TestReporterFlushFailureIncrementsMetric(t *testing.T) {
 	m := metrics.New(reg, "test")
 	fake := &fakeReportClient{failN: 1}
 	r := NewReporter(fake, discardLogger(), nil, m)
-	r.Start("srv", "amber", "1.2.3.4", "Steve", "")
+	r.Start("srv", "amber", "1.2.3.4", "Steve", "", apiclient.SourceJava)
 
 	// First flush fails → counter goes to 1.
 	r.flush(context.Background())
@@ -182,7 +197,7 @@ func (blockingClient) ReportSessions(ctx context.Context, _ []apiclient.SessionS
 func TestReporterFlushBoundedByTimeout(t *testing.T) {
 	r := NewReporter(blockingClient{}, discardLogger(), nil, nil)
 	r.flushTimeout = 50 * time.Millisecond
-	r.Start("srv", "amber", "1.2.3.4", "Steve", "")
+	r.Start("srv", "amber", "1.2.3.4", "Steve", "", apiclient.SourceJava)
 
 	done := make(chan struct{})
 	go func() { r.flush(context.Background()); close(done) }()
@@ -206,7 +221,7 @@ func TestReporterShutdownFlushTimesOut(t *testing.T) {
 	r := NewReporter(blockingClient{}, discardLogger(), nil, nil)
 	r.shutdownTimeout = 50 * time.Millisecond
 	r.WithFlushInterval(time.Hour) // prevent periodic flushes
-	r.Start("srv", "amber", "1.2.3.4", "Steve", "")
+	r.Start("srv", "amber", "1.2.3.4", "Steve", "", apiclient.SourceJava)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -224,7 +239,7 @@ func TestReporterShutdownFlushTimesOut(t *testing.T) {
 func TestReporterRunFlushesOnShutdown(t *testing.T) {
 	fake := &fakeReportClient{}
 	r := NewReporter(fake, discardLogger(), nil, nil)
-	r.Start("srv", "amber", "1.2.3.4", "Steve", "")
+	r.Start("srv", "amber", "1.2.3.4", "Steve", "", apiclient.SourceJava)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -248,7 +263,7 @@ func TestReporterRunDrainsPostShutdownEvents(t *testing.T) {
 	r.shutdownTimeout = 2 * time.Second
 	r.WithFlushInterval(time.Hour) // no periodic flushes
 
-	id := r.Start("srv", "amber", "1.2.3.4", "Steve", "")
+	id := r.Start("srv", "amber", "1.2.3.4", "Steve", "", apiclient.SourceJava)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
