@@ -1534,10 +1534,11 @@ export const en = {
   "plugins.serverNotStopped": "Stop the server to manage {nouns}.",
   // Bedrock companion hint (issue #1543): shown on Paper servers only when the
   // deployment's Bedrock gate (/meta bedrock_enabled) is on AND Geyser is already
-  // installed. Floodgate has no Spigot build on Modrinth (issue #1548), so it
-  // must be jar-uploaded.
+  // installed. Floodgate-Spigot is now catalog-installable via the GeyserMC
+  // source (#1914, closing #1548 option 2), so the hint leads with the one-click
+  // install and keeps the manual jar download as a fallback.
   "plugins.bedrockHint.text":
-    "Bedrock players also need Floodgate. It has no Spigot build on Modrinth — upload its jar:",
+    "Bedrock players also need Floodgate. Install Floodgate-Spigot in one click from the plugin catalog, or download its jar from the",
   "plugins.bedrockHint.link": "GeyserMC download page",
   // Table columns.
   "plugins.col.name": "Name",
