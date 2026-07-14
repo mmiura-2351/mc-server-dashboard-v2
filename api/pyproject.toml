@@ -386,7 +386,7 @@ source_modules = [
 forbidden_modules = ["mc_server_dashboard_api.servers.adapters"]
 
 [[tool.importlinter.contracts]]
-name = "servers domain and application import no other context"
+name = "servers domain and application import no other context and no httpx2"
 type = "forbidden"
 source_modules = [
     "mc_server_dashboard_api.servers.domain",
@@ -402,6 +402,11 @@ forbidden_modules = [
     # behind the NextRunCalculator Port; the domain stays stdlib-only (the
     # fleet-domain grpc precedent).
     "cronsim",
+    # The modrinth catalog client's HTTP transport lib lives only in the
+    # adapter (servers/adapters/modrinth_catalog.py), bound to the Port at the
+    # edge; the domain/application stay transport-free (mirrors the versions
+    # contract's httpx2 ban).
+    "httpx2",
 ]
 
 # --- storage context -------------------------------------------------------
