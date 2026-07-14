@@ -94,6 +94,10 @@ type Listener struct {
 	// the authenticated dial-out IS the registration.
 	mu      sync.Mutex
 	tunnels map[uint32]*Tunnel
+
+	// inflight tracks handle goroutines so Drain can wait for them on shutdown,
+	// mirroring the Java game.Listener (issue #1926).
+	inflight sync.WaitGroup
 }
 
 // NewListener binds the Bedrock tunnel QUIC listener on addr. tlsConf should
@@ -119,6 +123,26 @@ func NewListener(addr string, tlsConf *tls.Config, validator Validator, caps *ip
 // Addr returns the listener's bound address.
 func (l *Listener) Addr() net.Addr { return l.ln.Addr() }
 
+// Drain blocks until all in-flight tunnel handlers finish or the timeout
+// elapses. Call after Serve returns to let each accepted tunnel tear down its
+// flows and flush its promoted sessions' End events before shutting down
+// downstream services (e.g. the session reporter), mirroring
+// game.Listener.Drain (issues #1051, #1926). It returns true if all handlers
+// drained within the deadline, false on timeout.
+func (l *Listener) Drain(timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		l.inflight.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
 // Serve accepts Worker QUIC connections until ctx is cancelled or the
 // listener closes.
 func (l *Listener) Serve(ctx context.Context) error {
@@ -134,7 +158,11 @@ func (l *Listener) Serve(ctx context.Context) error {
 			}
 			return err
 		}
-		go l.handle(ctx, conn)
+		l.inflight.Add(1)
+		go func() {
+			defer l.inflight.Done()
+			l.handle(ctx, conn)
+		}()
 	}
 }
 
