@@ -376,6 +376,44 @@ describe("ServerDetailPage URL-driven tabs (#514)", () => {
     expect(panel).toHaveAttribute("aria-labelledby", "sd-tab-overview");
   });
 
+  it("wraps the plugins tab body in a labelled tabpanel (#1894)", async () => {
+    // The plugins tab body was rendered bare, so its button's aria-controls
+    // pointed at a non-existent panel; it must wrap in the same tabpanel the
+    // sibling tabs use. Route the tab's GET calls so its child renders cleanly.
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.endsWith("/plugins/validate")) {
+        return Promise.resolve({
+          missing_deps: [],
+          missing_catalog_deps: [],
+          version_unsatisfied: [],
+          conflicts: [],
+          mc_mismatch: [],
+        });
+      }
+      if (path.endsWith("/plugins/updates")) {
+        return Promise.resolve({ updates: [] });
+      }
+      if (path.endsWith("/plugins")) {
+        return Promise.resolve({ plugins: [] });
+      }
+      return Promise.resolve(server());
+    });
+    renderPage();
+    await screen.findByText("survival");
+
+    fireEvent.click(
+      screen.getByRole("tab", { name: t("serverDetail.tab.plugins") }),
+    );
+
+    const pluginsTab = screen.getByRole("tab", {
+      name: t("serverDetail.tab.plugins"),
+    });
+    expect(pluginsTab).toHaveAttribute("aria-controls", "sd-panel-plugins");
+    const panel = await screen.findByRole("tabpanel");
+    expect(panel).toHaveAttribute("id", "sd-panel-plugins");
+    expect(panel).toHaveAttribute("aria-labelledby", "sd-tab-plugins");
+  });
+
   it("ArrowRight moves focus to the next tab (#1216)", async () => {
     mockApi.get.mockResolvedValue(server());
     renderPage();
