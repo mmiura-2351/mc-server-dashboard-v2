@@ -36,7 +36,7 @@ func runTunnel(t *testing.T, server *quic.Conn, caps *ipcaps.IPCaps) (*net.UDPAd
 // the session-reporting tests (issue #1904).
 func runTunnelRec(t *testing.T, server *quic.Conn, caps *ipcaps.IPCaps, serverID string, sessions SessionRecorder) (*net.UDPAddr, func()) {
 	t.Helper()
-	tun, err := bind(0, serverID, server, caps, sessions, testLogger())
+	tun, err := bind(0, serverID, server, caps, sessions, nil, testLogger())
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestTunnelCloseUnblocksRunAndFreesPort(t *testing.T) {
 	server, client := quicConnPair(t)
 	caps := ipcaps.NewIPCaps(0, 0, 0, nil, nil)
 
-	tun, err := bind(0, testServerID, server, caps, noopRecorder{}, testLogger())
+	tun, err := bind(0, testServerID, server, caps, noopRecorder{}, nil, testLogger())
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
@@ -432,7 +432,7 @@ func TestReaderDoesNotStallWhenSendQueueFull(t *testing.T) {
 	// Disable the per-IP caps so many distinct 127.0.0.1 source ports (one flow
 	// each) are admitted; only the reader's non-blocking behaviour is under test.
 	caps := ipcaps.NewIPCaps(0, 0, 0, nil, nil)
-	tun, err := bind(0, testServerID, server, caps, noopRecorder{}, testLogger())
+	tun, err := bind(0, testServerID, server, caps, noopRecorder{}, nil, testLogger())
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
@@ -501,7 +501,7 @@ func TestReaderDoesNotStallWhenSendQueueFull(t *testing.T) {
 func TestFlowEvictionRacesPumps(t *testing.T) {
 	server, client := quicConnPair(t)
 	caps := ipcaps.NewIPCaps(100, 0, -1, nil, nil)
-	tun, err := bind(0, testServerID, server, caps, noopRecorder{}, testLogger())
+	tun, err := bind(0, testServerID, server, caps, noopRecorder{}, nil, testLogger())
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}

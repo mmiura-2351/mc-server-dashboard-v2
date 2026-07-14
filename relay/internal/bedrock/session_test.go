@@ -98,7 +98,7 @@ func TestBedrockFlowPromotesToSessionAndEndsOnEviction(t *testing.T) {
 	caps := ipcaps.NewIPCaps(0, 0, 0, nil, nil)
 	rec := &fakeRecorder{}
 
-	tun, err := bind(0, "srv-1", server, caps, rec, testLogger())
+	tun, err := bind(0, "srv-1", server, caps, rec, nil, testLogger())
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}

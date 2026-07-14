@@ -13,6 +13,7 @@ import (
 	"github.com/quic-go/quic-go"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/ipcaps"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/metrics"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/netutil"
 )
 
@@ -80,6 +81,7 @@ type Tunnel struct {
 	caps     *ipcaps.IPCaps
 	serverID string
 	sessions SessionRecorder
+	metrics  *metrics.Metrics
 	logger   *slog.Logger
 
 	// framePool recycles the flow-id-prefixed frame buffers that cross the
@@ -98,9 +100,10 @@ type Tunnel struct {
 // connection for the same server, e.g. a Worker redial racing its old QUIC
 // connection's idle timeout -- docs/app/BEDROCK_TUNNEL.md) is returned as-is
 // for the caller to treat as a handshake rejection.
-func bind(bedrockPort uint32, serverID string, quicConn *quic.Conn, caps *ipcaps.IPCaps, sessions SessionRecorder, logger *slog.Logger) (*Tunnel, error) {
+func bind(bedrockPort uint32, serverID string, quicConn *quic.Conn, caps *ipcaps.IPCaps, sessions SessionRecorder, m *metrics.Metrics, logger *slog.Logger) (*Tunnel, error) {
 	udpConn, err := net.ListenPacket("udp", fmt.Sprintf(":%d", bedrockPort))
 	if err != nil {
+		m.BedrockBindFailure()
 		return nil, err
 	}
 	if uc, ok := udpConn.(*net.UDPConn); ok {
@@ -113,12 +116,14 @@ func bind(bedrockPort uint32, serverID string, quicConn *quic.Conn, caps *ipcaps
 		caps:     caps,
 		serverID: serverID,
 		sessions: sessions,
+		metrics:  m,
 		logger:   logger,
 	}
 	t.framePool.New = func() any {
 		b := make([]byte, FlowIDSize+maxDatagramPayload)
 		return &b
 	}
+	m.BedrockTunnelBound()
 	return t, nil
 }
 
@@ -218,11 +223,15 @@ func (t *Tunnel) run(ctx context.Context) {
 
 	// End any sessions still open when the tunnel tears down (Worker disconnect,
 	// takeover, or relay shutdown) so promoted Bedrock flows do not strand
-	// (issue #1904). The reader has stopped (udpDone), so no new promotion can
-	// race this; the sweep may still run until the deferred cancel fires, but it
-	// and DrainPromoted both go through the FlowTable under its lock and
-	// DrainPromoted clears the flag, so each session is Ended exactly once.
-	for _, sid := range t.flows.DrainPromoted() {
+	// (issue #1904), and decrement the active-flows gauge by the whole abandoned
+	// flow table so it does not leak (issue #1909). The reader has stopped
+	// (udpDone), so no new flow can race this; the sweep may still run until the
+	// deferred cancel fires, but it and Drain both go through the FlowTable under
+	// its lock and Drain removes the entries, so each flow (and each session) is
+	// surfaced by exactly one of them.
+	endedSessions, drained := t.flows.Drain()
+	t.metrics.BedrockFlowsDrained(drained)
+	for _, sid := range endedSessions {
 		t.sessions.End(sid)
 	}
 }
@@ -237,6 +246,7 @@ func (t *Tunnel) close(reason string) {
 	t.closeOnce.Do(func() {
 		_ = t.quicConn.CloseWithError(0, reason)
 		t.unbind()
+		t.metrics.BedrockTunnelTornDown()
 	})
 }
 
@@ -255,6 +265,7 @@ func (t *Tunnel) pumpQUICToUDP(ctx context.Context) {
 			return
 		}
 		if len(data) < FlowIDSize {
+			t.metrics.BedrockDatagramDropped(metrics.DirectionOut, metrics.BedrockDropShortFrame)
 			continue // malformed frame: drop
 		}
 		id := binary.BigEndian.Uint32(data[:FlowIDSize])
@@ -263,11 +274,15 @@ func (t *Tunnel) pumpQUICToUDP(ctx context.Context) {
 			// Unknown or evicted flow (e.g. the relay reclaimed it for
 			// inactivity after the Worker's last reply): drop
 			// (docs/app/BEDROCK_TUNNEL.md).
+			t.metrics.BedrockDatagramDropped(metrics.DirectionOut, metrics.BedrockDropUnknownFlow)
 			continue
 		}
 		if _, err := t.udpConn.WriteTo(data[FlowIDSize:], addr); err != nil {
+			t.metrics.BedrockDatagramDropped(metrics.DirectionOut, metrics.BedrockDropUDPWrite)
 			t.logger.Debug("bedrock: UDP write failed", "addr", addr, "error", err)
+			continue
 		}
+		t.metrics.BedrockDatagram(metrics.DirectionOut)
 	}
 }
 
@@ -286,6 +301,7 @@ func (t *Tunnel) pumpUDPToQueue(sendCh chan<- *[]byte) {
 		if err != nil {
 			return
 		}
+		t.metrics.BedrockDatagram(metrics.DirectionIn)
 		udpAddr, ok := addr.(*net.UDPAddr)
 		if !ok {
 			continue
@@ -295,6 +311,7 @@ func (t *Tunnel) pumpUDPToQueue(sendCh chan<- *[]byte) {
 			// forward. RakNet's own MTU discovery reads this the same way it
 			// reads any other unanswered probe -- try a smaller candidate
 			// (docs/app/BEDROCK_TUNNEL.md).
+			t.metrics.BedrockDatagramDropped(metrics.DirectionIn, metrics.BedrockDropOversized)
 			continue
 		}
 
@@ -311,13 +328,21 @@ func (t *Tunnel) pumpUDPToQueue(sendCh chan<- *[]byte) {
 			ip := netutil.HostOf(udpAddr)
 			// New-flow rate cap, then the concurrent-flow cap -- both per
 			// source IP (RakNet unconnected-ping amplification hygiene,
-			// docs/app/BEDROCK_TUNNEL.md). When AllowJoin passes but Acquire
-			// fails, the rate-window count was already consumed -- strictly
-			// conservative (the flow was not admitted), so acceptable.
-			if !t.caps.AllowJoin(ip) || !t.caps.Acquire(ip) {
+			// docs/app/BEDROCK_TUNNEL.md), recorded on the shared per-IP
+			// rejection counter with listener="bedrock" (issue #1909). When
+			// AllowJoin passes but Acquire fails, the rate-window count was
+			// already consumed -- strictly conservative (the flow was not
+			// admitted), so acceptable.
+			if !t.caps.AllowJoin(ip) {
+				t.metrics.IPCapsReject(metrics.ListenerBedrock, metrics.CapKindRate)
+				continue
+			}
+			if !t.caps.Acquire(ip) {
+				t.metrics.IPCapsReject(metrics.ListenerBedrock, metrics.CapKindConn)
 				continue
 			}
 			id = t.flows.Create(udpAddr, connected)
+			t.metrics.BedrockFlowCreated()
 		}
 
 		// Promote the flow to a reported session once it crosses
@@ -343,6 +368,7 @@ func (t *Tunnel) pumpUDPToQueue(sendCh chan<- *[]byte) {
 		// buf[0]. buf[0] is read here, before the frame is copied out below, so a
 		// later read cannot overwrite it first.
 		if n > 0 && buf[0] == 0x01 && !t.flows.AllowPing(id) {
+			t.metrics.BedrockDatagramDropped(metrics.DirectionIn, metrics.BedrockDropPingRateCap)
 			continue
 		}
 
@@ -360,8 +386,9 @@ func (t *Tunnel) pumpUDPToQueue(sendCh chan<- *[]byte) {
 			// Single, per-datagram drop site: the tunnel is congestion-limited
 			// or in loss recovery and the send queue is full. Dropping here
 			// (rather than blocking the reader) is what keeps one congested flow
-			// from stalling ingress for every flow on the port (issue #1721). A
+			// from stalling ingress for every flow on the port (issue #1721). The
 			// drop-count metric hangs off exactly this point (issue #1909).
+			t.metrics.BedrockDatagramDropped(metrics.DirectionIn, metrics.BedrockDropQueueFull)
 			*bufp = (*bufp)[:cap(*bufp)]
 			t.framePool.Put(bufp)
 		}
@@ -376,6 +403,7 @@ func (t *Tunnel) pumpUDPToQueue(sendCh chan<- *[]byte) {
 func (t *Tunnel) pumpQueueToQUIC(sendCh <-chan *[]byte) {
 	for bufp := range sendCh {
 		if err := t.quicConn.SendDatagram(*bufp); err != nil {
+			t.metrics.BedrockDatagramDropped(metrics.DirectionIn, metrics.BedrockDropQUICSend)
 			t.logger.Debug("bedrock: SendDatagram failed", "error", err)
 		}
 		// SendDatagram copied the payload synchronously, so the buffer is free to
@@ -408,6 +436,7 @@ func (t *Tunnel) sweepOnce() {
 	for _, addr := range addrs {
 		t.caps.Release(netutil.HostOf(addr))
 	}
+	t.metrics.BedrockFlowsEvicted(len(addrs))
 	for _, sid := range endedSessions {
 		t.sessions.End(sid)
 	}

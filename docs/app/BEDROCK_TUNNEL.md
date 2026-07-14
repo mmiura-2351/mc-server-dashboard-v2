@@ -433,5 +433,19 @@ redesign.
   out of the history. Honest Java-vs-Bedrock labelling (a `SessionStart.source`
   discriminator, which needs a proto + migration change) is the deferred
   follow-up #1912.
-- **Metrics** -- no Prometheus metrics for flow counts, drop counts, or bind
-  failures yet (RELAY.md Section 17 notes the same gap for the Java path).
+- ~~**Metrics** -- no Prometheus metrics for flow counts, drop counts, or bind
+  failures yet~~ **Landed with #1909**: the Bedrock path exports, on the same
+  opt-in `/metrics` endpoint as the Java path (RELAY.md Section 17), active
+  tunnels/flows gauges (`relay_bedrock_active_tunnels`,
+  `relay_bedrock_active_flows`), flow lifecycle counters
+  (`relay_bedrock_flows_created_total`, `relay_bedrock_flows_evicted_total`),
+  datagram throughput (`relay_bedrock_udp_datagrams_total{direction}`) and drops
+  (`relay_bedrock_datagrams_dropped_total{direction,reason}`), tunnel
+  open/reject outcomes (`relay_bedrock_tunnels_opened_total`,
+  `relay_bedrock_tunnels_rejected_total{reason}`), UDP bind failures
+  (`relay_bedrock_bind_failures_total`), and the shared per-IP cap rejections
+  (`relay_ipcaps_rejections_total{listener="bedrock",kind}`) for the new-flow
+  cap. The active-flows gauge decrements on both idle eviction and tunnel
+  teardown, so an abandoned flow table does not leak it. Every label is a
+  bounded enum -- no per-client-IP/source-address label. Tracing (OpenTelemetry)
+  is still future work.

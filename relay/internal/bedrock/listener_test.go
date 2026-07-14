@@ -68,7 +68,7 @@ func newTestListener(t *testing.T, validator Validator, deadline ...time.Duratio
 func newTestListenerWithCaps(t *testing.T, validator Validator, preAuthCaps *ipcaps.IPCaps, deadline ...time.Duration) (*Listener, func()) {
 	t.Helper()
 	newCaps := func() *ipcaps.IPCaps { return ipcaps.NewIPCaps(0, 0, 0, nil, nil) }
-	ln, err := NewListener("127.0.0.1:0", selfSignedTLS(t), validator, preAuthCaps, newCaps, noopRecorder{}, testLogger())
+	ln, err := NewListener("127.0.0.1:0", selfSignedTLS(t), validator, preAuthCaps, newCaps, noopRecorder{}, nil, testLogger())
 	if err != nil {
 		t.Fatalf("NewListener: %v", err)
 	}

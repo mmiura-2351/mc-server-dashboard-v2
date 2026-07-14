@@ -96,6 +96,66 @@ func TestJavaPathHandlesRecord(t *testing.T) {
 	}
 }
 
+// TestBedrockPathHandlesRecord asserts every Bedrock-path handle increments the
+// series it owns, with the label value it was given, and that the flow gauge
+// tracks create/evict/drain correctly.
+func TestBedrockPathHandlesRecord(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := New(reg, "test")
+
+	m.BedrockTunnelBound()
+	m.BedrockTunnelBound()
+	m.BedrockTunnelTornDown()
+	m.BedrockTunnelOpened()
+	m.BedrockTunnelRejected(BedrockRejectInvalidCredential)
+	m.BedrockBindFailure()
+	m.BedrockFlowCreated()
+	m.BedrockFlowCreated()
+	m.BedrockFlowCreated()
+	m.BedrockFlowsEvicted(1)
+	m.BedrockFlowsDrained(2)
+	m.BedrockDatagram(DirectionIn)
+	m.BedrockDatagram(DirectionOut)
+	m.BedrockDatagramDropped(DirectionIn, BedrockDropQueueFull)
+	m.BedrockDatagramDropped(DirectionOut, BedrockDropShortFrame)
+
+	if got := testutil.ToFloat64(m.bedrockActiveTunnels); got != 1 {
+		t.Errorf("active_tunnels = %v, want 1 (2 bound, 1 torn down)", got)
+	}
+	if got := testutil.ToFloat64(m.bedrockTunnelsOpened); got != 1 {
+		t.Errorf("tunnels_opened = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(m.bedrockTunnelsRejected.WithLabelValues(BedrockRejectInvalidCredential)); got != 1 {
+		t.Errorf("tunnels_rejected{invalid_credential} = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(m.bedrockBindFailures); got != 1 {
+		t.Errorf("bind_failures = %v, want 1", got)
+	}
+	// 3 created, 1 evicted, 2 drained -> active_flows back to 0.
+	if got := testutil.ToFloat64(m.bedrockActiveFlows); got != 0 {
+		t.Errorf("active_flows = %v, want 0 (3 created, 1 evicted, 2 drained)", got)
+	}
+	if got := testutil.ToFloat64(m.bedrockFlowsCreated); got != 3 {
+		t.Errorf("flows_created = %v, want 3", got)
+	}
+	// Drain must NOT feed the evicted counter -- only the idle eviction does.
+	if got := testutil.ToFloat64(m.bedrockFlowsEvicted); got != 1 {
+		t.Errorf("flows_evicted = %v, want 1 (drain does not count as eviction)", got)
+	}
+	if got := testutil.ToFloat64(m.bedrockDatagrams.WithLabelValues(DirectionIn)); got != 1 {
+		t.Errorf("datagrams{in} = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(m.bedrockDatagrams.WithLabelValues(DirectionOut)); got != 1 {
+		t.Errorf("datagrams{out} = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(m.bedrockDatagramsDropped.WithLabelValues(DirectionIn, BedrockDropQueueFull)); got != 1 {
+		t.Errorf("dropped{in,queue_full} = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(m.bedrockDatagramsDropped.WithLabelValues(DirectionOut, BedrockDropShortFrame)); got != 1 {
+		t.Errorf("dropped{out,short_frame} = %v, want 1", got)
+	}
+}
+
 // TestNoSourceAddressLabels is the cardinality guardrail: no series may carry a
 // per-client-IP / source-address label, which a hostile client could otherwise
 // use to explode the series count. Every label name must be a bounded enum key.
@@ -104,8 +164,12 @@ func TestNoSourceAddressLabels(t *testing.T) {
 	m := New(reg, "test")
 	// Emit at least one child of every labelled vector so the labels materialise.
 	m.IPCapsReject(ListenerGame, CapKindConn)
+	m.IPCapsReject(ListenerBedrock, CapKindRate)
 	m.GameDrop(DropNotFound)
 	m.TunnelDialback(DialbackNoWaiter)
+	m.BedrockTunnelRejected(BedrockRejectBindFailed)
+	m.BedrockDatagram(DirectionIn)
+	m.BedrockDatagramDropped(DirectionOut, BedrockDropUnknownFlow)
 
 	families, err := reg.Gather()
 	if err != nil {
@@ -138,4 +202,14 @@ func TestNilMetricsIsNoop(_ *testing.T) {
 	m.GameDrop(DropHandshakeInvalid)
 	m.TunnelDialback(DialbackHandshakeInvalid)
 	m.SessionFlushFailure()
+	m.BedrockTunnelBound()
+	m.BedrockTunnelTornDown()
+	m.BedrockTunnelOpened()
+	m.BedrockTunnelRejected(BedrockRejectNoStream)
+	m.BedrockBindFailure()
+	m.BedrockFlowCreated()
+	m.BedrockFlowsEvicted(1)
+	m.BedrockFlowsDrained(1)
+	m.BedrockDatagram(DirectionIn)
+	m.BedrockDatagramDropped(DirectionOut, BedrockDropUDPWrite)
 }

@@ -654,9 +654,19 @@ for *new* joins); relay-mediated status pings with a 5 s cache (Section 7).
   reason (`relay_game_drops_total{reason}`), accepted/active sessions
   (`relay_game_sessions_accepted_total`, `relay_game_active_sessions`), tunnel
   dial-back results (`relay_tunnel_dialbacks_total{result}`), and session-report
-  flush failures (`relay_session_report_flush_failures_total`). All labels are
-  bounded enums — no per-client-IP/source-address label. The **Bedrock-path**
-  series (flows, datagrams, UDP binds — issue #1909) are a separate follow-up.
-  Tracing (OpenTelemetry) is still future work; add on demand.
+  flush failures (`relay_session_report_flush_failures_total`). The
+  **Bedrock-path** series (issue #1909) land on the same endpoint: active
+  tunnels/flows gauges (`relay_bedrock_active_tunnels`,
+  `relay_bedrock_active_flows`), flow lifecycle counters
+  (`relay_bedrock_flows_created_total`, `relay_bedrock_flows_evicted_total`),
+  datagram throughput and drops
+  (`relay_bedrock_udp_datagrams_total{direction}`,
+  `relay_bedrock_datagrams_dropped_total{direction,reason}`), tunnel
+  open/reject outcomes (`relay_bedrock_tunnels_opened_total`,
+  `relay_bedrock_tunnels_rejected_total{reason}`), UDP bind failures
+  (`relay_bedrock_bind_failures_total`), and the shared per-IP cap rejections
+  reused with `listener="bedrock"`. All labels are bounded enums — no
+  per-client-IP/source-address label. Tracing (OpenTelemetry) is still future
+  work; add on demand.
 - **Graceful drain on shutdown** — restart drops in-flight sessions rather
   than draining them; a drain window is future work.
