@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from mc_server_dashboard_api.servers.adapters.plugin_models import ServerPluginModel
 from mc_server_dashboard_api.servers.domain.plugin import (
+    CATALOG_SOURCES,
     LoaderType,
     PluginId,
     PluginSide,
@@ -185,12 +186,14 @@ class SqlAlchemyPluginRepository(PluginRepository):
         )
         await self._session.execute(stmt)
 
-    async def list_modrinth_plugins(self, server_id: ServerId) -> list[ServerPlugin]:
+    async def list_catalog_plugins(self, server_id: ServerId) -> list[ServerPlugin]:
         stmt = (
             select(ServerPluginModel)
             .where(
                 ServerPluginModel.server_id == server_id.value,
-                ServerPluginModel.source == PluginSource.MODRINTH.value,
+                ServerPluginModel.source.in_(
+                    sorted(source.value for source in CATALOG_SOURCES)
+                ),
                 ServerPluginModel.source_project_id.is_not(None),
             )
             .order_by(ServerPluginModel.display_name, ServerPluginModel.id)
