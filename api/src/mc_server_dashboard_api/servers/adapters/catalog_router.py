@@ -62,14 +62,18 @@ class RoutingCatalog(CatalogProvider):
         # every page. On the first page Floodgate takes one slot; later pages
         # are all Modrinth, read from one offset earlier.
         if offset == 0:
+            # Fetch a full page and drop the last Modrinth hit rather than
+            # requesting ``limit - 1``: a zero limit (``limit == 1``) is clamped
+            # up to 1 by Modrinth, which would re-inflate page 0 to ``limit + 1``
+            # and duplicate that hit onto page 1 (issue #1919).
             default_resp = await self._default.search(
                 query=query,
                 loader=loader,
                 game_versions=game_versions,
-                limit=limit - 1,
+                limit=limit,
                 offset=0,
             )
-            hits = geyser_resp.hits + default_resp.hits
+            hits = geyser_resp.hits + default_resp.hits[: limit - 1]
         else:
             default_resp = await self._default.search(
                 query=query,

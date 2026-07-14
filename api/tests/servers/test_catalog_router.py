@@ -117,7 +117,11 @@ class _PaginatingCatalog(_RecordingCatalog):
         limit: int = 20,
         offset: int = 0,
     ) -> CatalogSearchResponse:
-        window = self._results[offset : offset + limit]
+        # Modrinth's live /v2/search clamps ``limit=0`` up to ``1`` rather than
+        # returning no hits, so the router must never rely on a zero-limit
+        # sub-query to omit a Modrinth hit.
+        effective_limit = max(limit, 1)
+        window = self._results[offset : offset + effective_limit]
         return CatalogSearchResponse(
             hits=window,
             total_hits=len(self._results),
@@ -190,6 +194,22 @@ async def test_search_total_hits_consistent_across_pages() -> None:
         query="", loader="paper", game_versions=[], limit=3, offset=3
     )
     assert page0.total_hits == page1.total_hits == 6
+
+
+async def test_search_limit_one_page_zero_is_floodgate_only() -> None:
+    # limit=1 with a Floodgate match: page 0 is Floodgate alone (1 hit, not 2),
+    # and page 1 resumes at mod-0 with no Modrinth hit duplicated across the
+    # boundary. Because Modrinth clamps a zero limit to 1, the router must not
+    # sub-query Modrinth with ``limit - 1 == 0`` on page 0.
+    router = _paginating_router(total=5)
+    page0 = await router.search(
+        query="", loader="paper", game_versions=[], limit=1, offset=0
+    )
+    page1 = await router.search(
+        query="", loader="paper", game_versions=[], limit=1, offset=1
+    )
+    assert [h.project_id for h in page0.hits] == ["floodgate"]
+    assert [h.project_id for h in page1.hits] == ["mod-0"]
 
 
 async def test_search_pagination_boundary_has_no_gap_or_duplicate() -> None:
