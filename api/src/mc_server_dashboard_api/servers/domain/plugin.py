@@ -145,15 +145,25 @@ class ServerPlugin:
 
 # Geyser detection (issue #1541): installing Geyser as a normal plugin IS the
 # Bedrock enablement switch, so ingest recognizes it by the identity the jar
-# declares. The manifest name parsed at ingest (``plugin.yml`` ``name`` for
-# Paper) is the primary signal, compared case-insensitively. Paper-only in v1;
-# add the Fabric/Forge Geyser mod ids here when those loaders gain Bedrock
-# support (epic #1540).
-_GEYSER_MOD_IDENTIFIERS = frozenset({"geyser-spigot"})
+# declares. The manifest id parsed at ingest is the primary signal, compared
+# case-insensitively. ``_GEYSER_MOD_IDENTIFIERS`` holds the GeyserMC build's
+# manifest id on each loader this deployment installs -- ``geyser-spigot`` (Paper
+# ``plugin.yml`` ``name``), ``geyser-fabric`` (Fabric ``fabric.mod.json`` ``id``),
+# and ``geyser_neoforge`` (NeoForge ``neoforge.mods.toml`` ``modId``, which also
+# serves the Forge server family, whose parser reads the NeoForge descriptor) --
+# so local-upload detection is loader-complete (issue #1910), symmetric with the
+# loader-agnostic Modrinth-project-id signal below. GeyserMC ships no separate
+# legacy-Forge build, so there is no ``geyser_forge`` id.
+_GEYSER_MOD_IDENTIFIERS = frozenset(
+    {"geyser-spigot", "geyser-fabric", "geyser_neoforge"}
+)
 # Secondary signal for catalog installs whose jar carried no readable manifest:
 # the Modrinth Geyser project (https://modrinth.com/plugin/geyser). Installs may
 # reference the project by its immutable id or its slug, and the plugin row
-# stores whichever was used.
+# stores whichever was used. This signal is intentionally loader-agnostic -- the
+# one Modrinth Geyser project serves every loader, matching the
+# server-type-agnostic tunnel/port machinery (BEDROCK.md Section 1) -- so a
+# catalog Geyser install is detected regardless of loader.
 _GEYSER_MODRINTH_PROJECT_IDS = frozenset({"wKkoqHrH", "geyser"})
 
 
@@ -164,6 +174,11 @@ def is_geyser_plugin(plugin: ServerPlugin) -> bool:
     install (allocate) and on uninstall (release). Floodgate is the expected
     companion but is NOT the detection key -- the network path hangs off Geyser,
     which owns the UDP listener.
+
+    Detection is loader-agnostic (see the module constants above) and trusts the
+    jar's declared identity; a locally-uploaded jar can therefore self-allocate a
+    Bedrock port -- accepted, see BEDROCK.md Section 4 "Detection trusts
+    jar-declared identity".
     """
 
     identifier = (plugin.mod_identifier or "").lower()
