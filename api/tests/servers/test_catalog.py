@@ -520,17 +520,21 @@ def _geyser_project() -> CatalogProject:
 
 
 def _geyser_version(
-    *, content: bytes = b"floodgate-jar", sha256: str | None = None
+    *,
+    version_id: str = "2.2.5-138",
+    build: str = "138",
+    content: bytes = b"floodgate-jar",
+    sha256: str | None = None,
 ) -> tuple[CatalogVersion, bytes]:
     computed = sha256 or hashlib.sha256(content).hexdigest()
     url = (
         "https://download.geysermc.org/v2/projects/floodgate"
-        "/versions/2.2.5/builds/138/downloads/spigot"
+        f"/versions/2.2.5/builds/{build}/downloads/spigot"
     )
     version = CatalogVersion(
-        version_id="2.2.5-138",
+        version_id=version_id,
         version_number="2.2.5",
-        name="Floodgate 2.2.5 (build 138)",
+        name=f"Floodgate 2.2.5 (build {build})",
         game_versions=[],
         loaders=["paper"],
         files=[
@@ -1078,6 +1082,42 @@ def _plugin(
     )
 
 
+def _geyser_plugin(
+    *,
+    server_id: ServerId,
+    source_version_id: str = "2.2.5-138",
+    content: bytes = b"floodgate-jar",
+) -> ServerPlugin:
+    """An installed GeyserMC-sourced Floodgate plugin (issues #1905, #1916).
+
+    Paper-only, server-side, ``version-build`` version id, and no SHA-512 (the
+    GeyserMC artifact publishes only a SHA-256), mirroring what InstallFromCatalog
+    stores for a Floodgate install.
+    """
+
+    return ServerPlugin(
+        id=PluginId.new(),
+        server_id=server_id,
+        rel_path="plugins/floodgate-spigot.jar",
+        filename="floodgate-spigot.jar",
+        display_name="Floodgate",
+        description="Bedrock auth companion",
+        loader_type=LoaderType.PLUGIN,
+        source=PluginSource.GEYSER,
+        source_project_id="floodgate",
+        source_version_id=source_version_id,
+        version_number="2.2.5",
+        checksum_sha512=None,
+        sha256=hashlib.sha256(content).hexdigest(),
+        size_bytes=len(content),
+        enabled=True,
+        installed_by=None,
+        created_at=_NOW,
+        updated_at=_NOW,
+        side="server",
+    )
+
+
 # -- CheckUpdates --
 
 
@@ -1227,6 +1267,27 @@ async def test_check_updates_partial_catalog_unavailable() -> None:
     assert by_name["Failing Mod"].latest_version is None
 
 
+async def test_check_updates_includes_geyser() -> None:
+    """CheckUpdates covers GeyserMC-sourced plugins, not only Modrinth (#1916)."""
+    uow = FakeUnitOfWork()
+    server = _server(server_type=ServerType.PAPER)
+    uow.servers.seed(server)
+
+    plugin = _geyser_plugin(server_id=server.id, source_version_id="2.2.5-138")
+    uow.plugins.seed(plugin)
+
+    latest, _ = _geyser_version(version_id="2.2.5-139", build="139")
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(_geyser_project(), [latest])
+
+    uc = CheckUpdates(uow=uow, catalog=catalog)
+    results = await uc(community_id=_COMMUNITY, server_id=server.id)
+    assert len(results) == 1
+    assert results[0].plugin.source is PluginSource.GEYSER
+    assert results[0].latest_version is not None
+    assert results[0].latest_version.version_id == "2.2.5-139"
+
+
 # -- CheckPluginUpdate --
 
 
@@ -1277,6 +1338,47 @@ async def test_check_plugin_update_not_found() -> None:
     uc = CheckPluginUpdate(uow=uow, catalog=catalog)
     with pytest.raises(PluginNotFoundError):
         await uc(community_id=_COMMUNITY, server_id=server.id, plugin_id=PluginId.new())
+
+
+async def test_check_plugin_update_geyser_available() -> None:
+    """A GeyserMC Floodgate with an older build reports an in-place update (#1916).
+
+    The ``version-build`` id ("2.2.5-139" != "2.2.5-138") is compared as a whole,
+    so a newer resolved build is detected.
+    """
+    uow = FakeUnitOfWork()
+    server = _server(server_type=ServerType.PAPER)
+    uow.servers.seed(server)
+
+    plugin = _geyser_plugin(server_id=server.id, source_version_id="2.2.5-138")
+    uow.plugins.seed(plugin)
+
+    latest, _ = _geyser_version(version_id="2.2.5-139", build="139")
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(_geyser_project(), [latest])
+
+    uc = CheckPluginUpdate(uow=uow, catalog=catalog)
+    result = await uc(community_id=_COMMUNITY, server_id=server.id, plugin_id=plugin.id)
+    assert result.latest_version is not None
+    assert result.latest_version.version_id == "2.2.5-139"
+
+
+async def test_check_plugin_update_geyser_no_update() -> None:
+    """When the installed build is the latest, no update is offered (#1916)."""
+    uow = FakeUnitOfWork()
+    server = _server(server_type=ServerType.PAPER)
+    uow.servers.seed(server)
+
+    plugin = _geyser_plugin(server_id=server.id, source_version_id="2.2.5-138")
+    uow.plugins.seed(plugin)
+
+    latest, _ = _geyser_version(version_id="2.2.5-138", build="138")
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(_geyser_project(), [latest])
+
+    uc = CheckPluginUpdate(uow=uow, catalog=catalog)
+    result = await uc(community_id=_COMMUNITY, server_id=server.id, plugin_id=plugin.id)
+    assert result.latest_version is None
 
 
 # -- UpdatePlugin --
@@ -1569,6 +1671,49 @@ async def test_update_plugin_local_raises() -> None:
             plugin_id=plugin.id,
             version_id="ver-2",
         )
+
+
+async def test_update_plugin_geyser_reresolves_latest() -> None:
+    """Updating a GeyserMC Floodgate downloads the newer build in place (#1916).
+
+    The GeyserMC artifact carries a SHA-256 (no SHA-512), so the update verifies
+    against it and stores ``checksum_sha512=None``, matching the install path.
+    """
+    uow = FakeUnitOfWork()
+    server = _server(server_type=ServerType.PAPER)
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+
+    plugin = _geyser_plugin(server_id=server.id, source_version_id="2.2.5-138")
+    uow.plugins.seed(plugin)
+
+    new_content = b"floodgate-jar-139"
+    latest, _ = _geyser_version(
+        version_id="2.2.5-139", build="139", content=new_content
+    )
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(_geyser_project(), [latest])
+    catalog.seed_file(latest.files[0].url, new_content)
+
+    uc = UpdatePlugin(
+        uow=uow,
+        catalog=catalog,
+        file_store=fs,
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+    )
+    result = await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        plugin_id=plugin.id,
+        version_id="2.2.5-139",
+    )
+    assert result.source_version_id == "2.2.5-139"
+    assert result.version_number == "2.2.5"
+    assert result.sha256 == hashlib.sha256(new_content).hexdigest()
+    assert result.checksum_sha512 is None
+    assert "plugins/floodgate-spigot.jar" in fs.files
+    assert uow.commits == 1
 
 
 async def test_update_plugin_rel_path_collision() -> None:
