@@ -22,6 +22,7 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/adapters/apiclient"
 	bedrocktunnelv1 "github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/genproto/mcsd/bedrocktunnel/v1"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/ipcaps"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/metrics"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/netutil"
 )
 
@@ -76,6 +77,7 @@ type Listener struct {
 	caps      *ipcaps.IPCaps
 	newIPCaps func() *ipcaps.IPCaps
 	sessions  SessionRecorder
+	metrics   *metrics.Metrics
 	logger    *slog.Logger
 
 	// handshakeDeadline bounds each phase of a dial-out's pre-auth window
@@ -103,14 +105,15 @@ type Listener struct {
 // connection cap is used). newIPCaps builds a fresh per-server IPCaps for each
 // accepted Tunnel (the public UDP ingress hygiene caps); its lifetime matches
 // the Tunnel's. sessions records promoted Bedrock flows as game_session rows
-// (issue #1904); it is the same reporter the Java game listener uses.
-func NewListener(addr string, tlsConf *tls.Config, validator Validator, caps *ipcaps.IPCaps, newIPCaps func() *ipcaps.IPCaps, sessions SessionRecorder, logger *slog.Logger) (*Listener, error) {
+// (issue #1904); it is the same reporter the Java game listener uses. m is the
+// shared relay metrics handle (issue #1909); a nil handle is a safe no-op.
+func NewListener(addr string, tlsConf *tls.Config, validator Validator, caps *ipcaps.IPCaps, newIPCaps func() *ipcaps.IPCaps, sessions SessionRecorder, m *metrics.Metrics, logger *slog.Logger) (*Listener, error) {
 	quicConf := &quic.Config{EnableDatagrams: true, MaxIdleTimeout: maxIdleTimeout}
 	ln, err := quic.ListenAddr(addr, tlsConf, quicConf)
 	if err != nil {
 		return nil, err
 	}
-	return &Listener{ln: ln, validator: validator, caps: caps, newIPCaps: newIPCaps, sessions: sessions, logger: logger, handshakeDeadline: handshakeDeadline, tunnels: make(map[uint32]*Tunnel)}, nil
+	return &Listener{ln: ln, validator: validator, caps: caps, newIPCaps: newIPCaps, sessions: sessions, metrics: m, logger: logger, handshakeDeadline: handshakeDeadline, tunnels: make(map[uint32]*Tunnel)}, nil
 }
 
 // Addr returns the listener's bound address.
@@ -149,8 +152,12 @@ func (l *Listener) handle(ctx context.Context, conn *quic.Conn) {
 	// source IP can hold. Over the cap is a silent close. The slot covers
 	// only the pre-auth window -- released once the handshake resolves either
 	// way; an accepted tunnel's lifetime is governed by its authenticated
-	// QUIC connection, not this cap.
+	// QUIC connection, not this cap. Over-cap rejections share the
+	// {listener="bedrock",kind="conn"} ip-cap series with the per-flow
+	// concurrent cap (tunnel.go), matching the Java tunnel listener's
+	// single-series-per-listener model (issue #1909).
 	if !l.caps.Acquire(ip) {
+		l.metrics.IPCapsReject(metrics.ListenerBedrock, metrics.CapKindConn)
 		_ = conn.CloseWithError(0, "")
 		return
 	}
@@ -180,6 +187,7 @@ func (l *Listener) handshake(ctx context.Context, conn *quic.Conn) (*Tunnel, *be
 	acceptCancel()
 	if err != nil {
 		l.logger.Debug("bedrock: no handshake stream", "remote", conn.RemoteAddr(), "error", err)
+		l.metrics.BedrockTunnelRejected(metrics.BedrockRejectNoStream)
 		_ = conn.CloseWithError(0, "handshake failed")
 		return nil, nil
 	}
@@ -187,6 +195,7 @@ func (l *Listener) handshake(ctx context.Context, conn *quic.Conn) (*Tunnel, *be
 	hello, err := readHello(stream)
 	if err != nil {
 		l.logger.Debug("bedrock: handshake read failed", "remote", conn.RemoteAddr(), "error", err)
+		l.metrics.BedrockTunnelRejected(metrics.BedrockRejectHandshakeRead)
 		_ = conn.CloseWithError(0, "handshake failed")
 		return nil, nil
 	}
@@ -196,11 +205,13 @@ func (l *Listener) handshake(ctx context.Context, conn *quic.Conn) (*Tunnel, *be
 	validateCancel()
 	if err != nil {
 		l.logger.Warn("bedrock: ValidateBedrockTunnel RPC failed", "server_id", hello.GetServerId(), "error", err)
+		l.metrics.BedrockTunnelRejected(metrics.BedrockRejectValidateError)
 		l.reject(conn, stream, "validation unavailable")
 		return nil, nil
 	}
 	if !valid {
 		l.logger.Debug("bedrock: rejected", "server_id", hello.GetServerId(), "bedrock_port", hello.GetBedrockPort())
+		l.metrics.BedrockTunnelRejected(metrics.BedrockRejectInvalidCredential)
 		l.reject(conn, stream, "invalid credential")
 		return nil, nil
 	}
@@ -208,18 +219,21 @@ func (l *Listener) handshake(ctx context.Context, conn *quic.Conn) (*Tunnel, *be
 	tun, err := l.bindOrTakeover(hello.GetBedrockPort(), hello.GetServerId(), conn, l.newIPCaps())
 	if err != nil {
 		l.logger.Warn("bedrock: bind failed", "bedrock_port", hello.GetBedrockPort(), "error", err)
+		l.metrics.BedrockTunnelRejected(metrics.BedrockRejectBindFailed)
 		l.reject(conn, stream, "bind failed")
 		return nil, nil
 	}
 
 	if err := writeAck(stream, true, ""); err != nil {
 		l.logger.Debug("bedrock: ack write failed", "error", err)
+		l.metrics.BedrockTunnelRejected(metrics.BedrockRejectAckFailed)
 		_ = stream.Close()
 		tun.close("ack failed")
 		l.unregister(hello.GetBedrockPort(), tun)
 		return nil, nil
 	}
 	_ = stream.Close()
+	l.metrics.BedrockTunnelOpened()
 	return tun, hello
 }
 
@@ -252,7 +266,7 @@ func (l *Listener) bindOrTakeover(bedrockPort uint32, serverID string, conn *qui
 		displaced = true
 	}
 
-	tun, err := bind(bedrockPort, serverID, conn, caps, l.sessions, l.logger)
+	tun, err := bind(bedrockPort, serverID, conn, caps, l.sessions, l.metrics, l.logger)
 	if err != nil {
 		delete(l.tunnels, bedrockPort)
 		return nil, err

@@ -194,22 +194,29 @@ func TestFlowTableEvictReturnsPromotedSessions(t *testing.T) {
 	}
 }
 
-func TestFlowTableDrainPromoted(t *testing.T) {
+func TestFlowTableDrain(t *testing.T) {
 	ft := NewFlowTable(time.Minute, nil)
 	ft.Promote(ft.Create(udpAddr(t, "203.0.113.1:1"), false), "sess-1")
 	ft.Promote(ft.Create(udpAddr(t, "203.0.113.2:2"), false), "sess-2")
 	ft.Create(udpAddr(t, "203.0.113.3:3"), false) // not promoted
 
-	ids := ft.DrainPromoted()
+	ids, removed := ft.Drain()
 	got := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		got[id] = true
 	}
 	if len(ids) != 2 || !got["sess-1"] || !got["sess-2"] {
-		t.Errorf("DrainPromoted = %v, want {sess-1, sess-2}", ids)
+		t.Errorf("Drain ended sessions = %v, want {sess-1, sess-2}", ids)
 	}
-	// The flags are cleared, so a second drain (or a later Evict) reports nothing.
-	if again := ft.DrainPromoted(); len(again) != 0 {
-		t.Errorf("second DrainPromoted = %v, want empty", again)
+	// Drain removes every flow (promoted or not), so the removed count is all 3.
+	if removed != 3 {
+		t.Errorf("Drain removed = %d, want 3 (all flows)", removed)
+	}
+	// The table is emptied, so a second drain (or a later Evict) reports nothing.
+	if ft.Len() != 0 {
+		t.Errorf("Len() after Drain = %d, want 0", ft.Len())
+	}
+	if again, removedAgain := ft.Drain(); len(again) != 0 || removedAgain != 0 {
+		t.Errorf("second Drain = (%v, %d), want empty", again, removedAgain)
 	}
 }

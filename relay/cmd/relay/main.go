@@ -136,7 +136,7 @@ func run(ctx context.Context) error {
 		newBedrockIPCaps := func() *ipcaps.IPCaps {
 			return ipcaps.NewIPCaps(cfg.Bedrock.MaxFlowsPerIP, cfg.Bedrock.NewFlowsPerIPPerSecond, 0, time.Now, logger)
 		}
-		bedrockLn, err = bedrock.NewListener(cfg.Bedrock.TunnelListen, bedrockTLS, apiClient, bedrockTunnelCaps, newBedrockIPCaps, reporter, logger)
+		bedrockLn, err = bedrock.NewListener(cfg.Bedrock.TunnelListen, bedrockTLS, apiClient, bedrockTunnelCaps, newBedrockIPCaps, reporter, m, logger)
 		if err != nil {
 			return fmt.Errorf("bind bedrock tunnel listener %q: %w", cfg.Bedrock.TunnelListen, err)
 		}

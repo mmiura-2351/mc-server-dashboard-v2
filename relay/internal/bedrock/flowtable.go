@@ -48,7 +48,7 @@ type flowEntry struct {
 	// ingress reaches flowPromoteThreshold the flow is a real connection and the
 	// relay reports it to the API as a live session (issue #1904). promoted
 	// records that Start has already fired; sessionID is the reporter-minted id,
-	// set by Promote, so Evict / DrainPromoted can End the matching session.
+	// set by Promote, so Evict / Drain can End the matching session.
 	ingress   uint32
 	promoted  bool
 	sessionID string
@@ -127,7 +127,7 @@ func (t *FlowTable) Create(addr *net.UDPAddr, counts bool) uint32 {
 
 // Promote records that the flow with id has been reported to the session
 // reporter as a live session, storing the reporter-minted sessionID so a later
-// Evict or DrainPromoted can End it (issue #1904). The caller decides to promote
+// Evict or Drain can End it (issue #1904). The caller decides to promote
 // under Lookup's lock but calls the reporter (to mint the id) outside it, then
 // stores the id here. It is a no-op if the flow no longer exists.
 func (t *FlowTable) Promote(id uint32, sessionID string) {
@@ -203,22 +203,26 @@ func (t *FlowTable) Evict() (addrs []*net.UDPAddr, endedSessions []string) {
 	return addrs, endedSessions
 }
 
-// DrainPromoted clears the promoted flag on every currently-promoted flow and
-// returns their session ids, so tunnel teardown can End sessions still open when
-// the tunnel goes away (issue #1904). Clearing the flag keeps a concurrent or
-// later Evict from double-Ending the same session -- both paths run under this
-// lock, so each promoted session is surfaced by exactly one of them.
-func (t *FlowTable) DrainPromoted() []string {
+// Drain removes every flow from the table and returns the session ids of those
+// that had been promoted (so tunnel teardown can End sessions still open when
+// the tunnel goes away, issue #1904) plus the total number of flows removed (so
+// teardown can decrement the active-flows metric and not leak the gauge, issue
+// #1909). Removing the entries outright -- rather than only clearing the
+// promoted flag -- keeps a concurrent or later Evict from also surfacing the
+// same flow: both paths run under this lock, so each flow (and each promoted
+// session) is surfaced by exactly one of them.
+func (t *FlowTable) Drain() (endedSessions []string, removed int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	var ids []string
+	removed = len(t.byAddr)
 	for _, e := range t.byAddr {
 		if e.promoted {
-			ids = append(ids, e.sessionID)
-			e.promoted = false
+			endedSessions = append(endedSessions, e.sessionID)
 		}
 	}
-	return ids
+	t.byAddr = make(map[string]*flowEntry)
+	t.byID = make(map[uint32]*flowEntry)
+	return endedSessions, removed
 }
 
 // Len returns the current number of live flows (test/diagnostic use).
