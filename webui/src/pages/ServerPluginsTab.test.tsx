@@ -1389,7 +1389,7 @@ describe("ServerPluginsTab Bedrock discovery hint (issue #1543)", () => {
   });
 
   const HINT_TEXT =
-    "Bedrock players also need Floodgate. It has no Spigot build on Modrinth — upload its jar:";
+    "Bedrock players also need Floodgate. Install Floodgate-Spigot in one click from the plugin catalog, or download its jar from the";
   const HINT_LINK = "GeyserMC download page";
 
   // A real Geyser-Spigot install: mixed-case manifest identifier and a null
