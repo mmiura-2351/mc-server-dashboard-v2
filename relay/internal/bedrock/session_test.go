@@ -63,21 +63,27 @@ func (f *fakeRecorder) snapshot() (starts []startCall, ends []string) {
 	return append([]startCall(nil), f.starts...), append([]string(nil), f.ends...)
 }
 
-// sendGameplay writes one connected-RakNet-shaped datagram (first byte 0x84, so
-// the per-flow unconnected-ping cap never interferes) from src to dst and waits
-// for it to be forwarded as a QUIC DATAGRAM on conn. Receiving the forwarded
-// frame proves the reader processed the datagram (counting it for promotion),
-// keeping the test deterministic without draining timers.
-func sendGameplay(t *testing.T, src net.PacketConn, dst *net.UDPAddr, conn quicReceiver) {
+// sendAndForward writes one datagram from src to dst and waits for it to be
+// forwarded as a QUIC DATAGRAM on conn. Receiving the forwarded frame proves the
+// reader processed the datagram (counting it, or not, toward promotion), keeping
+// the tests deterministic without draining timers.
+func sendAndForward(t *testing.T, src net.PacketConn, dst *net.UDPAddr, conn quicReceiver, payload []byte) {
 	t.Helper()
-	if _, err := src.WriteTo([]byte{0x84, 0x00}, dst); err != nil {
+	if _, err := src.WriteTo(payload, dst); err != nil {
 		t.Fatalf("WriteTo: %v", err)
 	}
 	rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer rcancel()
 	if _, err := conn.ReceiveDatagram(rctx); err != nil {
-		t.Fatalf("gameplay datagram was not forwarded: %v", err)
+		t.Fatalf("datagram %#x was not forwarded: %v", payload, err)
 	}
+}
+
+// sendGameplay sends one connected RakNet-shaped datagram (first byte 0x84 --
+// FLAG_VALID set, so it counts toward promotion and is never ping-capped).
+func sendGameplay(t *testing.T, src net.PacketConn, dst *net.UDPAddr, conn quicReceiver) {
+	t.Helper()
+	sendAndForward(t, src, dst, conn, []byte{0x84, 0x00})
 }
 
 // TestBedrockFlowPromotesToSessionAndEndsOnEviction covers issue #1904's core
@@ -189,6 +195,54 @@ func TestBedrockShortFlowDoesNotPromote(t *testing.T) {
 	}
 
 	// Teardown must not conjure a session either.
+	stop()
+	if starts, ends := rec.snapshot(); len(starts) != 0 || len(ends) != 0 {
+		t.Errorf("after teardown starts=%d ends=%d, want 0/0", len(starts), len(ends))
+	}
+}
+
+// TestBedrockPingFloodDoesNotPromote pins issue #1904's noise gate against the
+// phantom-session case a naive counter allows: a client that keeps a server on
+// its list re-pings it (~1/s) from a stable RakNet source port, refreshing the
+// flow's idle deadline indefinitely. Those datagrams are offline
+// unconnected-pings (first byte 0x01, no FLAG_VALID), so they must NOT advance
+// promotion -- no number of them mints a session -- even though ingress counting
+// sits before the #1604 per-flow ping cap.
+func TestBedrockPingFloodDoesNotPromote(t *testing.T) {
+	server, client := quicConnPair(t)
+	caps := ipcaps.NewIPCaps(0, 0, 0, nil, nil)
+	rec := &fakeRecorder{}
+	dialAddr, stop := runTunnelRec(t, server, caps, "srv-1", rec)
+
+	fakeClient, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenPacket: %v", err)
+	}
+	defer func() { _ = fakeClient.Close() }()
+
+	// Drive flowPromoteThreshold unconnected-pings (first byte 0x01) from one
+	// source, draining each forwarded frame to confirm the reader processed it.
+	// flowPingsPerSecond == flowPromoteThreshold, so all of these clear the
+	// per-flow ping cap and are forwarded; had pings counted toward promotion,
+	// the last one would have crossed the threshold and fired Start before its
+	// frame was forwarded.
+	for i := 0; i < flowPromoteThreshold; i++ {
+		sendAndForward(t, fakeClient, dialAddr, client, []byte{0x01, 0xaa})
+	}
+	// Pile on well past the threshold; these get ping-capped (not forwarded) but
+	// still traverse Lookup, where promotion is counted.
+	for i := 0; i < flowPromoteThreshold*2; i++ {
+		if _, err := fakeClient.WriteTo([]byte{0x01, 0xbb}, dialAddr); err != nil {
+			t.Fatalf("WriteTo: %v", err)
+		}
+	}
+
+	// Give the reader ample time to (not) promote, then assert nothing was
+	// reported -- no Start on ingress.
+	if starts := waitForStarts(t, rec, 1); len(starts) != 0 {
+		t.Errorf("ping flood promoted %d sessions, want 0 (offline datagrams must not count)", len(starts))
+	}
+	// Teardown must not conjure a session or an End either.
 	stop()
 	if starts, ends := rec.snapshot(); len(starts) != 0 || len(ends) != 0 {
 		t.Errorf("after teardown starts=%d ends=%d, want 0/0", len(starts), len(ends))

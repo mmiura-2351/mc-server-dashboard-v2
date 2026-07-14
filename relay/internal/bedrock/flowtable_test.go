@@ -19,12 +19,12 @@ func TestFlowTableCreateThenLookup(t *testing.T) {
 	ft := NewFlowTable(time.Minute, nil)
 	a := udpAddr(t, "203.0.113.1:12345")
 
-	if _, ok, _ := ft.Lookup(a); ok {
+	if _, ok, _ := ft.Lookup(a, true); ok {
 		t.Fatal("Lookup should miss before Create")
 	}
-	id := ft.Create(a)
+	id := ft.Create(a, false)
 
-	got, ok, _ := ft.Lookup(a)
+	got, ok, _ := ft.Lookup(a, true)
 	if !ok {
 		t.Fatal("Lookup should hit after Create")
 	}
@@ -38,8 +38,8 @@ func TestFlowTableMultipleClientsGetDistinctIDs(t *testing.T) {
 	a1 := udpAddr(t, "203.0.113.1:1")
 	a2 := udpAddr(t, "203.0.113.2:2")
 
-	id1 := ft.Create(a1)
-	id2 := ft.Create(a2)
+	id1 := ft.Create(a1, false)
+	id2 := ft.Create(a2, false)
 	if id1 == id2 {
 		t.Errorf("distinct clients got the same flow id %d", id1)
 	}
@@ -51,7 +51,7 @@ func TestFlowTableMultipleClientsGetDistinctIDs(t *testing.T) {
 func TestFlowTableAddrByID(t *testing.T) {
 	ft := NewFlowTable(time.Minute, nil)
 	a := udpAddr(t, "203.0.113.1:12345")
-	id := ft.Create(a)
+	id := ft.Create(a, false)
 
 	got, ok := ft.AddrByID(id)
 	if !ok {
@@ -75,7 +75,7 @@ func TestFlowTableEvictIdle(t *testing.T) {
 	ft := NewFlowTable(time.Minute, clock)
 
 	a := udpAddr(t, "203.0.113.1:12345")
-	ft.Create(a)
+	ft.Create(a, false)
 
 	// Not idle yet: no eviction.
 	if evicted, _ := ft.Evict(); len(evicted) != 0 {
@@ -93,7 +93,7 @@ func TestFlowTableEvictIdle(t *testing.T) {
 	if ft.Len() != 0 {
 		t.Errorf("Len() after eviction = %d, want 0", ft.Len())
 	}
-	if _, ok, _ := ft.Lookup(a); ok {
+	if _, ok, _ := ft.Lookup(a, true); ok {
 		t.Error("Lookup should miss after eviction")
 	}
 }
@@ -104,11 +104,11 @@ func TestFlowTableActivityResetsIdleClock(t *testing.T) {
 	ft := NewFlowTable(time.Minute, clock)
 
 	a := udpAddr(t, "203.0.113.1:12345")
-	id := ft.Create(a)
+	id := ft.Create(a, false)
 
 	// Halfway through the idle window, a lookup (fresh datagram) refreshes it.
 	now = now.Add(30 * time.Second)
-	if _, ok, _ := ft.Lookup(a); !ok {
+	if _, ok, _ := ft.Lookup(a, true); !ok {
 		t.Fatal("Lookup should hit")
 	}
 
@@ -138,8 +138,8 @@ func TestFlowTableActivityResetsIdleClock(t *testing.T) {
 func TestFlowTableDefaultClock(t *testing.T) {
 	ft := NewFlowTable(time.Minute, nil)
 	a := udpAddr(t, "203.0.113.1:12345")
-	ft.Create(a)
-	if _, ok, _ := ft.Lookup(a); !ok {
+	ft.Create(a, false)
+	if _, ok, _ := ft.Lookup(a, true); !ok {
 		t.Fatal("Lookup should hit with the default (time.Now) clock")
 	}
 }
@@ -147,21 +147,29 @@ func TestFlowTableDefaultClock(t *testing.T) {
 func TestFlowTableLookupPromotesAtThreshold(t *testing.T) {
 	ft := NewFlowTable(time.Minute, nil)
 	a := udpAddr(t, "203.0.113.1:12345")
-	ft.Create(a) // the create datagram counts as ingress 1
+	ft.Create(a, false) // the offline creating datagram does not advance promotion
 
-	// Lookups up to (but not reaching) the threshold do not promote.
-	for i := 2; i < flowPromoteThreshold; i++ {
-		if _, ok, promote := ft.Lookup(a); !ok || promote {
-			t.Fatalf("lookup at ingress %d: ok=%v promote=%v, want ok=true promote=false", i, ok, promote)
+	// Offline datagrams (counts=false) never advance promotion, no matter how
+	// many arrive.
+	for i := 0; i < flowPromoteThreshold*2; i++ {
+		if _, ok, promote := ft.Lookup(a, false); !ok || promote {
+			t.Fatalf("offline lookup %d: ok=%v promote=%v, want ok=true promote=false", i, ok, promote)
 		}
 	}
-	// The datagram that carries the flow to the threshold promotes.
-	if _, ok, promote := ft.Lookup(a); !ok || !promote {
-		t.Fatalf("lookup at threshold: ok=%v promote=%v, want ok=true promote=true", ok, promote)
+
+	// Connected datagrams up to (but not reaching) the threshold do not promote.
+	for i := 1; i < flowPromoteThreshold; i++ {
+		if _, ok, promote := ft.Lookup(a, true); !ok || promote {
+			t.Fatalf("connected lookup %d: ok=%v promote=%v, want ok=true promote=false", i, ok, promote)
+		}
+	}
+	// The connected datagram that carries the flow to the threshold promotes.
+	if _, ok, promote := ft.Lookup(a, true); !ok || !promote {
+		t.Fatalf("connected lookup at threshold: ok=%v promote=%v, want ok=true promote=true", ok, promote)
 	}
 	// Promotion fires exactly once: past the threshold it never repeats.
-	if _, _, promote := ft.Lookup(a); promote {
-		t.Error("lookup past the threshold promoted again; want promote exactly once")
+	if _, _, promote := ft.Lookup(a, true); promote {
+		t.Error("connected lookup past the threshold promoted again; want promote exactly once")
 	}
 }
 
@@ -171,10 +179,10 @@ func TestFlowTableEvictReturnsPromotedSessions(t *testing.T) {
 	ft := NewFlowTable(time.Minute, clock)
 
 	promoted := udpAddr(t, "203.0.113.1:1")
-	ft.Promote(ft.Create(promoted), "sess-A")
+	ft.Promote(ft.Create(promoted, false), "sess-A")
 
 	plain := udpAddr(t, "203.0.113.2:2")
-	ft.Create(plain) // never promoted
+	ft.Create(plain, false) // never promoted
 
 	now = now.Add(2 * time.Minute)
 	addrs, ended := ft.Evict()
@@ -188,9 +196,9 @@ func TestFlowTableEvictReturnsPromotedSessions(t *testing.T) {
 
 func TestFlowTableDrainPromoted(t *testing.T) {
 	ft := NewFlowTable(time.Minute, nil)
-	ft.Promote(ft.Create(udpAddr(t, "203.0.113.1:1")), "sess-1")
-	ft.Promote(ft.Create(udpAddr(t, "203.0.113.2:2")), "sess-2")
-	ft.Create(udpAddr(t, "203.0.113.3:3")) // not promoted
+	ft.Promote(ft.Create(udpAddr(t, "203.0.113.1:1"), false), "sess-1")
+	ft.Promote(ft.Create(udpAddr(t, "203.0.113.2:2"), false), "sess-2")
+	ft.Create(udpAddr(t, "203.0.113.3:3"), false) // not promoted
 
 	ids := ft.DrainPromoted()
 	got := make(map[string]bool, len(ids))

@@ -392,9 +392,11 @@ honestly.
 **Bedrock flows** (issue #1904) are reported through the same `ReportSessions`
 path and `session.Reporter`, but the unit is a UDP flow, not an authenticated
 login: the relay never parses RakNet, so a flow becomes a session only once it
-crosses a client→worker datagram threshold (`flowPromoteThreshold`,
-`docs/app/BEDROCK_TUNNEL.md` Section 7), which keeps unconnected-ping /
-server-scan churn out of the history. Two caveats are inherent to a thin UDP
+crosses a threshold of *connected* client→worker datagrams (RakNet FLAG_VALID,
+first byte ≥ 0x80 — `flowPromoteThreshold`, `docs/app/BEDROCK_TUNNEL.md`
+Section 7). Offline packets (unconnected ping/pong, the connection handshake)
+never count, so a client re-pinging a pinned server — and server-scan churn —
+stay out of the history. Two caveats are inherent to a thin UDP
 forwarder and accepted: `player_uuid` / `username` are null (Floodgate identity
 is Geyser-side, invisible to the relay) while `player_ip` is the client's true
 UDP source; and `started_at` is the promotion time (~≤1 s after connect) while

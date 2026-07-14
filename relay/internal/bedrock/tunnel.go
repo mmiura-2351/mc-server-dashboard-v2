@@ -34,15 +34,15 @@ const flowSweepInterval = 15 * time.Second
 // (connected RakNet packets, first byte 0x80+).
 const flowPingsPerSecond = 5
 
-// flowPromoteThreshold is the number of client->worker datagrams a Bedrock flow
-// must send before the relay reports it to the API as a live player session
-// (issue #1904). The relay never parses RakNet, so a UDP flow -- not an
-// authenticated player -- is the only unit it can observe; a low threshold
-// separates a real RakNet connection (many datagrams within ~1s of connecting)
-// from unconnected-ping / server-scan churn (1-2 datagrams), which must not
-// mint a session row. It is a fixed const, not a config knob, mirroring
-// flowPingsPerSecond. Must be >= 2: the flow-creating datagram counts as 1 and
-// promotion is detected on a subsequent Lookup hit (FlowTable.Lookup / Create).
+// flowPromoteThreshold is the number of CONNECTED (RakNet FLAG_VALID, first byte
+// >= 0x80) client->worker datagrams a Bedrock flow must send before the relay
+// reports it to the API as a live player session (issue #1904). The relay never
+// parses RakNet, so a UDP flow -- not an authenticated player -- is the only
+// unit it can observe; counting only connected datagrams (never offline
+// unconnected-ping / server-scan / handshake packets, all first byte < 0x80)
+// separates a real connection -- which sends many connected datagrams within
+// ~1s -- from a client re-pinging a pinned server, which must not mint a session
+// row. It is a fixed const, not a config knob, mirroring flowPingsPerSecond.
 const flowPromoteThreshold = 5
 
 // udpReadBufferSize is sized generously above maxDatagramPayload so an
@@ -298,7 +298,15 @@ func (t *Tunnel) pumpUDPToQueue(sendCh chan<- *[]byte) {
 			continue
 		}
 
-		id, ok, promote := t.flows.Lookup(udpAddr)
+		// Only connected RakNet datagrams (FLAG_VALID, first byte >= 0x80) advance
+		// session promotion; offline packets (unconnected ping 0x01, pong, the
+		// connection handshake) refresh the flow but must not promote it, so a
+		// client re-pinging a pinned server from a stable source port never mints
+		// a phantom session (issue #1904). buf[0] is read here, before the frame
+		// is copied out below; the n > 0 guard keeps a zero-length datagram from
+		// indexing buf[0].
+		connected := n > 0 && buf[0] >= 0x80
+		id, ok, promote := t.flows.Lookup(udpAddr, connected)
 		if !ok {
 			ip := netutil.HostOf(udpAddr)
 			// New-flow rate cap, then the concurrent-flow cap -- both per
@@ -309,7 +317,7 @@ func (t *Tunnel) pumpUDPToQueue(sendCh chan<- *[]byte) {
 			if !t.caps.AllowJoin(ip) || !t.caps.Acquire(ip) {
 				continue
 			}
-			id = t.flows.Create(udpAddr)
+			id = t.flows.Create(udpAddr, connected)
 		}
 
 		// Promote the flow to a reported session once it crosses

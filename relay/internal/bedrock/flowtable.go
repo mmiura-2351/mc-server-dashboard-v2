@@ -41,13 +41,14 @@ type flowEntry struct {
 	pingWindowStart time.Time
 	pingCount       uint32
 
-	// ingress counts client->worker datagrams observed on this flow (both the
-	// Create datagram and every later Lookup hit). Once it reaches
-	// flowPromoteThreshold the flow is a real RakNet connection rather than
-	// ping/scan churn, and the relay reports it to the API as a live session
-	// (issue #1904). promoted records that Start has already fired; sessionID is
-	// the reporter-minted id, set by Promote, so Evict / DrainPromoted can End
-	// the matching session.
+	// ingress counts CONNECTED client->worker datagrams (RakNet FLAG_VALID, first
+	// byte >= 0x80) observed on this flow via Lookup. Offline packets
+	// (unconnected ping/pong, the connection handshake) refresh the flow but do
+	// not count, so a client re-pinging a pinned server never promotes. Once
+	// ingress reaches flowPromoteThreshold the flow is a real connection and the
+	// relay reports it to the API as a live session (issue #1904). promoted
+	// records that Start has already fired; sessionID is the reporter-minted id,
+	// set by Promote, so Evict / DrainPromoted can End the matching session.
 	ingress   uint32
 	promoted  bool
 	sessionID string
@@ -67,13 +68,17 @@ func NewFlowTable(idleTTL time.Duration, now func() time.Time) *FlowTable {
 	}
 }
 
-// Lookup returns the existing flow id for addr, refreshes its idle deadline, and
-// counts the client->worker datagram for session promotion (issue #1904). ok is
-// false when addr has no flow yet -- the caller (after applying any admission
-// checks, e.g. ipcaps) creates one via Create. promote is true on the single
-// datagram that carries the flow across flowPromoteThreshold; the caller then
-// mints a session id (outside this lock) and stores it back via Promote.
-func (t *FlowTable) Lookup(addr *net.UDPAddr) (id uint32, ok, promote bool) {
+// Lookup returns the existing flow id for addr and refreshes its idle deadline.
+// counts marks whether this datagram advances session promotion -- true only for
+// connected RakNet datagrams (FLAG_VALID, first byte >= 0x80); offline packets
+// (unconnected ping/pong, the connection handshake) refresh the flow but must
+// not promote it, so a client re-pinging a pinned server never mints a phantom
+// session (issue #1904). ok is false when addr has no flow yet -- the caller
+// (after applying any admission checks, e.g. ipcaps) creates one via Create.
+// promote is true on the single connected datagram that carries the flow across
+// flowPromoteThreshold; the caller then mints a session id (outside this lock)
+// and stores it back via Promote.
+func (t *FlowTable) Lookup(addr *net.UDPAddr, counts bool) (id uint32, ok, promote bool) {
 	key := addr.String()
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -81,7 +86,12 @@ func (t *FlowTable) Lookup(addr *net.UDPAddr) (id uint32, ok, promote bool) {
 	if !ok {
 		return 0, false, false
 	}
+	// Any datagram is activity that refreshes the idle deadline, but only a
+	// connected one advances promotion.
 	e.lastSeen = t.now()
+	if !counts {
+		return e.id, true, false
+	}
 	e.ingress++
 	// == (not >=) fires exactly once: ingress increases monotonically and a
 	// single reader goroutine drives it, so Start is reported at most once per
@@ -89,10 +99,11 @@ func (t *FlowTable) Lookup(addr *net.UDPAddr) (id uint32, ok, promote bool) {
 	return e.id, true, e.ingress == flowPromoteThreshold
 }
 
-// Create allocates a new flow id for addr and returns it. The caller must not
-// already hold a flow for addr (check via Lookup first); Create does not
-// re-check.
-func (t *FlowTable) Create(addr *net.UDPAddr) uint32 {
+// Create allocates a new flow id for addr and returns it. counts marks whether
+// the creating datagram is connected and so advances promotion, matching Lookup.
+// The caller must not already hold a flow for addr (check via Lookup first);
+// Create does not re-check.
+func (t *FlowTable) Create(addr *net.UDPAddr, counts bool) uint32 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	// nextID wraps at 2^32 without a liveness check; unreachable in practice
@@ -100,9 +111,15 @@ func (t *FlowTable) Create(addr *net.UDPAddr) uint32 {
 	// collision needs a >4-billion-flow-old entry still alive).
 	id := t.nextID
 	t.nextID++
-	// ingress starts at 1 for the datagram that created the flow; promotion is
-	// detected on a later Lookup hit, so flowPromoteThreshold must be >= 2.
-	e := &flowEntry{id: id, addr: addr, lastSeen: t.now(), ingress: 1}
+	// A flow's first datagram is normally an offline RakNet handshake/ping
+	// (counts=false, ingress 0), but a NAT-rebound mid-session client can create
+	// a flow with a connected packet, which must count toward promotion just like
+	// a connected Lookup hit (issue #1904).
+	var ingress uint32
+	if counts {
+		ingress = 1
+	}
+	e := &flowEntry{id: id, addr: addr, lastSeen: t.now(), ingress: ingress}
 	t.byAddr[addr.String()] = e
 	t.byID[id] = e
 	return id
