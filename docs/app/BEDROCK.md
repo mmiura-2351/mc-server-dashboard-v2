@@ -42,16 +42,17 @@ dashboard detects Geyser on a server and automatically wires the network path
 running). This also covers existing servers — install the plugin at rest and
 the same detection applies on the next start.
 
-Two install paths, because the two plugins ship differently:
+Both install from the plugin catalog, though from different sources because the
+two plugins ship differently — latest resolved at install time either way, no
+pinning, no bundling:
 
-- **Geyser**: install from the plugin catalog (Modrinth), like any other
-  plugin. Latest is resolved at install time — no pinning, no bundling.
-- **Floodgate**: upload the jar from
-  [geysermc.org](https://geysermc.org/download#floodgate) instead. Modrinth
-  carries no Spigot/Paper build of Floodgate (issue #1548), so the catalog
-  path does not apply to it. Geyser auto-detects an installed Floodgate at
-  runtime (`auth-type: FLOODGATE`) — no manual configuration is needed on
-  either plugin.
+- **Geyser**: from Modrinth, like any other plugin.
+- **Floodgate**: Modrinth carries no Spigot/Paper build of Floodgate (issue
+  #1548), so the catalog resolves it from GeyserMC's own download API instead
+  (issue #1905); uploading the jar from
+  [geysermc.org](https://geysermc.org/download#floodgate) still works as a
+  fallback. Geyser auto-detects an installed Floodgate at runtime
+  (`auth-type: FLOODGATE`) — no manual configuration is needed on either plugin.
 
 The deployment-wide Bedrock gate (`relay.enabled` AND `relay.bedrock_enabled`,
 `GET /api/meta` `bedrock_enabled`) must also be on, or Geyser detection

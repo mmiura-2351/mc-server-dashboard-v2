@@ -2296,18 +2296,25 @@ def get_download_client_modpack(
 
 
 def get_catalog_provider() -> CatalogProvider:
-    """Provide a per-request :class:`CatalogProvider` (Modrinth, issue #1151).
+    """Provide a per-request :class:`CatalogProvider` (issue #1151).
 
-    Stateless adapter; each request creates a fresh httpx2 client per call.
-    The import is local to avoid pulling the adapter at module level (the
-    adapter is bound at the edge, not importable from domain/application).
+    A router over Modrinth (the default catalog) and GeyserMC's download API,
+    which serves the Floodgate-Spigot build Modrinth lacks (issue #1905). Every
+    project except ``floodgate`` still resolves from Modrinth. Stateless
+    adapters; each request creates a fresh httpx2 client per call. The imports
+    are local to avoid pulling the adapters at module level (they are bound at
+    the edge, not importable from domain/application).
     """
 
+    from mc_server_dashboard_api.servers.adapters.catalog_router import RoutingCatalog
+    from mc_server_dashboard_api.servers.adapters.geysermc_catalog import (
+        GeyserMcCatalog,
+    )
     from mc_server_dashboard_api.servers.adapters.modrinth_catalog import (
         ModrinthCatalog,
     )
 
-    return ModrinthCatalog()
+    return RoutingCatalog(default=ModrinthCatalog(), geyser=GeyserMcCatalog())
 
 
 def get_search_catalog(
