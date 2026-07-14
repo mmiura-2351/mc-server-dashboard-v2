@@ -77,6 +77,13 @@ class PluginSource(enum.Enum):
     GEYSER = "geyser"
 
 
+# Sources whose "latest" is resolvable through the catalog seam, so an installed
+# plugin from one supports an in-place update check (issue #1916): the routing
+# catalog re-resolves its project's latest version at check time. A LOCAL upload
+# has no upstream, so it is never update-checkable.
+CATALOG_SOURCES = frozenset({PluginSource.MODRINTH, PluginSource.GEYSER})
+
+
 @dataclass
 class ServerPlugin:
     """Row of the ``server_plugin`` table (migration 0018).

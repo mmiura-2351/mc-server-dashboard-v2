@@ -67,8 +67,13 @@ class PluginRepository(abc.ABC):
         """Full entity update of the plugin row."""
 
     @abc.abstractmethod
-    async def list_modrinth_plugins(self, server_id: ServerId) -> list[ServerPlugin]:
-        """Return plugins with source=MODRINTH and a non-null source_project_id."""
+    async def list_catalog_plugins(self, server_id: ServerId) -> list[ServerPlugin]:
+        """Return catalog-sourced plugins with a non-null source_project_id.
+
+        Catalog-sourced means MODRINTH or GEYSER (see ``CATALOG_SOURCES``): both
+        resolve their latest version through the catalog seam, so both are
+        update-checkable (issue #1916). LOCAL uploads are excluded.
+        """
 
     @abc.abstractmethod
     async def get_by_source_project_id(
