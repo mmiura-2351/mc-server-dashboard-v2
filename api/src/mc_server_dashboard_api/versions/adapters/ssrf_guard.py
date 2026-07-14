@@ -11,7 +11,7 @@ No host allowlist: the upstream bases (Mojang / PaperMC / Fabric / Forge) and
 their download CDNs are public but not a closed, enumerable set, so an allowlist
 would break version installs. Scheme + private-IP is the whole policy.
 
-These fetchers do not follow redirects (httpx defaults ``follow_redirects`` to
+These fetchers do not follow redirects (httpx2 defaults ``follow_redirects`` to
 ``False`` and neither fetcher overrides it), so validating the single requested
 URL is sufficient — there are no redirect hops to re-validate the way the
 Modrinth download path does.

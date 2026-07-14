@@ -1,7 +1,7 @@
 """The ``JsonFetcher`` seam: fetch a document over HTTP (FR-VER-2).
 
 A narrow Port the catalog adapters depend on so the external HTTP layer is a
-single replaceable boundary: the real adapter is httpx-backed; tests inject a
+single replaceable boundary: the real adapter is httpx2-backed; tests inject a
 fake that serves recorded fixture documents with no network. Keeping the
 transport behind this Port is what lets the retry + cache-fallback wrapper
 compose over it uniformly and lets the adapter tests run offline (the issue's

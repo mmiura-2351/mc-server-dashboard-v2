@@ -1,6 +1,6 @@
 """HTTP JSON/text fetcher: SSRF guard + typed transport errors (FR-VER-2, #1598).
 
-The real :class:`HttpxJsonFetcher` is driven over an httpx ``MockTransport`` (no
+The real :class:`HttpxJsonFetcher` is driven over an httpx2 ``MockTransport`` (no
 live network). Verifies the happy paths pass the SSRF guard and return the
 document, and that the guard refuses a URL resolving to a private IP or a
 non-HTTPS URL — surfaced as :class:`FetchError` for the retry/cache wrapper.
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import functools
 
-import httpx
+import httpx2
 import pytest
 
 from mc_server_dashboard_api.versions.adapters import ssrf_guard
@@ -24,22 +24,22 @@ _URL = "https://example.test/manifest.json"
 
 
 def _install_transport(monkeypatch: pytest.MonkeyPatch, handler: object) -> None:
-    """Route the adapter's httpx client through a MockTransport and stub DNS.
+    """Route the adapter's httpx2 client through a MockTransport and stub DNS.
 
     The SSRF guard's resolver is stubbed to a public IP so it is a pass-through
     for the mocked host (the tests never touch real DNS).
     """
 
-    transport = httpx.MockTransport(handler)  # type: ignore[arg-type]
-    patched = functools.partial(httpx.AsyncClient, transport=transport)
-    monkeypatch.setattr(httpx, "AsyncClient", patched)
+    transport = httpx2.MockTransport(handler)  # type: ignore[arg-type]
+    patched = functools.partial(httpx2.AsyncClient, transport=transport)
+    monkeypatch.setattr(httpx2, "AsyncClient", patched)
     monkeypatch.setattr(ssrf_guard, "_resolve_host", lambda _host: ["93.184.216.34"])
 
 
 @pytest.mark.asyncio
 async def test_get_json_returns_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"latest": "1.21.1"})
+    def handler(_: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json={"latest": "1.21.1"})
 
     _install_transport(monkeypatch, handler)
     assert await HttpxJsonFetcher().get_json(_URL) == {"latest": "1.21.1"}
@@ -47,8 +47,8 @@ async def test_get_json_returns_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.asyncio
 async def test_get_text_returns_body(monkeypatch: pytest.MonkeyPatch) -> None:
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, text="<metadata/>")
+    def handler(_: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, text="<metadata/>")
 
     _install_transport(monkeypatch, handler)
     assert await HttpxJsonFetcher().get_text(_URL) == "<metadata/>"
@@ -58,8 +58,8 @@ async def test_get_text_returns_body(monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_get_json_non_2xx_is_fetch_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(503, content=b"upstream down")
+    def handler(_: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(503, content=b"upstream down")
 
     _install_transport(monkeypatch, handler)
     with pytest.raises(FetchError):
@@ -92,8 +92,8 @@ async def test_get_json_404_is_fetch_not_found_error(
 ) -> None:
     """A 404 is a definitive 'not found', distinct from a transient error (#1539)."""
 
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(404, content=b"not found")
+    def handler(_: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(404, content=b"not found")
 
     _install_transport(monkeypatch, handler)
     with pytest.raises(FetchNotFoundError):
@@ -104,8 +104,8 @@ async def test_get_json_404_is_fetch_not_found_error(
 async def test_get_text_404_is_fetch_not_found_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(404, content=b"not found")
+    def handler(_: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(404, content=b"not found")
 
     _install_transport(monkeypatch, handler)
     with pytest.raises(FetchNotFoundError):

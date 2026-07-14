@@ -1,6 +1,6 @@
 """Modrinth API v2 adapter for :class:`CatalogProvider` (issue #1151).
 
-Uses httpx with a per-request client (the same pattern as
+Uses httpx2 with a per-request client (the same pattern as
 :class:`HttpxJsonFetcher` in the versions adapters). Modrinth ToS requires a
 descriptive User-Agent.
 """
@@ -14,7 +14,7 @@ from collections.abc import Callable
 from typing import Any
 from urllib.parse import quote, urljoin, urlparse
 
-import httpx
+import httpx2
 
 from mc_server_dashboard_api.servers.domain.catalog_provider import (
     CatalogDependency,
@@ -33,8 +33,8 @@ from mc_server_dashboard_api.servers.domain.errors import (
 
 _BASE_URL = "https://api.modrinth.com/v2"
 _USER_AGENT = "mc-server-dashboard/2.0 (mmiura2351@gmail.com)"
-_METADATA_TIMEOUT = httpx.Timeout(15.0)
-_DOWNLOAD_TIMEOUT = httpx.Timeout(120.0)
+_METADATA_TIMEOUT = httpx2.Timeout(15.0)
+_DOWNLOAD_TIMEOUT = httpx2.Timeout(120.0)
 _MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024  # 512 MiB
 _MAX_JSON_BYTES = 10 * 1024 * 1024  # 10 MiB
 _MAX_REDIRECTS = 5
@@ -180,7 +180,7 @@ class ModrinthCatalog(CatalogProvider):
             )
         _assert_no_private_ips(parsed.hostname)
         try:
-            async with httpx.AsyncClient(
+            async with httpx2.AsyncClient(
                 timeout=_DOWNLOAD_TIMEOUT,
                 headers=self._headers(),
             ) as client:
@@ -221,11 +221,11 @@ class ModrinthCatalog(CatalogProvider):
                 raise CatalogUnavailableError("too many redirects")
         except (FileTooLargeError, CatalogUnavailableError):
             raise
-        except httpx.HTTPStatusError as exc:
+        except httpx2.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 raise CatalogProjectNotFoundError(url) from exc
             raise CatalogUnavailableError(str(exc)) from exc
-        except httpx.TransportError as exc:
+        except httpx2.TransportError as exc:
             raise CatalogUnavailableError(str(exc)) from exc
 
     # -- internal helpers --
@@ -234,7 +234,7 @@ class ModrinthCatalog(CatalogProvider):
         self, path: str, *, params: dict[str, str | int] | None = None
     ) -> Any:
         try:
-            async with httpx.AsyncClient(
+            async with httpx2.AsyncClient(
                 base_url=self._base_url,
                 timeout=_METADATA_TIMEOUT,
                 headers=self._headers(),
@@ -255,9 +255,9 @@ class ModrinthCatalog(CatalogProvider):
                     return json.loads(b"".join(chunks))
         except (CatalogProjectNotFoundError, CatalogUnavailableError):
             raise
-        except httpx.HTTPStatusError as exc:
+        except httpx2.HTTPStatusError as exc:
             raise CatalogUnavailableError(str(exc)) from exc
-        except httpx.TransportError as exc:
+        except httpx2.TransportError as exc:
             raise CatalogUnavailableError(str(exc)) from exc
 
     @staticmethod

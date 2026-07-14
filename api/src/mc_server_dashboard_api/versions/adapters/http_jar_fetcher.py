@@ -1,6 +1,6 @@
-"""httpx-backed :class:`JarFetcher` (FR-VER-3).
+"""httpx2-backed :class:`JarFetcher` (FR-VER-3).
 
-Confined to httpx at the transport edge alongside :class:`HttpxJsonFetcher`. The
+Confined to httpx2 at the transport edge alongside :class:`HttpxJsonFetcher`. The
 body is **streamed** (``aiter_bytes``) rather than read whole via
 ``response.content`` so a runaway or hostile response cannot buffer unboundedly
 before verification: the download is aborted the moment it crosses
@@ -14,7 +14,7 @@ edge maps both to the ``jar_unavailable`` 503 surface) before placement.
 
 from __future__ import annotations
 
-import httpx
+import httpx2
 
 from mc_server_dashboard_api.versions.adapters.ssrf_guard import (
     BlockedHostError,
@@ -27,7 +27,7 @@ from mc_server_dashboard_api.versions.domain.errors import (
 from mc_server_dashboard_api.versions.domain.jar_fetcher import JarFetcher
 
 # JAR downloads are larger than manifest JSON; a generous read timeout.
-_TIMEOUT = httpx.Timeout(60.0)
+_TIMEOUT = httpx2.Timeout(60.0)
 
 # Hard ceiling on a single JAR download. 512 MiB is generous for any Minecraft
 # server JAR (vanilla/Paper server JARs are tens of MB) while bounding the memory a
@@ -37,22 +37,22 @@ MAX_JAR_BYTES = 512 * 1024 * 1024
 
 
 class HttpxJarFetcher(JarFetcher):
-    """Stream a JAR's bytes over HTTP with httpx, capped at :data:`MAX_JAR_BYTES`."""
+    """Stream a JAR's bytes over HTTP with httpx2, capped at :data:`MAX_JAR_BYTES`."""
 
     async def fetch(self, url: str) -> bytes:
         try:
             assert_url_allowed(url)
-            async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            async with httpx2.AsyncClient(timeout=_TIMEOUT) as client:
                 async with client.stream("GET", url) as response:
                     response.raise_for_status()
                     return await _read_capped(response)
         except BlockedHostError as exc:
             raise JarDownloadError(str(exc)) from exc
-        except httpx.HTTPError as exc:
+        except httpx2.HTTPError as exc:
             raise JarDownloadError(str(exc)) from exc
 
 
-async def _read_capped(response: httpx.Response) -> bytes:
+async def _read_capped(response: httpx2.Response) -> bytes:
     """Buffer the streamed body, aborting the moment it crosses the cap."""
 
     chunks = bytearray()

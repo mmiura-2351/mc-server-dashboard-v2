@@ -461,7 +461,7 @@ def get_ensure_jar(
 ) -> EnsureJar:
     """Assemble the :class:`EnsureJar` use case (ensure-on-start, FR-VER-3).
 
-    Binds the catalog, the httpx JAR downloader, and the versions ``JarPool`` seam
+    Binds the catalog, the httpx2 JAR downloader, and the versions ``JarPool`` seam
     bound to the process-wide storage ``JarStore`` (content-addressed reuse).
     """
 
@@ -2298,7 +2298,7 @@ def get_download_client_modpack(
 def get_catalog_provider() -> CatalogProvider:
     """Provide a per-request :class:`CatalogProvider` (Modrinth, issue #1151).
 
-    Stateless adapter; each request creates a fresh httpx client per call.
+    Stateless adapter; each request creates a fresh httpx2 client per call.
     The import is local to avoid pulling the adapter at module level (the
     adapter is bound at the edge, not importable from domain/application).
     """

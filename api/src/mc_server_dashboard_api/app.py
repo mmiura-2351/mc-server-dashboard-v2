@@ -356,7 +356,7 @@ _CATALOG_SOURCE_PREFIXES: dict[CatalogServerType, str] = {
 def _build_version_catalog() -> tuple[VersionCatalog, RetryCachingFetcher]:
     """Build the process-wide :class:`VersionCatalog` (ARCHITECTURE.md Section 7.3).
 
-    One httpx fetcher wrapped in the retry + in-process TTL-cache fallback
+    One httpx2 fetcher wrapped in the retry + in-process TTL-cache fallback
     (FR-VER-2), shared by the vanilla (Mojang), Paper (PaperMC), Fabric
     (meta.fabricmc.net), and Forge (Forge Maven) catalogs so the last-good
     manifest cache is process-wide. A
