@@ -50,13 +50,19 @@ jobs:
         with:
           node-version-file: webui/.nvmrc
           cache: npm
-          cache-dependency-path: webui/package-lock.json
+          cache-dependency-path: |
+            webui/package-lock.json
+            webui/tools/openapi/package-lock.json
 
       - name: Pin npm (matches engines.npm so lockfiles stay deterministic)
         run: npm install -g npm@11.13.0
 
       - name: Install webui (reproducible, from lockfile)
         working-directory: webui
+        run: npm ci
+
+      - name: Install OpenAPI codegen tool (isolated classic-TypeScript toolchain)
+        working-directory: webui/tools/openapi
         run: npm ci
 
       - name: Drift check (regenerate and diff)
