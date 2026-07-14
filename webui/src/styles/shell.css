@@ -2035,6 +2035,17 @@ button.link:focus-visible {
 .badge.kind.whitelist {
   color: var(--text-dim);
 }
+/* Session source badges (#1928). Java carries a claimed identity (green, as
+ * normal); Bedrock is a flow-session with no claimed identity (amber, a caveat
+ * — its tooltip explains only the IP is known). */
+.badge.source.java {
+  color: var(--green);
+  border-color: rgba(63, 207, 110, 0.3);
+}
+.badge.source.bedrock {
+  color: var(--amber);
+  border-color: rgba(240, 180, 41, 0.3);
+}
 
 /* ---------- Community settings — Audit tab (WEBUI_SPEC.md 6.10). ---------- */
 .audit .audit-filters {

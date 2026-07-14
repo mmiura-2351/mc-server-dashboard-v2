@@ -838,6 +838,7 @@ export const ja: Record<TranslationKey, string> = {
   "sessions.loadError":
     "セッションを読み込めませんでした。更新してみてください。",
   "sessions.empty": "まだセッションの記録はありません。",
+  "sessions.col.source": "ソース",
   "sessions.col.hostname": "ホスト名",
   "sessions.col.playerIp": "IPアドレス（申告値）",
   "sessions.col.username": "ユーザー名（申告値）",
@@ -845,6 +846,14 @@ export const ja: Record<TranslationKey, string> = {
   "sessions.col.end": "終了",
   "sessions.valueUnknown": "—",
   "sessions.active": "アクティブ",
+  // セッションのソース（リレーの受信経路。issue #1912, #1904）。Java は Login
+  // Start で申告された識別情報を持つが、Bedrock は Floodgate のフローセッション
+  // で IPアドレスのみを記録する（ユーザー名・UUID は取得不可）ため、その旨をバッ
+  // ジで明示する。旧データは unspecified となり、中立のダッシュを表示する。
+  "sessions.source.java": "Java",
+  "sessions.source.bedrock": "Bedrock",
+  "sessions.source.bedrockHint":
+    "フロー方式の Bedrock セッション: プレイヤーの識別情報（ユーザー名・UUID）は取得できず、IPアドレスのみが記録されます。",
   "sessions.prev": "前へ",
   "sessions.next": "次へ",
 

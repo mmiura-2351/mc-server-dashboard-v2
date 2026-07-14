@@ -463,4 +463,39 @@ describe("ServerPlayersTab Sessions view (issue #961)", () => {
     const unknowns = screen.getAllByText(t("sessions.valueUnknown"));
     expect(unknowns.length).toBeGreaterThanOrEqual(3);
   });
+
+  it("labels a Java session with a Java source badge (issue #1928)", async () => {
+    routeGet({ sessions: [session({ source: "java" })] });
+    renderTab();
+    await openPlayers();
+
+    expect(
+      await screen.findByText(t("sessions.source.java")),
+    ).toBeInTheDocument();
+  });
+
+  it("labels a Bedrock session honestly as identity-unavailable (issue #1928)", async () => {
+    routeGet({ sessions: [session({ source: "bedrock" })] });
+    renderTab();
+    await openPlayers();
+
+    const badge = await screen.findByText(t("sessions.source.bedrock"));
+    expect(badge).toBeInTheDocument();
+    // The tooltip conveys the flow-based session has no claimed identity.
+    expect(badge).toHaveAttribute("title", t("sessions.source.bedrockHint"));
+  });
+
+  it("renders no source badge for a legacy unspecified session (issue #1928)", async () => {
+    routeGet({ sessions: [session({ source: "unspecified" })] });
+    renderTab();
+    await openPlayers();
+
+    await screen.findByText(t("sessions.col.hostname"));
+    expect(
+      screen.queryByText(t("sessions.source.java")),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(t("sessions.source.bedrock")),
+    ).not.toBeInTheDocument();
+  });
 });
