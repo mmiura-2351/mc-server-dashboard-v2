@@ -20,20 +20,34 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-API_PORT="${MCD_E2E_API_PORT:-8000}"
+# Per-worktree resource defaults. A shared host runs several worktrees at once
+# (concurrent agents), and this script owns three host-global resources that
+# would otherwise collide across them: the API port, the throwaway Postgres
+# container's name, and its published port. Derive each default from this
+# worktree's absolute path (sha256 -> an in-band port / a short, unique name
+# suffix) so two concurrent worktrees never share one, mirroring the
+# per-worktree UI port in webui/playwright.config.ts (#1861, #1890). The bands
+# are disjoint from each other, from the UI's 20000-29999, and from the Linux
+# ephemeral range (32768+): the API sits in 15000-19999 (the "18000" API region
+# reserved for manual runs), Postgres in 10000-14999. The MCD_E2E_* overrides
+# below still win explicitly. (sha256sum is coreutils; this script already
+# targets Linux + Docker.)
+wt_hash="$(printf '%s' "$REPO_ROOT" | sha256sum | cut -d' ' -f1)"
+API_PORT="${MCD_E2E_API_PORT:-$((15000 + 16#${wt_hash:0:8} % 5000))}"
 API_URL="http://127.0.0.1:${API_PORT}"
 
-# Fail fast if the API port is already taken: otherwise our uvicorn fails to
-# bind while the readiness probe later latches onto the FOREIGN API already
-# listening there (observed against the live deployment on :8000) and reports a
-# false ready. Set MCD_E2E_API_PORT to a free port to run alongside a deployment.
+# Fail fast if the API port is already taken (another process, or the rare
+# second worktree that hashes to the same port): otherwise our uvicorn fails to
+# bind while the readiness probe later latches onto whatever FOREIGN API is
+# already listening there (observed against the live deployment on :8000) and
+# reports a false ready. Set MCD_E2E_API_PORT to override the derived default.
 if (exec 3<>"/dev/tcp/127.0.0.1/${API_PORT}") 2>/dev/null; then
   echo "API port $API_PORT is already in use; set MCD_E2E_API_PORT to a free port" >&2
   exit 1
 fi
 
-PG_CONTAINER="mcsd-webui-e2e-pg"
-PG_PORT="${MCD_E2E_PG_PORT:-5544}"
+PG_CONTAINER="mcsd-webui-e2e-pg-${wt_hash:0:8}"
+PG_PORT="${MCD_E2E_PG_PORT:-$((10000 + 16#${wt_hash:8:8} % 5000))}"
 # postgres:17.6-alpine, the api.yml-vetted digest (docs/dev/DEPENDENCIES.md).
 PG_IMAGE="postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94"
 
