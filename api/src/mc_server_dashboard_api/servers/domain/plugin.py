@@ -72,6 +72,9 @@ class PluginSource(enum.Enum):
 
     LOCAL = "local"
     MODRINTH = "modrinth"
+    # GeyserMC's own download API (issue #1905): the only publisher of the
+    # Floodgate-Spigot build, which Modrinth does not carry for Paper.
+    GEYSER = "geyser"
 
 
 @dataclass

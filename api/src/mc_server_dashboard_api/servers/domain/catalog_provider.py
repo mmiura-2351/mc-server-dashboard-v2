@@ -49,17 +49,28 @@ class CatalogProject:
     loaders: list[str]
     client_side: str = "unknown"
     server_side: str = "unknown"
+    # Which catalog served this project (issue #1905). ``"modrinth"`` for the
+    # default catalog, ``"geyser"`` for GeyserMC's download API; maps to the
+    # persisted :class:`PluginSource` at install so provenance is not lost.
+    source: str = "modrinth"
 
 
 @dataclass(frozen=True)
 class CatalogFile:
-    """A downloadable file within a catalog version."""
+    """A downloadable file within a catalog version.
+
+    ``sha512`` is the integrity hash Modrinth publishes; ``sha256`` is the hash
+    GeyserMC's download API publishes per build (issue #1905). A catalog file
+    carries whichever its source serves -- exactly one is populated -- and the
+    install path verifies the downloaded bytes against the one present.
+    """
 
     url: str
     filename: str
     size: int
     sha512: str
     primary: bool
+    sha256: str = ""
 
 
 @dataclass(frozen=True)
