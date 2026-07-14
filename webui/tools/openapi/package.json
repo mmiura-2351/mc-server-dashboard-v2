@@ -1,0 +1,13 @@
+{
+  "name": "webui-openapi-codegen",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Isolated OpenAPI TypeScript codegen. openapi-typescript uses the classic TypeScript compiler API (ts.factory), which the native TypeScript 7 package no longer ships, so this tool stays on classic TypeScript. Standalone package with its own node_modules and lockfile — it must NOT be a webui npm workspace, otherwise its typescript would hoist onto webui's TypeScript 7.",
+  "scripts": {
+    "generate": "openapi-typescript ../../openapi.json --output ../../src/api/schema.ts"
+  },
+  "dependencies": {
+    "openapi-typescript": "^7.13.0",
+    "typescript": "^5.9.3"
+  }
+}

@@ -309,6 +309,7 @@ $(GOLANGCI):
 bootstrap: $(GOLANGCI)
 	cd api && uv sync
 	cd webui && npm ci
+	cd webui/tools/openapi && npm ci
 
 # ---------------------------------------------------------------------------
 # Git hooks
