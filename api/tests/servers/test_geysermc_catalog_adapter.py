@@ -8,10 +8,14 @@ and exercising the pure paths directly.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
+import httpx2
 import pytest
 
+from mc_server_dashboard_api.servers.adapters import geysermc_catalog
 from mc_server_dashboard_api.servers.adapters.geysermc_catalog import (
     _ALLOWED_DOWNLOAD_HOSTS,
     GeyserMcCatalog,
@@ -21,6 +25,37 @@ from mc_server_dashboard_api.servers.domain.errors import (
     CatalogProjectNotFoundError,
     CatalogUnavailableError,
 )
+
+_LATEST_URL = (
+    "https://download.geysermc.org/v2/projects/floodgate/versions/latest/builds/latest"
+)
+_CONCRETE_PATH = "/v2/projects/floodgate/versions/2.2.5/builds/138"
+_CONCRETE_URL = "https://download.geysermc.org" + _CONCRETE_PATH
+
+
+@contextmanager
+def _mock_transport(
+    handler: "Any",
+) -> Iterator[None]:
+    """Inject an httpx2 ``MockTransport`` into every ``AsyncClient`` in scope.
+
+    Mirrors the ``ModrinthCatalog`` adapter tests: the adapter builds its own
+    client, so the transport is patched in via ``__init__`` for the duration.
+    """
+
+    transport = httpx2.MockTransport(handler)
+    real_init = httpx2.AsyncClient.__init__
+
+    def patched_init(self_client: httpx2.AsyncClient, **kwargs: Any) -> None:
+        kwargs["transport"] = transport
+        real_init(self_client, **kwargs)
+
+    httpx2.AsyncClient.__init__ = patched_init  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        httpx2.AsyncClient.__init__ = real_init  # type: ignore[method-assign]
+
 
 _SPIGOT_SHA256 = "44bdb908e2fb4ff1b974d5313d048a625a21555a9844cfb86256a98e8e1c6bd1"
 
@@ -192,3 +227,55 @@ def test_assert_no_private_ips_blocks_loopback() -> None:
 
 def test_geysermc_host_is_the_only_allowed_download_host() -> None:
     assert _ALLOWED_DOWNLOAD_HOSTS == frozenset({"download.geysermc.org"})
+
+
+# -- metadata redirect follow (issue #1905 live-API regression) --
+
+
+async def test_list_versions_follows_metadata_redirect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The live ``.../builds/latest`` endpoint 302-redirects to the concrete build
+    # where the JSON lives; _get_json must follow it (not just error out).
+    monkeypatch.setattr(geysermc_catalog, "_resolve_host", lambda _h: ["104.18.0.1"])
+
+    def _handler(request: httpx2.Request) -> httpx2.Response:
+        url = str(request.url)
+        if url == _LATEST_URL:
+            return httpx2.Response(302, headers={"location": _CONCRETE_PATH})
+        if url == _CONCRETE_URL:
+            return httpx2.Response(200, json=_BUILD)
+        return httpx2.Response(404)
+
+    catalog = GeyserMcCatalog()
+    with _mock_transport(_handler):
+        versions = await catalog.list_versions("floodgate", loader="paper")
+
+    assert [v.version_id for v in versions] == ["2.2.5-138"]
+    assert versions[0].files[0].sha256 == _SPIGOT_SHA256
+
+
+async def test_metadata_redirect_to_disallowed_host_rejected() -> None:
+    def _handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(302, headers={"location": "https://evil.example.com/x"})
+
+    catalog = GeyserMcCatalog()
+    with _mock_transport(_handler):
+        with pytest.raises(CatalogUnavailableError, match="disallowed host"):
+            await catalog.list_versions("floodgate", loader="paper")
+
+
+async def test_metadata_redirect_to_private_ip_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An allowlisted host that resolves to a private IP (DNS rebinding) is still
+    # rejected on the redirect hop, not only the initial request.
+    monkeypatch.setattr(geysermc_catalog, "_resolve_host", lambda _h: ["127.0.0.1"])
+
+    def _handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(302, headers={"location": _CONCRETE_PATH})
+
+    catalog = GeyserMcCatalog()
+    with _mock_transport(_handler):
+        with pytest.raises(CatalogUnavailableError, match="private/reserved"):
+            await catalog.list_versions("floodgate", loader="paper")

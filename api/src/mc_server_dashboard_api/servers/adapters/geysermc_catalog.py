@@ -105,6 +105,32 @@ def _assert_no_private_ips(
             )
 
 
+def _next_redirect_url(response: httpx2.Response, current_url: str) -> str:
+    """Validate a redirect hop and return the absolute next URL (SSRF-safe).
+
+    Both the metadata and download fetches follow redirects manually (httpx2
+    default is not to follow) so every hop is re-checked, not just the first: a
+    relative ``Location`` is resolved against ``current_url``, and the target must
+    be HTTPS, on an allowlisted host, and free of private/reserved IPs. GeyserMC's
+    ``.../builds/latest`` endpoint 302-redirects to the concrete build, so this is
+    load-bearing for metadata, not only downloads (issue #1905).
+    """
+
+    location: str = response.headers.get("location", "")
+    redirect_parsed = urlparse(location)
+    if not redirect_parsed.scheme:
+        location = urljoin(current_url, location)
+        redirect_parsed = urlparse(location)
+    if redirect_parsed.scheme != "https":
+        raise CatalogUnavailableError(f"redirect to non-HTTPS: {location}")
+    if redirect_parsed.hostname not in _ALLOWED_DOWNLOAD_HOSTS:
+        raise CatalogUnavailableError(
+            f"redirect to disallowed host: {redirect_parsed.hostname}"
+        )
+    _assert_no_private_ips(redirect_parsed.hostname)
+    return location
+
+
 class GeyserMcCatalog(CatalogProvider):
     """GeyserMC download-API implementation of :class:`CatalogProvider`.
 
@@ -218,22 +244,7 @@ class GeyserMcCatalog(CatalogProvider):
                         "GET", current_url, follow_redirects=False
                     ) as response:
                         if response.is_redirect:
-                            location = response.headers.get("location", "")
-                            redirect_parsed = urlparse(location)
-                            if not redirect_parsed.scheme:
-                                location = urljoin(current_url, location)
-                                redirect_parsed = urlparse(location)
-                            if redirect_parsed.scheme != "https":
-                                raise CatalogUnavailableError(
-                                    f"redirect to non-HTTPS: {location}"
-                                )
-                            if redirect_parsed.hostname not in _ALLOWED_DOWNLOAD_HOSTS:
-                                raise CatalogUnavailableError(
-                                    f"redirect to disallowed host: "
-                                    f"{redirect_parsed.hostname}"
-                                )
-                            _assert_no_private_ips(redirect_parsed.hostname)
-                            current_url = location
+                            current_url = _next_redirect_url(response, current_url)
                             continue
                         response.raise_for_status()
                         chunks: list[bytes] = []
@@ -304,26 +315,39 @@ class GeyserMcCatalog(CatalogProvider):
         )
 
     async def _get_json(self, path: str) -> Any:
+        # Follow redirects manually with the same SSRF guard as download_file:
+        # GeyserMC's ``.../builds/latest`` endpoint 302-redirects to the concrete
+        # ``.../builds/{build}`` where the JSON lives, so a non-following fetch
+        # would fail every Floodgate resolution (issue #1905). An absolute URL is
+        # used (no client base_url) so each hop's host is re-validated.
+        url = f"{self._base_url}{path}"
         try:
             async with httpx2.AsyncClient(
-                base_url=self._base_url,
                 timeout=_METADATA_TIMEOUT,
                 headers=self._headers(),
             ) as client:
-                async with client.stream("GET", path) as response:
-                    if response.status_code == 404:
-                        raise CatalogProjectNotFoundError(path)
-                    response.raise_for_status()
-                    chunks: list[bytes] = []
-                    total = 0
-                    async for chunk in response.aiter_bytes():
-                        total += len(chunk)
-                        if total > _MAX_JSON_BYTES:
-                            raise CatalogUnavailableError(
-                                f"response too large: {total} bytes"
-                            )
-                        chunks.append(chunk)
-                    return json.loads(b"".join(chunks))
+                current_url = url
+                for _ in range(_MAX_REDIRECTS):
+                    async with client.stream(
+                        "GET", current_url, follow_redirects=False
+                    ) as response:
+                        if response.is_redirect:
+                            current_url = _next_redirect_url(response, current_url)
+                            continue
+                        if response.status_code == 404:
+                            raise CatalogProjectNotFoundError(path)
+                        response.raise_for_status()
+                        chunks: list[bytes] = []
+                        total = 0
+                        async for chunk in response.aiter_bytes():
+                            total += len(chunk)
+                            if total > _MAX_JSON_BYTES:
+                                raise CatalogUnavailableError(
+                                    f"response too large: {total} bytes"
+                                )
+                            chunks.append(chunk)
+                        return json.loads(b"".join(chunks))
+                raise CatalogUnavailableError("too many redirects")
         except (CatalogProjectNotFoundError, CatalogUnavailableError):
             raise
         except httpx2.HTTPStatusError as exc:
