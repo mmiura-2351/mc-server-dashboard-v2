@@ -236,7 +236,17 @@ function Loaded({
         </div>
       )}
       {tab === "plugins" && (
-        <ServerPluginsTab server={server} communityId={communityId} can={can} />
+        <div
+          role="tabpanel"
+          id={panelId("sd", "plugins")}
+          aria-labelledby={tabId("sd", "plugins")}
+        >
+          <ServerPluginsTab
+            server={server}
+            communityId={communityId}
+            can={can}
+          />
+        </div>
       )}
       {tab === "players" && (
         <div
