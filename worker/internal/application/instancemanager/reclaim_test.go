@@ -21,10 +21,14 @@ func TestReclaimDeletedScratchesRemovesScratchAndHydrateLeftovers(t *testing.T) 
 	}
 
 	m.ReclaimDeletedScratches([]string{"s1"})
-	// ReclaimDeletedScratches runs on a goroutine; wait for it.
+	// ReclaimDeletedScratches runs on a goroutine that removes the scratch dir
+	// first, then sweeps the hydrate leftover. Wait for BOTH to be gone before
+	// asserting, otherwise the leftover check races the goroutine (issue #1888).
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, err := os.Stat(dir); os.IsNotExist(err) {
+		_, dirErr := os.Stat(dir)
+		_, leftoverErr := os.Stat(leftover)
+		if os.IsNotExist(dirErr) && os.IsNotExist(leftoverErr) {
 			break
 		}
 		time.Sleep(time.Millisecond)
