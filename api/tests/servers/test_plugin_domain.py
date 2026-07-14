@@ -214,6 +214,16 @@ class TestIsGeyserPlugin:
     def test_manifest_name_matches_case_insensitively(self) -> None:
         assert is_geyser_plugin(self._plugin(mod_identifier="geyser-spigot"))
 
+    def test_fabric_manifest_id_matches(self) -> None:
+        # Geyser-Fabric's fabric.mod.json ``id`` (issue #1910): a locally-uploaded
+        # Geyser-Fabric jar is detected symmetrically with the catalog route.
+        assert is_geyser_plugin(self._plugin(mod_identifier="geyser-fabric"))
+
+    def test_neoforge_manifest_id_matches(self) -> None:
+        # Geyser-NeoForge's neoforge.mods.toml ``modId`` (issue #1910); also the id
+        # a Forge-family server detects, whose parser reads the NeoForge descriptor.
+        assert is_geyser_plugin(self._plugin(mod_identifier="geyser_neoforge"))
+
     def test_modrinth_project_id_matches(self) -> None:
         assert is_geyser_plugin(self._plugin(source_project_id="wKkoqHrH"))
 
@@ -232,6 +242,11 @@ class TestIsGeyserPlugin:
         assert not is_geyser_plugin(
             self._plugin(mod_identifier="WorldGuard", source_project_id="proj-1")
         )
+
+    def test_unrelated_fabric_mod_does_not_match(self) -> None:
+        # A genuine, unrelated Fabric/Forge mod id must not trip Geyser detection
+        # now that mod-loader manifest ids are recognized (issue #1910).
+        assert not is_geyser_plugin(self._plugin(mod_identifier="fabric-api"))
 
     def test_floodgate_is_not_the_detection_key(self) -> None:
         # Floodgate is the expected companion but does not own the UDP listener.
@@ -301,3 +316,13 @@ class TestHasEnabledGeyser:
     def test_false_when_only_non_geyser_plugins_enabled(self) -> None:
         plugins = [self._plugin(mod_identifier="WorldGuard", enabled=True)]
         assert has_enabled_geyser(plugins) is False
+
+    def test_true_when_enabled_geyser_fabric(self) -> None:
+        # A locally-uploaded Geyser-Fabric jar drives the predicate too (#1910).
+        plugins = [self._plugin(mod_identifier="geyser-fabric", enabled=True)]
+        assert has_enabled_geyser(plugins) is True
+
+    def test_true_when_enabled_geyser_neoforge(self) -> None:
+        # ...as does a Geyser-NeoForge jar (issue #1910).
+        plugins = [self._plugin(mod_identifier="geyser_neoforge", enabled=True)]
+        assert has_enabled_geyser(plugins) is True
