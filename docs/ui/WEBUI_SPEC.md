@@ -471,6 +471,51 @@ renumbering 6.8–6.12): the UI for the general scheduler (#1837).
   events socket (7.2) render as error toasts (title + sanitized detail) while
   the dashboard is open.
 
+### 6.14 Server detail — Plugins
+
+The `#plugins` tab (issue #1153; numbered out of tab order to avoid renumbering
+6.8–6.13): plugin/mod content management for a server. The tab label and every
+content noun are loader-aware — **Plugins** for Paper, **Mods** for
+Fabric/Forge (#1320) — and the whole tab is **hidden for `vanilla`** (no
+backend support; the tab body also self-guards with an "unsupported" notice).
+
+- Installed list (`GET …/plugins`): a table of name (with an "update available"
+  badge when a newer catalog version exists, from `GET …/plugins/updates`),
+  version, source badge (`modrinth` / `local`), status pill
+  (enabled / disabled), size, and — for mod loaders only — a **Side** column
+  (`both` / `server` / `client`, #1308), editable with `plugin:manage`
+  (`POST …/plugins/{id}/side`). An empty list shows a "none installed" row.
+- Per-row actions (`plugin:manage`): enable / disable
+  (`POST …/plugins/{id}/enable` · `/disable`), update to the offered catalog
+  version (`POST …/plugins/{id}/update`), remove (`DELETE …/plugins/{id}`, plain
+  confirm dialog), and — for Modrinth-sourced rows — a **Dependencies** expander
+  (`GET …/plugins/{id}/dependencies`) listing each dependency as
+  required/optional and installed/missing.
+- Install (`plugin:manage`): local `.jar` upload with a progress bar
+  (`POST …/plugins`, multipart); **Browse** opens the Modrinth catalog modal — a
+  debounced search (`GET …/catalog/search`) whose hits open a project detail
+  view with a per-version install picker (`POST …/catalog/install`) that marks
+  the already-installed version.
+- Dependency health: a validation checklist under the table
+  (`GET …/plugins/validate`, #1307) flags missing dependencies, unsatisfied
+  version ranges, conflicts, and MC-version mismatches, or shows an all-clear
+  line; **Resolve** (`POST …/plugins/resolve` → `…/resolve/apply`, #1309) plans
+  and then auto-imports the missing Modrinth dependencies.
+- Client modpack (mod loaders only): when at least one enabled mod is
+  client-relevant (side `client` / `both`), a **Download client modpack** button
+  bundles them (`GET …/client-mods/download`, #1342).
+- Bedrock hint: on a Paper server, when the deployment's Bedrock gate is on
+  (`/meta`'s `bedrock_enabled`, Section 2.4) and a Geyser plugin is installed, an
+  inline note links to Floodgate setup (epic #1540).
+- Server-state gating: reads render anytime, but **every mutation requires the
+  server at rest** (observed and desired both stopped). While not at rest a
+  notice shows and all install / enable / disable / update / remove / side /
+  resolve controls are disabled; a server-busy API reason (e.g.
+  `server_not_stopped`) surfaces as an error toast.
+- Permission gating (7.3): the tab body needs `plugin:read` (a member without it
+  sees a short notice); every mutation needs `plugin:manage`, which also gates
+  whether the toolbar and the per-row action buttons render at all.
+
 ## 7. Cross-cutting concerns
 
 ### 7.1 Auth/session lifecycle
