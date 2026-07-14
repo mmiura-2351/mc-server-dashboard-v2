@@ -26,12 +26,16 @@
 
 ## 1. Scope
 
-**Supported server types today: Paper only** (Geyser-Spigot + Floodgate). Fabric/Forge
-(the Geyser mod) is a later extension; Vanilla is permanently unsupported (it
-has no plugin directory, so there is nowhere to install Geyser). The relay,
-tunnel, and port-allocation machinery are all server-type-agnostic; the Paper
-restriction is solely because that is the only server type Geyser currently
-ships a build for in this deployment's install paths (Section 2).
+The relay, tunnel, port-allocation, and Geyser-detection machinery are all
+**server-type-agnostic**: Geyser detection and `bedrock_port` allocation treat
+Paper, Fabric, and NeoForge identically, whether Geyser arrives from the plugin
+catalog or a local upload, because Geyser ships a build for each of those three
+loaders (Section 4 lists the manifest ids detection keys on). Vanilla is
+permanently unsupported: it has no plugin/mod directory, so there is nowhere to
+install Geyser. The remaining **"Paper" emphasis** is only about what is
+validated end-to-end in practice — a real Bedrock client join has been exercised
+on Paper (with Floodgate, live against a Paper 1.21.1 server; Section 4's
+version-skew note), not yet on Fabric or NeoForge (Section 2).
 
 ## 2. Activation
 
