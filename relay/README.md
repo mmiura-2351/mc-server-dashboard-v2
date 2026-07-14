@@ -28,6 +28,7 @@ relay/
     ├── session/           # session id minting + batched ReportSessions
     ├── relaysvc/          # Register-with-backoff loop + learned base_domain
     ├── ipcaps/            # per-IP hygiene caps shared by the internet-exposed listeners
+    ├── metrics/           # Prometheus registry + Java-path metric handles (RELAY.md Section 17)
     ├── genproto/          # generated mcsd.relay.v1 / mcsd.bedrocktunnel.v1 stubs (see below)
     └── adapters/
         ├── apiclient/     # gRPC client for the API's RelayService
@@ -119,6 +120,10 @@ public_endpoint = "relay.example.com:25665"
 [tunnel.tls]
 cert_file = "/etc/mcsd/tunnel-cert.pem"
 key_file = "/etc/mcsd/tunnel-key.pem"
+
+[metrics]
+enabled = false               # opt-in Prometheus /metrics + /healthz endpoint
+listen = "127.0.0.1:9090"     # loopback by default (edge process)
 
 [log]
 level = "info"

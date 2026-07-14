@@ -9,14 +9,19 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
@@ -27,6 +32,7 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/bedrock"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/game"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/ipcaps"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/metrics"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/relaysvc"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/session"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/tunnel"
@@ -68,6 +74,12 @@ func run(ctx context.Context) error {
 	logger := newLogger(cfg.Log)
 	logger.Info("relay configuration loaded", "config", cfg)
 
+	// Dedicated registry (never the client_golang global default) plus the
+	// Java-path metric handles, injected into each subsystem below. The HTTP
+	// endpoint that exposes them is served later, only when enabled.
+	reg := prometheus.NewRegistry()
+	m := metrics.New(reg, version)
+
 	// The tunnel CA the relay advertises to Workers (Register → TunnelDial) for
 	// verifying the tunnel certificate (RELAY.md Section 5). Three cases keyed on
 	// tunnel.tls.advertised_ca_file: unset → the listener cert PEM (self-signed
@@ -84,7 +96,7 @@ func run(ctx context.Context) error {
 	defer func() { _ = conn.Close() }()
 
 	apiClient := apiclient.New(conn, cfg.API.Credential)
-	reporter := session.NewReporter(apiClient, logger, time.Now)
+	reporter := session.NewReporter(apiClient, logger, time.Now, m)
 	svc := relaysvc.New(apiClient, conn, reporter, cfg.Tunnel.PublicEndpoint, tunnelCAPEM, logger)
 
 	tokens := tunnel.NewTokenTable(tokenTTL, time.Now)
@@ -96,11 +108,11 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	tunnelLn, err := tunnel.NewListener(cfg.Tunnel.Listen, tunnelTLS, tokens, tunnelCaps, logger)
+	tunnelLn, err := tunnel.NewListener(cfg.Tunnel.Listen, tunnelTLS, tokens, tunnelCaps, m, logger)
 	if err != nil {
 		return fmt.Errorf("bind tunnel listener %q: %w", cfg.Tunnel.Listen, err)
 	}
-	gameLn, err := game.NewListener(cfg.Game.Listen, svc, tokens, cache, caps, reporter, logger)
+	gameLn, err := game.NewListener(cfg.Game.Listen, svc, tokens, cache, caps, reporter, m, logger)
 	if err != nil {
 		return fmt.Errorf("bind game listener %q: %w", cfg.Game.Listen, err)
 	}
@@ -193,8 +205,57 @@ func run(ctx context.Context) error {
 		// flushes any remaining End events.
 		svcStop()
 	}()
+
+	// Metrics / health HTTP endpoint (RELAY.md Section 17), served only when
+	// enabled. Unlike the game/tunnel binds, a metrics-bind failure is
+	// NON-FATAL: observability must never take player ingress down, so it is
+	// logged at Error and the relay keeps running without the endpoint.
+	if cfg.Metrics.Enabled {
+		srv := &http.Server{
+			Handler: metricsHandler(reg),
+			// Bound the header read so an idle/slow client cannot pin a
+			// connection on the metrics listener.
+			ReadHeaderTimeout: 5 * time.Second,
+		}
+		ln, lnErr := net.Listen("tcp", cfg.Metrics.Listen)
+		if lnErr != nil {
+			logger.Error("metrics listener bind failed; continuing without the metrics endpoint", "listen", cfg.Metrics.Listen, "error", lnErr)
+		} else {
+			logger.Info("metrics endpoint listening", "listen", cfg.Metrics.Listen)
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+					logger.Error("metrics server stopped", "error", err)
+				}
+			}()
+			go func() {
+				defer wg.Done()
+				<-sigCtx.Done()
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), metricsShutdownTimeout)
+				defer cancel()
+				_ = srv.Shutdown(shutdownCtx)
+			}()
+		}
+	}
+
 	wg.Wait()
 	return nil
+}
+
+// metricsShutdownTimeout bounds the metrics HTTP server's graceful shutdown on
+// SIGINT/SIGTERM before its connections are forcibly closed.
+const metricsShutdownTimeout = 5 * time.Second
+
+// metricsHandler builds the metrics/health mux: /metrics exposes reg's series
+// via promhttp; /healthz is a static liveness 200.
+func metricsHandler(reg *prometheus.Registry) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	return mux
 }
 
 // newLogger builds the structured logger from the log configuration. Secrets are

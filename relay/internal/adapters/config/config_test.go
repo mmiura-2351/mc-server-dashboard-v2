@@ -68,6 +68,12 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Bedrock.MaxFlowsPerIP != 32 || cfg.Bedrock.NewFlowsPerIPPerSecond != 10 {
 		t.Errorf("bedrock ip caps defaults = %d/%d", cfg.Bedrock.MaxFlowsPerIP, cfg.Bedrock.NewFlowsPerIPPerSecond)
 	}
+	if cfg.Metrics.Enabled {
+		t.Error("metrics.enabled default should be false")
+	}
+	if cfg.Metrics.Listen != "127.0.0.1:9090" {
+		t.Errorf("metrics.listen default = %q", cfg.Metrics.Listen)
+	}
 	if cfg.Log.Level != "info" || cfg.Log.Format != "json" {
 		t.Errorf("log defaults = %q/%q", cfg.Log.Level, cfg.Log.Format)
 	}
@@ -85,6 +91,8 @@ func TestLoadEnvOverride(t *testing.T) {
 		"MCD_RELAY_BEDROCK_TUNNEL_LISTEN":           ":30675",
 		"MCD_RELAY_BEDROCK_TUNNEL_MAX_CONNS_PER_IP": "48",
 		"MCD_RELAY_BEDROCK_MAX_FLOWS_PER_IP":        "16",
+		"MCD_RELAY_METRICS_ENABLED":                 "true",
+		"MCD_RELAY_METRICS_LISTEN":                  "0.0.0.0:9100",
 	})
 	cfg, err := Load(writeTOML(t, minimalTOML), env)
 	if err != nil {
@@ -119,6 +127,12 @@ func TestLoadEnvOverride(t *testing.T) {
 	}
 	if cfg.Bedrock.MaxFlowsPerIP != 16 {
 		t.Errorf("env override bedrock.max_flows_per_ip = %d", cfg.Bedrock.MaxFlowsPerIP)
+	}
+	if !cfg.Metrics.Enabled {
+		t.Error("env override metrics.enabled should be true")
+	}
+	if cfg.Metrics.Listen != "0.0.0.0:9100" {
+		t.Errorf("env override metrics.listen = %q", cfg.Metrics.Listen)
 	}
 }
 
@@ -163,5 +177,23 @@ func TestValidateBadLogFormat(t *testing.T) {
 	env := envMap(map[string]string{"MCD_RELAY_LOG_FORMAT": "yaml"})
 	if _, err := Load(writeTOML(t, minimalTOML), env); err == nil {
 		t.Error("unknown log.format should fail")
+	}
+}
+
+func TestValidateMetricsListenRequiredWhenEnabled(t *testing.T) {
+	body := minimalTOML + `
+[metrics]
+enabled = true
+listen = ""
+`
+	if _, err := Load(writeTOML(t, body), noEnv); err == nil {
+		t.Error("metrics.enabled=true with empty metrics.listen should fail")
+	}
+}
+
+func TestValidateBadMetricsEnabled(t *testing.T) {
+	env := envMap(map[string]string{"MCD_RELAY_METRICS_ENABLED": "notabool"})
+	if _, err := Load(writeTOML(t, minimalTOML), env); err == nil {
+		t.Error("non-boolean metrics.enabled should fail")
 	}
 }

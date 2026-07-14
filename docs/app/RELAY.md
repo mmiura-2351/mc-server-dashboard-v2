@@ -527,6 +527,8 @@ config, wiring at the edge.
 | `bedrock.tunnel_listen` | `:25675` | Bedrock QUIC tunnel listener (RFC 9221 DATAGRAM) — see [`BEDROCK_TUNNEL.md`](BEDROCK_TUNNEL.md). Reuses `tunnel.tls.{cert_file,key_file}` with a distinct ALPN; no separate cert/key config. Bound only when `bedrock.enabled` is true. |
 | `bedrock.tunnel_max_conns_per_ip` | `64` | Per-IP concurrent cap on unauthenticated handshake windows on the Bedrock QUIC listener, mirroring `tunnel.max_conns_per_ip` (Section 11) — see `BEDROCK_TUNNEL.md` Section 8. |
 | `bedrock.max_flows_per_ip` / `bedrock.new_flows_per_ip_per_second` | `32` / `10` | Hygiene caps on a bound Bedrock `bedrock_port`, same posture as `game.max_conns_per_ip` / `game.joins_per_ip_per_second` — see `BEDROCK_TUNNEL.md` Section 8. |
+| `metrics.enabled` | `false` | Master switch for the Prometheus `/metrics` + `/healthz` HTTP endpoint (Section 17). Off by default: the relay is an edge process, so observability is opt-in. Via `MCD_RELAY_METRICS_ENABLED`. A metrics-bind failure is non-fatal (logged, relay keeps serving) — unlike the game/tunnel binds. |
+| `metrics.listen` | `127.0.0.1:9090` | Metrics/health listener address. Loopback by default so the endpoint is never exposed on the public interface without an explicit choice. Via `MCD_RELAY_METRICS_LISTEN`. |
 | `log.level` / `log.format` | as Worker | Standard logging keys. |
 
 **Worker: no new configuration.** Everything a `TunnelDial` needs arrives in
@@ -628,7 +630,18 @@ for *new* joins); relay-mediated status pings with a 5 s cache (Section 7).
   [`BEDROCK_TUNNEL.md`](BEDROCK_TUNNEL.md).
 - **SRV-based custom domains** (player-owned domains pointing at the relay)
   — possible later; routing already keys on the full hostname.
-- **Observability / metrics** — the relay exposes no Prometheus metrics or
-  tracing yet; add on demand.
+- **Observability / metrics** — the relay exposes a Prometheus `/metrics`
+  endpoint plus a `/healthz` liveness probe (opt-in via `metrics.enabled`,
+  default off and loopback-bound; Section 13). It carries the process/Go
+  collectors (`go_goroutines`, `process_start_time_seconds`),
+  `relay_build_info{version}`, and the **Java-path** series: per-IP cap
+  rejections (`relay_ipcaps_rejections_total{listener,kind}`), game drops by
+  reason (`relay_game_drops_total{reason}`), accepted/active sessions
+  (`relay_game_sessions_accepted_total`, `relay_game_active_sessions`), tunnel
+  dial-back results (`relay_tunnel_dialbacks_total{result}`), and session-report
+  flush failures (`relay_session_report_flush_failures_total`). All labels are
+  bounded enums — no per-client-IP/source-address label. The **Bedrock-path**
+  series (flows, datagrams, UDP binds — issue #1909) are a separate follow-up.
+  Tracing (OpenTelemetry) is still future work; add on demand.
 - **Graceful drain on shutdown** — restart drops in-flight sessions rather
   than draining them; a drain window is future work.
