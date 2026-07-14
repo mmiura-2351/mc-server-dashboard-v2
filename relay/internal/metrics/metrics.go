@@ -112,10 +112,9 @@ type Metrics struct {
 
 // New registers the process and Go collectors, a relay_build_info{version} gauge
 // pinned to 1, and the Java-path and Bedrock-path handles on reg, returning the
-// handles. reg must
-// be a dedicated registry (not the global default) so the endpoint exposes only
-// the relay's own series. It panics on a duplicate registration, which is a
-// programmer error (New is called once at wiring time).
+// handles. reg must be a dedicated registry (not the global default) so the
+// endpoint exposes only the relay's own series. It panics on a duplicate
+// registration, which is a programmer error (New is called once at wiring time).
 func New(reg prometheus.Registerer, version string) *Metrics {
 	reg.MustRegister(
 		collectors.NewGoCollector(),

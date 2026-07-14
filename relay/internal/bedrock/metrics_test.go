@@ -512,8 +512,15 @@ func TestBedrockBindFailureMetric(t *testing.T) {
 // caps.
 func newInstrumentedListener(t *testing.T, validator Validator, m *metrics.Metrics) (*Listener, func()) {
 	t.Helper()
+	return newInstrumentedListenerWithCaps(t, validator, ipcaps.NewIPCaps(0, 0, 0, nil, nil), m)
+}
+
+// newInstrumentedListenerWithCaps is newInstrumentedListener with an explicit
+// pre-auth handshake-window cap, for tests that exercise that cap.
+func newInstrumentedListenerWithCaps(t *testing.T, validator Validator, preAuthCaps *ipcaps.IPCaps, m *metrics.Metrics) (*Listener, func()) {
+	t.Helper()
 	newCaps := func() *ipcaps.IPCaps { return ipcaps.NewIPCaps(0, 0, 0, nil, nil) }
-	ln, err := NewListener("127.0.0.1:0", selfSignedTLS(t), validator, ipcaps.NewIPCaps(0, 0, 0, nil, nil), newCaps, noopRecorder{}, m, testLogger())
+	ln, err := NewListener("127.0.0.1:0", selfSignedTLS(t), validator, preAuthCaps, newCaps, noopRecorder{}, m, testLogger())
 	if err != nil {
 		t.Fatalf("NewListener: %v", err)
 	}
@@ -562,6 +569,39 @@ func TestBedrockHandshakeRejectionMetric(t *testing.T) {
 	if got := waitForSeries(t, reg, "relay_bedrock_tunnels_rejected_total",
 		map[string]string{"reason": metrics.BedrockRejectInvalidCredential}, 1); got != 1 {
 		t.Errorf("tunnels_rejected{invalid_credential} = %v, want 1", got)
+	}
+}
+
+// TestBedrockPreAuthCapRejectionUsesBedrockListener asserts an over-cap pre-auth
+// handshake window (the #968 posture) increments
+// ipcaps_rejections_total{bedrock,conn} -- the Bedrock analogue of the Java
+// tunnel listener's pre-auth cap accounting.
+func TestBedrockPreAuthCapRejectionUsesBedrockListener(t *testing.T) {
+	m, reg := newBedrockMetrics(t)
+	// One concurrent pre-auth handshake window per source IP.
+	ln, stop := newInstrumentedListenerWithCaps(t, &fakeValidator{valid: true}, ipcaps.NewIPCaps(1, 0, 0, nil, nil), m)
+	defer stop()
+
+	// Pre-saturate the single pre-auth slot for the loopback source, so the next
+	// dial-out from 127.0.0.1 is rejected at the handshake-window cap before it
+	// can open a stream (mirrors the Java tunnel listener's cap-rejection test).
+	if !ln.caps.Acquire("127.0.0.1") {
+		t.Fatal("pre-saturating acquire should succeed")
+	}
+	defer ln.caps.Release("127.0.0.1")
+
+	dctx, dcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer dcancel()
+	conn := dialQUIC(dctx, t, ln.Addr().String())
+	select {
+	case <-conn.Context().Done():
+	case <-time.After(4 * time.Second):
+		t.Fatal("expected the over-cap connection to be closed")
+	}
+
+	if got := waitForSeries(t, reg, "relay_ipcaps_rejections_total",
+		map[string]string{"listener": metrics.ListenerBedrock, "kind": metrics.CapKindConn}, 1); got != 1 {
+		t.Errorf("ipcaps_rejections{bedrock,conn} = %v, want 1", got)
 	}
 }
 

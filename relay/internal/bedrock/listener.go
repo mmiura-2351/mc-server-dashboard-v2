@@ -151,8 +151,12 @@ func (l *Listener) handle(ctx context.Context, conn *quic.Conn) {
 	// source IP can hold. Over the cap is a silent close. The slot covers
 	// only the pre-auth window -- released once the handshake resolves either
 	// way; an accepted tunnel's lifetime is governed by its authenticated
-	// QUIC connection, not this cap.
+	// QUIC connection, not this cap. Over-cap rejections share the
+	// {listener="bedrock",kind="conn"} ip-cap series with the per-flow
+	// concurrent cap (tunnel.go), matching the Java tunnel listener's
+	// single-series-per-listener model (issue #1909).
 	if !l.caps.Acquire(ip) {
+		l.metrics.IPCapsReject(metrics.ListenerBedrock, metrics.CapKindConn)
 		_ = conn.CloseWithError(0, "")
 		return
 	}
