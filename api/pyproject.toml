@@ -58,13 +58,15 @@ dependencies = [
     # major. It ships no type stubs, handled by the mypy override below (the
     # grpcio precedent).
     "aioboto3>=15.5.0,<16",             # 2025-10-30
-    # Async HTTP client behind the VersionCatalog / JAR-source adapters
-    # (ARCHITECTURE.md Section 7.3, FR-VER-2): fetch the Mojang / PaperMC manifests
-    # and download the resolved JAR. Confined to versions/adapters/http_*.py at the
-    # transport edge. It was already a dev dep (FastAPI's TestClient transport);
-    # promoted here as a runtime dependency. 0.28.1 (2024-12-06) is well outside
-    # the 7-day cooldown (Section 3); cap the next minor (0.x, Section 1).
-    "httpx>=0.28.1,<0.29",              # 2024-12-06
+    # Async HTTP client behind the VersionCatalog / JAR-source and Modrinth
+    # catalog adapters (ARCHITECTURE.md Section 7.3, FR-VER-2): fetch the Mojang /
+    # PaperMC manifests, download the resolved JAR, and stream Modrinth downloads.
+    # Confined to the adapters at the transport edge. This is the sole runtime HTTP
+    # client (#1764 retired the prior httpx 0.28 pin): starlette's TestClient also
+    # imports it under the `httpx2` name, and since runtime deps are installed in
+    # the test env, no separate dev pin is needed. 2.5.0 (2026-06-25) is outside
+    # the 7-day cooldown (Section 3); cap the next major.
+    "httpx2>=2.5.0,<3",                 # 2026-06-25
     # Prometheus exposition + metric primitives behind the /metrics endpoint
     # (issue #282, NFR-OBS): the standard client library renders the text format
     # and provides the Counter/Histogram/Gauge primitives and the custom-collector
@@ -96,16 +98,6 @@ dev = [
     # cooldown (grpcio-tools 1.80.0 2026-03-30; mypy-protobuf 5.1.0 2026-04-28).
     "grpcio-tools>=1.80.0,<1.83",
     "mypy-protobuf>=5.1.0,<6",
-    # httpx (FastAPI's TestClient transport) is declared as a runtime dependency
-    # above (the VersionCatalog adapters use it); no separate dev pin is needed.
-    # starlette's TestClient now prefers the httpx 2.x line, distributed under the
-    # separate `httpx2` import name so it coexists with the httpx 0.28 runtime pin
-    # above (#1741). Installing it makes starlette.testclient import httpx2; absent
-    # it, starlette emits a StarletteDeprecationWarning ("install httpx2 instead")
-    # on every test run. Test-only (production is served by uvicorn, not the
-    # TestClient), so it stays in the dev group. 2.5.0 (2026-06-25) is outside the
-    # 7-day cooldown (Section 3); cap the next major (dev tooling, Section 1).
-    "httpx2>=2.5.0,<3",
     # Async test support for pytest (async DB-probe + endpoint tests).
     # 1.4.0 (2026-05-26) is inside the 7-day cooldown as of this change; cap
     # below it. 1.3.0 (2025-11-10) is outside. Lift the cap once it ages out
@@ -133,6 +125,14 @@ dev = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.uv]
+# Security override: force setuptools past PYSEC-2026-3447 (fixed in 83.0.0).
+# setuptools is transitive (via grpcio-tools), so it is pinned here as a
+# resolution constraint rather than a direct dependency. Security fixes bypass
+# the 7-day cooldown (docs/dev/DEPENDENCIES.md Section 3 / Section 4). Advisory:
+# https://osv.dev/vulnerability/PYSEC-2026-3447.
+constraint-dependencies = ["setuptools>=83.0.0"]
 
 # The generated control-plane stubs live in the top-level `mcsd` package
 # (mirroring the proto package `mcsd.controlplane.v1`); ship both packages.
@@ -434,7 +434,7 @@ forbidden_modules = [
 # --- versions context ------------------------------------------------------
 # The VersionCatalog / JAR-source context (#118, ARCHITECTURE.md Section 5.1):
 # domain (the Port + value objects) <- application (list + ensure-on-start) <- api
-# (the catalog endpoints), with adapters (Mojang / PaperMC / httpx clients + the
+# (the catalog endpoints), with adapters (Mojang / PaperMC / httpx2 clients + the
 # retry-cache wrapper) at the edge. The catalog is global (no community/server
 # scope), so the domain/application import no other context — the JAR store is
 # reached through the versions-owned ``JarPool`` seam, bound to the storage
@@ -458,7 +458,7 @@ source_modules = [
 forbidden_modules = ["mc_server_dashboard_api.versions.adapters"]
 
 [[tool.importlinter.contracts]]
-name = "versions domain and application import no other context and no httpx"
+name = "versions domain and application import no other context and no httpx2"
 type = "forbidden"
 source_modules = [
     "mc_server_dashboard_api.versions.domain",
@@ -471,7 +471,7 @@ forbidden_modules = [
     "mc_server_dashboard_api.servers",
     "mc_server_dashboard_api.storage",
     "mc_server_dashboard_api.core",
-    "httpx",
+    "httpx2",
 ]
 
 # --- audit context ---------------------------------------------------------

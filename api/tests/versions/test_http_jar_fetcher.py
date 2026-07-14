@@ -1,6 +1,6 @@
 """HTTP JAR fetcher: streamed download, size cap, typed transport errors (FR-VER-3).
 
-The real :class:`HttpxJarFetcher` is driven over an httpx ``MockTransport`` (no live
+The real :class:`HttpxJarFetcher` is driven over an httpx2 ``MockTransport`` (no live
 network, the issue's NO-live-network rule). Verifies the happy path returns the
 bytes, an over-cap body is aborted with :class:`JarTooLargeError`, a non-2xx
 response surfaces as :class:`JarDownloadError` (both map to ``jar_unavailable``),
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import functools
 
-import httpx
+import httpx2
 import pytest
 
 from mc_server_dashboard_api.versions.adapters import http_jar_fetcher, ssrf_guard
@@ -25,15 +25,15 @@ _URL = "https://example.test/server.jar"
 
 
 def _install_transport(monkeypatch: pytest.MonkeyPatch, handler: object) -> None:
-    """Make the adapter's httpx client route through a MockTransport handler.
+    """Make the adapter's httpx2 client route through a MockTransport handler.
 
     Also stubs the SSRF guard's resolver to a public IP so the guard is a
     pass-through for the mocked host (the tests never touch real DNS).
     """
 
-    transport = httpx.MockTransport(handler)  # type: ignore[arg-type]
-    patched = functools.partial(httpx.AsyncClient, transport=transport)
-    monkeypatch.setattr(httpx, "AsyncClient", patched)
+    transport = httpx2.MockTransport(handler)  # type: ignore[arg-type]
+    patched = functools.partial(httpx2.AsyncClient, transport=transport)
+    monkeypatch.setattr(httpx2, "AsyncClient", patched)
     monkeypatch.setattr(ssrf_guard, "_resolve_host", lambda _host: ["93.184.216.34"])
 
 
@@ -41,8 +41,8 @@ def _install_transport(monkeypatch: pytest.MonkeyPatch, handler: object) -> None
 async def test_returns_downloaded_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
     body = b"PK\x03\x04 a small jar"
 
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, content=body)
+    def handler(_: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, content=body)
 
     _install_transport(monkeypatch, handler)
     assert await HttpxJarFetcher().fetch(_URL) == body
@@ -52,8 +52,8 @@ async def test_returns_downloaded_bytes(monkeypatch: pytest.MonkeyPatch) -> None
 async def test_aborts_over_cap_body(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(http_jar_fetcher, "MAX_JAR_BYTES", 8)
 
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, content=b"way too many bytes for the cap")
+    def handler(_: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, content=b"way too many bytes for the cap")
 
     _install_transport(monkeypatch, handler)
     with pytest.raises(JarTooLargeError):
@@ -62,8 +62,8 @@ async def test_aborts_over_cap_body(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.asyncio
 async def test_non_2xx_is_download_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(503, content=b"upstream down")
+    def handler(_: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(503, content=b"upstream down")
 
     _install_transport(monkeypatch, handler)
     with pytest.raises(JarDownloadError):
