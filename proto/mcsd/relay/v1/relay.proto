@@ -180,6 +180,21 @@ message SessionEvent {
   }
 }
 
+// SessionSource is the relay ingress path a session was accepted on, so the
+// session history can label Java and Bedrock rows honestly (issue #1912). A
+// Bedrock flow-session carries no claimed identity (the relay never sees
+// Floodgate username/UUID), which without this discriminator is
+// indistinguishable from a Java login-session whose identity was unparseable.
+enum SessionSource {
+  SESSION_SOURCE_UNSPECIFIED = 0;
+  // JAVA is a Minecraft Java Edition login-session from the game listener
+  // (RELAY.md Section 8).
+  SESSION_SOURCE_JAVA = 1;
+  // BEDROCK is a Bedrock (Geyser) flow-session from the Bedrock tunnel path
+  // (epic #1540, issue #1904).
+  SESSION_SOURCE_BEDROCK = 2;
+}
+
 // SessionStart records the opening of a player session. Fields mirror the
 // game_session table columns (RELAY.md Section 14).
 message SessionStart {
@@ -212,6 +227,12 @@ message SessionStart {
 
   // started_at is when the relay accepted the session (relay clock).
   google.protobuf.Timestamp started_at = 7;
+
+  // source is the relay ingress path (Java game listener vs Bedrock tunnel) the
+  // session was accepted on, so the history can label the row honestly
+  // (issue #1912). Unset means an older relay that predates the field; the API
+  // stores it as the legacy/unspecified source.
+  SessionSource source = 8;
 }
 
 // SessionEnd records the closing of a player session.

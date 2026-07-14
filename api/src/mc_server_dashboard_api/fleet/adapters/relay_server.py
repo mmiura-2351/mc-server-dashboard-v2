@@ -280,6 +280,16 @@ def _to_datetime(ts: Timestamp) -> dt.datetime:
     return ts.ToDatetime(tzinfo=dt.timezone.utc)
 
 
+# The relay ingress path a session was accepted on, mapped from the proto enum
+# to the string the game_session.source column stores (issue #1912). UNSPECIFIED
+# (the proto3 default, e.g. an older relay predating the field) maps to None so
+# it is stored as the legacy/unspecified source (a NULL column).
+_SESSION_SOURCE_BY_PROTO = {
+    pb.SESSION_SOURCE_JAVA: "java",
+    pb.SESSION_SOURCE_BEDROCK: "bedrock",
+}
+
+
 def _to_session_start(start: pb.SessionStart) -> SessionStart:
     """Translate a proto ``SessionStart`` to the fleet Port value.
 
@@ -295,6 +305,7 @@ def _to_session_start(start: pb.SessionStart) -> SessionStart:
         username=start.username or None,
         player_uuid=start.player_uuid or None,
         started_at=_to_datetime(start.started_at),
+        source=_SESSION_SOURCE_BY_PROTO.get(start.source),
     )
 
 

@@ -37,6 +37,10 @@ class SessionStart:
     username: str | None
     player_uuid: str | None
     started_at: dt.datetime
+    # The relay ingress path (``"java"`` / ``"bedrock"``), or ``None`` when the
+    # relay did not report one — an older relay predating the field, stored as
+    # the legacy/unspecified source (issue #1912).
+    source: str | None = None
 
 
 class SessionSink(abc.ABC):

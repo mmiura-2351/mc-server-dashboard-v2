@@ -106,6 +106,9 @@ class ServersSessionSink(SessionSink):
             "player_uuid": _parse_uuid(start.player_uuid),
             "started_at": start.started_at,
             "ended_at": None,
+            # The relay ingress path ('java'/'bedrock'), or None -> NULL for a
+            # legacy/unspecified source (issue #1912).
+            "source": start.source,
         }
         stmt = pg_insert(GameSessionModel).values(**values)
         # On a pre-existing row, fill in the start fields but keep any recorded
@@ -120,6 +123,7 @@ class ServersSessionSink(SessionSink):
                 "username": stmt.excluded.username,
                 "player_uuid": stmt.excluded.player_uuid,
                 "started_at": stmt.excluded.started_at,
+                "source": stmt.excluded.source,
             },
             where=GameSessionModel.started_at.is_(None),
         )

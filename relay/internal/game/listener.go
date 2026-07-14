@@ -55,7 +55,7 @@ type Resolver interface {
 
 // SessionRecorder records accepted login sessions (RELAY.md Section 8).
 type SessionRecorder interface {
-	Start(serverID, slug, playerIP, username, playerUUID string) string
+	Start(serverID, slug, playerIP, username, playerUUID string, source apiclient.Source) string
 	End(id string)
 }
 
@@ -403,7 +403,7 @@ func (l *Listener) spliceLogin(ctx context.Context, conn net.Conn, r *bufio.Read
 	// serverID is the API's server identifier from the ResolveJoin decision; the
 	// slug is recorded separately as the historical hostname label (RELAY.md
 	// Section 8).
-	sessionID := l.sessions.Start(serverID, slug, ip, login.Name, login.UUID)
+	sessionID := l.sessions.Start(serverID, slug, ip, login.Name, login.UUID, apiclient.SourceJava)
 	defer l.sessions.End(sessionID)
 
 	// A login has spliced: count it and hold the active-sessions gauge at +1 for

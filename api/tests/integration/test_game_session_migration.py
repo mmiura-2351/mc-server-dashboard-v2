@@ -41,6 +41,17 @@ async def _table_exists(conn: AsyncConnection, name: str) -> bool:
     return result.scalar_one() is not None
 
 
+async def _column_exists(conn: AsyncConnection, table: str, column: str) -> bool:
+    result = await conn.execute(
+        text(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = :table AND column_name = :column"
+        ),
+        {"table": table, "column": column},
+    )
+    return result.scalar_one_or_none() is not None
+
+
 async def _seed_roles(
     conn: AsyncConnection, community_id: uuid.UUID
 ) -> dict[str, uuid.UUID]:
@@ -120,6 +131,31 @@ async def test_upgrade_creates_table_and_backfills_session_read() -> None:
         async with engine.connect() as conn:
             assert not await _table_exists(conn, "game_session")
             assert "session:read" not in await _perms(conn, ids["owner"])
+    finally:
+        await engine.dispose()
+
+    await downgrade_base(_DB_URL)
+
+
+async def test_0034_adds_and_drops_source_column() -> None:
+    # The 0034 migration adds a nullable game_session.source column and drops it
+    # on downgrade (issue #1912).
+    assert _DB_URL is not None
+    await downgrade_base(_DB_URL)
+    await upgrade_to("0033_server_plugin_source_geyser", _DB_URL)
+
+    engine = create_async_engine(_DB_URL)
+    try:
+        async with engine.connect() as conn:
+            assert not await _column_exists(conn, "game_session", "source")
+
+        await upgrade_to("0034_game_session_source", _DB_URL)
+        async with engine.connect() as conn:
+            assert await _column_exists(conn, "game_session", "source")
+
+        await downgrade_to("0033_server_plugin_source_geyser", _DB_URL)
+        async with engine.connect() as conn:
+            assert not await _column_exists(conn, "game_session", "source")
     finally:
         await engine.dispose()
 

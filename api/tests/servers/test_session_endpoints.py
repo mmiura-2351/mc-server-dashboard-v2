@@ -38,7 +38,10 @@ from mc_server_dashboard_api.dependencies import (
     get_permission_checker,
 )
 from mc_server_dashboard_api.servers.domain.errors import ServerNotFoundError
-from mc_server_dashboard_api.servers.domain.game_session import GameSession
+from mc_server_dashboard_api.servers.domain.game_session import (
+    GameSession,
+    GameSessionSource,
+)
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 from tests.identity.fakes import make_user
 
@@ -76,7 +79,12 @@ class _FakeUseCase:
         return self._result
 
 
-def _session(server_id: ServerId, *, ended: bool = True) -> GameSession:
+def _session(
+    server_id: ServerId,
+    *,
+    ended: bool = True,
+    source: GameSessionSource = GameSessionSource.UNSPECIFIED,
+) -> GameSession:
     return GameSession(
         id=uuid.uuid4(),
         server_id=server_id,
@@ -86,6 +94,7 @@ def _session(server_id: ServerId, *, ended: bool = True) -> GameSession:
         player_uuid=uuid.UUID("66666666-6666-6666-6666-666666666666"),
         started_at=_NOW,
         ended_at=_NOW + dt.timedelta(minutes=5) if ended else None,
+        source=source,
     )
 
 
@@ -150,6 +159,18 @@ def test_authorized_member_gets_session_list() -> None:
     assert row["username"] == "steve"
     assert row["player_uuid"] == "66666666-6666-6666-6666-666666666666"
     assert row["ended_at"] is not None
+    # A legacy row (UNSPECIFIED source) reads back as "unspecified" (issue #1912).
+    assert row["source"] == "unspecified"
+
+
+def test_bedrock_session_reports_source() -> None:
+    server = ServerId(uuid.uuid4())
+    use_case = _FakeUseCase(result=[_session(server, source=GameSessionSource.BEDROCK)])
+    app = _app(member=True, allow=True, list_=use_case)
+    client = next(_client(app))
+    resp = client.get(_url(uuid.uuid4(), server.value))
+    assert resp.status_code == 200
+    assert resp.json()["sessions"][0]["source"] == "bedrock"
 
 
 def test_pagination_params_are_forwarded() -> None:

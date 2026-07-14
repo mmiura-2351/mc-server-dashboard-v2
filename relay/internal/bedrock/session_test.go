@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/adapters/apiclient"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/ipcaps"
 )
 
@@ -19,8 +20,8 @@ const testServerID = "srv-test"
 // never promote (or that do not care about session reporting).
 type noopRecorder struct{}
 
-func (noopRecorder) Start(_, _, _, _, _ string) string { return "" }
-func (noopRecorder) End(_ string)                      {}
+func (noopRecorder) Start(_, _, _, _, _ string, _ apiclient.Source) string { return "" }
+func (noopRecorder) End(_ string)                                          {}
 
 // startCall captures one SessionRecorder.Start invocation and the id it minted.
 type startCall struct {
@@ -29,6 +30,7 @@ type startCall struct {
 	playerIP   string
 	username   string
 	playerUUID string
+	source     apiclient.Source
 	id         string
 }
 
@@ -42,12 +44,12 @@ type fakeRecorder struct {
 	counter int
 }
 
-func (f *fakeRecorder) Start(serverID, slug, playerIP, username, playerUUID string) string {
+func (f *fakeRecorder) Start(serverID, slug, playerIP, username, playerUUID string, source apiclient.Source) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.counter++
 	id := fmt.Sprintf("sess-%d", f.counter)
-	f.starts = append(f.starts, startCall{serverID, slug, playerIP, username, playerUUID, id})
+	f.starts = append(f.starts, startCall{serverID, slug, playerIP, username, playerUUID, source, id})
 	return id
 }
 
@@ -148,6 +150,10 @@ func TestBedrockFlowPromotesToSessionAndEndsOnEviction(t *testing.T) {
 	}
 	if s.playerIP != "127.0.0.1" {
 		t.Errorf("Start playerIP = %q, want the true client source 127.0.0.1", s.playerIP)
+	}
+	// The Bedrock tunnel path labels its sessions as Bedrock-sourced (issue #1912).
+	if s.source != apiclient.SourceBedrock {
+		t.Errorf("Start source = %v, want SourceBedrock", s.source)
 	}
 
 	// Idle the flow past the timeout and run one sweep: eviction Ends the session

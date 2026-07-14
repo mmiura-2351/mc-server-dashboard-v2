@@ -12,6 +12,7 @@ import (
 
 	"github.com/quic-go/quic-go"
 
+	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/adapters/apiclient"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/ipcaps"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/netutil"
 )
@@ -329,7 +330,7 @@ func (t *Tunnel) pumpUDPToQueue(sendCh chan<- *[]byte) {
 		// eviction / teardown. The relay cannot see Floodgate identity, so the
 		// username/uuid are empty; playerIP is the client's true UDP source.
 		if promote {
-			sid := t.sessions.Start(t.serverID, "", netutil.HostOf(udpAddr), "", "")
+			sid := t.sessions.Start(t.serverID, "", netutil.HostOf(udpAddr), "", "", apiclient.SourceBedrock)
 			t.flows.Promote(id, sid)
 		}
 

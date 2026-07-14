@@ -154,6 +154,64 @@ func (JoinDecision) EnumDescriptor() ([]byte, []int) {
 	return file_mcsd_relay_v1_relay_proto_rawDescGZIP(), []int{1}
 }
 
+// SessionSource is the relay ingress path a session was accepted on, so the
+// session history can label Java and Bedrock rows honestly (issue #1912). A
+// Bedrock flow-session carries no claimed identity (the relay never sees
+// Floodgate username/UUID), which without this discriminator is
+// indistinguishable from a Java login-session whose identity was unparseable.
+type SessionSource int32
+
+const (
+	SessionSource_SESSION_SOURCE_UNSPECIFIED SessionSource = 0
+	// JAVA is a Minecraft Java Edition login-session from the game listener
+	// (RELAY.md Section 8).
+	SessionSource_SESSION_SOURCE_JAVA SessionSource = 1
+	// BEDROCK is a Bedrock (Geyser) flow-session from the Bedrock tunnel path
+	// (epic #1540, issue #1904).
+	SessionSource_SESSION_SOURCE_BEDROCK SessionSource = 2
+)
+
+// Enum value maps for SessionSource.
+var (
+	SessionSource_name = map[int32]string{
+		0: "SESSION_SOURCE_UNSPECIFIED",
+		1: "SESSION_SOURCE_JAVA",
+		2: "SESSION_SOURCE_BEDROCK",
+	}
+	SessionSource_value = map[string]int32{
+		"SESSION_SOURCE_UNSPECIFIED": 0,
+		"SESSION_SOURCE_JAVA":        1,
+		"SESSION_SOURCE_BEDROCK":     2,
+	}
+)
+
+func (x SessionSource) Enum() *SessionSource {
+	p := new(SessionSource)
+	*p = x
+	return p
+}
+
+func (x SessionSource) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (SessionSource) Descriptor() protoreflect.EnumDescriptor {
+	return file_mcsd_relay_v1_relay_proto_enumTypes[2].Descriptor()
+}
+
+func (SessionSource) Type() protoreflect.EnumType {
+	return &file_mcsd_relay_v1_relay_proto_enumTypes[2]
+}
+
+func (x SessionSource) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use SessionSource.Descriptor instead.
+func (SessionSource) EnumDescriptor() ([]byte, []int) {
+	return file_mcsd_relay_v1_relay_proto_rawDescGZIP(), []int{2}
+}
+
 // RegisterRequest carries the relay's tunnel endpoint and active session set
 // to the API on startup or reconnect.
 type RegisterRequest struct {
@@ -618,7 +676,12 @@ type SessionStart struct {
 	// RELAY.md Sections 7 and 14).
 	PlayerUuid string `protobuf:"bytes,6,opt,name=player_uuid,json=playerUuid,proto3" json:"player_uuid,omitempty"`
 	// started_at is when the relay accepted the session (relay clock).
-	StartedAt     *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
+	StartedAt *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
+	// source is the relay ingress path (Java game listener vs Bedrock tunnel) the
+	// session was accepted on, so the history can label the row honestly
+	// (issue #1912). Unset means an older relay that predates the field; the API
+	// stores it as the legacy/unspecified source.
+	Source        SessionSource `protobuf:"varint,8,opt,name=source,proto3,enum=mcsd.relay.v1.SessionSource" json:"source,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -700,6 +763,13 @@ func (x *SessionStart) GetStartedAt() *timestamppb.Timestamp {
 		return x.StartedAt
 	}
 	return nil
+}
+
+func (x *SessionStart) GetSource() SessionSource {
+	if x != nil {
+		return x.Source
+	}
+	return SessionSource_SESSION_SOURCE_UNSPECIFIED
 }
 
 // SessionEnd records the closing of a player session.
@@ -900,7 +970,7 @@ const file_mcsd_relay_v1_relay_proto_rawDesc = "" +
 	"\fSessionEvent\x123\n" +
 	"\x05start\x18\x01 \x01(\v2\x1b.mcsd.relay.v1.SessionStartH\x00R\x05start\x12-\n" +
 	"\x03end\x18\x02 \x01(\v2\x19.mcsd.relay.v1.SessionEndH\x00R\x03endB\a\n" +
-	"\x05event\"\xf3\x01\n" +
+	"\x05event\"\xa9\x02\n" +
 	"\fSessionStart\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x1b\n" +
@@ -911,7 +981,8 @@ const file_mcsd_relay_v1_relay_proto_rawDesc = "" +
 	"\vplayer_uuid\x18\x06 \x01(\tR\n" +
 	"playerUuid\x129\n" +
 	"\n" +
-	"started_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\tstartedAt\"b\n" +
+	"started_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\tstartedAt\x124\n" +
+	"\x06source\x18\b \x01(\x0e2\x1c.mcsd.relay.v1.SessionSourceR\x06source\"b\n" +
 	"\n" +
 	"SessionEnd\x12\x1d\n" +
 	"\n" +
@@ -932,7 +1003,11 @@ const file_mcsd_relay_v1_relay_proto_rawDesc = "" +
 	"\x19JOIN_DECISION_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14JOIN_DECISION_TUNNEL\x10\x01\x12\x19\n" +
 	"\x15JOIN_DECISION_STOPPED\x10\x02\x12\x1b\n" +
-	"\x17JOIN_DECISION_NOT_FOUND\x10\x032\x84\x03\n" +
+	"\x17JOIN_DECISION_NOT_FOUND\x10\x03*d\n" +
+	"\rSessionSource\x12\x1e\n" +
+	"\x1aSESSION_SOURCE_UNSPECIFIED\x10\x00\x12\x17\n" +
+	"\x13SESSION_SOURCE_JAVA\x10\x01\x12\x1a\n" +
+	"\x16SESSION_SOURCE_BEDROCK\x10\x022\x84\x03\n" +
 	"\fRelayService\x12K\n" +
 	"\bRegister\x12\x1e.mcsd.relay.v1.RegisterRequest\x1a\x1f.mcsd.relay.v1.RegisterResponse\x12T\n" +
 	"\vResolveJoin\x12!.mcsd.relay.v1.ResolveJoinRequest\x1a\".mcsd.relay.v1.ResolveJoinResponse\x12]\n" +
@@ -953,45 +1028,47 @@ func file_mcsd_relay_v1_relay_proto_rawDescGZIP() []byte {
 	return file_mcsd_relay_v1_relay_proto_rawDescData
 }
 
-var file_mcsd_relay_v1_relay_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_mcsd_relay_v1_relay_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
 var file_mcsd_relay_v1_relay_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_mcsd_relay_v1_relay_proto_goTypes = []any{
 	(JoinIntent)(0),                       // 0: mcsd.relay.v1.JoinIntent
 	(JoinDecision)(0),                     // 1: mcsd.relay.v1.JoinDecision
-	(*RegisterRequest)(nil),               // 2: mcsd.relay.v1.RegisterRequest
-	(*RegisterResponse)(nil),              // 3: mcsd.relay.v1.RegisterResponse
-	(*ResolveJoinRequest)(nil),            // 4: mcsd.relay.v1.ResolveJoinRequest
-	(*ResolveJoinResponse)(nil),           // 5: mcsd.relay.v1.ResolveJoinResponse
-	(*ReportSessionsRequest)(nil),         // 6: mcsd.relay.v1.ReportSessionsRequest
-	(*ReportSessionsResponse)(nil),        // 7: mcsd.relay.v1.ReportSessionsResponse
-	(*SessionEvent)(nil),                  // 8: mcsd.relay.v1.SessionEvent
-	(*SessionStart)(nil),                  // 9: mcsd.relay.v1.SessionStart
-	(*SessionEnd)(nil),                    // 10: mcsd.relay.v1.SessionEnd
-	(*ValidateBedrockTunnelRequest)(nil),  // 11: mcsd.relay.v1.ValidateBedrockTunnelRequest
-	(*ValidateBedrockTunnelResponse)(nil), // 12: mcsd.relay.v1.ValidateBedrockTunnelResponse
-	(*timestamppb.Timestamp)(nil),         // 13: google.protobuf.Timestamp
+	(SessionSource)(0),                    // 2: mcsd.relay.v1.SessionSource
+	(*RegisterRequest)(nil),               // 3: mcsd.relay.v1.RegisterRequest
+	(*RegisterResponse)(nil),              // 4: mcsd.relay.v1.RegisterResponse
+	(*ResolveJoinRequest)(nil),            // 5: mcsd.relay.v1.ResolveJoinRequest
+	(*ResolveJoinResponse)(nil),           // 6: mcsd.relay.v1.ResolveJoinResponse
+	(*ReportSessionsRequest)(nil),         // 7: mcsd.relay.v1.ReportSessionsRequest
+	(*ReportSessionsResponse)(nil),        // 8: mcsd.relay.v1.ReportSessionsResponse
+	(*SessionEvent)(nil),                  // 9: mcsd.relay.v1.SessionEvent
+	(*SessionStart)(nil),                  // 10: mcsd.relay.v1.SessionStart
+	(*SessionEnd)(nil),                    // 11: mcsd.relay.v1.SessionEnd
+	(*ValidateBedrockTunnelRequest)(nil),  // 12: mcsd.relay.v1.ValidateBedrockTunnelRequest
+	(*ValidateBedrockTunnelResponse)(nil), // 13: mcsd.relay.v1.ValidateBedrockTunnelResponse
+	(*timestamppb.Timestamp)(nil),         // 14: google.protobuf.Timestamp
 }
 var file_mcsd_relay_v1_relay_proto_depIdxs = []int32{
 	0,  // 0: mcsd.relay.v1.ResolveJoinRequest.intent:type_name -> mcsd.relay.v1.JoinIntent
 	1,  // 1: mcsd.relay.v1.ResolveJoinResponse.decision:type_name -> mcsd.relay.v1.JoinDecision
-	8,  // 2: mcsd.relay.v1.ReportSessionsRequest.events:type_name -> mcsd.relay.v1.SessionEvent
-	9,  // 3: mcsd.relay.v1.SessionEvent.start:type_name -> mcsd.relay.v1.SessionStart
-	10, // 4: mcsd.relay.v1.SessionEvent.end:type_name -> mcsd.relay.v1.SessionEnd
-	13, // 5: mcsd.relay.v1.SessionStart.started_at:type_name -> google.protobuf.Timestamp
-	13, // 6: mcsd.relay.v1.SessionEnd.ended_at:type_name -> google.protobuf.Timestamp
-	2,  // 7: mcsd.relay.v1.RelayService.Register:input_type -> mcsd.relay.v1.RegisterRequest
-	4,  // 8: mcsd.relay.v1.RelayService.ResolveJoin:input_type -> mcsd.relay.v1.ResolveJoinRequest
-	6,  // 9: mcsd.relay.v1.RelayService.ReportSessions:input_type -> mcsd.relay.v1.ReportSessionsRequest
-	11, // 10: mcsd.relay.v1.RelayService.ValidateBedrockTunnel:input_type -> mcsd.relay.v1.ValidateBedrockTunnelRequest
-	3,  // 11: mcsd.relay.v1.RelayService.Register:output_type -> mcsd.relay.v1.RegisterResponse
-	5,  // 12: mcsd.relay.v1.RelayService.ResolveJoin:output_type -> mcsd.relay.v1.ResolveJoinResponse
-	7,  // 13: mcsd.relay.v1.RelayService.ReportSessions:output_type -> mcsd.relay.v1.ReportSessionsResponse
-	12, // 14: mcsd.relay.v1.RelayService.ValidateBedrockTunnel:output_type -> mcsd.relay.v1.ValidateBedrockTunnelResponse
-	11, // [11:15] is the sub-list for method output_type
-	7,  // [7:11] is the sub-list for method input_type
-	7,  // [7:7] is the sub-list for extension type_name
-	7,  // [7:7] is the sub-list for extension extendee
-	0,  // [0:7] is the sub-list for field type_name
+	9,  // 2: mcsd.relay.v1.ReportSessionsRequest.events:type_name -> mcsd.relay.v1.SessionEvent
+	10, // 3: mcsd.relay.v1.SessionEvent.start:type_name -> mcsd.relay.v1.SessionStart
+	11, // 4: mcsd.relay.v1.SessionEvent.end:type_name -> mcsd.relay.v1.SessionEnd
+	14, // 5: mcsd.relay.v1.SessionStart.started_at:type_name -> google.protobuf.Timestamp
+	2,  // 6: mcsd.relay.v1.SessionStart.source:type_name -> mcsd.relay.v1.SessionSource
+	14, // 7: mcsd.relay.v1.SessionEnd.ended_at:type_name -> google.protobuf.Timestamp
+	3,  // 8: mcsd.relay.v1.RelayService.Register:input_type -> mcsd.relay.v1.RegisterRequest
+	5,  // 9: mcsd.relay.v1.RelayService.ResolveJoin:input_type -> mcsd.relay.v1.ResolveJoinRequest
+	7,  // 10: mcsd.relay.v1.RelayService.ReportSessions:input_type -> mcsd.relay.v1.ReportSessionsRequest
+	12, // 11: mcsd.relay.v1.RelayService.ValidateBedrockTunnel:input_type -> mcsd.relay.v1.ValidateBedrockTunnelRequest
+	4,  // 12: mcsd.relay.v1.RelayService.Register:output_type -> mcsd.relay.v1.RegisterResponse
+	6,  // 13: mcsd.relay.v1.RelayService.ResolveJoin:output_type -> mcsd.relay.v1.ResolveJoinResponse
+	8,  // 14: mcsd.relay.v1.RelayService.ReportSessions:output_type -> mcsd.relay.v1.ReportSessionsResponse
+	13, // 15: mcsd.relay.v1.RelayService.ValidateBedrockTunnel:output_type -> mcsd.relay.v1.ValidateBedrockTunnelResponse
+	12, // [12:16] is the sub-list for method output_type
+	8,  // [8:12] is the sub-list for method input_type
+	8,  // [8:8] is the sub-list for extension type_name
+	8,  // [8:8] is the sub-list for extension extendee
+	0,  // [0:8] is the sub-list for field type_name
 }
 
 func init() { file_mcsd_relay_v1_relay_proto_init() }
@@ -1008,7 +1085,7 @@ func file_mcsd_relay_v1_relay_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_mcsd_relay_v1_relay_proto_rawDesc), len(file_mcsd_relay_v1_relay_proto_rawDesc)),
-			NumEnums:      2,
+			NumEnums:      3,
 			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   1,
