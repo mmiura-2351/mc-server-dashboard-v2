@@ -98,12 +98,14 @@ function pluginTabLabelKey(serverType: string): TranslationKey {
  *
  * `tabIndex={0}` puts the panel itself in the tab sequence: several panels have
  * no focusable descendant at all in plausible states (a read-only user on an
- * empty backups/schedules/plugins list), and none of them starts with a
- * focusable element, so without it activating a tab strands the keyboard user.
- * The WAI-ARIA APG tabs pattern applies this set-wide rather than per panel —
- * "it is recommended that all tabpanel elements in a tab set are focusable if
- * there are any panels in the set that contain content where the first element
- * in the panel is not focusable" — so all eight go through this wrapper.
+ * empty backups/schedules/plugins list), so without it activating a tab strands
+ * the keyboard user. Others merely open with non-focusable content (overview's
+ * metrics strip, settings' heading), which is what triggers the WAI-ARIA APG
+ * tabs pattern's set-wide rule — "it is recommended that all tabpanel elements
+ * in a tab set are focusable if there are any panels in the set that contain
+ * content where the first element in the panel is not focusable". So every
+ * panel goes through this wrapper, console included, even though console does
+ * open on a focusable element (the follow checkbox).
  */
 function TabPanel({ name, children }: { name: Tab; children: ReactNode }) {
   return (
