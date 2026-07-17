@@ -630,6 +630,11 @@ Authoritative codes are `<resource>:<action>`. Initial catalog to refine:
   state, assigned worker).
 - **Worker** — registered execution host (capabilities, liveness).
 - **Backup** — retained snapshot metadata for a server.
-- **FileEditHistory** — versioned file changes for rollback.
+- **File version history** — **not a database entity.** File versioning is a
+  Storage-layer mechanism: prior content is retained as immutable blobs under
+  `versions/<rel-path>/<version-id>` (STORAGE.md Section 5, DATABASE.md
+  Section 8). Version ids are monotonic and time-derived; mutation attribution
+  is available via **AuditLog** (`file:write` / `file:rollback` events) but is
+  not joinable to a specific version id.
 - **AuditLog** — activity trail.
 - **RefreshToken** — persisted session token.
