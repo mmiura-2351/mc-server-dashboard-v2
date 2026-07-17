@@ -908,7 +908,8 @@ the fast held path keeps that window short for routine single-host restarts with
 the operator lowering `grace_seconds` below its safety floor.
 
 Both knobs have boot-time safety floors (a warning, not fatal): `grace_seconds`
-must exceed `max(hydrate_timeout + command_timeout, snapshot_timeout)` (#822/#847),
+must exceed `max(hydrate_timeout + command_timeout, snapshot_timeout, stop_timeout)`
+(#822/#847/#930),
 and `held_start_grace_seconds` must exceed `command_timeout_seconds` (it only covers
 a command-only start). Lowering `grace_seconds` below its floor reopens the
 duplicate-start / stale-snapshot races; prefer the (already short by default) held
