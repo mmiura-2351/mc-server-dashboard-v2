@@ -74,7 +74,17 @@ def backoff_duration(
     Doubles ``base`` once per prior lockout (``base * 2**lockout_count``), capped
     at ``maximum``. ``lockout_count`` is the count *before* this lockout, so the
     first lockout (count 0) is exactly ``base``.
+
+    ``lockout_count`` is persisted and only reset by a successful login, so a
+    sustained attacker can grind it arbitrarily high (issue #1997). The cap is
+    therefore applied to the *exponent* rather than to the product: doubling
+    ``base`` more than ``(maximum // base).bit_length() - 1`` times can only
+    exceed ``maximum``, and computing that product would overflow
+    ``timedelta`` (or blow up ``2**lockout_count`` itself) long before the
+    comparison ran.
     """
 
+    if lockout_count >= (maximum // base).bit_length():
+        return maximum
     duration = base * (2**lockout_count)
     return duration if duration < maximum else maximum
