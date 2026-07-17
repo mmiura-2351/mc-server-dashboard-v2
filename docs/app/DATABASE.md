@@ -504,7 +504,7 @@ reload) is deferred.
 
 One row per plugin/mod jar installed in a server's content directory (`mods/`
 for Fabric/Forge, `plugins/` for Paper), added by migration 0019 and extended by
-0020–0024 and 0033. Like player groups, the tooling lives inside the servers
+0020–0023 and 0033. Like player groups, the tooling lives inside the servers
 bounded context — a plugin shares the `Server` aggregate and its at-rest state
 policy. **Metadata only**: the jar bytes live behind the `Storage` Port
 (STORAGE.md) in the content-addressed plugin cache, keyed by `sha256`; a cached
