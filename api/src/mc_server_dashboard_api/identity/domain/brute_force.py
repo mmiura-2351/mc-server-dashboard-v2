@@ -66,6 +66,26 @@ def prune_horizon(
     return horizon
 
 
+def backoff_cap_count(*, base: dt.timedelta, maximum: dt.timedelta) -> int:
+    """Lockout count at which the back-off saturates at ``maximum``.
+
+    Doubling ``base`` more than ``(maximum // base).bit_length() - 1`` times can
+    only exceed ``maximum``, so from this count on every lockout lasts exactly
+    ``maximum`` and a higher count changes nothing. Computing that product would
+    also overflow ``timedelta`` (or blow up ``2**lockout_count`` itself) long
+    before the comparison ran, so the cap is applied to the *exponent* rather
+    than to the product (issue #1997).
+
+    This is the single bound both readers of the count share: :func:`backoff_duration`
+    uses it as its exponent guard, and the login use case clamps the persisted
+    ``lockout_count`` to it so the value saturates instead of growing under a
+    sustained attacker (issue #2033). Sharing one computation keeps the two from
+    drifting apart.
+    """
+
+    return (maximum // base).bit_length()
+
+
 def backoff_duration(
     lockout_count: int, *, base: dt.timedelta, maximum: dt.timedelta
 ) -> dt.timedelta:
@@ -73,18 +93,11 @@ def backoff_duration(
 
     Doubles ``base`` once per prior lockout (``base * 2**lockout_count``), capped
     at ``maximum``. ``lockout_count`` is the count *before* this lockout, so the
-    first lockout (count 0) is exactly ``base``.
-
-    ``lockout_count`` is persisted and only reset by a successful login, so a
-    sustained attacker can grind it arbitrarily high (issue #1997). The cap is
-    therefore applied to the *exponent* rather than to the product: doubling
-    ``base`` more than ``(maximum // base).bit_length() - 1`` times can only
-    exceed ``maximum``, and computing that product would overflow
-    ``timedelta`` (or blow up ``2**lockout_count`` itself) long before the
-    comparison ran.
+    first lockout (count 0) is exactly ``base``. At or above
+    :func:`backoff_cap_count` the duration is pinned to ``maximum``.
     """
 
-    if lockout_count >= (maximum // base).bit_length():
+    if lockout_count >= backoff_cap_count(base=base, maximum=maximum):
         return maximum
     duration = base * (2**lockout_count)
     return duration if duration < maximum else maximum

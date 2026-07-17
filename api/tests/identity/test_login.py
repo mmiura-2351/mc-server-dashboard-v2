@@ -12,6 +12,7 @@ import datetime as dt
 import pytest
 
 from mc_server_dashboard_api.identity.application.login import Login
+from mc_server_dashboard_api.identity.domain.brute_force import backoff_cap_count
 from mc_server_dashboard_api.identity.domain.errors import InvalidCredentialsError
 from tests.identity.fakes import (
     FakeClock,
@@ -245,6 +246,32 @@ async def test_repeat_lockout_backoff_doubles() -> None:
     assert lockout.lockout_count == 3
     # base * 2**2 = 15min * 4 = 60min.
     assert lockout.locked_until == _NOW + dt.timedelta(minutes=60)
+
+
+async def test_lockout_count_saturates_at_backoff_cap() -> None:
+    # Past the back-off cap every further lockout already lasts lockout_max, so
+    # the persisted count must saturate there instead of growing without bound
+    # under a sustained failed-login campaign (issue #2033).
+    cap = backoff_cap_count(base=dt.timedelta(minutes=15), maximum=dt.timedelta(days=1))
+    uow = FakeUnitOfWork()
+    uow.users.seed(make_user(password=_PASSWORD))
+    attempts = FakeLoginAttemptStore()
+    # Already locked up to the cap, with the active lockout expired.
+    await attempts.lock(
+        "alice", locked_until=_NOW - dt.timedelta(seconds=1), lockout_count=cap
+    )
+    login = _login(uow, RecordingFailureDelay(), attempts)
+
+    for _ in range(5):
+        with pytest.raises(InvalidCredentialsError):
+            await login(username="alice", password="wrong", ip="198.51.100.1")
+
+    lockout = await attempts.get_lockout("alice")
+    assert lockout is not None
+    # Saturated at the cap, not cap + 1.
+    assert lockout.lockout_count == cap
+    # And the back-off is still pinned to the maximum.
+    assert lockout.locked_until == _NOW + dt.timedelta(days=1)
 
 
 async def test_ip_threshold_blocks_before_password_check() -> None:
