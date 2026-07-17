@@ -3,7 +3,7 @@
 A :class:`ServerPlugin` is the metadata of a plugin or mod jar installed in a
 server's content directory (``mods/`` for Fabric/Forge, ``plugins/`` for Paper).
 The jar bytes live behind the :class:`FileStore` seam; this entity only indexes
-them. The shape mirrors the ``server_plugin`` table (migration 0018).
+them. The shape mirrors the ``server_plugin`` table (migration 0019).
 
 Plugins live inside the servers context: they share the ``Server`` aggregate,
 the ``(community_id, server_id)`` scope, the at-rest state policy, and the
@@ -91,7 +91,7 @@ CATALOG_SOURCES = frozenset({PluginSource.MODRINTH, PluginSource.GEYSER})
 
 @dataclass
 class ServerPlugin:
-    """Row of the ``server_plugin`` table (migration 0018).
+    """Row of the ``server_plugin`` table (migration 0019).
 
     ``rel_path`` is the relative path within the working set (e.g.
     ``mods/fabric-api.jar``). ``source_project_id`` / ``source_version_id``

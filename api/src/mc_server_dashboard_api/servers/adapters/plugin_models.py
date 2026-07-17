@@ -1,4 +1,4 @@
-"""SQLAlchemy ORM model for the ``server_plugin`` table (migration 0018).
+"""SQLAlchemy ORM model for the ``server_plugin`` table (migration 0019).
 
 Maps the ``server_plugin`` table: installed plugin/mod metadata for a server.
 An adapter detail: the domain entity
@@ -32,7 +32,7 @@ from mc_server_dashboard_api.core.adapters.database import Base
 
 
 class ServerPluginModel(Base):
-    """Row of the ``server_plugin`` table (migration 0018)."""
+    """Row of the ``server_plugin`` table (migration 0019)."""
 
     __tablename__ = "server_plugin"
     __table_args__ = (
