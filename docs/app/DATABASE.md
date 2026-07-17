@@ -500,6 +500,59 @@ copy on its next natural hydrate (hydrate always carries the authoritative worki
 set). Pushing live changes to a running server via the Worker (EditFile + RCON
 reload) is deferred.
 
+### Server plugins (epic #650)
+
+One row per plugin/mod jar installed in a server's content directory (`mods/`
+for Fabric/Forge, `plugins/` for Paper), added by migration 0019 and extended by
+0020–0023 and 0033. Like player groups, the tooling lives inside the servers
+bounded context — a plugin shares the `Server` aggregate and its at-rest state
+policy. **Metadata only**: the jar bytes live behind the `Storage` Port
+(STORAGE.md) in the content-addressed plugin cache, keyed by `sha256`; a cached
+blob no row references is reclaimed by the plugin-cache GC
+([`CONFIGURATION.md`](CONFIGURATION.md) Section 5.12). The endpoints are guarded
+by the `plugin:read` / `plugin:manage` permission codes (Appendix A).
+
+#### `server_plugin`
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid PK | |
+| `server_id` | uuid FK → `server.id` | `ON DELETE CASCADE`; indexed (`ix_server_plugin_server_id`) for listing a server's plugins |
+| `rel_path` | text | path within the working set, e.g. `mods/fabric-api.jar` |
+| `filename` | text | the jar filename (sanitized to a basename at ingest) |
+| `display_name` | text | operator- / catalog-facing name |
+| `description` | text nullable | optional description |
+| `loader_type` | text | `mod` / `plugin` (CHECK enum) — the loader family the jar targets |
+| `source` | text | `local` / `modrinth` / `geyser` (CHECK enum; migration 0033 widened the 0019 two-value CHECK). `geyser` is GeyserMC's own download API (issue #1905), the only publisher of the Floodgate-Spigot build Modrinth does not carry for Paper ([`BEDROCK.md`](BEDROCK.md)). `modrinth` / `geyser` are the catalog sources whose latest version is re-resolvable, so only they support an in-place update check (issue #1916); a `local` upload has no upstream |
+| `source_project_id` | text nullable | catalog project id, when catalog-sourced; the key catalog dependencies are matched against |
+| `source_version_id` | text nullable | catalog version id, when catalog-sourced |
+| `version_number` | text nullable | the version string as published |
+| `checksum_sha512` | text nullable | SHA-512 of the jar bytes at install (Modrinth integrity verification). Indexed (`ix_server_plugin_checksum_sha512`, migration 0020): the download cache maps a published SHA-512 to the cached `sha256`, so the same version is not re-downloaded per server (issue #1306) |
+| `sha256` | text(64) nullable | content address of the jar in the content-addressed cache (issue #1306, migration 0020): identical content shares one cached blob keyed by this hash. Rows installed before the cache stay NULL and are simply not deduped |
+| `size_bytes` | bigint nullable | jar size |
+| `enabled` | bool | NOT NULL, defaults true. Tracks the `.disabled`-suffix rename convention: a disabled plugin's `rel_path` ends with `.disabled` |
+| `installed_by` | uuid nullable | the user who installed it; **soft reference** (no FK) so the row survives the actor's deletion (Section 9) |
+| `mod_identifier` | text nullable | the jar manifest's declared id (issue #1307, migration 0021); NULL when the jar carried no recognized manifest |
+| `provides` | jsonb nullable | alias ids the jar also satisfies |
+| `dependencies` | jsonb nullable | manifest dependencies: `[{mod_identifier, version_range, required, conflict}]` |
+| `mc_versions` | jsonb nullable | the declared compatible Minecraft versions |
+| `side` | text | `server` / `client` / `both` (CHECK enum, issue #1308, migration 0022). NOT NULL, server default `both` (the safe default — a `both` jar is present everywhere — so pre-migration rows backfilled to it). Governs working-set presence: only a jar with side in {`server`, `both`} deploys to the running server; a `client`-only jar is tracked and cached but never placed. Migration 0024 corrected existing Paper plugins to `server` (Paper/Bukkit plugins are always server-side) |
+| `catalog_dependencies` | jsonb nullable | the **required** Modrinth catalog dependencies of the selected version, keyed by project id: `[{project_id, required, slug, title}]` (issue #1321, migration 0023). A different namespace from the manifest `dependencies`, which many popular mods leave empty; local uploads carry none |
+| `created_at` / `updated_at` | timestamptz | |
+
+Constraints: `UNIQUE(server_id, rel_path)` (`uq_server_plugin_server_rel`) — one
+row per jar path per server. Indexes on `(server_id)` and `(checksum_sha512)`.
+Rows cascade away when their server is deleted, and with it when the server's
+Community is deleted (Section 10). The four manifest columns and
+`catalog_dependencies` are nullable because rows installed before their
+migrations carry NULL until re-ingested (no backfill — a re-install picks the
+metadata up); the repository maps a NULL JSON column to an empty list.
+
+A server whose plugin set carries Geyser is what drives `server.bedrock_port`
+allocation (Section 7): the port is allocated on detection and released on
+uninstall ([`BEDROCK.md`](BEDROCK.md), [`CONFIGURATION.md`](CONFIGURATION.md)
+Section 5.13).
+
 ---
 
 ## 8. Backups, file history, sessions, resource packs & schedules
@@ -585,6 +638,7 @@ the column is labelled "claimed identity" in the UI).
 | `player_uuid` | uuid nullable | Claimed; present on protocols that send it |
 | `started_at` | timestamptz nullable | |
 | `ended_at` | timestamptz nullable | NULL = still open (or relay crashed; healed on `Register`) |
+| `source` | text nullable | the relay ingress path the session was accepted on: `java` / `bedrock` (issue #1912, migration 0034), so a Bedrock flow-session is labelled honestly rather than as a Java login-session with an unparseable claimed identity. NULL = legacy/unspecified: rows predating the column, or a relay too old to report `SessionStart.source`. **No CHECK constraint** — like `refresh_token.revoked_reason` (Section 4), the column is a plain `text` validated in application code |
 
 Index: `(server_id, started_at)` for the newest-first paginated listing.
 Rows cascade away when their server is deleted. A retention prune loop
