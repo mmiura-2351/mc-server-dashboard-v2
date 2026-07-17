@@ -328,8 +328,9 @@ Requirements:
 ### 6.5 Minecraft Server Lifecycle
 
 - FR-SRV-1: A member with the right permission can create a server within a
-  Community, specifying at least: Minecraft edition/version, server type
-  (vanilla/Forge/Paper/etc. as supported), and the desired execution backend.
+  Community, specifying at least: Minecraft edition/version and server type
+  (vanilla/Forge/Paper/etc. as supported). The execution backend is not a create
+  parameter; it is fixed to container (FR-EXE-2, FR-EXE-3).
 - FR-SRV-2: Supported lifecycle operations: start, stop, restart, delete, and
   configuration edit. Each maps to an operation code and is permission-gated.
 - FR-SRV-3: The API holds the authoritative record of each server (identity,
@@ -626,7 +627,7 @@ Authoritative codes are `<resource>:<action>`. Initial catalog to refine:
 - **Role** — community-scoped named permission set.
 - **ResourceGrant** — (user, resource, permissions) override.
 - **Server** — community-scoped MC server (config, desired state, observed
-  state, execution backend, assigned worker).
+  state, assigned worker).
 - **Worker** — registered execution host (capabilities, liveness).
 - **Backup** — retained snapshot metadata for a server.
 - **FileEditHistory** — versioned file changes for rollback.
