@@ -41,7 +41,7 @@ class ServerPluginModel(Base):
             name="ck_server_plugin_loader_type",
         ),
         CheckConstraint(
-            "source IN ('local', 'modrinth', 'geyser')",
+            "source IN ('local', 'modrinth', 'geyser', 'unknown')",
             name="ck_server_plugin_source",
         ),
         CheckConstraint(

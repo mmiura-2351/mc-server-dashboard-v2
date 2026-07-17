@@ -1548,4 +1548,22 @@ describe("ServerPluginsTab Source column (issue #1934)", () => {
 
     expect(screen.getByText("Local")).toBeInTheDocument();
   });
+
+  it("labels a provenance-unknown row 'Unknown', not 'Local' (issue #2059)", async () => {
+    mockGets({
+      plugins: [
+        plugin({
+          display_name: "Restored Mod",
+          source: "unknown",
+          source_project_id: null,
+        }),
+      ],
+      validation: EMPTY_VALIDATION,
+    });
+    renderTab();
+    await screen.findByText("Restored Mod");
+
+    expect(screen.getByText("Unknown")).toBeInTheDocument();
+    expect(screen.queryByText("Local")).not.toBeInTheDocument();
+  });
 });

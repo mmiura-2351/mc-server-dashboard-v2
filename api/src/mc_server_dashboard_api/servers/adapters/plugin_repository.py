@@ -219,6 +219,27 @@ class SqlAlchemyPluginRepository(PluginRepository):
         # The WHERE clause guarantees no None values; the cast satisfies mypy.
         return {r for r in rows if r is not None}
 
+    async def find_catalog_provenance_by_sha512(
+        self, checksum_sha512: str
+    ) -> tuple[PluginSource, str] | None:
+        stmt = (
+            select(ServerPluginModel.source, ServerPluginModel.source_project_id)
+            .where(
+                ServerPluginModel.checksum_sha512 == checksum_sha512,
+                ServerPluginModel.source.in_(
+                    sorted(source.value for source in CATALOG_SOURCES)
+                ),
+                ServerPluginModel.source_project_id.is_not(None),
+            )
+            .order_by(ServerPluginModel.id)
+            .limit(1)
+        )
+        row = (await self._session.execute(stmt)).first()
+        if row is None:
+            return None
+        source, source_project_id = row
+        return PluginSource(source), source_project_id
+
     async def find_sha256_by_sha512(self, checksum_sha512: str) -> str | None:
         stmt = (
             select(ServerPluginModel.sha256)

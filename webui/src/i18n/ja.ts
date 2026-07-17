@@ -1549,6 +1549,7 @@ export const ja: Record<TranslationKey, string> = {
   "plugins.source.local": "ローカル",
   "plugins.source.modrinth": "Modrinth",
   "plugins.source.geyser": "GeyserMC",
+  "plugins.source.unknown": "不明",
   "plugins.side.label": "動作環境",
   "plugins.side.server": "サーバー",
   "plugins.side.client": "クライアント",

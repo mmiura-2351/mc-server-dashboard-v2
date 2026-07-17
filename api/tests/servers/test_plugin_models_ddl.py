@@ -34,7 +34,7 @@ def test_source_check_lists_documented_values() -> None:
         if isinstance(c, CheckConstraint)
     }
     assert "ck_server_plugin_source" in checks
-    for value in ("local", "modrinth", "geyser"):
+    for value in ("local", "modrinth", "geyser", "unknown"):
         assert value in checks["ck_server_plugin_source"]
 
 

@@ -73,6 +73,7 @@ from mc_server_dashboard_api.servers.domain.notifier import ServerNotifier
 from mc_server_dashboard_api.servers.domain.plugin import (
     CATALOG_SOURCES,
     PluginId,
+    PluginSource,
     ServerPlugin,
     has_enabled_geyser,
 )
@@ -850,6 +851,18 @@ class FakePluginRepository(PluginRepository):
 
     async def all_sha256s(self) -> set[str]:
         return {p.sha256 for p in self.by_id.values() if p.sha256 is not None}
+
+    async def find_catalog_provenance_by_sha512(
+        self, checksum_sha512: str
+    ) -> tuple[PluginSource, str] | None:
+        for plugin in self.by_id.values():
+            if (
+                plugin.checksum_sha512 == checksum_sha512
+                and plugin.source in CATALOG_SOURCES
+                and plugin.source_project_id is not None
+            ):
+                return plugin.source, plugin.source_project_id
+        return None
 
     async def find_sha256_by_sha512(self, checksum_sha512: str) -> str | None:
         for plugin in self.by_id.values():

@@ -280,6 +280,66 @@ async def test_restore_ingests_ghost_disabled_plugin_file() -> None:
     assert rows[0].enabled is False
 
 
+# --- ghost provenance recovery / unknown fallback (#2059) -------------------
+
+
+async def test_restore_recovers_catalog_provenance_from_checksum() -> None:
+    """A ghost jar whose checksum matches a catalog install elsewhere recovers
+    its source and source_project_id rather than being asserted local (#2059)."""
+    server = _server()
+    repo, backups, backup, archive = _seed_restore_fixture(server)
+    plugins = FakePluginRepository()
+    jar_bytes = _minimal_jar()
+    checksum = hashlib.sha512(jar_bytes).hexdigest()
+    # The same jar was installed from a catalog on ANOTHER server, so its
+    # provenance is recorded under this checksum in the global plugin table.
+    catalog_copy = _plugin(
+        server_id=ServerId.new(),
+        rel_path="mods/catalog.jar",
+        filename="catalog.jar",
+        checksum_sha512=checksum,
+    )
+    catalog_copy.source = PluginSource.MODRINTH
+    catalog_copy.source_project_id = "AABBCCDD"
+    plugins.seed(catalog_copy)
+    # The identical jar lands on the restored server as a ghost (no DB row here).
+    file_store = FakeFileStore()
+    file_store.files["mods/ghost.jar"] = jar_bytes
+    cache = FakePluginCacheStore()
+    uow = FakeUnitOfWork(servers=repo, backups=backups, plugins=plugins)
+
+    await _make_restore(uow, archive, file_store=file_store, cache=cache)(
+        community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id
+    )
+
+    rows = await plugins.list_for_server(server.id)
+    ghost = next(r for r in rows if r.server_id == server.id)
+    assert ghost.source is PluginSource.MODRINTH
+    assert ghost.source_project_id == "AABBCCDD"
+
+
+async def test_restore_marks_unrecoverable_ghost_source_unknown() -> None:
+    """A ghost jar with no catalog checksum match is marked provenance-unknown,
+    never silently asserted as a local upload (#2059)."""
+    server = _server()
+    repo, backups, backup, archive = _seed_restore_fixture(server)
+    plugins = FakePluginRepository()
+    jar_bytes = _minimal_jar()
+    file_store = FakeFileStore()
+    file_store.files["mods/ghost.jar"] = jar_bytes
+    cache = FakePluginCacheStore()
+    uow = FakeUnitOfWork(servers=repo, backups=backups, plugins=plugins)
+
+    await _make_restore(uow, archive, file_store=file_store, cache=cache)(
+        community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id
+    )
+
+    rows = await plugins.list_for_server(server.id)
+    assert len(rows) == 1
+    assert rows[0].source is PluginSource.UNKNOWN
+    assert rows[0].source_project_id is None
+
+
 # --- no plugins (no-op) -----------------------------------------------------
 
 

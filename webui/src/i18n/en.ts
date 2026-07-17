@@ -1554,6 +1554,7 @@ export const en = {
   "plugins.source.local": "Local",
   "plugins.source.modrinth": "Modrinth",
   "plugins.source.geyser": "GeyserMC",
+  "plugins.source.unknown": "Unknown",
   // Side (server / client / both, issue #1308).
   "plugins.side.label": "Runs on",
   "plugins.side.server": "Server",
