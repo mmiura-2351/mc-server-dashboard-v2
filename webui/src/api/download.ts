@@ -23,15 +23,15 @@ import { ApiError, getRefresher } from "./client.ts";
 export const MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024;
 
 /**
- * Thrown when a download's Content-Length exceeds {@link MAX_DOWNLOAD_BYTES}.
- * Callers show a user-facing message with the reported size.
+ * Thrown when a download exceeds {@link MAX_DOWNLOAD_BYTES}. Callers show a
+ * user-facing message with the reported size.
  */
 export class DownloadTooLargeError extends Error {
-  readonly contentLength: number;
-  constructor(contentLength: number) {
-    super(`Download too large: ${contentLength} bytes`);
+  readonly size: number;
+  constructor(size: number) {
+    super(`Download too large: ${size} bytes`);
     this.name = "DownloadTooLargeError";
-    this.contentLength = contentLength;
+    this.size = size;
   }
 }
 
@@ -96,9 +96,9 @@ export async function fetchFileBlob(
     throw new ApiError(response.status, await readProblem(response));
   }
 
-  // Guard against OOM: reject downloads that exceed the size cap before
-  // buffering the body. The check is best-effort — some responses omit
-  // Content-Length (e.g. chunked transfers) and will pass through.
+  // Guard against OOM: reject a download that exceeds the size cap before
+  // buffering it. A declared Content-Length rejects up front, without reading
+  // a byte.
   const cl = response.headers.get("content-length");
   if (cl !== null) {
     const size = Number(cl);
@@ -109,7 +109,41 @@ export async function fetchFileBlob(
     }
   }
 
-  return response.blob();
+  return readCappedBlob(response);
+}
+
+/**
+ * Buffer `response`'s body as a Blob, aborting past {@link MAX_DOWNLOAD_BYTES}.
+ *
+ * The header check above cannot stand alone: a chunked response declares no
+ * length, so it would otherwise buffer unbounded. That is not a corner case —
+ * the API streams a directory download as a zip built incrementally, with no
+ * Content-Length at all (`files.py` `download_file`), so a multi-GB `world`
+ * folder took exactly this path (issue #2027). Counting bytes as they arrive
+ * caps every response, whatever it declares, at the cost of one extra copy
+ * (the chunk list) over `response.blob()`.
+ */
+async function readCappedBlob(response: Response): Promise<Blob> {
+  if (response.body === null) return response.blob();
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array<ArrayBuffer>[] = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    received += value.byteLength;
+    if (received > MAX_DOWNLOAD_BYTES) {
+      // Stop pulling and release the connection: the bytes already read are
+      // dropped with `chunks`, and the rest is never transferred.
+      await reader.cancel();
+      throw new DownloadTooLargeError(received);
+    }
+    chunks.push(value);
+  }
+  return new Blob(chunks, {
+    type: response.headers.get("content-type") ?? "",
+  });
 }
 
 export async function downloadFile(
