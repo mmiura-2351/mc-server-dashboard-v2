@@ -4,14 +4,14 @@ These run *after* the route's two-layer authorization dependency has admitted th
 caller (non-member -> 404, member-without-permission -> 403; Section 6.4), so they
 assume an authorized member and only do the data work.
 
-- :class:`CreateServer` validates the server type and execution backend against
-  the known enums and stages a stopped server (desired=stopped, observed=stopped
+- :class:`CreateServer` validates ``(server_type, mc_version)`` against the
+  version catalog and stages a stopped server (desired=stopped, observed=stopped
   per DATABASE.md Section 7) with a fresh id.
 - :class:`ReadServer` / :class:`ListServers` are community-scoped reads; a server
   whose ``community_id`` does not match the path community is reported as
   not-found (no cross-community existence signal, FR-COMM-3).
 - :class:`UpdateServer` edits name/config only while the server is at rest
-  (Section 6.9 spirit); changing the backend is rejected as immutable (FR-EXE-3).
+  (Section 6.9 spirit).
 - :class:`DeleteServer` deletes a stopped server and sweeps its resource grants in
   the same transaction (Section 10).
 """
