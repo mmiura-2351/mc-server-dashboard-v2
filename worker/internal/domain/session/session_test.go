@@ -20,7 +20,7 @@ func testCaps() Capabilities {
 }
 
 func acceptedAck() RegisterAck {
-	return RegisterAck{Accepted: true, HeartbeatInterval: 5 * time.Second}
+	return RegisterAck{HeartbeatInterval: 5 * time.Second}
 }
 
 // waitFor polls cond until true or the deadline, keeping the fake-clock tests
@@ -142,21 +142,6 @@ func TestHeartbeatNotStarvedByEventTraffic(t *testing.T) {
 
 	cancel()
 	<-done
-}
-
-func TestRejectedRegistrationDoesNotReconnect(t *testing.T) {
-	transport := newFakeTransport(RegisterAck{Accepted: false, RejectionReason: "bad credential"})
-	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
-	clock := newFakeClock()
-	r := NewRunner(dialer, testCaps(), clock, discardLogger())
-
-	err := r.Run(context.Background())
-	if !errors.Is(err, ErrRejected) {
-		t.Fatalf("Run() error = %v, want ErrRejected", err)
-	}
-	if dialer.dialCount() != 1 {
-		t.Errorf("dialed %d times, want exactly 1 (no reconnect on reject)", dialer.dialCount())
-	}
 }
 
 func TestTerminalErrorDoesNotReconnect(t *testing.T) {

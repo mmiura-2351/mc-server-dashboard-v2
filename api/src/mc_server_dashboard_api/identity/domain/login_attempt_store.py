@@ -27,8 +27,8 @@ class Lockout:
     (in the past) means the account is no longer locked but keeps its row so the
     historic count survives. ``clear_lockout`` deletes the row outright, so a
     successful login leaves no row rather than a ``None`` ``locked_until``.
-    ``lockout_count`` is how many times the account has ever been locked, driving
-    the exponential back-off (SECURITY.md Section 2 step 4).
+    ``lockout_count`` is the back-off tier, saturated at the cap computed by
+    :func:`~.brute_force.backoff_cap_count` (SECURITY.md Section 2 step 4).
     """
 
     locked_until: dt.datetime | None

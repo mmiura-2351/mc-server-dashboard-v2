@@ -152,20 +152,18 @@ enum ExecutionDriverKind {
   EXECUTION_DRIVER_KIND_CONTAINER = 2;
 }
 
-// RegisterAck accepts or rejects a registration.
+// RegisterAck is the API's answer admitting a Worker into the registry. A
+// refusal is never carried here: the API aborts the Session stream with a
+// terminal gRPC status instead (CONTROL_PLANE.md Section 4.1).
 message RegisterAck {
-  // accepted is true when the API admitted this Worker into the registry.
-  bool accepted = 1;
+  reserved 1, 3;
+  reserved "accepted", "rejection_reason";
 
   // heartbeat_interval is how often the API expects a HEARTBEAT event. The API
   // marks the Worker disconnected after it misses heartbeats past its liveness
   // window (CONFIGURATION.md Section 5.1 control.heartbeat_timeout_seconds,
   // FR-WRK-2).
   google.protobuf.Duration heartbeat_interval = 2;
-
-  // rejection_reason explains a refusal (e.g. bad credential, duplicate id);
-  // empty when accepted is true.
-  string rejection_reason = 3;
 
   // transfer_deadline bounds a single data-plane transfer (the snapshot upload
   // and the hydrate download) Worker-side. The API derives it from its own

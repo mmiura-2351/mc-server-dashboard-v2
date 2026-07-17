@@ -119,7 +119,6 @@ async def test_tls_server_accepts_tls_client(
             await call.write(_register_message())
             response = await call.read()
             assert response.WhichOneof("payload") == "register_ack"
-            assert response.register_ack.accepted is True
             await call.done_writing()
     finally:
         await server.stop(grace=None)

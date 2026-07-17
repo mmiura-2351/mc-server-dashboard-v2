@@ -41,10 +41,10 @@ func (t realTimer) Stop()                 { t.t.Stop() }
 // fakeServer is an in-process WorkerService implementing the API side of the
 // stream lifecycle (CONTROL_PLANE.md Section 4) just enough to exercise the
 // client. It mirrors the real servicer (#83): a bad/missing credential aborts
-// the stream with gRPC status UNAUTHENTICATED rather than a RegisterAck — the
-// real server never sends accepted=false here. On success it answers Register
-// with an accepting ack, records heartbeats, and can drop the stream after the
-// first heartbeat to drive a transient reconnect.
+// the stream with gRPC status UNAUTHENTICATED rather than a RegisterAck — a
+// refusal is never carried in the ack. On success it answers Register with a
+// RegisterAck, records heartbeats, and can drop the stream after the first
+// heartbeat to drive a transient reconnect.
 type fakeServer struct {
 	controlplanev1.UnimplementedWorkerServiceServer
 
@@ -61,7 +61,7 @@ type fakeServer struct {
 
 func (s *fakeServer) Session(stream controlplanev1.WorkerService_SessionServer) error {
 	if !s.checkAuth(stream.Context()) {
-		// Match #83: abort with a status code, not RegisterAck{accepted=false}.
+		// Match #83: abort with a status code; a refusal is never carried in the ack.
 		return status.Error(codes.Unauthenticated, "worker credential rejected")
 	}
 
@@ -142,7 +142,6 @@ func acceptAck(every time.Duration) *controlplanev1.ApiMessage {
 	return &controlplanev1.ApiMessage{
 		Payload: &controlplanev1.ApiMessage_RegisterAck{
 			RegisterAck: &controlplanev1.RegisterAck{
-				Accepted:          true,
 				HeartbeatInterval: durationpb.New(every),
 			},
 		},

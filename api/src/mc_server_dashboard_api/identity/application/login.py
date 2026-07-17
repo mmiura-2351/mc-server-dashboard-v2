@@ -37,6 +37,7 @@ from mc_server_dashboard_api.identity.application.issue_tokens import issue_toke
 from mc_server_dashboard_api.identity.application.token_pair import TokenPair
 from mc_server_dashboard_api.identity.domain.brute_force import (
     BruteForceConfig,
+    backoff_cap_count,
     backoff_duration,
     is_locked,
     prune_horizon,
@@ -215,8 +216,16 @@ class Login:
             base=self.brute_force.lockout_base,
             maximum=self.brute_force.lockout_max,
         )
+        # Saturate the persisted count at the back-off cap: past it the duration
+        # is already pinned to ``lockout_max``, so a further increment only grows
+        # attacker-drivable state that nothing reads (issue #2033). Clamping to
+        # the same bound ``backoff_duration`` uses keeps the two from drifting.
+        cap = backoff_cap_count(
+            base=self.brute_force.lockout_base,
+            maximum=self.brute_force.lockout_max,
+        )
         await self.attempts.lock(
-            username, locked_until=now + duration, lockout_count=prior + 1
+            username, locked_until=now + duration, lockout_count=min(prior + 1, cap)
         )
 
     async def _prune(self, *, now: dt.datetime) -> None:

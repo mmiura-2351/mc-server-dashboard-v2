@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 
 from mc_server_dashboard_api.identity.domain.brute_force import (
+    backoff_cap_count,
     backoff_duration,
     is_locked,
     prune_horizon,
@@ -71,6 +72,16 @@ def test_backoff_caps_at_absurd_lockout_count() -> None:
     # sustained attacker can grind it arbitrarily high; the cap must still hold
     # without computing a giant power.
     assert backoff_duration(1000, base=_BASE, maximum=_MAX) == _MAX
+
+
+def test_backoff_saturates_from_the_cap_count() -> None:
+    # backoff_cap_count is the single bound the login use case also clamps the
+    # persisted lockout_count to (issue #2033), so the two cannot drift: at the
+    # cap the back-off is already pinned to maximum, and the tier just below it
+    # is still strictly shorter.
+    cap = backoff_cap_count(base=_BASE, maximum=_MAX)
+    assert backoff_duration(cap, base=_BASE, maximum=_MAX) == _MAX
+    assert backoff_duration(cap - 1, base=_BASE, maximum=_MAX) < _MAX
 
 
 def test_prune_horizon_is_longest_login_window() -> None:

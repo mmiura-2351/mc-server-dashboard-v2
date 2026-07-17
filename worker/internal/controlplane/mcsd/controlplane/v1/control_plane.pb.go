@@ -925,19 +925,16 @@ func (x *HostResources) GetMemoryBytes() uint64 {
 	return 0
 }
 
-// RegisterAck accepts or rejects a registration.
+// RegisterAck is the API's answer admitting a Worker into the registry. A
+// refusal is never carried here: the API aborts the Session stream with a
+// terminal gRPC status instead (CONTROL_PLANE.md Section 4.1).
 type RegisterAck struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// accepted is true when the API admitted this Worker into the registry.
-	Accepted bool `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
 	// heartbeat_interval is how often the API expects a HEARTBEAT event. The API
 	// marks the Worker disconnected after it misses heartbeats past its liveness
 	// window (CONFIGURATION.md Section 5.1 control.heartbeat_timeout_seconds,
 	// FR-WRK-2).
 	HeartbeatInterval *durationpb.Duration `protobuf:"bytes,2,opt,name=heartbeat_interval,json=heartbeatInterval,proto3" json:"heartbeat_interval,omitempty"`
-	// rejection_reason explains a refusal (e.g. bad credential, duplicate id);
-	// empty when accepted is true.
-	RejectionReason string `protobuf:"bytes,3,opt,name=rejection_reason,json=rejectionReason,proto3" json:"rejection_reason,omitempty"`
 	// transfer_deadline bounds a single data-plane transfer (the snapshot upload
 	// and the hydrate download) Worker-side. The API derives it from its own
 	// hydrate/snapshot budgets plus a small margin, so it is always >= the API
@@ -990,25 +987,11 @@ func (*RegisterAck) Descriptor() ([]byte, []int) {
 	return file_mcsd_controlplane_v1_control_plane_proto_rawDescGZIP(), []int{6}
 }
 
-func (x *RegisterAck) GetAccepted() bool {
-	if x != nil {
-		return x.Accepted
-	}
-	return false
-}
-
 func (x *RegisterAck) GetHeartbeatInterval() *durationpb.Duration {
 	if x != nil {
 		return x.HeartbeatInterval
 	}
 	return nil
-}
-
-func (x *RegisterAck) GetRejectionReason() string {
-	if x != nil {
-		return x.RejectionReason
-	}
-	return ""
 }
 
 func (x *RegisterAck) GetTransferDeadline() *durationpb.Duration {
@@ -2754,13 +2737,11 @@ const file_mcsd_controlplane_v1_control_plane_proto_rawDesc = "" +
 	"\tresources\x18\x03 \x01(\v2#.mcsd.controlplane.v1.HostResourcesR\tresources\"O\n" +
 	"\rHostResources\x12\x1b\n" +
 	"\tcpu_cores\x18\x01 \x01(\rR\bcpuCores\x12!\n" +
-	"\fmemory_bytes\x18\x02 \x01(\x04R\vmemoryBytes\"\x9d\x02\n" +
-	"\vRegisterAck\x12\x1a\n" +
-	"\baccepted\x18\x01 \x01(\bR\baccepted\x12H\n" +
-	"\x12heartbeat_interval\x18\x02 \x01(\v2\x19.google.protobuf.DurationR\x11heartbeatInterval\x12)\n" +
-	"\x10rejection_reason\x18\x03 \x01(\tR\x0frejectionReason\x12F\n" +
+	"\fmemory_bytes\x18\x02 \x01(\x04R\vmemoryBytes\"\xfe\x01\n" +
+	"\vRegisterAck\x12H\n" +
+	"\x12heartbeat_interval\x18\x02 \x01(\v2\x19.google.protobuf.DurationR\x11heartbeatInterval\x12F\n" +
 	"\x11transfer_deadline\x18\x04 \x01(\v2\x19.google.protobuf.DurationR\x10transferDeadline\x125\n" +
-	"\x17unknown_held_server_ids\x18\x05 \x03(\tR\x14unknownHeldServerIds\"\x9a\a\n" +
+	"\x17unknown_held_server_ids\x18\x05 \x03(\tR\x14unknownHeldServerIdsJ\x04\b\x01\x10\x02J\x04\b\x03\x10\x04R\bacceptedR\x10rejection_reason\"\x9a\a\n" +
 	"\n" +
 	"ApiCommand\x12\x1d\n" +
 	"\n" +
