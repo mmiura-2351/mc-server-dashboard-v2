@@ -614,7 +614,7 @@ class TokenSettings(_Section):
     # Refresh-token httpOnly-cookie transport for the Web UI session (issue #363).
     # The cookie name and the Secure flag are operator-configurable; the cookie's
     # Max-Age tracks ``refresh_ttl_seconds`` and its Path/SameSite are fixed in the
-    # auth router (SameSite=Strict; Path=/auth). ``refresh_cookie_secure`` defaults
+    # auth router (SameSite=Strict; Path=/api/auth). ``refresh_cookie_secure`` defaults
     # to True (HTTPS only); turn it off for plain-HTTP localhost dev so the browser
     # stores the cookie.
     refresh_cookie_name: str = Field(default="mcd_refresh", min_length=1)
