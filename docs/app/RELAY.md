@@ -438,10 +438,16 @@ relay control surface (RelayService, slug display in the UI) is active.
 path still uses it as the container's published loopback port that the Worker
 dials.
 
-**Single-host caveat:** when the relay and the Worker run on the same host, the
-relay's `0.0.0.0:25565` bind conflicts with the default game-port range
-(`25565..25664`); set `ports.range_start` to `25566` (or higher) to avoid the
-collision — see `docs/dev/DEPLOYMENT.md` "Relay — Single-host port collision".
+**Single-host caveat:** the relay's `0.0.0.0:25565` bind overlaps the default
+game-port range (`25565..25664`). This is handled automatically: when
+`relay.enabled=true` the allocator excludes any relay host binds that fall inside
+the range, so the first server is assigned `25566` (issue #1002). Only binds
+inside the range are excluded; by default that is just 25565, since the tunnel's
+25665 sits above `range_end`. `ports.range_start` remains as a fallback knob for
+shifting the range but is not needed for the documented relay setup. A server
+created *before* relay enablement keeps its `game_port` and can still collide —
+see `docs/dev/DEPLOYMENT.md`
+[Single-host port collision](../dev/DEPLOYMENT.md#single-host-port-collision).
 
 ---
 
