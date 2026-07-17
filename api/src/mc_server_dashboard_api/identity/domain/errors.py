@@ -64,8 +64,9 @@ class InvalidCredentialsError(IdentityError):
     cannot be used to tell "no such user" from "wrong password" (SECURITY.md
     Section 2; username-enumeration defence).
 
-    ``retry_after`` optionally carries how many seconds until the client should
-    retry (RFC 6585 ``Retry-After``); set when the rejection is due to a lockout
+    ``retry_after`` optionally carries how many seconds until the client
+    should retry (RFC 9110 Section 10.2.3 ``Retry-After``); set when the
+    rejection is due to a lockout
     or IP throttle, ``None`` for a plain wrong-password or unknown-user failure
     (issue #637). The value never leaks the *reason* for the rejection — only the
     timing hint.

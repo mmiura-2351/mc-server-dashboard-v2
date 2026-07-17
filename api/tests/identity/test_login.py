@@ -383,7 +383,7 @@ async def test_unknown_user_and_wrong_password_both_verify() -> None:
 
 async def test_locked_account_raises_with_retry_after_seconds() -> None:
     # A locked account should carry ``retry_after`` on the exception so the
-    # HTTP layer can emit a Retry-After header (RFC 6585, issue #637).
+    # HTTP layer can emit a Retry-After header (RFC 9110 Section 10.2.3, issue #637).
     uow = FakeUnitOfWork()
     uow.users.seed(make_user(password=_PASSWORD))
     attempts = FakeLoginAttemptStore()
