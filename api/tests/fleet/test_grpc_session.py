@@ -4,7 +4,7 @@ Starts a real grpc.aio server on an ephemeral localhost port and dials it with
 a real client channel, so the full stream lifecycle is exercised end to end
 (CONTROL_PLANE.md Section 4) without any database (NFR-TEST-1):
 
-- register -> RegisterAck{accepted, heartbeat_interval};
+- register -> RegisterAck{heartbeat_interval};
 - a wrong/missing credential is rejected with UNAUTHENTICATED;
 - a non-Register first message is rejected with FAILED_PRECONDITION;
 - Event{Heartbeat} refreshes liveness in the shared registry;
@@ -232,7 +232,6 @@ async def test_register_returns_ack(harness: _Harness) -> None:
     response = await call.read()
 
     assert response.WhichOneof("payload") == "register_ack"
-    assert response.register_ack.accepted is True
     assert response.register_ack.heartbeat_interval.ToTimedelta() == _TIMEOUT / 3
     # The ack advertises the Worker-side per-transfer deadline (issue #874).
     assert response.register_ack.transfer_deadline.ToTimedelta() == _TRANSFER_DEADLINE
@@ -1024,7 +1023,6 @@ async def test_register_ack_carries_unknown_held_server_ids() -> None:
         await call.write(_register_message(held_servers={_SERVER_A: 1, _SERVER_B: 2}))
         response = await call.read()
 
-        assert response.register_ack.accepted is True
         unknown = list(response.register_ack.unknown_held_server_ids)
         assert unknown == [_SERVER_B]
         await call.done_writing()
@@ -1046,7 +1044,6 @@ async def test_register_ack_empty_unknown_when_all_known() -> None:
         await call.write(_register_message(held_servers={_SERVER_A: 1, _SERVER_B: 2}))
         response = await call.read()
 
-        assert response.register_ack.accepted is True
         assert list(response.register_ack.unknown_held_server_ids) == []
         await call.done_writing()
     finally:
@@ -1071,7 +1068,6 @@ async def test_register_ack_sink_error_yields_empty_unknown_list() -> None:
         await call.write(_register_message(held_servers={_SERVER_A: 1}))
         response = await call.read()
 
-        assert response.register_ack.accepted is True
         # Fail-safe: empty list rather than misclassifying.
         assert list(response.register_ack.unknown_held_server_ids) == []
         await call.done_writing()
@@ -1093,7 +1089,6 @@ async def test_register_ack_no_held_servers_yields_empty_unknown() -> None:
         await call.write(_register_message())  # no held_servers
         response = await call.read()
 
-        assert response.register_ack.accepted is True
         assert list(response.register_ack.unknown_held_server_ids) == []
         await call.done_writing()
     finally:
@@ -1123,7 +1118,6 @@ async def test_register_ack_unparseable_held_id_treated_as_existing() -> None:
         )
         response = await call.read()
 
-        assert response.register_ack.accepted is True
         # "not-a-uuid" is unparseable so it must be treated as existing (safe),
         # not classified as deleted.
         assert list(response.register_ack.unknown_held_server_ids) == []

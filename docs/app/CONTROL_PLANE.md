@@ -137,7 +137,7 @@ backward-compatible change under the module's `FILE` breaking rule.
      │  WorkerMessage{Register: id, caps}    │   (FR-WRK-1)
      │ ───────────────────────────────────▶ │
      │                                       │  add to Worker registry
-     │   ApiMessage{RegisterAck: accepted,   │
+     │   ApiMessage{RegisterAck:             │
      │              heartbeat_interval}      │   (FR-WRK-2)
      │ ◀─────────────────────────────────── │
      │                                       │
@@ -176,7 +176,7 @@ prefix) falls back to generation 0. The fsck requires a quiesced working set
 (regionfsck's safety contract), so the Worker's startup sequence runs the
 container orphan sweep first to stop any live writers before scanning. A Worker that reports nothing held, or an
 older Worker that does not set the field, hydrates as before. The
-API answers `RegisterAck`: `accepted` plus the `heartbeat_interval` it expects,
+API answers `RegisterAck`: the `heartbeat_interval` it expects,
 the `transfer_deadline` that bounds one data-plane transfer Worker-side
 (Section 5), and `unknown_held_server_ids` — the subset of `held_servers` whose
 server no longer exists in the API (deleted while the scratch was live, issue
@@ -184,17 +184,16 @@ server no longer exists in the API (deleted while the scratch was live, issue
 each listed id but does **not** reclaim `.displaced-<id>` trees (issue #911:
 retained for operator recovery). The list is fail-safe: a DB error on the API
 side yields an empty list rather than misclassifying a live server as deleted.
-A refusal never rides in the ack: the API only ever acks `accepted=true`, and
-aborts the `Session` stream with a gRPC status instead — `UNAUTHENTICATED` for a
-missing or wrong credential, `FAILED_PRECONDITION` when the first message is not
-`Register` (or the stream ends before one arrives), `INVALID_ARGUMENT` when the
+A refusal never rides in the ack: `RegisterAck` carries no accept/reject flag —
+the API aborts the `Session` stream with a gRPC status instead — `UNAUTHENTICATED`
+for a missing or wrong credential, `FAILED_PRECONDITION` when the first message is
+not `Register` (or the stream ends before one arrives), `INVALID_ARGUMENT` when the
 worker id is not a UUID. The Worker treats those codes as **terminal** and stops
 rather than reconnecting, since re-dialing with the same rejected input would
 loop forever; the stalled-connect `DEADLINE_EXCEEDED` above is the exception,
-staying transient so the backoff-reconnect path (Section 4.4) retries it. So
-`RegisterAck` carries no refusal today: nothing constructs one with
-`accepted=false`, and the operator-visible signal for a Worker that will not
-register is the terminal status code, not a `rejection_reason`.
+staying transient so the backoff-reconnect path (Section 4.4) retries it. So the
+operator-visible signal for a Worker that will not register is the terminal
+status code.
 
 ### 4.2 Steady state
 

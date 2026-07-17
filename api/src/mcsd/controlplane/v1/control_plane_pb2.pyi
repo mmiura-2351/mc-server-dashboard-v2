@@ -546,21 +546,16 @@ Global___HostResources: _TypeAlias = HostResources  # noqa: Y015
 
 @_typing.final
 class RegisterAck(_message.Message):
-    """RegisterAck accepts or rejects a registration."""
+    """RegisterAck is the API's answer admitting a Worker into the registry. A
+    refusal is never carried here: the API aborts the Session stream with a
+    terminal gRPC status instead (CONTROL_PLANE.md Section 4.1).
+    """
 
     DESCRIPTOR: _descriptor.Descriptor
 
-    ACCEPTED_FIELD_NUMBER: _builtins.int
     HEARTBEAT_INTERVAL_FIELD_NUMBER: _builtins.int
-    REJECTION_REASON_FIELD_NUMBER: _builtins.int
     TRANSFER_DEADLINE_FIELD_NUMBER: _builtins.int
     UNKNOWN_HELD_SERVER_IDS_FIELD_NUMBER: _builtins.int
-    accepted: _builtins.bool
-    """accepted is true when the API admitted this Worker into the registry."""
-    rejection_reason: _builtins.str
-    """rejection_reason explains a refusal (e.g. bad credential, duplicate id);
-    empty when accepted is true.
-    """
     @_builtins.property
     def heartbeat_interval(self) -> _duration_pb2.Duration:
         """heartbeat_interval is how often the API expects a HEARTBEAT event. The API
@@ -596,15 +591,13 @@ class RegisterAck(_message.Message):
     def __init__(
         self,
         *,
-        accepted: _builtins.bool = ...,
         heartbeat_interval: _duration_pb2.Duration | None = ...,
-        rejection_reason: _builtins.str = ...,
         transfer_deadline: _duration_pb2.Duration | None = ...,
         unknown_held_server_ids: _abc.Iterable[_builtins.str] | None = ...,
     ) -> None: ...
     _HasFieldArgType: _TypeAlias = _typing.Literal["heartbeat_interval", b"heartbeat_interval", "transfer_deadline", b"transfer_deadline"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["accepted", b"accepted", "heartbeat_interval", b"heartbeat_interval", "rejection_reason", b"rejection_reason", "transfer_deadline", b"transfer_deadline", "unknown_held_server_ids", b"unknown_held_server_ids"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["heartbeat_interval", b"heartbeat_interval", "transfer_deadline", b"transfer_deadline", "unknown_held_server_ids", b"unknown_held_server_ids"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     def WhichOneof(self, oneof_group: _Never) -> None: ...
 

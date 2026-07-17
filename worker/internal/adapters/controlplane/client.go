@@ -145,10 +145,8 @@ func (t *transport) RecvRegisterAck(_ context.Context) (session.RegisterAck, err
 		return session.RegisterAck{}, fmt.Errorf("controlplane: first API message was not a RegisterAck")
 	}
 	return session.RegisterAck{
-		Accepted:             ack.GetAccepted(),
 		HeartbeatInterval:    ack.GetHeartbeatInterval().AsDuration(),
 		TransferDeadline:     ack.GetTransferDeadline().AsDuration(),
-		RejectionReason:      ack.GetRejectionReason(),
 		UnknownHeldServerIDs: ack.GetUnknownHeldServerIds(),
 	}, nil
 }
@@ -302,9 +300,9 @@ func (t *transport) Close() error {
 }
 
 // classify maps a gRPC stream error to the domain's terminal/transient
-// distinction. The API aborts the stream with a status code rather than sending
-// RegisterAck{accepted=false} for a bad/missing credential or a protocol
-// violation (CONTROL_PLANE.md Section 4.1): those codes are terminal so the run
+// distinction. The API aborts the stream with a status code for a bad/missing
+// credential or a protocol violation (a registration refusal is never carried
+// in the ack; CONTROL_PLANE.md Section 4.1): those codes are terminal so the run
 // loop stops instead of reconnecting forever with the same rejected input. All
 // other failures (UNAVAILABLE, DEADLINE_EXCEEDED, mid-stream drops) stay
 // transient and keep the backoff-reconnect path. err must be non-nil.
