@@ -79,6 +79,31 @@ Notable contract points, each verifiable in the router:
 
 The `401` responses carry `WWW-Authenticate: Bearer`.
 
+A `POST /auth/login` `401` additionally carries `Retry-After: <delta-seconds>`
+when brute-force protection ([`SECURITY.md`](SECURITY.md) Section 2) rejected the
+request *before* the password was verified — that is, when the account is already
+locked or the source IP is already throttled (issue #637). The value is a
+non-negative integer count of seconds — the `delta-seconds` form of
+`Retry-After` (RFC 9110 Section 10.2.3), never an HTTP-date:
+
+- **IP throttled** — the configured `ip_window_seconds` in full, not the time
+  remaining in the window. The IP check runs first, so this value is the one
+  reported when a locked account is also throttled by its source IP.
+- **Account locked** — the seconds remaining until the lockout expires, rounded
+  up, with a floor of `1`.
+
+Every other login `401` omits the header: a plain credential failure (unknown
+user, wrong password, deactivated account) has no throttle to report, and neither
+does the attempt that *crosses* a threshold and triggers the lock — the lock is
+applied after that response, so only the subsequent blocked attempts carry
+`Retry-After`. The header is likewise absent when brute-force protection is
+disabled. `Retry-After` is unique to login: the `401`s from `/auth/refresh` and
+`/auth/session` never carry it.
+
+The header is the only way a client can tell a throttled rejection from a plain
+one — the status code, the problem body, and the `invalid_credentials` reason are
+deliberately identical across every failure path (Section 2).
+
 ## 2. Error body shape
 
 Every error response across the HTTP surface is RFC 9457
