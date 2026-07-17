@@ -1031,7 +1031,7 @@ export function ServerFilesTab({
         if (error instanceof DownloadTooLargeError) {
           showToast(
             t("files.error.downloadTooLarge", {
-              size: humanizeBytes(error.contentLength),
+              size: humanizeBytes(error.size),
             }),
             "error",
           );
@@ -1718,7 +1718,7 @@ function Listing({
       if (error instanceof DownloadTooLargeError) {
         showToast(
           t("files.error.downloadTooLarge", {
-            size: humanizeBytes(error.contentLength),
+            size: humanizeBytes(error.size),
           }),
           "error",
         );
@@ -2015,7 +2015,7 @@ function Listing({
                           if (error instanceof DownloadTooLargeError) {
                             showToast(
                               t("files.error.downloadTooLarge", {
-                                size: humanizeBytes(error.contentLength),
+                                size: humanizeBytes(error.size),
                               }),
                               "error",
                             );
@@ -2272,7 +2272,7 @@ function Viewer({
                 if (error instanceof DownloadTooLargeError) {
                   showToast(
                     t("files.error.downloadTooLarge", {
-                      size: humanizeBytes(error.contentLength),
+                      size: humanizeBytes(error.size),
                     }),
                     "error",
                   );
@@ -2658,7 +2658,7 @@ function Toolbar({
         } else if (error instanceof DownloadTooLargeError) {
           showToast(
             t("files.error.downloadTooLarge", {
-              size: humanizeBytes(error.contentLength),
+              size: humanizeBytes(error.size),
             }),
             "error",
           );

@@ -49,7 +49,6 @@ type HeldServer struct {
 
 // RegisterAck is the API's answer to a Register (CONTROL_PLANE.md Section 4.1).
 type RegisterAck struct {
-	Accepted          bool
 	HeartbeatInterval time.Duration
 	// TransferDeadline bounds a single data-plane transfer (snapshot upload /
 	// hydrate download) Worker-side (issue #874). The API derives it from its
@@ -58,7 +57,6 @@ type RegisterAck struct {
 	// closes the unbounded-upload case (#869). A non-positive value (an older
 	// API that does not set the field) leaves the transfer unbounded as before.
 	TransferDeadline time.Duration
-	RejectionReason  string
 	// UnknownHeldServerIDs is the subset of Register.held_servers whose server
 	// no longer exists in the API (deleted while the scratch was live, issue
 	// #924). The Worker reclaims the scratch dir and .hydrate-<id>-* leftovers
