@@ -108,21 +108,49 @@ func demuxLogsTo(r io.Reader, w io.Writer) {
 	}
 }
 
+// maxCarryBytes bounds the per-stream partial line held across frames. Without
+// it a newline-less stream (a \r-rewriting progress bar, one enormous stack dump,
+// a binary stream misrouted to stdout) grows the carry with every frame until the
+// stream ends or the worker OOMs: the MaxLogLineBytes cap is only consulted once
+// a newline completes a line (issue #2029).
+//
+// It sits two bytes above MaxLogLineBytes so LogPump.Emit's own truncation still
+// sees the overflow: one byte puts a capped carry past the cap (Emit marks a line
+// only when it exceeds MaxLogLineBytes), and a second absorbs a trailing \r that
+// the line-end trim may strip at the cap boundary.
+const maxCarryBytes = execution.MaxLogLineBytes + 2
+
 // emitFramePayload appends payload to the stream's partial buffer and emits every
 // complete (newline-terminated) line, keeping any trailing partial for the next
-// frame.
+// frame. The carry is capped at maxCarryBytes: content past the cap is discarded
+// until the next newline resynchronizes the stream, and Emit truncates the kept
+// content to MaxLogLineBytes and marks it. This mirrors LogPump.Scan, which keeps
+// at most MaxLogLineBytes of an over-long line, discards the excess until the
+// newline arrives, and emits the line marked as truncated (issue #2029).
 func emitFramePayload(pump *execution.LogPump, stream execution.LogStream, buf *strings.Builder, payload string) {
-	buf.WriteString(payload)
-	text := buf.String()
 	for {
-		idx := strings.IndexByte(text, '\n')
+		idx := strings.IndexByte(payload, '\n')
 		if idx < 0 {
-			break
+			appendCapped(buf, payload)
+			return
 		}
-		line := strings.TrimSuffix(text[:idx], "\r")
-		pump.Emit(line, stream)
-		text = text[idx+1:]
+		appendCapped(buf, payload[:idx])
+		pump.Emit(strings.TrimSuffix(buf.String(), "\r"), stream)
+		buf.Reset()
+		payload = payload[idx+1:]
 	}
-	buf.Reset()
-	buf.WriteString(text)
+}
+
+// appendCapped appends as much of s to buf as maxCarryBytes allows, dropping the
+// rest. The dropped bytes are what makes an over-long line truncated; Emit adds
+// the marker when the kept content is handed over.
+func appendCapped(buf *strings.Builder, s string) {
+	room := maxCarryBytes - buf.Len()
+	if room <= 0 {
+		return
+	}
+	if len(s) > room {
+		s = s[:room]
+	}
+	buf.WriteString(s)
 }
