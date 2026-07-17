@@ -186,7 +186,7 @@ start command deadline. Below the floor, a slow start crashed/timed-out mid-flig
 can still be converging on its assigned Worker when the reconciler's orphan path
 re-places it elsewhere and starts a **second** live instance. `create_app` logs a
 `WARN` (not a hard failure) when the floor is violated. The stock default
-(`grace_seconds=660`) already exceeds the stock floor (`max(600 + 30, 600) = 630`),
+(`grace_seconds=660`) already exceeds the stock floor (`max(600 + 30, 600, 600) = 630`),
 so no warning fires out of the box; lower `grace_seconds` (or raise the timeouts)
 only when adjusting the reconciler for non-default budgets.
 
