@@ -706,9 +706,8 @@ copied into `versions/<rel-path>/<version-id>` before the new content is
 published. `version-id` is a monotonic, opaque id whose lexicographic order is
 creation order, so listing and pruning are a plain enumeration of the version
 directory. Versions are **storage-only** — no database table indexes them
-(DATABASE.md Section 8) and no author is recorded, so "who edited this file" is
-answerable from the `audit_log` (`file:write` / `file:rollback`), not from a
-version.
+(DATABASE.md Section 8) and no author is recorded, so per-file attribution
+("who edited this file") is not available from any layer.
 
 Retention is bounded by a **configurable per-file version count** (default and
 key owned by #16); when the count is exceeded the oldest version of that file is
