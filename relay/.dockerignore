@@ -1,0 +1,13 @@
+# Keep the build context small: compiled binaries and test artifacts must not
+# leak into the image build (mirrors worker/.dockerignore; the relay has no
+# module-local .bin/ — it reuses worker/.bin/golangci-lint).
+*.test
+*.out
+coverage.txt
+/relay
+Dockerfile
+.dockerignore
+
+# Test-only sources: `go build ./cmd/relay` never compiles them, and their churn
+# would otherwise invalidate the builder's `COPY . .` layer.
+test/
