@@ -249,7 +249,7 @@ describe("downloadFile", () => {
       const error = await downloadFile("/api/x", "big.zip").catch((e) => e);
 
       expect(error).toBeInstanceOf(DownloadTooLargeError);
-      expect(error.contentLength).toBe(oversized);
+      expect(error.size).toBe(oversized);
       expect(clicks).toHaveLength(0);
     });
 
@@ -299,7 +299,7 @@ describe("downloadFile", () => {
       const error = await fetchFileBlob("/api/x").catch((e) => e);
 
       expect(error).toBeInstanceOf(DownloadTooLargeError);
-      expect(error.contentLength).toBe(oversized);
+      expect(error.size).toBe(oversized);
     });
   });
 });

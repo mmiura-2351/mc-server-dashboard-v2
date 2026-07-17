@@ -23,15 +23,15 @@ import { ApiError, getRefresher } from "./client.ts";
 export const MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024;
 
 /**
- * Thrown when a download's Content-Length exceeds {@link MAX_DOWNLOAD_BYTES}.
- * Callers show a user-facing message with the reported size.
+ * Thrown when a download exceeds {@link MAX_DOWNLOAD_BYTES}. Callers show a
+ * user-facing message with the reported size.
  */
 export class DownloadTooLargeError extends Error {
-  readonly contentLength: number;
-  constructor(contentLength: number) {
-    super(`Download too large: ${contentLength} bytes`);
+  readonly size: number;
+  constructor(size: number) {
+    super(`Download too large: ${size} bytes`);
     this.name = "DownloadTooLargeError";
-    this.contentLength = contentLength;
+    this.size = size;
   }
 }
 
