@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -170,6 +171,24 @@ public_endpoint = "relay:25665"
 `
 	if _, err := Load(writeTOML(t, body), noEnv); err == nil {
 		t.Error("missing tunnel.tls cert/key should fail")
+	}
+}
+
+func TestValidateBadLogLevel(t *testing.T) {
+	env := envMap(map[string]string{"MCD_RELAY_LOG_LEVEL": "trace"})
+	_, err := Load(writeTOML(t, minimalTOML), env)
+	if err == nil {
+		t.Fatal("unknown log.level should fail")
+	}
+	if !strings.Contains(err.Error(), "log.level") {
+		t.Errorf("error %q does not mention log.level", err.Error())
+	}
+}
+
+func TestValidateBadLogLevelTypo(t *testing.T) {
+	env := envMap(map[string]string{"MCD_RELAY_LOG_LEVEL": "debgu"})
+	if _, err := Load(writeTOML(t, minimalTOML), env); err == nil {
+		t.Error("typo log.level should fail")
 	}
 }
 
