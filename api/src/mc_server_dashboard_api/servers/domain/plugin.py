@@ -75,6 +75,11 @@ class PluginSource(enum.Enum):
     # GeyserMC's own download API (issue #1905): the only publisher of the
     # Floodgate-Spigot build, which Modrinth does not carry for Paper.
     GEYSER = "geyser"
+    # Provenance lost and unrecoverable (issue #2059): a jar re-ingested at
+    # backup restore whose catalog origin no checksum match could recover. Kept
+    # distinct from LOCAL so the system marks the loss honestly instead of
+    # asserting a manual upload; like LOCAL it is not catalog-update-checkable.
+    UNKNOWN = "unknown"
 
 
 # Sources whose "latest" is resolvable through the catalog seam, so an installed

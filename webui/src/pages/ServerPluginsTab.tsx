@@ -150,6 +150,9 @@ function sideLabel(side: string): string {
 function sourceLabel(source: string): string {
   if (source === "modrinth") return t("plugins.source.modrinth");
   if (source === "geyser") return t("plugins.source.geyser");
+  // Provenance lost in a backup restore (issue #2059): labelled distinctly so it
+  // never reads as a manual Local upload it is not.
+  if (source === "unknown") return t("plugins.source.unknown");
   return t("plugins.source.local");
 }
 

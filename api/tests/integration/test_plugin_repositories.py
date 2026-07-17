@@ -466,3 +466,52 @@ async def test_delete_removes_plugin(engine: AsyncEngine) -> None:
         listed = await uow.plugins.list_for_server(server_id)
     assert fetched is None
     assert listed == []
+
+
+# --- find_catalog_provenance_by_sha512 (the #2059 recovery lookup) ----------
+
+
+async def test_find_catalog_provenance_by_sha512_matches_catalog_install(
+    engine: AsyncEngine,
+) -> None:
+    # A catalog install's checksum recovers its (source, source_project_id) across
+    # servers -- the ghost re-ingestion provenance recovery (issue #2059).
+    server_id = await _seed_server(engine)
+    factory = create_session_factory(engine)
+    catalog = dc_replace(
+        _plugin(server_id, rel_path="mods/catalog.jar", filename="catalog.jar"),
+        source=PluginSource.MODRINTH,
+        source_project_id="P7dR8mSH",
+        checksum_sha512="cafebabe",
+    )
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.plugins.add(catalog)
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        found = await uow.plugins.find_catalog_provenance_by_sha512("cafebabe")
+    assert found == (PluginSource.MODRINTH, "P7dR8mSH")
+
+
+async def test_find_catalog_provenance_by_sha512_ignores_local_and_misses(
+    engine: AsyncEngine,
+) -> None:
+    # A LOCAL upload is not a catalog artifact, so its checksum must not recover a
+    # provenance; an unknown checksum returns None (issue #2059).
+    server_id = await _seed_server(engine)
+    factory = create_session_factory(engine)
+    local = dc_replace(
+        _plugin(server_id, rel_path="mods/local.jar", filename="local.jar"),
+        checksum_sha512="feedface",
+    )
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.plugins.add(local)
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        by_local = await uow.plugins.find_catalog_provenance_by_sha512("feedface")
+        by_miss = await uow.plugins.find_catalog_provenance_by_sha512("nomatch")
+    assert by_local is None
+    assert by_miss is None

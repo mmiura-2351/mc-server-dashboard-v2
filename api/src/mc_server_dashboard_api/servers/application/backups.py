@@ -580,6 +580,19 @@ async def _ingest_ghost(
 
     ts = clock.now() if clock is not None else dt.datetime.now(dt.timezone.utc)
 
+    # Recover provenance by checksum (issue #2059): a restored filesystem carries
+    # jars, not the DB rows that recorded their origin, so a catalog-installed jar
+    # re-ingested here would otherwise be asserted LOCAL and drop out of update
+    # checking. Match its checksum against any catalog install elsewhere to restore
+    # source / source_project_id; on a miss, mark it UNKNOWN rather than silently
+    # claiming a manual upload.
+    recovered = await uow.plugins.find_catalog_provenance_by_sha512(checksum)
+    if recovered is not None:
+        source, source_project_id = recovered
+    else:
+        source = PluginSource.UNKNOWN
+        source_project_id = None
+
     plugin = ServerPlugin(
         id=PluginId.new(),
         server_id=server_id,
@@ -588,8 +601,8 @@ async def _ingest_ghost(
         display_name=manifest.mod_identifier or filename.removesuffix(".jar"),
         description=None,
         loader_type=loader_type,
-        source=PluginSource.LOCAL,
-        source_project_id=None,
+        source=source,
+        source_project_id=source_project_id,
         source_version_id=None,
         version_number=None,
         checksum_sha512=checksum,

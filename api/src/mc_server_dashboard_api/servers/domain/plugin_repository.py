@@ -11,7 +11,11 @@ from __future__ import annotations
 import abc
 from collections.abc import Iterable
 
-from mc_server_dashboard_api.servers.domain.plugin import PluginId, ServerPlugin
+from mc_server_dashboard_api.servers.domain.plugin import (
+    PluginId,
+    PluginSource,
+    ServerPlugin,
+)
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 
 
@@ -93,6 +97,21 @@ class PluginRepository(abc.ABC):
         The plugin-cache GC's reference set (issue #1332): a cached blob
         whose sha256 is in this set is still referenced by at least one
         installed plugin and must not be reclaimed.
+        """
+
+    @abc.abstractmethod
+    async def find_catalog_provenance_by_sha512(
+        self, checksum_sha512: str
+    ) -> tuple[PluginSource, str] | None:
+        """Return the catalog ``(source, source_project_id)`` for a known SHA-512.
+
+        The provenance-recovery lookup behind ghost re-ingestion (issue #2059):
+        a jar re-ingested after a backup restore carries no DB row of its own, so
+        its origin is matched against the checksum of any catalog-sourced plugin
+        (``source`` in ``CATALOG_SOURCES``, non-null ``source_project_id``)
+        installed anywhere, using the ``ix_server_plugin_checksum_sha512`` index.
+        Returns ``None`` when no catalog install shares the checksum, so the
+        caller marks the row provenance-unknown instead of asserting ``local``.
         """
 
     @abc.abstractmethod

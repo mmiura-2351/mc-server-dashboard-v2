@@ -1330,6 +1330,26 @@ async def test_check_plugin_update_local_returns_none() -> None:
     assert result.latest_version is None
 
 
+async def test_check_plugin_update_unknown_source_returns_none() -> None:
+    """A provenance-unknown row cannot be update-checked; it must not crash (#2059)."""
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+
+    plugin = _plugin(
+        server_id=server.id,
+        source=PluginSource.UNKNOWN,
+        source_project_id=None,
+        source_version_id=None,
+    )
+    uow.plugins.seed(plugin)
+
+    catalog = FakeCatalogProvider()
+    uc = CheckPluginUpdate(uow=uow, catalog=catalog)
+    result = await uc(community_id=_COMMUNITY, server_id=server.id, plugin_id=plugin.id)
+    assert result.latest_version is None
+
+
 async def test_check_plugin_update_not_found() -> None:
     uow = FakeUnitOfWork()
     server = _server()
