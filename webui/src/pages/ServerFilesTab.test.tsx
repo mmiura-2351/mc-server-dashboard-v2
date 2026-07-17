@@ -10,6 +10,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+import { unzipSync } from "fflate";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client.ts";
@@ -526,6 +527,34 @@ describe("ServerFilesTab operations", () => {
       expect(mockDownload.downloadFile).toHaveBeenCalledWith(
         `${FILES_BASE}/download?path=log.txt`,
         "log.txt",
+        expect.any(AbortSignal),
+      ),
+    );
+  });
+
+  it("downloads a directory as a .zip-named file via context menu (#2018)", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "world", is_dir: true }]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/world/);
+
+    const row = screen.getByText(/world/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+
+    fireEvent.click(
+      screen.getByRole("menuitem", {
+        name: t("files.contextMenu.downloadZip"),
+      }),
+    );
+    // The API streams the directory as a ZIP, so the saved file must be named
+    // `world.zip` — not the bare entry name.
+    await waitFor(() =>
+      expect(mockDownload.downloadFile).toHaveBeenCalledWith(
+        `${FILES_BASE}/download?path=world`,
+        "world.zip",
         expect.any(AbortSignal),
       ),
     );
@@ -2222,6 +2251,112 @@ describe("ServerFilesTab bulk operations", () => {
       expect.any(AbortSignal),
     );
     expect(mockDownload.fetchFileBlob).not.toHaveBeenCalled();
+  });
+
+  it("bulk downloads a single selected directory as a .zip-named file (#2018)", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "world", is_dir: true },
+        { name: "a.txt", is_dir: false },
+      ]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/world/);
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "world" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.bulk.download") }),
+    );
+
+    await waitFor(() =>
+      expect(mockDownload.downloadFile).toHaveBeenCalledWith(
+        `${FILES_BASE}/download?path=world`,
+        "world.zip",
+        expect.any(AbortSignal),
+      ),
+    );
+  });
+
+  it("names a bulk-selected directory's nested ZIP entry with .zip (#2018)", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "world", is_dir: true },
+        { name: "a.txt", is_dir: false },
+      ]),
+    });
+    const blobs: Blob[] = [];
+    const createObjectURL = vi
+      .spyOn(URL, "createObjectURL")
+      .mockImplementation((obj: Blob | MediaSource) => {
+        blobs.push(obj as Blob);
+        return "blob:fake";
+      });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/world/);
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "world" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }), {
+      ctrlKey: true,
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.bulk.download") }),
+    );
+
+    await waitFor(() => expect(createObjectURL).toHaveBeenCalled());
+    const names = Object.keys(
+      unzipSync(new Uint8Array(await blobs[0].arrayBuffer())),
+    );
+    // The directory's bytes are themselves a ZIP: name the entry accordingly.
+    expect(names).toContain("world.zip");
+    expect(names).toContain("a.txt");
+    createObjectURL.mockRestore();
+  });
+
+  it("keeps a directory and its sibling .zip file as distinct ZIP entries (#2018)", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "world", is_dir: true },
+        { name: "world.zip", is_dir: false, size: 10 },
+      ]),
+    });
+    // Distinct bytes per path so an overwrite is visible, not just a key clash.
+    mockDownload.fetchFileBlob.mockImplementation((path: string) =>
+      Promise.resolve(new Blob([path.endsWith("world") ? "DIR" : "FILE"])),
+    );
+    const blobs: Blob[] = [];
+    const createObjectURL = vi
+      .spyOn(URL, "createObjectURL")
+      .mockImplementation((obj: Blob | MediaSource) => {
+        blobs.push(obj as Blob);
+        return "blob:fake";
+      });
+    renderPage();
+    await openFiles();
+    await screen.findByRole("checkbox", { name: "world.zip" });
+
+    // Select the directory first: suffixing `world` -> `world.zip` would claim
+    // the sibling file's own name and silently drop one of the two.
+    fireEvent.click(screen.getByRole("checkbox", { name: "world" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "world.zip" }), {
+      ctrlKey: true,
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.bulk.download") }),
+    );
+
+    await waitFor(() => expect(createObjectURL).toHaveBeenCalled());
+    const archive = unzipSync(new Uint8Array(await blobs[0].arrayBuffer()));
+    // Both selected items survive, and neither overwrote the other.
+    expect(Object.keys(archive)).toHaveLength(2);
+    const decode = (name: string) => new TextDecoder().decode(archive[name]);
+    expect(decode("world.zip")).toBe("FILE");
+    expect(decode("world")).toBe("DIR");
+    createObjectURL.mockRestore();
   });
 
   it("bulk moves selected items to a destination directory", async () => {
