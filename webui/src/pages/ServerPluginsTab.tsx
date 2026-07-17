@@ -146,6 +146,13 @@ function sideLabel(side: string): string {
   return t("plugins.side.both");
 }
 
+/** Human label for a plugin's provenance (issue #1934). */
+function sourceLabel(source: string): string {
+  if (source === "modrinth") return t("plugins.source.modrinth");
+  if (source === "geyser") return t("plugins.source.geyser");
+  return t("plugins.source.local");
+}
+
 export function ServerPluginsTab({
   server,
   communityId,
@@ -677,11 +684,7 @@ function PluginRow({
         </td>
         <td>{plugin.version_number ?? "—"}</td>
         <td>
-          <span className="badge">
-            {plugin.source === "modrinth"
-              ? t("plugins.source.modrinth")
-              : t("plugins.source.local")}
-          </span>
+          <span className="badge">{sourceLabel(plugin.source)}</span>
         </td>
         {showSide && (
           <td>
