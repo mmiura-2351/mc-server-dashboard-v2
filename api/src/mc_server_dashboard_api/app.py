@@ -1151,8 +1151,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.middleware("http")(correlation_id_middleware)
     # Defence-in-depth security headers (issue #635): CSP, X-Frame-Options,
     # nosniff, Referrer-Policy, Permissions-Policy, conditional Cache-Control
-    # and HSTS. Registered after the correlation-ID middleware so it is inside
-    # that wrapper (outermost-last ordering).
+    # and HSTS. Registered after the correlation-ID middleware so it wraps it
+    # (outermost-last ordering).
     app.middleware("http")(security_headers_middleware)
     app.middleware("http")(metrics_middleware)
     # Strip the spurious Content-Type/Content-Length the default JSONResponse
