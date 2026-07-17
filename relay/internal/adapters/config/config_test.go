@@ -180,6 +180,17 @@ func TestValidateBadLogFormat(t *testing.T) {
 	}
 }
 
+func TestValidateBadLogLevel(t *testing.T) {
+	env := envMap(map[string]string{"MCD_RELAY_LOG_LEVEL": "verbose"})
+	_, err := Load(writeTOML(t, minimalTOML), env)
+	if err == nil {
+		t.Fatal("unknown log.level should fail")
+	}
+	if got, want := err.Error(), `config: log.level: unknown level "verbose" (want debug, info, warn, or error)`; got != want {
+		t.Errorf("error = %q, want %q", got, want)
+	}
+}
+
 func TestValidateMetricsListenRequiredWhenEnabled(t *testing.T) {
 	body := minimalTOML + `
 [metrics]

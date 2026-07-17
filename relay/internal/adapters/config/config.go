@@ -17,6 +17,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -414,6 +415,11 @@ func (c Config) validate() error {
 	case "json", "text":
 	default:
 		return fmt.Errorf("config: log.format: unknown format %q (want json or text)", c.Log.Format)
+	}
+
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(c.Log.Level)); err != nil {
+		return fmt.Errorf("config: log.level: unknown level %q (want debug, info, warn, or error)", c.Log.Level)
 	}
 
 	return nil
