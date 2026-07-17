@@ -103,6 +103,8 @@ function Loaded({ communityId }: { communityId: string }) {
         role="tabpanel"
         id={panelId("cs", tab)}
         aria-labelledby={tabId("cs", tab)}
+        // biome-ignore lint/a11y/noNoninteractiveTabindex: a focusable tabpanel is the APG tabs pattern itself; the rule has no role exception (eslint-jsx-a11y exempts role="tabpanel" by default).
+        tabIndex={0}
       >
         <TabContent
           tab={tab}
