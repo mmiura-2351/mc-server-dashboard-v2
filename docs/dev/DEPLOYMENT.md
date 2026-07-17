@@ -873,13 +873,23 @@ relay advertises an empty CA bundle and Workers fall back to their system roots.
 
 ### Single-host port collision
 
-The relay binds `0.0.0.0:25565` for the game listener. The API's default
-game-port allocator range is `25565..25664`, so the first server created on a
-single host that also runs the relay will fail to publish its game port — even a
-`127.0.0.1:25565` publish conflicts with an existing `0.0.0.0:25565` bind.
+The relay binds `0.0.0.0:25565` for the game listener, overlapping the API's
+default game-port allocator range (`25565..25664`). This is handled
+automatically: when `relay.enabled=true` — which the relay setup above requires —
+the allocator excludes the relay's published host binds (`relay.game_port`,
+`relay.tunnel_port`) from the assignable range, so the first server created on a
+single host is assigned `25566` (issue #1002). Only binds inside the range are
+excluded; by default that is just 25565, since the tunnel's 25665 sits above
+`range_end`. The exclusion covers auto-assignment, explicit `game_port` requests
+(rejected as taken), and the free-port listings alike.
 
-**Fix:** shift the allocator range up by setting `MCD_API_PORTS__RANGE_START`
-(e.g. `25566`) in `.env`, or run the relay on a separate host.
+`MCD_API_PORTS__RANGE_START` (e.g. `25566`) remains as a fallback knob for
+shifting the range; the documented single-host relay setup does not need it.
+
+**Residual case:** the exclusion applies at assignment time only. A server
+created *before* the relay was enabled keeps its `game_port`, so one already
+holding 25565 still collides when the relay comes up — reassign its `game_port`
+before enabling the relay.
 
 ### Reconciler grace after an API restart
 
@@ -912,8 +922,8 @@ must exceed `max(hydrate_timeout + command_timeout, snapshot_timeout, stop_timeo
 (#822/#847/#930),
 and `held_start_grace_seconds` must exceed `command_timeout_seconds` (it only covers
 a command-only start). Lowering `grace_seconds` below its floor reopens the
-duplicate-start / stale-snapshot races; prefer the (already short by default) held
-path over shrinking the full grace.
+duplicate-start / stale-snapshot / stale-stop-replay races; prefer the (already
+short by default) held path over shrinking the full grace.
 
 The reconciler knobs (`INTERVAL_SECONDS`, `GRACE_SECONDS`, `BACKOFF_BASE_SECONDS`,
 `BACKOFF_MAX_SECONDS`) are forwarded via `compose.yaml`; see `.env.example` for
@@ -936,11 +946,9 @@ their defaults and `api/src/mc_server_dashboard_api/config.py` for constraints
 When the relay is enabled, set `MCD_WORKER_GAME_BIND_IP=127.0.0.1` in `.env`
 so game ports bind only on loopback — the Worker dials its own loopback game
 port into the tunnel, and no inbound game-port range is needed on the worker
-host. The relay takes all inbound player traffic on port 25565. On a single
-host the loopback bind still allocates from `25565..`, so the first server's
-`127.0.0.1:25565` publish collides with the relay's `0.0.0.0:25565` bind; shift
-the allocator range as described under
-[Single-host port collision](#single-host-port-collision).
+host. The relay takes all inbound player traffic on port 25565; on a single host
+the allocator keeps new servers off that port automatically (see
+[Single-host port collision](#single-host-port-collision)).
 
 The two paths are not mutually exclusive at the protocol level (a server is
 reachable both ways during migration); `relay.enabled` governs whether the
