@@ -1548,6 +1548,7 @@ export const ja: Record<TranslationKey, string> = {
   "plugins.status.disabled": "無効",
   "plugins.source.local": "ローカル",
   "plugins.source.modrinth": "Modrinth",
+  "plugins.source.geyser": "GeyserMC",
   "plugins.side.label": "動作環境",
   "plugins.side.server": "サーバー",
   "plugins.side.client": "クライアント",

@@ -1553,6 +1553,7 @@ export const en = {
   "plugins.status.disabled": "Disabled",
   "plugins.source.local": "Local",
   "plugins.source.modrinth": "Modrinth",
+  "plugins.source.geyser": "GeyserMC",
   // Side (server / client / both, issue #1308).
   "plugins.side.label": "Runs on",
   "plugins.side.server": "Server",
