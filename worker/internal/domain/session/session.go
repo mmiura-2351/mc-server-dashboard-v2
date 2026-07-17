@@ -10,12 +10,6 @@ import (
 	"time"
 )
 
-// ErrRejected is returned when the API refuses registration
-// (RegisterAck.accepted=false, CONTROL_PLANE.md Section 4.1). It is terminal:
-// the run loop does not reconnect, because re-dialing with the same rejected
-// credential would loop forever.
-var ErrRejected = errors.New("session: registration rejected by API")
-
 // ErrTerminal marks a connection failure the run loop must not retry: the same
 // dial would fail the same way (e.g. the API aborted the stream for a bad/
 // missing credential or a protocol violation). The transport adapter wraps such
@@ -79,8 +73,8 @@ func NewRunner(dialer Dialer, caps Capabilities, clock Clock, logger *slog.Logge
 // shutdown) or a terminal connection error occurs. On a transient transport
 // error it reconnects with backoff, re-registering from scratch each time
 // (CONTROL_PLANE.md Section 4.4). It returns nil on a cancellation-driven
-// shutdown and the terminal error (ErrRejected or ErrTerminal) when the API
-// refused registration or aborted the stream for a non-retryable reason.
+// shutdown and ErrTerminal when the API aborted the stream for a non-retryable
+// reason (e.g. a refused registration).
 func (r *Runner) Run(ctx context.Context) error {
 	attempt := 0
 	for {
@@ -90,7 +84,7 @@ func (r *Runner) Run(ctx context.Context) error {
 			if ctx.Err() != nil {
 				return nil
 			}
-		case errors.Is(err, ErrRejected), errors.Is(err, ErrTerminal):
+		case errors.Is(err, ErrTerminal):
 			r.logger.Error("terminal connection error; not reconnecting", "error", err)
 			return err
 		default:
@@ -146,9 +140,6 @@ func (r *Runner) runOnce(ctx context.Context) (registered bool, err error) {
 	ack, err := transport.RecvRegisterAck(ctx)
 	if err != nil {
 		return false, fmt.Errorf("recv register ack: %w", err)
-	}
-	if !ack.Accepted {
-		return false, fmt.Errorf("%w: %s", ErrRejected, ack.RejectionReason)
 	}
 
 	interval := ack.HeartbeatInterval

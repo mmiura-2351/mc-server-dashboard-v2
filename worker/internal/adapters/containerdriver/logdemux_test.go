@@ -3,7 +3,11 @@ package containerdriver
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"io"
+	"runtime"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -181,6 +185,194 @@ func TestDemuxLogsAcceptsFrameAtCap(t *testing.T) {
 	if got[1].Line != "after at-cap" {
 		t.Fatalf("trailing line = %q, want the line after the at-cap frame", got[1].Line)
 	}
+}
+
+// newlinelessReader streams total bytes of newline-less payload as a sequence of
+// Docker frames, generating them lazily so the source itself allocates nothing
+// proportional to total. Just before it reports EOF it forces a GC and records
+// the live heap, which at that moment still holds the demux's carry buffer.
+type newlinelessReader struct {
+	total     int
+	sent      int
+	pending   []byte
+	frameSize int
+	peakHeap  uint64
+}
+
+func (r *newlinelessReader) Read(p []byte) (int, error) {
+	if len(r.pending) == 0 {
+		if r.sent >= r.total {
+			// The carry buffer is still live here: measure before returning EOF, as
+			// the demux's deferred flush releases it once demuxLogs returns.
+			runtime.GC()
+			var ms runtime.MemStats
+			runtime.ReadMemStats(&ms)
+			r.peakHeap = ms.HeapAlloc
+			return 0, io.EOF
+		}
+		size := min(r.frameSize, r.total-r.sent)
+		payload := bytes.Repeat([]byte{'a'}, size)
+		r.pending = frame(dockerStreamStdout, string(payload))
+		r.sent += size
+	}
+	n := copy(p, r.pending)
+	r.pending = r.pending[n:]
+	return n, nil
+}
+
+// A stream that never emits a newline must not grow the per-stream carry buffer
+// without bound: the cap is consulted while the line accumulates across frames,
+// not only once a newline completes it (issue #2029). Without the bound the
+// carry retains every byte the container wrote, so the worker's heap tracks the
+// container's newline-less output until the stream ends or the worker OOMs.
+func TestDemuxLogsBoundsNewlinelessCarry(t *testing.T) {
+	const total = 128 << 20 // 128 MiB of newline-less output, streamed lazily.
+
+	runtime.GC()
+	var base runtime.MemStats
+	runtime.ReadMemStats(&base)
+
+	r := &newlinelessReader{total: total, frameSize: 64 << 10}
+	pump := execution.NewLogPump("s1", 16)
+	go func() { demuxLogs(r, pump); pump.Close() }()
+	drainLogs(pump)
+
+	// The carry holds ~MaxLogLineBytes; the allowance covers the frame buffers and
+	// ordinary test-run noise while staying far below the 128 MiB an unbounded
+	// carry retains.
+	const allowance = 8 << 20
+	if growth := int64(r.peakHeap) - int64(base.HeapAlloc); growth > allowance {
+		t.Fatalf("live heap grew by %d bytes while accumulating %d bytes of newline-less output; want <= %d (carry is unbounded)",
+			growth, total, allowance)
+	}
+}
+
+// An over-long line spanning frames is truncated at MaxLogLineBytes and marked,
+// and the stream resynchronises at the next newline so the line after it is
+// emitted intact — mirroring LogPump.Scan, which keeps at most MaxLogLineBytes
+// and discards the excess until the newline arrives (issue #2029).
+func TestDemuxLogsTruncatesOverLongLineAndResyncs(t *testing.T) {
+	long := strings.Repeat("a", execution.MaxLogLineBytes+5000)
+
+	var buf bytes.Buffer
+	buf.Write(frame(dockerStreamStdout, long[:3000]))
+	buf.Write(frame(dockerStreamStdout, long[3000:]))
+	buf.Write(frame(dockerStreamStdout, "\nafter overflow\n"))
+
+	pump := execution.NewLogPump("s1", 16)
+	go func() { demuxLogs(&buf, pump); pump.Close() }()
+
+	got := drainLogs(pump)
+	if len(got) != 2 {
+		t.Fatalf("got %d line(s), want the truncated line plus the line after it", len(got))
+	}
+	want := long[:execution.MaxLogLineBytes]
+	if !strings.HasPrefix(got[0].Line, want) || len(got[0].Line) <= execution.MaxLogLineBytes {
+		t.Fatalf("first line = %d bytes, want %d kept bytes plus a truncation marker", len(got[0].Line), execution.MaxLogLineBytes)
+	}
+	if got[1].Line != "after overflow" {
+		t.Fatalf("second line = %q, want the stream to resync at the newline", got[1].Line)
+	}
+}
+
+// The final unterminated partial is flushed on stream end (issue #2023) even when
+// it is itself over-long: it is emitted truncated and marked, as LogPump.Scan
+// emits its trailing partial at EOF.
+func TestDemuxLogsEmitsOverLongFinalPartial(t *testing.T) {
+	long := strings.Repeat("a", execution.MaxLogLineBytes+5000)
+
+	var buf bytes.Buffer
+	buf.Write(frame(dockerStreamStdout, long[:3000]))
+	buf.Write(frame(dockerStreamStdout, long[3000:])) // no trailing newline.
+
+	pump := execution.NewLogPump("s1", 16)
+	go func() { demuxLogs(&buf, pump); pump.Close() }()
+
+	got := drainLogs(pump)
+	if len(got) != 1 {
+		t.Fatalf("got %d line(s), want the over-long final partial emitted", len(got))
+	}
+	if !strings.HasPrefix(got[0].Line, long[:execution.MaxLogLineBytes]) || len(got[0].Line) <= execution.MaxLogLineBytes {
+		t.Fatalf("final partial = %d bytes, want %d kept bytes plus a truncation marker", len(got[0].Line), execution.MaxLogLineBytes)
+	}
+}
+
+// The container path (demuxLogs) and the process path (LogPump.Scan) must agree
+// on over-long-line handling — #2023 established that the two paths stay
+// consistent. Feeding identical content through both must emit identical lines,
+// including where the truncation lands and whether the line is marked. The cases
+// walk the cap boundary, since that is where the two implementations could
+// plausibly disagree (issue #2029).
+func TestDemuxLogsMatchesScanOverLongSemantics(t *testing.T) {
+	const lineCap = execution.MaxLogLineBytes
+	a := func(n int) string { return strings.Repeat("a", n) }
+
+	cases := []struct {
+		name    string
+		content string
+	}{
+		{"under cap", "short line\n"},
+		{"exactly at cap", a(lineCap) + "\n"},
+		{"one over cap", a(lineCap+1) + "\n"},
+		{"far over cap then resync", a(lineCap+5000) + "\nnext line\n"},
+		{"at cap with crlf", a(lineCap) + "\r\n"},
+		{"one over cap with crlf", a(lineCap+1) + "\r\n"},
+		// A \r sitting exactly at the cap boundary is interior to the real line, so
+		// neither path may treat it as a line ending and drop the truncation mark.
+		{"cr at cap boundary", a(lineCap) + "\r" + a(5000) + "\n"},
+		{"over-long unterminated final line", a(lineCap + 5000)},
+		{"empty", ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			scanPump := execution.NewLogPump("s1", 64)
+			go func() {
+				scanPump.Scan(strings.NewReader(tc.content), execution.LogStreamStdout)
+				scanPump.Close()
+			}()
+			wantLines := linesOf(drainLogs(scanPump))
+
+			// Chunk the same content into frames at a size that is not a divisor of the
+			// cap, so line boundaries and the cap boundary fall mid-frame.
+			var buf bytes.Buffer
+			for rest := tc.content; len(rest) > 0; {
+				n := min(1000, len(rest))
+				buf.Write(frame(dockerStreamStdout, rest[:n]))
+				rest = rest[n:]
+			}
+			demuxPump := execution.NewLogPump("s1", 64)
+			go func() { demuxLogs(&buf, demuxPump); demuxPump.Close() }()
+			gotLines := linesOf(drainLogs(demuxPump))
+
+			if !slices.Equal(gotLines, wantLines) {
+				t.Fatalf("demuxLogs and LogPump.Scan disagree\n demux: %s\n  scan: %s",
+					describeLines(gotLines), describeLines(wantLines))
+			}
+		})
+	}
+}
+
+func linesOf(evs []execution.LogEvent) []string {
+	out := make([]string, 0, len(evs))
+	for _, ev := range evs {
+		out = append(out, ev.Line)
+	}
+	return out
+}
+
+// describeLines renders lines as length + suffix, so a failure involving
+// multi-KiB lines stays readable.
+func describeLines(lines []string) string {
+	parts := make([]string, 0, len(lines))
+	for _, l := range lines {
+		suffix := l
+		if len(suffix) > 24 {
+			suffix = "..." + l[len(l)-24:]
+		}
+		parts = append(parts, fmt.Sprintf("(%d bytes, ending %q)", len(l), suffix))
+	}
+	return "[" + strings.Join(parts, " ") + "]"
 }
 
 // An out-of-range stream-type byte is labelled stderr (not silently stdout), so

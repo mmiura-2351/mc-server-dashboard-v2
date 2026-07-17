@@ -62,6 +62,20 @@ GOLANGCI_LINT_CACHE := $(shell git rev-parse --absolute-git-dir)/golangci-lint-c
 GOLANGCI_LINT_MEMLIMIT := 2GiB
 GOLANGCI_LINT_CONCURRENCY := 2
 
+# Make a contended lint run queue instead of failing (#2031). golangci-lint
+# takes an exclusive flock before every run; the lock lives at
+# $TMPDIR/golangci-lint.lock -- host-global, NOT inside GOLANGCI_LINT_CACHE. So
+# the per-worktree cache above does not decouple it: two agents linting in
+# sibling worktrees contend even with disjoint caches. By default the loser
+# waits only 5s and then exits non-zero with "parallel golangci-lint is
+# running", which check_parallel.sh reports as a failed chain -- a push rejected
+# because of who else was linting, not because of the diff (8 sightings, none
+# reproducible, none correlated with the change under test).
+# --allow-serial-runners keeps the mutual exclusion but makes the wait
+# unbounded, so contenders queue and then run. Uncontended runs (CI, a single
+# developer) take the lock immediately and are unaffected.
+GOLANGCI_LINT_LOCK_WAIT := --allow-serial-runners
+
 # protoc code-generation plugins. Pinned + documented (proto/README.md,
 # docs/dev/DEPENDENCIES.md). The Go plugins install into the same gitignored
 # worker/.bin; the Python generators come from the api/ dev group (uv).
@@ -142,7 +156,7 @@ worker-lint: $(GOLANGCI)
 		exit 1; \
 	fi
 	cd worker && go vet ./...
-	cd worker && GOMEMLIMIT="$(GOLANGCI_LINT_MEMLIMIT)" GOLANGCI_LINT_CACHE="$(GOLANGCI_LINT_CACHE)" ./.bin/golangci-lint run --concurrency=$(GOLANGCI_LINT_CONCURRENCY)
+	cd worker && GOMEMLIMIT="$(GOLANGCI_LINT_MEMLIMIT)" GOLANGCI_LINT_CACHE="$(GOLANGCI_LINT_CACHE)" ./.bin/golangci-lint run --concurrency=$(GOLANGCI_LINT_CONCURRENCY) $(GOLANGCI_LINT_LOCK_WAIT)
 
 worker-format:
 	cd worker && gofmt -w .
@@ -185,7 +199,7 @@ relay-lint: $(GOLANGCI)
 		exit 1; \
 	fi
 	cd relay && go vet ./...
-	cd relay && GOMEMLIMIT="$(GOLANGCI_LINT_MEMLIMIT)" GOLANGCI_LINT_CACHE="$(GOLANGCI_LINT_CACHE)" ../worker/.bin/golangci-lint run --concurrency=$(GOLANGCI_LINT_CONCURRENCY)
+	cd relay && GOMEMLIMIT="$(GOLANGCI_LINT_MEMLIMIT)" GOLANGCI_LINT_CACHE="$(GOLANGCI_LINT_CACHE)" ../worker/.bin/golangci-lint run --concurrency=$(GOLANGCI_LINT_CONCURRENCY) $(GOLANGCI_LINT_LOCK_WAIT)
 
 relay-format:
 	cd relay && gofmt -w .
