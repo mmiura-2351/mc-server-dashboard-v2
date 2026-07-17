@@ -83,8 +83,8 @@ A `POST /auth/login` `401` additionally carries `Retry-After: <delta-seconds>`
 when brute-force protection ([`SECURITY.md`](SECURITY.md) Section 2) rejected the
 request *before* the password was verified — that is, when the account is already
 locked or the source IP is already throttled (issue #637). The value is a
-non-negative integer count of seconds (RFC 6585 / RFC 9110 delta-seconds form,
-never an HTTP-date):
+non-negative integer count of seconds — the `delta-seconds` form of
+`Retry-After` (RFC 9110 Section 10.2.3), never an HTTP-date:
 
 - **IP throttled** — the configured `ip_window_seconds` in full, not the time
   remaining in the window. The IP check runs first, so this value is the one
