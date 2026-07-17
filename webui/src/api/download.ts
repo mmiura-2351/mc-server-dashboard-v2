@@ -126,12 +126,7 @@ export async function fetchFileBlob(
 async function readCappedBlob(response: Response): Promise<Blob> {
   if (response.body === null) return response.blob();
 
-  // The body stream is typed `Uint8Array<ArrayBufferLike>`, whose buffer could
-  // in principle be a SharedArrayBuffer (which Blob does not accept). A fetch
-  // body is never shared-backed, so narrow it rather than copy every chunk.
-  const reader = (
-    response.body as ReadableStream<Uint8Array<ArrayBuffer>>
-  ).getReader();
+  const reader = response.body.getReader();
   const chunks: Uint8Array<ArrayBuffer>[] = [];
   let received = 0;
   for (;;) {
