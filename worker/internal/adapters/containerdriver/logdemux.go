@@ -30,12 +30,25 @@ const maxFrameBytes = 16 * 1024 * 1024
 // (FR-MON-2). It returns when r is exhausted or errors (e.g. the follow is
 // closed on container exit). Lines are reassembled across frame boundaries: a
 // frame may end mid-line, so a trailing partial is held until the newline
-// arrives in a later frame.
+// arrives in a later frame. Whatever partial is still held when the stream ends
+// is emitted, mirroring LogPump.Scan's EOF handling (issue #2023).
 func demuxLogs(r io.Reader, pump *execution.LogPump) {
 	br := bufio.NewReader(r)
 	header := make([]byte, dockerStreamHeaderLen)
 	// Carry a partial (newline-less) line per stream across frames.
 	var partial [3]strings.Builder // index by stream type (1=stdout, 2=stderr)
+
+	// The stream can end mid-line on every exit path below (header EOF, oversized
+	// frame, payload read error). A container that dies abruptly flushes its last
+	// diagnostic without a trailing newline, so emit it rather than drop it.
+	defer func() {
+		if line := partial[dockerStreamStdout].String(); line != "" {
+			pump.Emit(line, execution.LogStreamStdout)
+		}
+		if line := partial[dockerStreamStderr].String(); line != "" {
+			pump.Emit(line, execution.LogStreamStderr)
+		}
+	}()
 
 	for {
 		if _, err := io.ReadFull(br, header); err != nil {
