@@ -6,8 +6,8 @@
 # openapi-check) in Phase 2 after all readers have finished. This avoids the
 # read-during-rewrite race between generators and lint/test/build targets.
 #
-# Phase 1a — Go lint (serial; golangci-lint enforces cache-level mutual
-#            exclusion, so worker-lint and relay-lint cannot overlap):
+# Phase 1a — Go lint (serial; golangci-lint holds a host-global lock for the
+#            duration of a run, so worker-lint and relay-lint cannot overlap):
 #   worker-lint, relay-lint
 #
 # Phase 1b — reader chains (parallel, disjoint module dirs):
@@ -32,10 +32,22 @@
 
 set -uo pipefail
 
-LOGDIR=$(mktemp -d)
-# On normal exit: clean up the temp dir.
-# On INT/TERM: kill background jobs first, then exit (triggers EXIT cleanup).
-trap 'rm -rf "$LOGDIR"' EXIT
+# Per-chain logs persist after the run (#2031). These used to go to a mktemp
+# dir deleted on exit, so a failure left nothing behind once the terminal
+# output scrolled or was truncated: three of eight reported failures could not
+# even name which chain broke, and the run that produced the error is gone by
+# the time anyone knows they want it. Writing under the worktree's git dir
+# keeps them unique per worktree, never tracked, and swept with the worktree
+# (same rationale as GOLANGCI_LINT_CACHE in the Makefile). Each run starts
+# clean, so the logs always describe the most recent run.
+git_dir=$(git rev-parse --absolute-git-dir 2>/dev/null) || {
+    echo "FAIL: not inside a git checkout (needed to locate the log dir)" >&2
+    exit 1
+}
+LOGDIR="$git_dir/check-logs"
+rm -rf "$LOGDIR"
+mkdir -p "$LOGDIR"
+# On INT/TERM: kill background jobs first, then exit.
 trap 'jobs -p | xargs -r kill 2>/dev/null; exit 1' INT TERM
 
 failed_chains=()
@@ -65,10 +77,15 @@ make worker/.bin/golangci-lint >"$LOGDIR/golangci-install.log" 2>&1 || {
     exit 1
 }
 
-# --- Phase 1a: Go lint serial (golangci-lint cache mutual exclusion) ---
-# golangci-lint v2 enforces cache-level locking; overlapping runs against the
-# same GOLANGCI_LINT_CACHE abort with "parallel golangci-lint is running".
-# Serialize the two lint targets (~0.8s each), then let tests run in parallel.
+# --- Phase 1a: Go lint serial (golangci-lint mutual exclusion) ---
+# golangci-lint v2 takes an exclusive flock on $TMPDIR/golangci-lint.lock for
+# every run. The lock is host-global -- it lives outside GOLANGCI_LINT_CACHE, so
+# the Makefile's per-worktree cache does not decouple it and any two concurrent
+# runs on this host contend, worktree-local or not. The Makefile passes
+# --allow-serial-runners so a contender queues rather than aborting with
+# "parallel golangci-lint is running" (#2031). Running the two lint targets
+# (~0.8s each) serially here keeps them off each other's lock instead of paying
+# that wait, then tests run in parallel.
 echo "=== Phase 1a: Go lint (serial) ==="
 
 run_chain worker-lint worker-lint || failed_chains+=(worker-lint)
@@ -117,6 +134,7 @@ if (( ${#failed_chains[@]} > 0 )); then
     done
     echo "FAILED chains: ${failed_chains[*]}" >&2
     echo "(Phase 2 drift checks skipped due to Phase 1 failures)" >&2
+    echo "Full output per chain: $LOGDIR/<chain>.log" >&2
     exit 1
 fi
 
@@ -140,6 +158,7 @@ done
 # --- Final verdict ---
 if (( ${#failed_chains[@]} > 0 )); then
     echo "FAILED chains: ${failed_chains[*]}" >&2
+    echo "Full output per chain: $LOGDIR/<chain>.log" >&2
     exit 1
 fi
 
