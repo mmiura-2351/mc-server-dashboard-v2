@@ -2675,6 +2675,16 @@ function Toolbar({
 
     // Multiple files — fetch all, bundle into a single ZIP. The whole
     // operation shares one abort signal so leaving the view stops the loop.
+    //
+    // A directory's suffixed key can collide with a selected sibling that
+    // already bears that exact name (dir `world` next to file `world.zip`):
+    // keep the bare path so neither entry overwrites the other. Derived from
+    // the selection rather than the accumulated keys so the result does not
+    // depend on fetch order.
+    const zipKey = (path: string): string => {
+      const key = downloadName(path, dirPaths.has(path));
+      return key !== path && selected.has(key) ? path : key;
+    };
     setBulkBusy(true);
     const signal = nextDownloadSignal();
     const files: Record<string, Uint8Array> = {};
@@ -2693,7 +2703,7 @@ function Toolbar({
         const buf = new Uint8Array(await blob.arrayBuffer());
         // Use full path as ZIP key to avoid collisions between files with the
         // same basename in different directories.
-        files[downloadName(path, dirPaths.has(path))] = buf;
+        files[zipKey(path)] = buf;
         done += 1;
       } catch (error) {
         if (isAbortError(error)) {

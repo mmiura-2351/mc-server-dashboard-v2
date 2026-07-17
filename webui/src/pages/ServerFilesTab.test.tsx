@@ -2316,6 +2316,49 @@ describe("ServerFilesTab bulk operations", () => {
     createObjectURL.mockRestore();
   });
 
+  it("keeps a directory and its sibling .zip file as distinct ZIP entries (#2018)", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "world", is_dir: true },
+        { name: "world.zip", is_dir: false, size: 10 },
+      ]),
+    });
+    // Distinct bytes per path so an overwrite is visible, not just a key clash.
+    mockDownload.fetchFileBlob.mockImplementation((path: string) =>
+      Promise.resolve(new Blob([path.endsWith("world") ? "DIR" : "FILE"])),
+    );
+    const blobs: Blob[] = [];
+    const createObjectURL = vi
+      .spyOn(URL, "createObjectURL")
+      .mockImplementation((obj: Blob | MediaSource) => {
+        blobs.push(obj as Blob);
+        return "blob:fake";
+      });
+    renderPage();
+    await openFiles();
+    await screen.findByRole("checkbox", { name: "world.zip" });
+
+    // Select the directory first: suffixing `world` -> `world.zip` would claim
+    // the sibling file's own name and silently drop one of the two.
+    fireEvent.click(screen.getByRole("checkbox", { name: "world" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "world.zip" }), {
+      ctrlKey: true,
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.bulk.download") }),
+    );
+
+    await waitFor(() => expect(createObjectURL).toHaveBeenCalled());
+    const archive = unzipSync(new Uint8Array(await blobs[0].arrayBuffer()));
+    // Both selected items survive, and neither overwrote the other.
+    expect(Object.keys(archive)).toHaveLength(2);
+    const decode = (name: string) => new TextDecoder().decode(archive[name]);
+    expect(decode("world.zip")).toBe("FILE");
+    expect(decode("world")).toBe("DIR");
+    createObjectURL.mockRestore();
+  });
+
   it("bulk moves selected items to a destination directory", async () => {
     routeGet({
       detail: server(),
