@@ -457,6 +457,46 @@ describe("ServerDetailPage URL-driven tabs (#514)", () => {
     expect(playersTab).toHaveAttribute("aria-selected", "true");
   });
 
+  it("a tabpanel whose content has no focusable element is focusable (#1898)", async () => {
+    // A read-only user on an empty plugins list gets a panel with no focusable
+    // descendant at all; without tabindex=0 on the panel, activating the tab
+    // strands the keyboard user — Tab jumps straight past the panel content.
+    // APG tabs: the panel is focusable when it has no focusable element or its
+    // first element with content is not focusable.
+    mockCan = (code) => code === "plugin:read";
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.endsWith("/plugins/validate")) {
+        return Promise.resolve({
+          missing_deps: [],
+          missing_catalog_deps: [],
+          version_unsatisfied: [],
+          conflicts: [],
+          mc_mismatch: [],
+        });
+      }
+      if (path.endsWith("/plugins/updates")) {
+        return Promise.resolve({ updates: [] });
+      }
+      if (path.endsWith("/plugins")) {
+        return Promise.resolve({ plugins: [] });
+      }
+      return Promise.resolve(server());
+    });
+    renderPage(`/communities/${CID}/servers/${SID}#plugins`);
+    await screen.findByText("survival");
+
+    const panel = await screen.findByRole("tabpanel");
+    // Precondition: nothing inside the panel can take focus.
+    expect(
+      panel.querySelectorAll(
+        "a[href], button, input, select, textarea, [tabindex]",
+      ),
+    ).toHaveLength(0);
+
+    panel.focus();
+    expect(panel).toHaveFocus();
+  });
+
   it("inactive tabs have tabIndex -1 (roving tabindex, #1216)", async () => {
     mockApi.get.mockResolvedValue(server());
     renderPage();

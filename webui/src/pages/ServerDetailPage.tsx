@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type KeyboardEvent,
   memo,
+  type ReactNode,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -92,6 +93,32 @@ function pluginTabLabelKey(serverType: string): TranslationKey {
     : "serverDetail.tab.plugins";
 }
 
+/**
+ * The shared wrapper for every server-detail tab panel (issue #1898).
+ *
+ * `tabIndex={0}` puts the panel itself in the tab sequence: several panels have
+ * no focusable descendant at all in plausible states (a read-only user on an
+ * empty backups/schedules/plugins list), and none of them starts with a
+ * focusable element, so without it activating a tab strands the keyboard user.
+ * The WAI-ARIA APG tabs pattern applies this set-wide rather than per panel —
+ * "it is recommended that all tabpanel elements in a tab set are focusable if
+ * there are any panels in the set that contain content where the first element
+ * in the panel is not focusable" — so all eight go through this wrapper.
+ */
+function TabPanel({ name, children }: { name: Tab; children: ReactNode }) {
+  return (
+    <div
+      role="tabpanel"
+      id={panelId("sd", name)}
+      aria-labelledby={tabId("sd", name)}
+      // biome-ignore lint/a11y/noNoninteractiveTabindex: a focusable tabpanel is the APG tabs pattern itself; the rule has no role exception (eslint-jsx-a11y exempts role="tabpanel" by default).
+      tabIndex={0}
+    >
+      {children}
+    </div>
+  );
+}
+
 export function ServerDetailPage() {
   const { cid, sid } = useParams();
   if (cid === undefined || sid === undefined) {
@@ -176,101 +203,69 @@ function Loaded({
         ))}
       </div>
       {tab === "overview" && (
-        <div
-          role="tabpanel"
-          id={panelId("sd", "overview")}
-          aria-labelledby={tabId("sd", "overview")}
-        >
+        <TabPanel name="overview">
           <Overview
             server={server}
             events={events}
             onOpenConsole={() => setTab("console")}
           />
-        </div>
+        </TabPanel>
       )}
       {tab === "console" && (
-        <div
-          role="tabpanel"
-          id={panelId("sd", "console")}
-          aria-labelledby={tabId("sd", "console")}
-        >
+        <TabPanel name="console">
           <Console
             server={server}
             communityId={communityId}
             can={can}
             events={events}
           />
-        </div>
+        </TabPanel>
       )}
       {tab === "files" && (
-        <div
-          role="tabpanel"
-          id={panelId("sd", "files")}
-          aria-labelledby={tabId("sd", "files")}
-        >
+        <TabPanel name="files">
           <ServerFilesTab server={server} communityId={communityId} can={can} />
-        </div>
+        </TabPanel>
       )}
       {tab === "backups" && (
-        <div
-          role="tabpanel"
-          id={panelId("sd", "backups")}
-          aria-labelledby={tabId("sd", "backups")}
-        >
+        <TabPanel name="backups">
           <ServerBackupsTab
             server={server}
             communityId={communityId}
             can={can}
           />
-        </div>
+        </TabPanel>
       )}
       {tab === "schedules" && (
-        <div
-          role="tabpanel"
-          id={panelId("sd", "schedules")}
-          aria-labelledby={tabId("sd", "schedules")}
-        >
+        <TabPanel name="schedules">
           <ServerSchedulesTab
             server={server}
             communityId={communityId}
             can={can}
           />
-        </div>
+        </TabPanel>
       )}
       {tab === "plugins" && (
-        <div
-          role="tabpanel"
-          id={panelId("sd", "plugins")}
-          aria-labelledby={tabId("sd", "plugins")}
-        >
+        <TabPanel name="plugins">
           <ServerPluginsTab
             server={server}
             communityId={communityId}
             can={can}
           />
-        </div>
+        </TabPanel>
       )}
       {tab === "players" && (
-        <div
-          role="tabpanel"
-          id={panelId("sd", "players")}
-          aria-labelledby={tabId("sd", "players")}
-        >
+        <TabPanel name="players">
           <ServerPlayersTab
             communityId={communityId}
             serverId={server.id}
             can={can}
           />
-        </div>
+        </TabPanel>
       )}
       {tab === "settings" && (
-        <div
-          role="tabpanel"
-          id={panelId("sd", "settings")}
-          aria-labelledby={tabId("sd", "settings")}
-        >
+        <TabPanel name="settings">
           <Settings server={server} communityId={communityId} can={can} />
-        </div>
+        </TabPanel>
       )}
     </>
   );
