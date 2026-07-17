@@ -9,6 +9,39 @@ import {
   MAX_DOWNLOAD_BYTES,
 } from "./download.ts";
 
+const MIB = 1024 * 1024;
+/** Chunk count that carries a 1 MiB-chunked body 1 MiB past the cap. */
+const MIB_OVER_CAP = MAX_DOWNLOAD_BYTES / MIB + 1;
+
+/**
+ * A response with no Content-Length whose body streams `mib` × 1 MiB — the
+ * shape the API's directory ZIP arrives in (a chunked StreamingResponse, no
+ * length known up front; `files.py` `download_file`). The same 1 MiB buffer is
+ * enqueued on every pull, so the fixture costs 1 MiB rather than the size it
+ * streams. `pulls` counts the chunks the consumer actually asked for.
+ */
+function chunkedBody(mib: number, onCancel?: () => void) {
+  const chunk = new Uint8Array(MIB);
+  const state = { pulls: 0 };
+  const stream = new ReadableStream({
+    pull(controller) {
+      if (state.pulls === mib) {
+        controller.close();
+        return;
+      }
+      state.pulls += 1;
+      controller.enqueue(chunk);
+    },
+    cancel: onCancel,
+  });
+  return {
+    response: new Response(stream, { status: 200 }),
+    get pulls() {
+      return state.pulls;
+    },
+  };
+}
+
 describe("downloadFile", () => {
   const clicks: HTMLAnchorElement[] = [];
 
@@ -300,6 +333,31 @@ describe("downloadFile", () => {
 
       expect(error).toBeInstanceOf(DownloadTooLargeError);
       expect(error.size).toBe(oversized);
+    });
+
+    it("rejects a chunked download that passes the cap mid-stream", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(chunkedBody(MIB_OVER_CAP).response),
+      );
+
+      const error = await downloadFile("/api/dir", "world.zip").catch((e) => e);
+
+      expect(error).toBeInstanceOf(DownloadTooLargeError);
+      expect(error.size).toBeGreaterThan(MAX_DOWNLOAD_BYTES);
+      expect(clicks).toHaveLength(0);
+    });
+
+    it("cancels the oversized body instead of draining it", async () => {
+      const onCancel = vi.fn();
+      const body = chunkedBody(MIB_OVER_CAP + 16, onCancel);
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(body.response));
+
+      await fetchFileBlob("/api/dir").catch(() => {});
+
+      expect(onCancel).toHaveBeenCalled();
+      // Stopped once the cap was passed rather than reading to the end.
+      expect(body.pulls).toBeLessThan(MIB_OVER_CAP + 16);
     });
   });
 });
