@@ -1,3 +1,7 @@
+// @vitest-environment jsdom
+// Pinned to jsdom: the WAI-ARIA tabpanel focus test relies on jsdom's focus
+// handling (happy-dom may not replicate tabIndex-based focusability faithfully).
+
 /**
  * URL-driven tab tests for the community-settings page (#514): the active tab
  * lives in the URL hash (WEBUI_SPEC.md Section 5 names #members / #audit ...),
@@ -227,6 +231,28 @@ describe("CommunitySettingsPage URL-driven tabs (#514)", () => {
     });
     expect(membersTab).toHaveAttribute("tabindex", "0");
     expect(rolesTab).toHaveAttribute("tabindex", "-1");
+  });
+
+  it("a tabpanel whose content has no focusable element is focusable (#2058)", async () => {
+    // A user without member:read lands on a permission-denied message — a bare
+    // <p> with no focusable descendant. Without tabIndex={0} on the panel,
+    // activating the tab strands the keyboard user.
+    // APG tabs: the panel is focusable when it has no focusable element or its
+    // first element with content is not focusable.
+    mockCan = () => false;
+    renderPage();
+    await screen.findAllByText("Sakura");
+
+    const panel = screen.getByRole("tabpanel");
+    // Precondition: nothing inside the panel can take focus.
+    expect(
+      panel.querySelectorAll(
+        "a[href], button, input, select, textarea, [tabindex]",
+      ),
+    ).toHaveLength(0);
+
+    panel.focus();
+    expect(panel).toHaveFocus();
   });
 });
 
