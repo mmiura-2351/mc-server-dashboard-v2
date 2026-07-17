@@ -39,7 +39,7 @@ class HashAlgorithm(enum.Enum):
 
     Mojang's version manifest publishes a SHA-1 for ``server.jar``; the PaperMC
     API publishes a SHA-256 per build download. The verify step on download hashes
-    the bytes with the matching algorithm and compares constant-time.
+    the bytes with the matching algorithm and compares the digests.
     """
 
     SHA1 = "sha1"
