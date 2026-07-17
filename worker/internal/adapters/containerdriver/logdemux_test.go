@@ -82,6 +82,35 @@ func TestDemuxLogsTrimsCarriageReturn(t *testing.T) {
 	}
 }
 
+// A final payload without a trailing newline is emitted when the stream ends,
+// on each stream that carries one: a container dying abruptly flushes its last
+// diagnostic newline-less, and that line is the one that explains the crash
+// (issue #2023).
+func TestDemuxLogsEmitsUnterminatedFinalLine(t *testing.T) {
+	var buf bytes.Buffer
+	buf.Write(frame(dockerStreamStdout, "terminated\n"))
+	buf.Write(frame(dockerStreamStderr, "last words"))
+	buf.Write(frame(dockerStreamStdout, "no newline here"))
+
+	pump := execution.NewLogPump("s1", 16)
+	go func() { demuxLogs(&buf, pump); pump.Close() }()
+
+	var stdout, stderr []string
+	for _, ev := range drainLogs(pump) {
+		if ev.Stream == execution.LogStreamStderr {
+			stderr = append(stderr, ev.Line)
+		} else {
+			stdout = append(stdout, ev.Line)
+		}
+	}
+	if len(stdout) != 2 || stdout[1] != "no newline here" {
+		t.Fatalf("stdout = %v, want the unterminated final line emitted", stdout)
+	}
+	if len(stderr) != 1 || stderr[0] != "last words" {
+		t.Fatalf("stderr = %v, want the unterminated final line emitted", stderr)
+	}
+}
+
 // oneHeaderReader returns its header bytes once, then reports EOF. It proves the
 // demux rejects an oversized frame from the header alone: if the demux tried to
 // read the (multi-GiB) declared payload it would first allocate that buffer; the

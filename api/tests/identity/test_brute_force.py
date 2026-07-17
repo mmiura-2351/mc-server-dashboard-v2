@@ -60,6 +60,19 @@ def test_backoff_capped_at_maximum() -> None:
     assert backoff_duration(10, base=_BASE, maximum=_MAX) == _MAX
 
 
+def test_backoff_caps_at_timedelta_overflow_boundary() -> None:
+    # base * 2**37 exceeds timedelta.max at the default base, so multiplying
+    # before capping raises OverflowError (issue #1997).
+    assert backoff_duration(37, base=_BASE, maximum=_MAX) == _MAX
+
+
+def test_backoff_caps_at_absurd_lockout_count() -> None:
+    # lockout_count is persisted and only reset by a successful login, so a
+    # sustained attacker can grind it arbitrarily high; the cap must still hold
+    # without computing a giant power.
+    assert backoff_duration(1000, base=_BASE, maximum=_MAX) == _MAX
+
+
 def test_prune_horizon_is_longest_login_window() -> None:
     config = make_brute_force_config(
         username_window=dt.timedelta(minutes=40),

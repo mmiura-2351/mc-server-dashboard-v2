@@ -163,7 +163,9 @@ function Loaded({
             tabIndex={tab === name ? 0 : -1}
             className={`tab${tab === name ? " active" : ""}`}
             onClick={() => setTab(name)}
-            onKeyDown={(e) => handleTabKeyDown(e, TABS, tab, setTab, "sd")}
+            onKeyDown={(e) =>
+              handleTabKeyDown(e, visibleTabs, tab, setTab, "sd")
+            }
           >
             {t(
               name === "plugins"
