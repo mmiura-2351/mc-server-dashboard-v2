@@ -231,6 +231,7 @@ class SqlAlchemyPluginRepository(PluginRepository):
                 ),
                 ServerPluginModel.source_project_id.is_not(None),
             )
+            .order_by(ServerPluginModel.id)
             .limit(1)
         )
         row = (await self._session.execute(stmt)).first()
