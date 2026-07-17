@@ -54,9 +54,10 @@ without touching business logic (REQUIREMENTS.md Section 1.1).
 
 - **Blob layout** (the byte-level on-backend layout of working sets, JARs,
   backup archives, and file versions) is owned by this document.
-- **Metadata** (the `Server`, `Backup`, `FileEditHistory` rows that index those
-  blobs, schedules, audit) lives in the database and is owned by
-  `DATABASE.md` (#15). `Storage` returns opaque keys/handles; the metadata
+- **Metadata** (the `Server`, `Backup` rows that index those blobs, schedules,
+  audit) lives in the database and is owned by `DATABASE.md` (#15). File
+  versions are the exception: they carry no metadata rows and live wholly
+  behind the Port (Section 5). `Storage` returns opaque keys/handles; the metadata
   layer records them. The Port never queries the database and the database never
   reaches into the backend.
 - **Config key names** for selecting and tuning a backend are owned by
@@ -363,7 +364,7 @@ Serve versioned edits (FR-FILE-3). See Section 5 for the retention scheme.
 
 | Operation | Purpose | Notes |
 |---|---|---|
-| `list_file_versions(community_id, server_id, rel_path) -> [VersionId]` | List retained prior versions of a file | Ordered newest-first. Version metadata is indexed in the DB (#15). |
+| `list_file_versions(community_id, server_id, rel_path) -> [VersionId]` | List retained prior versions of a file | Ordered newest-first. Versions are storage-only — the ids are enumerated from the backend, not from a DB index (Section 5). |
 | `read_file_version(community_id, server_id, rel_path, VersionId) -> bytes` | Read a specific retained version | For preview/diff before rollback. |
 | `rollback_file(community_id, server_id, rel_path, VersionId)` | Restore a file to a retained version | Implemented as a `write_file` of the old content, so the pre-rollback content is itself retained (rollback is reversible) and the generation bump + `api-edit` sentinel ride that delegated write (#889). |
 
@@ -702,8 +703,11 @@ can be restored.
 **Decision — copy-on-write per file, count-bounded retention.** On every
 `write_file` (and `rollback_file`), the **previous** content of that file is
 copied into `versions/<rel-path>/<version-id>` before the new content is
-published. `version-id` is a monotonic, opaque id; the DB (#15) indexes
-`(server, rel_path, version-id, author, timestamp)`.
+published. `version-id` is a monotonic, opaque id whose lexicographic order is
+creation order, so listing and pruning are a plain enumeration of the version
+directory. Versions are **storage-only** — no database table indexes them
+(DATABASE.md Section 8) and no author is recorded, so per-file attribution
+("who edited this file") is not available from any layer.
 
 Retention is bounded by a **configurable per-file version count** (default and
 key owned by #16); when the count is exceeded the oldest version of that file is
@@ -1113,5 +1117,5 @@ lifecycle and are backend-specific (not all backends offer cheap clones).
 |---|---|
 | [`../REQUIREMENTS.md`](../REQUIREMENTS.md) | Source of truth: Sections 6.8–6.12, FR-DATA-1…7, FR-FILE-3, FR-FILE-4, FR-BAK-*, FR-VER-3. |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | `Storage` Port placement (Section 5.1), layering and edge wiring (Section 2), naming (Section 6), the running-server file-access decision (Section 7.2) that bounds this Port's file ops to the stopped-server case. |
-| [`DATABASE.md`](DATABASE.md) | The metadata indexing the blobs this document lays out (`Server`, `Backup`, `FileEditHistory`). Blob layout is here; metadata tables are there. |
+| [`DATABASE.md`](DATABASE.md) | The metadata indexing the blobs this document lays out (`Server`, `Backup`). Blob layout is here; metadata tables are there. File versions have no metadata table — they are storage-only (DATABASE.md Section 8). |
 | [`CONFIGURATION.md`](CONFIGURATION.md) | The runtime keys that select the backend family and tune snapshot interval / version-retention count. This document defines *what* is selectable; `CONFIGURATION.md` names the keys. |
