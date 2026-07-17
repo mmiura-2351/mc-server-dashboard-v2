@@ -432,6 +432,31 @@ describe("ServerDetailPage URL-driven tabs (#514)", () => {
     expect(consoleTab).toHaveAttribute("aria-selected", "true");
   });
 
+  it("ArrowRight skips the hidden plugins tab on vanilla servers (#2017)", async () => {
+    // Keyboard navigation must cycle only through rendered tabs: selecting the
+    // filtered-out plugins tab leaves no tab selected and strands focus.
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.endsWith("/schedules")) {
+        return Promise.resolve([]);
+      }
+      return Promise.resolve(server({ server_type: "vanilla" }));
+    });
+    renderPage(`/communities/${CID}/servers/${SID}#schedules`);
+    await screen.findByText("survival");
+
+    const schedulesTab = screen.getByRole("tab", {
+      name: t("serverDetail.tab.schedules"),
+    });
+    schedulesTab.focus();
+    fireEvent.keyDown(schedulesTab, { key: "ArrowRight" });
+
+    const playersTab = screen.getByRole("tab", {
+      name: t("serverDetail.tab.players"),
+    });
+    expect(playersTab).toHaveFocus();
+    expect(playersTab).toHaveAttribute("aria-selected", "true");
+  });
+
   it("inactive tabs have tabIndex -1 (roving tabindex, #1216)", async () => {
     mockApi.get.mockResolvedValue(server());
     renderPage();
