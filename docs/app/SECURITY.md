@@ -140,6 +140,13 @@ Section 7.2); the algorithm is:
 A successful authentication clears the active lockout and resets the back-off for
 that account.
 
+Steps 2 and 3 are evaluated *before* the password is verified, so a login blocked
+by an active lockout or an already-throttled IP is rejected on that check alone.
+Such a rejection keeps the uniform `401` — the status and body never distinguish
+it from a wrong password — but adds a `Retry-After` header telling the client how
+long to wait: the remaining lockout for step 2, the full `ip_window_seconds` for
+step 3. See [`AUTH_API.md`](AUTH_API.md) Section 1 for the header contract.
+
 This algorithm needs **runtime state** that outlives a single request: the
 attempt records that the sliding windows count over, and the per-account lockout/back-off
 record. Where that state lives is decided in Section 3.
