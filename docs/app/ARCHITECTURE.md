@@ -266,25 +266,31 @@ design decisions and do not change the requirements.
 
 ### 7.1 Execution backend is fixed for a server's lifetime (FR-EXE-3)
 
-**Decision.** The execution backend is chosen at
-server creation and is **immutable for the server's lifetime** in M1. Container
-is the only shipped backend; the immutability rule is retained for any future
-backend. Changing backend means deleting and recreating the server (its world
-data can be carried over via backup/restore through `Storage`).
+**Decision.** Container is the only backend (FR-EXE-2) and it is **fixed for a
+server's lifetime** (FR-EXE-3). The backend is not a per-server attribute: it is
+not a create parameter (FR-SRV-1) and is not recorded on the `Server` entity
+(Appendix B). The API supplies the container driver as a constant when it places
+and commands a server. Changing backend means deleting and recreating the server
+(its world data can be carried over via backup/restore through `Storage`).
 
 **Alternatives considered.**
 1. *Mutable backend via a config edit* — allow switching on a stopped server.
 2. *Mutable via internal relocation* — snapshot under the old backend, hydrate
    under the new one, reusing the FR-WRK-6 relocation machinery.
 
-**Rationale.** The backend is recorded on the `Server` entity (Appendix B) and
-feeds placement (the required `ExecutionDriver` is a Worker-capability filter,
-FR-WRK-3). Keeping it immutable removes a state-transition class and the edge
-cases of a half-migrated server, for a use case (alternative 1/2) that is rare at
-this scale and already achievable via recreate. The data model still *stores*
-the backend as a field, so a future milestone can lift this to a supported
-operation (built on the existing relocation path) without a schema change — the
-constraint is a policy, not a structural limit.
+**Rationale.** With a single backend, a per-server backend field would record a
+value that never varies, while a mutable one would add a state-transition class
+and the edge cases of a half-migrated server — for a use case (alternative 1/2)
+that is rare at this scale and already achievable via recreate. An earlier
+iteration did store the backend as a column; #1450 dropped it once container
+became the only backend. The required `ExecutionDriver` still filters placement
+candidates by Worker capability (FR-WRK-3), but the API asks for the constant
+`container` rather than reading a per-server value. The cost is that this is now
+a structural limit, not a policy: adding a second backend in a future milestone
+means reintroducing the field — a schema change, plus its create and placement
+paths — before the mutability question (REQUIREMENTS.md Section 9.1) can be
+revisited. The `ExecutionDriver` abstraction itself stays pluggable Worker-side
+(FR-EXE-1, FR-EXE-4), so that cost falls on the API's data model alone.
 
 ### 7.2 Worker-side file access rides the control plane (Section 6.9)
 
