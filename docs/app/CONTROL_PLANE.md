@@ -184,8 +184,17 @@ server no longer exists in the API (deleted while the scratch was live, issue
 each listed id but does **not** reclaim `.displaced-<id>` trees (issue #911:
 retained for operator recovery). The list is fail-safe: a DB error on the API
 side yields an empty list rather than misclassifying a live server as deleted.
-On refusal, `accepted=false` with a `rejection_reason` and the API closes the
-stream.
+A refusal never rides in the ack: the API only ever acks `accepted=true`, and
+aborts the `Session` stream with a gRPC status instead — `UNAUTHENTICATED` for a
+missing or wrong credential, `FAILED_PRECONDITION` when the first message is not
+`Register` (or the stream ends before one arrives), `INVALID_ARGUMENT` when the
+worker id is not a UUID. The Worker treats those codes as **terminal** and stops
+rather than reconnecting, since re-dialing with the same rejected input would
+loop forever; the stalled-connect `DEADLINE_EXCEEDED` above is the exception,
+staying transient so the backoff-reconnect path (Section 4.4) retries it. So
+`RegisterAck` carries no refusal today: nothing constructs one with
+`accepted=false`, and the operator-visible signal for a Worker that will not
+register is the terminal status code, not a `rejection_reason`.
 
 ### 4.2 Steady state
 
@@ -412,8 +421,11 @@ classes a Worker can hit:
 | `IMAGE_MISSING` | A `StartServer` could not find or pull the server's container image (the container driver classifies it from the Docker daemon's error message). |
 | `INTERNAL` | An unclassified failure applying the command. |
 
-A registration refusal is reported differently: `RegisterAck.accepted=false`
-with a `rejection_reason`, since it predates any command.
+A registration refusal is reported differently, since it predates any command:
+there is no `CommandResult` to carry it, and no refusal ack either. The API
+aborts the `Session` stream with a terminal gRPC status — `UNAUTHENTICATED`,
+`FAILED_PRECONDITION`, or `INVALID_ARGUMENT` — which the Worker classifies as
+terminal instead of reconnecting (Section 4.1).
 
 ### 7.1 Command-error contract (binding)
 
