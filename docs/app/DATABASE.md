@@ -734,7 +734,7 @@ What must **not** be touched:
 
 Distinct from member removal, **deleting a whole Community** cascades to its
 `membership`, `role`, `membership_role`, `resource_grant`, `server` (and thence
-`backup`, `file_edit_history`) rows via `ON DELETE CASCADE`, while `audit_log`
+`backup`) rows via `ON DELETE CASCADE`, while `audit_log`
 keeps its soft-referenced history.
 
 Also distinct, **deleting a single server** (without deleting its Community) must
