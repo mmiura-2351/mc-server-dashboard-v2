@@ -13,7 +13,7 @@ CONTROL_PLANE.md Section 4:
    it is bounded (issue #1700): a client that connects and sends nothing is
    aborted with ``DEADLINE_EXCEEDED``. On success the Worker is added to the
    :class:`WorkerRegistry` and the API replies
-   ``RegisterAck{accepted, heartbeat_interval}``.
+   ``RegisterAck{heartbeat_interval}``.
 3. **Steady state.** ``Event{Heartbeat}`` refreshes liveness (FR-WRK-2);
    ``Event{StatusChange}`` reconciles the server's observed state through the
    :class:`ServerStateSink` (FR-SRV-4); ``CommandResult`` resolves the pending
@@ -601,7 +601,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
         correlation_id: str,
         unknown_held_server_ids: list[str] | None = None,
     ) -> pb.ApiMessage:
-        ack = pb.RegisterAck(accepted=True)
+        ack = pb.RegisterAck()
         ack.heartbeat_interval.FromTimedelta(self._heartbeat_interval)
         ack.transfer_deadline.FromTimedelta(self._transfer_deadline)
         if unknown_held_server_ids:
