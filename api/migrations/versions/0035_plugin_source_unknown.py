@@ -18,7 +18,7 @@ downgrade would violate that narrower CHECK, so the downgrade first remaps them 
 ``local`` -- the value the ghost path asserted before this change, and a downgrade
 that rejected data valid at head would itself be a latent migration bug.
 
-Revision ID: 0035_server_plugin_source_unknown
+Revision ID: 0035_plugin_source_unknown
 Revises: 0034_game_session_source
 Create Date: 2026-07-17
 """
@@ -29,7 +29,7 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0035_server_plugin_source_unknown"
+revision: str = "0035_plugin_source_unknown"
 down_revision: str | None = "0034_game_session_source"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
