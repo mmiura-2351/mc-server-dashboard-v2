@@ -145,6 +145,15 @@ function joinPath(dir: string, name: string): string {
   return dir === "" ? name : `${dir}/${name}`;
 }
 
+/**
+ * The name a downloaded entry is saved under. The API streams a directory as a
+ * ZIP archive, so its saved name carries the `.zip` suffix the bare entry name
+ * lacks (issue #2018).
+ */
+function downloadName(name: string, isDir: boolean): string {
+  return isDir ? `${name}.zip` : name;
+}
+
 /** The directory portion of a rel-path ("" for a top-level file). */
 function parentDir(path: string): string {
   const cut = path.lastIndexOf("/");
@@ -1699,7 +1708,7 @@ function Listing({
           "/api/communities/{community_id}/servers/{server_id}/files/download",
           { community_id: communityId, server_id: serverId },
         )}?path=${encodeURIComponent(joinPath(dir, entry.name))}`,
-        entry.name,
+        downloadName(entry.name, entry.is_dir),
         nextDownloadSignal(),
       ),
     onError: (error) => {
@@ -2612,6 +2621,9 @@ function Toolbar({
     const sizeByPath = new Map(
       entries.map((e) => [joinPath(dir, e.name), e.size]),
     );
+    const dirPaths = new Set(
+      entries.filter((e) => e.is_dir).map((e) => joinPath(dir, e.name)),
+    );
     const totalBytes = paths.reduce(
       (sum, p) => sum + (sizeByPath.get(p) ?? 0),
       0,
@@ -2627,7 +2639,8 @@ function Toolbar({
     // Single file — download directly, no ZIP wrapper needed.
     if (total === 1) {
       const path = paths[0];
-      const filename = path.split("/").at(-1) ?? path;
+      const base = path.split("/").at(-1) ?? path;
+      const filename = downloadName(base, dirPaths.has(path));
       setBulkBusy(true);
       try {
         await downloadFile(
@@ -2680,7 +2693,7 @@ function Toolbar({
         const buf = new Uint8Array(await blob.arrayBuffer());
         // Use full path as ZIP key to avoid collisions between files with the
         // same basename in different directories.
-        files[path] = buf;
+        files[downloadName(path, dirPaths.has(path))] = buf;
         done += 1;
       } catch (error) {
         if (isAbortError(error)) {
