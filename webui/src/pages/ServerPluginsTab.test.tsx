@@ -1514,3 +1514,38 @@ describe("ServerPluginsTab refetch failure (#1805)", () => {
     expect(screen.queryByText(/Could not load mods/)).not.toBeInTheDocument();
   });
 });
+
+describe("ServerPluginsTab Source column (issue #1934)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("labels a GeyserMC catalog install with its catalog, not 'Local'", async () => {
+    mockGets({
+      plugins: [
+        plugin({
+          display_name: "Floodgate-Spigot",
+          source: "geyser",
+          source_project_id: "floodgate",
+        }),
+      ],
+      validation: EMPTY_VALIDATION,
+    });
+    renderTab();
+    await screen.findByText("Floodgate-Spigot");
+
+    expect(screen.getByText("GeyserMC")).toBeInTheDocument();
+    expect(screen.queryByText("Local")).not.toBeInTheDocument();
+  });
+
+  it("labels a manual upload 'Local'", async () => {
+    mockGets({
+      plugins: [plugin({ source: "local" })],
+      validation: EMPTY_VALIDATION,
+    });
+    renderTab();
+    await screen.findByText("Sodium");
+
+    expect(screen.getByText("Local")).toBeInTheDocument();
+  });
+});
