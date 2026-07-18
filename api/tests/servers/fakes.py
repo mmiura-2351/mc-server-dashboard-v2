@@ -854,14 +854,19 @@ class FakePluginRepository(PluginRepository):
 
     async def find_catalog_provenance_by_sha512(
         self, checksum_sha512: str
-    ) -> tuple[PluginSource, str] | None:
+    ) -> tuple[PluginSource, str, str | None, str | None] | None:
         for plugin in self.by_id.values():
             if (
                 plugin.checksum_sha512 == checksum_sha512
                 and plugin.source in CATALOG_SOURCES
                 and plugin.source_project_id is not None
             ):
-                return plugin.source, plugin.source_project_id
+                return (
+                    plugin.source,
+                    plugin.source_project_id,
+                    plugin.source_version_id,
+                    plugin.version_number,
+                )
         return None
 
     async def find_sha256_by_sha512(self, checksum_sha512: str) -> str | None:
