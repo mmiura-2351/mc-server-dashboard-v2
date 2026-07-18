@@ -287,7 +287,7 @@ async def test_get_json_html_body_raises_catalog_unavailable(
     catalog = GeyserMcCatalog()
     with _mock_transport(_handler):
         with pytest.raises(CatalogUnavailableError):
-            await catalog.list_versions("floodgate", loader="paper")
+            await catalog.list_versions("geysermc-floodgate", loader="paper")
 
 
 async def test_list_versions_shape_error_raises_catalog_unavailable() -> None:
@@ -295,7 +295,7 @@ async def test_list_versions_shape_error_raises_catalog_unavailable() -> None:
     # Return a JSON array instead of the expected build object.
     catalog = _catalog_with_build(["unexpected", "array"])  # type: ignore[arg-type]
     with pytest.raises(CatalogUnavailableError):
-        await catalog.list_versions("floodgate", loader="paper")
+        await catalog.list_versions("geysermc-floodgate", loader="paper")
 
 
 async def test_metadata_redirect_to_private_ip_rejected(
