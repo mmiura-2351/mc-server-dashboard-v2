@@ -102,14 +102,20 @@ class PluginRepository(abc.ABC):
     @abc.abstractmethod
     async def find_catalog_provenance_by_sha512(
         self, checksum_sha512: str
-    ) -> tuple[PluginSource, str] | None:
-        """Return the catalog ``(source, source_project_id)`` for a known SHA-512.
+    ) -> tuple[PluginSource, str, str | None, str | None] | None:
+        """Return catalog provenance for a known SHA-512.
+
+        Returns ``(source, source_project_id, source_version_id, version_number)``
+        when a catalog-sourced plugin with a matching checksum exists, or ``None``
+        when no match is found.
 
         The provenance-recovery lookup behind ghost re-ingestion (issue #2059):
         a jar re-ingested after a backup restore carries no DB row of its own, so
         its origin is matched against the checksum of any catalog-sourced plugin
         (``source`` in ``CATALOG_SOURCES``, non-null ``source_project_id``)
         installed anywhere, using the ``ix_server_plugin_checksum_sha512`` index.
+        ``source_version_id`` and ``version_number`` are recovered alongside
+        (issue #2068) so that the update check does not report a spurious update.
         Returns ``None`` when no catalog install shares the checksum, so the
         caller marks the row provenance-unknown instead of asserting ``local``.
         """
