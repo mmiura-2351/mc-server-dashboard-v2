@@ -14,6 +14,8 @@ export const ja: Record<TranslationKey, string> = {
   "shell.switchCommunity": "コミュニティを切り替え",
   "shell.noCommunity": "コミュニティなし",
   "shell.noCommunities": "まだどのコミュニティにも所属していません。",
+  "shell.communitiesError": "コミュニティを読み込めませんでした。",
+  "shell.communitiesRetry": "再試行",
   "shell.language": "言語",
   "shell.language.en": "English",
   "shell.language.ja": "日本語",

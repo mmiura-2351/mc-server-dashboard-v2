@@ -242,6 +242,38 @@ describe("AppShell community switcher", () => {
     expect(dashboard).toHaveAttribute("aria-label", t("nav.dashboard"));
   });
 
+  it("shows an error with retry in the switcher when GET /communities fails", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === "/api/communities") {
+        return Promise.resolve(
+          new Response("", {
+            status: 500,
+            statusText: "Internal Server Error",
+          }),
+        );
+      }
+      return Promise.resolve(tokenResponse());
+    });
+
+    renderAt("/communities/alpha");
+
+    // The switcher renders the error message and a retry button instead of the
+    // permanent loading placeholder (the content area also shows the error, so
+    // multiple elements may match).
+    const errors = await screen.findAllByText(t("shell.communitiesError"));
+    expect(errors.length).toBeGreaterThanOrEqual(1);
+    // The switcher's error element is inside a `.community-switcher` div.
+    const switcherError = errors.find(
+      (el) => el.closest(".community-switcher") !== null,
+    );
+    expect(switcherError).toBeDefined();
+    const retries = screen.getAllByRole("button", {
+      name: t("shell.communitiesRetry"),
+    });
+    expect(retries.length).toBeGreaterThanOrEqual(1);
+  });
+
   it("clicking the brand navigates to the landing page", async () => {
     signedInWith([ALPHA, BETA]);
 

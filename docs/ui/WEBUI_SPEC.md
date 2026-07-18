@@ -538,8 +538,11 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   in-flight rotation and leave a revoked predecessor cookie in the jar (the
   torn-rotation logout, issue #512). Rotation stays on the transparent
   `POST /api/auth/refresh` (the in-session 401-retry path), where reuse-detection
-  still applies; a mid-session refresh failure still hard-logs-out (a genuinely
-  expired / revoked session).
+  still applies; a mid-session refresh failure hard-logs-out only when the
+  server's response is auth-definitive (401 or 403 — a genuinely expired /
+  revoked session). Transient failures — network errors, proxy 5xx, or garbled
+  bodies — do not end the session; the original request surfaces its own error
+  to the caller so the user can retry (issue #1982).
 - WS connections carry the access token in the `Sec-WebSocket-Protocol`
   subprotocol header (`["access_token", "<jwt>"]`, issue #1596); on token
   rotation, sockets are reconnected (reconnect-on-rotate chosen).

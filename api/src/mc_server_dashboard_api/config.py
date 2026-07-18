@@ -820,14 +820,21 @@ class Settings(BaseSettings):
         # present. ``None`` (relay disabled) is not a secret.
         if relay["credential"] is not None:
             relay["credential"] = _MASK
+        database = self.database.model_dump()
+        # The database URL carries the DB password (CONFIGURATION.md Section
+        # 5.2); mask it but keep the non-secret pool-sizing fields (issue #1993).
+        database["url"] = _MASK
         return {
             "server": self.server.model_dump(),
             "control": control,
             "log": self.log.model_dump(),
-            "database": {"url": _MASK},
+            "database": database,
             "storage": storage,
             "snapshot": self.snapshot.model_dump(),
+            "schedule": self.schedule.model_dump(),
             "reconciler": self.reconciler.model_dump(),
+            "jar_gc": self.jar_gc.model_dump(),
+            "plugin_cache_gc": self.plugin_cache_gc.model_dump(),
             "ports": self.ports.model_dump(),
             "memory_limit": self.memory_limit.model_dump(),
             "webui": self.webui.model_dump(),

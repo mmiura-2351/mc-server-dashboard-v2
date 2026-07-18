@@ -9,6 +9,8 @@ export const en = {
   "shell.switchCommunity": "Switch community",
   "shell.noCommunity": "No community",
   "shell.noCommunities": "You are not a member of any community yet.",
+  "shell.communitiesError": "Could not load communities.",
+  "shell.communitiesRetry": "Retry",
   "shell.language": "Language",
   "shell.language.en": "English",
   "shell.language.ja": "日本語",

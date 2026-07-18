@@ -17,9 +17,12 @@ export interface UploadProgressState {
   total: number;
   percent: number;
   elapsedMs: number;
-  /** The abort signal for the current upload; pass to `postFormWithProgress`. */
-  signal: AbortSignal;
-  start: (total: number) => void;
+  /**
+   * Arm the tracker with the file size and return the fresh {@link AbortSignal}
+   * for the upload. Pass the returned signal to `postFormWithProgress` — it
+   * belongs to the controller that {@link cancel} will abort.
+   */
+  start: (total: number) => AbortSignal;
   onProgress: UploadProgress;
   reset: () => void;
   /** Abort the in-flight upload and reset the progress state (issue #1780). */
@@ -64,12 +67,13 @@ function getSnapshot(): UploadState {
   return state;
 }
 
-function startUpload(total: number) {
+function startUpload(total: number): AbortSignal {
   // Each upload gets a fresh controller so a previous cancel does not affect it.
   abortController = new AbortController();
   const t = Date.now();
   state = { active: true, loaded: 0, total, startedAt: t, now: t };
   emitChange();
+  return abortController.signal;
 }
 
 function onUploadProgress(loaded: number, total: number) {
@@ -116,7 +120,6 @@ export function useUploadProgress(): UploadProgressState {
     total: snapshot.total,
     percent,
     elapsedMs,
-    signal: abortController.signal,
     start: useCallback(startUpload, []),
     onProgress: useCallback(onUploadProgress, []),
     reset: useCallback(resetUpload, []),
