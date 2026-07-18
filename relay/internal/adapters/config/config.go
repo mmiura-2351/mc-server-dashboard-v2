@@ -410,6 +410,12 @@ func (c Config) validate() error {
 		return fmt.Errorf("config: metrics.listen is required when metrics.enabled=true")
 	}
 
+	switch c.Log.Level {
+	case "debug", "info", "warn", "error":
+	default:
+		return fmt.Errorf("config: log.level: unknown level %q (want debug, info, warn, or error)", c.Log.Level)
+	}
+
 	switch c.Log.Format {
 	case "json", "text":
 	default:

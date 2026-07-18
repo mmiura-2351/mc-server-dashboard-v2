@@ -30,6 +30,7 @@ since the fleet is cross-community infrastructure, not community-scoped:
 
 from __future__ import annotations
 
+import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, status
@@ -127,14 +128,13 @@ async def set_worker_drain(
     servers_stopped = await use_case(worker_id=WorkerId(worker_id), draining=True)
     if servers_stopped is None:
         raise problem(status.HTTP_404_NOT_FOUND, "not_found")
-    # Worker ids are not UUIDs; the worker is named by the operation code, not a
-    # UUID target_id (DATABASE.md Section 9 target_id is a UUID soft reference).
     await recorder.record(
         AuditEvent(
             operation=ops.WORKER_DRAIN_SET,
             outcome=Outcome.SUCCESS,
             actor_id=user.id.value,
             target_type=ops.TARGET_WORKER,
+            target_id=uuid.UUID(worker_id),
         )
     )
     return DrainResponse(servers_stopped=servers_stopped)
@@ -158,5 +158,6 @@ async def clear_worker_drain(
             outcome=Outcome.SUCCESS,
             actor_id=user.id.value,
             target_type=ops.TARGET_WORKER,
+            target_id=uuid.UUID(worker_id),
         )
     )

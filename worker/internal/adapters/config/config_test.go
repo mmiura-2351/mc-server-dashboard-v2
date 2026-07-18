@@ -445,6 +445,42 @@ func TestLoadRejectsContainerWithoutImages(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsBadLogLevel(t *testing.T) {
+	env := mapEnv(map[string]string{
+		"MCD_WORKER_API_GRPC_ENDPOINT":       "api:50051",
+		"MCD_WORKER_API_CREDENTIAL":          "secret",
+		"MCD_WORKER_API_TLS_INSECURE":        "true",
+		"MCD_WORKER_WORKER_SCRATCH_DIR":      t.TempDir(),
+		"MCD_WORKER_WORKER_DRIVERS":          "container",
+		"MCD_WORKER_DRIVER_CONTAINER_IMAGES": "21=eclipse-temurin:21-jre",
+		"MCD_WORKER_LOG_LEVEL":               "trace",
+	})
+
+	_, err := Load("", env)
+	if err == nil {
+		t.Fatal("Load() with unknown log.level: want error, got nil")
+	}
+	if !contains(err.Error(), "log.level") {
+		t.Errorf("error %q does not mention log.level", err.Error())
+	}
+}
+
+func TestLoadRejectsBadLogLevelTypo(t *testing.T) {
+	env := mapEnv(map[string]string{
+		"MCD_WORKER_API_GRPC_ENDPOINT":       "api:50051",
+		"MCD_WORKER_API_CREDENTIAL":          "secret",
+		"MCD_WORKER_API_TLS_INSECURE":        "true",
+		"MCD_WORKER_WORKER_SCRATCH_DIR":      t.TempDir(),
+		"MCD_WORKER_WORKER_DRIVERS":          "container",
+		"MCD_WORKER_DRIVER_CONTAINER_IMAGES": "21=eclipse-temurin:21-jre",
+		"MCD_WORKER_LOG_LEVEL":               "debgu",
+	})
+
+	if _, err := Load("", env); err == nil {
+		t.Fatal("Load() with typo in log.level: want error, got nil")
+	}
+}
+
 func contains(s, sub string) bool {
 	return strings.Contains(s, sub)
 }
