@@ -11,12 +11,16 @@ from __future__ import annotations
 import uuid
 
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from mc_server_dashboard_api.servers.adapters.group_models import (
     GroupPlayerModel,
     PlayerGroupModel,
     ServerGroupModel,
+)
+from mc_server_dashboard_api.servers.adapters.integrity import (
+    translate_integrity_error,
 )
 from mc_server_dashboard_api.servers.domain.group_repository import GroupRepository
 from mc_server_dashboard_api.servers.domain.groups import (
@@ -47,7 +51,13 @@ class SqlAlchemyGroupRepository(GroupRepository):
         # Flush the parent before the children: without an ORM relationship
         # SQLAlchemy does not order the INSERTs, so the group_player rows would
         # otherwise hit the FK to player_group before that row exists.
-        await self._session.flush()
+        # The flush is also the site where uq_player_group_community_kind_name
+        # surfaces for a concurrent create racer (issue #2000), so translate it.
+        try:
+            await self._session.flush()
+        except IntegrityError as exc:
+            translate_integrity_error(exc)
+            raise
         for player in group.players:
             self._session.add(_player_model(group.id, player))
 
