@@ -23,14 +23,18 @@ class ServerStateSink(abc.ABC):
     @abc.abstractmethod
     async def record_observed_state(
         self, *, server_id: str, worker_id: str, state: str
-    ) -> None:
+    ) -> bool:
         """Cache the worker-reported observed state for ``server_id`` (FR-SRV-4).
 
-        A report for an unknown server is ignored (the worker may know a server
-        the API has since deleted). ``worker_id`` is the reporting worker; the
-        adapter applies the write only when it is the server's assigned worker, so
-        a stale or misrouted report from a worker that no longer owns the server
-        cannot overwrite authoritative state (defense-in-depth).
+        Returns True when the write was applied, False when it was dropped
+        (unknown server, ownership guard, or monotonic guard). The caller uses
+        the flag to gate downstream side-effects such as real-time event
+        publishing (issue #1957).
+
+        ``worker_id`` is the reporting worker; the adapter applies the write
+        only when it is the server's assigned worker, so a stale or misrouted
+        report from a worker that no longer owns the server cannot overwrite
+        authoritative state (defense-in-depth).
         """
 
     @abc.abstractmethod
