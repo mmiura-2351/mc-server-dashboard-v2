@@ -47,6 +47,7 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     GroupNameAlreadyExistsError,
     PortAlreadyTakenError,
+    ResourcePackInUseError,
     ScheduleNameAlreadyExistsError,
     ServerNameAlreadyExistsError,
     SlugAlreadyTakenError,
@@ -295,3 +296,17 @@ async def test_group_add_reraises_unknown_violation_untranslated() -> None:
     repo = SqlAlchemyGroupRepository(session)  # type: ignore[arg-type]
     with pytest.raises(IntegrityError):
         await repo.add(_group_entity())
+
+
+# --- FK violation path (issue #1962) ------------------------------------------
+# A concurrent assignment races past the delete pre-check; the FK violation on
+# the resource_packs row delete surfaces as ResourcePackInUseError (409), not 500.
+
+
+async def test_commit_translates_resource_pack_fk_violation() -> None:
+    uow, session = _uow_with_commit_error(
+        "fk_srv_rp_assignments_resource_pack_id_resource_packs"
+    )
+    with pytest.raises(ResourcePackInUseError):
+        await uow.commit()
+    assert session.rolled_back is True
