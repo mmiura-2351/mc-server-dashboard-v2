@@ -1471,6 +1471,39 @@ async def test_update_safe_key_only_succeeds_while_running() -> None:
     assert uow.commits == 1
 
 
+async def test_update_safe_key_only_succeeds_while_running_with_jar_keys() -> None:
+    # A safe-keys-only edit must not be blocked by the at-rest gate even when the
+    # server already carries system-managed JAR keys in its config (#1965). The
+    # stripping logic must not cause JAR keys to appear as "changed" in the diff.
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(
+        community_id=community,
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.RUNNING,
+    )
+    server.config = {
+        "motd": "hi",
+        JAR_KEY_CONFIG_FIELD: "abcd1234" * 8,
+        JAR_SOURCE_CONFIG_FIELD: "sha1:abcd1234",
+    }
+    uow.servers.seed(server)
+    updated = await _updater(uow, min_interval_seconds=300)(
+        community_id=community,
+        server_id=server.id,
+        config={
+            "motd": "hi",
+            "snapshot_interval_seconds": 600,
+            JAR_KEY_CONFIG_FIELD: "abcd1234" * 8,
+            JAR_SOURCE_CONFIG_FIELD: "sha1:abcd1234",
+        },
+    )
+    assert updated.config["snapshot_interval_seconds"] == 600
+    # JAR keys preserved from old config.
+    assert updated.config[JAR_KEY_CONFIG_FIELD] == "abcd1234" * 8
+    assert uow.commits == 1
+
+
 async def test_update_unsafe_key_rejected_while_running() -> None:
     uow = FakeUnitOfWork()
     community = CommunityId(uuid.uuid4())

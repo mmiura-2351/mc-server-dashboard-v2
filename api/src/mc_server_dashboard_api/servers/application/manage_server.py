@@ -174,10 +174,12 @@ _RESERVED_CONFIG_KEYS = frozenset(
     }
 )
 
-# System-managed JAR keys written by the start path (issue #1965). These must
-# never be settable by an API client: a client-supplied value could pin an
-# arbitrary pooled JAR, bypassing version validation. Silently stripped from
-# client input following the Kubernetes/Stripe round-trip convention.
+# System-managed JAR keys written by the start path (issue #1965). A subset of
+# ``_RESERVED_CONFIG_KEYS`` that is additionally stripped from client input
+# (the other reserved keys are user-settable platform knobs or validated
+# independently). A client-supplied value could pin an arbitrary pooled JAR,
+# bypassing version validation; silently stripped following the
+# Kubernetes/Stripe round-trip convention.
 _SYSTEM_MANAGED_JAR_KEYS = frozenset({JAR_KEY_CONFIG_FIELD, JAR_SOURCE_CONFIG_FIELD})
 
 # The permission code the update gate evaluates. Kept as a bare string so this
@@ -587,7 +589,8 @@ class UpdateServer:
             # before any write, so it is never written into server.properties.
             _reject_retired_config_keys(config)
             # System-managed JAR keys are silently stripped from client input
-            # (#1965): the existing on-row values are preserved below.
+            # (#1965): the existing on-row values are restored once the
+            # server is read from the DB (before the config diff).
             _strip_system_jar_keys(config)
             # Validate the overrides carried on config before any write; each
             # raises on a bad value. The snapshot interval (FR-DATA-7) is
@@ -616,6 +619,13 @@ class UpdateServer:
                 server = await self.uow.servers.get_by_id(server_id)
                 if server is None or server.community_id != community_id:
                     raise ServerNotFoundError(str(server_id.value))
+                # Restore system-managed JAR keys from the existing config
+                # into the (already-stripped) client config before the diff,
+                # so they do not appear as "changed" (#1965).
+                if config is not None:
+                    for jar_key in _SYSTEM_MANAGED_JAR_KEYS:
+                        if jar_key in server.config:
+                            config[jar_key] = server.config[jar_key]
                 # The config diff drives the at-rest gate (issue #115): it applies
                 # unless this is a safe-keys-only config edit — a config update
                 # whose changed keys are all in ``_SAFE_CONFIG_KEYS``, with no name
@@ -671,14 +681,7 @@ class UpdateServer:
                         pending_removed_keys = (
                             old_overrides.keys() - new_overrides.keys()
                         )
-                    # Preserve system-managed JAR keys from the old config
-                    # (#1965): client input was stripped above, but the
-                    # start-path values must survive across updates.
-                    old_config = server.config
                     server.config = config
-                    for jar_key in _SYSTEM_MANAGED_JAR_KEYS:
-                        if jar_key in old_config:
-                            server.config[jar_key] = old_config[jar_key]
                 if game_port is not None and game_port != server.game_port:
                     # Uniqueness check excluding the server's own current port;
                     # the file rewrite is deferred to after commit (#1705).
