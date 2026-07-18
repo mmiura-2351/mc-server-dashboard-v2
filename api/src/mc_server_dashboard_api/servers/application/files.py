@@ -975,9 +975,10 @@ class DeleteFile:
 class MakeDir:
     """Create an (empty) directory at rest (file:edit, issue #259).
 
-    At rest only (running -> 409). Backend-dependent: fs materializes a real empty
-    directory; object storage cannot represent an empty directory and the seam
-    is a no-op there (the documented limitation). The path is traversal-validated.
+    At rest only (running -> 409). The path is traversal-validated; the root
+    path (``.``/empty) is rejected with 422 since the root always exists
+    (issue #1944). Both backends materialize the directory (fs: real empty
+    directory; object storage: zero-byte ``.dir`` marker, issue #1125).
     """
 
     uow: UnitOfWork
@@ -988,6 +989,11 @@ class MakeDir:
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> None:
         self.file_store.validate_rel_path(rel_path)
+        # The root directory always exists; creating it writes a poisoned marker
+        # key that the worker's safeJoin rejects (issue #1944).
+        cleaned = [p for p in PurePosixPath(rel_path).parts if p not in ("", ".")]
+        if not cleaned:
+            raise InvalidFilePathError(rel_path)
         # Hold the per-server lifecycle lock across the at-rest check and the
         # make-dir so a concurrent start cannot race the mutation (issue #827).
         async with self.lifecycle_lock.hold(server_id):
