@@ -820,6 +820,7 @@ function ImportForm({ communityId }: { communityId: string }) {
         progress.onProgress,
         progress.signal,
       );
+      progress.reset();
       navigate(`${dashboardPath(communityId)}/servers/${server.id}`);
     } catch (err) {
       progress.reset();

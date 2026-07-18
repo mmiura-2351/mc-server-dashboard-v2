@@ -34,14 +34,6 @@ if [ ! -f .env ]; then
 	MCD_API_STORAGE__OBJECT__SECRET_KEY="$(openssl rand -hex 32)"
 
 	# --- Host-specific values (interactive) ---
-	default_docker_gid="$(getent group docker 2>/dev/null | cut -d: -f3 || echo "")"
-	read -rp "DOCKER_GID [${default_docker_gid}]: " DOCKER_GID
-	DOCKER_GID="${DOCKER_GID:-$default_docker_gid}"
-	if [ -z "$DOCKER_GID" ]; then
-		echo "deploy: ERROR -- could not detect docker group GID and none provided." >&2
-		exit 1
-	fi
-
 	read -rp "MCSD_SCRATCH_DIR [/opt/mcsd/scratch]: " MCSD_SCRATCH_DIR
 	MCSD_SCRATCH_DIR="${MCSD_SCRATCH_DIR:-/opt/mcsd/scratch}"
 
@@ -153,7 +145,6 @@ ${MCD_API_STORAGE__BACKEND_LINE:+${MCD_API_STORAGE__BACKEND_LINE}}
 
 # --- Worker / container driver ---------------------------------------------
 MCSD_SCRATCH_DIR=${MCSD_SCRATCH_DIR}
-DOCKER_GID=${DOCKER_GID}
 ${MCD_WORKER_GAME_BIND_IP:+MCD_WORKER_GAME_BIND_IP=${MCD_WORKER_GAME_BIND_IP}}
 
 # --- Relay -----------------------------------------------------------------
