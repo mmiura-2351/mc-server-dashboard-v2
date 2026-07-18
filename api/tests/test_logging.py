@@ -298,6 +298,13 @@ def test_startup_warnings_use_configured_json_format() -> None:
     probe = _JsonProbeHandler()
     probe.setLevel(logging.WARNING)
     root = logging.getLogger()
+    # Strip any tagged app handler left by earlier tests (e.g.
+    # test_caplog_survives_multiple_create_app calls create_app which installs
+    # a JsonFormatter handler).  Without this, the probe would see the stale
+    # handler and pass even if configure_logging ran AFTER the warning.
+    stale = [h for h in root.handlers if getattr(h, "_mcsd_app_handler", False)]
+    for h in stale:
+        root.removeHandler(h)
     root.addHandler(probe)
     try:
         create_app(settings)
