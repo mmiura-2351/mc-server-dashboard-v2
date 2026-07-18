@@ -1164,3 +1164,71 @@ async def test_successful_backup_retry_also_prunes() -> None:
     remaining = _scheduled_rows(env, server)
     assert len(remaining) == 1
     assert remaining[0].id != old.id
+
+
+# --- hydration isolation (issue #1856) ------------------------------------
+
+
+def test_safe_hydrate_skips_unloadable_rows_and_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A ScheduleModel with invalid cadence data is skipped, not propagated.
+
+    Defense-in-depth (issue #1856): a corrupted row (e.g. interval_seconds
+    below the domain floor from a past migration bug or a manual DB edit) must
+    not prevent the remaining valid rows from loading.
+    """
+
+    from mc_server_dashboard_api.servers.adapters.schedule_models import ScheduleModel
+    from mc_server_dashboard_api.servers.adapters.schedule_repository import (
+        _safe_hydrate,
+    )
+
+    good_id = uuid.uuid4()
+    bad_id = uuid.uuid4()
+    server_id = uuid.uuid4()
+
+    good_row = ScheduleModel(
+        id=good_id,
+        server_id=server_id,
+        name="nightly-backup",
+        action="backup",
+        payload={},
+        cron=None,
+        interval_seconds=3600,
+        timezone="UTC",
+        enabled=True,
+        next_run_at=_NOW,
+        last_run_at=None,
+        created_by=None,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    bad_row = ScheduleModel(
+        id=bad_id,
+        server_id=server_id,
+        name="corrupted",
+        action="backup",
+        payload={},
+        cron=None,
+        interval_seconds=0,  # below the MIN_INTERVAL_SECONDS floor
+        timezone="UTC",
+        enabled=True,
+        next_run_at=_NOW,
+        last_run_at=None,
+        created_by=None,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = _safe_hydrate([bad_row, good_row])
+
+    # The valid row survived; the bad one was silently dropped.
+    assert len(result) == 1
+    assert result[0].id.value == good_id
+
+    # A warning was logged for the bad row, identifying it by id.
+    hydration_warnings = [r for r in caplog.records if "failed to hydrate" in r.message]
+    assert len(hydration_warnings) == 1
+    assert str(bad_id) in hydration_warnings[0].getMessage()
