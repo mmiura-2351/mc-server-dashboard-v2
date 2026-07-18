@@ -117,6 +117,19 @@ class MembershipRepository(abc.ABC):
     async def list_role_ids(self, membership_id: MembershipId) -> list[RoleId]:
         """Return the ids of the roles assigned to ``membership_id``."""
 
+    @abc.abstractmethod
+    async def lock_owner_role_holders(
+        self, community_id: CommunityId, role_id: RoleId
+    ) -> list[MembershipId]:
+        """Lock and return the membership ids holding ``role_id`` in ``community_id``.
+
+        Takes a ``SELECT ... FOR UPDATE`` lock on the ``membership_role`` rows
+        that assign ``role_id`` to members of ``community_id``, serializing
+        concurrent removals/unassignments so the second transaction blocks
+        until the first commits and then re-evaluates the decremented set
+        (#1959). Returns the membership ids of the current holders.
+        """
+
 
 class RoleRepository(abc.ABC):
     """Port: persistence for :class:`Role` aggregates."""
