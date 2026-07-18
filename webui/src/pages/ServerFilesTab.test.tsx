@@ -1876,6 +1876,85 @@ describe("ServerFilesTab drag-and-drop upload", () => {
     const [, form] = mockPostFormWithProgress.mock.calls[0];
     expect((form as FormData).get("file")).toBeTruthy();
   });
+
+  it("excludes oversized files from the progress denominator", async () => {
+    routeGet({ detail: server(), list: listing([]) });
+    // Simulate the upload completing by invoking the progress callback with
+    // the full file size, then hold the promise so the progress bar stays
+    // visible for inspection.
+    let resolveUpload: (() => void) | undefined;
+    mockPostFormWithProgress.mockImplementation(
+      (_url: string, form: FormData, onProgress: (loaded: number) => void) => {
+        const file = form.get("file") as File;
+        onProgress(file.size);
+        return new Promise<void>((resolve) => {
+          resolveUpload = resolve;
+        });
+      },
+    );
+    renderPage();
+    await openFiles();
+    await screen.findByText(t("files.empty"));
+
+    const tree = document.querySelector(".file-tree") as HTMLElement;
+    const small = new File(["hello"], "small.txt");
+    const big = new File(["x"], "huge.bin");
+    // Fake the size to exceed the 512 MiB cap.
+    Object.defineProperty(big, "size", { value: 600 * 1024 * 1024 });
+
+    fireEvent.drop(tree, { dataTransfer: dataTransfer([small, big]) });
+
+    // The progress bar should reach 100% because the oversized file's bytes
+    // must not inflate the denominator.
+    await waitFor(() => {
+      const bar = screen.getByRole("progressbar");
+      expect(bar).toHaveAttribute("aria-valuenow", "100");
+    });
+
+    // Only the small file was uploaded.
+    expect(mockPostFormWithProgress).toHaveBeenCalledTimes(1);
+
+    // The too-large toast fired.
+    expect(screen.getByText(t("files.error.tooLarge"))).toBeInTheDocument();
+
+    // Clean up: resolve the pending upload promise.
+    resolveUpload?.();
+  });
+
+  it("does not arm the progress bar when all dropped files are oversized", async () => {
+    routeGet({ detail: server(), list: listing([]) });
+    renderPage();
+    await openFiles();
+    await screen.findByText(t("files.empty"));
+
+    const tree = document.querySelector(".file-tree") as HTMLElement;
+    const big = new File(["x"], "huge.bin");
+    Object.defineProperty(big, "size", { value: 600 * 1024 * 1024 });
+
+    fireEvent.drop(tree, { dataTransfer: dataTransfer([big]) });
+
+    // Advance past the first yield in onDrop (the preparing-indicator phase).
+    // Do NOT wrap in act() — act flushes all pending async work, which would
+    // also process the handler's second yield and run progress.reset(),
+    // hiding the bug. A bare setTimeout lets the handler pause between
+    // progress.start() (armed) and progress.reset() (disarmed), exposing
+    // the progress bar if it was incorrectly armed.
+    await new Promise((r) => setTimeout(r, 0));
+
+    // With the pre-fix code, progress.start() fires during the tick above
+    // and the handler yields again before the upload loop — the progress
+    // bar would be in the DOM here. With the fix, the oversized file is
+    // filtered out and the handler returns early, so no bar appears.
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+
+    // No upload should have been attempted.
+    expect(mockPostFormWithProgress).not.toHaveBeenCalled();
+
+    // The too-large toast should have fired.
+    await waitFor(() =>
+      expect(screen.getByText(t("files.error.tooLarge"))).toBeInTheDocument(),
+    );
+  });
 });
 
 describe("ServerFilesTab multi-select", () => {
