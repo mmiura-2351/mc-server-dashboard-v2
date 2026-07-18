@@ -226,9 +226,9 @@ async def test_download_rejects_disallowed_host() -> None:
         await catalog.download_file("https://evil.example.com/x")
 
 
-def test_assert_no_private_ips_blocks_loopback() -> None:
+async def test_assert_no_private_ips_blocks_loopback() -> None:
     with pytest.raises(CatalogUnavailableError, match="private/reserved"):
-        _assert_no_private_ips(
+        await _assert_no_private_ips(
             "download.geysermc.org", _resolver=lambda _h: ["127.0.0.1"]
         )
 
@@ -245,7 +245,11 @@ async def test_list_versions_follows_metadata_redirect(
 ) -> None:
     # The live ``.../builds/latest`` endpoint 302-redirects to the concrete build
     # where the JSON lives; _get_json must follow it (not just error out).
-    monkeypatch.setattr(geysermc_catalog, "_resolve_host", lambda _h: ["104.18.0.1"])
+
+    async def _public_resolver(_h: str) -> list[str]:
+        return ["104.18.0.1"]
+
+    monkeypatch.setattr(geysermc_catalog, "_async_resolve_host", _public_resolver)
 
     def _handler(request: httpx2.Request) -> httpx2.Response:
         url = str(request.url)
@@ -277,7 +281,11 @@ async def test_get_json_html_body_raises_catalog_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An HTML body on HTTP 200 raises CatalogUnavailableError."""
-    monkeypatch.setattr(geysermc_catalog, "_resolve_host", lambda _h: ["104.18.0.1"])
+
+    async def _public_resolver(_h: str) -> list[str]:
+        return ["104.18.0.1"]
+
+    monkeypatch.setattr(geysermc_catalog, "_async_resolve_host", _public_resolver)
 
     def _handler(request: httpx2.Request) -> httpx2.Response:
         return httpx2.Response(
@@ -303,7 +311,11 @@ async def test_metadata_redirect_to_private_ip_rejected(
 ) -> None:
     # An allowlisted host that resolves to a private IP (DNS rebinding) is still
     # rejected on the redirect hop, not only the initial request.
-    monkeypatch.setattr(geysermc_catalog, "_resolve_host", lambda _h: ["127.0.0.1"])
+
+    async def _private_resolver(_h: str) -> list[str]:
+        return ["127.0.0.1"]
+
+    monkeypatch.setattr(geysermc_catalog, "_async_resolve_host", _private_resolver)
 
     def _handler(request: httpx2.Request) -> httpx2.Response:
         return httpx2.Response(302, headers={"location": _CONCRETE_PATH})

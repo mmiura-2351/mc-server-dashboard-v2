@@ -19,6 +19,7 @@ Modrinth download path does.
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import socket
 from collections.abc import Callable
@@ -29,16 +30,17 @@ class BlockedHostError(Exception):
     """A URL was refused by the SSRF guard (non-HTTPS or a private/reserved IP)."""
 
 
-def _default_resolve_host(hostname: str) -> list[str]:
-    """Resolve *hostname* to a list of IP address strings via DNS."""
-    results = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
+async def _async_resolve_host(hostname: str) -> list[str]:
+    """Resolve *hostname* without blocking the event loop.
+
+    Uses ``loop.getaddrinfo``, which delegates to the executor internally.
+    """
+    loop = asyncio.get_running_loop()
+    results = await loop.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
     return list({str(addr[4][0]) for addr in results})
 
 
-_resolve_host: Callable[[str], list[str]] = _default_resolve_host
-
-
-def assert_url_allowed(
+async def assert_url_allowed(
     url: str,
     *,
     _resolver: Callable[[str], list[str]] | None = None,
@@ -55,9 +57,11 @@ def assert_url_allowed(
     hostname = parsed.hostname
     if not hostname:
         raise BlockedHostError(f"URL has no host: {url}")
-    resolver = _resolver or _resolve_host
     try:
-        addrs = resolver(hostname)
+        if _resolver is not None:
+            addrs = _resolver(hostname)
+        else:
+            addrs = await _async_resolve_host(hostname)
     except (socket.gaierror, OSError) as exc:
         raise BlockedHostError(f"DNS resolution failed for {hostname}") from exc
     if not addrs:

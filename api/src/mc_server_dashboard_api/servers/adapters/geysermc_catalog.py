@@ -18,6 +18,7 @@ bounded redirects, download size cap).
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
 import socket
@@ -72,16 +73,17 @@ _FLOODGATE_DESCRIPTION = (
 _FLOODGATE_AUTHOR = "GeyserMC"
 
 
-def _default_resolve_host(hostname: str) -> list[str]:
-    """Resolve *hostname* to a list of IP address strings via DNS."""
-    results = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
+async def _async_resolve_host(hostname: str) -> list[str]:
+    """Resolve *hostname* without blocking the event loop.
+
+    Uses ``loop.getaddrinfo``, which delegates to the executor internally.
+    """
+    loop = asyncio.get_running_loop()
+    results = await loop.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
     return list({str(addr[4][0]) for addr in results})
 
 
-_resolve_host: Callable[[str], list[str]] = _default_resolve_host
-
-
-def _assert_no_private_ips(
+async def _assert_no_private_ips(
     hostname: str,
     *,
     _resolver: Callable[[str], list[str]] | None = None,
@@ -92,9 +94,11 @@ def _assert_no_private_ips(
     initially passes the allowlist check but resolves to a private/loopback
     address (mirrors :class:`ModrinthCatalog`).
     """
-    resolver = _resolver or _resolve_host
     try:
-        addrs = resolver(hostname)
+        if _resolver is not None:
+            addrs = _resolver(hostname)
+        else:
+            addrs = await _async_resolve_host(hostname)
     except (socket.gaierror, OSError) as exc:
         raise CatalogUnavailableError(f"DNS resolution failed for {hostname}") from exc
     if not addrs:
@@ -109,7 +113,7 @@ def _assert_no_private_ips(
             )
 
 
-def _next_redirect_url(response: httpx2.Response, current_url: str) -> str:
+async def _next_redirect_url(response: httpx2.Response, current_url: str) -> str:
     """Validate a redirect hop and return the absolute next URL (SSRF-safe).
 
     Both the metadata and download fetches follow redirects manually (httpx2
@@ -131,7 +135,7 @@ def _next_redirect_url(response: httpx2.Response, current_url: str) -> str:
         raise CatalogUnavailableError(
             f"redirect to disallowed host: {redirect_parsed.hostname}"
         )
-    _assert_no_private_ips(redirect_parsed.hostname)
+    await _assert_no_private_ips(redirect_parsed.hostname)
     return location
 
 
@@ -240,7 +244,7 @@ class GeyserMcCatalog(CatalogProvider):
             raise CatalogUnavailableError(
                 f"download URL host not allowed: {parsed.hostname}"
             )
-        _assert_no_private_ips(parsed.hostname)
+        await _assert_no_private_ips(parsed.hostname)
         try:
             async with httpx2.AsyncClient(
                 timeout=_DOWNLOAD_TIMEOUT,
@@ -252,7 +256,9 @@ class GeyserMcCatalog(CatalogProvider):
                         "GET", current_url, follow_redirects=False
                     ) as response:
                         if response.is_redirect:
-                            current_url = _next_redirect_url(response, current_url)
+                            current_url = await _next_redirect_url(
+                                response, current_url
+                            )
                             continue
                         response.raise_for_status()
                         chunks: list[bytes] = []
@@ -340,7 +346,9 @@ class GeyserMcCatalog(CatalogProvider):
                         "GET", current_url, follow_redirects=False
                     ) as response:
                         if response.is_redirect:
-                            current_url = _next_redirect_url(response, current_url)
+                            current_url = await _next_redirect_url(
+                                response, current_url
+                            )
                             continue
                         if response.status_code == 404:
                             raise CatalogProjectNotFoundError(path)
