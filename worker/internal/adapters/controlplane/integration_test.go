@@ -3,9 +3,11 @@ package controlplane_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"regexp"
 	"sync"
 	"testing"
 	"time"
@@ -57,6 +59,8 @@ type fakeServer struct {
 	heartbeats  int
 	heldServers []*controlplanev1.HeldServer
 	resources   *controlplanev1.HostResources
+	// messages records every WorkerMessage received on the stream, in order.
+	messages []*controlplanev1.WorkerMessage
 }
 
 func (s *fakeServer) Session(stream controlplanev1.WorkerService_SessionServer) error {
@@ -77,6 +81,7 @@ func (s *fakeServer) Session(stream controlplanev1.WorkerService_SessionServer) 
 	s.registers++
 	s.heldServers = first.GetRegister().GetHeldServers()
 	s.resources = first.GetRegister().GetCapabilities().GetResources()
+	s.messages = append(s.messages, first)
 	s.mu.Unlock()
 
 	if err := stream.Send(acceptAck(s.heartbeatEvery)); err != nil {
@@ -90,6 +95,9 @@ func (s *fakeServer) Session(stream controlplanev1.WorkerService_SessionServer) 
 		if err != nil {
 			return err
 		}
+		s.mu.Lock()
+		s.messages = append(s.messages, msg)
+		s.mu.Unlock()
 		if ev := msg.GetEvent(); ev != nil && ev.GetHeartbeat() != nil {
 			s.mu.Lock()
 			s.heartbeats++
@@ -136,6 +144,14 @@ func (s *fakeServer) reportedResources() *controlplanev1.HostResources {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.resources
+}
+
+func (s *fakeServer) recordedMessages() []*controlplanev1.WorkerMessage {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*controlplanev1.WorkerMessage, len(s.messages))
+	copy(out, s.messages)
+	return out
 }
 
 func acceptAck(every time.Duration) *controlplanev1.ApiMessage {
@@ -363,4 +379,67 @@ func TestRegisterAdvertisesResources(t *testing.T) {
 	if got.GetMemoryBytes() != 16*1024*1024*1024 {
 		t.Errorf("memory_bytes = %d, want %d", got.GetMemoryBytes(), uint64(16*1024*1024*1024))
 	}
+}
+
+// TestRegisterAndHeartbeatCarryCorrelationId proves the adapter stamps a fresh
+// UUID correlation_id on Register and Heartbeat messages (NFR-OBS-1, issue #2002)
+// so an operator can trace each event end to end.
+func TestRegisterAndHeartbeatCarryCorrelationId(t *testing.T) {
+	srv := &fakeServer{
+		wantCredential: "the-secret",
+		heartbeatEvery: 20 * time.Millisecond,
+	}
+	conn := startServer(t, srv)
+
+	dialer := controlplane.NewDialer(conn, "the-secret", realClock{})
+	runner := session.NewRunner(dialer, testCaps(), realClock{}, testLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = runner.Run(ctx); close(done) }()
+
+	waitFor(t, func() bool { return srv.registerCount() == 1 })
+	waitFor(t, func() bool { return srv.heartbeatCount() >= 1 })
+
+	cancel()
+	<-done
+
+	msgs := srv.recordedMessages()
+	if len(msgs) < 2 {
+		t.Fatalf("expected at least 2 messages (Register + Heartbeat), got %d", len(msgs))
+	}
+
+	// First message is Register; it must carry a non-empty UUID correlation_id.
+	regID := msgs[0].GetCorrelationId()
+	if regID == "" {
+		t.Fatal("Register message has empty correlation_id, want a fresh UUID")
+	}
+	if _, err := parseUUID(regID); err != nil {
+		t.Fatalf("Register correlation_id %q is not a valid UUID: %v", regID, err)
+	}
+
+	// Second message is Heartbeat; its correlation_id must also be non-empty and
+	// different from the Register's (each event gets its own fresh id).
+	hbID := msgs[1].GetCorrelationId()
+	if hbID == "" {
+		t.Fatal("Heartbeat message has empty correlation_id, want a fresh UUID")
+	}
+	if _, err := parseUUID(hbID); err != nil {
+		t.Fatalf("Heartbeat correlation_id %q is not a valid UUID: %v", hbID, err)
+	}
+	if hbID == regID {
+		t.Errorf("Heartbeat correlation_id equals Register's (%s); each event must get a fresh id", hbID)
+	}
+}
+
+// uuidRe matches the canonical 8-4-4-4-12 UUID text form.
+var uuidRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// parseUUID validates a string as a UUID without importing google/uuid in tests.
+func parseUUID(s string) (string, error) {
+	if !uuidRe.MatchString(s) {
+		return "", fmt.Errorf("%q is not a valid UUID", s)
+	}
+	return s, nil
 }
