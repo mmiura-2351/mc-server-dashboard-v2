@@ -556,7 +556,7 @@ export function ServerFilesTab({
     mutationFn: (file: File) => {
       const form = new FormData();
       form.append("file", file);
-      progress.start(file.size);
+      const signal = progress.start(file.size);
       return postFormWithProgress(
         `${apiPath(
           "/api/communities/{community_id}/servers/{server_id}/files/upload",
@@ -564,7 +564,7 @@ export function ServerFilesTab({
         )}?path=${encodeURIComponent(dir)}&extract=false` as never,
         form,
         progress.onProgress,
-        progress.signal,
+        signal,
       );
     },
     onSuccess: () => {
@@ -882,7 +882,7 @@ export function ServerFilesTab({
         0,
       );
       setUploadPreparing(false);
-      progress.start(totalSize);
+      const signal = progress.start(totalSize);
       // Yield to the renderer so React commits the progress-bar state before
       // the upload loop monopolises the main thread.
       await new Promise((resolve) => setTimeout(resolve, 0));
@@ -906,7 +906,7 @@ export function ServerFilesTab({
             (loaded) => {
               progress.onProgress(fileBaseLoaded + loaded, totalSize);
             },
-            progress.signal,
+            signal,
           );
           cumulativeLoaded += file.size;
           uploaded++;
@@ -1321,7 +1321,7 @@ export function ServerFilesTab({
               onExtract={(file) => {
                 const form = new FormData();
                 form.append("file", file);
-                progress.start(file.size);
+                const signal = progress.start(file.size);
                 postFormWithProgress(
                   `${apiPath(
                     "/api/communities/{community_id}/servers/{server_id}/files/upload",
@@ -1329,7 +1329,7 @@ export function ServerFilesTab({
                   )}?path=${encodeURIComponent(dir)}&extract=true` as never,
                   form,
                   progress.onProgress,
-                  progress.signal,
+                  signal,
                 ).then(
                   () => {
                     progress.reset();
