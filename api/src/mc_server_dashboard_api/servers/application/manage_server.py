@@ -10,7 +10,7 @@ assume an authorized member and only do the data work.
 - :class:`ReadServer` / :class:`ListServers` are community-scoped reads; a server
   whose ``community_id`` does not match the path community is reported as
   not-found (no cross-community existence signal, FR-COMM-3).
-- :class:`UpdateServer` edits name/config only while the server is at rest
+- :class:`UpdateServer` edits mutable server properties while the server is at rest
   (Section 6.9 spirit).
 - :class:`DeleteServer` deletes a stopped server and sweeps its resource grants in
   the same transaction (Section 10).

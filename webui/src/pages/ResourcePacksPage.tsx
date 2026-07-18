@@ -237,7 +237,10 @@ function UploadDialog({
         progress.signal,
       );
     },
-    onSuccess,
+    onSuccess: () => {
+      progress.reset();
+      onSuccess();
+    },
     onError: (error) => {
       progress.reset();
       if (isUploadAbortError(error)) return;

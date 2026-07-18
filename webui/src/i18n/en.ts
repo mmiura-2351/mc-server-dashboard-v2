@@ -1713,6 +1713,8 @@ export const en = {
   // Server resource pack assignment (issue #1179). Displayed as a card in the
   // server detail Settings tab.
   "serverDetail.resourcePack.heading": "Resource pack",
+  "serverDetail.resourcePack.loadError":
+    "Could not load the resource pack assignment.",
   "serverDetail.resourcePack.none": "No resource pack assigned.",
   "serverDetail.resourcePack.assign": "Assign",
   "serverDetail.resourcePack.change": "Change",
