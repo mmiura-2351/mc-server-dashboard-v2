@@ -20,6 +20,7 @@ _EMPTY = SweepSummary(
     servers_scanned=0,
     backups_healthy=0,
     backups_quarantined=0,
+    backups_dangling=0,
     snapshots_scanned=0,
     snapshots_flagged=0,
 )
