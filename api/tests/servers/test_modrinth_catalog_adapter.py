@@ -355,6 +355,107 @@ async def test_get_project_encodes_slug_in_url_path() -> None:
     assert "my%20mod%2Fv2" in captured_urls[0]
 
 
+async def test_get_json_html_body_raises_catalog_unavailable() -> None:
+    """An HTML body on HTTP 200 raises CatalogUnavailableError."""
+
+    def _handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            200, content=b"<html><body>Service Unavailable</body></html>"
+        )
+
+    transport = httpx2.MockTransport(_handler)
+    catalog = ModrinthCatalog(base_url="https://api.modrinth.com/v2")
+
+    real_init = httpx2.AsyncClient.__init__
+
+    def patched_init(self_client: httpx2.AsyncClient, **kwargs: Any) -> None:
+        kwargs["transport"] = transport
+        real_init(self_client, **kwargs)
+
+    httpx2.AsyncClient.__init__ = patched_init  # type: ignore[assignment]
+    try:
+        with pytest.raises(CatalogUnavailableError):
+            await catalog.search(
+                query="test", loader="fabric", game_versions=["1.20.4"]
+            )
+    finally:
+        httpx2.AsyncClient.__init__ = real_init  # type: ignore[method-assign]
+
+
+async def test_search_shape_error_raises_catalog_unavailable() -> None:
+    """A valid JSON response with unexpected shape raises CatalogUnavailableError."""
+
+    def _handler(request: httpx2.Request) -> httpx2.Response:
+        # Return a JSON array instead of the expected object with "hits".
+        return httpx2.Response(200, content=b'["unexpected", "array"]')
+
+    transport = httpx2.MockTransport(_handler)
+    catalog = ModrinthCatalog(base_url="https://api.modrinth.com/v2")
+
+    real_init = httpx2.AsyncClient.__init__
+
+    def patched_init(self_client: httpx2.AsyncClient, **kwargs: Any) -> None:
+        kwargs["transport"] = transport
+        real_init(self_client, **kwargs)
+
+    httpx2.AsyncClient.__init__ = patched_init  # type: ignore[assignment]
+    try:
+        with pytest.raises(CatalogUnavailableError):
+            await catalog.search(
+                query="test", loader="fabric", game_versions=["1.20.4"]
+            )
+    finally:
+        httpx2.AsyncClient.__init__ = real_init  # type: ignore[method-assign]
+
+
+async def test_get_project_shape_error_raises_catalog_unavailable() -> None:
+    """get_project raises CatalogUnavailableError when required keys are missing."""
+
+    def _handler(request: httpx2.Request) -> httpx2.Response:
+        # Return valid JSON but missing the required "id" key.
+        return httpx2.Response(200, content=b'{"slug":"test","title":"Test"}')
+
+    transport = httpx2.MockTransport(_handler)
+    catalog = ModrinthCatalog(base_url="https://api.modrinth.com/v2")
+
+    real_init = httpx2.AsyncClient.__init__
+
+    def patched_init(self_client: httpx2.AsyncClient, **kwargs: Any) -> None:
+        kwargs["transport"] = transport
+        real_init(self_client, **kwargs)
+
+    httpx2.AsyncClient.__init__ = patched_init  # type: ignore[assignment]
+    try:
+        with pytest.raises(CatalogUnavailableError):
+            await catalog.get_project("test")
+    finally:
+        httpx2.AsyncClient.__init__ = real_init  # type: ignore[method-assign]
+
+
+async def test_list_versions_shape_error_raises_catalog_unavailable() -> None:
+    """list_versions raises CatalogUnavailableError on bad shape."""
+
+    def _handler(request: httpx2.Request) -> httpx2.Response:
+        # Return a list with an entry missing the required "id" key.
+        return httpx2.Response(200, content=b'[{"version_number":"1.0"}]')
+
+    transport = httpx2.MockTransport(_handler)
+    catalog = ModrinthCatalog(base_url="https://api.modrinth.com/v2")
+
+    real_init = httpx2.AsyncClient.__init__
+
+    def patched_init(self_client: httpx2.AsyncClient, **kwargs: Any) -> None:
+        kwargs["transport"] = transport
+        real_init(self_client, **kwargs)
+
+    httpx2.AsyncClient.__init__ = patched_init  # type: ignore[assignment]
+    try:
+        with pytest.raises(CatalogUnavailableError):
+            await catalog.list_versions("test")
+    finally:
+        httpx2.AsyncClient.__init__ = real_init  # type: ignore[method-assign]
+
+
 async def test_get_project_author_is_none_not_team_id() -> None:
     """get_project must not expose the opaque team ID as author (issue #1999)."""
 

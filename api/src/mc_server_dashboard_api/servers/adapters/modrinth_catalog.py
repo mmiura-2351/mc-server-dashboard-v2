@@ -114,44 +114,50 @@ class ModrinthCatalog(CatalogProvider):
             "offset": offset,
         }
         data = await self._get_json("/search", params=params)
-        hits = [
-            CatalogSearchResult(
-                project_id=h["project_id"],
-                slug=h.get("slug", ""),
-                title=h.get("title", ""),
-                description=h.get("description", ""),
-                author=h.get("author", ""),
-                icon_url=h.get("icon_url"),
-                downloads=h.get("downloads", 0),
-                categories=h.get("categories", []),
-                latest_game_versions=h.get("versions", []),
+        try:
+            hits = [
+                CatalogSearchResult(
+                    project_id=h["project_id"],
+                    slug=h.get("slug", ""),
+                    title=h.get("title", ""),
+                    description=h.get("description", ""),
+                    author=h.get("author", ""),
+                    icon_url=h.get("icon_url"),
+                    downloads=h.get("downloads", 0),
+                    categories=h.get("categories", []),
+                    latest_game_versions=h.get("versions", []),
+                )
+                for h in data.get("hits", [])
+            ]
+            return CatalogSearchResponse(
+                hits=hits,
+                total_hits=data.get("total_hits", 0),
+                offset=data.get("offset", offset),
+                limit=data.get("limit", limit),
             )
-            for h in data.get("hits", [])
-        ]
-        return CatalogSearchResponse(
-            hits=hits,
-            total_hits=data.get("total_hits", 0),
-            offset=data.get("offset", offset),
-            limit=data.get("limit", limit),
-        )
+        except (AttributeError, KeyError, TypeError) as exc:
+            raise CatalogUnavailableError(f"unexpected response shape: {exc}") from exc
 
     async def get_project(self, project_id_or_slug: str) -> CatalogProject:
         data = await self._get_json(f"/project/{quote(project_id_or_slug, safe='')}")
-        return CatalogProject(
-            project_id=data["id"],
-            slug=data.get("slug", ""),
-            title=data.get("title", ""),
-            description=data.get("description", ""),
-            body=data.get("body", ""),
-            author=None,
-            icon_url=data.get("icon_url"),
-            downloads=data.get("downloads", 0),
-            categories=data.get("categories", []),
-            game_versions=data.get("game_versions", []),
-            loaders=data.get("loaders", []),
-            client_side=data.get("client_side", "unknown"),
-            server_side=data.get("server_side", "unknown"),
-        )
+        try:
+            return CatalogProject(
+                project_id=data["id"],
+                slug=data.get("slug", ""),
+                title=data.get("title", ""),
+                description=data.get("description", ""),
+                body=data.get("body", ""),
+                author=None,
+                icon_url=data.get("icon_url"),
+                downloads=data.get("downloads", 0),
+                categories=data.get("categories", []),
+                game_versions=data.get("game_versions", []),
+                loaders=data.get("loaders", []),
+                client_side=data.get("client_side", "unknown"),
+                server_side=data.get("server_side", "unknown"),
+            )
+        except (AttributeError, KeyError, TypeError) as exc:
+            raise CatalogUnavailableError(f"unexpected response shape: {exc}") from exc
 
     async def list_versions(
         self,
@@ -168,7 +174,10 @@ class ModrinthCatalog(CatalogProvider):
         data = await self._get_json(
             f"/project/{quote(project_id_or_slug, safe='')}/version", params=params
         )
-        return [self._parse_version(v) for v in data]
+        try:
+            return [self._parse_version(v) for v in data]
+        except (AttributeError, KeyError, TypeError) as exc:
+            raise CatalogUnavailableError(f"unexpected response shape: {exc}") from exc
 
     async def download_file(self, url: str) -> bytes:
         parsed = urlparse(url)
@@ -257,7 +266,7 @@ class ModrinthCatalog(CatalogProvider):
             raise
         except httpx2.HTTPStatusError as exc:
             raise CatalogUnavailableError(str(exc)) from exc
-        except httpx2.TransportError as exc:
+        except (httpx2.TransportError, ValueError) as exc:
             raise CatalogUnavailableError(str(exc)) from exc
 
     @staticmethod
