@@ -786,10 +786,15 @@ What must **not** be touched:
   member removes their *assignment*, not the role definition).
 - `audit_log` rows referencing the user (soft references; Section 9).
 
-Distinct from member removal, **deleting a whole Community** cascades to its
-`membership`, `role`, `membership_role`, `resource_grant`, `server` (and thence
-`backup`) rows via `ON DELETE CASCADE`, while `audit_log` keeps its
-soft-referenced history.
+Distinct from member removal, **deleting a whole Community** removes every row
+reachable from `community.id` through `ON DELETE CASCADE` foreign keys.
+Rather than enumerate the full transitive set here (where it drifts each time a
+table is added), each table definition in Sections 5–8 documents its own FK and
+cascade behavior — the cascade column in any table that carries
+`ON DELETE CASCADE` from `community` (directly or transitively through `server`,
+`player_group`, or `schedule`) is the authoritative source. `audit_log` is the
+deliberate exception: its references are soft (no FK), so its rows survive the
+deletion (Section 9).
 
 Also distinct, **deleting a single server** (without deleting its Community) must
 sweep the `resource_grant` rows that point at it. Since `resource_id` is a soft
