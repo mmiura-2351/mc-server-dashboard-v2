@@ -651,6 +651,15 @@ class ObjectStorage(Storage):
                 members = sorted(
                     await client.list_objects(snapshot_prefix), key=lambda o: o.key
                 )
+                # Scrub poisoned keys whose relative name starts with ``/``
+                # (issue #1944): a prior root ``make_dir`` bug could write
+                # ``<prefix>//.dir`` whose tar member ``/.dir`` is absolute and
+                # the worker's ``safeJoin`` rejects, blocking hydrate forever.
+                members = [
+                    m
+                    for m in members
+                    if not m.key[len(snapshot_prefix) :].startswith("/")
+                ]
                 async for chunk in _tar_stream_from_objects(
                     client, snapshot_prefix, members
                 ):
@@ -1604,6 +1613,11 @@ class ObjectStorage(Storage):
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
     ) -> None:
         sub = self._safe_subkey(rel_path)
+        if not sub:
+            # Root path — the root always exists; writing a marker here would
+            # produce a ``//.dir`` key whose hydrate tar member ``/.dir`` the
+            # worker's safeJoin rejects as absolute (issue #1944).
+            return
         # Write a zero-byte marker object so the empty directory is visible in
         # listings (issue #1125). The marker is filtered out by ``_entries_at_level``
         # so it never appears as a file entry.
