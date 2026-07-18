@@ -49,7 +49,7 @@ _RESOURCE_PACK_FK_CONSTRAINTS = frozenset(
 
 
 def translate_integrity_error(exc: IntegrityError) -> None:
-    """Raise the matching domain error for a known unique violation, else return."""
+    """Raise the matching domain error for a known constraint violation, else return."""
 
     constraint = _constraint_name(exc)
     if constraint in _SERVER_NAME_CONSTRAINTS:
