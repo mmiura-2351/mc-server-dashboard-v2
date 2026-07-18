@@ -1933,14 +1933,27 @@ describe("ServerFilesTab drag-and-drop upload", () => {
 
     fireEvent.drop(tree, { dataTransfer: dataTransfer([big]) });
 
-    // The too-large toast fires.
+    // Advance past the first yield in onDrop (the preparing-indicator phase).
+    // Do NOT wrap in act() — act flushes all pending async work, which would
+    // also process the handler's second yield and run progress.reset(),
+    // hiding the bug. A bare setTimeout lets the handler pause between
+    // progress.start() (armed) and progress.reset() (disarmed), exposing
+    // the progress bar if it was incorrectly armed.
+    await new Promise((r) => setTimeout(r, 0));
+
+    // With the pre-fix code, progress.start() fires during the tick above
+    // and the handler yields again before the upload loop — the progress
+    // bar would be in the DOM here. With the fix, the oversized file is
+    // filtered out and the handler returns early, so no bar appears.
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+
+    // No upload should have been attempted.
+    expect(mockPostFormWithProgress).not.toHaveBeenCalled();
+
+    // The too-large toast should have fired.
     await waitFor(() =>
       expect(screen.getByText(t("files.error.tooLarge"))).toBeInTheDocument(),
     );
-
-    // No upload should have been attempted and no progress bar armed.
-    expect(mockPostFormWithProgress).not.toHaveBeenCalled();
-    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
   });
 });
 
