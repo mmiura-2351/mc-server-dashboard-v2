@@ -281,7 +281,11 @@ async def test_get_json_html_body_raises_catalog_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An HTML body on HTTP 200 raises CatalogUnavailableError."""
-    monkeypatch.setattr(geysermc_catalog, "_resolve_host", lambda _h: ["104.18.0.1"])
+
+    async def _public_resolver(_h: str) -> list[str]:
+        return ["104.18.0.1"]
+
+    monkeypatch.setattr(geysermc_catalog, "_async_resolve_host", _public_resolver)
 
     def _handler(request: httpx2.Request) -> httpx2.Response:
         return httpx2.Response(
