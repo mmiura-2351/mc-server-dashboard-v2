@@ -93,9 +93,10 @@ def _catalog_with_build(build: dict[str, Any]) -> GeyserMcCatalog:
 # -- routing predicates --
 
 
-def test_handles_only_floodgate() -> None:
+def test_handles_only_synthetic_id() -> None:
     catalog = GeyserMcCatalog()
-    assert catalog.handles("floodgate") is True
+    assert catalog.handles("geysermc-floodgate") is True
+    assert catalog.handles("floodgate") is False  # bare slug belongs to Modrinth
     assert catalog.handles("geyser") is False
     assert catalog.handles("fabric-api") is False
 
@@ -118,7 +119,7 @@ def test_handles_url_only_geysermc_host() -> None:
 async def test_search_surfaces_floodgate_for_paper(query: str) -> None:
     catalog = GeyserMcCatalog()
     resp = await catalog.search(query=query, loader="paper", game_versions=["1.21.1"])
-    assert [h.project_id for h in resp.hits] == ["floodgate"]
+    assert [h.project_id for h in resp.hits] == ["geysermc-floodgate"]
     assert resp.total_hits == 1
 
 
@@ -148,9 +149,9 @@ async def test_search_empty_beyond_first_page() -> None:
 
 async def test_get_project_floodgate_carries_geyser_source() -> None:
     catalog = GeyserMcCatalog()
-    project = await catalog.get_project("floodgate")
-    assert project.project_id == "floodgate"
-    assert project.slug == "floodgate"
+    project = await catalog.get_project("geysermc-floodgate")
+    assert project.project_id == "geysermc-floodgate"
+    assert project.slug == "geysermc-floodgate"
     assert project.source == "geyser"
     assert project.loaders == ["paper"]
 
@@ -161,12 +162,19 @@ async def test_get_project_rejects_unhandled_project() -> None:
         await catalog.get_project("sodium")
 
 
+async def test_get_project_rejects_bare_floodgate_slug() -> None:
+    """The bare ``floodgate`` slug belongs to Modrinth (issue #1961)."""
+    catalog = GeyserMcCatalog()
+    with pytest.raises(CatalogProjectNotFoundError):
+        await catalog.get_project("floodgate")
+
+
 # -- list_versions --
 
 
 async def test_list_versions_parses_latest_spigot_build() -> None:
     catalog = _catalog_with_build(_BUILD)
-    versions = await catalog.list_versions("floodgate", loader="paper")
+    versions = await catalog.list_versions("geysermc-floodgate", loader="paper")
     assert len(versions) == 1
     version = versions[0]
     assert version.version_id == "2.2.5-138"
@@ -186,7 +194,7 @@ async def test_list_versions_parses_latest_spigot_build() -> None:
 
 async def test_list_versions_empty_for_non_paper_loader() -> None:
     catalog = _catalog_with_build(_BUILD)
-    assert await catalog.list_versions("floodgate", loader="fabric") == []
+    assert await catalog.list_versions("geysermc-floodgate", loader="fabric") == []
 
 
 async def test_list_versions_rejects_unhandled_project() -> None:
@@ -200,7 +208,7 @@ async def test_list_versions_raises_when_no_spigot_download() -> None:
     build["downloads"] = {"velocity": {"name": "x", "sha256": "cc"}}
     catalog = _catalog_with_build(build)
     with pytest.raises(CatalogProjectNotFoundError):
-        await catalog.list_versions("floodgate", loader="paper")
+        await catalog.list_versions("geysermc-floodgate", loader="paper")
 
 
 # -- download_file SSRF guards (mirrors ModrinthCatalog hardening) --
@@ -249,7 +257,7 @@ async def test_list_versions_follows_metadata_redirect(
 
     catalog = GeyserMcCatalog()
     with _mock_transport(_handler):
-        versions = await catalog.list_versions("floodgate", loader="paper")
+        versions = await catalog.list_versions("geysermc-floodgate", loader="paper")
 
     assert [v.version_id for v in versions] == ["2.2.5-138"]
     assert versions[0].files[0].sha256 == _SPIGOT_SHA256
@@ -262,7 +270,7 @@ async def test_metadata_redirect_to_disallowed_host_rejected() -> None:
     catalog = GeyserMcCatalog()
     with _mock_transport(_handler):
         with pytest.raises(CatalogUnavailableError, match="disallowed host"):
-            await catalog.list_versions("floodgate", loader="paper")
+            await catalog.list_versions("geysermc-floodgate", loader="paper")
 
 
 async def test_get_json_html_body_raises_catalog_unavailable(
@@ -303,4 +311,4 @@ async def test_metadata_redirect_to_private_ip_rejected(
     catalog = GeyserMcCatalog()
     with _mock_transport(_handler):
         with pytest.raises(CatalogUnavailableError, match="private/reserved"):
-            await catalog.list_versions("floodgate", loader="paper")
+            await catalog.list_versions("geysermc-floodgate", loader="paper")

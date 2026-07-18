@@ -1354,9 +1354,9 @@ func TestRegisterAckEmptyUnknownHeldServerIDsSkipsReclaimer(t *testing.T) {
 	done := make(chan struct{})
 	go func() { _ = r.Run(ctx); close(done) }()
 
-	waitFor(t, func() bool { return transport.registerCount() == 1 })
-	// Give a small window for any erroneous reclaimer call to land.
-	time.Sleep(50 * time.Millisecond)
+	// Wait for ResyncStatus (called after the reclaimer check in the register
+	// flow) to confirm ack processing completed.
+	waitFor(t, func() bool { return handler.resyncCallsCopy() > 0 })
 	if got := handler.reclaimedIDsCopy(); len(got) != 0 {
 		t.Fatalf("reclaimed ids = %v, want empty", got)
 	}

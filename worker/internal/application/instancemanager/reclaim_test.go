@@ -68,9 +68,7 @@ func TestReclaimDeletedScratchesSkipsRunningServer(t *testing.T) {
 	_ = m.Handle(context.Background(), startCmd())
 	dir := seedScratch(t, m, "s1")
 
-	m.ReclaimDeletedScratches([]string{"s1"})
-	// Give time for the goroutine.
-	time.Sleep(50 * time.Millisecond)
+	m.reclaimDeletedScratches([]string{"s1"})
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("scratch dir removed for a running server: %v", err)
 	}
@@ -86,8 +84,7 @@ func TestReclaimDeletedScratchesRefusesUnsafeID(t *testing.T) {
 	}
 	defer func() { _ = os.RemoveAll(sibling) }()
 
-	m.ReclaimDeletedScratches([]string{"../escaped", "", "."})
-	time.Sleep(50 * time.Millisecond)
+	m.reclaimDeletedScratches([]string{"../escaped", "", "."})
 	if _, err := os.Stat(sibling); err != nil {
 		t.Fatalf("traversal-unsafe id escaped the scratch root: %v", err)
 	}
@@ -97,8 +94,7 @@ func TestReclaimDeletedScratchesRefusesUnsafeID(t *testing.T) {
 func TestReclaimDeletedScratchesIdempotentOnMissingDir(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	// "no-such-server" has no scratch dir — the call should not panic.
-	m.ReclaimDeletedScratches([]string{"no-such-server"})
-	time.Sleep(50 * time.Millisecond)
+	m.reclaimDeletedScratches([]string{"no-such-server"})
 	// Reaching here without a panic is the assertion.
 }
 
@@ -113,8 +109,7 @@ func TestReclaimDeletedScratchesSkipsReservedServer(t *testing.T) {
 		t.Fatal("could not reserve s1 for test setup")
 	}
 
-	m.ReclaimDeletedScratches([]string{"s1"})
-	time.Sleep(50 * time.Millisecond)
+	m.reclaimDeletedScratches([]string{"s1"})
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("scratch dir removed for a reserved server: %v", err)
 	}
