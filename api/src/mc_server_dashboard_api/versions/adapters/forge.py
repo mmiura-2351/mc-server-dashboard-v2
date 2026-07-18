@@ -33,7 +33,11 @@ from mc_server_dashboard_api.versions.domain.errors import (
     CatalogUnavailableError,
     UnknownVersionError,
 )
-from mc_server_dashboard_api.versions.domain.fetcher import FetchError, JsonFetcher
+from mc_server_dashboard_api.versions.domain.fetcher import (
+    FetchError,
+    FetchNotFoundError,
+    JsonFetcher,
+)
 from mc_server_dashboard_api.versions.domain.value_objects import (
     HashAlgorithm,
     JarSource,
@@ -89,7 +93,10 @@ class ForgeCatalog(VersionCatalog):
             # (1.7.10, 1.8.9, 1.9.4) append the MC version.
             full_version = f"{version}-{forge_version}-{version}"
             url = _installer_sha1_url(full_version)
-            sha1 = (await self.fetcher.get_text(url)).strip()
+            try:
+                sha1 = (await self.fetcher.get_text(url)).strip()
+            except FetchNotFoundError:
+                raise UnknownVersionError(f"forge {version}")
         return JarSource(
             server_type=ServerType.FORGE,
             version=version,
