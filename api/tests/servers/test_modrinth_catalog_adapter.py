@@ -355,6 +355,34 @@ async def test_get_project_encodes_slug_in_url_path() -> None:
     assert "my%20mod%2Fv2" in captured_urls[0]
 
 
+async def test_get_project_author_is_none_not_team_id() -> None:
+    """get_project must not expose the opaque team ID as author (issue #1999)."""
+
+    def _handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            200,
+            content=b'{"id":"abc","slug":"fabric-api","title":"Fabric API",'
+            b'"team":"peSx5UYg","description":"","body":""}',
+        )
+
+    transport = httpx2.MockTransport(_handler)
+    catalog = ModrinthCatalog(base_url="https://api.modrinth.com/v2")
+
+    real_init = httpx2.AsyncClient.__init__
+
+    def patched_init(self_client: httpx2.AsyncClient, **kwargs: Any) -> None:
+        kwargs["transport"] = transport
+        real_init(self_client, **kwargs)
+
+    httpx2.AsyncClient.__init__ = patched_init  # type: ignore[assignment]
+    try:
+        project = await catalog.get_project("fabric-api")
+    finally:
+        httpx2.AsyncClient.__init__ = real_init  # type: ignore[method-assign]
+
+    assert project.author is None
+
+
 async def test_list_versions_encodes_slug_in_url_path() -> None:
     """list_versions also percent-encodes the slug in the URL path."""
     captured_urls: list[str] = []
