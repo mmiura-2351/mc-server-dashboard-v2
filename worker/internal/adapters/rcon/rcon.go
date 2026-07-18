@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"time"
 )
 
@@ -85,30 +86,47 @@ func Dial(ctx context.Context, addr, password string) (*Client, error) {
 	return c, nil
 }
 
-// Execute sends one command line and returns the server's reply body. It honours
-// ctx's deadline for the round trip, and falls back to defaultExecuteTimeout when
-// ctx carries none, so a server that accepts the connection but never replies
-// cannot block the call forever. It returns ctx.Err() when ctx cancellation
-// caused the failure, and ErrConnBroken when the connection was poisoned by a
-// prior failed round trip.
+// Execute sends one command line and returns the server's reply body. Vanilla
+// Minecraft's RCON server fragments replies longer than 4096 bytes into multiple
+// RESPONSE_VALUE packets with the same request id, with no end marker. Execute
+// sends a second marker command (empty body) with its own id after the real
+// command: the arrival of the marker's reply deterministically signals that all
+// fragments for the real command have been received.
+//
+// It honours ctx's deadline for the round trip, and falls back to
+// defaultExecuteTimeout when ctx carries none, so a server that accepts the
+// connection but never replies cannot block the call forever. It returns
+// ctx.Err() when ctx cancellation caused the failure, and ErrConnBroken when
+// the connection was poisoned by a prior failed round trip.
 func (c *Client) Execute(ctx context.Context, line string) (string, error) {
 	if c.broken {
 		return "", ErrConnBroken
 	}
 	var body string
 	err := c.withDeadline(ctx, func() error {
-		id := c.id()
-		if err := c.write(id, typeExecCommand, line); err != nil {
+		cmdID := c.id()
+		markerID := c.id()
+		if err := c.write(cmdID, typeExecCommand, line); err != nil {
 			return err
 		}
-		respID, _, b, err := c.read()
-		if err != nil {
+		if err := c.write(markerID, typeExecCommand, ""); err != nil {
 			return err
 		}
-		if respID != id {
-			return fmt.Errorf("rcon: response id %d did not match request id %d", respID, id)
+		var buf strings.Builder
+		for {
+			respID, _, b, err := c.read()
+			if err != nil {
+				return err
+			}
+			if respID == markerID {
+				break
+			}
+			if respID != cmdID {
+				return fmt.Errorf("rcon: response id %d did not match request id %d or marker id %d", respID, cmdID, markerID)
+			}
+			buf.WriteString(b)
 		}
-		body = b
+		body = buf.String()
 		return nil
 	})
 	if err != nil {
