@@ -8,7 +8,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from mc_server_dashboard_api.app import create_app
-from mc_server_dashboard_api.config import DatabaseSettings, Settings
+from mc_server_dashboard_api.config import (
+    DatabaseSettings,
+    LogSettings,
+    RelaySettings,
+    Settings,
+)
 from mc_server_dashboard_api.logging import (
     JsonFormatter,
     configure_logging,
@@ -256,3 +261,57 @@ def test_caplog_survives_multiple_create_app(caplog: pytest.LogCaptureFixture) -
         logger.info("visible-after-rebuild")
 
     assert "visible-after-rebuild" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Regression: startup config warnings must use the configured JSON format
+# (issue #1992). Before the fix, configure_logging ran after the warnings,
+# so they fell through to logging.lastResort as plain text.
+# ---------------------------------------------------------------------------
+
+
+class _JsonProbeHandler(logging.Handler):
+    """Handler that records whether a ``JsonFormatter`` sibling exists on the
+    root logger at the moment each record is emitted."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.had_json_formatter: dict[str, bool] = {}
+
+    def emit(self, record: logging.LogRecord) -> None:
+        root = logging.getLogger()
+        self.had_json_formatter[record.getMessage()] = any(
+            isinstance(h.formatter, JsonFormatter)
+            for h in root.handlers
+            if h is not self
+        )
+
+
+def test_startup_warnings_use_configured_json_format() -> None:
+    """Config warnings emitted during create_app must go through the
+    configured JSON formatter, not bypass it via logging.lastResort."""
+    settings = Settings(
+        database=DatabaseSettings(url="postgresql+asyncpg://u:s@db/app"),
+        log=LogSettings(format="json"),
+        relay=RelaySettings(bedrock_enabled=True, enabled=False),
+    )
+    probe = _JsonProbeHandler()
+    probe.setLevel(logging.WARNING)
+    root = logging.getLogger()
+    root.addHandler(probe)
+    try:
+        create_app(settings)
+    finally:
+        root.removeHandler(probe)
+
+    # The bedrock_enabled warning must have been emitted while a
+    # JsonFormatter handler was already installed on the root logger.
+    bedrock_msgs = [
+        msg for msg in probe.had_json_formatter if "relay.bedrock_enabled" in msg
+    ]
+    assert bedrock_msgs, "bedrock_enabled warning was not emitted"
+    for msg in bedrock_msgs:
+        assert probe.had_json_formatter[msg], (
+            "relay.bedrock_enabled warning was emitted before "
+            "configure_logging installed the JsonFormatter"
+        )
