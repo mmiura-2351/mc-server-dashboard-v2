@@ -199,6 +199,132 @@ describe("per-community cache isolation", () => {
   });
 });
 
+describe("selection reconciliation when the active community vanishes", () => {
+  function Switcher() {
+    const { communityId, setCommunityId } = useActiveCommunity();
+    return (
+      <div>
+        <span data-testid="cid">{communityId ?? "none"}</span>
+        <button type="button" onClick={() => setCommunityId("c2")}>
+          to-c2
+        </button>
+      </div>
+    );
+  }
+
+  it("falls back to the first community when the selected one disappears from the list", async () => {
+    let communitiesResponse = [
+      { id: "c1", name: "First" },
+      { id: "c2", name: "Second" },
+    ];
+    fetchMock.mockImplementation((url: string) => {
+      if (url === "/api/communities") {
+        return Promise.resolve(jsonResponse(communitiesResponse));
+      }
+      return Promise.resolve(jsonResponse({ permissions: [], grants: [] }));
+    });
+
+    const client = newClient();
+    render(wrap(<Switcher />, client));
+
+    // Wait for the default to be selected.
+    await waitFor(() =>
+      expect(screen.getByTestId("cid")).toHaveTextContent("c1"),
+    );
+
+    // User explicitly picks c2.
+    act(() => {
+      screen.getByRole("button", { name: "to-c2" }).click();
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("cid")).toHaveTextContent("c2"),
+    );
+
+    // Simulate the server removing c2 from the user's community list, then
+    // trigger a refetch (as window-focus would).
+    communitiesResponse = [{ id: "c1", name: "First" }];
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ["communities"] });
+    });
+
+    // The provider should reconcile and fall back to c1.
+    await waitFor(() =>
+      expect(screen.getByTestId("cid")).toHaveTextContent("c1"),
+    );
+  });
+
+  it("falls back to null when the list becomes empty after the selected community vanishes", async () => {
+    let communitiesResponse: { id: string; name: string }[] = [
+      { id: "c1", name: "Only" },
+    ];
+    fetchMock.mockImplementation((url: string) => {
+      if (url === "/api/communities") {
+        return Promise.resolve(jsonResponse(communitiesResponse));
+      }
+      return Promise.resolve(jsonResponse({ permissions: [], grants: [] }));
+    });
+
+    const client = newClient();
+    render(wrap(<Switcher />, client));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("cid")).toHaveTextContent("c1"),
+    );
+
+    // The community is deleted and the user has no others.
+    communitiesResponse = [];
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ["communities"] });
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("cid")).toHaveTextContent("none"),
+    );
+  });
+
+  it("falls back to the first community when setCommunityId(null) is called with remaining communities", async () => {
+    fetchMock.mockImplementation((url: string) => {
+      if (url === "/api/communities") {
+        return Promise.resolve(
+          jsonResponse([
+            { id: "c1", name: "First" },
+            { id: "c2", name: "Second" },
+          ]),
+        );
+      }
+      return Promise.resolve(jsonResponse({ permissions: [], grants: [] }));
+    });
+
+    function NullSetter() {
+      const { communityId, setCommunityId } = useActiveCommunity();
+      return (
+        <div>
+          <span data-testid="cid">{communityId ?? "none"}</span>
+          <button type="button" onClick={() => setCommunityId(null)}>
+            clear
+          </button>
+        </div>
+      );
+    }
+
+    render(wrap(<NullSetter />, newClient()));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("cid")).toHaveTextContent("c1"),
+    );
+
+    // Simulate the self-delete flow: setCommunityId(null) with communities
+    // still available. The provider should fall back to the first community.
+    act(() => {
+      screen.getByRole("button", { name: "clear" }).click();
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("cid")).toHaveTextContent("c1"),
+    );
+  });
+});
+
 describe("re-fetch on 403", () => {
   function ForbiddenProbe() {
     const onForbidden = useOnForbidden();
