@@ -116,4 +116,6 @@ not regenerate `uv.lock`. The `dependabot-uv-lock` workflow
 `uv sync --locked` in the `api` workflow passes. The workflow pushes using a
 GitHub App token (via `actions/create-github-app-token`) so the resulting commit
 triggers CI; this requires the repository secrets `APP_ID` and `APP_PRIVATE_KEY`
-to be configured for the App.
+to be configured for the App. Because Dependabot-triggered workflows cannot
+access regular repository secrets, these two secrets must also be added to the
+**Dependabot secrets** (Settings > Secrets and variables > Dependabot).
