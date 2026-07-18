@@ -63,12 +63,12 @@ cleanup() {
   # MCD_RELAY_E2E_KEEP=1 leaves the stack up for debugging (tear it down manually
   # with `docker compose -p mcsd-relay-e2e down -v`).
   if [ "${MCD_RELAY_E2E_KEEP:-}" != "1" ]; then
-    "${COMPOSE[@]}" --env-file "$ENV_FILE" down -v --rmi local --remove-orphans >/dev/null 2>&1 || true
+    "${COMPOSE[@]}" --env-file "$ENV_FILE" down -v --rmi all --remove-orphans >/dev/null 2>&1 || true
     rm -f "$ENV_FILE"
     rm -rf "$TLS_DIR"
   else
-    echo "MCD_RELAY_E2E_KEEP=1: leaving the stack up (env file: $ENV_FILE)." >&2
-    echo "  Tear down: docker compose -p mcsd-relay-e2e down -v --rmi local" >&2
+    echo "MCD_RELAY_E2E_KEEP=1: leaving the stack up (env file: $ENV_FILE)" >&2
+    echo "  Tear down: docker compose -p mcsd-relay-e2e down -v --rmi all" >&2
   fi
 }
 trap cleanup EXIT
