@@ -1255,35 +1255,39 @@ func (m *Manager) sweepHydrateLeftovers(serverID string) {
 //   - Phase 2 (refresh held inventory per re-registration) is implemented:
 //     HeldServers() (issue #1711) refreshes the advertised set each register.
 func (m *Manager) ReclaimDeletedScratches(serverIDs []string) {
-	go func() {
-		for _, id := range serverIDs {
-			if err := validateServerID(id); err != nil {
-				m.logger.Warn("refusing to reclaim scratch for unsafe server id",
-					"server_id", id, "error", err)
-				continue
-			}
-			ok, _, _ := m.reserve(id)
-			if !ok {
-				// The id is running, has a failed-stop orphan, or is reserved for
-				// an in-flight command — skip it rather than interfere.
-				continue
-			}
-			dir := filepath.Join(m.scratchDir, id)
-			if _, statErr := os.Stat(dir); statErr == nil {
-				if err := os.RemoveAll(dir); err != nil {
-					m.logger.Warn("failed to reclaim deleted-server scratch",
-						"server_id", id, "dir", dir, "error", err)
-				} else {
-					m.logger.Info("reclaimed orphaned scratch for deleted server",
-						"server_id", id, "dir", dir)
-				}
-			}
-			m.sweepHydrateLeftovers(id)
-			// NOTE: .displaced-<id> trees are intentionally NOT reclaimed here
-			// (issue #911). They are retained for operator recovery.
-			m.release(id)
+	go m.reclaimDeletedScratches(serverIDs)
+}
+
+// reclaimDeletedScratches is the synchronous body of ReclaimDeletedScratches.
+// Tests call this directly to avoid timing dependencies on the goroutine.
+func (m *Manager) reclaimDeletedScratches(serverIDs []string) {
+	for _, id := range serverIDs {
+		if err := validateServerID(id); err != nil {
+			m.logger.Warn("refusing to reclaim scratch for unsafe server id",
+				"server_id", id, "error", err)
+			continue
 		}
-	}()
+		ok, _, _ := m.reserve(id)
+		if !ok {
+			// The id is running, has a failed-stop orphan, or is reserved for
+			// an in-flight command — skip it rather than interfere.
+			continue
+		}
+		dir := filepath.Join(m.scratchDir, id)
+		if _, statErr := os.Stat(dir); statErr == nil {
+			if err := os.RemoveAll(dir); err != nil {
+				m.logger.Warn("failed to reclaim deleted-server scratch",
+					"server_id", id, "dir", dir, "error", err)
+			} else {
+				m.logger.Info("reclaimed orphaned scratch for deleted server",
+					"server_id", id, "dir", dir)
+			}
+		}
+		m.sweepHydrateLeftovers(id)
+		// NOTE: .displaced-<id> trees are intentionally NOT reclaimed here
+		// (issue #911). They are retained for operator recovery.
+		m.release(id)
+	}
 }
 
 // orphanEntry pairs a failed-stop orphan instance with the execution driver name

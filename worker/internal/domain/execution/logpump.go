@@ -142,6 +142,12 @@ func (p *LogPump) Scan(r io.Reader, stream LogStream) {
 			}
 			return
 		}
+		// Strip a trailing \r that a buffer-boundary split left in kept:
+		// when CRLF spans the ReadSlice boundary, trimLineEnd only sees the
+		// final chunk (\n) and the \r from the previous chunk stays (#2067).
+		if n := len(kept); n > 0 && kept[n-1] == '\r' {
+			kept = kept[:n-1]
+		}
 		p.emitScanLine(kept, truncated, stream)
 	}
 }

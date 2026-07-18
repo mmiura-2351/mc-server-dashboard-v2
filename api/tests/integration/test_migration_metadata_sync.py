@@ -24,8 +24,12 @@ only -- names the models declare must exist in the DB; it does not assert the
 reverse, because a migration-only construct the models do not declare is a
 separate concern (a spurious *drop*, not a rename).
 
-Runs only when ``MCD_TEST_DATABASE_URL`` is set (the CI Postgres service);
-skipped otherwise (TESTING.md Section 5).
+``test_revision_id_length`` guards against revision IDs exceeding Alembic's
+``varchar(32)`` ceiling for ``alembic_version.version_num`` (#2069). This is a
+pure filesystem check and runs without a database.
+
+Database-dependent tests run only when ``MCD_TEST_DATABASE_URL`` is set (the CI
+Postgres service); skipped otherwise (TESTING.md Section 5).
 """
 
 from __future__ import annotations
@@ -44,9 +48,14 @@ from tests.integration.migrate import downgrade_base, upgrade_head
 
 _DB_URL = os.environ.get("MCD_TEST_DATABASE_URL")
 
-pytestmark = pytest.mark.skipif(
+_needs_db = pytest.mark.skipif(
     _DB_URL is None, reason="MCD_TEST_DATABASE_URL not set (no real database)"
 )
+
+# Alembic's ``alembic_version.version_num`` column is ``varchar(32)``. A
+# revision ID exceeding this length silently passes every non-Postgres check
+# and fails only on a real ``upgrade head`` (#2069).
+_ALEMBIC_VERSION_NUM_MAX = 32
 
 # Alembic's own bookkeeping table is created by the migration runner, not by an
 # ORM model, so it is never part of the registry's metadata.
@@ -116,6 +125,7 @@ def _db_names(sync_conn: Connection) -> dict[str, set[str]]:
     return names
 
 
+@_needs_db
 async def test_head_tables_match_registry() -> None:
     assert _DB_URL is not None
     await downgrade_base(_DB_URL)
@@ -146,6 +156,7 @@ async def test_head_tables_match_registry() -> None:
     )
 
 
+@_needs_db
 async def test_metadata_constraint_names_exist_in_db() -> None:
     assert _DB_URL is not None
     await downgrade_base(_DB_URL)
@@ -170,4 +181,20 @@ async def test_metadata_constraint_names_exist_in_db() -> None:
         "constraint/index names rendered by the ORM models that the migrated "
         "database does not have -- the naming convention diverges from the "
         f"migration-created names (autogenerate would emit a rename): {mismatches}"
+    )
+
+
+def test_revision_id_length() -> None:
+    """Reject migration filenames whose stem exceeds varchar(32) (#2069)."""
+
+    versions_dir = _MIGRATIONS_DIR / "versions"
+    too_long = {
+        path.stem: len(path.stem)
+        for path in versions_dir.glob("*.py")
+        if len(path.stem) > _ALEMBIC_VERSION_NUM_MAX
+    }
+    assert not too_long, (
+        f"migration revision IDs exceed Alembic's varchar(32) ceiling for "
+        f"alembic_version.version_num — rename to <= {_ALEMBIC_VERSION_NUM_MAX} "
+        f"characters: {too_long}"
     )
