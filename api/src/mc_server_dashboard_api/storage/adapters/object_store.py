@@ -1831,22 +1831,32 @@ async def _spool_stream(
     hashing as it lands. Returns the spool path; the caller unlinks it."""
 
     fd, name = await asyncio.to_thread(tempfile.mkstemp, prefix=prefix, suffix=suffix)
-    with open(fd, "wb") as out:
-        async for chunk in stream:
-            if hasher is not None:
-                hasher.update(chunk)
-            await asyncio.to_thread(out.write, chunk)
-    return Path(name)
+    spool = Path(name)
+    try:
+        with open(fd, "wb") as out:
+            async for chunk in stream:
+                if hasher is not None:
+                    hasher.update(chunk)
+                await asyncio.to_thread(out.write, chunk)
+    except BaseException:
+        await asyncio.to_thread(spool.unlink, missing_ok=True)
+        raise
+    return spool
 
 
 async def _spool_object(client: S3Client, key: str, prefix: str, suffix: str) -> Path:
     """Spool one object's body to a local temp file (bounded disk)."""
 
     fd, name = await asyncio.to_thread(tempfile.mkstemp, prefix=prefix, suffix=suffix)
-    with open(fd, "wb") as out:
-        async for chunk in await client.get_object(key):
-            await asyncio.to_thread(out.write, chunk)
-    return Path(name)
+    spool = Path(name)
+    try:
+        with open(fd, "wb") as out:
+            async for chunk in await client.get_object(key):
+                await asyncio.to_thread(out.write, chunk)
+    except BaseException:
+        await asyncio.to_thread(spool.unlink, missing_ok=True)
+        raise
+    return spool
 
 
 # --- tar streaming (bounded memory, one member-chunk at a time) -------------

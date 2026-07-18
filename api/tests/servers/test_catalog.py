@@ -504,8 +504,8 @@ async def test_install_from_catalog_paper_server() -> None:
 def _geyser_project() -> CatalogProject:
     """A GeyserMC-sourced Floodgate project (issue #1905)."""
     return CatalogProject(
-        project_id="floodgate",
-        slug="floodgate",
+        project_id="geysermc-floodgate",
+        slug="geysermc-floodgate",
         title="Floodgate",
         description="Bedrock auth companion",
         body="Floodgate",
@@ -577,11 +577,11 @@ async def test_install_from_catalog_geyser_source_stores_provenance() -> None:
     plugin = await uc(
         community_id=_COMMUNITY,
         server_id=server.id,
-        project_id="floodgate",
+        project_id="geysermc-floodgate",
         version_id="2.2.5-138",
     )
     assert plugin.source is PluginSource.GEYSER
-    assert plugin.source_project_id == "floodgate"
+    assert plugin.source_project_id == "geysermc-floodgate"
     assert plugin.checksum_sha512 is None
     assert plugin.sha256 == hashlib.sha256(content).hexdigest()
     assert plugin.rel_path == "plugins/floodgate-spigot.jar"
@@ -611,7 +611,7 @@ async def test_install_from_catalog_geyser_sha256_mismatch() -> None:
         await uc(
             community_id=_COMMUNITY,
             server_id=server.id,
-            project_id="floodgate",
+            project_id="geysermc-floodgate",
             version_id="2.2.5-138",
         )
 
@@ -1104,7 +1104,7 @@ def _geyser_plugin(
         description="Bedrock auth companion",
         loader_type=LoaderType.PLUGIN,
         source=PluginSource.GEYSER,
-        source_project_id="floodgate",
+        source_project_id="geysermc-floodgate",
         source_version_id=source_version_id,
         version_number="2.2.5",
         checksum_sha512=None,
