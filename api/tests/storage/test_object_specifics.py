@@ -464,6 +464,21 @@ async def test_make_dir_writes_marker_and_dir_is_visible() -> None:
     assert entries == []
 
 
+async def test_make_dir_root_path_is_noop_guard() -> None:
+    """make_dir with an empty-parts RelPath (root) is a no-op (#1944).
+
+    Defence-in-depth: the use-case layer already rejects the root path, but if
+    something bypasses it the adapter must not write the poisoned ``//.dir`` key.
+    """
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    await _publish(storage, community, server, {"server.properties": b"x"})
+
+    keys_before = set(store.objects)
+    await storage.make_dir(community, server, RelPath("."))
+    assert set(store.objects) == keys_before  # no new objects written
+
+
 async def test_subkey_traversal_is_confined_to_server_prefix() -> None:
     # RelPath blocks .. at construction; assert the adapter's read path rejects it
     # too (defence in depth at the key-derivation step, Section 6).
@@ -813,6 +828,34 @@ async def test_hydrate_reader_rereads_when_gc_lands_in_lease_gap() -> None:
 
     blob = await drain(storage.open_hydrate_source(community, server))
     assert read_tar(blob) == {"f": b"NEW"}
+
+
+async def test_hydrate_skips_poisoned_root_dir_marker() -> None:
+    """A pre-existing ``//.dir`` key (from a prior root make_dir) is excluded from
+    the hydrate tar so already-poisoned snapshots self-heal (issue #1944).
+
+    The poisoned key produces a ``/.dir`` tar member (absolute path) that the
+    worker's ``safeJoin`` rejects, blocking the server start permanently. The
+    hydrate stream must silently skip it.
+    """
+
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    await _publish(storage, community, server, {"server.properties": b"x"})
+
+    # Plant the poisoned key directly into the store (simulates the old bug).
+    prefix = _server_prefix(community, server)
+    pointer_raw = store.objects[prefix + _POINTER]
+    snapshot_prefix = json.loads(pointer_raw)["snapshot"]
+    poisoned_key = snapshot_prefix + "/" + _DIR_MARKER  # produces ``//.dir``
+    store.objects[poisoned_key] = b""
+
+    # The hydrate must NOT include the poisoned member.
+    blob = await drain(storage.open_hydrate_source(community, server))
+    members = read_tar(blob)
+    assert "/.dir" not in members
+    # The legitimate file must still be present.
+    assert "server.properties" in members
 
 
 async def test_file_stream_rereads_when_gc_lands_in_lease_gap() -> None:
