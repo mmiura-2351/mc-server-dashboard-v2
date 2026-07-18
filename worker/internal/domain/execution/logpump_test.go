@@ -177,6 +177,30 @@ func TestLogPumpNotReadyOnOtherLines(t *testing.T) {
 	}
 }
 
+// When the CRLF line ending spans the 4096-byte ReadSlice buffer boundary
+// (content length ≡ 4095 mod 4096 so the CR is the last byte of one read and
+// the LF begins the next), the trailing CR must still be stripped — matching
+// the container demux path (issue #2067).
+func TestLogPumpScanTrimsCRLFAcrossReadSliceBoundary(t *testing.T) {
+	p := NewLogPump("s1", 16)
+	// 4095 content bytes + \r\n: the CR lands on the 4096th byte (last in the
+	// default bufio buffer), triggering ErrBufferFull, and the LF starts the
+	// next read.
+	content := strings.Repeat("a", 4095)
+	r := strings.NewReader(content + "\r\n")
+	p.Scan(r, LogStreamStdout)
+	p.Close()
+
+	got := drainLogs(p.Logs())
+	if len(got) != 1 {
+		t.Fatalf("got %d lines, want 1", len(got))
+	}
+	if got[0].Line != content {
+		t.Fatalf("trailing CR not stripped: len(line)=%d, want %d (line suffix %q)",
+			len(got[0].Line), len(content), got[0].Line[len(got[0].Line)-5:])
+	}
+}
+
 // Ready is a one-shot: a second matching line does not re-close the channel
 // (which would panic).
 func TestLogPumpReadyFiresOnce(t *testing.T) {
