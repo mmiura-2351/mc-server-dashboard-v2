@@ -28,6 +28,8 @@ from mc_server_dashboard_api.storage.adapters.object_store import (
     _POINTER,
     ObjectStorage,
     S3Client,
+    _spool_object,
+    _spool_stream,
 )
 from mc_server_dashboard_api.storage.domain.errors import (
     IntegrityCheckError,
@@ -839,3 +841,82 @@ async def test_file_stream_rereads_when_gc_lands_in_lease_gap() -> None:
 
     blob = await drain(storage.open_file_stream(community, server, RelPath("f")))
     assert blob == b"NEW"
+
+
+# --- spool helpers: temp-file cleanup on stream failure (#1956) ---------------
+
+
+class _MidStreamError(Exception):
+    """Raised mid-iteration to simulate a client disconnect / S3 error."""
+
+
+async def _failing_stream(payload: bytes, *, fail_after: int) -> AsyncIterator[bytes]:
+    """Yield ``fail_after`` bytes of ``payload``, then raise."""
+    yielded = 0
+    for i in range(0, len(payload), 7):
+        chunk = payload[i : i + 7]
+        if yielded + len(chunk) >= fail_after:
+            raise _MidStreamError("simulated mid-write failure")
+        yield chunk
+        yielded += len(chunk)
+
+
+@pytest.mark.anyio
+async def test_spool_stream_unlinks_on_stream_error() -> None:
+    """_spool_stream must not leak the temp file when the source stream raises."""
+
+    import glob
+    import tempfile
+
+    # Snapshot temp files before the spool attempt.
+    tmp_dir = tempfile.gettempdir()
+    before = set(glob.glob(f"{tmp_dir}/.leak-test.*"))
+
+    with pytest.raises(_MidStreamError):
+        await _spool_stream(
+            _failing_stream(b"x" * 100, fail_after=30),
+            ".leak-test.",
+            ".tmp",
+        )
+
+    # No new files with the spool prefix should remain.
+    after = set(glob.glob(f"{tmp_dir}/.leak-test.*"))
+    leaked = after - before
+    assert not leaked, f"spool file leaked: {leaked}"
+
+
+@pytest.mark.anyio
+async def test_spool_object_unlinks_on_stream_error() -> None:
+    """_spool_object must not leak the temp file when the S3 body stream raises."""
+
+    import glob
+    import tempfile
+
+    store = FakeS3Store()
+    # Seed an object whose body stream will fail mid-read.
+    store.objects["test/key"] = b"x" * 100
+
+    # Patch the fake client's get_object to yield a failing stream.
+    factory = fake_s3_factory(store)
+
+    class _FailingClient:
+        def __init__(self, inner: S3Client) -> None:
+            self._inner = inner
+
+        async def get_object(self, key: str) -> AsyncIterator[bytes]:
+            return _failing_stream(store.objects[key], fail_after=30)
+
+        def __getattr__(self, name: str):  # type: ignore[no-untyped-def]
+            return getattr(self._inner, name)
+
+    tmp_dir = tempfile.gettempdir()
+    before = set(glob.glob(f"{tmp_dir}/.leak-obj.*"))
+
+    async with factory() as real_client:
+        failing_client = _FailingClient(real_client)
+        with pytest.raises(_MidStreamError):
+            await _spool_object(failing_client, "test/key", ".leak-obj.", ".tmp")
+
+    after = set(glob.glob(f"{tmp_dir}/.leak-obj.*"))
+    leaked = after - before
+    assert not leaked, f"spool file leaked: {leaked}"
