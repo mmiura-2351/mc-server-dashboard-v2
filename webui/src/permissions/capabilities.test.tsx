@@ -255,7 +255,8 @@ describe("selection reconciliation when the active community vanishes", () => {
 
   it("falls back to null when the list becomes empty after the selected community vanishes", async () => {
     let communitiesResponse: { id: string; name: string }[] = [
-      { id: "c1", name: "Only" },
+      { id: "c1", name: "First" },
+      { id: "c2", name: "Second" },
     ];
     fetchMock.mockImplementation((url: string) => {
       if (url === "/api/communities") {
@@ -271,7 +272,15 @@ describe("selection reconciliation when the active community vanishes", () => {
       expect(screen.getByTestId("cid")).toHaveTextContent("c1"),
     );
 
-    // The community is deleted and the user has no others.
+    // Explicitly select c2 so the selection is user-driven.
+    act(() => {
+      screen.getByRole("button", { name: "to-c2" }).click();
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("cid")).toHaveTextContent("c2"),
+    );
+
+    // Both communities are removed; the user has none left.
     communitiesResponse = [];
     await act(async () => {
       await client.invalidateQueries({ queryKey: ["communities"] });
