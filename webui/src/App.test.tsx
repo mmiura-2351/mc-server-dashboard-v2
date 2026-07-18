@@ -81,6 +81,72 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("Landing communities error state", () => {
+  it("shows an error with a retry button when GET /communities fails", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === "/api/communities") {
+        return Promise.resolve(
+          new Response("", {
+            status: 500,
+            statusText: "Internal Server Error",
+          }),
+        );
+      }
+      return Promise.resolve(tokenResponse());
+    });
+
+    renderAt("/");
+
+    // The error message appears in the Landing content area (the CommunitySwitcher
+    // also shows the error, so multiple elements match — use findAllByText).
+    const errors = await screen.findAllByText(t("shell.communitiesError"));
+    expect(errors.length).toBeGreaterThanOrEqual(1);
+    // At least one retry button is present.
+    const retries = screen.getAllByRole("button", {
+      name: t("shell.communitiesRetry"),
+    });
+    expect(retries.length).toBeGreaterThanOrEqual(1);
+    // The loading indicator must not be showing.
+    expect(screen.queryByText(t("auth.loading"))).not.toBeInTheDocument();
+  });
+
+  it("retry button re-fetches communities after an error", async () => {
+    let callCount = 0;
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === "/api/communities") {
+        callCount++;
+        if (callCount <= 1) {
+          return Promise.resolve(new Response("", { status: 500 }));
+        }
+        return Promise.resolve(jsonResponse([{ id: "alpha", name: "Alpha" }]));
+      }
+      if (url.endsWith("/me/permissions")) {
+        return Promise.resolve(jsonResponse({}));
+      }
+      if (url.endsWith("/servers")) {
+        return Promise.resolve(jsonResponse([]));
+      }
+      return Promise.resolve(tokenResponse());
+    });
+
+    renderApp({ path: "/", extras: <LocationProbe /> });
+
+    // Wait for the error state (multiple retry buttons: switcher + landing).
+    const retryButtons = await screen.findAllByRole("button", {
+      name: t("shell.communitiesRetry"),
+    });
+
+    // Click the first retry — the second attempt succeeds and redirects to the dashboard.
+    fireEvent.click(retryButtons[0]);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("url").textContent).toBe("/communities/alpha"),
+    );
+  });
+});
+
 describe("App route guards", () => {
   it("shows a neutral loading state while the session bootstraps", async () => {
     // Hold the bootstrap refresh in flight, then release it so the shared

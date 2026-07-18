@@ -35,6 +35,10 @@ interface ActiveCommunityValue {
    * top-bar switcher so it reuses the same query instead of re-fetching.
    */
   communities: Community[] | undefined;
+  /** True when fetching communities has failed (all retries exhausted). */
+  communitiesError: boolean;
+  /** Re-fetch the communities list (e.g. after an error). */
+  refetchCommunities: () => void;
 }
 
 const ActiveCommunityContext = createContext<ActiveCommunityValue | null>(null);
@@ -51,7 +55,11 @@ function useCommunities(signedIn: boolean) {
 export function ActiveCommunityProvider({ children }: { children: ReactNode }) {
   const { status } = useSession();
   const signedIn = status === "signed-in";
-  const { data: communities } = useCommunities(signedIn);
+  const {
+    data: communities,
+    isError: communitiesError,
+    refetch: refetchCommunities,
+  } = useCommunities(signedIn);
 
   // null = no explicit selection yet; we fall back to the first community once
   // the list arrives. An explicit setCommunityId(...) wins over the default.
@@ -80,9 +88,19 @@ export function ActiveCommunityProvider({ children }: { children: ReactNode }) {
     }
   }, [signedIn]);
 
+  const refetch = useCallback(() => {
+    refetchCommunities();
+  }, [refetchCommunities]);
+
   const value = useMemo<ActiveCommunityValue>(
-    () => ({ communityId: selected, setCommunityId, communities }),
-    [selected, setCommunityId, communities],
+    () => ({
+      communityId: selected,
+      setCommunityId,
+      communities,
+      communitiesError,
+      refetchCommunities: refetch,
+    }),
+    [selected, setCommunityId, communities, communitiesError, refetch],
   );
 
   return (
