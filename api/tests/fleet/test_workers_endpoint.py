@@ -9,6 +9,7 @@ endpoints (FR-WRK-5).
 from __future__ import annotations
 
 import datetime as dt
+import uuid
 from collections.abc import Iterator
 
 import pytest
@@ -17,13 +18,19 @@ from fastapi.testclient import TestClient
 
 from mc_server_dashboard_api.dependencies import (
     get_current_user,
+    get_set_worker_drain,
     get_worker_registry,
 )
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
+from mc_server_dashboard_api.fleet.application.set_worker_drain import SetWorkerDrain
+from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
 from tests.fleet.fakes import FakeClock, make_worker
 from tests.identity.fakes import make_user
+from tests.servers.fakes import FakeClock as ServersFakeClock
+from tests.servers.fakes import FakeUnitOfWork
 
 _T0 = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
+_WORKER_UUID = str(uuid.uuid4())
 
 _shared_app: FastAPI
 
@@ -100,13 +107,18 @@ def test_clear_drain_requires_platform_admin() -> None:
 
 
 def test_set_drain_marks_worker_draining_in_listing() -> None:
-    app, _ = _app(platform_admin=True)
+    app, registry = _app(platform_admin=True, seed=False)
+    registry.register(make_worker(worker_id=_WORKER_UUID, at=_T0))
+    use_case = SetWorkerDrain(
+        registry=registry, uow=FakeUnitOfWork(), clock=ServersFakeClock(_T0)
+    )
+    _shared_app.dependency_overrides[get_set_worker_drain] = lambda: use_case
     client = next(_client(app))
 
-    resp = client.put("/api/workers/worker-1/drain")
+    resp = client.put(f"/api/workers/{_WORKER_UUID}/drain")
     assert resp.status_code == 200
-    # No UUID-format worker / no assigned servers in this in-memory fixture, so the
-    # count is zero; the response shape (servers_stopped) is what this asserts.
+    # No assigned servers in this in-memory fixture, so the count is zero; the
+    # response shape (servers_stopped) is what this asserts.
     assert resp.json() == {"servers_stopped": 0}
 
     worker = client.get("/api/workers").json()["workers"][0]
@@ -114,11 +126,16 @@ def test_set_drain_marks_worker_draining_in_listing() -> None:
 
 
 def test_clear_drain_returns_worker_to_online() -> None:
-    app, registry = _app(platform_admin=True)
-    registry.set_draining(make_worker(at=_T0).id, True)
+    app, registry = _app(platform_admin=True, seed=False)
+    registry.register(make_worker(worker_id=_WORKER_UUID, at=_T0))
+    registry.set_draining(WorkerId(_WORKER_UUID), True)
+    use_case = SetWorkerDrain(
+        registry=registry, uow=FakeUnitOfWork(), clock=ServersFakeClock(_T0)
+    )
+    _shared_app.dependency_overrides[get_set_worker_drain] = lambda: use_case
     client = next(_client(app))
 
-    assert client.delete("/api/workers/worker-1/drain").status_code == 204
+    assert client.delete(f"/api/workers/{_WORKER_UUID}/drain").status_code == 204
 
     worker = client.get("/api/workers").json()["workers"][0]
     assert worker["status"] == "online"
