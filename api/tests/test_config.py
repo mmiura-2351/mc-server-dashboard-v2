@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from mc_server_dashboard_api.config import load_settings
+from mc_server_dashboard_api.config import Settings, load_settings
 
 
 def _write_toml(tmp_path: Path, body: str) -> Path:
@@ -1082,3 +1082,57 @@ def test_effective_data_plane_base_url_none_when_both_unset(
     monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
     settings = load_settings(config_file=None)
     assert settings.server.effective_data_plane_base_url is None
+
+
+# --- masked_dump completeness (issue #1993) ---
+
+
+def test_masked_dump_keys_match_settings_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every Settings field must appear in masked_dump(); a missing key means a
+    newly-added section was forgotten."""
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    settings = load_settings(config_file=None)
+    assert set(settings.masked_dump()) == set(Settings.model_fields)
+
+
+def test_masked_dump_includes_schedule_section(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    monkeypatch.setenv("MCD_API_SCHEDULE__TICK_SECONDS", "45")
+    settings = load_settings(config_file=None)
+    dump = settings.masked_dump()
+    assert dump["schedule"]["tick_seconds"] == 45
+
+
+def test_masked_dump_includes_jar_gc_section(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    settings = load_settings(config_file=None)
+    dump = settings.masked_dump()
+    assert dump["jar_gc"]["interval_seconds"] == 86400
+
+
+def test_masked_dump_includes_plugin_cache_gc_section(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    settings = load_settings(config_file=None)
+    dump = settings.masked_dump()
+    assert dump["plugin_cache_gc"]["interval_seconds"] == 86400
+
+
+def test_masked_dump_database_includes_pool_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    monkeypatch.setenv("MCD_API_DATABASE__POOL_SIZE", "10")
+    monkeypatch.setenv("MCD_API_DATABASE__MAX_OVERFLOW", "20")
+    settings = load_settings(config_file=None)
+    dump = settings.masked_dump()
+    assert dump["database"]["url"] == "***"
+    assert dump["database"]["pool_size"] == 10
+    assert dump["database"]["max_overflow"] == 20

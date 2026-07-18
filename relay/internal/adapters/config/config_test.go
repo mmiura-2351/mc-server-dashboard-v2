@@ -174,6 +174,17 @@ public_endpoint = "relay:25665"
 	}
 }
 
+func TestValidateZeroStatusCacheMaxEntries(t *testing.T) {
+	env := envMap(map[string]string{"MCD_RELAY_GAME_STATUS_CACHE_MAX_ENTRIES": "0"})
+	_, err := Load(writeTOML(t, minimalTOML), env)
+	if err == nil {
+		t.Fatal("status_cache_max_entries=0 should fail validation")
+	}
+	if !strings.Contains(err.Error(), "status_cache_max_entries") {
+		t.Errorf("error %q does not mention status_cache_max_entries", err.Error())
+	}
+}
+
 func TestValidateBadLogLevel(t *testing.T) {
 	env := envMap(map[string]string{"MCD_RELAY_LOG_LEVEL": "trace"})
 	_, err := Load(writeTOML(t, minimalTOML), env)
