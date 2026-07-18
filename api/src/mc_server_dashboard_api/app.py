@@ -46,6 +46,7 @@ from mc_server_dashboard_api.dependencies import (
     build_brute_force_config,
     build_registration_config,
 )
+from mc_server_dashboard_api.docs import mount_docs
 from mc_server_dashboard_api.fleet.adapters.clock import SystemClock as FleetSystemClock
 from mc_server_dashboard_api.fleet.adapters.control_plane import (
     ControlPlaneState,
@@ -1146,9 +1147,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         title="mc-server-dashboard API",
         lifespan=lifespan,
         openapi_url="/api/openapi.json",
-        docs_url="/api/docs",
-        redoc_url="/api/redoc",
+        # Docs routes are self-hosted (issue #1990): the default CDN-backed
+        # routes are disabled; mount_docs() below adds same-origin equivalents.
+        docs_url=None,
+        redoc_url=None,
     )
+    mount_docs(app)
     # Render every error response as RFC 9457 problem+json (issue #371): one body
     # shape for application errors, framework HTTPExceptions, and 422 validation.
     install_problem_handlers(app)
