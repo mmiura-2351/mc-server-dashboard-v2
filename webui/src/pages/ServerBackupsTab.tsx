@@ -181,7 +181,7 @@ export function ServerBackupsTab({
     mutationFn: (file: File) => {
       const form = new FormData();
       form.append("file", file);
-      progress.start(file.size);
+      const signal = progress.start(file.size);
       return postFormWithProgress(
         apiPath(
           "/api/communities/{community_id}/servers/{server_id}/backups/upload",
@@ -189,7 +189,7 @@ export function ServerBackupsTab({
         ),
         form,
         progress.onProgress,
-        progress.signal,
+        signal,
       );
     },
     onSuccess: () => {

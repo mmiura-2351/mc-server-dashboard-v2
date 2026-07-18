@@ -546,11 +546,11 @@ async def test_success_resets_consecutive_failure_counter(harness: _Harness) -> 
 
         async def record_observed_state(
             self, *, server_id: str, worker_id: str, state: str
-        ) -> None:
+        ) -> bool:
             self.calls += 1
             if server_id == bad_server:
                 raise RuntimeError("observed-state sink unavailable")
-            await super().record_observed_state(
+            return await super().record_observed_state(
                 server_id=server_id, worker_id=worker_id, state=state
             )
 
@@ -784,6 +784,35 @@ async def test_status_change_is_published_to_real_time_events(
     assert event.stream is EventStream.STATUS
     assert event.payload["state"] == "running"
     await call.done_writing()
+
+
+async def test_dropped_status_change_is_not_published() -> None:
+    """A StatusChange whose sink write is rejected (applied=False) must NOT be
+    relayed to real-time subscribers (issue #1957)."""
+    sink = FakeServerStateSink(reject_observed_for={_SERVER_ID})
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+    )
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call.write(_register_message())
+        await call.read()  # ack
+
+        await call.write(_status_message(_SERVER_ID, pb.SERVER_STATE_RUNNING))
+        # Wait for the sink to have processed the message.
+        for _ in range(100):
+            if sink.observed or sink.rejected:
+                break
+            await asyncio.sleep(0.01)
+
+        assert sink.rejected == [(_SERVER_ID, _WORKER_ID, "running")]
+        assert h.real_time_events.published == []
+        await call.done_writing()
+    finally:
+        await h.stop()
 
 
 async def test_log_line_is_published_to_real_time_events(harness: _Harness) -> None:
