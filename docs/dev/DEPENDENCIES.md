@@ -92,6 +92,7 @@ configuration lives in `.github/dependabot.yml` and covers:
 | `docker` | `/api` | Base images |
 | `docker` | `/worker` | Base images |
 | `docker` | `/relay` | Base images |
+| `docker-compose` | `/` | Service images in `compose.yaml` |
 
 Grouping and PR rules:
 
