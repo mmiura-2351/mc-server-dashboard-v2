@@ -608,7 +608,9 @@ class WorkerSessionServicer(WorkerServiceServicer):
         ack.transfer_deadline.FromTimedelta(self._transfer_deadline)
         if unknown_held_server_ids:
             ack.unknown_held_server_ids.extend(unknown_held_server_ids)
-        return pb.ApiMessage(correlation_id=correlation_id, register_ack=ack)
+        msg = pb.ApiMessage(correlation_id=correlation_id, register_ack=ack)
+        msg.sent_at.FromDatetime(self._clock.now())
+        return msg
 
 
 def _bind_port(

@@ -969,3 +969,57 @@ async def test_reconnect_sweeps_promoted_late_snapshot_from_prior_session() -> N
     # A spurious later result for the old command routes nowhere — the record is gone.
     await state.resolve("cmd-1", owner, _failed_transfer_result())
     assert sink.calls == []
+
+
+async def test_register_ack_echoes_correlation_id_and_sets_sent_at(
+    harness: _Harness,
+) -> None:
+    """RegisterAck echoes the Register's correlation_id and populates sent_at
+    (issue #2002, NFR-OBS-1)."""
+
+    stub = await harness.start()
+    call = stub.Session(metadata=_auth())
+    reg = pb.WorkerMessage(
+        correlation_id="trace-register-42",
+        register=pb.Register(
+            worker_id=_WORKER,
+            worker_version="1.0.0",
+            capabilities=pb.WorkerCapabilities(
+                drivers=[pb.EXECUTION_DRIVER_KIND_CONTAINER]
+            ),
+        ),
+    )
+    await call.write(reg)
+    ack_msg = await call.read()
+
+    assert ack_msg.correlation_id == "trace-register-42"
+    assert ack_msg.HasField("sent_at")
+    assert ack_msg.sent_at.seconds > 0
+    await call.done_writing()
+
+
+async def test_dispatched_command_carries_sent_at(harness: _Harness) -> None:
+    """Every dispatched ApiMessage populates sent_at (issue #2002)."""
+
+    stub = await harness.start()
+    call = await _registered_call(harness, stub)
+
+    async def worker_echo() -> None:
+        msg = await call.read()
+        assert msg.HasField("sent_at")
+        assert msg.sent_at.seconds > 0
+        await call.write(
+            pb.WorkerMessage(
+                correlation_id=msg.api_command.command_id,
+                command_result=pb.CommandResult(success=True),
+            )
+        )
+
+    echo = asyncio.ensure_future(worker_echo())
+    await harness.control_plane.dispatch(
+        worker_id=WorkerId(_WORKER),
+        server_id=str(uuid.uuid4()),
+        command=ServerCommandCommand(line="list"),
+    )
+    await echo
+    await call.done_writing()

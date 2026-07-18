@@ -24,6 +24,8 @@ import asyncio
 import logging
 import uuid
 
+from google.protobuf.timestamp_pb2 import Timestamp
+
 from mc_server_dashboard_api.fleet.domain.control_plane import (
     CloseBedrockTunnelCommand,
     Command,
@@ -56,6 +58,14 @@ from mc_server_dashboard_api.fleet.domain.value_objects import DriverKind, Worke
 from mcsd.controlplane.v1 import control_plane_pb2 as pb
 
 _LOG = logging.getLogger(__name__)
+
+
+def _now_timestamp() -> Timestamp:
+    """Return a protobuf Timestamp set to the current wall-clock time."""
+    ts = Timestamp()
+    ts.GetCurrentTime()
+    return ts
+
 
 # Map the domain driver kind to the wire enum at the transport edge (the servers
 # context's underscore spelling is mapped to ``DriverKind`` upstream; here we go
@@ -494,9 +504,9 @@ class GrpcControlPlane(ControlPlane):
             command_id, worker_id, snapshot_server_id=snapshot_server_id
         )
         api_command = _to_api_command(command_id, server_id, command)
-        await queue.put(
-            pb.ApiMessage(correlation_id=command_id, api_command=api_command)
-        )
+        msg = pb.ApiMessage(correlation_id=command_id, api_command=api_command)
+        msg.sent_at.CopyFrom(_now_timestamp())
+        await queue.put(msg)
         # A longer per-command budget (the start's hydrate phase, issue #822)
         # overrides the default command deadline for this one dispatch.
         timeout = self._timeout if timeout_override is None else timeout_override
@@ -539,9 +549,9 @@ class GrpcControlPlane(ControlPlane):
         command_id = str(uuid.uuid4())
         future = self._state.register_pending(command_id, worker_id)
         api_command = _to_api_command(command_id, server_id, command)
-        await queue.put(
-            pb.ApiMessage(correlation_id=command_id, api_command=api_command)
-        )
+        msg = pb.ApiMessage(correlation_id=command_id, api_command=api_command)
+        msg.sent_at.CopyFrom(_now_timestamp())
+        await queue.put(msg)
         # Fire-and-forget: the result is not awaited here. The task is held in
         # _background_tasks so it is not GC-collected mid-flight; a done callback
         # removes it once the coroutine finishes.

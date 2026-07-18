@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -94,7 +95,8 @@ type transport struct {
 
 func (t *transport) SendRegister(_ context.Context, caps session.Capabilities) error {
 	msg := &controlplanev1.WorkerMessage{
-		EmittedAt: timestamppb.New(t.clock.Now()),
+		CorrelationId: uuid.New().String(),
+		EmittedAt:     timestamppb.New(t.clock.Now()),
 		Payload: &controlplanev1.WorkerMessage_Register{
 			Register: &controlplanev1.Register{
 				WorkerId:      caps.WorkerID,
@@ -153,7 +155,8 @@ func (t *transport) RecvRegisterAck(_ context.Context) (session.RegisterAck, err
 
 func (t *transport) SendHeartbeat(_ context.Context) error {
 	msg := &controlplanev1.WorkerMessage{
-		EmittedAt: timestamppb.New(t.clock.Now()),
+		CorrelationId: uuid.New().String(),
+		EmittedAt:     timestamppb.New(t.clock.Now()),
 		Payload: &controlplanev1.WorkerMessage_Event{
 			Event: &controlplanev1.Event{
 				Event: &controlplanev1.Event_Heartbeat{Heartbeat: &controlplanev1.Heartbeat{}},
@@ -208,7 +211,8 @@ func (t *transport) SendCommandResult(_ context.Context, result session.CommandR
 
 func (t *transport) SendStatusChange(_ context.Context, event session.StatusEvent) error {
 	msg := &controlplanev1.WorkerMessage{
-		EmittedAt: timestamppb.New(t.clock.Now()),
+		CorrelationId: uuid.New().String(),
+		EmittedAt:     timestamppb.New(t.clock.Now()),
 		Payload: &controlplanev1.WorkerMessage_Event{
 			Event: &controlplanev1.Event{
 				ServerId: event.ServerID,
@@ -229,7 +233,8 @@ func (t *transport) SendStatusChange(_ context.Context, event session.StatusEven
 
 func (t *transport) SendLogLine(_ context.Context, event session.LogEvent) error {
 	msg := &controlplanev1.WorkerMessage{
-		EmittedAt: timestamppb.New(t.clock.Now()),
+		CorrelationId: uuid.New().String(),
+		EmittedAt:     timestamppb.New(t.clock.Now()),
 		Payload: &controlplanev1.WorkerMessage_Event{
 			Event: &controlplanev1.Event{
 				ServerId: event.ServerID,
@@ -250,7 +255,8 @@ func (t *transport) SendLogLine(_ context.Context, event session.LogEvent) error
 
 func (t *transport) SendMetrics(_ context.Context, event session.MetricsEvent) error {
 	msg := &controlplanev1.WorkerMessage{
-		EmittedAt: timestamppb.New(t.clock.Now()),
+		CorrelationId: uuid.New().String(),
+		EmittedAt:     timestamppb.New(t.clock.Now()),
 		Payload: &controlplanev1.WorkerMessage_Event{
 			Event: &controlplanev1.Event{
 				ServerId: event.ServerID,
