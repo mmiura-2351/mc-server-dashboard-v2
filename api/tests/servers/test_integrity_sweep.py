@@ -178,6 +178,51 @@ async def test_unpublished_server_snapshot_is_skipped() -> None:
     assert summary.snapshots_flagged == 0
 
 
+async def test_dangling_backup_row_is_quarantined_and_counted() -> None:
+    """A backup row whose archive is missing (crash-window dangling row) is
+    marked QUARANTINED, counted as ``backups_dangling`` in the summary, and
+    produces an audit entry — mirroring the lazy size backfill's handling."""
+    sid = ServerId.new()
+    dangling = _backup(sid, "gone", health=BackupHealth.UNKNOWN)
+    sweep, uow, store, audit = _wire(servers=[_server(sid)], backups=[dangling])
+    # Remove the archive so check_backup_health raises BackupNotFoundError.
+    store.archives.discard("gone")
+
+    summary = await sweep()
+
+    assert uow.backups.by_id[dangling.id].health is BackupHealth.QUARANTINED
+    assert summary.backups_dangling == 1
+    assert summary.backups_quarantined == 0
+    assert summary.backups_healthy == 0
+    quarantines = [e for e in audit.events if e.operation == BACKUP_QUARANTINE]
+    assert len(quarantines) == 1
+    assert quarantines[0].target_id == dangling.id.value
+
+
+async def test_dangling_row_does_not_abort_remaining_backups() -> None:
+    """A dangling row must not propagate and abort the sweep — the healthy
+    backup on the same server (and other servers) must still be checked."""
+    s1 = ServerId.new()
+    s2 = ServerId.new()
+    dangling = _backup(s1, "gone", health=BackupHealth.UNKNOWN)
+    healthy = _backup(s1, "ok", health=BackupHealth.UNKNOWN)
+    other = _backup(s2, "also-ok", health=BackupHealth.UNKNOWN)
+    sweep, uow, store, _audit = _wire(
+        servers=[_server(s1), _server(s2)],
+        backups=[dangling, healthy, other],
+    )
+    store.archives.discard("gone")
+
+    summary = await sweep()
+
+    assert uow.backups.by_id[dangling.id].health is BackupHealth.QUARANTINED
+    assert uow.backups.by_id[healthy.id].health is BackupHealth.HEALTHY
+    assert uow.backups.by_id[other.id].health is BackupHealth.HEALTHY
+    assert summary.backups_dangling == 1
+    assert summary.backups_healthy == 2
+    assert summary.servers_scanned == 2
+
+
 async def test_rerunning_is_idempotent() -> None:
     sid = ServerId.new()
     healthy = _backup(sid, "good", health=BackupHealth.UNKNOWN)

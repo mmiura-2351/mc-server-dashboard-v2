@@ -545,9 +545,11 @@ class WorkerSessionServicer(WorkerServiceServicer):
         state = _STATE_BY_PROTO.get(event.status_change.state)
         if state is None or not event.server_id:
             return
-        await self._state_sink.record_observed_state(
+        applied = await self._state_sink.record_observed_state(
             server_id=event.server_id, worker_id=worker_id.value, state=state
         )
+        if not applied:
+            return
         # Relay the observed transition to subscribed clients (FR-MON-1). The
         # publish is synchronous and best-effort: it never awaits subscriber
         # consumption, so a slow client cannot back-pressure this session path.

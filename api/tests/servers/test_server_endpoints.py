@@ -335,6 +335,50 @@ def test_create_forwards_and_reads_back_memory_limit() -> None:
     assert use_case.calls[0]["config"] == {"motd": "hi", MEMORY_LIMIT_CONFIG_KEY: 2048}
 
 
+def test_create_top_level_memory_limit_merges_into_config() -> None:
+    # A top-level ``memory_limit_mb`` on the request body is merged into the
+    # config dict so the value round-trips through create (#1849). Clients see
+    # the field at the top level of the response and naturally send it the same
+    # way — the endpoint must accept both locations.
+    community = uuid.uuid4()
+    server = _server_entity(community_id=community)
+    server.config = {**server.config, MEMORY_LIMIT_CONFIG_KEY: 2048}
+    use_case = _FakeUseCase(result=server)
+    app = _app(member=True, allow=True, create=use_case)
+    client = next(_client(app))
+    resp = client.post(
+        f"/api/communities/{community}/servers",
+        json={**_create_body(), "memory_limit_mb": 2048},
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["memory_limit_mb"] == 2048
+    # The use case must receive the value inside config, not as a separate kwarg.
+    assert use_case.calls[0]["config"] == {"motd": "hi", MEMORY_LIMIT_CONFIG_KEY: 2048}
+
+
+def test_create_config_memory_limit_takes_precedence_over_top_level() -> None:
+    # When both the top-level field and the config key are present, the config
+    # key wins — config is the canonical location (#1849).
+    community = uuid.uuid4()
+    server = _server_entity(community_id=community)
+    server.config = {**server.config, MEMORY_LIMIT_CONFIG_KEY: 4096}
+    use_case = _FakeUseCase(result=server)
+    app = _app(member=True, allow=True, create=use_case)
+    client = next(_client(app))
+    resp = client.post(
+        f"/api/communities/{community}/servers",
+        json={
+            **_create_body(),
+            "memory_limit_mb": 2048,
+            "config": {"motd": "hi", MEMORY_LIMIT_CONFIG_KEY: 4096},
+        },
+    )
+    assert resp.status_code == 201
+    # config key wins over the top-level convenience field.
+    assert use_case.calls[0]["config"] == {"motd": "hi", MEMORY_LIMIT_CONFIG_KEY: 4096}
+
+
 def test_create_without_memory_limit_reads_back_none() -> None:
     # Default-unset: no key, memory_limit_mb is null (#705).
     community = uuid.uuid4()
