@@ -175,7 +175,7 @@ updates:
           - patch
 
   # --- Docker images (compose.yaml) ---
-  - package-ecosystem: docker
+  - package-ecosystem: docker-compose
     directory: /
     schedule:
       interval: weekly
