@@ -174,10 +174,23 @@ _RESERVED_CONFIG_KEYS = frozenset(
     }
 )
 
+# System-managed JAR keys written by the start path (issue #1965). These must
+# never be settable by an API client: a client-supplied value could pin an
+# arbitrary pooled JAR, bypassing version validation. Silently stripped from
+# client input following the Kubernetes/Stripe round-trip convention.
+_SYSTEM_MANAGED_JAR_KEYS = frozenset({JAR_KEY_CONFIG_FIELD, JAR_SOURCE_CONFIG_FIELD})
+
 # The permission code the update gate evaluates. Kept as a bare string so this
 # application module stays free of community-context value objects; the edge maps
 # a denial to the 403 ``permission`` member.
 _SERVER_UPDATE_PERMISSION = "server:update"
+
+
+def _strip_system_jar_keys(config: dict[str, Any]) -> None:
+    """Remove system-managed JAR keys from client-supplied config in place (#1965)."""
+
+    for key in _SYSTEM_MANAGED_JAR_KEYS:
+        config.pop(key, None)
 
 
 def _reject_retired_config_keys(config: dict[str, Any]) -> None:
@@ -295,6 +308,9 @@ class CreateServer:
         # the row is staged, so it is never written into server.properties as a
         # bogus override.
         _reject_retired_config_keys(config)
+        # System-managed JAR keys are silently stripped from client input (#1965):
+        # a client-supplied value could pin an arbitrary pooled JAR.
+        _strip_system_jar_keys(config)
         # Apply the operator-configurable default when the request omits the key
         # (issue #1069). The default is injected into the config so it persists on
         # the row and is visible in responses. An explicit value takes precedence.
@@ -570,6 +586,9 @@ class UpdateServer:
             # A retired platform key (``backup_interval_hours``, #1840) 422s
             # before any write, so it is never written into server.properties.
             _reject_retired_config_keys(config)
+            # System-managed JAR keys are silently stripped from client input
+            # (#1965): the existing on-row values are preserved below.
+            _strip_system_jar_keys(config)
             # Validate the overrides carried on config before any write; each
             # raises on a bad value. The snapshot interval (FR-DATA-7) is
             # validated the same way.
@@ -652,7 +671,14 @@ class UpdateServer:
                         pending_removed_keys = (
                             old_overrides.keys() - new_overrides.keys()
                         )
+                    # Preserve system-managed JAR keys from the old config
+                    # (#1965): client input was stripped above, but the
+                    # start-path values must survive across updates.
+                    old_config = server.config
                     server.config = config
+                    for jar_key in _SYSTEM_MANAGED_JAR_KEYS:
+                        if jar_key in old_config:
+                            server.config[jar_key] = old_config[jar_key]
                 if game_port is not None and game_port != server.game_port:
                     # Uniqueness check excluding the server's own current port;
                     # the file rewrite is deferred to after commit (#1705).

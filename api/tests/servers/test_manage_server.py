@@ -65,6 +65,8 @@ from mc_server_dashboard_api.servers.domain.plugin import (
 )
 from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.value_objects import (
+    JAR_KEY_CONFIG_FIELD,
+    JAR_SOURCE_CONFIG_FIELD,
     CommunityId,
     DesiredState,
     ObservedState,
@@ -911,6 +913,34 @@ async def test_create_seed_failure_surfaces_after_commit() -> None:
     assert len(uow.servers.by_id) == 1
 
 
+async def test_create_strips_system_jar_keys_from_config() -> None:
+    # Client-supplied JAR keys (resolved_jar_sha256, resolved_jar_source) are
+    # system-managed and must be silently stripped from config on create (#1965).
+    uow = FakeUnitOfWork()
+    server = await CreateServer(
+        uow=uow,
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=FakeFileStore(),
+        port_range=_PORTS,
+    )(
+        community_id=CommunityId(uuid.uuid4()),
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        config={
+            "motd": "hi",
+            JAR_KEY_CONFIG_FIELD: "deadbeef" * 8,
+            JAR_SOURCE_CONFIG_FIELD: "sha256:deadbeef",
+        },
+    )
+    assert JAR_KEY_CONFIG_FIELD not in server.config
+    assert JAR_SOURCE_CONFIG_FIELD not in server.config
+    assert server.config["motd"] == "hi"
+    assert uow.commits == 1
+
+
 # --- read / list -----------------------------------------------------------
 
 
@@ -1702,6 +1732,58 @@ async def test_update_config_overrides_skips_resource_pack_keys() -> None:
     assert "resource-pack-prompt=" not in props_text
     # Legitimate user overrides still apply.
     assert "motd=bye" in props_text
+    assert uow.commits == 1
+
+
+async def test_update_strips_system_jar_keys_from_config() -> None:
+    # Client-supplied JAR keys are silently stripped on update (#1965).
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    server.config = {"motd": "hi"}
+    uow.servers.seed(server)
+    updated = await _updater(uow)(
+        community_id=community,
+        server_id=server.id,
+        config={
+            "motd": "bye",
+            JAR_KEY_CONFIG_FIELD: "deadbeef" * 8,
+            JAR_SOURCE_CONFIG_FIELD: "sha256:deadbeef",
+        },
+    )
+    assert JAR_KEY_CONFIG_FIELD not in updated.config
+    assert JAR_SOURCE_CONFIG_FIELD not in updated.config
+    assert updated.config["motd"] == "bye"
+    assert uow.commits == 1
+
+
+async def test_update_preserves_existing_jar_keys() -> None:
+    # When a server already has system-managed JAR keys, an update must preserve
+    # them from the old config even if the client supplies different values (#1965).
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    existing_key = "abcd1234" * 8
+    existing_source = "sha1:abcd1234"
+    server.config = {
+        "motd": "hi",
+        JAR_KEY_CONFIG_FIELD: existing_key,
+        JAR_SOURCE_CONFIG_FIELD: existing_source,
+    }
+    uow.servers.seed(server)
+    updated = await _updater(uow)(
+        community_id=community,
+        server_id=server.id,
+        config={
+            "motd": "bye",
+            JAR_KEY_CONFIG_FIELD: "deadbeef" * 8,
+            JAR_SOURCE_CONFIG_FIELD: "sha256:evil",
+        },
+    )
+    # The JAR keys are preserved from the OLD config, not the client input.
+    assert updated.config[JAR_KEY_CONFIG_FIELD] == existing_key
+    assert updated.config[JAR_SOURCE_CONFIG_FIELD] == existing_source
+    assert updated.config["motd"] == "bye"
     assert uow.commits == 1
 
 
