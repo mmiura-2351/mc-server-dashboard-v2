@@ -24,6 +24,9 @@ from mc_server_dashboard_api.versions.domain.catalog import VersionCatalog
 from mc_server_dashboard_api.versions.domain.errors import (
     CatalogUnavailableError as VersionsCatalogUnavailableError,
 )
+from mc_server_dashboard_api.versions.domain.errors import (
+    UnknownVersionError as VersionsUnknownVersionError,
+)
 from mc_server_dashboard_api.versions.domain.value_objects import ServerType
 
 
@@ -46,6 +49,11 @@ class CatalogVersionValidator(VersionValidator):
             # A transient source outage with no usable cache: translate the
             # versions-domain error into the servers-domain one so the create edge
             # maps it to a 503 without importing the versions domain (FR-VER-2).
+            raise CatalogUnavailableError(str(exc)) from exc
+        except VersionsUnknownVersionError as exc:
+            # A malformed upstream payload (e.g. HTML error page on a 200):
+            # the catalog source is unusable, not "version not found" — the
+            # membership check is local (issue #1991).
             raise CatalogUnavailableError(str(exc)) from exc
         if version not in {ref.version for ref in offered}:
             raise UnknownVersionError(f"{server_type} {version}")
