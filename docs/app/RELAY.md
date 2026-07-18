@@ -294,6 +294,8 @@ service RelayService {
   rpc Register(RegisterRequest) returns (RegisterResponse);
   rpc ResolveJoin(ResolveJoinRequest) returns (ResolveJoinResponse);
   rpc ReportSessions(ReportSessionsRequest) returns (ReportSessionsResponse);
+  rpc ValidateBedrockTunnel(ValidateBedrockTunnelRequest)
+      returns (ValidateBedrockTunnelResponse);
 }
 ```
 
@@ -319,6 +321,12 @@ service RelayService {
   username, player_uuid?, started_at}` and `SessionEnd {session_id,
   ended_at}`. Idempotent upserts keyed on the relay-minted `session_id`
   (UUID), so retries after transient API errors are safe.
+- **`ValidateBedrockTunnel`** — called when the relay accepts a Worker's QUIC
+  dial-out for a Bedrock tunnel (BEDROCK_TUNNEL.md). The relay has no prior
+  waiter to match against (unlike the per-player join token from
+  `ResolveJoin`), so it asks the API to confirm the credential. This keeps
+  the relay free of a persistent server list; its own state stays limited to
+  in-flight tunnel connections.
 
 ---
 
@@ -405,8 +413,9 @@ forwarder and accepted: `player_uuid` / `username` are null (Floodgate identity
 is Geyser-side, invisible to the relay) while `player_ip` is the client's true
 UDP source; and `started_at` is the promotion time (~≤1 s after connect) while
 `ended_at` lags the true disconnect by up to `flowIdleTimeout` (60 s, the
-idle-eviction window). Honest Java-vs-Bedrock labelling is a deferred follow-up
-(#1912, which needs a proto + migration change).
+idle-eviction window). Honest Java-vs-Bedrock labelling shipped with #1912:
+`SessionStart.source` (a `SessionSource` enum — `JAVA` / `BEDROCK`) is set by
+the relay and persisted in the `game_session.source` column (migration 0034).
 
 **Access control** (owner decision): a new permission **`session:read`**,
 granted to the seeded Owner role by default (DATABASE.md role seeding). The
@@ -586,6 +595,7 @@ a later migration with issue #957.
 | `player_uuid` | UUID NULL | Claimed; present on protocols that send it. |
 | `started_at` | timestamptz | |
 | `ended_at` | timestamptz NULL | NULL = still open (or relay crashed; healed on `Register`). |
+| `source` | TEXT NULL | Relay ingress path (`java` / `bedrock`); NULL for sessions predating #1912 (migration 0034). |
 
 - **Permission seeding**: add `session:read` to the seeded Owner role
   (DATABASE.md role model). Existing deployments: the migration appends
