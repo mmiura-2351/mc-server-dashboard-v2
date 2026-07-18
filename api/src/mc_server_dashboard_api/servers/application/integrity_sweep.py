@@ -40,6 +40,7 @@ from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
 from mc_server_dashboard_api.servers.domain.backup import Backup, BackupHealth
 from mc_server_dashboard_api.servers.domain.backup_store import BackupArchiveStore
 from mc_server_dashboard_api.servers.domain.entities import Server
+from mc_server_dashboard_api.servers.domain.errors import BackupNotFoundError
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -61,6 +62,7 @@ class SweepSummary:
     servers_scanned: int
     backups_healthy: int
     backups_quarantined: int
+    backups_dangling: int
     snapshots_scanned: int
     snapshots_flagged: int
 
@@ -85,13 +87,15 @@ class IntegritySweep:
         servers = await self._servers_to_scan(server_id)
         backups_healthy = 0
         backups_quarantined = 0
+        backups_dangling = 0
         snapshots_scanned = 0
         snapshots_flagged = 0
         for server in servers:
             _LOG.info("integrity sweep: scanning server %s", server.id.value)
-            healthy, quarantined = await self._sweep_backups(server, actor_id)
+            healthy, quarantined, dangling = await self._sweep_backups(server, actor_id)
             backups_healthy += healthy
             backups_quarantined += quarantined
+            backups_dangling += dangling
             scanned, flagged = await self._sweep_snapshot(server, actor_id)
             snapshots_scanned += scanned
             snapshots_flagged += flagged
@@ -99,15 +103,17 @@ class IntegritySweep:
             servers_scanned=len(servers),
             backups_healthy=backups_healthy,
             backups_quarantined=backups_quarantined,
+            backups_dangling=backups_dangling,
             snapshots_scanned=snapshots_scanned,
             snapshots_flagged=snapshots_flagged,
         )
         _LOG.info(
             "integrity sweep done: %d servers, %d backups healthy, %d quarantined, "
-            "%d snapshots scanned, %d flagged",
+            "%d dangling, %d snapshots scanned, %d flagged",
             summary.servers_scanned,
             summary.backups_healthy,
             summary.backups_quarantined,
+            summary.backups_dangling,
             summary.snapshots_scanned,
             summary.snapshots_flagged,
         )
@@ -122,17 +128,35 @@ class IntegritySweep:
 
     async def _sweep_backups(
         self, server: Server, actor_id: uuid.UUID | None
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, int]:
         async with self.uow:
             backups = await self.uow.backups.list_for_server(server.id)
         healthy = 0
         quarantined = 0
+        dangling = 0
         for backup in backups:
-            corrupt_count = await self.backup_store.check_backup_health(
-                community_id=server.community_id,
-                server_id=server.id,
-                storage_ref=backup.storage_ref,
-            )
+            try:
+                corrupt_count = await self.backup_store.check_backup_health(
+                    community_id=server.community_id,
+                    server_id=server.id,
+                    storage_ref=backup.storage_ref,
+                )
+            except BackupNotFoundError:
+                _LOG.warning(
+                    "integrity sweep: backup %s has no archive (dangling row); "
+                    "quarantining",
+                    backup.id.value,
+                )
+                async with self.uow:
+                    await self.uow.backups.update_health(
+                        backup.id, BackupHealth.QUARANTINED
+                    )
+                    await self.uow.commit()
+                dangling += 1
+                await self._audit_backup_quarantine(
+                    server.community_id, backup, actor_id
+                )
+                continue
             health = BackupHealth.QUARANTINED if corrupt_count else BackupHealth.HEALTHY
             _LOG.info(
                 "integrity sweep: backup %s -> %s (%d corrupt region files)",
@@ -150,7 +174,7 @@ class IntegritySweep:
                 )
             else:
                 healthy += 1
-        return healthy, quarantined
+        return healthy, quarantined, dangling
 
     async def _sweep_snapshot(
         self, server: Server, actor_id: uuid.UUID | None

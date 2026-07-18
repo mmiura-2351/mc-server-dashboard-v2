@@ -105,17 +105,17 @@ class ServersServerStateSink(ServerStateSink):
 
     async def record_observed_state(
         self, *, server_id: str, worker_id: str, state: str
-    ) -> None:
+    ) -> bool:
         parsed = _parse_id(server_id, kind="server_id")
         parsed_worker = _parse_id(worker_id, kind="worker_id")
         if parsed is None or parsed_worker is None:
-            return
+            return False
         observed = ObservedState(state)
         async with self._session_factory() as session:
             repo = SqlAlchemyServerRepository(session)
             server = await repo.get_by_id(ServerId(parsed))
             if server is None:
-                return
+                return False
             # Ownership guard: only the server's currently assigned worker may
             # write its observed state. A report from any other worker (stale or
             # misrouted) is dropped with a warning, not applied (defense-in-depth).
@@ -136,7 +136,7 @@ class ServersServerStateSink(ServerStateSink):
                         ),
                     },
                 )
-                return
+                return False
             # The sink NEVER unassigns from a status report (issue #847). The old
             # #217 sink-unassign (clear the assignment when the owning worker
             # reports stopped under desired=stopped) raced the final-snapshot
@@ -173,6 +173,7 @@ class ServersServerStateSink(ServerStateSink):
                     worker_id=WorkerId(parsed_worker),
                     running=observed is ObservedState.RUNNING,
                 )
+            return applied
 
     async def mark_worker_servers_unknown(self, *, worker_id: str) -> None:
         parsed = _parse_id(worker_id, kind="worker_id")

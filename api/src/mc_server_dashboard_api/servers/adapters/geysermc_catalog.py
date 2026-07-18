@@ -9,8 +9,8 @@ build over HTTPS. This adapter surfaces exactly that one artifact through the
 catalog seam so Floodgate installs symmetrically with Geyser, retiring the
 jar-upload-only path (issue #1548 option 2).
 
-Scope is deliberately narrow: the sole handled project is ``floodgate`` for a
-Paper (``paper`` loader) server, always resolving the latest build at install
+Scope is deliberately narrow: the sole handled project is Floodgate-Spigot for
+a Paper (``paper`` loader) server, always resolving the latest build at install
 time (the epic's locked "no pinning, no bundling" rule). It mirrors the SSRF
 hardening of :class:`ModrinthCatalog` (host allowlist, private-IP guard,
 bounded redirects, download size cap).
@@ -52,10 +52,14 @@ _MAX_REDIRECTS = 5
 
 _ALLOWED_DOWNLOAD_HOSTS = frozenset({_HOST})
 
-# The single artifact this adapter serves. ``floodgate`` is a stable GeyserMC
-# project id; ``spigot`` is the Paper-compatible download of each build. The
-# source string is the persisted :class:`PluginSource` value.
-_FLOODGATE_PROJECT_ID = "floodgate"
+# The single artifact this adapter serves. ``_GEYSERMC_PROJECT`` is the
+# upstream GeyserMC project name (used in API URLs); ``_SYNTHETIC_PROJECT_ID``
+# is the client-facing id/slug that avoids shadowing Modrinth's own
+# ``floodgate`` slug -- Modrinth publishes Fabric/NeoForge Floodgate builds
+# under that slug (issue #1961). ``spigot`` is the Paper-compatible download
+# of each build. The source string is the persisted :class:`PluginSource` value.
+_GEYSERMC_PROJECT = "floodgate"
+_SYNTHETIC_PROJECT_ID = "geysermc-floodgate"
 _SPIGOT_DOWNLOAD = "spigot"
 _PAPER_LOADER = "paper"
 _SOURCE = "geyser"
@@ -134,8 +138,9 @@ def _next_redirect_url(response: httpx2.Response, current_url: str) -> str:
 class GeyserMcCatalog(CatalogProvider):
     """GeyserMC download-API implementation of :class:`CatalogProvider`.
 
-    Handles only the ``floodgate`` project; a router delegates every other
-    project id to the default (Modrinth) catalog.
+    Handles only the synthetic ``geysermc-floodgate`` project id; a router
+    delegates every other project id -- including the bare ``floodgate`` slug
+    (which belongs to Modrinth) -- to the default catalog.
     """
 
     def __init__(self, *, base_url: str = _BASE_URL) -> None:
@@ -144,9 +149,9 @@ class GeyserMcCatalog(CatalogProvider):
     # -- routing predicates (used by the catalog router) --
 
     def handles(self, project_id_or_slug: str) -> bool:
-        """Whether this adapter owns ``project_id_or_slug`` (only ``floodgate``)."""
+        """Whether this adapter owns *project_id_or_slug* (only the synthetic id)."""
 
-        return project_id_or_slug == _FLOODGATE_PROJECT_ID
+        return project_id_or_slug == _SYNTHETIC_PROJECT_ID
 
     def handles_url(self, url: str) -> bool:
         """Whether ``url`` points at GeyserMC's download host."""
@@ -169,14 +174,14 @@ class GeyserMcCatalog(CatalogProvider):
         if (
             offset != 0
             or loader != _PAPER_LOADER
-            or (query and query.lower() not in _FLOODGATE_PROJECT_ID)
+            or (query and query.lower() not in _GEYSERMC_PROJECT)
         ):
             return CatalogSearchResponse(
                 hits=[], total_hits=0, offset=offset, limit=limit
             )
         hit = CatalogSearchResult(
-            project_id=_FLOODGATE_PROJECT_ID,
-            slug=_FLOODGATE_PROJECT_ID,
+            project_id=_SYNTHETIC_PROJECT_ID,
+            slug=_SYNTHETIC_PROJECT_ID,
             title=_FLOODGATE_TITLE,
             description=_FLOODGATE_DESCRIPTION,
             author=_FLOODGATE_AUTHOR,
@@ -193,8 +198,8 @@ class GeyserMcCatalog(CatalogProvider):
         if not self.handles(project_id_or_slug):
             raise CatalogProjectNotFoundError(project_id_or_slug)
         return CatalogProject(
-            project_id=_FLOODGATE_PROJECT_ID,
-            slug=_FLOODGATE_PROJECT_ID,
+            project_id=_SYNTHETIC_PROJECT_ID,
+            slug=_SYNTHETIC_PROJECT_ID,
             title=_FLOODGATE_TITLE,
             description=_FLOODGATE_DESCRIPTION,
             body=_FLOODGATE_DESCRIPTION,
@@ -220,7 +225,7 @@ class GeyserMcCatalog(CatalogProvider):
         if loader is not None and loader != _PAPER_LOADER:
             return []
         build = await self._get_json(
-            f"/projects/{_FLOODGATE_PROJECT_ID}/versions/latest/builds/latest"
+            f"/projects/{_GEYSERMC_PROJECT}/versions/latest/builds/latest"
         )
         return [self._parse_latest_build(build)]
 
@@ -292,7 +297,7 @@ class GeyserMcCatalog(CatalogProvider):
         filename = spigot.get("name", "")
         sha256 = spigot.get("sha256", "")
         download_url = (
-            f"{self._base_url}/projects/{_FLOODGATE_PROJECT_ID}"
+            f"{self._base_url}/projects/{_GEYSERMC_PROJECT}"
             f"/versions/{version}/builds/{build_no}/downloads/{_SPIGOT_DOWNLOAD}"
         )
         catalog_file = CatalogFile(

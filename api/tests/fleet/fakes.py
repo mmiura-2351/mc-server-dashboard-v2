@@ -46,8 +46,10 @@ class FakeServerStateSink(ServerStateSink):
         fail_observed_for: set[str] | None = None,
         always_fail_observed: bool = False,
         known_server_ids: set[str] | None = None,
+        reject_observed_for: set[str] | None = None,
     ) -> None:
         self.observed: list[tuple[str, str, str]] = []
+        self.rejected: list[tuple[str, str, str]] = []
         self.unknown_for: list[str] = []
         self.counted_for: list[str] = []
         self._running_ids = running_ids or {}
@@ -63,16 +65,23 @@ class FakeServerStateSink(ServerStateSink):
         # None, all ids are treated as existing (the default for tests that do not
         # exercise the unknown-held-server path).
         self._known_server_ids = known_server_ids
+        # Server ids whose record_observed_state returns False (applied=False),
+        # simulating a monotonic/ownership guard rejection (issue #1957).
+        self._reject_observed_for = reject_observed_for or set()
 
     async def record_observed_state(
         self, *, server_id: str, worker_id: str, state: str
-    ) -> None:
+    ) -> bool:
         if self._always_fail_observed:
             raise RuntimeError("observed-state sink unavailable")
         if server_id in self._fail_observed_for:
             self._fail_observed_for.discard(server_id)
             raise RuntimeError("transient observed-state write failure")
+        if server_id in self._reject_observed_for:
+            self.rejected.append((server_id, worker_id, state))
+            return False
         self.observed.append((server_id, worker_id, state))
+        return True
 
     async def mark_worker_servers_unknown(self, *, worker_id: str) -> None:
         self.unknown_for.append(worker_id)

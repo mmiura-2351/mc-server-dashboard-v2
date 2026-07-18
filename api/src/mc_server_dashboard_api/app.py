@@ -64,7 +64,10 @@ from mc_server_dashboard_api.fleet.adapters.relay_state import (
 )
 from mc_server_dashboard_api.fleet.api import events as server_events
 from mc_server_dashboard_api.fleet.api import workers
-from mc_server_dashboard_api.http_problem import install_problem_handlers
+from mc_server_dashboard_api.http_problem import (
+    install_problem_handlers,
+    unhandled_exception_middleware,
+)
 from mc_server_dashboard_api.identity.adapters.clock import (
     SystemClock as IdentitySystemClock,
 )
@@ -1149,9 +1152,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Render every error response as RFC 9457 problem+json (issue #371): one body
     # shape for application errors, framework HTTPExceptions, and 422 validation.
     install_problem_handlers(app)
-    # Middleware is applied outermost-last: adding the metrics middleware after the
-    # correlation-id one makes it the outer wrapper, so it times the full request
-    # handling and labels by route template (issue #282).
+    # Middleware is applied outermost-last: the catch-all exception middleware is
+    # registered FIRST so it is the innermost user middleware, just outside routing.
+    # An unhandled exception caught here returns a problem+json 500 that flows
+    # outward through correlation-ID, security-headers, and metrics middleware —
+    # unlike the belt-and-braces add_exception_handler(Exception, ...) path, which
+    # Starlette attaches to ServerErrorMiddleware outside all user middleware
+    # (issue #1951).
+    app.middleware("http")(unhandled_exception_middleware)
+    # Adding the correlation-id middleware after the catch-all makes it wrap it,
+    # so the correlation contextvar is set when the catch-all runs and the 500
+    # response carries the correlation ID header.
     app.middleware("http")(correlation_id_middleware)
     # Defence-in-depth security headers (issue #635): CSP, X-Frame-Options,
     # nosniff, Referrer-Policy, Permissions-Policy, conditional Cache-Control
