@@ -265,6 +265,31 @@ async def test_metadata_redirect_to_disallowed_host_rejected() -> None:
             await catalog.list_versions("floodgate", loader="paper")
 
 
+async def test_get_json_html_body_raises_catalog_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An HTML body on HTTP 200 raises CatalogUnavailableError."""
+    monkeypatch.setattr(geysermc_catalog, "_resolve_host", lambda _h: ["104.18.0.1"])
+
+    def _handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            200, content=b"<html><body>Service Unavailable</body></html>"
+        )
+
+    catalog = GeyserMcCatalog()
+    with _mock_transport(_handler):
+        with pytest.raises(CatalogUnavailableError):
+            await catalog.list_versions("floodgate", loader="paper")
+
+
+async def test_list_versions_shape_error_raises_catalog_unavailable() -> None:
+    """list_versions raises CatalogUnavailableError when build JSON is a non-dict."""
+    # Return a JSON array instead of the expected build object.
+    catalog = _catalog_with_build(["unexpected", "array"])  # type: ignore[arg-type]
+    with pytest.raises(CatalogUnavailableError):
+        await catalog.list_versions("floodgate", loader="paper")
+
+
 async def test_metadata_redirect_to_private_ip_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
