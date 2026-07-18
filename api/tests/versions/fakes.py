@@ -79,10 +79,12 @@ class FakeDocumentFetcher(JsonFetcher):
         texts: dict[str, str],
         payloads: dict[str, object],
         fail: bool = False,
+        not_found_urls: set[str] | None = None,
     ) -> None:
         self.texts = texts
         self._payloads = payloads
         self.fail = fail
+        self._not_found_urls = not_found_urls or set()
         self.calls: list[str] = []
 
     async def get_json(self, url: str) -> object:
@@ -97,6 +99,8 @@ class FakeDocumentFetcher(JsonFetcher):
         self.calls.append(url)
         if self.fail:
             raise FetchError(f"forced failure for {url}")
+        if url in self._not_found_urls:
+            raise FetchNotFoundError(f"404 for {url}")
         if url not in self.texts:
             raise FetchError(f"no text fixture for {url}")
         return self.texts[url]

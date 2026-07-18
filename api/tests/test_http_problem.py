@@ -13,10 +13,17 @@ from fastapi import FastAPI, status
 from fastapi.testclient import TestClient
 from pydantic import BaseModel, Field
 
+from mc_server_dashboard_api.core.adapters.metrics import http_requests_total
+from mc_server_dashboard_api.core.adapters.metrics_middleware import metrics_middleware
 from mc_server_dashboard_api.http_problem import (
     ProblemException,
     install_problem_handlers,
     problem,
+    unhandled_exception_middleware,
+)
+from mc_server_dashboard_api.middleware import (
+    correlation_id_middleware,
+    security_headers_middleware,
 )
 
 
@@ -151,3 +158,80 @@ def test_validation_error_entries_omit_input_and_ctx() -> None:
     assert entry["loc"] == ["body", "password"]
     assert entry["type"] == "string_too_long"
     assert isinstance(entry["msg"], str) and entry["msg"]
+
+
+# -- Regression tests: unhandled 500 must flow through user middleware (#1951) --
+
+
+def _client_with_middleware() -> TestClient:
+    """Build a test app with the full user middleware stack.
+
+    Mirrors the ``app.py`` registration order so the 500 response produced by
+    ``unhandled_exception_middleware`` flows through correlation-ID, security
+    headers, and metrics middleware — the exact path that was broken before
+    issue #1951.
+    """
+
+    app = FastAPI()
+    install_problem_handlers(app)
+    # Same registration order as app.py: innermost first.
+    app.middleware("http")(unhandled_exception_middleware)
+    app.middleware("http")(correlation_id_middleware)
+    app.middleware("http")(security_headers_middleware)
+    app.middleware("http")(metrics_middleware)
+
+    @app.get("/boom")
+    def boom() -> None:
+        raise RuntimeError("kaboom")
+
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def test_unhandled_500_carries_security_headers() -> None:
+    """An unhandled-exception 500 must carry the defence-in-depth security
+    headers (issue #1951). Before the fix, ``add_exception_handler(Exception)``
+    ran outside all user middleware, so the 500 had no security headers."""
+
+    resp = _client_with_middleware().get("/boom")
+    assert resp.status_code == 500
+    assert resp.headers["content-type"] == "application/problem+json"
+    assert resp.headers["Content-Security-Policy"]
+    assert resp.headers["X-Frame-Options"] == "DENY"
+    assert resp.headers["X-Content-Type-Options"] == "nosniff"
+    assert resp.headers["Referrer-Policy"] == "strict-origin-when-cross-origin"
+    assert resp.headers["Permissions-Policy"]
+
+
+def test_unhandled_500_carries_correlation_id() -> None:
+    """An unhandled-exception 500 must echo back the correlation ID
+    (issue #1951). Before the fix, the 500 bypassed the correlation-ID
+    middleware so no X-Correlation-ID header was set."""
+
+    client = _client_with_middleware()
+    # With an inbound correlation ID.
+    resp = client.get("/boom", headers={"X-Correlation-ID": "trace-abc"})
+    assert resp.status_code == 500
+    assert resp.headers["X-Correlation-ID"] == "trace-abc"
+    # Without an inbound correlation ID — one must still be minted.
+    resp = client.get("/boom")
+    assert resp.status_code == 500
+    assert resp.headers.get("X-Correlation-ID")
+
+
+def test_unhandled_500_increments_metrics() -> None:
+    """An unhandled-exception 500 must be visible to ``http_requests_total``
+    (issue #1951). Before the fix, the 500 bypassed the metrics middleware
+    so it was invisible to the counter."""
+
+    client = _client_with_middleware()
+    # Snapshot the counter before the request. The label combination for
+    # an unmatched-template GET 500 is method=GET, route=<unmatched> or
+    # the actual template, status=500. We check any 500 increment.
+    before = http_requests_total.labels(
+        method="GET", route="/boom", status="500"
+    )._value.get()
+    client.get("/boom")
+    after = http_requests_total.labels(
+        method="GET", route="/boom", status="500"
+    )._value.get()
+    assert after == before + 1
