@@ -444,9 +444,10 @@ redesign.
   `game_session` row like a Java login. Identity is null
   (the relay cannot see Floodgate username/UUID) but `player_ip` is the client's
   true UDP source, and the promotion gate keeps unconnected-ping / scan churn
-  out of the history. Honest Java-vs-Bedrock labelling (a `SessionStart.source`
-  discriminator, which needs a proto + migration change) is the deferred
-  follow-up #1912.
+  out of the history. Honest Java-vs-Bedrock labelling shipped with #1912:
+  `SessionStart.source` (a `SessionSource` enum — `JAVA` / `BEDROCK`) is set
+  by the relay and persisted in the `game_session.source` column
+  (migration 0034).
 - ~~**Metrics** -- no Prometheus metrics for flow counts, drop counts, or bind
   failures yet~~ **Landed with #1909**: the Bedrock path exports, on the same
   opt-in `/metrics` endpoint as the Java path (RELAY.md Section 17), active

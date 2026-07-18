@@ -30,68 +30,68 @@ def _resolver_for(*addrs: str) -> Callable[[str], list[str]]:
     return _resolve
 
 
-def test_allows_public_host() -> None:
+async def test_allows_public_host() -> None:
     """An HTTPS URL whose host resolves to a public IP passes."""
-    assert_url_allowed(_PUBLIC, _resolver=_resolver_for("93.184.216.34"))
+    await assert_url_allowed(_PUBLIC, _resolver=_resolver_for("93.184.216.34"))
 
 
-def test_rejects_loopback() -> None:
+async def test_rejects_loopback() -> None:
     with pytest.raises(BlockedHostError, match="private"):
-        assert_url_allowed(_PUBLIC, _resolver=_resolver_for("127.0.0.1"))
+        await assert_url_allowed(_PUBLIC, _resolver=_resolver_for("127.0.0.1"))
 
 
-def test_rejects_rfc1918() -> None:
+async def test_rejects_rfc1918() -> None:
     with pytest.raises(BlockedHostError, match="private"):
-        assert_url_allowed(_PUBLIC, _resolver=_resolver_for("192.168.1.1"))
+        await assert_url_allowed(_PUBLIC, _resolver=_resolver_for("192.168.1.1"))
 
 
-def test_rejects_link_local() -> None:
+async def test_rejects_link_local() -> None:
     with pytest.raises(BlockedHostError, match="private"):
-        assert_url_allowed(_PUBLIC, _resolver=_resolver_for("169.254.169.254"))
+        await assert_url_allowed(_PUBLIC, _resolver=_resolver_for("169.254.169.254"))
 
 
-def test_rejects_ipv6_loopback() -> None:
+async def test_rejects_ipv6_loopback() -> None:
     with pytest.raises(BlockedHostError, match="private"):
-        assert_url_allowed(_PUBLIC, _resolver=_resolver_for("::1"))
+        await assert_url_allowed(_PUBLIC, _resolver=_resolver_for("::1"))
 
 
-def test_rejects_cgnat() -> None:
+async def test_rejects_cgnat() -> None:
     with pytest.raises(BlockedHostError, match="private"):
-        assert_url_allowed(_PUBLIC, _resolver=_resolver_for("100.64.0.1"))
+        await assert_url_allowed(_PUBLIC, _resolver=_resolver_for("100.64.0.1"))
 
 
-def test_rejects_if_any_addr_private() -> None:
+async def test_rejects_if_any_addr_private() -> None:
     """If any resolved address is private, the check fails."""
     with pytest.raises(BlockedHostError, match="private"):
-        assert_url_allowed(
+        await assert_url_allowed(
             _PUBLIC, _resolver=_resolver_for("93.184.216.34", "10.0.0.1")
         )
 
 
-def test_rejects_non_https() -> None:
+async def test_rejects_non_https() -> None:
     with pytest.raises(BlockedHostError, match="HTTPS"):
-        assert_url_allowed(
+        await assert_url_allowed(
             "http://example.com/server.jar", _resolver=_resolver_for("93.184.216.34")
         )
 
 
-def test_rejects_dns_failure() -> None:
+async def test_rejects_dns_failure() -> None:
     def _boom(_: str) -> list[str]:
         raise socket.gaierror("no such host")
 
     with pytest.raises(BlockedHostError, match="DNS resolution failed"):
-        assert_url_allowed(_PUBLIC, _resolver=_boom)
+        await assert_url_allowed(_PUBLIC, _resolver=_boom)
 
 
-def test_rejects_empty_resolver_result() -> None:
+async def test_rejects_empty_resolver_result() -> None:
     """An empty resolver result must fail closed, not silently pass."""
     with pytest.raises(BlockedHostError, match="returned no addresses"):
-        assert_url_allowed(_PUBLIC, _resolver=_resolver_for())
+        await assert_url_allowed(_PUBLIC, _resolver=_resolver_for())
 
 
-def test_rejects_url_without_host() -> None:
+async def test_rejects_url_without_host() -> None:
     """An HTTPS URL with no hostname is refused."""
     with pytest.raises(BlockedHostError, match="no host"):
-        assert_url_allowed(
+        await assert_url_allowed(
             "https:///server.jar", _resolver=_resolver_for("93.184.216.34")
         )

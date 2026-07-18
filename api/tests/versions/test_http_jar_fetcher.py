@@ -34,7 +34,11 @@ def _install_transport(monkeypatch: pytest.MonkeyPatch, handler: object) -> None
     transport = httpx2.MockTransport(handler)  # type: ignore[arg-type]
     patched = functools.partial(httpx2.AsyncClient, transport=transport)
     monkeypatch.setattr(httpx2, "AsyncClient", patched)
-    monkeypatch.setattr(ssrf_guard, "_resolve_host", lambda _host: ["93.184.216.34"])
+
+    async def _public_resolver(_host: str) -> list[str]:
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(ssrf_guard, "_async_resolve_host", _public_resolver)
 
 
 @pytest.mark.asyncio
@@ -74,7 +78,10 @@ async def test_non_2xx_is_download_error(monkeypatch: pytest.MonkeyPatch) -> Non
 async def test_private_ip_is_download_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """A URL resolving to a private IP is refused before any request (#1598)."""
 
-    monkeypatch.setattr(ssrf_guard, "_resolve_host", lambda _host: ["10.0.0.1"])
+    async def _private_resolver(_host: str) -> list[str]:
+        return ["10.0.0.1"]
+
+    monkeypatch.setattr(ssrf_guard, "_async_resolve_host", _private_resolver)
     with pytest.raises(JarDownloadError, match="private"):
         await HttpxJarFetcher().fetch(_URL)
 

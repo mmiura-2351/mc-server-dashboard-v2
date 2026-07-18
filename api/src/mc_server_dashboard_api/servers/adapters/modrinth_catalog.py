@@ -7,6 +7,7 @@ descriptive User-Agent.
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
 import socket
@@ -48,16 +49,17 @@ _ALLOWED_DOWNLOAD_HOSTS = frozenset(
 )
 
 
-def _default_resolve_host(hostname: str) -> list[str]:
-    """Resolve *hostname* to a list of IP address strings via DNS."""
-    results = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
+async def _async_resolve_host(hostname: str) -> list[str]:
+    """Resolve *hostname* without blocking the event loop.
+
+    Uses ``loop.getaddrinfo``, which delegates to the executor internally.
+    """
+    loop = asyncio.get_running_loop()
+    results = await loop.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
     return list({str(addr[4][0]) for addr in results})
 
 
-_resolve_host: Callable[[str], list[str]] = _default_resolve_host
-
-
-def _assert_no_private_ips(
+async def _assert_no_private_ips(
     hostname: str,
     *,
     _resolver: Callable[[str], list[str]] | None = None,
@@ -68,9 +70,11 @@ def _assert_no_private_ips(
     initially passes the allowlist check but resolves to a private/loopback
     address.
     """
-    resolver = _resolver or _resolve_host
     try:
-        addrs = resolver(hostname)
+        if _resolver is not None:
+            addrs = _resolver(hostname)
+        else:
+            addrs = await _async_resolve_host(hostname)
     except (socket.gaierror, OSError) as exc:
         raise CatalogUnavailableError(f"DNS resolution failed for {hostname}") from exc
     if not addrs:
@@ -114,44 +118,50 @@ class ModrinthCatalog(CatalogProvider):
             "offset": offset,
         }
         data = await self._get_json("/search", params=params)
-        hits = [
-            CatalogSearchResult(
-                project_id=h["project_id"],
-                slug=h.get("slug", ""),
-                title=h.get("title", ""),
-                description=h.get("description", ""),
-                author=h.get("author", ""),
-                icon_url=h.get("icon_url"),
-                downloads=h.get("downloads", 0),
-                categories=h.get("categories", []),
-                latest_game_versions=h.get("versions", []),
+        try:
+            hits = [
+                CatalogSearchResult(
+                    project_id=h["project_id"],
+                    slug=h.get("slug", ""),
+                    title=h.get("title", ""),
+                    description=h.get("description", ""),
+                    author=h.get("author", ""),
+                    icon_url=h.get("icon_url"),
+                    downloads=h.get("downloads", 0),
+                    categories=h.get("categories", []),
+                    latest_game_versions=h.get("versions", []),
+                )
+                for h in data.get("hits", [])
+            ]
+            return CatalogSearchResponse(
+                hits=hits,
+                total_hits=data.get("total_hits", 0),
+                offset=data.get("offset", offset),
+                limit=data.get("limit", limit),
             )
-            for h in data.get("hits", [])
-        ]
-        return CatalogSearchResponse(
-            hits=hits,
-            total_hits=data.get("total_hits", 0),
-            offset=data.get("offset", offset),
-            limit=data.get("limit", limit),
-        )
+        except (AttributeError, KeyError, TypeError) as exc:
+            raise CatalogUnavailableError(f"unexpected response shape: {exc}") from exc
 
     async def get_project(self, project_id_or_slug: str) -> CatalogProject:
         data = await self._get_json(f"/project/{quote(project_id_or_slug, safe='')}")
-        return CatalogProject(
-            project_id=data["id"],
-            slug=data.get("slug", ""),
-            title=data.get("title", ""),
-            description=data.get("description", ""),
-            body=data.get("body", ""),
-            author=data.get("team", None),
-            icon_url=data.get("icon_url"),
-            downloads=data.get("downloads", 0),
-            categories=data.get("categories", []),
-            game_versions=data.get("game_versions", []),
-            loaders=data.get("loaders", []),
-            client_side=data.get("client_side", "unknown"),
-            server_side=data.get("server_side", "unknown"),
-        )
+        try:
+            return CatalogProject(
+                project_id=data["id"],
+                slug=data.get("slug", ""),
+                title=data.get("title", ""),
+                description=data.get("description", ""),
+                body=data.get("body", ""),
+                author=None,
+                icon_url=data.get("icon_url"),
+                downloads=data.get("downloads", 0),
+                categories=data.get("categories", []),
+                game_versions=data.get("game_versions", []),
+                loaders=data.get("loaders", []),
+                client_side=data.get("client_side", "unknown"),
+                server_side=data.get("server_side", "unknown"),
+            )
+        except (AttributeError, KeyError, TypeError) as exc:
+            raise CatalogUnavailableError(f"unexpected response shape: {exc}") from exc
 
     async def list_versions(
         self,
@@ -168,7 +178,10 @@ class ModrinthCatalog(CatalogProvider):
         data = await self._get_json(
             f"/project/{quote(project_id_or_slug, safe='')}/version", params=params
         )
-        return [self._parse_version(v) for v in data]
+        try:
+            return [self._parse_version(v) for v in data]
+        except (AttributeError, KeyError, TypeError) as exc:
+            raise CatalogUnavailableError(f"unexpected response shape: {exc}") from exc
 
     async def download_file(self, url: str) -> bytes:
         parsed = urlparse(url)
@@ -178,7 +191,7 @@ class ModrinthCatalog(CatalogProvider):
             raise CatalogUnavailableError(
                 f"download URL host not allowed: {parsed.hostname}"
             )
-        _assert_no_private_ips(parsed.hostname)
+        await _assert_no_private_ips(parsed.hostname)
         try:
             async with httpx2.AsyncClient(
                 timeout=_DOWNLOAD_TIMEOUT,
@@ -204,7 +217,7 @@ class ModrinthCatalog(CatalogProvider):
                                     f"redirect to disallowed host: "
                                     f"{redirect_parsed.hostname}"
                                 )
-                            _assert_no_private_ips(redirect_parsed.hostname)
+                            await _assert_no_private_ips(redirect_parsed.hostname)
                             current_url = location
                             continue
                         response.raise_for_status()
@@ -257,7 +270,7 @@ class ModrinthCatalog(CatalogProvider):
             raise
         except httpx2.HTTPStatusError as exc:
             raise CatalogUnavailableError(str(exc)) from exc
-        except httpx2.TransportError as exc:
+        except (httpx2.TransportError, ValueError) as exc:
             raise CatalogUnavailableError(str(exc)) from exc
 
     @staticmethod

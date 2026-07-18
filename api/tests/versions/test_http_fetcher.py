@@ -33,7 +33,11 @@ def _install_transport(monkeypatch: pytest.MonkeyPatch, handler: object) -> None
     transport = httpx2.MockTransport(handler)  # type: ignore[arg-type]
     patched = functools.partial(httpx2.AsyncClient, transport=transport)
     monkeypatch.setattr(httpx2, "AsyncClient", patched)
-    monkeypatch.setattr(ssrf_guard, "_resolve_host", lambda _host: ["93.184.216.34"])
+
+    async def _public_resolver(_host: str) -> list[str]:
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(ssrf_guard, "_async_resolve_host", _public_resolver)
 
 
 @pytest.mark.asyncio
@@ -72,7 +76,10 @@ async def test_get_json_private_ip_is_fetch_error(
 ) -> None:
     """A URL resolving to a private IP is refused before any request (#1598)."""
 
-    monkeypatch.setattr(ssrf_guard, "_resolve_host", lambda _host: ["169.254.169.254"])
+    async def _private_resolver(_host: str) -> list[str]:
+        return ["169.254.169.254"]
+
+    monkeypatch.setattr(ssrf_guard, "_async_resolve_host", _private_resolver)
     with pytest.raises(FetchError, match="private"):
         await HttpxJsonFetcher().get_json(_URL)
 
@@ -81,7 +88,10 @@ async def test_get_json_private_ip_is_fetch_error(
 async def test_get_text_private_ip_is_fetch_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(ssrf_guard, "_resolve_host", lambda _host: ["127.0.0.1"])
+    async def _private_resolver(_host: str) -> list[str]:
+        return ["127.0.0.1"]
+
+    monkeypatch.setattr(ssrf_guard, "_async_resolve_host", _private_resolver)
     with pytest.raises(FetchError, match="private"):
         await HttpxJsonFetcher().get_text(_URL)
 
@@ -116,7 +126,10 @@ async def test_get_text_404_is_fetch_not_found_error(
 async def test_get_json_non_https_is_fetch_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(ssrf_guard, "_resolve_host", lambda _host: ["93.184.216.34"])
+    async def _public_resolver(_host: str) -> list[str]:
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(ssrf_guard, "_async_resolve_host", _public_resolver)
     with pytest.raises(FetchError, match="HTTPS"):
         await HttpxJsonFetcher().get_json("http://example.test/manifest.json")
 
