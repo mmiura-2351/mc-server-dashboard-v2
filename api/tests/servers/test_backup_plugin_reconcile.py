@@ -301,6 +301,8 @@ async def test_restore_recovers_catalog_provenance_from_checksum() -> None:
     )
     catalog_copy.source = PluginSource.MODRINTH
     catalog_copy.source_project_id = "AABBCCDD"
+    catalog_copy.source_version_id = "VER123"
+    catalog_copy.version_number = "1.2.3"
     plugins.seed(catalog_copy)
     # The identical jar lands on the restored server as a ghost (no DB row here).
     file_store = FakeFileStore()
@@ -316,6 +318,8 @@ async def test_restore_recovers_catalog_provenance_from_checksum() -> None:
     ghost = next(r for r in rows if r.server_id == server.id)
     assert ghost.source is PluginSource.MODRINTH
     assert ghost.source_project_id == "AABBCCDD"
+    assert ghost.source_version_id == "VER123"
+    assert ghost.version_number == "1.2.3"
 
 
 async def test_restore_marks_unrecoverable_ghost_source_unknown() -> None:
@@ -338,6 +342,8 @@ async def test_restore_marks_unrecoverable_ghost_source_unknown() -> None:
     assert len(rows) == 1
     assert rows[0].source is PluginSource.UNKNOWN
     assert rows[0].source_project_id is None
+    assert rows[0].source_version_id is None
+    assert rows[0].version_number is None
 
 
 # --- no plugins (no-op) -----------------------------------------------------

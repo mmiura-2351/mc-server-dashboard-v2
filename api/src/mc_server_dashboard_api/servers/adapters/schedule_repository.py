@@ -11,6 +11,8 @@ serialize to ``{"command": ...}`` / ``{"warnings": [...]}`` / ``{}``.
 from __future__ import annotations
 
 import datetime as dt
+import logging
+from collections.abc import Iterable
 from typing import Any
 
 from sqlalchemy import delete, select, update
@@ -39,6 +41,8 @@ from mc_server_dashboard_api.servers.domain.schedule_repository import (
     ScheduleRunRepository,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
+
+_LOG = logging.getLogger(__name__)
 
 
 def _payload_json(schedule: Schedule) -> dict[str, Any]:
@@ -78,6 +82,28 @@ def _to_schedule(row: ScheduleModel) -> Schedule:
         last_run_at=row.last_run_at,
         created_by=row.created_by,
     )
+
+
+def _safe_hydrate(rows: Iterable[ScheduleModel]) -> list[Schedule]:
+    """Hydrate schedule rows, skipping any that fail domain validation.
+
+    Defense-in-depth (issue #1856): a row whose data violates a domain
+    invariant (e.g. ``interval_seconds`` below the floor from a past migration
+    bug or a manual DB edit) is logged and skipped rather than failing the
+    entire list — one bad row must not stop the fleet's schedules.
+    """
+
+    result: list[Schedule] = []
+    for row in rows:
+        try:
+            result.append(_to_schedule(row))
+        except Exception:  # noqa: BLE001 - skip-and-log, never propagate
+            _LOG.warning(
+                "schedule row %s failed to hydrate; skipping",
+                row.id,
+                exc_info=True,
+            )
+    return result
 
 
 class SqlAlchemyScheduleRepository(ScheduleRepository):
@@ -120,7 +146,7 @@ class SqlAlchemyScheduleRepository(ScheduleRepository):
             .order_by(ScheduleModel.next_run_at, ScheduleModel.id)
         )
         rows = (await self._session.execute(stmt)).scalars().all()
-        return [_to_schedule(row) for row in rows]
+        return _safe_hydrate(rows)
 
     async def list_warning_candidates(
         self, now: dt.datetime, until: dt.datetime
@@ -142,7 +168,7 @@ class SqlAlchemyScheduleRepository(ScheduleRepository):
             .order_by(ScheduleModel.next_run_at, ScheduleModel.id)
         )
         rows = (await self._session.execute(stmt)).scalars().all()
-        return [_to_schedule(row) for row in rows]
+        return _safe_hydrate(rows)
 
     async def list_for_server(self, server_id: ServerId) -> list[Schedule]:
         stmt = (
