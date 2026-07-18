@@ -464,6 +464,65 @@ func TestRetryBackoffOnRejectedRedial(t *testing.T) {
 	}
 }
 
+// After a successful handshake whose connection drops immediately (pump
+// returns), the run loop must apply a backoff delay before redialing
+// rather than looping with zero delay — the fix for the duel hot-loop
+// described in issue #1988. Mirrors session.Runner.Run, which delays
+// before every redial regardless of whether the previous attempt succeeded.
+func TestRedialAfterPumpDropAppliesBackoff(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	relay := newFakeRelay(t, nil)
+	m := newTestManager(ctx, t)
+	m.randFloat = func() float64 { return 0.5 }
+
+	// afterFunc is called by the run loop's unified backoff path. Capture
+	// every delay it receives after the connection drops so we can verify
+	// the delay is applied, with the correct value, on the pump-return
+	// path — not just the handshake-error path.
+	var dropped atomic.Bool
+	afterCalled := make(chan time.Duration, 8)
+	m.afterFunc = func(d time.Duration) <-chan time.Time {
+		if dropped.Load() {
+			afterCalled <- d
+		}
+		ch := make(chan time.Time, 1)
+		ch <- time.Now() // unblock immediately
+		return ch
+	}
+
+	if err := m.Open(specFor(relay, "s1", "tok")); err != nil {
+		t.Fatalf("Open = %v, want nil", err)
+	}
+
+	// First connection: accept, then drop from the relay side so pump
+	// returns and the run loop must redial.
+	first := relay.waitAccepted(t)
+	dropped.Store(true)
+	_ = first.conn.CloseWithError(0, "simulated drop")
+
+	// The run loop must call afterFunc with the correct backoff delay
+	// after the pump returns. With fastBackoff (Initial=1ms) and
+	// randFloat=0.5, Delay(0, 0.5) = 500ns (attempt is 0 because a
+	// successful handshake resets it).
+	want := m.backoff.Delay(0, 0.5)
+	select {
+	case got := <-afterCalled:
+		if got != want {
+			t.Fatalf("backoff delay after pump drop = %v, want %v", got, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("afterFunc was not called after pump drop (issue #1988)")
+	}
+
+	// The redial must succeed after the delay.
+	second := relay.waitAccepted(t)
+	if second.hello.GetToken() != first.hello.GetToken() {
+		t.Fatalf("redial token = %q, want %q", second.hello.GetToken(), first.hello.GetToken())
+	}
+}
+
 // An always-rejecting relay does not make the Worker give up: it keeps
 // retrying with backoff indefinitely while the tunnel is still open
 // (docs/app/BEDROCK_TUNNEL.md Section 3.1).

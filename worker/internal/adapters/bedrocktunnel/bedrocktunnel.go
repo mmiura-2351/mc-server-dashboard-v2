@@ -120,6 +120,10 @@ type Manager struct {
 	// port for one flow; injectable so tests point flows at a fake local
 	// listener instead of a real container.
 	dialUDP func(ctx context.Context, addr string) (net.Conn, error)
+	// afterFunc creates a timer channel for backoff delays; injectable so
+	// tests verify delay behavior without wall-clock waits. Defaults to
+	// time.After.
+	afterFunc func(time.Duration) <-chan time.Time
 
 	mu      sync.Mutex
 	tunnels map[string]*tunnelHandle
@@ -161,6 +165,7 @@ func New(baseCtx context.Context, gameBindIP string, gameHost func(serverID stri
 		var d net.Dialer
 		return d.DialContext(ctx, "udp", addr)
 	}
+	m.afterFunc = time.After
 	return m
 }
 
@@ -225,6 +230,11 @@ func (m *Manager) forget(serverID string, handle *tunnelHandle) {
 // (docs/app/BEDROCK_TUNNEL.md Section 3.1: a redial can be rejected for up to
 // ~15s while the relay's stale prior connection times out — backoff treats
 // that as retryable, never terminal).
+//
+// Backoff is applied before every redial, including after a successful
+// handshake whose connection then drops (mirroring session.Runner.Run) —
+// without this, two Workers holding the same token duel at network speed,
+// each displacing the other's connection on every handshake (issue #1988).
 func (m *Manager) run(ctx context.Context, handle *tunnelHandle, spec Spec, tlsCfg *tls.Config) {
 	defer m.forget(spec.ServerID, handle)
 
@@ -240,21 +250,28 @@ func (m *Manager) run(ctx context.Context, handle *tunnelHandle, spec Spec, tlsC
 			}
 			m.logger.Warn("bedrock tunnel dial/handshake failed; retrying",
 				"server_id", spec.ServerID, "error", err)
-			delay := m.backoff.Delay(attempt, m.randFloat())
-			attempt++
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(delay):
-			}
-			continue
+		} else {
+			// A successful handshake resets the backoff counter, mirroring
+			// session.Runner.Run: the next drop starts the sequence over
+			// rather than inheriting the growth from earlier failures.
+			attempt = 0
+			m.logger.Info("bedrock tunnel established", "server_id", spec.ServerID, "bedrock_port", spec.BedrockPort)
+			m.pump(ctx, conn, spec)
+			// pump returned: either ctx was cancelled (checked below) or
+			// the connection dropped — both fall through to the backoff.
 		}
-		attempt = 0
-		m.logger.Info("bedrock tunnel established", "server_id", spec.ServerID, "bedrock_port", spec.BedrockPort)
-		m.pump(ctx, conn, spec)
-		// pump returns either because ctx was cancelled (graceful close already
-		// sent) or the connection dropped on its own; the loop re-checks ctx.Err()
-		// at the top either way, redialing in the latter case.
+
+		if ctx.Err() != nil {
+			return
+		}
+
+		delay := m.backoff.Delay(attempt, m.randFloat())
+		attempt++
+		select {
+		case <-ctx.Done():
+			return
+		case <-m.afterFunc(delay):
+		}
 	}
 }
 
