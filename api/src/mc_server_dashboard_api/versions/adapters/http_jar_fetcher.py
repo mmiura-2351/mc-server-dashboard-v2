@@ -41,7 +41,7 @@ class HttpxJarFetcher(JarFetcher):
 
     async def fetch(self, url: str) -> bytes:
         try:
-            assert_url_allowed(url)
+            await assert_url_allowed(url)
             async with httpx2.AsyncClient(timeout=_TIMEOUT) as client:
                 async with client.stream("GET", url) as response:
                     response.raise_for_status()
