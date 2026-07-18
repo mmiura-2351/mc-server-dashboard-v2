@@ -231,7 +231,10 @@ class GeyserMcCatalog(CatalogProvider):
         build = await self._get_json(
             f"/projects/{_GEYSERMC_PROJECT}/versions/latest/builds/latest"
         )
-        return [self._parse_latest_build(build)]
+        try:
+            return [self._parse_latest_build(build)]
+        except (AttributeError, KeyError, TypeError) as exc:
+            raise CatalogUnavailableError(f"unexpected response shape: {exc}") from exc
 
     async def download_file(self, url: str) -> bytes:
         parsed = urlparse(url)
@@ -365,5 +368,5 @@ class GeyserMcCatalog(CatalogProvider):
             raise
         except httpx2.HTTPStatusError as exc:
             raise CatalogUnavailableError(str(exc)) from exc
-        except httpx2.TransportError as exc:
+        except (httpx2.TransportError, ValueError) as exc:
             raise CatalogUnavailableError(str(exc)) from exc

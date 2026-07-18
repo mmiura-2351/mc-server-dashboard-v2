@@ -67,6 +67,20 @@ _CSP = (
     "frame-ancestors 'none'"
 )
 
+# Docs pages (issue #1990): the self-hosted swagger-ui init HTML emitted by
+# ``get_swagger_ui_html`` contains an inline ``<script>`` block, which the
+# strict ``script-src 'self'`` blocks. A path-scoped relaxation adds
+# ``'unsafe-inline'`` only on the two docs pages; every other path keeps the
+# strict policy.
+_DOCS_PATHS = frozenset({"/api/docs", "/api/redoc"})
+_DOCS_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: https://cdn.modrinth.com; "
+    "frame-ancestors 'none'"
+)
+
 _PERMISSIONS_POLICY = "camera=(), microphone=(), geolocation=()"
 
 # Paths whose responses carry ``Cache-Control: no-store`` because the body
@@ -89,7 +103,10 @@ async def security_headers_middleware(
 
     response = await call_next(request)
 
-    response.headers["Content-Security-Policy"] = _CSP
+    if request.url.path in _DOCS_PATHS:
+        response.headers["Content-Security-Policy"] = _DOCS_CSP
+    else:
+        response.headers["Content-Security-Policy"] = _CSP
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
