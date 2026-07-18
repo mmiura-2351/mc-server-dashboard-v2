@@ -59,6 +59,4 @@ jobs:
           cache-dependency-path: relay/go.sum
 
       - name: Run the relay protocol-level E2E suite
-        # The orchestrator resolves the host docker group GID itself (the worker
-        # container needs it for the mounted socket), so no extra env is needed.
         run: scripts/run_relay_e2e.sh

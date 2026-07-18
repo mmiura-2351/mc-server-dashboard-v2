@@ -77,7 +77,6 @@ cp .env.example .env
 | `MCD_API_STORAGE__OBJECT__ACCESS_KEY` | S3 access key for the object backend (required when `COMPOSE_PROFILES=object`) | `openssl rand -hex 16` |
 | `MCD_API_STORAGE__OBJECT__SECRET_KEY` | S3 secret key for the object backend (required when `COMPOSE_PROFILES=object`) | `openssl rand -hex 16` |
 | `MCSD_SCRATCH_DIR` | Absolute host path for the worker scratch dir | choose a path, e.g. `/opt/mcsd/scratch` |
-| `DOCKER_GID` | GID of the host `docker` group | `getent group docker \| cut -d: -f3` |
 | `API_HTTP_PORT` | Published host port for the API HTTP surface | default `8000` |
 | `API_HTTP_BIND_IP` | Host interface for the API port; `127.0.0.1` (default) binds loopback only, `0.0.0.0` binds all interfaces | default `127.0.0.1` |
 
