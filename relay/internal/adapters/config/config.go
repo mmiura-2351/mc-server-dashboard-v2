@@ -406,6 +406,10 @@ func (c Config) validate() error {
 		return fmt.Errorf("config: api.tls.ca_file is required (or set api.tls.insecure=true for a plaintext dev dial)")
 	}
 
+	if c.Game.StatusCacheMaxEntries == 0 {
+		return fmt.Errorf("config: game.status_cache_max_entries must be positive")
+	}
+
 	if c.Metrics.Enabled && c.Metrics.Listen == "" {
 		return fmt.Errorf("config: metrics.listen is required when metrics.enabled=true")
 	}
