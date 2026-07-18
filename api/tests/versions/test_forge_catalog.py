@@ -208,6 +208,28 @@ def test_installer_sha1_url_encodes_special_characters() -> None:
 
 
 @pytest.mark.asyncio
+async def test_resolve_raises_unknown_when_both_sha1_fetches_404() -> None:
+    """Pre-1.5.2 versions: neither standard nor legacy .sha1 exists (issue #1941)."""
+    metadata_xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <metadata><versioning><versions>
+      <version>1.4.7-6.6.2.534</version>
+    </versions></versioning></metadata>"""
+    promotions: dict[str, object] = {
+        "promos": {"1.4.7-recommended": "6.6.2.534"},
+    }
+    standard = "1.4.7-6.6.2.534"
+    legacy = "1.4.7-6.6.2.534-1.4.7"
+    fetcher = FakeDocumentFetcher(
+        texts={_METADATA_URL: metadata_xml},
+        payloads={_PROMOTIONS_URL: promotions},
+        not_found_urls={_installer_sha1_url(standard), _installer_sha1_url(legacy)},
+    )
+    catalog = ForgeCatalog(fetcher=fetcher)
+    with pytest.raises(UnknownVersionError):
+        await catalog.resolve(ServerType.FORGE, "1.4.7")
+
+
+@pytest.mark.asyncio
 async def test_non_forge_request_rejected() -> None:
     catalog, _ = _catalog()
     with pytest.raises(UnknownVersionError):
