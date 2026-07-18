@@ -3,6 +3,7 @@ import {
   act,
   fireEvent,
   render,
+  renderHook,
   screen,
   waitFor,
 } from "@testing-library/react";
@@ -10,6 +11,10 @@ import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client.ts";
 import { ToastProvider } from "../components/Toast.tsx";
+import {
+  _resetForTesting as resetUploadProgress,
+  useUploadProgress,
+} from "../components/useUploadProgress.ts";
 import { t } from "../i18n/index.ts";
 import { ServerCreatePage } from "./ServerCreatePage.tsx";
 
@@ -792,6 +797,35 @@ describe("import tab", () => {
     const form = mockPostFormWithProgress.mock.calls[0][1] as FormData;
     expect(form.get("name")).toBe("restored");
     expect(form.get("file")).toBeInstanceOf(File);
+  });
+
+  it("resets upload progress on successful import (#1984)", async () => {
+    resetUploadProgress();
+    mockPostFormWithProgress.mockResolvedValue({ id: "s-imported" });
+    renderPage();
+    fireEvent.click(await screen.findByText(t("serverCreate.tab.import")));
+
+    fireEvent.change(
+      await screen.findByLabelText(t("serverCreate.nameLabel")),
+      { target: { value: "restored" } },
+    );
+    const file = new File(["zip-bytes"], "export.zip", {
+      type: "application/zip",
+    });
+    fireEvent.change(
+      screen.getByLabelText(t("serverCreate.import.fileLabel")),
+      { target: { files: [file] } },
+    );
+    fireEvent.click(screen.getByText(t("serverCreate.import.submit")));
+
+    await waitFor(() => {
+      expect(lastPath).toBe(`/communities/${CID}/servers/s-imported`);
+    });
+
+    // The shared upload-progress singleton must be idle after a successful
+    // import — otherwise other upload surfaces show a stale progress bar.
+    const { result } = renderHook(() => useUploadProgress());
+    expect(result.current.active).toBe(false);
   });
 
   it("shows the chosen filename after selecting a file", async () => {

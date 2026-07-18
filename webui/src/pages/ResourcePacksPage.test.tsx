@@ -1,6 +1,16 @@
-import { act, fireEvent, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  renderHook,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAccessToken } from "../auth/tokenStore.ts";
+import {
+  _resetForTesting as resetUploadProgress,
+  useUploadProgress,
+} from "../components/useUploadProgress.ts";
 import { t } from "../i18n/index.ts";
 import { installMockXhrUpload } from "../test/mockXhrUpload.ts";
 import { renderApp } from "../test/render.tsx";
@@ -285,6 +295,41 @@ describe("resource packs library", () => {
     expect(
       await screen.findByText(t("resourcePacks.uploaded")),
     ).toBeInTheDocument();
+  });
+
+  it("resets upload progress on successful upload (#1984)", async () => {
+    resetUploadProgress();
+    signedIn();
+
+    renderApp({ path: "/resource-packs" });
+
+    const uploadButton = await screen.findByRole("button", {
+      name: t("resourcePacks.upload"),
+    });
+    fireEvent.click(uploadButton);
+
+    const nameInput = await screen.findByRole("textbox");
+    fireEvent.change(nameInput, { target: { value: "My Pack" } });
+
+    const fileInput = screen.getByLabelText(
+      t("common.chooseFile"),
+    ) as HTMLInputElement;
+    const file = new File(["content"], "mypack.zip", {
+      type: "application/zip",
+    });
+    fireEvent.change(fileInput, { target: { files: [file] } });
+
+    const submitButton = screen.getByRole("button", {
+      name: t("resourcePacks.uploadDialog.submit"),
+    });
+    fireEvent.click(submitButton);
+
+    await screen.findByText(t("resourcePacks.uploaded"));
+
+    // The shared upload-progress singleton must be idle after a successful
+    // upload — otherwise other upload surfaces show a stale progress bar.
+    const { result } = renderHook(() => useUploadProgress());
+    expect(result.current.active).toBe(false);
   });
 
   it("shows an error toast when upload fails", async () => {
