@@ -863,9 +863,14 @@ export function ServerFilesTab({
         }
       }
 
-      const approvedFiles = filesToUpload.filter(
-        ({ file }) => !skippedFiles.has(file),
-      );
+      const approvedFiles = filesToUpload.filter(({ file }) => {
+        if (skippedFiles.has(file)) return false;
+        if (file.size > MAX_UPLOAD_BYTES) {
+          showToast(t("files.error.tooLarge"), "error");
+          return false;
+        }
+        return true;
+      });
       if (approvedFiles.length === 0) {
         setUploadPreparing(false);
         return;
@@ -888,10 +893,6 @@ export function ServerFilesTab({
       let cumulativeLoaded = 0;
 
       for (const { file, targetDir } of approvedFiles) {
-        if (file.size > MAX_UPLOAD_BYTES) {
-          showToast(t("files.error.tooLarge"), "error");
-          continue;
-        }
         const fileBaseLoaded = cumulativeLoaded;
         const form = new FormData();
         form.append("file", file);
