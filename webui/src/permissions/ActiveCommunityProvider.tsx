@@ -61,8 +61,8 @@ export function ActiveCommunityProvider({ children }: { children: ReactNode }) {
     refetch: refetchCommunities,
   } = useCommunities(signedIn);
 
-  // null = no explicit selection yet; we fall back to the first community once
-  // the list arrives. An explicit setCommunityId(...) wins over the default.
+  // null = no explicit selection yet; we derive the default from the community
+  // list at render time. An explicit setCommunityId(...) wins over the default.
   const [selected, setSelected] = useState<string | null>(null);
   const [touched, setTouched] = useState(false);
 
@@ -71,13 +71,11 @@ export function ActiveCommunityProvider({ children }: { children: ReactNode }) {
     setSelected(id);
   }, []);
 
-  // Default to the first community once the list loads, unless the user (or a
-  // future switcher) has already chosen one.
-  useEffect(() => {
-    if (!touched && communities !== undefined) {
-      setSelected(communities.length > 0 ? communities[0].id : null);
-    }
-  }, [touched, communities]);
+  // Derive the effective community id at render time so there is no one-frame
+  // gap between the community list arriving and the default being applied
+  // (issue #2014). The effect-based default committed a render where
+  // communities was loaded but communityId was still null.
+  const communityId = touched ? selected : (communities?.[0]?.id ?? null);
 
   // Dropping out of the signed-in state clears the selection so a later
   // sign-in re-derives the default rather than reusing a stale id.
@@ -94,13 +92,13 @@ export function ActiveCommunityProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<ActiveCommunityValue>(
     () => ({
-      communityId: selected,
+      communityId,
       setCommunityId,
       communities,
       communitiesError,
       refetchCommunities: refetch,
     }),
-    [selected, setCommunityId, communities, communitiesError, refetch],
+    [communityId, setCommunityId, communities, communitiesError, refetch],
   );
 
   return (
