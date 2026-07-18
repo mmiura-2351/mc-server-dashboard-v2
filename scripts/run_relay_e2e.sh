@@ -98,7 +98,6 @@ MCD_API_CONTROL__WORKER_CREDENTIAL=relay-e2e-worker-credential
 MCD_API_STORAGE__OBJECT__ACCESS_KEY=
 MCD_API_STORAGE__OBJECT__SECRET_KEY=
 MCSD_SCRATCH_DIR=/tmp/mcsd-relay-e2e-scratch
-DOCKER_GID=${DOCKER_GID:-$(getent group docker | cut -d: -f3)}
 MCD_WORKER_GAME_BIND_IP=127.0.0.1
 MCD_API_RELAY__ENABLED=true
 MCD_API_RELAY__CREDENTIAL=relay-e2e-relay-credential

@@ -259,10 +259,8 @@ services:
       # worker also DROPS the host RCON publication: RCON never leaves the network.
       MCD_WORKER_DRIVER_CONTAINER_NETWORK: mcsd
     # The Docker socket is how the container driver creates sibling MC containers.
-    # group_add gives the worker process the host docker group so it can use the
-    # socket without running privileged.
-    group_add:
-      - "${DOCKER_GID}"
+    # The worker runs as root (worker/Dockerfile), so it reads the socket
+    # regardless of group ownership.
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       # The scratch dir MUST be bind-mounted at the SAME absolute path on host and

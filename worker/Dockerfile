@@ -40,7 +40,7 @@ RUN apt-get update \
 
 COPY --from=builder /out/worker /usr/local/bin/worker
 
-# Run as root so the worker can talk to the Docker socket; compose grants the
-# docker group via group_add, and the socket's group is what actually gates
-# access (the worker only needs the socket, not root capabilities).
+# No USER directive: the worker runs as root so it can read the mounted Docker
+# socket unconditionally. A non-root user with group_add is a possible
+# hardening step (see issue #1978).
 ENTRYPOINT ["/usr/local/bin/worker"]
