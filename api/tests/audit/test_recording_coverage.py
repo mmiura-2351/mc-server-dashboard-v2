@@ -368,8 +368,9 @@ def test_set_worker_drain_records_success() -> None:
     app, user = _base_app(recorder, platform_admin=True)
     app.dependency_overrides[get_set_worker_drain] = lambda: _FakeUseCase(result=0)
     client = next(_client(app))
+    worker_id = uuid.uuid4()
 
-    resp = client.put("/api/workers/worker-1/drain")
+    resp = client.put(f"/api/workers/{worker_id}/drain")
 
     assert resp.status_code == 200
     assert len(recorder.events) == 1
@@ -377,6 +378,27 @@ def test_set_worker_drain_records_success() -> None:
     assert event.operation == ops.WORKER_DRAIN_SET
     assert event.outcome is Outcome.SUCCESS
     assert event.actor_id == user.id.value
+    assert event.target_type == ops.TARGET_WORKER
+    assert event.target_id == worker_id
+
+
+def test_clear_worker_drain_records_success() -> None:
+    recorder = RecordingAuditRecorder()
+    app, user = _base_app(recorder, platform_admin=True)
+    app.dependency_overrides[get_set_worker_drain] = lambda: _FakeUseCase(result=0)
+    client = next(_client(app))
+    worker_id = uuid.uuid4()
+
+    resp = client.delete(f"/api/workers/{worker_id}/drain")
+
+    assert resp.status_code == 204
+    assert len(recorder.events) == 1
+    event = recorder.events[0]
+    assert event.operation == ops.WORKER_DRAIN_CLEAR
+    assert event.outcome is Outcome.SUCCESS
+    assert event.actor_id == user.id.value
+    assert event.target_type == ops.TARGET_WORKER
+    assert event.target_id == worker_id
 
 
 def test_set_worker_drain_unknown_worker_records_nothing() -> None:
