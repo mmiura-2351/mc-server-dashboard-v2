@@ -1700,6 +1700,8 @@ export const ja: Record<TranslationKey, string> = {
 
   // Server resource pack assignment (issue #1179).
   "serverDetail.resourcePack.heading": "リソースパック",
+  "serverDetail.resourcePack.loadError":
+    "リソースパックの割り当てを読み込めませんでした。",
   "serverDetail.resourcePack.none": "リソースパックが割り当てられていません。",
   "serverDetail.resourcePack.assign": "割り当て",
   "serverDetail.resourcePack.change": "変更",
