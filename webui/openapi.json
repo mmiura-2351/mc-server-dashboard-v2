@@ -1401,6 +1401,17 @@
             "title": "Mc Version",
             "type": "string"
           },
+          "memory_limit_mb": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory Limit Mb"
+          },
           "name": {
             "minLength": 1,
             "title": "Name",

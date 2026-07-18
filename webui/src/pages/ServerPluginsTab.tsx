@@ -372,7 +372,7 @@ export function ServerPluginsTab({
       const form = new FormData();
       form.append("file", file);
       form.append("display_name", file.name.replace(/\.jar$/i, ""));
-      progress.start(file.size);
+      const signal = progress.start(file.size);
       return postFormWithProgress(
         apiPath("/api/communities/{community_id}/servers/{server_id}/plugins", {
           community_id: communityId,
@@ -380,7 +380,7 @@ export function ServerPluginsTab({
         }),
         form,
         progress.onProgress,
-        progress.signal,
+        signal,
       );
     },
     onSuccess: () => {

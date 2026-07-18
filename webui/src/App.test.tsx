@@ -1,8 +1,10 @@
 import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { useRef } from "react";
 import { useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAccessToken } from "./auth/tokenStore.ts";
 import { t } from "./i18n/index.ts";
+import { useActiveCommunity } from "./permissions/ActiveCommunityProvider.tsx";
 import { renderApp } from "./test/render.tsx";
 
 // Suspend the account route indefinitely so the lazy-chunk loading frame is
@@ -280,6 +282,49 @@ describe("App route guards", () => {
       ).toBeInTheDocument(),
     );
     expect(screen.getByText(t("auth.loading"))).toBeInTheDocument();
+  });
+
+  it("never flashes NoCommunityPage while the default community resolves", async () => {
+    signedInWith([{ id: "alpha", name: "Alpha" }]);
+
+    // A probe that records every (communityId, communities) pair it observes
+    // across renders. If the provider exposes a frame where communities are
+    // loaded but communityId is still null, this probe captures it (issue #2014).
+    function CommunityProbe() {
+      const { communityId, communities } = useActiveCommunity();
+      const log = useRef<Array<{ id: string | null; len: number | undefined }>>(
+        [],
+      );
+      log.current.push({ id: communityId, len: communities?.length });
+      return (
+        <span data-testid="community-log">{JSON.stringify(log.current)}</span>
+      );
+    }
+
+    renderApp({
+      path: "/",
+      extras: (
+        <>
+          <LocationProbe />
+          <CommunityProbe />
+        </>
+      ),
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("url").textContent).toBe("/communities/alpha"),
+    );
+
+    // Parse the render log and verify no frame had communities loaded (len > 0)
+    // while communityId was null — that would be the NoCommunityPage flash.
+    const log = JSON.parse(
+      screen.getByTestId("community-log").textContent ?? "[]",
+    );
+    const flash = log.some(
+      (entry: { id: string | null; len: number | undefined }) =>
+        entry.len !== undefined && entry.len > 0 && entry.id === null,
+    );
+    expect(flash).toBe(false);
   });
 
   it("renders the login page for signed-out users without shell chrome", async () => {

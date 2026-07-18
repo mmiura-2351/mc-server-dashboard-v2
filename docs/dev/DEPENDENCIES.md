@@ -113,4 +113,7 @@ Security updates bypass the cooldown per Section 3.
 not regenerate `uv.lock`. The `dependabot-uv-lock` workflow
 (`.github/workflows/dependabot-uv-lock.yml`) detects this and automatically runs
 `uv lock`, committing the updated lockfile back to the PR branch so that
-`uv sync --locked` in the `api` workflow passes without manual intervention.
+`uv sync --locked` in the `api` workflow passes. The workflow pushes using a
+GitHub App token (via `actions/create-github-app-token`) so the resulting commit
+triggers CI; this requires the repository secrets `APP_ID` and `APP_PRIVATE_KEY`
+to be configured for the App.

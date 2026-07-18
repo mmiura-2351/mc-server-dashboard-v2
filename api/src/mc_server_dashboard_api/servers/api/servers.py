@@ -126,6 +126,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
 from mc_server_dashboard_api.servers.domain.game_session import GameSession
 from mc_server_dashboard_api.servers.domain.jar_provisioner import JarProvisioningError
 from mc_server_dashboard_api.servers.domain.memory_limit import (
+    MEMORY_LIMIT_CONFIG_KEY,
     memory_limit_from_config,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
@@ -169,6 +170,11 @@ class CreateServerRequest(BaseModel):
     # 6-char random slug; supplied, it is validated (422 invalid/reserved) and
     # checked for global uniqueness (409 taken). Blank string is treated as omitted.
     slug: str | None = None
+    # Top-level convenience alias for ``config['memory_limit_mb']`` (issue #1849).
+    # The response surfaces the value at the top level, so the request accepts it
+    # the same way. When set, the value is merged into ``config`` before the use
+    # case runs; an explicit ``config['memory_limit_mb']`` takes precedence.
+    memory_limit_mb: int | None = None
 
 
 class UpdateServerRequest(BaseModel):
@@ -366,6 +372,10 @@ async def create_server(
     bedrock: Annotated[BedrockJoinability, Depends(get_bedrock_joinability)],
 ) -> ServerResponse:
     config = _validated_config(body.config)
+    # Merge the top-level convenience field into config when present and the
+    # caller did not also set the key inside config (issue #1849).
+    if body.memory_limit_mb is not None and MEMORY_LIMIT_CONFIG_KEY not in config:
+        config[MEMORY_LIMIT_CONFIG_KEY] = body.memory_limit_mb
     try:
         server = await use_case(
             community_id=CommunityId(community_id),

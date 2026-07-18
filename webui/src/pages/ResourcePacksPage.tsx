@@ -229,12 +229,12 @@ function UploadDialog({
       const form = new FormData();
       form.append("display_name", name);
       form.append("file", f);
-      progress.start(f.size);
+      const signal = progress.start(f.size);
       return postFormWithProgress(
         "/api/resource-packs",
         form,
         progress.onProgress,
-        progress.signal,
+        signal,
       );
     },
     onSuccess: () => {
