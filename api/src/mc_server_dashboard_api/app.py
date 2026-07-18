@@ -501,6 +501,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     if settings is None:
         settings = load_settings(_resolve_config_file())
 
+    # Install the configured log handler/formatter BEFORE any validation that
+    # logs, so warnings (bedrock_enabled-without-relay, reconciler grace-floor)
+    # respect log.format=json instead of falling through to logging.lastResort
+    # as plain text (issue #1992).
+    configure_logging(settings.log.level, settings.log.format)
+
     # The token signing key is a required secret whenever the auth endpoints are
     # mounted (CONFIGURATION.md Section 5.3); fail fast at boot rather than
     # starting unable to issue or verify tokens (Section 3).
@@ -580,8 +586,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # is shared across requests (FR-VER-2). No external secret is required, so it
     # cannot fail at boot; it is stored on app state below.
     version_catalog, version_fetcher = _build_version_catalog()
-
-    configure_logging(settings.log.level, settings.log.format)
 
     heartbeat_timeout = dt.timedelta(seconds=settings.control.heartbeat_timeout_seconds)
     # Worker-side data-plane transfer bound advertised in RegisterAck (issue #874):

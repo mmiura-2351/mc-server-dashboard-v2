@@ -143,7 +143,7 @@ class ModrinthCatalog(CatalogProvider):
             title=data.get("title", ""),
             description=data.get("description", ""),
             body=data.get("body", ""),
-            author=data.get("team", None),
+            author=None,
             icon_url=data.get("icon_url"),
             downloads=data.get("downloads", 0),
             categories=data.get("categories", []),
