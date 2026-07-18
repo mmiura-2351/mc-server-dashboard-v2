@@ -122,6 +122,24 @@ if [ ! -f .env ]; then
 		fi
 	fi
 
+	# --- Public base URL ---
+	# Prompt after the tunnel section so we can tailor guidance.
+	echo ""
+	echo "MCD_API_SERVER__PUBLIC_BASE_URL is the externally reachable origin"
+	echo "for this deployment. Player-facing links (e.g. resource-pack download"
+	echo "URLs) are rendered from this value."
+	if [ "$TUNNEL_ENABLED" = "yes" ]; then
+		echo ""
+		echo "  You enabled Cloudflare Tunnel -- set this to the tunnel's public"
+		echo "  hostname (e.g. https://mc.example.com)."
+	fi
+	echo ""
+	echo "Leave blank ONLY for LAN-only / dev setups (falls back to the"
+	echo "compose-internal address, unreachable from the internet)."
+
+	read -rp "MCD_API_SERVER__PUBLIC_BASE_URL (e.g. https://mc.example.com): " MCD_API_SERVER__PUBLIC_BASE_URL
+	MCD_API_SERVER__PUBLIC_BASE_URL="${MCD_API_SERVER__PUBLIC_BASE_URL:-}"
+
 	# --- Write .env ---
 	cat > .env << ENVEOF
 # Environment for the single-host compose deployment.
@@ -136,6 +154,13 @@ POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
 # --- API secrets -----------------------------------------------------------
 MCD_API_AUTH__TOKEN__SIGNING_KEY=${MCD_API_AUTH__TOKEN__SIGNING_KEY}
 MCD_API_CONTROL__WORKER_CREDENTIAL=${MCD_API_CONTROL__WORKER_CREDENTIAL}
+
+# --- Public base URL (issue #1554) -----------------------------------------
+# The externally reachable origin for this deployment. Player-facing links
+# (e.g. resource-pack download URLs) are rendered from this value. Empty
+# falls back to compose's internal default (http://api:8000), which is
+# unreachable from the internet.
+MCD_API_SERVER__PUBLIC_BASE_URL=${MCD_API_SERVER__PUBLIC_BASE_URL}
 
 # --- Storage backend -------------------------------------------------------
 COMPOSE_PROFILES=${COMPOSE_PROFILES}
