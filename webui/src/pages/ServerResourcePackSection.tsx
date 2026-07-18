@@ -140,6 +140,20 @@ export function ServerResourcePackSection({
     return null;
   }
 
+  // Error only when there is nothing to show (the initial load failed). A
+  // failed background refetch retains `data`, so the cached assignment keeps
+  // rendering through transient API blips (#1985).
+  if (assignmentQuery.data === undefined) {
+    return (
+      <div className="card form-card">
+        <h2>{t("serverDetail.resourcePack.heading")}</h2>
+        <p className="field-error">
+          {t("serverDetail.resourcePack.loadError")}
+        </p>
+      </div>
+    );
+  }
+
   const assignment = assignmentQuery.data ?? null;
 
   return (

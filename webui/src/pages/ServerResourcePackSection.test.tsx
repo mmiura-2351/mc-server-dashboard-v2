@@ -161,6 +161,60 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+describe("ServerResourcePackSection — assignment load error", () => {
+  it("shows load-error message when the assignment query fails", async () => {
+    // Simulate a 500 error (non-404) on the assignment endpoint.
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.endsWith("/resource-pack")) {
+        return Promise.reject(new ApiError(500, {}));
+      }
+      if (path === "/api/resource-packs") {
+        return Promise.resolve({ resource_packs: [PACK] });
+      }
+      if (path === "/api/meta") {
+        return Promise.resolve({
+          relay_enabled: false,
+          default_memory_limit_mb: null,
+          max_memory_limit_mb: null,
+        });
+      }
+      return Promise.resolve(server());
+    });
+    await openSettings();
+
+    expect(
+      await screen.findByText(t("serverDetail.resourcePack.loadError")),
+    ).toBeInTheDocument();
+  });
+
+  it("does not render the Assign button in the error state", async () => {
+    mockApi.get.mockImplementation((path: string) => {
+      if (path.endsWith("/resource-pack")) {
+        return Promise.reject(new ApiError(500, {}));
+      }
+      if (path === "/api/resource-packs") {
+        return Promise.resolve({ resource_packs: [PACK] });
+      }
+      if (path === "/api/meta") {
+        return Promise.resolve({
+          relay_enabled: false,
+          default_memory_limit_mb: null,
+          max_memory_limit_mb: null,
+        });
+      }
+      return Promise.resolve(server());
+    });
+    await openSettings();
+
+    await screen.findByText(t("serverDetail.resourcePack.loadError"));
+    expect(
+      screen.queryByRole("button", {
+        name: t("serverDetail.resourcePack.assign"),
+      }),
+    ).not.toBeInTheDocument();
+  });
+});
+
 describe("ServerResourcePackSection — unassigned state", () => {
   it("shows the 'no pack assigned' message when none is assigned", async () => {
     routeGet({ assignment: null });
