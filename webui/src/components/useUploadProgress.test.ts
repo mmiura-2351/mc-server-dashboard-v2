@@ -84,19 +84,24 @@ describe("useUploadProgress", () => {
     expect(result.current.total).toBe(0);
   });
 
-  it("exposes a signal that is not aborted while active", () => {
+  it("returns a signal that is not aborted while active", () => {
     const { result } = renderHook(() => useUploadProgress());
 
-    act(() => result.current.start(2000));
+    let signal!: AbortSignal;
+    act(() => {
+      signal = result.current.start(2000);
+    });
 
-    expect(result.current.signal.aborted).toBe(false);
+    expect(signal.aborted).toBe(false);
   });
 
   it("aborts the signal and resets state when cancel is called", () => {
     const { result } = renderHook(() => useUploadProgress());
 
-    act(() => result.current.start(2000));
-    const signal = result.current.signal;
+    let signal!: AbortSignal;
+    act(() => {
+      signal = result.current.start(2000);
+    });
     act(() => result.current.cancel());
 
     expect(signal.aborted).toBe(true);
@@ -106,15 +111,52 @@ describe("useUploadProgress", () => {
   it("creates a fresh signal on each start", () => {
     const { result } = renderHook(() => useUploadProgress());
 
-    act(() => result.current.start(1000));
-    const first = result.current.signal;
+    let first!: AbortSignal;
+    act(() => {
+      first = result.current.start(1000);
+    });
     act(() => result.current.cancel());
 
-    act(() => result.current.start(2000));
-    const second = result.current.signal;
+    let second!: AbortSignal;
+    act(() => {
+      second = result.current.start(2000);
+    });
 
     expect(second).not.toBe(first);
     expect(second.aborted).toBe(false);
     expect(first.aborted).toBe(true);
+  });
+
+  it("returns the signal that cancel() aborts, without a re-render", () => {
+    const { result } = renderHook(() => useUploadProgress());
+
+    let signal!: AbortSignal;
+    act(() => {
+      // start() returns the fresh signal synchronously — no re-render needed.
+      signal = result.current.start(5000);
+    });
+
+    expect(signal.aborted).toBe(false);
+    act(() => result.current.cancel());
+    expect(signal.aborted).toBe(true);
+  });
+
+  it("returns a signal from start() that differs from a previous cancel'd one", () => {
+    const { result } = renderHook(() => useUploadProgress());
+
+    let first!: AbortSignal;
+    act(() => {
+      first = result.current.start(1000);
+    });
+    act(() => result.current.cancel());
+    expect(first.aborted).toBe(true);
+
+    let second!: AbortSignal;
+    act(() => {
+      second = result.current.start(2000);
+    });
+    expect(second.aborted).toBe(false);
+    // A cancelled controller must not leak into the next upload.
+    expect(second).not.toBe(first);
   });
 });

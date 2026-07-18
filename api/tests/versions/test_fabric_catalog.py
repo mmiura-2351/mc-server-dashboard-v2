@@ -85,6 +85,22 @@ async def test_resolve_unknown_game_version_raises() -> None:
 
 
 @pytest.mark.asyncio
+async def test_resolve_raises_unknown_when_loader_for_game_404s() -> None:
+    """FetchNotFoundError should surface as UnknownVersionError (#1941)."""
+    fetcher = FakeJsonFetcher(
+        {
+            _GAME_URL: _GAME,
+            _LOADER_URL: _LOADER,
+            _INSTALLER_URL: _INSTALLER,
+        },
+        not_found_urls={_loader_for_game_url("1.21.1")},
+    )
+    catalog = FabricCatalog(fetcher=fetcher)
+    with pytest.raises(UnknownVersionError):
+        await catalog.resolve(ServerType.FABRIC, "1.21.1")
+
+
+@pytest.mark.asyncio
 async def test_non_fabric_request_rejected() -> None:
     catalog, _ = _catalog()
     with pytest.raises(UnknownVersionError):
