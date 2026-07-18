@@ -63,11 +63,12 @@ cleanup() {
   # MCD_RELAY_E2E_KEEP=1 leaves the stack up for debugging (tear it down manually
   # with `docker compose -p mcsd-relay-e2e down -v`).
   if [ "${MCD_RELAY_E2E_KEEP:-}" != "1" ]; then
-    "${COMPOSE[@]}" --env-file "$ENV_FILE" down -v --remove-orphans >/dev/null 2>&1 || true
+    "${COMPOSE[@]}" --env-file "$ENV_FILE" down -v --rmi all --remove-orphans >/dev/null 2>&1 || true
     rm -f "$ENV_FILE"
     rm -rf "$TLS_DIR"
   else
     echo "MCD_RELAY_E2E_KEEP=1: leaving the stack up (env file: $ENV_FILE)" >&2
+    echo "  Tear down: docker compose -p mcsd-relay-e2e down -v --rmi all" >&2
   fi
 }
 trap cleanup EXIT
@@ -111,9 +112,11 @@ EOF
 
 echo "==> building and bringing up the stack (db, api, worker, relay)"
 # MCD_RELAY_E2E_NO_BUILD=1 skips the in-line image build (for environments where
-# the api/worker/relay images are already built and tagged :dev — e.g. a sandbox
-# whose Docker build network cannot resolve DNS; pre-build them once with
-# `docker build --network=host`).
+# the api/worker/relay images are already built and tagged :relay-e2e — e.g. a
+# sandbox whose Docker build network cannot resolve DNS; pre-build them once with
+# `docker build --network=host -t mcsd-api:relay-e2e`,
+# `docker build --network=host -t mcsd-worker:relay-e2e`,
+# `docker build --network=host -t mcsd-relay:relay-e2e`).
 if [ "${MCD_RELAY_E2E_NO_BUILD:-}" = "1" ]; then
   "${COMPOSE[@]}" --env-file "$ENV_FILE" up -d
 else

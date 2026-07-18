@@ -8,6 +8,13 @@
 # project-scoped name and points the worker's container-network at the same name,
 # so the E2E stack is fully isolated and can run alongside the live stack.
 #
+# Image tags: the base compose.yaml declares `image: mcsd-*:dev` alongside its
+# `build:` sections. Docker image tags are daemon-global — `-p` scopes only
+# containers/networks/volumes — so a `--build` here would retag the live
+# deploy's :dev images from whatever branch the harness runs on. This override
+# replaces every built service's image tag with a :relay-e2e variant so the
+# harness never collides with the deploy tags (issue #1948).
+#
 # Port remapping: the base compose.yaml hard-codes 25565:25565 and 25665:25665 for
 # the relay service. This override replaces those bindings with parameterized
 # values so that MCD_RELAY_E2E_GAME_PORT / MCD_RELAY_E2E_TUNNEL_PORT (written
@@ -22,10 +29,16 @@
 # The `!override` tag makes this list REPLACE the base list instead of merging,
 # so only the parameterized entries are published. Requires Compose v2.24+.
 services:
+  migrate:
+    image: mcsd-api:relay-e2e
+  api:
+    image: mcsd-api:relay-e2e
   worker:
+    image: mcsd-worker:relay-e2e
     environment:
       MCD_WORKER_DRIVER_CONTAINER_NETWORK: mcsd-relay-e2e
   relay:
+    image: mcsd-relay:relay-e2e
     ports: !override
       - "${MCD_RELAY_E2E_GAME_PORT:-25565}:25565"    # game listener (players join here)
       - "${MCD_RELAY_E2E_TUNNEL_PORT:-25665}:25665"  # tunnel listener (Workers dial back here)
