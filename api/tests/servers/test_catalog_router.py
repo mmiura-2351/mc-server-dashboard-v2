@@ -1,8 +1,9 @@
-"""Tests for :class:`RoutingCatalog` (issue #1905).
+"""Tests for :class:`RoutingCatalog` (issue #1905, #1961).
 
 The router must keep every non-Floodgate project on the default (Modrinth)
-catalog, route ``floodgate`` metadata and GeyserMC-host downloads to the GeyserMC
-adapter, and merge the Floodgate search hit ahead of the default hits.
+catalog, route ``geysermc-floodgate`` metadata and GeyserMC-host downloads to
+the GeyserMC adapter, and merge the Floodgate search hit ahead of the default
+hits. The bare ``floodgate`` slug must fall through to Modrinth (#1961).
 """
 
 from __future__ import annotations
@@ -163,7 +164,7 @@ def _paginating_router(total: int) -> RoutingCatalog:
 async def test_search_merges_floodgate_ahead_of_default() -> None:
     router, _ = _router()
     resp = await router.search(query="", loader="paper", game_versions=["1.21.1"])
-    assert [h.project_id for h in resp.hits] == ["floodgate", "sodium"]
+    assert [h.project_id for h in resp.hits] == ["geysermc-floodgate", "sodium"]
     assert resp.total_hits == 2
 
 
@@ -181,7 +182,7 @@ async def test_search_page_zero_respects_limit_with_floodgate_first() -> None:
     resp = await router.search(
         query="", loader="paper", game_versions=[], limit=3, offset=0
     )
-    assert [h.project_id for h in resp.hits] == ["floodgate", "mod-0", "mod-1"]
+    assert [h.project_id for h in resp.hits] == ["geysermc-floodgate", "mod-0", "mod-1"]
 
 
 async def test_search_total_hits_consistent_across_pages() -> None:
@@ -208,7 +209,7 @@ async def test_search_limit_one_page_zero_is_floodgate_only() -> None:
     page1 = await router.search(
         query="", loader="paper", game_versions=[], limit=1, offset=1
     )
-    assert [h.project_id for h in page0.hits] == ["floodgate"]
+    assert [h.project_id for h in page0.hits] == ["geysermc-floodgate"]
     assert [h.project_id for h in page1.hits] == ["mod-0"]
 
 
@@ -222,11 +223,18 @@ async def test_search_pagination_boundary_has_no_gap_or_duplicate() -> None:
     assert [h.project_id for h in page1.hits] == ["mod-2", "mod-3", "mod-4"]
 
 
-async def test_get_project_floodgate_routes_to_geyser() -> None:
+async def test_get_project_synthetic_id_routes_to_geyser() -> None:
     router, default = _router()
-    project = await router.get_project("floodgate")
+    project = await router.get_project("geysermc-floodgate")
     assert project.source == "geyser"
     assert default.project_calls == []  # default catalog never consulted
+
+
+async def test_get_project_bare_floodgate_slug_routes_to_default() -> None:
+    """The bare ``floodgate`` slug must reach Modrinth, not GeyserMC (#1961)."""
+    router, default = _router()
+    await router.get_project("floodgate")
+    assert default.project_calls == ["floodgate"]
 
 
 async def test_get_project_other_routes_to_default() -> None:
@@ -235,11 +243,18 @@ async def test_get_project_other_routes_to_default() -> None:
     assert default.project_calls == ["sodium"]
 
 
-async def test_list_versions_floodgate_routes_to_geyser() -> None:
+async def test_list_versions_synthetic_id_routes_to_geyser() -> None:
     router, default = _router()
-    versions = await router.list_versions("floodgate", loader="paper")
+    versions = await router.list_versions("geysermc-floodgate", loader="paper")
     assert [v.version_id for v in versions] == ["2.2.5-138"]
     assert default.version_calls == []
+
+
+async def test_list_versions_bare_floodgate_slug_routes_to_default() -> None:
+    """The bare ``floodgate`` slug must reach Modrinth, not GeyserMC (#1961)."""
+    router, default = _router()
+    await router.list_versions("floodgate", loader="fabric")
+    assert default.version_calls == ["floodgate"]
 
 
 async def test_list_versions_other_routes_to_default() -> None:
