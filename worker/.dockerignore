@@ -1,9 +1,13 @@
 # Keep the build context small: local tool installs, compiled binaries, and test
 # artifacts must not leak into the image build.
 .bin/
-*.test
-*.out
+**/*.test
+**/*.out
 coverage.txt
 /worker
 Dockerfile
 .dockerignore
+
+# Test-only sources: `go build ./cmd/worker` never compiles them, and their
+# churn would otherwise invalidate the builder's `COPY . .` layer.
+test/
