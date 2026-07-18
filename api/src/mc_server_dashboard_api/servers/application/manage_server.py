@@ -174,10 +174,25 @@ _RESERVED_CONFIG_KEYS = frozenset(
     }
 )
 
+# System-managed JAR keys written by the start path (issue #1965). A subset of
+# ``_RESERVED_CONFIG_KEYS`` that is additionally stripped from client input
+# (the other reserved keys are user-settable platform knobs or validated
+# independently). A client-supplied value could pin an arbitrary pooled JAR,
+# bypassing version validation; silently stripped following the
+# Kubernetes/Stripe round-trip convention.
+_SYSTEM_MANAGED_JAR_KEYS = frozenset({JAR_KEY_CONFIG_FIELD, JAR_SOURCE_CONFIG_FIELD})
+
 # The permission code the update gate evaluates. Kept as a bare string so this
 # application module stays free of community-context value objects; the edge maps
 # a denial to the 403 ``permission`` member.
 _SERVER_UPDATE_PERMISSION = "server:update"
+
+
+def _strip_system_jar_keys(config: dict[str, Any]) -> None:
+    """Remove system-managed JAR keys from client-supplied config in place (#1965)."""
+
+    for key in _SYSTEM_MANAGED_JAR_KEYS:
+        config.pop(key, None)
 
 
 def _reject_retired_config_keys(config: dict[str, Any]) -> None:
@@ -295,6 +310,9 @@ class CreateServer:
         # the row is staged, so it is never written into server.properties as a
         # bogus override.
         _reject_retired_config_keys(config)
+        # System-managed JAR keys are silently stripped from client input (#1965):
+        # a client-supplied value could pin an arbitrary pooled JAR.
+        _strip_system_jar_keys(config)
         # Apply the operator-configurable default when the request omits the key
         # (issue #1069). The default is injected into the config so it persists on
         # the row and is visible in responses. An explicit value takes precedence.
@@ -570,6 +588,10 @@ class UpdateServer:
             # A retired platform key (``backup_interval_hours``, #1840) 422s
             # before any write, so it is never written into server.properties.
             _reject_retired_config_keys(config)
+            # System-managed JAR keys are silently stripped from client input
+            # (#1965): the existing on-row values are restored once the
+            # server is read from the DB (before the config diff).
+            _strip_system_jar_keys(config)
             # Validate the overrides carried on config before any write; each
             # raises on a bad value. The snapshot interval (FR-DATA-7) is
             # validated the same way.
@@ -597,6 +619,13 @@ class UpdateServer:
                 server = await self.uow.servers.get_by_id(server_id)
                 if server is None or server.community_id != community_id:
                     raise ServerNotFoundError(str(server_id.value))
+                # Restore system-managed JAR keys from the existing config
+                # into the (already-stripped) client config before the diff,
+                # so they do not appear as "changed" (#1965).
+                if config is not None:
+                    for jar_key in _SYSTEM_MANAGED_JAR_KEYS:
+                        if jar_key in server.config:
+                            config[jar_key] = server.config[jar_key]
                 # The config diff drives the at-rest gate (issue #115): it applies
                 # unless this is a safe-keys-only config edit — a config update
                 # whose changed keys are all in ``_SAFE_CONFIG_KEYS``, with no name
