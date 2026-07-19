@@ -769,6 +769,13 @@ type instance struct {
 	// window (issue #1987). Nil in production.
 	beforeRetryStart func()
 
+	// beforeReadyPublish is a test-only hook fired inside awaitReady after
+	// state is set to Running but before emitLocked publishes the event, under
+	// i.mu. A test spawns Stop here; pre-fix Stop could interleave (the lock was
+	// released between state write and emit), post-fix Stop blocks on the held
+	// lock (issue #2022). Nil in production.
+	beforeReadyPublish func()
+
 	// beforeSurvivedReset is a test-only hook fired inside Stop after the post-kill
 	// confirm wait times out but before re-acquiring the lock to reset the latch, so
 	// a test can drive the container exit (and supervise) into the exact window the
@@ -873,13 +880,15 @@ func (i *instance) awaitReady() {
 		return // the container exited first; supervise owns the terminal state.
 	}
 	i.mu.Lock()
+	defer i.mu.Unlock()
 	if i.state != execution.StateStarting {
-		i.mu.Unlock()
 		return
 	}
 	i.state = execution.StateRunning
-	i.mu.Unlock()
-	i.emit(execution.StateRunning, "")
+	if i.beforeReadyPublish != nil {
+		i.beforeReadyPublish()
+	}
+	i.emitLocked(execution.StateRunning, "")
 }
 
 // superviseInstall waits for the supervised install container to exit, captures
@@ -1738,6 +1747,11 @@ func (i *instance) set(s execution.ServerState) {
 func (i *instance) emit(state execution.ServerState, detail string) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	i.emitLocked(state, detail)
+}
+
+// emitLocked is the lock-free core of emit. Caller must hold i.mu.
+func (i *instance) emitLocked(state execution.ServerState, detail string) {
 	if i.closed {
 		return
 	}
