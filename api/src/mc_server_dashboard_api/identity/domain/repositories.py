@@ -130,6 +130,10 @@ class RefreshTokenRepository(abc.ABC):
     ) -> None:
         """Revoke every still-active token of ``user_id`` (family revoke).
 
+        Also re-stamps any already-revoked ``'rotated'`` predecessors to
+        ``'family'``, preserving their original ``revoked_at`` via COALESCE, so
+        they are no longer eligible for the reuse grace window (issue #1960).
+
         Stamps ``revoked_reason = 'family'`` so none of the revoked tokens is
         graceable in the reuse window: a family revoke is the theft response (or
         a password change / deactivate / delete), never a rotation (issue #369).

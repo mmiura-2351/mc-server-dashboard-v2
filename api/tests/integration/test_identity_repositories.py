@@ -24,6 +24,7 @@ from mc_server_dashboard_api.identity.adapters.unit_of_work import (
 from mc_server_dashboard_api.identity.domain.entities import (
     REVOKED_FAMILY,
     REVOKED_ROTATED,
+    REVOKED_SUPERSEDED,
     REVOKED_USER,
     RefreshToken,
     User,
@@ -274,6 +275,74 @@ async def test_revoke_all_for_user_revokes_only_active_tokens(
     # An already-revoked token keeps its original timestamp (only active swept).
     assert loaded_revoked is not None
     assert loaded_revoked.revoked_at == already_revoked_at
+
+
+async def test_revoke_all_for_user_restamps_rotated_preserving_revoked_at(
+    engine: AsyncEngine,
+) -> None:
+    """Issue #1960: rotated predecessors are re-stamped to 'family' with COALESCE."""
+    factory = create_session_factory(engine)
+    user = _user()
+    rotated_at = _NOW - dt.timedelta(seconds=30)
+    active = RefreshToken(
+        id=RefreshTokenId.new(),
+        user_id=user.id,
+        token_hash="active",
+        issued_at=_NOW,
+        expires_at=_NOW + dt.timedelta(days=30),
+    )
+    rotated = RefreshToken(
+        id=RefreshTokenId.new(),
+        user_id=user.id,
+        token_hash="rotated",
+        issued_at=_NOW,
+        expires_at=_NOW + dt.timedelta(days=30),
+        revoked_at=rotated_at,
+        revoked_reason=REVOKED_ROTATED,
+    )
+    superseded = RefreshToken(
+        id=RefreshTokenId.new(),
+        user_id=user.id,
+        token_hash="superseded",
+        issued_at=_NOW,
+        expires_at=_NOW + dt.timedelta(days=30),
+        revoked_at=rotated_at,
+        revoked_reason=REVOKED_SUPERSEDED,
+    )
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.users.add(user)
+        await uow.commit()
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.refresh_tokens.add(active)
+        await uow.refresh_tokens.add(rotated)
+        await uow.refresh_tokens.add(superseded)
+        await uow.commit()
+
+    sweep_at = _NOW + dt.timedelta(hours=1)
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.refresh_tokens.revoke_all_for_user(user.id, revoked_at=sweep_at)
+        await uow.commit()
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        loaded_active = await uow.refresh_tokens.get_by_token_hash("active")
+        loaded_rotated = await uow.refresh_tokens.get_by_token_hash("rotated")
+        loaded_superseded = await uow.refresh_tokens.get_by_token_hash("superseded")
+
+    # Active token: newly revoked as 'family' at the sweep time.
+    assert loaded_active is not None
+    assert loaded_active.revoked_at == sweep_at
+    assert loaded_active.revoked_reason == REVOKED_FAMILY
+
+    # Rotated predecessor: reason changed to 'family', revoked_at preserved
+    # (COALESCE keeps the original rotation time).
+    assert loaded_rotated is not None
+    assert loaded_rotated.revoked_at == rotated_at
+    assert loaded_rotated.revoked_reason == REVOKED_FAMILY
+
+    # Superseded: untouched by the family revoke (not in the WHERE clause).
+    assert loaded_superseded is not None
+    assert loaded_superseded.revoked_at == rotated_at
+    assert loaded_superseded.revoked_reason == REVOKED_SUPERSEDED
 
 
 def _token(
