@@ -132,7 +132,7 @@ class _Aioboto3S3Client:
                 CopySource={"Bucket": self._bucket, "Key": src_key},
             )
         except ClientError as exc:
-            if _is_not_found(exc):
+            if _is_not_found(exc) or _is_no_such_bucket(exc):
                 raise NotFoundError(f"object not found: {src_key}") from exc
             raise
 

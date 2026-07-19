@@ -1038,32 +1038,54 @@ async def test_list_dir_survives_concurrent_pointer_flip() -> None:
 
 
 async def test_retain_file_version_survives_concurrent_pointer_flip() -> None:
-    """retain_file_version must not raise when a concurrent publish flips the
-    pointer and GCs the old prefix (issue #1953).
+    """The per-server lock in retain_file_version serializes against a
+    concurrent publish whose post-flip GC would otherwise delete the resolved
+    prefix between head_object and copy_object (issue #1953).
 
-    The lock prevents a real concurrent publish from racing, so the test
-    simulates the aftermath: the pointer is directly rewritten and the old
-    prefix is deleted between the two _read_pointer calls that _server_lock
-    serializes (proving that the re-read inside the lock sees the new state)."""
+    Coordination: retain signals it has entered the critical section (past
+    head_object), then waits for the concurrent publish to attempt completion.
+    With the lock the publish is blocked and the wait times out — the prefix
+    is still intact. Without the lock (pre-fix), the publish completes and GCs
+    the old prefix, so copy_object would raise NotFoundError."""
+
+    import asyncio
 
     store, storage = _store_and_storage()
     community, server = new_scope()
     await _publish(storage, community, server, {"f": b"CONTENT"})
 
-    # Seed a new snapshot directly in the store (bypassing the lock).
-    server_pfx = _server_prefix(community, server)
-    new_prefix = server_pfx + "snapshots/new-snap/"
-    store.objects[new_prefix + "f"] = b"CONTENT2"
+    retain_entered = asyncio.Event()
+    publish_done = asyncio.Event()
 
-    # Remember the old prefix so we can delete it after re-pointing.
-    old_pointer = json.loads(store.objects[server_pfx + _POINTER])["snapshot"]
+    original_matches = ObjectStorage._matches_newest_version
 
-    # Flip the pointer to the new snapshot and GC the old prefix.
-    store.objects[server_pfx + _POINTER] = json.dumps({"snapshot": new_prefix}).encode()
-    for k in list(store.objects):
-        if k.startswith(old_pointer):
-            del store.objects[k]
-            store.mtimes.pop(k, None)
+    async def _wait_for_publish(
+        self: ObjectStorage, client: S3Client, versions: str, source_key: str
+    ) -> bool:
+        # Signal that retain is past head_object() and about to hash/copy.
+        retain_entered.set()
+        # Wait for the concurrent publish to complete. With the lock: publish
+        # is blocked by the same lock, so this times out and the prefix is
+        # intact. Without the lock (pre-fix): publish completes and GCs the
+        # old prefix, so the copy in _capture_version would crash.
+        try:
+            await asyncio.wait_for(publish_done.wait(), timeout=1.0)
+        except asyncio.TimeoutError:
+            pass
+        return await original_matches(self, client, versions, source_key)
 
-    # Must not raise — the lock ensures the pointer is read consistently.
-    await storage.retain_file_version(community, server, RelPath("f"))
+    storage._matches_newest_version = _wait_for_publish.__get__(  # type: ignore[method-assign]
+        storage, ObjectStorage
+    )
+
+    async def _concurrent_publish() -> None:
+        await retain_entered.wait()
+        await _publish(storage, community, server, {"f": b"CONTENT2"})
+        publish_done.set()
+
+    # Both run concurrently. The lock serializes them: retain finishes first
+    # (publish is blocked on the same lock), then publish proceeds.
+    await asyncio.gather(
+        storage.retain_file_version(community, server, RelPath("f")),
+        _concurrent_publish(),
+    )

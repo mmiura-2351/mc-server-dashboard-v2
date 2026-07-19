@@ -1724,8 +1724,8 @@ class ObjectStorage(Storage):
         # pointer and GC the old prefix between resolve and copy, yielding an
         # untranslated ClientError → 500 on the edit request.
         sub = self._safe_subkey(rel_path)
-        async with self._server_lock(community_id, server_id):
-            async with self._client_factory() as client:
+        async with self._client_factory() as client:
+            async with self._server_lock(community_id, server_id):
                 snapshot_prefix = await self._read_pointer(
                     client, self._server_prefix(community_id, server_id)
                 )

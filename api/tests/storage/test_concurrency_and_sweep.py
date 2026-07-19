@@ -392,43 +392,51 @@ async def test_list_dir_survives_concurrent_publish_reclaim(
 async def test_retain_file_version_survives_concurrent_publish_reclaim(
     tmp_path: Path,
 ) -> None:
-    """retain_file_version must not raise FileNotFoundError when a concurrent
-    publish flips and reclaims the old snapshot mid-operation (issue #1953).
+    """The per-server lock in _retain_file_version serializes against a
+    concurrent publish whose post-flip GC would otherwise delete the resolved
+    snapshot between is_file() and _capture_version (issue #1953).
 
-    Under the lock the resolve sees the new snapshot, so the version capture
-    either runs against the new snapshot or skips (never-published case)."""
+    Coordination: retain signals it has entered the critical section (past
+    is_file), then waits for the concurrent publish to attempt completion.
+    With the lock the publish is blocked and the wait times out — the snapshot
+    is still intact. Without the lock (pre-fix), the publish completes and
+    rmtrees the snapshot, so the stat/hash in _matches_newest_version would
+    raise FileNotFoundError."""
+
+    import asyncio
+    import threading
 
     from mc_server_dashboard_api.storage.domain.value_objects import RelPath
 
     storage = FsStorage(tmp_path)
     community, server = new_scope()
-    await publish(storage, community, server, {"f": b"CONTENT"})
+    await publish(storage, community, server, {"f": b"OLD"})
 
-    old_snapshot = snapshot_dir(tmp_path, community, server)
-    server_root = old_snapshot.parent.parent
+    retain_entered = threading.Event()
+    publish_done = threading.Event()
 
-    new_snap_dir = server_root / "snapshots" / "new-snap"
-    new_snap_dir.mkdir(parents=True)
-    (new_snap_dir / "f").write_bytes(b"CONTENT2")
+    original_matches = FsStorage._matches_newest_version
 
-    call_count = {"n": 0}
-    original_current_dir = FsStorage._current_dir
+    def _wait_for_publish(self: FsStorage, versions: object, source: object) -> bool:
+        # Signal that retain is past is_file() and about to stat/hash source.
+        retain_entered.set()
+        # Wait for the concurrent publish to complete. With the lock: publish
+        # is blocked by the same lock, so this times out and source is intact.
+        # Without the lock (pre-fix): publish completes and rmtrees the source
+        # dir, so the original_matches call would crash on source.stat().
+        publish_done.wait(timeout=1.0)
+        return original_matches(self, versions, source)  # type: ignore[arg-type]
 
-    def _racing_current_dir(self: FsStorage, cid: object, sid: object) -> Path:
-        call_count["n"] += 1
-        result = original_current_dir(self, cid, sid)  # type: ignore[arg-type]
-        if call_count["n"] == 1:
-            link = server_root / "current"
-            tmp_link = server_root / ".current.race"
-            os.symlink(os.path.join("snapshots", "new-snap"), tmp_link)
-            os.replace(tmp_link, link)
-            import shutil
+    storage._matches_newest_version = _wait_for_publish.__get__(storage, FsStorage)  # type: ignore[method-assign]
 
-            shutil.rmtree(old_snapshot)
-        return result
+    async def _concurrent_publish() -> None:
+        await asyncio.to_thread(retain_entered.wait, 5.0)
+        await publish(storage, community, server, {"f": b"NEW"})
+        publish_done.set()
 
-    storage._current_dir = _racing_current_dir.__get__(storage, FsStorage)  # type: ignore[method-assign]
-
-    # Must not raise FileNotFoundError — it should succeed against the new
-    # snapshot (the lock serializes with the publish and re-resolves current).
-    await storage.retain_file_version(community, server, RelPath("f"))
+    # Both run concurrently. The lock serializes them: retain finishes first
+    # (publish is blocked on the same lock), then publish proceeds.
+    await asyncio.gather(
+        storage.retain_file_version(community, server, RelPath("f")),
+        _concurrent_publish(),
+    )
