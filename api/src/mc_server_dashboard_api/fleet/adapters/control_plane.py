@@ -26,6 +26,7 @@ import uuid
 
 from google.protobuf.timestamp_pb2 import Timestamp
 
+from mc_server_dashboard_api.fleet.domain.clock import Clock
 from mc_server_dashboard_api.fleet.domain.control_plane import (
     CloseBedrockTunnelCommand,
     Command,
@@ -75,13 +76,6 @@ class StaleSessionError(RuntimeError):
         )
         self.worker_id = worker_id
         self.session = session
-
-
-def _now_timestamp() -> Timestamp:
-    """Return a protobuf Timestamp set to the current wall-clock time."""
-    ts = Timestamp()
-    ts.GetCurrentTime()
-    return ts
 
 
 # Map the domain driver kind to the wire enum at the transport edge (the servers
@@ -493,10 +487,19 @@ def _to_listing(message: pb.FileListing) -> FileListing:
 class GrpcControlPlane(ControlPlane):
     """:class:`ControlPlane` adapter over the shared :class:`ControlPlaneState`."""
 
-    def __init__(self, state: ControlPlaneState, *, timeout_seconds: float) -> None:
+    def __init__(
+        self, state: ControlPlaneState, *, clock: Clock, timeout_seconds: float
+    ) -> None:
         self._state = state
+        self._clock = clock
         self._timeout = timeout_seconds
         self._background_tasks: set[asyncio.Task[None]] = set()
+
+    def _now_timestamp(self) -> Timestamp:
+        """Return a protobuf Timestamp from the injected clock."""
+        ts = Timestamp()
+        ts.FromDatetime(self._clock.now())
+        return ts
 
     async def dispatch(
         self,
@@ -530,7 +533,7 @@ class GrpcControlPlane(ControlPlane):
         )
         api_command = _to_api_command(command_id, server_id, command)
         msg = pb.ApiMessage(correlation_id=command_id, api_command=api_command)
-        msg.sent_at.CopyFrom(_now_timestamp())
+        msg.sent_at.CopyFrom(self._now_timestamp())
         await queue.put(msg)
         # A longer per-command budget (the start's hydrate phase, issue #822)
         # overrides the default command deadline for this one dispatch.
@@ -575,7 +578,7 @@ class GrpcControlPlane(ControlPlane):
         future = self._state.register_pending(command_id, worker_id)
         api_command = _to_api_command(command_id, server_id, command)
         msg = pb.ApiMessage(correlation_id=command_id, api_command=api_command)
-        msg.sent_at.CopyFrom(_now_timestamp())
+        msg.sent_at.CopyFrom(self._now_timestamp())
         await queue.put(msg)
         # Fire-and-forget: the result is not awaited here. The task is held in
         # _background_tasks so it is not GC-collected mid-flight; a done callback

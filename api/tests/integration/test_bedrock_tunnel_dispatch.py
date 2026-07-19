@@ -67,6 +67,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerId,
     WorkerId,
 )
+from tests.fleet.fakes import FakeClock as FleetFakeClock
 from tests.integration.migrate import downgrade_base, upgrade_head
 from tests.servers.fakes import FakeClock, FakeFileStore, FakeVersionValidator
 
@@ -214,7 +215,9 @@ class _Harness:
             FleetWorkerId(str(worker_id)), session=0
         )
         self.control_plane = GrpcControlPlane(
-            self.control_plane_state, timeout_seconds=5.0
+            self.control_plane_state,
+            clock=FleetFakeClock(_NOW),
+            timeout_seconds=5.0,
         )
         self.registration = RelayRegistration()
         self.registration.set(endpoint=_RELAY_ENDPOINT, ca_pem=_RELAY_CA_PEM)

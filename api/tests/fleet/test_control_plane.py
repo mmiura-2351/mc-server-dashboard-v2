@@ -23,6 +23,7 @@ import uuid
 from collections.abc import AsyncIterator
 
 import pytest
+from google.protobuf.timestamp_pb2 import Timestamp
 from grpc import aio
 
 from mc_server_dashboard_api.fleet.adapters.control_plane import (
@@ -84,8 +85,9 @@ def _register_message() -> pb.WorkerMessage:
 class _Harness:
     def __init__(self, *, command_timeout: float = 5.0) -> None:
         self.state = ControlPlaneState()
+        self.clock = FakeClock(_T0)
         self.control_plane = GrpcControlPlane(
-            self.state, timeout_seconds=command_timeout
+            self.state, clock=self.clock, timeout_seconds=command_timeout
         )
         self.registry = InMemoryWorkerRegistry(
             clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT
@@ -816,7 +818,9 @@ async def test_periodic_snapshot_timeout_does_not_clear_final_snapshot_hold() ->
     sink = _RecordingLateSnapshotSink()
     harness = _Harness(command_timeout=0.2)
     harness.state = ControlPlaneState(late_snapshot_sink=sink)
-    harness.control_plane = GrpcControlPlane(harness.state, timeout_seconds=0.2)
+    harness.control_plane = GrpcControlPlane(
+        harness.state, clock=harness.clock, timeout_seconds=0.2
+    )
     try:
         stub = await harness.start()
         call = await _registered_call(harness, stub)
@@ -867,7 +871,7 @@ async def test_cancelled_final_snapshot_dispatch_clears_on_late_result() -> None
     # being dropped on the matched path and waiting out the grace arm.
     sink = _RecordingLateSnapshotSink()
     state = ControlPlaneState(late_snapshot_sink=sink)
-    control_plane = GrpcControlPlane(state, timeout_seconds=5.0)
+    control_plane = GrpcControlPlane(state, clock=FakeClock(_T0), timeout_seconds=5.0)
     worker = WorkerId(_WORKER)
     queue = state.open_session(worker, 1)
 
@@ -897,7 +901,7 @@ async def test_cancelled_periodic_snapshot_dispatch_leaves_no_late_record() -> N
     # dispatch is simply forgotten — its late result clears nothing.
     sink = _RecordingLateSnapshotSink()
     state = ControlPlaneState(late_snapshot_sink=sink)
-    control_plane = GrpcControlPlane(state, timeout_seconds=5.0)
+    control_plane = GrpcControlPlane(state, clock=FakeClock(_T0), timeout_seconds=5.0)
     worker = WorkerId(_WORKER)
     queue = state.open_session(worker, 1)
 
@@ -926,7 +930,7 @@ async def test_cancelled_fire_and_forget_logger_discards_pending_entry() -> None
     # surface — map boundedness IS the observable — and the shutdown scenario
     # is precisely "the holder of the private task set cancels the task".
     state = ControlPlaneState()
-    control_plane = GrpcControlPlane(state, timeout_seconds=5.0)
+    control_plane = GrpcControlPlane(state, clock=FakeClock(_T0), timeout_seconds=5.0)
     worker = WorkerId(_WORKER)
     queue = state.open_session(worker, 1)
 
@@ -1000,15 +1004,18 @@ async def test_register_ack_echoes_correlation_id_and_sets_sent_at(
 
 
 async def test_dispatched_command_carries_sent_at(harness: _Harness) -> None:
-    """Every dispatched ApiMessage populates sent_at (issue #2002)."""
+    """Every dispatched ApiMessage populates sent_at from the injected clock
+    (issue #2002, issue #2166)."""
 
     stub = await harness.start()
     call = await _registered_call(harness, stub)
+    expected = Timestamp()
+    expected.FromDatetime(_T0)
 
     async def worker_echo() -> None:
         msg = await call.read()
         assert msg.HasField("sent_at")
-        assert msg.sent_at.seconds > 0
+        assert msg.sent_at == expected
         await call.write(
             pb.WorkerMessage(
                 correlation_id=msg.api_command.command_id,
