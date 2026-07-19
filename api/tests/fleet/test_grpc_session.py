@@ -1153,3 +1153,97 @@ async def test_register_ack_unparseable_held_id_treated_as_existing() -> None:
         await call.done_writing()
     finally:
         await h.stop()
+
+
+# ---------------------------------------------------------------------------
+# Reconnect-race regression (issue #1694)
+# ---------------------------------------------------------------------------
+
+
+async def test_superseded_registration_cannot_divorce_control_plane_from_registry() -> (
+    None
+):
+    """A stale session that resumes its DB awaits after a newer session's
+    open_session must be aborted, leaving the current session's outbound queue
+    intact (issue #1694).
+
+    The race: session B registers (gets a registry token), then stalls in its
+    DB awaits. Session C registers (gets a higher token), finishes its awaits
+    first, and calls open_session. When B resumes, its is_current_session check
+    must fail and the session must be aborted with ABORTED, so it never calls
+    open_session to overwrite C's queue.
+    """
+
+    # Gate the first session's DB await so we can control interleaving.
+    gate = asyncio.Event()
+
+    class _GatedSink(FakeServerStateSink):
+        """Stalls running_assignment_ids until the gate is set."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._first_call = True
+
+        async def running_assignment_ids(self, *, worker_id: str) -> dict[str, int]:
+            if self._first_call:
+                self._first_call = False
+                await gate.wait()
+            return await super().running_assignment_ids(worker_id=worker_id)
+
+    sink = _GatedSink()
+    control_plane = ControlPlaneState()
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+        control_plane=control_plane,
+    )
+    try:
+        stub = await h.start()
+
+        # Session B registers; its _rebuild_assignments stalls on the gate.
+        call_b = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call_b.write(_register_message())
+        # Do NOT read the ack yet; B is stalled in its awaits.
+
+        # Wait until B's registration has landed in the registry (the register
+        # call itself is synchronous and happens before the stalled await).
+        for _ in range(200):
+            if h.registry.list_workers():
+                break
+            await asyncio.sleep(0.01)
+        assert h.registry.list_workers(), "B should have registered"
+
+        # Session C registers the same worker; its awaits complete immediately
+        # because the gate only blocks the FIRST call.
+        call_c = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call_c.write(_register_message())
+        ack_c = await call_c.read()
+        assert ack_c.WhichOneof("payload") == "register_ack"
+
+        # Wait until C's open_session has populated the outbound queue.
+        worker = WorkerId(_WORKER_ID)
+        for _ in range(200):
+            if control_plane.outbound_for(worker) is not None:
+                break
+            await asyncio.sleep(0.01)
+        queue_c = control_plane.outbound_for(worker)
+        assert queue_c is not None, "C's outbound queue should exist"
+
+        # Release the gate: B resumes its awaits, hits the is_current_session
+        # check, and should be aborted.
+        gate.set()
+
+        # B's stream must end with ABORTED (superseded by C).
+        code_b = await asyncio.wait_for(call_b.code(), timeout=5)
+        assert code_b == grpc.StatusCode.ABORTED
+
+        # C's outbound queue must still be the current one — not overwritten.
+        assert control_plane.outbound_for(worker) is queue_c
+
+        # C's worker is still ONLINE.
+        snapshot = h.registry.list_workers()[0]
+        assert snapshot.status is WorkerStatus.ONLINE
+        await call_c.done_writing()
+    finally:
+        await h.stop()

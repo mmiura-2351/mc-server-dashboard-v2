@@ -28,6 +28,7 @@ from grpc import aio
 from mc_server_dashboard_api.fleet.adapters.control_plane import (
     ControlPlaneState,
     GrpcControlPlane,
+    StaleSessionError,
     _to_result,
 )
 from mc_server_dashboard_api.fleet.adapters.grpc_server import WorkerSessionServicer
@@ -1023,3 +1024,40 @@ async def test_dispatched_command_carries_sent_at(harness: _Harness) -> None:
     )
     await echo
     await call.done_writing()
+
+
+# ---------------------------------------------------------------------------
+# Reconnect-race defense-in-depth: StaleSessionError (issue #1694)
+# ---------------------------------------------------------------------------
+
+
+async def test_open_session_refuses_a_stale_token_after_a_newer_open() -> None:
+    """open_session(W, 2) then open_session(W, 1) raises StaleSessionError;
+    outbound_for(W) still returns session-2's queue (issue #1694)."""
+
+    state = ControlPlaneState()
+    worker = WorkerId(_WORKER)
+
+    queue_2 = state.open_session(worker, 2)
+    with pytest.raises(StaleSessionError):
+        state.open_session(worker, 1)
+
+    # The current outbound queue must still be the one from session 2.
+    assert state.outbound_for(worker) is queue_2
+
+
+async def test_open_session_refuses_a_stale_token_after_close() -> None:
+    """open_session(W, 2), close(W, q2), then open_session(W, 1) still refuses.
+
+    The high-water mark is monotonic: closing a session does not reset it, so a
+    stale session arriving after the current one closed is still rejected.
+    """
+
+    state = ControlPlaneState()
+    worker = WorkerId(_WORKER)
+
+    queue_2 = state.open_session(worker, 2)
+    state.close_session(worker, queue_2)
+
+    with pytest.raises(StaleSessionError):
+        state.open_session(worker, 1)

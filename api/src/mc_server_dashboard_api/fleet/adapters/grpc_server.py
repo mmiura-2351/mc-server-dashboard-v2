@@ -275,6 +275,15 @@ class WorkerSessionServicer(WorkerServiceServicer):
                     exc_info=True,
                 )
 
+        # Race-free under cooperative scheduling (no await between this check
+        # and open_session): a stale session that lost the registry to a newer
+        # reconnect during its DB awaits is aborted before it can overwrite the
+        # current session's outbound queue (issue #1694).
+        if not self._registry.is_current_session(worker_id, session):
+            await context.abort(
+                grpc.StatusCode.ABORTED,
+                "registration superseded by a newer session",
+            )
         outbound = self._control_plane.open_session(worker_id, session)
         # Read inbound events/results in a background task while this generator
         # yields the Worker's outbound commands; both share the one stream.
