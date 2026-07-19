@@ -129,7 +129,9 @@ class _Harness:
             resolver=self.resolver,
             registry=self.registry,
             control_plane=GrpcControlPlane(
-                self.control_plane, timeout_seconds=_TIMEOUT.total_seconds()
+                self.control_plane,
+                clock=self.clock,
+                timeout_seconds=_TIMEOUT.total_seconds(),
             ),
             session_sink=self.session_sink,
             clock=self.clock,

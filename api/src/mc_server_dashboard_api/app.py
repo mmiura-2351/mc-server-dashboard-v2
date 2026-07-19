@@ -669,6 +669,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         control_plane_state = ControlPlaneState()
         app.state.control_plane = GrpcControlPlane(
             control_plane_state,
+            clock=FleetSystemClock(),
             timeout_seconds=settings.control.command_timeout_seconds,
         )
         # Bedrock relay tunnel dispatch (issue #1544) shares the relay's
