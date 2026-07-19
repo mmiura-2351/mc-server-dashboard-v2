@@ -14,6 +14,7 @@ import datetime as dt
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import pytest
 
@@ -28,6 +29,7 @@ from mc_server_dashboard_api.storage.adapters.object_store import (
     _POINTER,
     ObjectStorage,
     S3Client,
+    S3Object,
     _spool_object,
     _spool_stream,
 )
@@ -1089,3 +1091,55 @@ async def test_retain_file_version_survives_concurrent_pointer_flip() -> None:
         storage.retain_file_version(community, server, RelPath("f")),
         _concurrent_publish(),
     )
+
+
+async def test_backup_pack_survives_concurrent_publish_gc() -> None:
+    """A concurrent publish during the backup pack must not destroy the source.
+
+    Without a reader lease, the concurrent publish flips the pointer and GCs the
+    old snapshot prefix (the backup source), yielding either NotFoundError or a
+    silently incomplete archive recorded HEALTHY (issue #1702).
+
+    With the lease, the publish's ``_gc_after_flip`` sees the prefix is leased
+    and skips GC, so the backup reads the complete OLD content.
+    """
+
+    from unittest.mock import patch
+
+    from mc_server_dashboard_api.storage.adapters import object_store as _os_mod
+
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    await _publish(storage, community, server, {"f": b"OLD"})
+
+    # Record the OLD prefix for later assertions.
+    server_prefix = _server_prefix(community, server)
+    old_prefix = json.loads(store.objects[server_prefix + _POINTER])["snapshot"]
+
+    # Monkeypatch the module-level _write_backup_targz to inject a concurrent
+    # publish mid-pack (after the lease is acquired). The publish's GC respects
+    # the lease and must NOT delete the old prefix.
+    original_write = _os_mod._write_backup_targz
+
+    async def _racing_write(
+        client: S3Client, prefix: str, objs: list[S3Object], spool: "Path"
+    ) -> None:
+        # A concurrent publish flips the pointer. Its GC checks _is_leased.
+        await _publish(storage, community, server, {"f": b"NEW"})
+        await original_write(client, prefix, objs, spool)
+
+    with patch.object(_os_mod, "_write_backup_targz", _racing_write):
+        key = await storage.create_backup_from_current(community, server)
+
+    # The OLD prefix must still exist (lease prevented GC).
+    old_keys = [k for k in store.objects if k.startswith(old_prefix)]
+    assert old_keys, "lease must prevent GC of old prefix"
+
+    # The backup must contain the complete OLD content.
+    backup_key = (
+        f"communities/{community.value}/servers/{server.value}/"
+        f"backups/{key.value}.tar.gz"
+    )
+    assert backup_key in store.objects
+    blob = store.objects[backup_key]
+    assert read_tar(blob) == {"f": b"OLD"}

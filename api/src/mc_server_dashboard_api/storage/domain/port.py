@@ -330,10 +330,10 @@ class WorkingSetStore(abc.ABC):
         """Structurally fsck the on-disk authoritative snapshot (issue #744).
 
         The one-shot sweep's per-snapshot probe: walk ``current/`` for corrupt
-        ``.mca`` region files (issue #738). A published snapshot is immutable and
-        quiesced, so the scan is safe in place and needs no staging. Read-only — it
-        never mutates ``current``. Raises :class:`~.errors.NotFoundError` if no
-        snapshot has been published.
+        ``.mca`` region files (issue #738). The implementation holds a reader lease
+        for the duration of the walk so a concurrent publish cannot reclaim the
+        snapshot mid-scan (issue #1702). Read-only — it never mutates ``current``.
+        Raises :class:`~.errors.NotFoundError` if no snapshot has been published.
         """
 
     @abc.abstractmethod
