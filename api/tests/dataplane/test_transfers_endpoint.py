@@ -21,6 +21,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from mc_server_dashboard_api.dependencies import (
+    get_assigned_worker_lookup,
     get_resolved_jar_lookup,
     get_storage,
     get_worker_credential,
@@ -65,7 +66,10 @@ def _read_tar(blob: bytes) -> dict[str, bytes]:
 
 
 def _setup(
-    tmp_path: Path, *, resolved_jar: str | None = None
+    tmp_path: Path,
+    *,
+    resolved_jar: str | None = None,
+    assigned_worker_id: str | None = None,
 ) -> tuple[TestClient, FsStorage]:
     # Reuse the per-worker shared app; clear overrides on entry so a helper called
     # twice in one test starts clean (the shared_app wrapper clears between tests).
@@ -78,6 +82,11 @@ def _setup(
         return resolved_jar
 
     app.dependency_overrides[get_resolved_jar_lookup] = lambda: _lookup
+
+    async def _assigned(_c: uuid.UUID, _s: uuid.UUID) -> str | None:
+        return assigned_worker_id
+
+    app.dependency_overrides[get_assigned_worker_lookup] = lambda: _assigned
     # The Worker credential the data plane authenticates against is injected via
     # Depends(get_worker_credential) (issue #1753), so the shared app — built with
     # no credential configured — receives the test credential through the override
@@ -1209,3 +1218,148 @@ def test_hydrate_generation_header_on_204_is_zero(tmp_path: Path) -> None:
         resp = client.get(_url(community, server, "working-set"), headers=_auth())
     assert resp.status_code == 204
     assert resp.headers["X-Working-Set-Generation"] == "0"
+
+
+# --- assignment-aware publisher guard (issue #1703) ----------------------------
+
+
+def test_snapshot_stale_base_from_assigned_worker_is_allowed(tmp_path: Path) -> None:
+    # Issue #1703 unwedge: worker A published the current generation (a late final
+    # snapshot after being re-placed). Worker B is now the assigned worker and tries
+    # to publish with base < current (because A advanced the store after B hydrated).
+    # The guard sees current_publisher=A != publisher=B, but B IS the assigned worker,
+    # so the publish must be ALLOWED — refusing it would wedge B's entire session.
+    import asyncio
+
+    worker_a = str(uuid.uuid4())
+    worker_b = str(uuid.uuid4())
+
+    client, storage = _setup(tmp_path, assigned_worker_id=worker_b)
+    community, server = _scope()
+    # A published gen1, then A published gen2 (late final snapshot).
+    asyncio.run(_publish(storage, community, server, {"k": b"g1"}, publisher=worker_a))
+    asyncio.run(_publish(storage, community, server, {"k": b"g2"}, publisher=worker_a))
+    current = asyncio.run(
+        storage.current_generation(CommunityId(community), ServerId(server))
+    )
+
+    body = _tar_bytes({"world/level.dat": b"from-b"})
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"),
+            content=body,
+            headers={
+                **_auth(),
+                "X-Working-Set-Base-Generation": str(current - 1),
+                "X-Worker-Id": worker_b,
+            },
+        )
+    assert resp.status_code == 204
+
+    async def _read() -> bytes:
+        return b"".join(
+            [
+                chunk
+                async for chunk in storage.open_hydrate_source(
+                    CommunityId(community), ServerId(server)
+                )
+            ]
+        )
+
+    assert _read_tar(asyncio.run(_read())) == {"world/level.dat": b"from-b"}
+
+
+def test_snapshot_commit_fenced_when_assignment_moved_during_upload(
+    tmp_path: Path,
+) -> None:
+    # Issue #1703 fence: worker A's upload starts with base==current (pre-stream guard
+    # passes). During the upload the server is re-placed on B (assignment changed).
+    # At commit time the fence re-reads the assignment: assigned=B != publisher=A, so
+    # the staging is aborted and A's late commit never wedges B's session.
+    import asyncio
+
+    worker_a = str(uuid.uuid4())
+    worker_b = str(uuid.uuid4())
+
+    # The assignment lookup is hooked to return worker_b (simulating re-placement
+    # during the upload window). The pre-stream guard passes because base==current.
+    client, storage = _setup(tmp_path, assigned_worker_id=worker_b)
+    community, server = _scope()
+    asyncio.run(_publish(storage, community, server, {"k": b"g1"}, publisher=worker_a))
+    current = asyncio.run(
+        storage.current_generation(CommunityId(community), ServerId(server))
+    )
+
+    body = _tar_bytes({"world/level.dat": b"late-from-a"})
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"),
+            content=body,
+            headers={
+                **_auth(),
+                "X-Working-Set-Base-Generation": str(current),
+                "X-Worker-Id": worker_a,
+            },
+        )
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "publisher_not_assigned"
+
+    # The prior authoritative copy survives.
+    async def _read() -> bytes:
+        return b"".join(
+            [
+                chunk
+                async for chunk in storage.open_hydrate_source(
+                    CommunityId(community), ServerId(server)
+                )
+            ]
+        )
+
+    assert _read_tar(asyncio.run(_read())) == {"k": b"g1"}
+
+
+def test_snapshot_late_publish_after_clear_with_no_replacement_still_lands(
+    tmp_path: Path,
+) -> None:
+    # Regression guard: when no worker is currently assigned (the stale-stop arm
+    # cleared the assignment, and no new placement happened yet), a publish from the
+    # old worker must still land — the fence is permissive when assigned is None,
+    # because refusing would discard the final snapshot the held-assignment window
+    # was designed to protect. This case is the normal path for a stop whose final
+    # snapshot completes within the grace window.
+    import asyncio
+
+    worker_a = str(uuid.uuid4())
+
+    # assigned_worker_id=None simulates the cleared-no-replacement state.
+    client, storage = _setup(tmp_path, assigned_worker_id=None)
+    community, server = _scope()
+    asyncio.run(_publish(storage, community, server, {"k": b"g1"}, publisher=worker_a))
+    current = asyncio.run(
+        storage.current_generation(CommunityId(community), ServerId(server))
+    )
+
+    body = _tar_bytes({"world/level.dat": b"final-from-a"})
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"),
+            content=body,
+            headers={
+                **_auth(),
+                "X-Working-Set-Base-Generation": str(current),
+                "X-Worker-Id": worker_a,
+            },
+        )
+    assert resp.status_code == 204
+
+    async def _read() -> bytes:
+        return b"".join(
+            [
+                chunk
+                async for chunk in storage.open_hydrate_source(
+                    CommunityId(community), ServerId(server)
+                )
+            ]
+        )
+
+    assert _read_tar(asyncio.run(_read())) == {"world/level.dat": b"final-from-a"}

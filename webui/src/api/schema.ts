@@ -1773,6 +1773,17 @@ export interface paths {
          *     is discarded and the newer ``current`` is kept, so the Worker re-bases on its next
          *     start — the same convergence as the pre-stream refusal.
          *
+         *     An assignment-aware fence (issue #1703) adds a second input: the server's
+         *     currently-assigned worker id. The pre-stream guard ALLOWS a stale-base publish
+         *     from a different publisher when that publisher IS the assigned worker (the wedge
+         *     case: the old worker's late final snapshot advanced the store, and the new assigned
+         *     worker's base now lags). A commit-time fence re-reads the assignment AFTER the
+         *     upload stream and refuses when the publisher is NOT the currently-assigned worker
+         *     (409 ``publisher_not_assigned``): this prevents a late commit from a re-placed
+         *     worker from wedging the new session. The fence is permissive when no worker is
+         *     assigned (``None``): the held-assignment final-snapshot window and the post-clear
+         *     no-replacement case must still land.
+         *
          *     The content-integrity gate uses the single region rule set (issue #927): a
          *     non-4096-aligned tail is the normal on-disk shape of a 26.x world, not a tear, on
          *     every snapshot source. The earlier source-keyed strict/live split (issue #923)

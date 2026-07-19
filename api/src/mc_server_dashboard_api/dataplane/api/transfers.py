@@ -47,7 +47,9 @@ from fastapi import (
 from fastapi.responses import StreamingResponse
 
 from mc_server_dashboard_api.dependencies import (
+    AssignedWorkerLookup,
     ResolvedJarLookup,
+    get_assigned_worker_lookup,
     get_resolved_jar_lookup,
     get_storage,
     get_worker_credential,
@@ -307,6 +309,9 @@ async def publish_snapshot(
     request: Request,
     response: Response,
     storage: Annotated[Storage, Depends(get_storage)],
+    assigned_worker: Annotated[
+        AssignedWorkerLookup, Depends(get_assigned_worker_lookup)
+    ],
     content_length: Annotated[int | None, Header()] = None,
     base_generation: Annotated[
         int | None, Header(alias=_BASE_GENERATION_HEADER)
@@ -358,6 +363,17 @@ async def publish_snapshot(
     is discarded and the newer ``current`` is kept, so the Worker re-bases on its next
     start — the same convergence as the pre-stream refusal.
 
+    An assignment-aware fence (issue #1703) adds a second input: the server's
+    currently-assigned worker id. The pre-stream guard ALLOWS a stale-base publish
+    from a different publisher when that publisher IS the assigned worker (the wedge
+    case: the old worker's late final snapshot advanced the store, and the new assigned
+    worker's base now lags). A commit-time fence re-reads the assignment AFTER the
+    upload stream and refuses when the publisher is NOT the currently-assigned worker
+    (409 ``publisher_not_assigned``): this prevents a late commit from a re-placed
+    worker from wedging the new session. The fence is permissive when no worker is
+    assigned (``None``): the held-assignment final-snapshot window and the post-clear
+    no-replacement case must still land.
+
     The content-integrity gate uses the single region rule set (issue #927): a
     non-4096-aligned tail is the normal on-disk shape of a 26.x world, not a tear, on
     every snapshot source. The earlier source-keyed strict/live split (issue #923)
@@ -402,24 +418,31 @@ async def publish_snapshot(
                 and publisher is not None
                 and current_publisher != publisher
             ):
-                _logger.warning(
-                    "snapshot publish refused: stale base generation for server %s "
-                    "from a different worker (publisher %s held %d, store at %d "
-                    "published by %s)",
-                    server_id,
-                    publisher,
-                    base_generation,
-                    current,
-                    current_publisher,
-                )
-                raise problem(
-                    status.HTTP_409_CONFLICT,
-                    "stale_generation",
-                    extensions={
-                        "base_generation": base_generation,
-                        "current": current,
-                    },
-                )
+                # The publisher differs from the last recorder of current. Before
+                # refusing, check whether the publisher is the CURRENTLY-ASSIGNED
+                # worker (issue #1703): a re-placed worker whose base lags because
+                # the old worker's late final snapshot advanced the store is the
+                # authoritative session — refusing it would wedge the server.
+                assigned = await assigned_worker(community_id, server_id)
+                if assigned != publisher:
+                    _logger.warning(
+                        "snapshot publish refused: stale base generation for server "
+                        "%s from a different worker (publisher %s held %d, store at "
+                        "%d published by %s)",
+                        server_id,
+                        publisher,
+                        base_generation,
+                        current,
+                        current_publisher,
+                    )
+                    raise problem(
+                        status.HTTP_409_CONFLICT,
+                        "stale_generation",
+                        extensions={
+                            "base_generation": base_generation,
+                            "current": current,
+                        },
+                    )
     handle = await storage.begin_snapshot(*scope)
     counter = _ByteCounter(request.stream(), declared=content_length)
     try:
@@ -430,6 +453,30 @@ async def publish_snapshot(
             # prior snapshot intact.
             await storage.abort_snapshot(handle)
             raise problem(status.HTTP_400_BAD_REQUEST, "length_mismatch")
+        # Commit-time assignment fence (issue #1703): after the (multi-minute)
+        # upload stream completes, re-read the server's assignment. If the
+        # publisher is known AND a different worker is now assigned, this is the
+        # late final snapshot from an old worker whose assignment was cleared and
+        # the server was re-placed — committing it would wedge the new session.
+        # Abort the staging and refuse. Cases that still pass: the publisher IS
+        # the assigned worker (normal); no assignment exists (post-clear with no
+        # replacement yet, or the held-assignment final-snapshot window); absent
+        # publisher header (older worker, permissive).
+        if publisher is not None:
+            assigned = await assigned_worker(community_id, server_id)
+            if assigned is not None and assigned != publisher:
+                await storage.abort_snapshot(handle)
+                _logger.warning(
+                    "snapshot publish refused: publisher %s is not the assigned "
+                    "worker (%s) for server %s at commit time",
+                    publisher,
+                    assigned,
+                    server_id,
+                )
+                raise problem(
+                    status.HTTP_409_CONFLICT,
+                    "publisher_not_assigned",
+                )
         generation = await storage.commit_snapshot(
             handle,
             publisher=publisher,
