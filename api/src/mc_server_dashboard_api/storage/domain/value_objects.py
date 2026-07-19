@@ -97,6 +97,19 @@ class SnapshotId:
 # value reaches a filesystem or object-store path join.
 _VERSION_ID_RE = re.compile(r"\A[a-zA-Z0-9_-]+\Z")
 
+# The exact format minted by _new_version_id:
+# ``f"{time.time_ns():020d}-{uuid4().hex[:8]}"`` — always 29 chars, 20
+# digits + hyphen + 8 hex chars.  Used by adapters to distinguish genuine
+# ring members from child-directory entries that share the same object-store
+# prefix (issue #1952).
+_RING_MEMBER_RE = re.compile(r"\A\d{20}-[0-9a-f]{8}\Z")
+
+
+def is_version_ring_member(name: str) -> bool:
+    """True if ``name`` matches the version-id format minted by ``_new_version_id``."""
+
+    return _RING_MEMBER_RE.match(name) is not None
+
 
 @dataclass(frozen=True)
 class VersionId:
