@@ -125,11 +125,16 @@ class _Aioboto3S3Client:
         return size
 
     async def copy_object(self, src_key: str, dst_key: str) -> None:
-        await self._client.copy_object(
-            Bucket=self._bucket,
-            Key=dst_key,
-            CopySource={"Bucket": self._bucket, "Key": src_key},
-        )
+        try:
+            await self._client.copy_object(
+                Bucket=self._bucket,
+                Key=dst_key,
+                CopySource={"Bucket": self._bucket, "Key": src_key},
+            )
+        except ClientError as exc:
+            if _is_not_found(exc) or _is_no_such_bucket(exc):
+                raise NotFoundError(f"object not found: {src_key}") from exc
+            raise
 
     async def delete_object(self, key: str) -> None:
         await self._client.delete_object(Bucket=self._bucket, Key=key)
