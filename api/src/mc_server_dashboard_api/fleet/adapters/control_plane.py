@@ -60,6 +60,23 @@ from mcsd.controlplane.v1 import control_plane_pb2 as pb
 _LOG = logging.getLogger(__name__)
 
 
+class StaleSessionError(RuntimeError):
+    """Raised when ``open_session`` receives a token older than the latest opened.
+
+    Defense-in-depth against the reconnect race (issue #1694): a stale session
+    that resumes its DB awaits after a newer session already opened must not
+    overwrite the current outbound queue.
+    """
+
+    def __init__(self, worker_id: str, session: int) -> None:
+        super().__init__(
+            f"worker {worker_id}: session {session} is stale "
+            "(a newer session was already opened)"
+        )
+        self.worker_id = worker_id
+        self.session = session
+
+
 def _now_timestamp() -> Timestamp:
     """Return a protobuf Timestamp set to the current wall-clock time."""
     ts = Timestamp()
@@ -148,6 +165,11 @@ class ControlPlaneState:
         # collides).
         self._late_snapshots: dict[str, tuple[WorkerId, str]] = {}
         self._late_snapshot_sink = late_snapshot_sink
+        # Monotonic high-water mark of the latest session token opened per worker
+        # (issue #1694). A stale session that resumes its awaits after a newer one
+        # already called open_session is refused, preventing it from overwriting the
+        # current outbound queue.
+        self._latest_opened: dict[WorkerId, SessionToken] = {}
 
     def set_late_snapshot_sink(self, sink: LateSnapshotResultSink) -> None:
         """Bind the late-snapshot sink after construction (issue #891).
@@ -177,6 +199,9 @@ class ControlPlaneState:
         it on the superseding session keeps the map from accreting.
         """
 
+        if session < self._latest_opened.get(worker_id, session):
+            raise StaleSessionError(worker_id.value, session)
+        self._latest_opened[worker_id] = session
         for command_id in [
             cid for cid, (wid, _) in self._late_snapshots.items() if wid == worker_id
         ]:
