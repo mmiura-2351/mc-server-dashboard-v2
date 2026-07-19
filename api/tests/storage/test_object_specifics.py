@@ -963,3 +963,107 @@ async def test_spool_object_unlinks_on_stream_error() -> None:
     after = set(glob.glob(f"{tmp_dir}/.leak-obj.*"))
     leaked = after - before
     assert not leaked, f"spool file leaked: {leaked}"
+
+
+# --- unleased read paths concurrency (issue #1953) ----------------------------
+
+
+async def test_read_file_survives_concurrent_pointer_flip() -> None:
+    """read_file must not yield stale/deleted content when a concurrent publish
+    flips the pointer between resolve and get_object (issue #1953)."""
+
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    await _publish(storage, community, server, {"f": b"OLD"})
+
+    call_count = {"n": 0}
+    original = ObjectStorage._live_snapshot_prefix
+
+    async def _racing(
+        self: ObjectStorage, client: S3Client, cid: CommunityId, sid: ServerId
+    ) -> str:
+        result = await original(self, client, cid, sid)
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            # Concurrent publish: flips pointer and GCs old prefix.
+            old_prefix = result
+            await _publish(storage, community, server, {"f": b"NEW"})
+            # Remove all keys from the old prefix to simulate GC.
+            for k in list(store.objects):
+                if k.startswith(old_prefix):
+                    del store.objects[k]
+                    store.mtimes.pop(k, None)
+        return result
+
+    storage._live_snapshot_prefix = _racing.__get__(storage, ObjectStorage)  # type: ignore[method-assign]
+
+    content = await storage.read_file(community, server, RelPath("f"))
+    assert content == b"NEW"
+
+
+async def test_list_dir_survives_concurrent_pointer_flip() -> None:
+    """list_dir must not raise NotFoundError when a concurrent publish flips
+    the pointer between resolve and list_objects (issue #1953)."""
+
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    await _publish(storage, community, server, {"sub/a": b"A", "sub/b": b"B"})
+
+    call_count = {"n": 0}
+    original_read_pointer = ObjectStorage._read_pointer
+
+    async def _racing_read_pointer(
+        self: ObjectStorage, client: S3Client, server_prefix: str
+    ) -> str | None:
+        result = await original_read_pointer(self, client, server_prefix)
+        expected_prefix = _server_prefix(community, server)
+        if server_prefix == expected_prefix and result is not None:
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                old_prefix = result
+                await _publish(
+                    storage, community, server, {"sub/a": b"A2", "sub/b": b"B2"}
+                )
+                for k in list(store.objects):
+                    if k.startswith(old_prefix):
+                        del store.objects[k]
+                        store.mtimes.pop(k, None)
+        return result
+
+    storage._read_pointer = _racing_read_pointer.__get__(storage, ObjectStorage)  # type: ignore[method-assign]
+
+    entries = await storage.list_dir(community, server, RelPath("sub"))
+    names = sorted(e.name for e in entries)
+    assert names == ["a", "b"]
+
+
+async def test_retain_file_version_survives_concurrent_pointer_flip() -> None:
+    """retain_file_version must not raise when a concurrent publish flips the
+    pointer and GCs the old prefix (issue #1953).
+
+    The lock prevents a real concurrent publish from racing, so the test
+    simulates the aftermath: the pointer is directly rewritten and the old
+    prefix is deleted between the two _read_pointer calls that _server_lock
+    serializes (proving that the re-read inside the lock sees the new state)."""
+
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    await _publish(storage, community, server, {"f": b"CONTENT"})
+
+    # Seed a new snapshot directly in the store (bypassing the lock).
+    server_pfx = _server_prefix(community, server)
+    new_prefix = server_pfx + "snapshots/new-snap/"
+    store.objects[new_prefix + "f"] = b"CONTENT2"
+
+    # Remember the old prefix so we can delete it after re-pointing.
+    old_pointer = json.loads(store.objects[server_pfx + _POINTER])["snapshot"]
+
+    # Flip the pointer to the new snapshot and GC the old prefix.
+    store.objects[server_pfx + _POINTER] = json.dumps({"snapshot": new_prefix}).encode()
+    for k in list(store.objects):
+        if k.startswith(old_pointer):
+            del store.objects[k]
+            store.mtimes.pop(k, None)
+
+    # Must not raise — the lock ensures the pointer is read consistently.
+    await storage.retain_file_version(community, server, RelPath("f"))

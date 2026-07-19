@@ -1178,11 +1178,17 @@ class FsStorage(Storage):
     def _read_file(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
     ) -> bytes:
-        current = self._current_dir(community_id, server_id)
-        target = self._safe_target(current, rel_path)
-        if not target.is_file():
-            raise NotFoundError(f"file not found: {rel_path.value}")
-        return target.read_bytes()
+        # Resolve and lease the live snapshot so a concurrent publish's post-flip
+        # GC cannot delete the snapshot between resolve and read (issue #1953),
+        # mirroring open_file_stream's lease discipline.
+        current, release = self._lease_current(community_id, server_id)
+        try:
+            target = self._safe_target(current, rel_path)
+            if not target.is_file():
+                raise NotFoundError(f"file not found: {rel_path.value}")
+            return target.read_bytes()
+        finally:
+            release()
 
     def open_file_stream(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
@@ -1221,21 +1227,27 @@ class FsStorage(Storage):
         # plane's JAR-only hydrate posture for the unpublished state.
         if not self._current_link(community_id, server_id).is_symlink():
             return []
-        current = self._current_dir(community_id, server_id)
-        target = self._safe_target(current, rel_path)
-        if not target.is_dir():
-            raise NotFoundError(f"directory not found: {rel_path.value}")
-        entries = []
-        for child in sorted(target.iterdir(), key=lambda p: p.name):
-            is_dir = child.is_dir()
-            entries.append(
-                DirEntry(
-                    name=child.name,
-                    is_dir=is_dir,
-                    size=0 if is_dir else child.stat().st_size,
+        # Lease the live snapshot so a concurrent publish's post-flip GC cannot
+        # delete the snapshot between resolve and iterdir/stat (issue #1953),
+        # mirroring open_file_stream's lease discipline.
+        current, release = self._lease_current(community_id, server_id)
+        try:
+            target = self._safe_target(current, rel_path)
+            if not target.is_dir():
+                raise NotFoundError(f"directory not found: {rel_path.value}")
+            entries = []
+            for child in sorted(target.iterdir(), key=lambda p: p.name):
+                is_dir = child.is_dir()
+                entries.append(
+                    DirEntry(
+                        name=child.name,
+                        is_dir=is_dir,
+                        size=0 if is_dir else child.stat().st_size,
+                    )
                 )
-            )
-        return entries
+            return entries
+        finally:
+            release()
 
     def open_working_set_view(
         self, community_id: CommunityId, server_id: ServerId
@@ -1602,17 +1614,23 @@ class FsStorage(Storage):
         # the frozen authoritative copy before each edit, and without this dedup
         # repeated edits to one file would push identical copies into the bounded
         # ring and evict distinct at-rest versions.
-        try:
-            current = self._current_dir(community_id, server_id)
-        except NotFoundError:
-            return  # never-published server: nothing authoritative to retain
-        target = self._safe_target(current, rel_path)
-        if not target.is_file():
-            return  # no authoritative copy yet: nothing to retain
-        versions = self._versions_dir(community_id, server_id, rel_path)
-        if self._matches_newest_version(versions, target):
-            return  # unchanged since the newest retained version: skip the churn
-        self._capture_version(community_id, server_id, rel_path, target)
+        #
+        # The resolve + stat + hash + copy must run under the per-server lock
+        # (issue #1953): without it, a concurrent snapshot commit can flip
+        # ``current`` and rmtree the resolved snapshot between resolve and
+        # read, yielding a FileNotFoundError → 500 on the edit request.
+        with self._server_lock(community_id, server_id):
+            try:
+                current = self._current_dir(community_id, server_id)
+            except NotFoundError:
+                return  # never-published server: nothing authoritative to retain
+            target = self._safe_target(current, rel_path)
+            if not target.is_file():
+                return  # no authoritative copy yet: nothing to retain
+            versions = self._versions_dir(community_id, server_id, rel_path)
+            if self._matches_newest_version(versions, target):
+                return  # unchanged since the newest retained version: skip the churn
+            self._capture_version(community_id, server_id, rel_path, target)
 
     def _matches_newest_version(self, versions: Path, source: Path) -> bool:
         """True if ``source`` equals the newest retained version under ``versions``.

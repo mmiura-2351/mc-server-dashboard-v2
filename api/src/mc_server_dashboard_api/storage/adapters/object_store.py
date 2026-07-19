@@ -1324,15 +1324,21 @@ class ObjectStorage(Storage):
     async def read_file(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
     ) -> bytes:
+        # Lease the live snapshot so a concurrent publish's post-flip GC cannot
+        # delete the resolved prefix between resolve and get_object (issue #1953),
+        # mirroring open_file_stream's lease discipline.
         sub = self._safe_subkey(rel_path)
         async with self._client_factory() as client:
-            snapshot_prefix = await self._live_snapshot_prefix(
+            snapshot_prefix = await self._lease_live_snapshot(
                 client, community_id, server_id
             )
-            key = snapshot_prefix + sub
-            if await client.head_object(key) is None:
-                raise NotFoundError(f"file not found: {rel_path.value}")
-            return await _read_all(client, key)
+            try:
+                key = snapshot_prefix + sub
+                if await client.head_object(key) is None:
+                    raise NotFoundError(f"file not found: {rel_path.value}")
+                return await _read_all(client, key)
+            finally:
+                self._release_lease(snapshot_prefix)
 
     def open_file_stream(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
@@ -1374,13 +1380,21 @@ class ObjectStorage(Storage):
         dir_suffix = sub + "/" if sub else ""
         async with self._client_factory() as client:
             server_prefix = self._server_prefix(community_id, server_id)
-            snapshot_prefix = await self._read_pointer(client, server_prefix)
             # A never-snapshotted server has an empty working set, not a missing one
             # (issue #205): list it as empty rather than raising, mirroring the data
             # plane's JAR-only hydrate posture for the unpublished state.
-            if snapshot_prefix is None:
+            if await self._read_pointer(client, server_prefix) is None:
                 return []
-            objs = await client.list_objects(snapshot_prefix + dir_suffix)
+            # Lease the live snapshot so a concurrent publish's post-flip GC cannot
+            # delete the resolved prefix between resolve and list (issue #1953),
+            # mirroring open_file_stream's lease discipline.
+            snapshot_prefix = await self._lease_live_snapshot(
+                client, community_id, server_id
+            )
+            try:
+                objs = await client.list_objects(snapshot_prefix + dir_suffix)
+            finally:
+                self._release_lease(snapshot_prefix)
         if not objs and sub:
             # A prefix with no members is an empty (non-existent) directory; the
             # root (sub == "") always lists, even when empty.
@@ -1704,20 +1718,28 @@ class ObjectStorage(Storage):
         # the frozen authoritative copy before each edit, and without this dedup
         # repeated edits to one file would push identical copies into the bounded
         # ring and evict distinct at-rest versions.
+        #
+        # The pointer read + head + dedup + copy must run under the per-server lock
+        # (issue #1953): without it, a concurrent snapshot commit can flip the
+        # pointer and GC the old prefix between resolve and copy, yielding an
+        # untranslated ClientError → 500 on the edit request.
         sub = self._safe_subkey(rel_path)
-        async with self._client_factory() as client:
-            snapshot_prefix = await self._read_pointer(
-                client, self._server_prefix(community_id, server_id)
-            )
-            if snapshot_prefix is None:
-                return  # never-published server: nothing authoritative to retain
-            key = snapshot_prefix + sub
-            if await client.head_object(key) is None:
-                return  # no authoritative copy yet: nothing to retain
-            versions = self._versions_prefix(community_id, server_id, rel_path)
-            if await self._matches_newest_version(client, versions, key):
-                return  # unchanged since the newest retained version: skip churn
-            await self._capture_version(client, community_id, server_id, rel_path, key)
+        async with self._server_lock(community_id, server_id):
+            async with self._client_factory() as client:
+                snapshot_prefix = await self._read_pointer(
+                    client, self._server_prefix(community_id, server_id)
+                )
+                if snapshot_prefix is None:
+                    return  # never-published server: nothing authoritative to retain
+                key = snapshot_prefix + sub
+                if await client.head_object(key) is None:
+                    return  # no authoritative copy yet: nothing to retain
+                versions = self._versions_prefix(community_id, server_id, rel_path)
+                if await self._matches_newest_version(client, versions, key):
+                    return  # unchanged since the newest retained version: skip churn
+                await self._capture_version(
+                    client, community_id, server_id, rel_path, key
+                )
 
     async def _matches_newest_version(
         self, client: S3Client, versions: str, source_key: str
