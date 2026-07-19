@@ -213,15 +213,22 @@ class SqlAlchemyScheduleRepository(ScheduleRepository):
         self,
         schedule_id: ScheduleId,
         *,
+        fired_occurrence: dt.datetime,
         next_run_at: dt.datetime,
         last_run_at: dt.datetime | None,
     ) -> None:
-        # Only the runner's bookkeeping columns, guarded ``WHERE enabled`` so a
-        # concurrently disabled/deleted schedule matches no row (the Port's
-        # silent-skip contract) and a concurrent CRUD edit is never clobbered.
+        # Only the runner's bookkeeping columns, guarded ``WHERE enabled AND
+        # next_run_at = fired_occurrence`` so a concurrently disabled/deleted
+        # schedule matches no row (the Port's silent-skip contract) and a
+        # concurrent CRUD edit that changed the cadence (and recomputed
+        # next_run_at) is never clobbered — the concurrent edit's value wins.
         stmt = (
             update(ScheduleModel)
-            .where(ScheduleModel.id == schedule_id.value, ScheduleModel.enabled)
+            .where(
+                ScheduleModel.id == schedule_id.value,
+                ScheduleModel.enabled,
+                ScheduleModel.next_run_at == fired_occurrence,
+            )
             .values(next_run_at=next_run_at, last_run_at=last_run_at)
         )
         await self._session.execute(stmt)

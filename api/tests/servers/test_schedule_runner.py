@@ -1232,3 +1232,58 @@ def test_safe_hydrate_skips_unloadable_rows_and_logs(
     hydration_warnings = [r for r in caplog.records if "failed to hydrate" in r.message]
     assert len(hydration_warnings) == 1
     assert str(bad_id) in hydration_warnings[0].getMessage()
+
+
+# --- advance CAS guard (issue #1963) ----------------------------------------
+
+
+async def test_advance_does_not_clobber_a_concurrently_edited_cadence() -> None:
+    """A concurrent PATCH that recomputed next_run_at wins (#1963)."""
+    # A schedule that was due when the runner's list_due read it.
+    original_next = _NOW - dt.timedelta(seconds=10)
+    patched_next = _NOW + dt.timedelta(hours=5)
+
+    # Use a FakeControlPlane subclass that mutates the schedule store mid-dispatch,
+    # simulating a concurrent PATCH that recomputes next_run_at.
+    class _RacingControlPlane(FakeControlPlane):
+        def __init__(self, uow: FakeUnitOfWork, schedule_id: ScheduleId) -> None:
+            super().__init__()
+            self._uow = uow
+            self._schedule_id = schedule_id
+
+        async def command(
+            self, *, worker_id: WorkerId, server_id: ServerId, line: str
+        ) -> CommandOutcome:
+            # Simulate the concurrent PATCH arriving between list_due and _advance.
+            stored = self._uow.schedules.by_id[self._schedule_id]
+            self._uow.schedules.by_id[self._schedule_id] = replace(
+                stored, next_run_at=patched_next
+            )
+            return await super().command(
+                worker_id=worker_id, server_id=server_id, line=line
+            )
+
+    server = _running_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.COMMAND,
+        command="say hi",
+        cadence=Cadence.from_interval(_HOUR),
+        next_run_at=original_next,
+    )
+
+    cp = _RacingControlPlane(FakeUnitOfWork(), schedule.id)
+    env = _env(control_plane=cp)
+    # Re-attach the control plane's uow reference after _env builds the real one.
+    cp._uow = env.uow
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    # The command still executed (that happened before the advance).
+    assert [k for k, *_ in env.control_plane.dispatched] == ["command"]
+    # But the advance was a no-op because the CAS on fired_occurrence failed:
+    # next_run_at is still the patched value, not a stale hourly advance.
+    final = env.uow.schedules.by_id[schedule.id]
+    assert final.next_run_at == patched_next

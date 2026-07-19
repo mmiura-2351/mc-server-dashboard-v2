@@ -976,13 +976,18 @@ class FakeScheduleRepository(ScheduleRepository):
         self,
         schedule_id: ScheduleId,
         *,
+        fired_occurrence: dt.datetime,
         next_run_at: dt.datetime,
         last_run_at: dt.datetime | None,
     ) -> None:
         # Mirror the adapter's guarded bookkeeping UPDATE: only an enabled row
-        # matches; a disabled/deleted schedule is silently left untouched.
+        # whose next_run_at still matches the fired occurrence is advanced; a
+        # disabled/deleted/concurrently-edited schedule is silently left
+        # untouched.
         schedule = self.by_id.get(schedule_id)
         if schedule is None or not schedule.enabled:
+            return
+        if schedule.next_run_at != fired_occurrence:
             return
         self.by_id[schedule_id] = replace(
             schedule, next_run_at=next_run_at, last_run_at=last_run_at
