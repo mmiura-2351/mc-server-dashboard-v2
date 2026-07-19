@@ -220,7 +220,11 @@ async def hydrate_working_set(
     scope = (CommunityId(community_id), ServerId(server_id))
     jar_member = await _jar_member(storage, resolved_jar, community_id, server_id)
 
-    stream = storage.open_hydrate_source(*scope)
+    # When a resolved JAR is being injected, exclude the working set's embedded
+    # copy so the stale jar cannot overwrite the freshly injected one (the Worker
+    # unpacks last-wins). Issue #1942.
+    exclude = frozenset({_JAR_RELPATH}) if jar_member is not None else frozenset()
+    stream = storage.open_hydrate_source(*scope, exclude=exclude)
     # The hydrate stream resolves + leases the snapshot on its FIRST iteration,
     # so a NotFoundError (no published snapshot) only surfaces once we pull a
     # chunk. Peek the first chunk here, before sending response headers, so an

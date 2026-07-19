@@ -189,13 +189,22 @@ class WorkingSetStore(abc.ABC):
 
     @abc.abstractmethod
     def open_hydrate_source(
-        self, community_id: CommunityId, server_id: ServerId
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        *,
+        exclude: frozenset[str] = frozenset(),
     ) -> HydrateSource:
         """Open a read stream over the current authoritative working set.
 
         The data plane reads from this to feed a Worker on start/relocation
         (hydrate). Reads ``current/``. Raises :class:`~.errors.NotFoundError` if no
         snapshot has been published for the server.
+
+        ``exclude`` names exact top-level member relpaths to omit from the stream
+        (issue #1942). When the resolved JAR is being injected, the caller passes
+        ``frozenset({"server.jar"})`` so the working set's embedded (stale) copy
+        does not overwrite the freshly injected one on unpack (last-wins).
 
         The returned :class:`HydrateSource` exposes ``generation`` — ``None`` until
         the first chunk is pulled, then the marker value read atomically with the

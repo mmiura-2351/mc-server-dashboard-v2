@@ -1133,6 +1133,40 @@ def test_snapshot_chunk_idle_timeout_aborts_staging_and_returns_408(
     assert _read_tar(published) == {"keep.txt": b"prior"}
 
 
+def test_hydrate_resolved_jar_supersedes_stale_embedded_jar(tmp_path: Path) -> None:
+    """The resolved JAR must overwrite the stale embedded server.jar in the snapshot.
+
+    Regression test for issue #1942: when a working set embeds its own
+    ``server.jar`` (from a prior snapshot), a version change must still take
+    effect — the hydrate tar must contain exactly ONE ``server.jar`` with the
+    resolved content, not the stale embedded one.
+    """
+    import asyncio
+
+    jar_bytes = b"PK\x03\x04 resolved JAR B (version 1.22)"
+    sha256 = asyncio.run(_store_jar(FsStorage(tmp_path), jar_bytes))
+
+    client, storage = _setup(tmp_path, resolved_jar=sha256)
+    community, server = _scope()
+    # The working set embeds a STALE server.jar (from a prior snapshot that
+    # ran version 1.21). The hydrate must NOT serve it.
+    files = {
+        "server.jar": b"PK\x03\x04 stale JAR A (version 1.21)",
+        "server.properties": b"motd=hi",
+        "world/level.dat": b"\x00\x01",
+    }
+    asyncio.run(_publish(storage, community, server, files))
+    with client:
+        resp = client.get(_url(community, server, "working-set"), headers=_auth())
+    assert resp.status_code == 200
+    members = _read_tar(resp.content)
+    # Exactly one server.jar in the output, carrying the RESOLVED content.
+    assert members["server.jar"] == jar_bytes
+    # Other working-set files still round-trip.
+    assert members["server.properties"] == b"motd=hi"
+    assert members["world/level.dat"] == b"\x00\x01"
+
+
 def test_hydrate_generation_header_matches_leased_snapshot(tmp_path: Path) -> None:
     """Issue #1954: the generation header must match the served content.
 

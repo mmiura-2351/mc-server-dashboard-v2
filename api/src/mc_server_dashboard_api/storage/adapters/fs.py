@@ -382,7 +382,11 @@ class FsStorage(Storage):
     # --- working-set hydrate / snapshot (Section 3.1) ----------------------
 
     def open_hydrate_source(
-        self, community_id: CommunityId, server_id: ServerId
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        *,
+        exclude: frozenset[str] = frozenset(),
     ) -> HydrateSource:
         # The live snapshot is resolved and leased on the FIRST iteration, not at
         # open time: a caller that opens the stream but never iterates/closes it
@@ -408,7 +412,7 @@ class FsStorage(Storage):
                     raise
             return path, release
 
-        source._inner = _tar_stream(_open, self._tar_member_hook)
+        source._inner = _tar_stream(_open, self._tar_member_hook, exclude)
         return source
 
     async def begin_snapshot(
@@ -1814,6 +1818,7 @@ def _fsync_tree(root: Path) -> None:
 def _tar_stream(
     open_source: Callable[[], tuple[Path, Callable[[], None]]],
     member_hook: Callable[[Path], None] | None = None,
+    exclude: frozenset[str] = frozenset(),
 ) -> AsyncIterator[bytes]:
     """Stream a tar of the hydrate working set (incremental, error-surfacing).
 
@@ -1821,6 +1826,8 @@ def _tar_stream(
     snapshot directory and takes the active-reader lease, returning the directory
     and the matching lease-release callback. Deferring it to first iteration
     means a stream that is opened but never consumed never pins a snapshot.
+
+    ``exclude`` names top-level children to skip (issue #1942).
 
     The tar is generated incrementally in stream mode (``w|``) by a worker thread
     writing into one end of an ``os.pipe``; the generator reads bounded ``_CHUNK``
@@ -1840,7 +1847,7 @@ def _tar_stream(
             holder: list[BaseException] = []
             writer = threading.Thread(
                 target=_tar_into_fd,
-                args=(directory, write_fd, member_hook, holder),
+                args=(directory, write_fd, member_hook, holder, exclude),
                 daemon=True,
             )
             writer.start()
@@ -1871,8 +1878,11 @@ def _tar_into_fd(
     write_fd: int,
     member_hook: Callable[[Path], None] | None,
     holder: list[BaseException],
+    exclude: frozenset[str] = frozenset(),
 ) -> None:
     """Write a tar of ``directory`` into ``write_fd`` (stream mode), then close it.
+
+    ``exclude`` names top-level children to skip (issue #1942).
 
     Any failure other than the consumer closing early is recorded in ``holder``
     so the consumer can re-raise it instead of mistaking the closed pipe for a
@@ -1885,6 +1895,8 @@ def _tar_into_fd(
             tarfile.open(fileobj=out, mode="w|") as tar,
         ):
             for child in sorted(directory.iterdir(), key=lambda p: p.name):
+                if child.name in exclude:
+                    continue
                 if member_hook is not None:
                     member_hook(child)
                 tar.add(child, arcname=child.name)

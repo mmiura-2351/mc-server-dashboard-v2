@@ -634,7 +634,11 @@ class ObjectStorage(Storage):
     # --- working-set hydrate / snapshot (Section 3.1) ----------------------
 
     def open_hydrate_source(
-        self, community_id: CommunityId, server_id: ServerId
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        *,
+        exclude: frozenset[str] = frozenset(),
     ) -> HydrateSource:
         # The live snapshot is resolved and leased on the FIRST iteration (not at
         # open time), mirroring the fs adapter: a stream opened but never iterated
@@ -647,7 +651,7 @@ class ObjectStorage(Storage):
         # publishes.
         source = HydrateSource.__new__(HydrateSource)
         source.generation = None
-        source._inner = self._hydrate_gen(community_id, server_id, source)
+        source._inner = self._hydrate_gen(community_id, server_id, source, exclude)
         return source
 
     async def _hydrate_gen(
@@ -655,6 +659,7 @@ class ObjectStorage(Storage):
         community_id: CommunityId,
         server_id: ServerId,
         source: HydrateSource,
+        exclude: frozenset[str] = frozenset(),
     ) -> AsyncIterator[bytes]:
         async with self._client_factory() as client:
             server_prefix = self._server_prefix(community_id, server_id)
@@ -700,6 +705,14 @@ class ObjectStorage(Storage):
                     for m in members
                     if not m.key[len(snapshot_prefix) :].startswith("/")
                 ]
+                # Filter out excluded top-level members (issue #1942): the
+                # relative key's first path segment is checked against the set.
+                if exclude:
+                    members = [
+                        m
+                        for m in members
+                        if m.key[len(snapshot_prefix) :].split("/", 1)[0] not in exclude
+                    ]
                 async for chunk in _tar_stream_from_objects(
                     client, snapshot_prefix, members
                 ):
