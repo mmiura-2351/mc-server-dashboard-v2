@@ -124,14 +124,23 @@ func (l *Listener) Serve(ctx context.Context) error {
 		<-ctx.Done()
 		_ = l.ln.Close()
 	}()
+	var backoff netutil.AcceptBackoff
 	for {
 		conn, err := l.ln.Accept()
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
+			if netutil.IsTransientAcceptError(err) {
+				l.logger.Warn("accept failed; retrying", "error", err)
+				if !backoff.Sleep(ctx) {
+					return nil
+				}
+				continue
+			}
 			return err
 		}
+		backoff.Reset()
 		l.inflight.Add(1)
 		go func() {
 			defer l.inflight.Done()
