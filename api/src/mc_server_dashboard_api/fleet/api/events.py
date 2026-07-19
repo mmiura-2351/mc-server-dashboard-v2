@@ -20,11 +20,10 @@ same condition would produce:
 - ``4404`` — not a member, or the server does not exist in this community.
 
 Authorization is re-checked mid-stream: the two-layer gate is re-run every
-:data:`_REAUTHZ_INTERVAL_SECONDS` while the socket is idle, so a member removed
-or a grant revoked after accept stops receiving on the next interval instead of
-keeping events until disconnect. The re-check is two indexed queries and runs in
-the receive loop's idle path, so it never blocks frame delivery; on failure the
-socket closes with the same code the accept-time gate would have used.
+:data:`_REAUTHZ_INTERVAL_SECONDS` of wall-clock time, so a member removed or a
+grant revoked after accept stops receiving within one interval regardless of
+stream traffic. The re-check is two indexed queries; on failure the socket closes
+with the same code the accept-time gate would have used.
 
 Delivery is best-effort and decoupled from REST (FR-MON-4): if no event ever
 arrives, the socket simply stays quiet; a slow client that overflows its buffer
@@ -99,10 +98,10 @@ _CLOSE_UNAUTHENTICATED = 4401
 _CLOSE_FORBIDDEN = 4403
 _CLOSE_NOT_FOUND = 4404
 
-# How often the two-layer authorization gate is re-run while the socket is idle.
+# How often the two-layer authorization gate is re-run (wall-clock deadline).
 # A constant, not a config knob: the check is two indexed queries, and a minute
 # is a tight-enough bound on how long a removed member can keep receiving without
-# adding query load. Re-checking only when idle keeps it off the delivery path.
+# adding query load.
 _REAUTHZ_INTERVAL_SECONDS = 60.0
 
 # The streams a client may subscribe to (the gap marker is always delivered and
@@ -304,16 +303,20 @@ async def _relay(
     """Deliver subscription events until the client goes away or authz is revoked.
 
     Each turn of the loop races three outcomes: the next buffered event (handed
-    to ``deliver``), the re-authz interval elapsing idle (``reauthorize`` re-runs
-    the accept-time gate without touching delivery; a denial closes the socket
-    with its code), and the client disconnecting. Disconnect is observed by a
-    companion reader task (:func:`_client_gone`) because a client gone from a
-    quiet topic never wakes the delivery wait (#1695). The pending-event task is
-    kept across idle re-checks, so no event is dropped; every exit path —
+    to ``deliver``), the wall-clock re-authz deadline expiring (``reauthorize``
+    re-runs the accept-time gate; a denial closes the socket with its code), and
+    the client disconnecting. The deadline is absolute wall-clock time so a busy
+    stream cannot indefinitely postpone re-authorization. Disconnect is observed
+    by a companion reader task (:func:`_client_gone`) because a client gone from
+    a quiet topic never wakes the delivery wait (#1695). The pending-event task
+    is kept across re-checks, so no event is dropped; every exit path —
     disconnect, subscription end, revocation, an exception, cancellation on
     server shutdown — discards both helper tasks. The caller owns
     ``subscription.aclose()``.
     """
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _REAUTHZ_INTERVAL_SECONDS
 
     disconnected = asyncio.create_task(_client_gone(websocket))
     next_event = asyncio.ensure_future(subscription.__anext__())
@@ -321,7 +324,7 @@ async def _relay(
         while True:
             done, _pending = await asyncio.wait(
                 {next_event, disconnected},
-                timeout=_REAUTHZ_INTERVAL_SECONDS,
+                timeout=max(0.0, deadline - loop.time()),
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if disconnected in done:
@@ -333,13 +336,14 @@ async def _relay(
                     return
                 next_event = asyncio.ensure_future(subscription.__anext__())
                 await deliver(event)
-            else:
-                # Idle window elapsed: re-run the gate. A revoked subscriber is
-                # closed with the accept-time code.
+            # Check the wall-clock deadline unconditionally: a busy stream must
+            # not prevent re-authorization from running.
+            if loop.time() >= deadline:
                 denied = await reauthorize()
                 if denied is not None:
                     await websocket.close(code=denied)
                     return
+                deadline = loop.time() + _REAUTHZ_INTERVAL_SECONDS
     except WebSocketDisconnect:
         # Client went away mid-send; the caller cleans up the subscription.
         pass

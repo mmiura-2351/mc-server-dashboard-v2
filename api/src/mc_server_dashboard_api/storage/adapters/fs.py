@@ -830,24 +830,31 @@ class FsStorage(Storage):
         server_id: ServerId,
         key: BackupKey | None = None,
     ) -> BackupKey:
-        current = await asyncio.to_thread(self._current_dir, community_id, server_id)
-        # Content-integrity gate (issue #739): never archive a known-corrupt world.
-        # Walk the authoritative ``current/`` working set for structurally corrupt
-        # ``.mca`` region files (issue #738) BEFORE writing the archive; any corrupt
-        # region refuses the backup and no ``.tar.gz`` is written (fail-closed, #703).
-        # The single region rule set (issue #927) tolerates ``current/``'s legitimate
-        # unpadded (live-format) tail — its content was already gated at publish — while
-        # still catching realistic tears.
-        report = await asyncio.to_thread(check_working_set, current)
-        if not report.healthy:
-            raise IntegrityCheckError(report)
-        backups = self._server_root(community_id, server_id) / "backups"
-        await asyncio.to_thread(backups.mkdir, parents=True, exist_ok=True)
-        if key is None:
-            key = BackupKey(uuid.uuid4().hex)
-        archive = backups / f"{key.value}.tar.gz"
-        await asyncio.to_thread(self._write_backup_archive, current, archive)
-        return key
+        # Lease the live snapshot for the duration of the integrity walk + pack so a
+        # concurrent publish cannot reclaim it mid-operation (issue #1702).
+        current, release = await asyncio.to_thread(
+            self._lease_current, community_id, server_id
+        )
+        try:
+            # Content-integrity gate (issue #739): never archive a known-corrupt
+            # world. Walk the authoritative ``current/`` working set for structurally
+            # corrupt ``.mca`` region files (issue #738) BEFORE writing the archive;
+            # any corrupt region refuses the backup and no ``.tar.gz`` is written
+            # (fail-closed, #703). The single region rule set (issue #927) tolerates
+            # ``current/``'s legitimate unpadded (live-format) tail — its content was
+            # already gated at publish — while still catching realistic tears.
+            report = await asyncio.to_thread(check_working_set, current)
+            if not report.healthy:
+                raise IntegrityCheckError(report)
+            backups = self._server_root(community_id, server_id) / "backups"
+            await asyncio.to_thread(backups.mkdir, parents=True, exist_ok=True)
+            if key is None:
+                key = BackupKey(uuid.uuid4().hex)
+            archive = backups / f"{key.value}.tar.gz"
+            await asyncio.to_thread(self._write_backup_archive, current, archive)
+            return key
+        finally:
+            release()
 
     @staticmethod
     def _write_backup_archive(source: Path, archive: Path) -> None:
@@ -1017,14 +1024,19 @@ class FsStorage(Storage):
     async def check_current_health(
         self, community_id: CommunityId, server_id: ServerId
     ) -> WorkingSetReport:
-        # One-shot fsck of the on-disk authoritative snapshot (issue #744). A
-        # published snapshot is immutable/quiesced, so scanning ``current/`` in place
-        # is safe and needs no staging. Read-only: it never mutates ``current``.
-        # Raises NotFoundError if nothing is published. The single region rule set
-        # (issue #927) tolerates a published snapshot's legitimate unpadded tail or the
-        # sweep would falsely quarantine a healthy live-format snapshot.
-        current = await asyncio.to_thread(self._current_dir, community_id, server_id)
-        return await asyncio.to_thread(check_working_set, current)
+        # One-shot fsck of the on-disk authoritative snapshot (issue #744). Lease the
+        # snapshot so a concurrent publish cannot reclaim it mid-walk (issue #1702).
+        # Read-only: it never mutates ``current``. Raises NotFoundError if nothing is
+        # published. The single region rule set (issue #927) tolerates a published
+        # snapshot's legitimate unpadded tail or the sweep would falsely quarantine a
+        # healthy live-format snapshot.
+        current, release = await asyncio.to_thread(
+            self._lease_current, community_id, server_id
+        )
+        try:
+            return await asyncio.to_thread(check_working_set, current)
+        finally:
+            release()
 
     async def prune_to_final_snapshot(
         self, community_id: CommunityId, server_id: ServerId

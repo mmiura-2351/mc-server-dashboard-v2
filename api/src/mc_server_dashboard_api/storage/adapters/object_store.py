@@ -1131,36 +1131,43 @@ class ObjectStorage(Storage):
         if key is None:
             key = BackupKey(uuid.uuid4().hex)
         async with self._client_factory() as client:
-            snapshot_prefix = await self._live_snapshot_prefix(
+            # Lease the live snapshot for the duration of the integrity check + pack
+            # so a concurrent publish cannot GC the prefix mid-operation (#1702).
+            snapshot_prefix = await self._lease_live_snapshot(
                 client, community_id, server_id
             )
-            objs = sorted(
-                await client.list_objects(snapshot_prefix), key=lambda o: o.key
-            )
-            # Content-integrity gate (issue #750): never archive a known-corrupt
-            # world, mirroring the fs adapter (#739). Walk the live snapshot's
-            # ``.mca`` region bodies BEFORE writing the archive; any corrupt region
-            # refuses the backup and no ``.tar.gz`` object is uploaded (fail-closed,
-            # #703). The single region rule set (issue #927): a snapshot may hold a
-            # legitimate unpadded set (gated when it published), so the at-rest backup
-            # gate tolerates the unpadded tail, mirroring the fs adapter.
-            report = await self._check_staged_regions(client, snapshot_prefix, objs)
-            if not report.healthy:
-                raise IntegrityCheckError(report)
-            # Build the self-contained tar.gz to local scratch (gzip streams, so the
-            # bodies are not all held at once), then upload it as one object.
-            fd, spool_name = await asyncio.to_thread(
-                tempfile.mkstemp, prefix=".backup.", suffix=".tar.gz"
-            )
-            await asyncio.to_thread(_close_fd, fd)
-            spool = Path(spool_name)
             try:
-                await _write_backup_targz(client, snapshot_prefix, objs, spool)
-                await client.upload_multipart(
-                    self._backup_key(community_id, server_id, key), _file_parts(spool)
+                objs = sorted(
+                    await client.list_objects(snapshot_prefix), key=lambda o: o.key
                 )
+                # Content-integrity gate (issue #750): never archive a known-corrupt
+                # world, mirroring the fs adapter (#739). Walk the live snapshot's
+                # ``.mca`` region bodies BEFORE writing the archive; any corrupt
+                # region refuses the backup and no ``.tar.gz`` object is uploaded
+                # (fail-closed, #703). The single region rule set (issue #927): a
+                # snapshot may hold a legitimate unpadded set (gated when it
+                # published), so the at-rest backup gate tolerates the unpadded tail,
+                # mirroring the fs adapter.
+                report = await self._check_staged_regions(client, snapshot_prefix, objs)
+                if not report.healthy:
+                    raise IntegrityCheckError(report)
+                # Build the self-contained tar.gz to local scratch (gzip streams, so
+                # the bodies are not all held at once), then upload it as one object.
+                fd, spool_name = await asyncio.to_thread(
+                    tempfile.mkstemp, prefix=".backup.", suffix=".tar.gz"
+                )
+                await asyncio.to_thread(_close_fd, fd)
+                spool = Path(spool_name)
+                try:
+                    await _write_backup_targz(client, snapshot_prefix, objs, spool)
+                    await client.upload_multipart(
+                        self._backup_key(community_id, server_id, key),
+                        _file_parts(spool),
+                    )
+                finally:
+                    await asyncio.to_thread(spool.unlink, missing_ok=True)
             finally:
-                await asyncio.to_thread(spool.unlink, missing_ok=True)
+                self._release_lease(snapshot_prefix)
         return key
 
     async def list_backups(
