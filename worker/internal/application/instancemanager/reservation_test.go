@@ -407,3 +407,84 @@ func TestRestartUnavailableDriverLeavesInstanceTracked(t *testing.T) {
 		t.Fatalf("stop after failed restart = %+v, want success (instance was still tracked, id not wedged)", stop)
 	}
 }
+
+// A RestartServer for an unknown id must return SERVER_NOT_FOUND without
+// leaking a reservation: a subsequent StartServer for the same id must succeed,
+// not be wedged with BUSY. The pre-fix code's hasRunning pre-check raced with
+// takeRunningReserve and permanently leaked reserved[id]=true on the takeFound
+// path (issue #1950).
+func TestRestartNeverLeaksReservation(t *testing.T) {
+	d := &fakeDriver{}
+	m := newManager(t, d, nil)
+
+	// Restart for an id that was never started: must return SERVER_NOT_FOUND.
+	res := m.Handle(context.Background(), session.Command{CommandID: "r1", ServerID: "s1", Kind: "RestartServer"})
+	if res.Success || res.ErrorCode != session.CommandErrorServerNotFound {
+		t.Fatalf("restart unknown id = %+v, want SERVER_NOT_FOUND", res)
+	}
+
+	// The reserved map must be empty: no leaked reservation.
+	m.mu.Lock()
+	leaked := m.reserved["s1"]
+	m.mu.Unlock()
+	if leaked {
+		t.Fatal("reserved[s1] leaked after restart of unknown id (issue #1950)")
+	}
+
+	// The id must not be leaked as reserved: a StartServer must succeed (not BUSY).
+	start := m.Handle(context.Background(), startCmd())
+	if !start.Success {
+		t.Fatalf("start after restart of unknown id = %+v, want success (reservation must not leak)", start)
+	}
+}
+
+// A RestartServer dispatched while a StartServer is still mid-driver.Start must
+// return BUSY and not permanently wedge the id: after the start completes, a
+// StopServer must succeed (the reservation was never leaked). Issue #1950.
+func TestRestartRacingStartCompletion(t *testing.T) {
+	d := newGatedDriver()
+	m := newManager(t, d, nil)
+
+	// Start a server but hold it inside driver.Start.
+	startDone := make(chan session.CommandResult, 1)
+	go func() { startDone <- m.Handle(context.Background(), startCmd()) }()
+	awaitEnter(t, d.entered)
+
+	// Restart while the start is in flight: must return BUSY.
+	res := m.Handle(context.Background(), session.Command{CommandID: "r1", ServerID: "s1", Kind: "RestartServer"})
+	if res.Success || res.ErrorCode != session.CommandErrorBusy {
+		t.Fatalf("restart during in-flight start = %+v, want BUSY", res)
+	}
+
+	// Release the start; it must succeed.
+	close(d.release)
+	sr := <-startDone
+	if !sr.Success {
+		t.Fatalf("start = %+v, want success", sr)
+	}
+
+	// The id must not be permanently wedged: a StopServer must succeed.
+	stop := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+	if !stop.Success {
+		t.Fatalf("stop after restart+start completion = %+v, want success (no permanent BUSY leak)", stop)
+	}
+}
+
+// A RestartServer dispatched while a StartServer holds the reservation (mid-
+// driver.Start) must return BUSY. Issue #1950.
+func TestRestartMidStartStillBusy(t *testing.T) {
+	d := newGatedDriver()
+	m := newManager(t, d, nil)
+
+	// Hold a StartServer mid-driver.Start.
+	go func() { _ = m.Handle(context.Background(), startCmd()) }()
+	awaitEnter(t, d.entered)
+
+	// Restart while reservation is held: BUSY expected.
+	res := m.Handle(context.Background(), session.Command{CommandID: "r1", ServerID: "s1", Kind: "RestartServer"})
+	if res.Success || res.ErrorCode != session.CommandErrorBusy {
+		t.Fatalf("restart mid-start = %+v, want BUSY", res)
+	}
+
+	close(d.release)
+}
