@@ -464,3 +464,149 @@ async def test_sweep_spares_young_backup_tmp(tmp_path: Path) -> None:
     storage.sweep()
 
     assert young_tmp.exists(), "a young spool a live write may be filling must survive"
+
+
+async def test_commit_snapshot_fsyncs_staged_data_before_flip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Durability ordering (issue #1943): _publish_and_bump must fsync the staged
+    # tree's file data BEFORE the symlink flip. Otherwise a power cut after commit
+    # but before writeback leaves torn .mca files under the new current with the
+    # prior snapshot already reclaimed. The monkeypatch spy records fsync-file events
+    # and the flip (os.replace onto `current`) and asserts every file fsync precedes
+    # the flip.
+    import os
+    import stat as stat_module
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+
+    events: list[str] = []
+    real_fsync = os.fsync
+    real_replace = os.replace
+
+    def spy_fsync(fd: int) -> None:
+        is_dir = stat_module.S_ISDIR(os.fstat(fd).st_mode)
+        events.append("fsync-dir" if is_dir else "fsync-file")
+        real_fsync(fd)
+
+    def spy_replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        if str(dst).endswith("/current") or str(dst).endswith("\\current"):
+            events.append("flip")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "fsync", spy_fsync)
+    monkeypatch.setattr(os, "replace", spy_replace)
+
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(handle, tar_stream({"level.dat": b"data"}))
+    await storage.commit_snapshot(handle)
+
+    assert "flip" in events
+    flip_at = events.index("flip")
+    # At least one file fsync must precede the flip (the staged tree's data).
+    file_fsyncs_before_flip = [
+        i for i, e in enumerate(events) if e == "fsync-file" and i < flip_at
+    ]
+    assert file_fsyncs_before_flip, (
+        "no file fsync before the current flip — staged data is not durable"
+    )
+
+
+async def test_restore_backup_fsyncs_staged_data_before_flip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Same ordering as test_commit_snapshot_fsyncs_staged_data_before_flip but
+    # through the restore_backup path (issue #1943).
+    import os
+    import stat as stat_module
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    # Seed a snapshot so restore has a current to flip away from.
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(handle, tar_stream({"f": b"old"}))
+    await storage.commit_snapshot(handle)
+
+    # Create a backup to restore from.
+    key = await storage.create_backup_from_current(community, server)
+
+    events: list[str] = []
+    real_fsync = os.fsync
+    real_replace = os.replace
+
+    def spy_fsync(fd: int) -> None:
+        is_dir = stat_module.S_ISDIR(os.fstat(fd).st_mode)
+        events.append("fsync-dir" if is_dir else "fsync-file")
+        real_fsync(fd)
+
+    def spy_replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        if str(dst).endswith("/current") or str(dst).endswith("\\current"):
+            events.append("flip")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "fsync", spy_fsync)
+    monkeypatch.setattr(os, "replace", spy_replace)
+
+    await storage.restore_backup(community, server, key)
+
+    assert "flip" in events
+    flip_at = events.index("flip")
+    file_fsyncs_before_flip = [
+        i for i, e in enumerate(events) if e == "fsync-file" and i < flip_at
+    ]
+    assert file_fsyncs_before_flip, (
+        "no file fsync before the current flip — staged data is not durable"
+    )
+
+
+async def test_publish_fsyncs_snapshots_dir_after_move(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Durability ordering (issue #1943): _publish must fsync the snapshots/ directory
+    # after moving the staging dir into it, so the rename entry is durable before
+    # the symlink flip. We spy os.fsync and os.replace and assert a dir fsync of the
+    # snapshots/ parent occurs between the staging-to-snapshots move and the current
+    # flip.
+    import os
+    import stat as stat_module
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+
+    events: list[str] = []
+    real_fsync = os.fsync
+    real_replace = os.replace
+
+    def spy_fsync(fd: int) -> None:
+        is_dir = stat_module.S_ISDIR(os.fstat(fd).st_mode)
+        events.append("fsync-dir" if is_dir else "fsync-file")
+        real_fsync(fd)
+
+    def spy_replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        dst_s = str(dst)
+        if "/snapshots/" in dst_s or "\\snapshots\\" in dst_s:
+            events.append("move-to-snapshots")
+        elif dst_s.endswith("/current") or dst_s.endswith("\\current"):
+            events.append("flip")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "fsync", spy_fsync)
+    monkeypatch.setattr(os, "replace", spy_replace)
+
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(handle, tar_stream({"level.dat": b"data"}))
+    await storage.commit_snapshot(handle)
+
+    assert "move-to-snapshots" in events
+    assert "flip" in events
+    move_at = events.index("move-to-snapshots")
+    flip_at = events.index("flip")
+    # A directory fsync must occur between the move and the flip (snapshots/ dir).
+    dir_fsyncs_between = [
+        i for i, e in enumerate(events) if e == "fsync-dir" and move_at < i < flip_at
+    ]
+    assert dir_fsyncs_between, (
+        "no dir fsync between staging move and current flip — "
+        "the rename entry into snapshots/ is not durable"
+    )
