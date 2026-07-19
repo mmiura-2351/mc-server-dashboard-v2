@@ -24,6 +24,7 @@ from mc_server_dashboard_api.identity.adapters.models import (
 )
 from mc_server_dashboard_api.identity.domain.entities import (
     REVOKED_FAMILY,
+    REVOKED_ROTATED,
     RefreshToken,
     User,
 )
@@ -232,9 +233,13 @@ class SqlAlchemyRefreshTokenRepository(RefreshTokenRepository):
             update(RefreshTokenModel)
             .where(
                 RefreshTokenModel.user_id == user_id.value,
-                RefreshTokenModel.revoked_at.is_(None),
+                (RefreshTokenModel.revoked_at.is_(None))
+                | (RefreshTokenModel.revoked_reason == REVOKED_ROTATED),
             )
-            .values(revoked_at=revoked_at, revoked_reason=REVOKED_FAMILY)
+            .values(
+                revoked_at=func.coalesce(RefreshTokenModel.revoked_at, revoked_at),
+                revoked_reason=REVOKED_FAMILY,
+            )
         )
         await self._session.execute(stmt)
 
