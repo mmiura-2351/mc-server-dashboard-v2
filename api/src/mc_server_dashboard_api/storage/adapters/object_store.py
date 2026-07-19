@@ -678,11 +678,15 @@ class ObjectStorage(Storage):
                                 client, server_prefix
                             )
                             break
-                    # A publish slipped between lease and lock — re-lease.
-                    self._release_lease(snapshot_prefix)
-                    snapshot_prefix = await self._lease_live_snapshot(
+                    # A publish slipped between lease and lock — acquire the new
+                    # lease BEFORE releasing the old so a cancellation between
+                    # the two cannot leave snapshot_prefix pointing at an
+                    # already-released prefix (double-release in the finally).
+                    new_prefix = await self._lease_live_snapshot(
                         client, community_id, server_id
                     )
+                    self._release_lease(snapshot_prefix)
+                    snapshot_prefix = new_prefix
                 members = sorted(
                     await client.list_objects(snapshot_prefix), key=lambda o: o.key
                 )
