@@ -540,6 +540,38 @@ def get_resolved_jar_lookup(request: Request) -> ResolvedJarLookup:
     return _lookup
 
 
+# An async lookup of a server's currently-assigned worker id (as a string), or
+# None if unassigned. The data-plane snapshot endpoint uses it to fence late
+# publishes from a worker that is no longer assigned (issue #1703).
+AssignedWorkerLookup = Callable[[uuid.UUID, uuid.UUID], Awaitable[str | None]]
+
+
+def get_assigned_worker_lookup(request: Request) -> AssignedWorkerLookup:
+    """Provide a lookup of a server's currently-assigned worker id (#1703).
+
+    Returns the ``assigned_worker_id`` value (as a string) when the server
+    exists and belongs to the given community, or ``None`` when the server is
+    unknown, belongs to a different community, or has no assignment.
+    """
+
+    from mc_server_dashboard_api.servers.domain.value_objects import (
+        ServerId as ServersServerId,
+    )
+
+    session_factory = create_session_factory(get_engine(request))
+
+    async def _lookup(community_id: uuid.UUID, server_id: uuid.UUID) -> str | None:
+        async with ServersUnitOfWork(session_factory) as uow:
+            server = await uow.servers.get_by_id(ServersServerId(server_id))
+        if server is None or server.community_id.value != community_id:
+            return None
+        if server.assigned_worker_id is None:
+            return None
+        return str(server.assigned_worker_id.value)
+
+    return _lookup
+
+
 def get_worker_registry(request: Request) -> WorkerRegistry:
     """Return the process-wide WorkerRegistry stored on application state.
 
