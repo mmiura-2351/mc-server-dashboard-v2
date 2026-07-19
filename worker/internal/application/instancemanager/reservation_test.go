@@ -69,6 +69,14 @@ func (t *gatedTransfer) Hydrate(_ context.Context, _, _, _ string) (uint64, erro
 	return 0, nil
 }
 
+func (t *gatedTransfer) PackSnapshot(_ context.Context, _ string) (string, func(), error) {
+	return "/fake/spool.tar", func() {}, nil
+}
+
+func (t *gatedTransfer) UploadSnapshot(_ context.Context, _, _, _ string, _ uint64, _ string) (uint64, error) {
+	return 0, nil
+}
+
 func (t *gatedTransfer) Snapshot(_ context.Context, _, _, _ string, _ uint64, _ string) (uint64, error) {
 	return 0, nil
 }

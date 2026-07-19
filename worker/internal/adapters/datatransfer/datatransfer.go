@@ -179,56 +179,58 @@ func SweepSnapshotSpools(scratchRoot string) {
 	}
 }
 
-// Snapshot packs srcDir into a tar and uploads it to url. The tar is spooled to a
-// temp file (in srcDir's parent, i.e. the scratch root, so it shares srcDir's
-// filesystem) rather than a memory buffer: a multi-GB world times the bounded
-// concurrent transfers would otherwise pin gigabytes of RAM. The file is Stat'd
-// for the Content-Length the API's proven-complete gate matches, streamed as the
-// request body, and removed on every path (delta/streamed snapshot is deferred,
-// FR-DATA-5). A crash before that deferred remove leaks the spool; SweepSnapshotSpools
-// reclaims such leftovers at startup (issue #787).
-func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string, baseGeneration uint64, workerID string) (uint64, error) {
+// PackSnapshot packs srcDir into a tar spooled to a temp file in srcDir's parent
+// (the scratch root, so it shares srcDir's filesystem). It returns the spool path
+// and a cleanup function that removes the spool. The caller can release the quiesce
+// bracket after PackSnapshot returns because only the pack reads the working
+// directory; the upload reads only the spool (issue #1710). A crash before the
+// cleanup leaks the spool; SweepSnapshotSpools reclaims such leftovers at startup
+// (issue #787).
+func (c *Client) PackSnapshot(_ context.Context, srcDir string) (string, func(), error) {
 	spool, err := os.CreateTemp(filepath.Dir(srcDir), snapshotSpoolPrefix+"*.tar")
 	if err != nil {
-		return 0, fmt.Errorf("datatransfer: create snapshot spool: %w", err)
+		return "", func() {}, fmt.Errorf("datatransfer: create snapshot spool: %w", err)
 	}
-	defer func() {
-		_ = spool.Close()
-		_ = os.Remove(spool.Name())
-	}()
-
+	spoolPath := spool.Name()
 	if err := packTar(srcDir, spool, c.logger); err != nil {
-		return 0, fmt.Errorf("datatransfer: pack: %w", err)
+		_ = spool.Close()
+		_ = os.Remove(spoolPath)
+		return "", func() {}, fmt.Errorf("datatransfer: pack: %w", err)
 	}
-	size, err := spool.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return 0, fmt.Errorf("datatransfer: size snapshot spool: %w", err)
-	}
-	if _, err := spool.Seek(0, io.SeekStart); err != nil {
-		return 0, fmt.Errorf("datatransfer: rewind snapshot spool: %w", err)
-	}
+	_ = spool.Close()
+	cleanup := func() { _ = os.Remove(spoolPath) }
+	return spoolPath, cleanup, nil
+}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, spool)
+// UploadSnapshot streams the tar spool file at spoolPath to url, declaring
+// baseGeneration and workerID for the API's publish-time generation guard (issue
+// #847). It returns the NEW store generation the publish produced (the value of the
+// API's response header, issue #763); 0 when the header is absent (an older API).
+func (c *Client) UploadSnapshot(ctx context.Context, url, token, spoolPath string, baseGeneration uint64, workerID string) (uint64, error) {
+	f, err := os.Open(spoolPath)
+	if err != nil {
+		return 0, fmt.Errorf("datatransfer: open snapshot spool: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	info, err := f.Stat()
+	if err != nil {
+		return 0, fmt.Errorf("datatransfer: stat snapshot spool: %w", err)
+	}
+	size := info.Size()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, f)
 	if err != nil {
 		return 0, fmt.Errorf("datatransfer: build snapshot request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/x-tar")
-	// Declare the store generation this set was hydrated from (issue #847) so the
-	// API's publish-time generation guard can refuse a stale publish. Omit it for an
-	// unknown set (0) — the guard then has no base to compare and the publish
-	// proceeds as before.
 	if baseGeneration != 0 {
 		req.Header.Set(baseGenerationHeader, strconv.FormatUint(baseGeneration, 10))
 	}
-	// Declare this Worker's own id (issue #847 bug 3) so the guard can tell a
-	// same-Worker re-publish (lost-response self-heal, allowed) from a different-Worker
-	// stale-scratch publish (A->B->A, refused). Omit it when unknown (empty) — the
-	// guard then treats the publisher as unknown and stays permissive.
 	if workerID != "" {
 		req.Header.Set(workerIDHeader, workerID)
 	}
-	// Set an explicit length so the API's proven-complete gate can match it.
 	req.ContentLength = size
 
 	resp, err := c.http.Do(req)
@@ -240,9 +242,19 @@ func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string, baseGe
 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
 		return 0, fmt.Errorf("datatransfer: snapshot: unexpected status %s", resp.Status)
 	}
-	// The new store generation the publish produced, recorded by the caller as the
-	// generation its scratch is now at (issue #763).
 	return parseGeneration(resp.Header), nil
+}
+
+// Snapshot packs srcDir into a tar and uploads it to url in one step. It composes
+// PackSnapshot + UploadSnapshot for callers that do not need to release a quiesce
+// bracket between pack and upload (e.g. the stopped-id path and e2e tests).
+func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string, baseGeneration uint64, workerID string) (uint64, error) {
+	spoolPath, cleanup, err := c.PackSnapshot(ctx, srcDir)
+	if err != nil {
+		return 0, err
+	}
+	defer cleanup()
+	return c.UploadSnapshot(ctx, url, token, spoolPath, baseGeneration, workerID)
 }
 
 // unpackAndSwap unpacks the tar stream into a fresh temp sibling of destDir, then

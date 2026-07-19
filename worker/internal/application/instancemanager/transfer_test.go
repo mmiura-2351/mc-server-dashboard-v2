@@ -14,18 +14,23 @@ import (
 )
 
 // fakeTransfer records hydrate/snapshot calls and returns a canned error. When
-// seq is set, Snapshot appends a "transfer" marker to it so a test can assert the
-// copy is ordered between the RCON save-off / save-on bracket (#694).
+// seq is set, PackSnapshot appends a "pack" marker and UploadSnapshot appends an
+// "upload" marker so a test can assert the ordering between the RCON save-off /
+// save-on bracket (#694) and the split pack/upload phases (#1710).
 type fakeTransfer struct {
 	mu        sync.Mutex
 	hydrated  []string // workingDir args
 	snapshots []string
+	packs     []string
+	uploads   []string
 	// snapshotHadWorkingSet records, per Snapshot call, whether the working dir
 	// held a real working set at the moment the pack ran (issue #841): a graceful
 	// stop must not GC the scratch before the post-stop final SnapshotTrigger packs
 	// it, or the snapshot captures an empty/absent dir and is silently lost.
 	snapshotHadWorkingSet []bool
 	err                   error
+	packErr               error
+	uploadErr             error
 	seq                   *[]string
 	// gen is the store generation Hydrate/Snapshot report (issue #763); 0 by
 	// default. The manager records it in the working set's generation marker.
@@ -59,6 +64,47 @@ func (f *fakeTransfer) Hydrate(ctx context.Context, _, _, workingDir string) (ui
 		f.gotCtxErr = ctx.Err()
 		f.mu.Unlock()
 		return 0, ctx.Err()
+	}
+	return f.gen, f.err
+}
+
+func (f *fakeTransfer) PackSnapshot(_ context.Context, workingDir string) (string, func(), error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.packs = append(f.packs, workingDir)
+	if f.seq != nil {
+		*f.seq = append(*f.seq, "pack")
+	}
+	if f.packErr != nil {
+		return "", func() {}, f.packErr
+	}
+	return "/fake/spool.tar", func() {}, nil
+}
+
+func (f *fakeTransfer) UploadSnapshot(ctx context.Context, _, _, _ string, baseGeneration uint64, workerID string) (uint64, error) {
+	f.mu.Lock()
+	if f.blockUntilCtxDone {
+		f.uploads = append(f.uploads, "upload")
+		f.mu.Unlock()
+		<-ctx.Done()
+		f.mu.Lock()
+		f.gotCtxErr = ctx.Err()
+		f.mu.Unlock()
+		return 0, ctx.Err()
+	}
+	defer f.mu.Unlock()
+	f.uploads = append(f.uploads, "upload")
+	f.snapshotBaseGenerations = append(f.snapshotBaseGenerations, baseGeneration)
+	f.snapshotWorkerIDs = append(f.snapshotWorkerIDs, workerID)
+	if f.seq != nil {
+		*f.seq = append(*f.seq, "upload")
+	}
+	if f.cancelDuringSnapshot != nil {
+		f.cancelDuringSnapshot()
+		return 0, context.Canceled
+	}
+	if f.uploadErr != nil {
+		return 0, f.uploadErr
 	}
 	return f.gen, f.err
 }
@@ -225,9 +271,9 @@ func TestSnapshotTriggerRunningServerBracketsCopyWithSaveOffOn(t *testing.T) {
 	}
 }
 
-// save-off must precede the transfer (the world is quiesced before the copy
-// starts) and save-on must follow it (auto-save is only re-enabled after the copy
-// completes) — otherwise the bracket would not actually protect the copy window.
+// save-off brackets the PACK only (issue #1710): save-on is restored immediately
+// after the pack completes, before the upload begins. This narrows the window
+// where auto-save is disabled to the minimum needed (reading the working dir).
 func TestSnapshotTriggerRunningServerSaveOffBracketsTheTransfer(t *testing.T) {
 	var seq []string
 	ctrl := &fakeControl{reply: "ok", seq: &seq}
@@ -240,19 +286,19 @@ func TestSnapshotTriggerRunningServerSaveOffBracketsTheTransfer(t *testing.T) {
 	if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
 		t.Fatalf("SnapshotTrigger result = %+v, want success", res)
 	}
-	want := []string{"save-off", "save-all", "transfer", "save-on"}
+	want := []string{"save-off", "save-all", "pack", "save-on", "upload"}
 	if !equalLines(seq, want) {
 		t.Fatalf("operation order = %v, want %v", seq, want)
 	}
 }
 
-// save-on MUST still run when the transfer itself fails: the deferred restore
-// re-enables auto-save before the failed result is returned, so a transfer error
-// never leaves the server with auto-save disabled (#694).
+// save-on MUST still run when the upload fails: the restore re-enables auto-save
+// before the upload (issue #1710), so an upload error never leaves the server with
+// auto-save disabled. The ordering is: save-off, save-all, pack, save-on, upload.
 func TestSnapshotTriggerRunningServerSaveOnRunsOnTransferError(t *testing.T) {
 	var seq []string
 	ctrl := &fakeControl{reply: "ok", seq: &seq}
-	tr := &fakeTransfer{seq: &seq, err: errors.New("boom")}
+	tr := &fakeTransfer{seq: &seq, uploadErr: errors.New("boom")}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
 
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
@@ -262,9 +308,9 @@ func TestSnapshotTriggerRunningServerSaveOnRunsOnTransferError(t *testing.T) {
 	if res.Success || res.ErrorCode != session.CommandErrorTransferFailed {
 		t.Fatalf("SnapshotTrigger = %+v, want transfer-failed", res)
 	}
-	want := []string{"save-off", "save-all", "transfer", "save-on"}
+	want := []string{"save-off", "save-all", "pack", "save-on", "upload"}
 	if !equalLines(seq, want) {
-		t.Fatalf("operation order = %v, want %v (save-on must run after a failed transfer)", seq, want)
+		t.Fatalf("operation order = %v, want %v (save-on must run before upload)", seq, want)
 	}
 }
 
@@ -505,5 +551,65 @@ func TestSnapshotTriggerWithoutDeadlineRunsUnbounded(t *testing.T) {
 	tr.mu.Unlock()
 	if !errors.Is(gotErr, context.Canceled) {
 		t.Fatalf("transfer ctx err = %v, want context.Canceled (request cancel, not a deadline)", gotErr)
+	}
+}
+
+// An upload failure must not prevent save-on from running: save-on is issued
+// BEFORE the upload begins (issue #1710), so save-on is always present in the
+// sequence regardless of upload outcome.
+func TestSnapshotTriggerUploadFailureSaveOnAlreadyRestored(t *testing.T) {
+	var seq []string
+	ctrl := &fakeControl{reply: "ok", seq: &seq}
+	tr := &fakeTransfer{seq: &seq, uploadErr: errors.New("upload boom")}
+	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
+
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	res := m.Handle(context.Background(), snapshotCmd())
+	if res.Success || res.ErrorCode != session.CommandErrorTransferFailed {
+		t.Fatalf("SnapshotTrigger = %+v, want transfer-failed", res)
+	}
+	// save-on must precede upload in the sequence.
+	saveOnIdx := -1
+	uploadIdx := -1
+	for i, s := range seq {
+		if s == "save-on" {
+			saveOnIdx = i
+		}
+		if s == "upload" {
+			uploadIdx = i
+		}
+	}
+	if saveOnIdx < 0 {
+		t.Fatalf("sequence = %v, want save-on present", seq)
+	}
+	if uploadIdx < 0 {
+		t.Fatalf("sequence = %v, want upload present", seq)
+	}
+	if saveOnIdx >= uploadIdx {
+		t.Fatalf("sequence = %v, save-on (idx %d) must precede upload (idx %d)", seq, saveOnIdx, uploadIdx)
+	}
+}
+
+// A pack failure must restore save-on and skip the upload entirely (issue #1710).
+func TestSnapshotTriggerPackFailureRestoresSaveOnAndSkipsUpload(t *testing.T) {
+	var seq []string
+	ctrl := &fakeControl{reply: "ok", seq: &seq}
+	tr := &fakeTransfer{seq: &seq, packErr: errors.New("pack boom")}
+	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
+
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	res := m.Handle(context.Background(), snapshotCmd())
+	if res.Success || res.ErrorCode != session.CommandErrorTransferFailed {
+		t.Fatalf("SnapshotTrigger = %+v, want transfer-failed", res)
+	}
+	if !containsLine(seq, "save-on") {
+		t.Fatalf("sequence = %v, want save-on present after pack failure", seq)
+	}
+	if len(tr.uploads) != 0 {
+		t.Fatalf("uploads = %d, want 0 (upload must be skipped on pack failure)", len(tr.uploads))
 	}
 }

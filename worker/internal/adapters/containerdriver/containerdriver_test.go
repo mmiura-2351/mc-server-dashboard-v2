@@ -2245,6 +2245,79 @@ func TestSweepBoundsWedgedStop(t *testing.T) {
 	}
 }
 
+// A running orphan receives a best-effort RCON save-on before the docker stop
+// (issue #1710): a worker crash mid-snapshot may have left auto-save disabled.
+// The save-on must precede the stop so the MC shutdown hook can auto-save.
+func TestSweepIssuesSaveOnToRunningOrphanBeforeStop(t *testing.T) {
+	docker := newFakeDocker()
+	docker.listResult = []Container{{ID: "a", Name: "/mcsd-s1", State: "running"}}
+	var rconLines []string
+	ctrl := &fakeRconControl{reply: "ok", lines: &rconLines}
+	d := New(docker, images(), func(_ context.Context, _ execution.InstanceSpec, _ string) (execution.ServerControl, error) {
+		return ctrl, nil
+	}, Options{
+		WorkerID:        "w1",
+		StopTimeout:     50 * time.Millisecond,
+		ScratchDir:      t.TempDir(),
+		SweepCallMargin: 50 * time.Millisecond,
+	})
+
+	if err := d.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	// save-on must have been issued via RCON.
+	if len(rconLines) != 1 || rconLines[0] != "save-on" {
+		t.Fatalf("rcon lines = %v, want [save-on]", rconLines)
+	}
+	// The stop and remove must still proceed.
+	if len(docker.stopped) != 1 || docker.stopped[0] != "a" {
+		t.Fatalf("stopped = %v, want [a]", docker.stopped)
+	}
+	if len(docker.removed) != 1 || docker.removed[0] != "a" {
+		t.Fatalf("removed = %v, want [a]", docker.removed)
+	}
+}
+
+// A failed save-on must not prevent the stop or removal (issue #1710): the pre-fix
+// behavior was no save-on at all, so any save-on failure degrades gracefully.
+func TestSweepSaveOnFailureStillStopsAndRemoves(t *testing.T) {
+	docker := newFakeDocker()
+	docker.listResult = []Container{{ID: "a", Name: "/mcsd-s1", State: "running"}}
+	d := New(docker, images(), func(_ context.Context, _ execution.InstanceSpec, _ string) (execution.ServerControl, error) {
+		return nil, errors.New("rcon: connection refused")
+	}, Options{
+		WorkerID:        "w1",
+		StopTimeout:     50 * time.Millisecond,
+		ScratchDir:      t.TempDir(),
+		SweepCallMargin: 50 * time.Millisecond,
+		Logger:          slog.New(slog.DiscardHandler),
+	})
+
+	if err := d.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	// The stop and remove must still proceed despite save-on failure.
+	if len(docker.stopped) != 1 || docker.stopped[0] != "a" {
+		t.Fatalf("stopped = %v, want [a]", docker.stopped)
+	}
+	if len(docker.removed) != 1 || docker.removed[0] != "a" {
+		t.Fatalf("removed = %v, want [a]", docker.removed)
+	}
+}
+
+// fakeRconControl is a simple ServerControl for Sweep tests that records RCON lines.
+type fakeRconControl struct {
+	reply string
+	lines *[]string
+}
+
+func (c *fakeRconControl) Execute(_ context.Context, line string) (string, error) {
+	*c.lines = append(*c.lines, line)
+	return c.reply, nil
+}
+
+func (c *fakeRconControl) Close() error { return nil }
+
 // The wait-for-name-free loop (issue #233) heals every interleaving of the
 // create-vs-async-remover race on the deterministic name. The five tests below
 // drive the loop branches; a foreign label or a running own container still
