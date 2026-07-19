@@ -763,6 +763,12 @@ type instance struct {
 	// production.
 	beforeLaunch func()
 
+	// beforeRetryStart is a test-only hook fired inside superviseInstall after the
+	// retry install container is created but before the latch-check-and-start
+	// critical section, so a test can drive a Stop into the exact retry-setup
+	// window (issue #1987). Nil in production.
+	beforeRetryStart func()
+
 	// beforeSurvivedReset is a test-only hook fired inside Stop after the post-kill
 	// confirm wait times out but before re-acquiring the lock to reset the latch, so
 	// a test can drive the container exit (and supervise) into the exact window the
@@ -885,6 +891,13 @@ func (i *instance) awaitReady() {
 // it as the current container until then gives a concurrent Stop a valid target
 // through the install-exit→launch handoff window (issue #306). Its distinct name
 // (mcsd-<id>-install) means the launch create never contends with it.
+//
+// Retry-publish invariant (issue #1987): the retry container is created outside
+// the lock, then {stop re-check, docker.Start, containerID publish,
+// exitObserved reset} form one critical section — mirroring the install→launch
+// handoff (issue #306). This prevents Stop from capturing a stale containerID
+// and returning false success against a removed container while the retried
+// installer keeps running.
 func (i *instance) superviseInstall(installID string) {
 	// Retry loop: on a non-zero install exit, clean artifacts and re-run the
 	// install container up to maxInstallRetries additional times before giving
@@ -958,21 +971,40 @@ func (i *instance) superviseInstall(installID string) {
 			return
 		}
 
-		// Clean stale artifacts and re-run install (issue #1127).
+		// Clean stale artifacts and create (but do not start) the retry container
+		// outside the lock (issue #1127). The latch re-check, Start, containerID
+		// publish, and exitObserved reset are one critical section — mirroring the
+		// install→launch handoff (issue #306) — so a Stop racing this window either
+		// wins the lock first (aborting and removing the unstarted container) or
+		// blocks for the one Start call and then acts on the already-started retry
+		// container. There is therefore no published-but-unstarted sub-window for
+		// Stop to mishandle (issue #1987).
 		_ = execution.CleanForgeInstallArtifacts(i.spec.WorkingDir)
-		newID, err := i.rerunInstallContainer()
+		newID, err := i.createInstallRetryContainer()
 		if err != nil {
 			i.finishTerminal(execution.StateCrashed, "forge install retry failed: "+err.Error())
 			return
 		}
-		installID = newID
-		i.setContainerID(newID)
-		// Reset exitObserved for the new container: the old container's exit must
-		// not prevent the survived-kill restore from running against the new one
-		// (issue #595).
+		if i.beforeRetryStart != nil {
+			i.beforeRetryStart()
+		}
 		i.mu.Lock()
+		if i.stopRequested {
+			i.mu.Unlock()
+			_ = i.docker.Remove(context.Background(), newID)
+			i.finishTerminal(execution.StateStopped, "")
+			return
+		}
+		if err := i.docker.Start(context.Background(), newID); err != nil {
+			i.mu.Unlock()
+			_ = i.docker.Remove(context.Background(), newID)
+			i.finishTerminal(execution.StateCrashed, "forge install retry failed: "+err.Error())
+			return
+		}
+		i.containerID = newID
 		i.exitObserved = false
 		i.mu.Unlock()
+		installID = newID
 	}
 
 	// The install exited cleanly. A Stop that arrived after the wait returned
@@ -1120,11 +1152,13 @@ func (i *instance) installBackoffOrStopping(d time.Duration) bool {
 	return false
 }
 
-// rerunInstallContainer creates and starts a new install container for a retry
-// attempt, reusing the instance's captured fields. It mirrors
-// Driver.runInstallContainer but runs from the instance after the driver has
-// returned (issue #1128).
-func (i *instance) rerunInstallContainer() (string, error) {
+// createInstallRetryContainer creates (but does not start) a new install
+// container for a retry attempt, reusing the instance's captured fields. Starting
+// is deferred to the latch-guarded critical section so a Stop can abort the retry
+// before it starts (issue #1987). It mirrors Driver.runInstallContainer's create
+// but omits Start, like createLaunchContainer for the install→launch handoff
+// (issue #306).
+func (i *instance) createInstallRetryContainer() (string, error) {
 	plan, err := execution.BuildLaunchPlan(i.spec, i.spec.WorkingDir, containerPathResolver(i.spec.WorkingDir))
 	if err != nil {
 		return "", err
@@ -1139,15 +1173,7 @@ func (i *instance) rerunInstallContainer() (string, error) {
 		MemoryLimitBytes: memoryLimitBytes(i.spec.MemoryLimitMB),
 		CPUShares:        cpuShares(i.spec.CPUMillis),
 	}
-	id, err := i.createFn(context.Background(), create)
-	if err != nil {
-		return "", err
-	}
-	if err := i.docker.Start(context.Background(), id); err != nil {
-		_ = i.docker.Remove(context.Background(), id)
-		return "", err
-	}
-	return id, nil
+	return i.createFn(context.Background(), create)
 }
 
 // captureInstallOutput follows the install container's log stream and writes it to
