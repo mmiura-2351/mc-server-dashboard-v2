@@ -1425,32 +1425,9 @@ func (m *Manager) takeRunningReserve(serverID string) (execution.Instance, sessi
 	return inst, start, takeFound
 }
 
-// hasRunning reports whether a running instance is tracked for serverID WITHOUT
-// evicting or reserving it. handleRestart uses it as a cheap existence check so
-// the early-out failure paths leave the instance tracked and live.
-func (m *Manager) hasRunning(serverID string) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	_, ok := m.instances[serverID]
-	return ok
-}
-
 func (m *Manager) handleRestart(ctx context.Context, cmd session.Command) session.CommandResult {
-	// Quick existence check: is there a running instance tracked for this id?
-	// We peek without evicting so the early-out failure paths ("not found" vs
-	// "in-flight") leave the instance tracked and live.
-	if !m.hasRunning(cmd.ServerID) {
-		// No tracked running instance: takeRunningReserve distinguishes a genuinely
-		// unknown id (SERVER_NOT_FOUND) from a reserved in-flight command — a detached
-		// stop or a start/hydrate mid-operation (BUSY, issue #780/#824).
-		_, _, outcome := m.takeRunningReserve(cmd.ServerID)
-		if outcome == takeInFlight {
-			return fail(cmd.CommandID, session.CommandErrorBusy,
-				"instancemanager: a lifecycle command is already in flight for this server")
-		}
-		return fail(cmd.CommandID, session.CommandErrorServerNotFound,
-			"instancemanager: server not running")
-	}
+	// Single atomic take: this is the sole decision point for the restart path.
+	// It distinguishes all three outcomes without a TOCTOU window (issue #1950).
 	inst, start, outcome := m.takeRunningReserve(cmd.ServerID)
 	switch outcome {
 	case takeNotFound:
