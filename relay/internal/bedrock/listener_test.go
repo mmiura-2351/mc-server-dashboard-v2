@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"net"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -450,5 +453,100 @@ func TestListenerPreAuthCapEnforcedAndReleased(t *testing.T) {
 	_, ack3 := doHandshake(t, ln, &bedrocktunnelv1.TunnelHello{ServerId: "srv-2", BedrockPort: 0, Token: "tok"})
 	if !ack3.GetAccepted() {
 		t.Fatalf("third handshake rejected (%q); pre-auth slot not released after resolution", ack3.GetRejectReason())
+	}
+}
+
+// --- Serve transient-accept-error retry tests ---
+
+// scriptedQUICAcceptor is a fake quicAcceptor for testing Serve's retry logic.
+type scriptedQUICAcceptor struct {
+	results []quicAcceptResult
+	idx     int
+	done    chan struct{}
+}
+
+type quicAcceptResult struct {
+	conn *quic.Conn
+	err  error
+}
+
+func (s *scriptedQUICAcceptor) Accept(_ context.Context) (*quic.Conn, error) {
+	if s.idx < len(s.results) {
+		r := s.results[s.idx]
+		s.idx++
+		return r.conn, r.err
+	}
+	<-s.done
+	return nil, net.ErrClosed
+}
+
+func (s *scriptedQUICAcceptor) Close() error {
+	select {
+	case <-s.done:
+	default:
+		close(s.done)
+	}
+	return nil
+}
+
+func (s *scriptedQUICAcceptor) Addr() net.Addr {
+	return &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0}
+}
+
+// TestServeRetriesTransientAcceptError verifies that a transient EMFILE error
+// does not cause the bedrock Serve to return; it retries and only returns on
+// a permanent error.
+func TestServeRetriesTransientAcceptError(t *testing.T) {
+	permanent := errors.New("permanent listener failure")
+	sl := &scriptedQUICAcceptor{
+		results: []quicAcceptResult{
+			{nil, syscall.EMFILE},
+			{nil, permanent},
+		},
+		done: make(chan struct{}),
+	}
+
+	l := &Listener{
+		ln:      sl,
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		tunnels: make(map[uint32]*Tunnel),
+	}
+
+	err := l.Serve(context.Background())
+	if !errors.Is(err, permanent) {
+		t.Errorf("Serve returned %v, want %v", err, permanent)
+	}
+	if sl.idx != 2 {
+		t.Errorf("Accept called %d times, want 2", sl.idx)
+	}
+}
+
+// TestServeTransientRetryStopsOnCancel verifies that cancelling the context
+// during a transient-error backoff causes Serve to return nil.
+func TestServeTransientRetryStopsOnCancel(t *testing.T) {
+	results := make([]quicAcceptResult, 100)
+	for i := range results {
+		results[i] = quicAcceptResult{nil, syscall.EMFILE}
+	}
+	sl := &scriptedQUICAcceptor{
+		results: results,
+		done:    make(chan struct{}),
+	}
+
+	l := &Listener{
+		ln:      sl,
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		tunnels: make(map[uint32]*Tunnel),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+
+	err := l.Serve(ctx)
+	if err != nil {
+		t.Errorf("Serve returned %v on ctx cancel, want nil", err)
 	}
 }
