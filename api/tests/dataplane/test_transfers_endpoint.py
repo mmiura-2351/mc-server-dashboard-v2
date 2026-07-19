@@ -1363,3 +1363,134 @@ def test_snapshot_late_publish_after_clear_with_no_replacement_still_lands(
         )
 
     assert _read_tar(asyncio.run(_read())) == {"world/level.dat": b"final-from-a"}
+
+
+# --- hydrate send deadline (issue #1822) --------------------------------------
+
+
+def test_hydrate_send_stall_releases_reader_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stalled ASGI send triggers _ChunkSendTimeout and releases the lease."""
+    from mc_server_dashboard_api.dataplane.api.transfers import (
+        _ChunkSendTimeout,
+        _DeadlineStreamingResponse,
+    )
+
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    # Publish a working set large enough to produce at least one body chunk.
+    files = {"world/level.dat": b"x" * 200_000}
+    asyncio.run(_publish(storage, community, server, files))
+
+    # Exercise the response's stream_response directly with a stalling send,
+    # bypassing middleware (which proxies the send through internal queues).
+    # This proves the mechanism: the send deadline fires, the body iterator is
+    # closed, and the generator's finally releases the lease.
+    async def _drive() -> None:
+        hydrate_source = storage.open_hydrate_source(
+            CommunityId(community), ServerId(server)
+        )
+        resp = _DeadlineStreamingResponse(
+            hydrate_source,
+            server_id=server,
+            media_type="application/x-tar",
+            send_timeout=0.05,
+        )
+
+        from collections.abc import MutableMapping
+        from typing import Any
+
+        async def stalling_send(message: MutableMapping[str, Any]) -> None:
+            if message.get("type") == "http.response.body" and message.get("body"):
+                await asyncio.sleep(3600)
+
+        with pytest.raises(_ChunkSendTimeout):
+            await asyncio.wait_for(resp.stream_response(stalling_send), timeout=5.0)
+
+    asyncio.run(_drive())
+
+    # The reader lease must have been released (the generator's finally ran).
+    # FsStorage exposes _leases; an empty dict means all leases are released.
+    assert storage._leases == {}
+
+
+def test_hydrate_send_no_false_positive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A normal fast send delivers the full body without triggering a timeout."""
+    from mc_server_dashboard_api.dataplane.api import transfers
+
+    # Even with a short timeout, a fast send must not fire.
+    monkeypatch.setattr(transfers, "_CHUNK_SEND_TIMEOUT", 5.0)
+
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    files = {"world/level.dat": b"y" * 100_000}
+    asyncio.run(_publish(storage, community, server, files))
+    with client:
+        resp = client.get(_url(community, server, "working-set"), headers=_auth())
+    assert resp.status_code == 200
+    assert _read_tar(resp.content) == files
+
+
+def test_close_propagation_replay(tmp_path: Path) -> None:
+    """Closing _replay propagates to the inner iterator (lease release)."""
+
+    closed = False
+
+    async def _source() -> object:
+        nonlocal closed
+        try:
+            yield b"first-chunk"
+            yield b"second-chunk"
+        finally:
+            closed = True
+
+    from mc_server_dashboard_api.dataplane.api.transfers import _prime
+
+    async def _drive() -> None:
+        nonlocal closed
+        primed = await _prime(_source())  # type: ignore[arg-type]
+        # Pull one chunk then close early.
+        chunk = await primed.__anext__()
+        assert chunk == b"first-chunk"
+        aclose = getattr(primed, "aclose", None)
+        assert aclose is not None
+        await aclose()
+        assert closed
+
+    asyncio.run(_drive())
+
+
+def test_close_propagation_with_jar_member(tmp_path: Path) -> None:
+    """Closing _with_jar_member propagates to the inner working_set iterator."""
+
+    closed = False
+
+    async def _source() -> object:
+        nonlocal closed
+        try:
+            yield b"ws-chunk-1"
+            yield b"ws-chunk-2"
+        finally:
+            closed = True
+
+    from mc_server_dashboard_api.dataplane.api.transfers import _with_jar_member
+
+    async def _drive() -> None:
+        nonlocal closed
+        gen = _with_jar_member(_source(), b"jar-member-bytes")  # type: ignore[arg-type]
+        # Pull the jar member and one ws chunk, then close early.
+        chunk1 = await gen.__anext__()
+        assert chunk1 == b"jar-member-bytes"
+        chunk2 = await gen.__anext__()
+        assert chunk2 == b"ws-chunk-1"
+        aclose = getattr(gen, "aclose", None)
+        assert aclose is not None
+        await aclose()
+        assert closed
+
+    asyncio.run(_drive())
