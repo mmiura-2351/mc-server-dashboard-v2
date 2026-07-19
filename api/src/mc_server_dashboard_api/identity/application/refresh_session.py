@@ -29,7 +29,10 @@ the revocation is. Keying the grace on ``revoked_at`` recency alone would let an
 attacker who auto-refreshes within the window escape a family revoke -- the
 family revoke stamps the successor's ``revoked_at`` to now, so a recency-only
 grace would treat the just-revoked successor as a concurrent refresh and re-issue
-a pair (issue #369).
+a pair (issue #369). The *predecessor* case (a token already revoked by rotation
+before the family revoke) is closed by ``revoke_all_for_user`` re-stamping
+``'rotated'`` rows to ``'family'`` while preserving their ``revoked_at``
+(issue #1960).
 """
 
 from __future__ import annotations
