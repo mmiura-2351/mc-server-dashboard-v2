@@ -2552,3 +2552,60 @@ func drainStates(ch <-chan execution.StatusEvent) []execution.ServerState {
 		}
 	}
 }
+
+// A Stop that lands after WaitReady returns but before awaitReady publishes
+// running must prevent the running event: Stop latches stopping and moves
+// state to stopping, so awaitReady's guard (state != Starting) rejects the
+// transition. The beforeReadyPublish hook creates that exact window
+// deterministically (issue #2022).
+func TestStopDuringReadyPublishWindowDoesNotEmitRunning(t *testing.T) {
+	pr, pw := io.Pipe()
+	docker := newFakeDocker()
+	docker.logBody = pr
+	d := newReadinessTestDriver(docker, 10*time.Second)
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	in := inst.(*instance)
+
+	// The hook fires after WaitReady returns but before awaitReady takes the
+	// lock to publish running. Drive a Stop and wait for stopping.
+	hookFired := make(chan struct{})
+	in.beforeReadyPublish = func() {
+		close(hookFired)
+		// Wait for Stop to emit stopping before releasing awaitReady.
+		drainTo(t, inst.Events(), execution.StateStopping)
+	}
+
+	// Feed the readiness marker to trigger WaitReady → hook → awaitReady.
+	if _, err := pw.Write(frame(dockerStreamStdout,
+		`[12:00:03] [Server thread/INFO]: Done (3.210s)! For help, type "help"`+"\n")); err != nil {
+		t.Fatalf("write done frame: %v", err)
+	}
+
+	// Wait for the hook to fire (WaitReady returned), then run Stop concurrently.
+	select {
+	case <-hookFired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for beforeReadyPublish hook to fire")
+	}
+	if err := inst.Stop(context.Background(), false); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	// Let the container exit so supervise finishes.
+	docker.exit(137, nil)
+	_ = pw.Close()
+
+	// Drain remaining events: after stopping we expect stopped (from supervise)
+	// and must NOT see running.
+	drainTo(t, inst.Events(), execution.StateStopped)
+
+	// Confirm no running event was ever emitted (it would appear after stopping
+	// if the race manifested).
+	if observedRunning(inst.Events()) {
+		t.Fatal("running was emitted after stopping — the awaitReady/Stop race manifested (issue #2022)")
+	}
+}
