@@ -321,7 +321,21 @@ class WorkerSessionServicer(WorkerServiceServicer):
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 if outbound_get in done:
-                    yield outbound_get.result()
+                    msg = outbound_get.result()
+                    if msg.WhichOneof(
+                        "payload"
+                    ) == "api_command" and self._control_plane.discard_if_stale(
+                        msg.correlation_id
+                    ):
+                        _LOG.info(
+                            "dropping stale queued command",
+                            extra={
+                                "worker_id": worker_id.value,
+                                "command_id": msg.correlation_id,
+                            },
+                        )
+                        continue
+                    yield msg
                 else:
                     # The inbound stream ended or the watchdog detected a
                     # heartbeat lapse; stop yielding and tear down.

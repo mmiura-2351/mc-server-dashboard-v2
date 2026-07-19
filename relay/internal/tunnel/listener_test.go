@@ -1,8 +1,13 @@
 package tunnel
 
 import (
+	"context"
+	"errors"
+	"io"
+	"log/slog"
 	"net"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -98,5 +103,99 @@ func TestReadHandshakeOverLongToken(t *testing.T) {
 	})
 	if ok {
 		t.Error("an over-long token line must be rejected")
+	}
+}
+
+// --- Serve transient-accept-error retry tests ---
+
+// scriptedListener is a fake net.Listener that returns a scripted sequence of
+// (conn, error) results from Accept.
+type scriptedListener struct {
+	results []acceptResult
+	idx     int
+	done    chan struct{}
+}
+
+type acceptResult struct {
+	conn net.Conn
+	err  error
+}
+
+func (s *scriptedListener) Accept() (net.Conn, error) {
+	if s.idx < len(s.results) {
+		r := s.results[s.idx]
+		s.idx++
+		return r.conn, r.err
+	}
+	<-s.done
+	return nil, net.ErrClosed
+}
+
+func (s *scriptedListener) Close() error {
+	select {
+	case <-s.done:
+	default:
+		close(s.done)
+	}
+	return nil
+}
+
+func (s *scriptedListener) Addr() net.Addr {
+	return &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0}
+}
+
+// TestServeRetriesTransientAcceptError verifies that a transient EMFILE error
+// does not cause Serve to return; Serve must retry and only return on a
+// permanent (non-transient) error.
+func TestServeRetriesTransientAcceptError(t *testing.T) {
+	permanent := errors.New("permanent listener failure")
+	sl := &scriptedListener{
+		results: []acceptResult{
+			{nil, syscall.EMFILE},
+			{nil, permanent},
+		},
+		done: make(chan struct{}),
+	}
+
+	l := &Listener{
+		ln:     sl,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	err := l.Serve(context.Background())
+	if !errors.Is(err, permanent) {
+		t.Errorf("Serve returned %v, want %v", err, permanent)
+	}
+	if sl.idx != 2 {
+		t.Errorf("Accept called %d times, want 2", sl.idx)
+	}
+}
+
+// TestServeTransientRetryStopsOnCancel verifies that cancelling the context
+// during a transient-error backoff causes Serve to return nil.
+func TestServeTransientRetryStopsOnCancel(t *testing.T) {
+	results := make([]acceptResult, 100)
+	for i := range results {
+		results[i] = acceptResult{nil, syscall.EMFILE}
+	}
+	sl := &scriptedListener{
+		results: results,
+		done:    make(chan struct{}),
+	}
+
+	l := &Listener{
+		ln:     sl,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+
+	err := l.Serve(ctx)
+	if err != nil {
+		t.Errorf("Serve returned %v on ctx cancel, want nil", err)
 	}
 }
