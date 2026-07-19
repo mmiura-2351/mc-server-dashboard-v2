@@ -95,6 +95,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     ServerId,
     SnapshotId,
     VersionId,
+    is_version_ring_member,
 )
 from mc_server_dashboard_api.storage.integrity.region import (
     RegionFinding,
@@ -1724,8 +1725,22 @@ class ObjectStorage(Storage):
         await client.copy_object(source_key, versions + _new_version_id())
         await self._prune_versions(client, versions)
 
+    @staticmethod
+    def _ring_members(objs: list[S3Object], versions_prefix: str) -> list[S3Object]:
+        """Filter to objects whose tail matches the version-id format.
+
+        Child-ring objects (``versions/config/paper.yml/<id>``) share
+        the same prefix scan as the parent ring (``versions/config/``)
+        and must be excluded (issue #1952).
+        """
+
+        return sorted(
+            (o for o in objs if is_version_ring_member(o.key[len(versions_prefix) :])),
+            key=lambda o: o.key,
+        )
+
     async def _prune_versions(self, client: S3Client, versions: str) -> None:
-        objs = sorted(await client.list_objects(versions), key=lambda o: o.key)
+        objs = self._ring_members(await client.list_objects(versions), versions)
         excess = len(objs) - self._version_retention
         for obj in objs[:excess] if excess > 0 else []:
             await client.delete_object(obj.key)
@@ -1771,7 +1786,7 @@ class ObjectStorage(Storage):
         rather than both held in memory.
         """
 
-        objs = sorted(await client.list_objects(versions), key=lambda o: o.key)
+        objs = self._ring_members(await client.list_objects(versions), versions)
         if not objs:
             return False
         newest = objs[-1].key  # ids are time-ordered (_new_version_id)
@@ -1787,7 +1802,7 @@ class ObjectStorage(Storage):
     ) -> list[VersionId]:
         versions = self._versions_prefix(community_id, server_id, rel_path)
         async with self._client_factory() as client:
-            objs = sorted(await client.list_objects(versions), key=lambda o: o.key)
+            objs = self._ring_members(await client.list_objects(versions), versions)
         # Newest-first (Section 3.5); version ids are time-ordered (_new_version_id).
         return [VersionId(obj.key[len(versions) :]) for obj in reversed(objs)]
 

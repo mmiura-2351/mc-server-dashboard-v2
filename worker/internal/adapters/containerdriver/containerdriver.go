@@ -158,6 +158,12 @@ type Options struct {
 	// deadline so a wedged daemon cannot hang worker startup (issue #338). Zero uses
 	// defaultSweepCallMargin; tests set a short value to keep the suite fast.
 	SweepCallMargin time.Duration
+	// ScratchDir is the working-set scratch root. When set, the startup Sweep issues
+	// a best-effort RCON save-on to running orphans before stopping them (issue
+	// #1710): a worker crash mid-snapshot may have left auto-save disabled, and
+	// stopping without restore would leave the server permanently save-off. Empty
+	// skips the save-on (the pre-fix behavior).
+	ScratchDir string
 	// Logger records the lazy base-image pull (image name, duration) at INFO (issue
 	// #904). Nil uses a discard logger.
 	Logger *slog.Logger
@@ -172,6 +178,7 @@ type Driver struct {
 	stopTimeout time.Duration
 	gameBindIP  string
 	network     string
+	scratchDir  string
 	// conflictPoll and conflictDeadline bound the wait-for-name-free loop (#233).
 	conflictPoll     time.Duration
 	conflictDeadline time.Duration
@@ -225,6 +232,7 @@ func New(docker dockerAPI, images *ImageSelector, openControl controlFunc, opts 
 		stopTimeout:      timeout,
 		gameBindIP:       gameBindIP,
 		network:          opts.Network,
+		scratchDir:       opts.ScratchDir,
 		conflictPoll:     conflictPoll,
 		conflictDeadline: conflictDeadline,
 		readinessTimeout: readinessTimeout,
@@ -651,6 +659,13 @@ func (d *Driver) Sweep(ctx context.Context) error {
 	var errs []error
 	for _, c := range containers {
 		if c.State == containerStateRunning {
+			// Best-effort save-on (issue #1710): a worker crash mid-snapshot may have
+			// left auto-save disabled via the quiesce bracket's save-off. Issuing save-on
+			// before stop ensures the MC server's shutdown hook (triggered by the SIGTERM
+			// from docker stop) can auto-save the world. Failure is logged and does not
+			// block the stop — the pre-fix behavior was no save-on at all.
+			d.sweepSaveOn(ctx, c.Name)
+
 			// This bare docker.Stop is the orphan-sweep stop leg observed in the #927
 			// incident (a redeploy sweep stopped a running 26.x server, then the stop-leg
 			// snapshot found unpadded regions). The daemon-internal SIGTERM→SIGKILL
@@ -673,6 +688,55 @@ func (d *Driver) Sweep(ctx context.Context) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// sweepSaveOn issues a best-effort RCON save-on to a running orphan container
+// before it is stopped (issue #1710). A worker crash mid-snapshot leaves the MC
+// server with auto-save disabled; restoring it before the SIGTERM ensures the
+// shutdown save captures the world. Install containers (suffix "-install") are
+// skipped — they are not MC servers. Failure is logged and never blocks the stop.
+func (d *Driver) sweepSaveOn(ctx context.Context, containerName string) {
+	if d.openControl == nil || d.scratchDir == "" {
+		return
+	}
+	serverID := d.serverIDFromName(containerName)
+	if serverID == "" {
+		return
+	}
+	// Skip install containers — they are not MC servers.
+	if strings.HasSuffix(serverID, "-install") {
+		return
+	}
+	rconHost := d.networkHost(serverID)
+	spec := execution.InstanceSpec{
+		ServerID:   serverID,
+		WorkingDir: filepath.Join(d.scratchDir, serverID),
+	}
+	saveOnCtx, cancel := context.WithTimeout(ctx, d.sweepCallMargin)
+	defer cancel()
+	ctrl, err := d.openControl(saveOnCtx, spec, rconHost)
+	if err != nil {
+		d.logger.Warn("sweep save-on: open rcon failed; stopping without restore",
+			"server_id", serverID, "error", err)
+		return
+	}
+	defer func() { _ = ctrl.Close() }()
+	if _, err := ctrl.Execute(saveOnCtx, "save-on"); err != nil {
+		d.logger.Warn("sweep save-on: save-on failed; stopping without restore",
+			"server_id", serverID, "error", err)
+	}
+}
+
+// serverIDFromName extracts the server ID from a Docker container name. Docker
+// List returns names prefixed with "/" (e.g. "/mcsd-abc123"). Returns empty when
+// the name does not match the expected prefix.
+func (d *Driver) serverIDFromName(name string) string {
+	// Strip the leading "/" Docker prefixes.
+	name = strings.TrimPrefix(name, "/")
+	if !strings.HasPrefix(name, containerNamePrefix) {
+		return ""
+	}
+	return strings.TrimPrefix(name, containerNamePrefix)
 }
 
 // labels are attached to every container: a worker-id label scopes the orphan

@@ -381,6 +381,24 @@ class ControlPlaneState:
         ]:
             del self._late_snapshots[command_id]
 
+    def discard_if_stale(self, command_id: str) -> bool:
+        """Return True when ``command_id``'s dispatch was abandoned (issue #1697).
+
+        A command whose ``correlation_id`` has no entry in ``_pending`` was
+        abandoned (timeout or cancellation). The Session generator calls this
+        before yielding a dequeued ``ApiMessage`` so stale commands are dropped
+        instead of being replayed when a stalled worker reader resumes.
+
+        Also cleans up any promoted late-snapshot record for the command so a
+        stale message that carried a final-snapshot payload does not leave an
+        orphan entry in ``_late_snapshots``.
+        """
+
+        if command_id in self._pending:
+            return False
+        self._late_snapshots.pop(command_id, None)
+        return True
+
     def outbound_for(self, worker_id: WorkerId) -> asyncio.Queue[pb.ApiMessage] | None:
         return self._outbound.get(worker_id)
 

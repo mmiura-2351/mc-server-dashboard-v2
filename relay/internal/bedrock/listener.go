@@ -68,11 +68,19 @@ type SessionRecorder interface {
 	End(id string)
 }
 
+// quicAcceptor abstracts the Accept/Close/Addr surface of *quic.Listener so
+// tests can inject a fake.
+type quicAcceptor interface {
+	Accept(ctx context.Context) (*quic.Conn, error)
+	Close() error
+	Addr() net.Addr
+}
+
 // Listener accepts Worker QUIC dial-outs, authenticates each one via the
 // TunnelHello/TunnelHelloAck handshake, and on acceptance binds a per-server
 // Tunnel (docs/app/BEDROCK_TUNNEL.md).
 type Listener struct {
-	ln        *quic.Listener
+	ln        quicAcceptor
 	validator Validator
 	caps      *ipcaps.IPCaps
 	newIPCaps func() *ipcaps.IPCaps
@@ -150,14 +158,23 @@ func (l *Listener) Serve(ctx context.Context) error {
 		<-ctx.Done()
 		_ = l.ln.Close()
 	}()
+	var backoff netutil.AcceptBackoff
 	for {
 		conn, err := l.ln.Accept(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
+			if netutil.IsTransientAcceptError(err) {
+				l.logger.Warn("accept failed; retrying", "error", err)
+				if !backoff.Sleep(ctx) {
+					return nil
+				}
+				continue
+			}
 			return err
 		}
+		backoff.Reset()
 		l.inflight.Add(1)
 		go func() {
 			defer l.inflight.Done()

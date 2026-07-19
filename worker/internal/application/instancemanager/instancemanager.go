@@ -83,6 +83,16 @@ type Transfer interface {
 	// API served (the value of its response header, issue #763); 0 when the header
 	// is absent (a server with no published snapshot, or an older API).
 	Hydrate(ctx context.Context, url, token, workingDir string) (uint64, error)
+	// PackSnapshot packs workingDir into a tar spool file and returns its path.
+	// The returned cleanup function removes the spool; the caller must invoke it
+	// when the spool is no longer needed. Only the pack reads the working
+	// directory, so the caller can release the quiesce bracket after PackSnapshot
+	// returns (issue #1710).
+	PackSnapshot(ctx context.Context, workingDir string) (spoolPath string, cleanup func(), err error)
+	// UploadSnapshot streams the spool file at spoolPath to url, declaring
+	// baseGeneration and workerID for the API's publish-time generation guard
+	// (issue #847). It returns the NEW store generation the publish produced.
+	UploadSnapshot(ctx context.Context, url, token, spoolPath string, baseGeneration uint64, workerID string) (uint64, error)
 	// Snapshot packs workingDir and uploads it to url, declaring baseGeneration as
 	// the store generation this working set was hydrated from (issue #847) and
 	// workerID as this Worker's own id (issue #847 bug 3): the API refuses the publish
@@ -567,11 +577,12 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	m.mu.Lock()
 	_, running := m.instances[cmd.ServerID]
 	m.mu.Unlock()
+	// restore re-enables auto-save after the quiesce. Declared here so it is
+	// accessible after the if/else for the explicit restore() call between pack and
+	// upload (issue #1710). Made idempotent via sync.Once so the deferred safety-net
+	// and the explicit call do not double-issue save-on.
+	var restore func()
 	if running {
-		// restore is always non-nil; it re-enables auto-save (when it was disabled)
-		// and releases the RCON connection. Deferring it guarantees save-on runs on
-		// every return path below, including the transfer-error path and a panic.
-		//
 		// The running-id snapshot takes NO reservation across its quiesce window, and
 		// that is safe (issue #829, item 4):
 		//   - Same stream: SnapshotTrigger and a StopServer/RestartServer for one id are
@@ -599,7 +610,11 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// A reservation would only convert that refused-and-retried outcome into a
 		// BUSY-rejected one — same net effect, more coordination state — so it
 		// is intentionally not taken.
-		quiesced, restore := m.quiesceRunning(ctx, cmd.ServerID, filepath.Join(m.scratchDir, cmd.ServerID))
+		var quiesced bool
+		var rawRestore func()
+		quiesced, rawRestore = m.quiesceRunning(ctx, cmd.ServerID, filepath.Join(m.scratchDir, cmd.ServerID))
+		var once sync.Once
+		restore = func() { once.Do(rawRestore) }
 		defer restore()
 		if !quiesced {
 			// The world could not be quiesced (RCON down, save-off/save-all failed, or the
@@ -693,18 +708,34 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	// can refuse the publish if the store advanced past it. 0 (an unknown/never-
 	// hydrated set) leaves the guard to compare against the store's current value.
 	baseGeneration := readGeneration(workingDir)
-	// Bound the upload with the per-transfer deadline (issue #874): without it the
-	// upload has no deadline at all and could outlive the API's snapshot_timeout
+	// Bound the pack+upload with the per-transfer deadline (issue #874): without it
+	// the upload has no deadline at all and could outlive the API's snapshot_timeout
 	// indefinitely (#869). The bound is the API budget + a margin (the ack value),
 	// so the API-side timeout fires first and this is the cleanup backstop.
 	transferCtx, cancel := m.transferContext(ctx)
 	defer cancel()
-	gen, err := m.transfer.Snapshot(transferCtx, cmd.TransferURL, cmd.TransferToken, workingDir, baseGeneration, m.workerID)
-	if err != nil {
-		return fail(cmd.CommandID, session.CommandErrorTransferFailed,
-			fmt.Sprintf("instancemanager: snapshot: %v", err))
-	}
+
 	if running {
+		// Running-server snapshot (issue #1710): split pack from upload so save-on is
+		// restored as soon as the pack (the only phase that reads the live working dir)
+		// completes. The upload reads only the spool file and does not need the server
+		// quiesced. A multi-GB upload can take minutes; keeping auto-save disabled for
+		// that entire window risked permanent save-off on a worker crash mid-upload.
+		spoolPath, cleanup, err := m.transfer.PackSnapshot(transferCtx, workingDir)
+		if err != nil {
+			return fail(cmd.CommandID, session.CommandErrorTransferFailed,
+				fmt.Sprintf("instancemanager: snapshot pack: %v", err))
+		}
+		defer cleanup()
+		// Restore save-on immediately after the pack — the working dir is no longer
+		// being read, so auto-save can safely resume. The deferred restore() is still
+		// in place as a safety net for early returns above this point.
+		restore()
+		gen, err := m.transfer.UploadSnapshot(transferCtx, cmd.TransferURL, cmd.TransferToken, spoolPath, baseGeneration, m.workerID)
+		if err != nil {
+			return fail(cmd.CommandID, session.CommandErrorTransferFailed,
+				fmt.Sprintf("instancemanager: snapshot upload: %v", err))
+		}
 		// Record the NEW generation the publish produced (issue #763): the scratch we
 		// just pushed is the source of this store generation, so its local generation
 		// advances to match. This keeps a same-Worker restart's held generation equal to
@@ -716,6 +747,13 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// recovery copy is no longer needed. Mirrors the #845 GC-on-success pattern.
 		m.sweepDisplaced(cmd.ServerID)
 	} else {
+		// Stopped-id snapshot: the set is at rest, no quiesce bracket needed. Use the
+		// combined Snapshot (pack+upload) — there is no save-off to release between them.
+		_, err := m.transfer.Snapshot(transferCtx, cmd.TransferURL, cmd.TransferToken, workingDir, baseGeneration, m.workerID)
+		if err != nil {
+			return fail(cmd.CommandID, session.CommandErrorTransferFailed,
+				fmt.Sprintf("instancemanager: snapshot: %v", err))
+		}
 		// Stopped-id snapshot succeeded: this is the post-stop FINAL snapshot (or a
 		// snapshot of an at-rest set). The working set is now captured authoritatively
 		// and the API has typically already unassigned this Worker, so the local scratch
