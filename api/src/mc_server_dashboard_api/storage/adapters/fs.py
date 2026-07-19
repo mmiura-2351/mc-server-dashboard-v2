@@ -365,7 +365,7 @@ class FsStorage(Storage):
         versions_root = server_root / "versions"
         if versions_root.is_dir():
             for stale in versions_root.rglob(".*.tmp"):
-                if _is_stale_spool(stale):
+                if stale.is_file() and _is_stale_spool(stale):
                     stale.unlink(missing_ok=True)
 
     def _live_snapshot_name(self, server_root: Path) -> str | None:

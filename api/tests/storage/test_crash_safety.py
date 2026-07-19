@@ -704,6 +704,43 @@ async def test_sweep_spares_young_version_capture_litter(tmp_path: Path) -> None
     )
 
 
+async def test_sweep_skips_dot_tmp_shaped_version_directory(
+    tmp_path: Path,
+) -> None:
+    """A rel_path like ``.env.tmp`` creates a ``versions/.env.tmp/`` directory.
+
+    The rglob ``.*.tmp`` matches it, but sweep must not attempt to unlink a
+    directory — that would raise IsADirectoryError and crash startup.
+    """
+
+    import os
+    import time
+
+    community, server = new_scope()
+    storage = FsStorage(tmp_path)
+    await publish(storage, community, server, {".env.tmp": b"SECRET=x"})
+
+    # Plant the versions directory for that rel_path (mimics a prior capture).
+    server_root = (
+        tmp_path / "communities" / str(community.value) / "servers" / str(server.value)
+    )
+    dot_tmp_dir = server_root / "versions" / ".env.tmp"
+    dot_tmp_dir.mkdir(parents=True, exist_ok=True)
+    # Place a real version file inside it.
+    version_file = dot_tmp_dir / "00000000000000001-abcdefab"
+    version_file.write_bytes(b"SECRET=old")
+    # Age the directory past the sweep threshold so it would be a candidate.
+    old = time.time() - 7200
+    os.utime(dot_tmp_dir, (old, old))
+
+    # Must not raise IsADirectoryError.
+    storage.sweep()
+
+    # The directory and its contents survive.
+    assert dot_tmp_dir.is_dir()
+    assert version_file.exists()
+
+
 async def test_version_capture_fsyncs_before_rename(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
