@@ -23,6 +23,8 @@ type forgeFakeDocker struct {
 
 	createSpecs []CreateSpec
 	nextID      int
+	// started tracks the ids passed to Start in call order.
+	started []string
 	// exited maps a container id to its exit channel; Wait blocks on it, exit
 	// closes it.
 	exited  map[string]chan struct{}
@@ -77,7 +79,12 @@ func (f *forgeFakeDocker) Create(_ context.Context, spec CreateSpec) (string, er
 
 func (f *forgeFakeDocker) ImagePull(_ context.Context, _ string) error { return nil }
 
-func (f *forgeFakeDocker) Start(_ context.Context, _ string) error { return nil }
+func (f *forgeFakeDocker) Start(_ context.Context, id string) error {
+	f.mu.Lock()
+	f.started = append(f.started, id)
+	f.mu.Unlock()
+	return nil
+}
 
 func (f *forgeFakeDocker) Stop(_ context.Context, id string, _ time.Duration) error {
 	f.mu.Lock()
@@ -940,6 +947,105 @@ func TestInstallSurvivedKillRestoreDoesNotStompTerminalState(t *testing.T) {
 	}
 }
 
+// A Stop that arrives after the first install attempt fails but before the retry
+// container is started must win: the retry container is never started, Stop
+// returns nil, and the instance reaches stopped. Without the guarded publish
+// (issue #1987), Stop captures a stale containerID pointing at the removed old
+// container, gets 404s, checks the stale exitObserved=true, and returns a false
+// nil while the retried installer keeps running.
+func TestForgeInstallRetryStopWinsLatchBeforeRetryStart(t *testing.T) {
+	prev := installRetryBackoff
+	installRetryBackoff = []time.Duration{time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { installRetryBackoff = prev })
+
+	dir := t.TempDir()
+	docker := newForgeFakeDocker()
+	installID := "mcsd-s1-install"
+	installErr := statusError{method: "POST", path: "/wait", code: 200, message: "install exited 1"}
+	// Unbuffered: Wait blocks until we push a result, giving us time to set the
+	// hook before the retry path runs.
+	docker.waitGates[installID] = make(chan waitResult)
+
+	hookCh := make(chan struct{})
+	d := New(docker, images(), func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
+		return nil, errors.New("no rcon")
+	}, Options{
+		WorkerID:             "w1",
+		StopTimeout:          500 * time.Millisecond,
+		GameBindIP:           "0.0.0.0",
+		ReadinessTimeout:     20 * time.Millisecond,
+		ConflictPollInterval: time.Millisecond,
+		ConflictDeadline:     100 * time.Millisecond,
+	})
+
+	inst, err := d.Start(context.Background(), forgeSpec(dir))
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	contInst := inst.(*instance)
+
+	// Install the hook while the supervisor is blocked in Wait (attempt 0):
+	// no data race because the supervisor cannot read the field until we push
+	// the exit result below.
+	contInst.beforeRetryStart = func() {
+		// Signal the main goroutine to issue Stop.
+		close(hookCh)
+		// Wait for Stop to set the latch (give it plenty of time).
+		deadline := time.After(2 * time.Second)
+		for {
+			contInst.mu.Lock()
+			sr := contInst.stopRequested
+			contInst.mu.Unlock()
+			if sr {
+				return
+			}
+			select {
+			case <-deadline:
+				return
+			default:
+				time.Sleep(time.Millisecond)
+			}
+		}
+	}
+
+	// Trigger attempt 0 failure → retry path.
+	docker.waitGates[installID] <- waitResult{code: 1, err: installErr}
+
+	// Wait for the hook to fire (meaning attempt 0 failed, retry container created).
+	select {
+	case <-hookCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for beforeRetryStart hook")
+	}
+
+	// Issue Stop: it must return nil (success) because the guarded publish
+	// detects stopRequested and aborts the retry.
+	if err := inst.Stop(context.Background(), false); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	drainTo(t, inst.Events(), execution.StateStopped)
+
+	// The retry container must never have been started (only the initial
+	// attempt's container was started).
+	docker.mu.Lock()
+	startCount := 0
+	for _, s := range docker.started {
+		if s == installID {
+			startCount++
+		}
+	}
+	docker.mu.Unlock()
+	if startCount > 1 {
+		t.Fatalf("retry container %q was started %d times; want at most 1 (initial attempt only)", installID, startCount)
+	}
+
+	// The retry container must have been removed (cleanup of the unstarted container).
+	if !docker.wasRemoved(installID) {
+		t.Fatal("retry container was not removed after Stop aborted it")
+	}
+}
+
 // When install attempt N exits (non-zero, triggering a retry) and attempt N+1
 // starts a new container, exitObserved must be reset so a Stop during attempt
 // N+1 whose kill is survived still triggers the survived-kill restore. Without
@@ -977,12 +1083,26 @@ func TestInstallRetryResetsExitObservedForNewContainer(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	// Wait until the retry container is created (attempt 1).
+	// Wait until the retry container is started (issue #1987: with the guarded
+	// publish, we must wait for Start to complete — not just Create — otherwise
+	// Stop may win the lock before Start and abort the retry instead of racing
+	// the Wait). The install container name is reused, so count Start calls.
 	deadline := time.After(2 * time.Second)
-	for len(docker.names()) < 2 {
+	for {
+		docker.mu.Lock()
+		startCount := 0
+		for _, s := range docker.started {
+			if s == installID {
+				startCount++
+			}
+		}
+		docker.mu.Unlock()
+		if startCount >= 2 {
+			break
+		}
 		select {
 		case <-deadline:
-			t.Fatal("timed out waiting for retry install container")
+			t.Fatal("timed out waiting for retry install container to be started")
 		default:
 			time.Sleep(time.Millisecond)
 		}
