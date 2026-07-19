@@ -24,8 +24,19 @@ from mc_server_dashboard_api.storage.adapters.failure_seam import (
     PublishPhase,
 )
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
-from mc_server_dashboard_api.storage.domain.value_objects import CommunityId, ServerId
-from tests.storage.helpers import drain, new_scope, read_tar, snapshot_dir, tar_stream
+from mc_server_dashboard_api.storage.domain.value_objects import (
+    CommunityId,
+    RelPath,
+    ServerId,
+)
+from tests.storage.helpers import (
+    drain,
+    new_scope,
+    publish,
+    read_tar,
+    snapshot_dir,
+    tar_stream,
+)
 
 
 async def _seed_initial(
@@ -610,3 +621,170 @@ async def test_publish_fsyncs_snapshots_dir_after_move(
         "no dir fsync between staging move and current flip — "
         "the rename entry into snapshots/ is not durable"
     )
+
+
+# --- Version capture crash safety (issue #1955) ----------------------------
+
+
+async def test_crash_mid_version_capture_leaves_no_visible_version(
+    tmp_path: Path,
+) -> None:
+    """A crash after the version temp is fsynced but before the rename leaves no
+    visible version entry. The in-process exception path cleans the temp (the
+    except-BaseException clause), but in a real SIGKILL it would survive as
+    dot-prefixed litter — tested by the sweep tests below.
+    """
+
+    community, server = new_scope()
+    storage = FsStorage(tmp_path)
+    await publish(storage, community, server, {"cfg": b"v0"})
+
+    crashed = FsStorage(
+        tmp_path,
+        failure_seam=CrashAt(PublishPhase.AFTER_VERSION_TEMP_WRITE),
+    )
+    with pytest.raises(InjectedCrash):
+        await crashed.write_file(community, server, RelPath("cfg"), b"v1")
+
+    # current/ must still hold the OLD content (the atomic overwrite never renamed).
+    recovered = FsStorage(tmp_path)
+    content = await recovered.read_file(community, server, RelPath("cfg"))
+    assert content == b"v0"
+
+    # No visible version listed — the temp never renamed into place.
+    versions = await recovered.list_file_versions(community, server, RelPath("cfg"))
+    assert versions == []
+
+
+async def test_sweep_reclaims_stale_version_capture_litter(tmp_path: Path) -> None:
+    """Sweep removes version-capture temp siblings older than the age threshold."""
+
+    import os
+    import time
+
+    community, server = new_scope()
+    storage = FsStorage(tmp_path)
+    await publish(storage, community, server, {"cfg": b"v0"})
+
+    # Plant a stale version litter file.
+    server_root = (
+        tmp_path / "communities" / str(community.value) / "servers" / str(server.value)
+    )
+    versions_dir = server_root / "versions" / "cfg"
+    versions_dir.mkdir(parents=True, exist_ok=True)
+    stale = versions_dir / ".some-id.deadbeef.tmp"
+    stale.write_bytes(b"partial")
+    old = time.time() - 7200
+    os.utime(stale, (old, old))
+
+    storage.sweep()
+
+    assert not stale.exists()
+
+
+async def test_sweep_spares_young_version_capture_litter(tmp_path: Path) -> None:
+    """Sweep leaves version-capture temp siblings younger than the age threshold."""
+
+    community, server = new_scope()
+    storage = FsStorage(tmp_path)
+    await publish(storage, community, server, {"cfg": b"v0"})
+
+    server_root = (
+        tmp_path / "communities" / str(community.value) / "servers" / str(server.value)
+    )
+    versions_dir = server_root / "versions" / "cfg"
+    versions_dir.mkdir(parents=True, exist_ok=True)
+    young = versions_dir / ".some-id.cafef00d.tmp"
+    young.write_bytes(b"in-flight")
+
+    storage.sweep()
+
+    assert young.exists(), (
+        "young version litter a live capture may be filling must survive"
+    )
+
+
+async def test_version_capture_fsyncs_before_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """_atomic_copy fsyncs the temp data before renaming it into versions/ and
+    fsyncs the versions directory after the rename.
+    """
+
+    import os
+    import stat as stat_module
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"cfg": b"v0"})
+
+    events: list[str] = []
+    real_fsync = os.fsync
+    real_replace = os.replace
+
+    def spy_fsync(fd: int) -> None:
+        is_dir = stat_module.S_ISDIR(os.fstat(fd).st_mode)
+        events.append("fsync-dir" if is_dir else "fsync-file")
+        real_fsync(fd)
+
+    def spy_replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        dst_str = str(dst)
+        # The version rename target is inside a versions/ directory and is NOT a
+        # .tmp file (the temp is the source).
+        if "/versions/" in dst_str and not dst_str.endswith(".tmp"):
+            events.append("rename-version")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "fsync", spy_fsync)
+    monkeypatch.setattr(os, "replace", spy_replace)
+
+    await storage.write_file(community, server, RelPath("cfg"), b"v1")
+
+    assert "rename-version" in events
+    rename_at = events.index("rename-version")
+    # The temp-file fsync precedes the rename (data is durable).
+    assert "fsync-file" in events and events.index("fsync-file") < rename_at
+    # The directory fsync follows the rename (rename entry is durable).
+    dir_fsyncs_after = [
+        i for i, e in enumerate(events) if e == "fsync-dir" and i > rename_at
+    ]
+    assert dir_fsyncs_after, "no dir fsync after version rename — entry not durable"
+
+
+async def test_version_litter_does_not_consume_retention_slots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dot-prefixed leftover must not count toward the retention limit and must
+    not cause legitimate versions to be pruned away.
+    """
+
+    import mc_server_dashboard_api.storage.adapters.fs as fs_module
+
+    storage = FsStorage(tmp_path, version_retention=2)
+    community, server = new_scope()
+    await publish(storage, community, server, {"cfg": b"v0"})
+
+    # Use crafted ids to control ordering.
+    crafted = iter([f"{n:020d}-aaaaaaaa" for n in range(1, 100)])
+    monkeypatch.setattr(fs_module, "_new_version_id", lambda: next(crafted))
+
+    # Write v1 (captures v0), then v2 (captures v1) — retention=2 keeps both.
+    await storage.write_file(community, server, RelPath("cfg"), b"v1")
+    await storage.write_file(community, server, RelPath("cfg"), b"v2")
+
+    # Plant litter in the versions directory.
+    server_root = (
+        tmp_path / "communities" / str(community.value) / "servers" / str(server.value)
+    )
+    versions_dir = server_root / "versions" / "cfg"
+    litter = versions_dir / ".fake-id.tmp"
+    litter.write_bytes(b"leftover")
+
+    # Write v3 (captures v2) — retention=2 means oldest of [v0, v1, v2] pruned.
+    await storage.write_file(community, server, RelPath("cfg"), b"v3")
+
+    # Still exactly 2 visible versions (the litter is not counted).
+    versions = await storage.list_file_versions(community, server, RelPath("cfg"))
+    assert len(versions) == 2
+    # Litter still on disk (not removed by prune, only by sweep).
+    assert litter.exists()

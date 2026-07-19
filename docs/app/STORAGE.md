@@ -724,6 +724,17 @@ running server's live working set go over the control plane (ARCHITECTURE.md
 Section 7.2) and are captured as versions when that working set is next
 snapshotted and the resulting file differs, not on each keystroke.
 
+**Crash-safe capture (issue #1955).** The version capture uses the same
+temp-sibling + fsync + atomic rename discipline as Section 4.4 single-file
+writes: the prior content is streamed into a dot-prefixed temp sibling
+(`.{version-id}.*.tmp`) in the target `versions/` directory, fsynced, then
+atomically renamed to its final name. A crash mid-capture leaves only the temp
+sibling — never a truncated file under a valid version id. The enumerators
+(`list_file_versions`, `_matches_newest_version`, `_prune_versions`) filter
+dot-prefixed entries so leftover temps are invisible to callers. The startup
+sweep (`_sweep_server`) reclaims stale `.*.tmp` files under `versions/` using
+the same mtime age threshold as backup spool litter (issue #903).
+
 **Alternatives considered.**
 1. *Whole-working-set versioning* (snapshot the entire `current/` per edit) —
    simple to reason about but stores enormous redundant data per single-file
