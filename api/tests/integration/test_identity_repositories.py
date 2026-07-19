@@ -297,8 +297,6 @@ async def test_revoke_all_for_user_restamps_rotated_preserving_revoked_at(
         token_hash="rotated",
         issued_at=_NOW,
         expires_at=_NOW + dt.timedelta(days=30),
-        revoked_at=rotated_at,
-        revoked_reason=REVOKED_ROTATED,
     )
     superseded = RefreshToken(
         id=RefreshTokenId.new(),
@@ -306,8 +304,6 @@ async def test_revoke_all_for_user_restamps_rotated_preserving_revoked_at(
         token_hash="superseded",
         issued_at=_NOW,
         expires_at=_NOW + dt.timedelta(days=30),
-        revoked_at=rotated_at,
-        revoked_reason=REVOKED_SUPERSEDED,
     )
     async with SqlAlchemyUnitOfWork(factory) as uow:
         await uow.users.add(user)
@@ -316,6 +312,15 @@ async def test_revoke_all_for_user_restamps_rotated_preserving_revoked_at(
         await uow.refresh_tokens.add(active)
         await uow.refresh_tokens.add(rotated)
         await uow.refresh_tokens.add(superseded)
+        await uow.commit()
+    # Seed revoked state via revoke() — add() does not persist revoked_reason.
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.refresh_tokens.revoke(
+            "rotated", revoked_at=rotated_at, reason=REVOKED_ROTATED
+        )
+        await uow.refresh_tokens.revoke(
+            "superseded", revoked_at=rotated_at, reason=REVOKED_SUPERSEDED
+        )
         await uow.commit()
 
     sweep_at = _NOW + dt.timedelta(hours=1)
