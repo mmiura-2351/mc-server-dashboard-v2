@@ -24,7 +24,10 @@ from mc_server_dashboard_api.servers.domain.plugin import (
     ServerPlugin,
     has_enabled_geyser,
 )
-from mc_server_dashboard_api.servers.domain.plugin_repository import PluginRepository
+from mc_server_dashboard_api.servers.domain.plugin_repository import (
+    CatalogProvenance,
+    PluginRepository,
+)
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 
 
@@ -221,7 +224,7 @@ class SqlAlchemyPluginRepository(PluginRepository):
 
     async def find_catalog_provenance_by_sha512(
         self, checksum_sha512: str
-    ) -> tuple[PluginSource, str, str | None, str | None] | None:
+    ) -> CatalogProvenance | None:
         stmt = (
             select(
                 ServerPluginModel.source,
@@ -243,7 +246,9 @@ class SqlAlchemyPluginRepository(PluginRepository):
         if row is None:
             return None
         source, project_id, version_id, version_num = row
-        return PluginSource(source), project_id, version_id, version_num
+        return CatalogProvenance(
+            PluginSource(source), project_id, version_id, version_num
+        )
 
     async def find_sha256_by_sha512(self, checksum_sha512: str) -> str | None:
         stmt = (

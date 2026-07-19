@@ -73,7 +73,6 @@ from mc_server_dashboard_api.servers.domain.notifier import ServerNotifier
 from mc_server_dashboard_api.servers.domain.plugin import (
     CATALOG_SOURCES,
     PluginId,
-    PluginSource,
     ServerPlugin,
     has_enabled_geyser,
 )
@@ -81,7 +80,10 @@ from mc_server_dashboard_api.servers.domain.plugin_cache_store import (
     CacheEntry,
     PluginCacheStore,
 )
-from mc_server_dashboard_api.servers.domain.plugin_repository import PluginRepository
+from mc_server_dashboard_api.servers.domain.plugin_repository import (
+    CatalogProvenance,
+    PluginRepository,
+)
 from mc_server_dashboard_api.servers.domain.repositories import (
     ResourceGrantSweeper,
     ServerRepository,
@@ -854,18 +856,18 @@ class FakePluginRepository(PluginRepository):
 
     async def find_catalog_provenance_by_sha512(
         self, checksum_sha512: str
-    ) -> tuple[PluginSource, str, str | None, str | None] | None:
+    ) -> CatalogProvenance | None:
         for plugin in self.by_id.values():
             if (
                 plugin.checksum_sha512 == checksum_sha512
                 and plugin.source in CATALOG_SOURCES
                 and plugin.source_project_id is not None
             ):
-                return (
-                    plugin.source,
-                    plugin.source_project_id,
-                    plugin.source_version_id,
-                    plugin.version_number,
+                return CatalogProvenance(
+                    source=plugin.source,
+                    project_id=plugin.source_project_id,
+                    source_version_id=plugin.source_version_id,
+                    version_number=plugin.version_number,
                 )
         return None
 
