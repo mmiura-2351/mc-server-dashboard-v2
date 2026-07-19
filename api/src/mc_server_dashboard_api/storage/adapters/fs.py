@@ -75,6 +75,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     ServerId,
     SnapshotId,
     VersionId,
+    is_version_ring_member,
 )
 from mc_server_dashboard_api.storage.integrity.region import (
     WorkingSetReport,
@@ -1657,7 +1658,7 @@ class FsStorage(Storage):
 
         if not versions.is_dir():
             return False
-        names = sorted(p.name for p in versions.iterdir() if not p.name.startswith("."))
+        names = _ring_members(versions)
         if not names:
             return False
         newest = versions / names[-1]  # ids are time-ordered (_new_version_id)
@@ -1666,9 +1667,7 @@ class FsStorage(Storage):
         return _file_sha256(source) == _file_sha256(newest)
 
     def _prune_versions(self, versions: Path) -> None:
-        existing = sorted(
-            p.name for p in versions.iterdir() if not p.name.startswith(".")
-        )
+        existing = _ring_members(versions)
         excess = len(existing) - self._version_retention
         for name in existing[:excess] if excess > 0 else []:
             (versions / name).unlink(missing_ok=True)
@@ -1679,11 +1678,7 @@ class FsStorage(Storage):
         versions = self._versions_dir(community_id, server_id, rel_path)
         if not await asyncio.to_thread(versions.is_dir):
             return []
-        names = await asyncio.to_thread(
-            lambda: sorted(
-                p.name for p in versions.iterdir() if not p.name.startswith(".")
-            )
-        )
+        names = await asyncio.to_thread(_ring_members, versions)
         # Newest-first (Section 3.5); version ids are time-ordered (_new_version_id).
         return [VersionId(name) for name in reversed(names)]
 
@@ -1751,6 +1746,20 @@ def _new_version_id() -> str:
     """
 
     return f"{time.time_ns():020d}-{uuid.uuid4().hex[:8]}"
+
+
+def _ring_members(versions_dir: Path) -> list[str]:
+    """Return sorted names of direct-child files matching the version-id format.
+
+    Excludes child directories (whose names may collide with the prefix scan)
+    and dotfiles (temp files), preventing cross-ring pollution (issue #1952).
+    """
+
+    return sorted(
+        p.name
+        for p in versions_dir.iterdir()
+        if is_version_ring_member(p.name) and p.is_file()
+    )
 
 
 def _file_sha256(path: Path) -> str:
