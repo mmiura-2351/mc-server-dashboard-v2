@@ -36,6 +36,10 @@ class PublishPhase(enum.Enum):
     AFTER_FILE_TEMP_WRITE = (
         "after_file_temp_write"  # temp sibling written+fsynced, before rename
     )
+    # Version capture (Section 5): temp copy fsynced, before rename into versions/.
+    AFTER_VERSION_TEMP_WRITE = (
+        "after_version_temp_write"  # version temp fsynced, before rename
+    )
 
 
 class InjectedCrash(Exception):

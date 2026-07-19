@@ -359,6 +359,14 @@ class FsStorage(Storage):
             for stale in backups.glob(".backup.*.tmp"):
                 if _is_stale_spool(stale):
                     stale.unlink(missing_ok=True)
+        # Sweep stale version-capture temp siblings (``.*.tmp``) left by a crash
+        # mid-_atomic_copy (issue #1955). These sit inside ``versions/`` subtrees;
+        # rglob covers arbitrarily nested rel_path directories.
+        versions_root = server_root / "versions"
+        if versions_root.is_dir():
+            for stale in versions_root.rglob(".*.tmp"):
+                if stale.is_file() and _is_stale_spool(stale):
+                    stale.unlink(missing_ok=True)
 
     def _live_snapshot_name(self, server_root: Path) -> str | None:
         link = server_root / "current"
@@ -1510,6 +1518,26 @@ class FsStorage(Storage):
             tmp.unlink(missing_ok=True)
             raise
 
+    def _atomic_copy(self, source: Path, target: Path) -> None:
+        """temp-sibling + copyfileobj + fsync + atomic rename (Section 4.4/5)."""
+
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp"
+        )
+        tmp = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "wb") as out:
+                with source.open("rb") as src:
+                    shutil.copyfileobj(src, out)
+                out.flush()
+                os.fsync(out.fileno())
+            self._seam.reach(PublishPhase.AFTER_VERSION_TEMP_WRITE)
+            os.replace(tmp, target)
+            _fsync_dir(target.parent)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+
     # --- file version retention / rollback (Section 3.5, Section 5) ---------
 
     def _versions_dir(
@@ -1531,7 +1559,7 @@ class FsStorage(Storage):
         versions = self._versions_dir(community_id, server_id, rel_path)
         versions.mkdir(parents=True, exist_ok=True)
         version_id = _new_version_id()
-        shutil.copyfile(source, versions / version_id)
+        self._atomic_copy(source, versions / version_id)
         self._prune_versions(versions)
 
     async def retain_file_version(
@@ -1570,7 +1598,7 @@ class FsStorage(Storage):
 
         if not versions.is_dir():
             return False
-        names = sorted(p.name for p in versions.iterdir())
+        names = sorted(p.name for p in versions.iterdir() if not p.name.startswith("."))
         if not names:
             return False
         newest = versions / names[-1]  # ids are time-ordered (_new_version_id)
@@ -1579,7 +1607,9 @@ class FsStorage(Storage):
         return _file_sha256(source) == _file_sha256(newest)
 
     def _prune_versions(self, versions: Path) -> None:
-        existing = sorted(p.name for p in versions.iterdir())
+        existing = sorted(
+            p.name for p in versions.iterdir() if not p.name.startswith(".")
+        )
         excess = len(existing) - self._version_retention
         for name in existing[:excess] if excess > 0 else []:
             (versions / name).unlink(missing_ok=True)
@@ -1591,7 +1621,9 @@ class FsStorage(Storage):
         if not await asyncio.to_thread(versions.is_dir):
             return []
         names = await asyncio.to_thread(
-            lambda: sorted(p.name for p in versions.iterdir())
+            lambda: sorted(
+                p.name for p in versions.iterdir() if not p.name.startswith(".")
+            )
         )
         # Newest-first (Section 3.5); version ids are time-ordered (_new_version_id).
         return [VersionId(name) for name in reversed(names)]
