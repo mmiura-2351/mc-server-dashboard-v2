@@ -1131,3 +1131,47 @@ def test_snapshot_chunk_idle_timeout_aborts_staging_and_returns_408(
 
     published = asyncio.run(_read())
     assert _read_tar(published) == {"keep.txt": b"prior"}
+
+
+def test_hydrate_generation_header_matches_leased_snapshot(tmp_path: Path) -> None:
+    """Issue #1954: the generation header must match the served content.
+
+    Previously, a standalone ``current_generation`` read BEFORE the hydrate stream
+    leased the snapshot left a window where a concurrent bump mislabeled the served
+    bytes. After the fix, generation is read atomically with the lease, so the header
+    always matches the content's generation.
+    """
+    import asyncio
+
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    c, s = CommunityId(community), ServerId(server)
+
+    asyncio.run(_publish(storage, community, server, {"f": b"v1"}))
+    gen1 = asyncio.run(storage.current_generation(c, s))
+
+    with client:
+        resp = client.get(_url(community, server, "working-set"), headers=_auth())
+    assert resp.status_code == 200
+    assert resp.headers["X-Working-Set-Generation"] == str(gen1)
+
+    # Publish a second snapshot and verify the generation header advances.
+    asyncio.run(_publish(storage, community, server, {"f": b"v2"}))
+    gen2 = asyncio.run(storage.current_generation(c, s))
+    assert gen2 > gen1
+
+    with client:
+        resp = client.get(_url(community, server, "working-set"), headers=_auth())
+    assert resp.status_code == 200
+    assert resp.headers["X-Working-Set-Generation"] == str(gen2)
+    assert _read_tar(resp.content) == {"f": b"v2"}
+
+
+def test_hydrate_generation_header_on_204_is_zero(tmp_path: Path) -> None:
+    """On 204 (no published snapshot) the generation header is 0."""
+    client, _ = _setup(tmp_path)
+    community, server = _scope()
+    with client:
+        resp = client.get(_url(community, server, "working-set"), headers=_auth())
+    assert resp.status_code == 204
+    assert resp.headers["X-Working-Set-Generation"] == "0"

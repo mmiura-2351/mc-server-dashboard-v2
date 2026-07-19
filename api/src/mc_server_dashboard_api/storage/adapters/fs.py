@@ -59,6 +59,7 @@ from mc_server_dashboard_api.storage.domain.port import (
     RESTORE_PUBLISHER,
     ByteStream,
     DirEntry,
+    HydrateSource,
     JarPoolEntry,
     JarPoolStats,
     SnapshotHandle,
@@ -380,16 +381,33 @@ class FsStorage(Storage):
 
     def open_hydrate_source(
         self, community_id: CommunityId, server_id: ServerId
-    ) -> ByteStream:
+    ) -> HydrateSource:
         # The live snapshot is resolved and leased on the FIRST iteration, not at
         # open time: a caller that opens the stream but never iterates/closes it
         # must not pin a snapshot forever (otherwise reclaim + sweep are starved).
         # Re-resolving on first read also means the leased snapshot is exactly the
         # one whose bytes are streamed (Section 4.2 reader safety).
-        def _open() -> tuple[Path, Callable[[], None]]:
-            return self._lease_current(community_id, server_id)
+        #
+        # The generation is read atomically with the lease under the per-server lock
+        # (issue #1954): a bump between a standalone generation read and the deferred
+        # lease would mislabel the served bytes, wedging the session's publishes.
+        source = HydrateSource.__new__(HydrateSource)
+        source.generation = None
 
-        return _tar_stream(_open, self._tar_member_hook)
+        def _open() -> tuple[Path, Callable[[], None]]:
+            server_root = self._server_root(community_id, server_id)
+            lock = self._server_lock(community_id, server_id)
+            with lock:
+                path, release = self._lease_current(community_id, server_id)
+                try:
+                    source.generation = self._read_generation(server_root)
+                except BaseException:
+                    release()
+                    raise
+            return path, release
+
+        source._inner = _tar_stream(_open, self._tar_member_hook)
+        return source
 
     async def begin_snapshot(
         self, community_id: CommunityId, server_id: ServerId

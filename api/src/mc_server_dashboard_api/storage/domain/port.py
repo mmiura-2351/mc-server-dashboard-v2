@@ -41,6 +41,36 @@ from mc_server_dashboard_api.storage.integrity.region import WorkingSetReport
 # working set or JAR in memory (STORAGE.md Sections 3.1, 3.2).
 ByteStream = AsyncIterator[bytes]
 
+
+class HydrateSource:
+    """AsyncIterator[bytes] over the working-set tar with an atomic generation.
+
+    ``generation`` is ``None`` until the first chunk is pulled; after that it
+    carries the marker value read atomically with the snapshot lease (issue #1954).
+    This coupling eliminates the race between a standalone ``current_generation``
+    read and the deferred lease acquisition that ``open_hydrate_source`` performs on
+    first iteration.
+
+    Structurally satisfies ``ByteStream`` (``AsyncIterator[bytes]``), so existing
+    iteration sites keep working unchanged.
+    """
+
+    def __init__(self, inner: AsyncIterator[bytes]) -> None:
+        self._inner = inner
+        self.generation: int | None = None
+
+    def __aiter__(self) -> AsyncIterator[bytes]:
+        return self
+
+    async def __anext__(self) -> bytes:
+        return await self._inner.__anext__()
+
+    async def aclose(self) -> None:
+        aclose = getattr(self._inner, "aclose", None)
+        if aclose is not None:
+            await aclose()
+
+
 # The publisher id recorded for an API-initiated restore (issue #873). A restore is
 # an authoritative publish with no producing Worker, so it bumps the generation like
 # a snapshot commit and stamps this sentinel as the publisher. Recording a sentinel
@@ -123,12 +153,18 @@ class WorkingSetStore(abc.ABC):
     @abc.abstractmethod
     def open_hydrate_source(
         self, community_id: CommunityId, server_id: ServerId
-    ) -> ByteStream:
+    ) -> HydrateSource:
         """Open a read stream over the current authoritative working set.
 
         The data plane reads from this to feed a Worker on start/relocation
         (hydrate). Reads ``current/``. Raises :class:`~.errors.NotFoundError` if no
         snapshot has been published for the server.
+
+        The returned :class:`HydrateSource` exposes ``generation`` — ``None`` until
+        the first chunk is pulled, then the marker value read atomically with the
+        snapshot lease (issue #1954). The endpoint stamps this on the response header
+        instead of a separate ``current_generation`` call, closing the race where a
+        bump between the two mislabels the served bytes.
 
         POSIX semantics reliance: on fs/remote-fs the stream reads the snapshot
         directory ``current`` resolved to *at open time*. A concurrent publish flips

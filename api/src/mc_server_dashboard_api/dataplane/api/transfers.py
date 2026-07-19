@@ -220,22 +220,27 @@ async def hydrate_working_set(
     scope = (CommunityId(community_id), ServerId(server_id))
     jar_member = await _jar_member(storage, resolved_jar, community_id, server_id)
 
-    # Stamp the authoritative working-set generation the hydrate serves (issue #763)
-    # so the Worker records the generation its scratch is now at. 0 when no snapshot
-    # has been published (the Worker then treats the set as older than any store
-    # generation and re-hydrates later), matching the Worker's "nothing held"
-    # default. The header rides every response, including the 204 (no working set).
-    headers = {_GENERATION_HEADER: str(await storage.current_generation(*scope))}
-
     stream = storage.open_hydrate_source(*scope)
     # The hydrate stream resolves + leases the snapshot on its FIRST iteration,
     # so a NotFoundError (no published snapshot) only surfaces once we pull a
     # chunk. Peek the first chunk here, before sending response headers, so an
     # unpublished server becomes a clean 204 rather than a stream that aborts
     # mid-body with headers already committed.
+    #
+    # The generation is read atomically with the snapshot lease inside the stream
+    # (issue #1954): after priming, ``stream.generation`` carries the marker value
+    # that corresponds to the leased snapshot. On the 204/JAR-only path (no
+    # published snapshot) the stream never leased, so fall back to
+    # ``current_generation`` (which returns 0 for an unpublished server).
     try:
         primed = await _prime(stream)
     except NotFoundError:
+        # NotFoundError from the lazy lease proves the pointer is absent (no
+        # published snapshot) — the generation is definitionally 0. Stamping a
+        # literal avoids re-reading current_generation, which would reintroduce
+        # the mislabel race if a publish lands between the NotFoundError and the
+        # read (issue #1954).
+        headers = {_GENERATION_HEADER: "0"}
         if jar_member is None:
             return StreamingResponse(
                 _empty(),
@@ -250,6 +255,8 @@ async def hydrate_working_set(
             media_type="application/x-tar",
             headers=headers,
         )
+    # The generation was stamped atomically with the lease on first iteration.
+    headers = {_GENERATION_HEADER: str(stream.generation)}
     if jar_member is None:
         return StreamingResponse(
             primed, media_type="application/x-tar", headers=headers
