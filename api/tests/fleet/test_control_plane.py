@@ -1068,3 +1068,110 @@ async def test_open_session_refuses_a_stale_token_after_close() -> None:
 
     with pytest.raises(StaleSessionError):
         state.open_session(worker, 1)
+
+
+# ---------------------------------------------------------------------------
+# Stale queued command skip (issue #1697)
+# ---------------------------------------------------------------------------
+
+
+async def test_timed_out_dispatch_message_is_stale() -> None:
+    """A command whose dispatch timed out has no pending entry; discard_if_stale
+    returns True for it and False for a live pending command (issue #1697)."""
+
+    state = ControlPlaneState()
+    worker = WorkerId(_WORKER)
+    state.open_session(worker, 1)
+
+    # A live pending command is NOT stale.
+    future = state.register_pending("live-cmd", worker)
+    assert state.discard_if_stale("live-cmd") is False
+    assert not future.done()
+
+    # A timed-out command (discarded pending) IS stale.
+    state.register_pending("stale-cmd", worker)
+    state.discard_pending("stale-cmd")
+    assert state.discard_if_stale("stale-cmd") is True
+
+
+async def test_stale_queued_commands_are_not_replayed_on_resume() -> None:
+    """After timed-out commands accrue in the outbound queue, the worker's first
+    received message must be the live command — stale ones are skipped at send
+    time by the Session generator (issue #1697).
+
+    The scenario: a stalled worker reader causes messages to pile up in the
+    outbound asyncio.Queue. When the Session generator resumes dequeuing, it must
+    skip stale messages (those whose pending entry was discarded on timeout).
+    """
+
+    harness = _Harness(command_timeout=5.0)
+    try:
+        stub = await harness.start()
+        call = await _registered_call(harness, stub)
+        worker = WorkerId(_WORKER)
+        queue = harness.state.outbound_for(worker)
+        assert queue is not None
+
+        # Simulate 3 timed-out commands: manually enqueue messages and discard
+        # their pending entries. All operations are synchronous (no awaits
+        # between put_nowait and discard_pending), so the Session generator
+        # does not get a scheduling slot to dequeue them between the two steps.
+        for i in range(3):
+            cmd_id = f"stale-{i}"
+            harness.state.register_pending(cmd_id, worker)
+            api_cmd = pb.ApiCommand(
+                command_id=cmd_id,
+                server_id="s",
+                server_command=pb.ServerCommand(line="stale"),
+            )
+            msg = pb.ApiMessage(correlation_id=cmd_id, api_command=api_cmd)
+            queue.put_nowait(msg)
+            harness.state.discard_pending(cmd_id)
+
+        # Now dispatch a live command whose result the worker answers.
+        async def worker_read_and_answer() -> str:
+            msg = await call.read()
+            await call.write(
+                pb.WorkerMessage(
+                    correlation_id=msg.api_command.command_id,
+                    command_result=pb.CommandResult(success=True),
+                )
+            )
+            line: str = msg.api_command.server_command.line
+            return line
+
+        echo = asyncio.ensure_future(worker_read_and_answer())
+        result = await harness.control_plane.dispatch(
+            worker_id=worker,
+            server_id=str(uuid.uuid4()),
+            command=ServerCommandCommand(line="live"),
+        )
+        received_line = await echo
+
+        # The worker must see the live command first, not a stale one.
+        assert received_line == "live"
+        assert result.success
+        await call.done_writing()
+    finally:
+        await harness.stop()
+
+
+async def test_skipped_stale_final_snapshot_drops_late_record() -> None:
+    """discard_if_stale for a timed-out final snapshot also cleans up the
+    promoted _late_snapshots record (issue #1697)."""
+
+    sink = _RecordingLateSnapshotSink()
+    state = ControlPlaneState(late_snapshot_sink=sink)
+    worker = WorkerId(_WORKER)
+    state.open_session(worker, 1)
+
+    state.register_pending("cmd-1", worker, snapshot_server_id=_SERVER)
+    state.discard_pending("cmd-1")  # timeout: promoted to _late_snapshots
+
+    # The Session loop would call discard_if_stale when it dequeues the message.
+    assert state.discard_if_stale("cmd-1") is True
+
+    # The late-snapshot record must have been cleaned up — a late result routes
+    # nowhere.
+    await state.resolve("cmd-1", worker, _failed_transfer_result())
+    assert sink.calls == []
