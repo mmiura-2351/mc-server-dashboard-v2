@@ -336,8 +336,8 @@ func (l *Listener) handleLogin(ctx context.Context, conn net.Conn, r *bufio.Read
 		_ = conn.Close()
 		return
 	}
-	// Clear the pre-route deadline before the splice (RELAY.md Section 5: no idle
-	// timeout on spliced sessions).
+	// Clear the pre-route deadline before the splice; the splice installs its own
+	// progress deadlines per-read/write (RELAY.md Section 5).
 	_ = conn.SetReadDeadline(time.Time{})
 
 	rctx, cancel := context.WithTimeout(ctx, resolveJoinTimeout)
