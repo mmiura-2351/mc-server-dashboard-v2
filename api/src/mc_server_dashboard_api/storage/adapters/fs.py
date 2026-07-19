@@ -540,6 +540,11 @@ class FsStorage(Storage):
         and the flip. ``None`` skips the re-check (no base claim).
         """
 
+        # Make the staged tree's file data durable BEFORE acquiring the lock and
+        # flipping current (issue #1943). Runs pre-lock per the #920 discipline —
+        # staging is complete and leased, so no concurrent writer can mutate it.
+        _fsync_tree(staging)
+
         server_root = self._server_root(community_id, server_id)
         with self._server_lock(community_id, server_id):
             if expected_base is not None:
@@ -571,10 +576,14 @@ class FsStorage(Storage):
     ) -> Path | None:
         """The atomic-publish core (Section 4.2), driven on a worker thread.
 
+        The caller has already made the staged tree's file data durable
+        (``_fsync_tree`` in ``_publish_and_bump``, issue #1943).
+
         Steps, each followed by a failure-seam boundary so a crash at any of them
         leaves ``current`` resolving to one complete snapshot (Section 4.3):
-        move staging -> ``snapshots/<id>/``; create a temp symlink; atomically
-        replace ``current`` with it; fsync the parent dir.
+        move staging -> ``snapshots/<id>/``; fsync ``snapshots/`` (the rename entry);
+        create a temp symlink; atomically replace ``current`` with it; fsync the
+        parent dir.
 
         The move + symlink flip are fast metadata ops (same-filesystem rename), so
         they run under the caller's per-server lock. The superseded snapshot's
@@ -596,6 +605,9 @@ class FsStorage(Storage):
         # Same-filesystem rename: staging (incoming/) and snapshots/ share <root>
         # (Section 7.1 caveat), so this is an atomic move, never a copy.
         os.replace(staging, snapshot_dir)
+        # Make the rename entry durable so a crash after the flip cannot lose the
+        # directory the new symlink points at (issue #1943).
+        _fsync_dir(snapshots)
 
         self._seam.reach(PublishPhase.AFTER_MOVE)
 
@@ -1686,6 +1698,30 @@ def _fsync_dir(path: Path) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def _fsync_tree(root: Path) -> None:
+    """fsync every regular file and directory under ``root`` (post-order).
+
+    Mirrors the worker's ``fsyncTree``: child data is made durable before parent
+    directory entries, so a power loss after this returns cannot leave torn files
+    under a directory whose entry survived. Symlinks are skipped (their target is
+    not owned by the tree).
+    """
+
+    for dirpath, _dirnames, filenames in os.walk(
+        root, topdown=False, followlinks=False
+    ):
+        for name in filenames:
+            filepath = os.path.join(dirpath, name)
+            if os.path.islink(filepath):
+                continue
+            fd = os.open(filepath, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        _fsync_dir(Path(dirpath))
 
 
 def _tar_stream(
