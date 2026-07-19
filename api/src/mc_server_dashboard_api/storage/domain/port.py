@@ -23,6 +23,7 @@ authoritative-side semantics.
 from __future__ import annotations
 
 import abc
+import contextlib
 import datetime as dt
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -69,6 +70,42 @@ class HydrateSource:
         aclose = getattr(self._inner, "aclose", None)
         if aclose is not None:
             await aclose()
+
+
+class WorkingSetView(abc.ABC):
+    """Read-only view pinned to one snapshot via an active-reader lease.
+
+    Used by export/download to ensure the entire walk reads from a single
+    consistent snapshot even when a concurrent restore/publish flips
+    ``current/`` mid-stream (issue #1966). The view is an async context
+    manager: ``__aenter__`` acquires the lease and ``__aexit__`` releases it.
+    """
+
+    @abc.abstractmethod
+    async def list_dir(self, rel_path: RelPath) -> list[DirEntry]:
+        """List a directory in the pinned snapshot.
+
+        Returns ``[]`` for the root of an unpublished server. Raises
+        :class:`~.errors.NotFoundError` for a missing subdirectory.
+        """
+
+    @abc.abstractmethod
+    def open_file_stream(self, rel_path: RelPath) -> ByteStream:
+        """Open a chunked read stream over one file in the pinned snapshot.
+
+        Raises :class:`~.errors.NotFoundError` if the file is absent.
+        """
+
+    @abc.abstractmethod
+    async def __aenter__(self) -> WorkingSetView: ...
+
+    @abc.abstractmethod
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: object,
+    ) -> None: ...
 
 
 # The publisher id recorded for an API-initiated restore (issue #873). A restore is
@@ -642,6 +679,22 @@ class FileStore(abc.ABC):
         the live working directory), is re-packed into the next snapshot, and is
         carried into backups/restores. Idempotent: creating an existing directory is
         fine. See STORAGE.md Section 3.4 for the full lifecycle note.
+        """
+
+    @abc.abstractmethod
+    def open_working_set_view(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> contextlib.AbstractAsyncContextManager[WorkingSetView]:
+        """Open a pinned read-only view of the current working set (issue #1966).
+
+        The returned async context manager acquires an active-reader lease on
+        ``__aenter__`` and releases it on ``__aexit__``. All ``list_dir`` and
+        ``open_file_stream`` calls through the view resolve against the snapshot
+        that was live at enter time, so a concurrent publish cannot tear the walk.
+
+        An unpublished server (no ``current`` pointer) yields a view whose root
+        ``list_dir(".")`` returns ``[]`` and file reads raise
+        :class:`~.errors.NotFoundError`.
         """
 
 

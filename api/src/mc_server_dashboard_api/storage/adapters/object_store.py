@@ -85,6 +85,7 @@ from mc_server_dashboard_api.storage.domain.port import (
     JarPoolStats,
     SnapshotHandle,
     Storage,
+    WorkingSetView,
 )
 from mc_server_dashboard_api.storage.domain.value_objects import (
     BackupKey,
@@ -1386,6 +1387,11 @@ class ObjectStorage(Storage):
             raise NotFoundError(f"directory not found: {rel_path.value}")
         return _entries_at_level(objs, snapshot_prefix + dir_suffix)
 
+    def open_working_set_view(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> AbstractAsyncContextManager[WorkingSetView]:
+        return _ObjectWorkingSetView(self, community_id, server_id)
+
     async def write_file(
         self,
         community_id: CommunityId,
@@ -2046,3 +2052,78 @@ async def _write_backup_targz(
             await asyncio.to_thread(tar.addfile, info, buf)
     finally:
         await asyncio.to_thread(tar.close)
+
+
+class _ObjectWorkingSetView(WorkingSetView):
+    """Pinned read-only view of a working set for the object adapter (issue #1966).
+
+    Acquires an active-reader lease on ``__aenter__``, capturing the snapshot prefix.
+    All reads resolve against that pinned prefix; a concurrent publish cannot change
+    what this view sees. ``__aexit__`` releases the lease.
+    """
+
+    def __init__(
+        self,
+        storage: ObjectStorage,
+        community_id: CommunityId,
+        server_id: ServerId,
+    ) -> None:
+        self._storage = storage
+        self._community_id = community_id
+        self._server_id = server_id
+        self._snapshot_prefix: str | None = None
+        self._leased = False
+
+    async def __aenter__(self) -> WorkingSetView:
+        async with self._storage._client_factory() as client:
+            server_prefix = self._storage._server_prefix(
+                self._community_id, self._server_id
+            )
+            pointer = await self._storage._read_pointer(client, server_prefix)
+            if pointer is None:
+                # Unpublished server — no snapshot to pin.
+                self._snapshot_prefix = None
+                return self
+            self._snapshot_prefix = await self._storage._lease_live_snapshot(
+                client, self._community_id, self._server_id
+            )
+            self._leased = True
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: object,
+    ) -> None:
+        if self._leased and self._snapshot_prefix is not None:
+            self._storage._release_lease(self._snapshot_prefix)
+            self._leased = False
+
+    async def list_dir(self, rel_path: RelPath) -> list[DirEntry]:
+        if self._snapshot_prefix is None:
+            if not rel_path.parts:
+                return []
+            raise NotFoundError(f"directory not found: {rel_path.value}")
+        sub = self._storage._safe_subkey(rel_path)
+        dir_suffix = sub + "/" if sub else ""
+        async with self._storage._client_factory() as client:
+            objs = await client.list_objects(self._snapshot_prefix + dir_suffix)
+        if not objs and sub:
+            raise NotFoundError(f"directory not found: {rel_path.value}")
+        return _entries_at_level(objs, self._snapshot_prefix + dir_suffix)
+
+    def open_file_stream(self, rel_path: RelPath) -> ByteStream:
+        if self._snapshot_prefix is None:
+            raise NotFoundError(f"file not found: {rel_path.value}")
+        sub = self._storage._safe_subkey(rel_path)
+        return self._stream_file(sub, rel_path)
+
+    async def _stream_file(self, sub: str, rel_path: RelPath) -> AsyncIterator[bytes]:
+        assert self._snapshot_prefix is not None
+        async with self._storage._client_factory() as client:
+            key = self._snapshot_prefix + sub
+            if await client.head_object(key) is None:
+                raise NotFoundError(f"file not found: {rel_path.value}")
+            async for chunk in await client.get_object(key):
+                yield chunk

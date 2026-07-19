@@ -28,6 +28,7 @@ error rather than a silent EOF.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as dt
 import hashlib
 import os
@@ -64,6 +65,7 @@ from mc_server_dashboard_api.storage.domain.port import (
     JarPoolStats,
     SnapshotHandle,
     Storage,
+    WorkingSetView,
 )
 from mc_server_dashboard_api.storage.domain.value_objects import (
     BackupKey,
@@ -1235,6 +1237,11 @@ class FsStorage(Storage):
             )
         return entries
 
+    def open_working_set_view(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> contextlib.AbstractAsyncContextManager[WorkingSetView]:
+        return _FsWorkingSetView(self, community_id, server_id)
+
     async def write_file(
         self,
         community_id: CommunityId,
@@ -1988,3 +1995,99 @@ def _extract_member_capped(
     os.chmod(target, safe.mode)
     os.utime(target, (safe.mtime, safe.mtime))
     return total
+
+
+def _pinned_file_stream(target: Path, rel_path: RelPath) -> AsyncIterator[bytes]:
+    """Stream one file's bytes without taking a lease (caller already holds one)."""
+
+    async def _gen() -> AsyncIterator[bytes]:
+        if not target.is_file():
+            raise NotFoundError(f"file not found: {rel_path.value}")
+        handle = await asyncio.to_thread(open, target, "rb")
+        try:
+            while True:
+                chunk = await asyncio.to_thread(handle.read, _CHUNK)
+                if not chunk:
+                    return
+                yield chunk
+        finally:
+            await asyncio.to_thread(handle.close)
+
+    return _gen()
+
+
+class _FsWorkingSetView(WorkingSetView):
+    """Pinned read-only view of a working set for the fs adapter (issue #1966).
+
+    Acquires an active-reader lease on ``__aenter__`` and resolves the snapshot
+    directory once. All reads go through the pinned path; a concurrent publish
+    cannot change what this view sees. ``__aexit__`` releases the lease.
+    """
+
+    def __init__(
+        self,
+        storage: FsStorage,
+        community_id: CommunityId,
+        server_id: ServerId,
+    ) -> None:
+        self._storage = storage
+        self._community_id = community_id
+        self._server_id = server_id
+        self._pinned: Path | None = None
+        self._release: Callable[[], None] | None = None
+
+    async def __aenter__(self) -> WorkingSetView:
+        link = self._storage._current_link(self._community_id, self._server_id)
+        if not link.is_symlink():
+            # Unpublished server — no snapshot to pin.
+            self._pinned = None
+            return self
+        pinned, release = await asyncio.to_thread(
+            self._storage._lease_current, self._community_id, self._server_id
+        )
+        self._pinned = pinned
+        self._release = release
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: object,
+    ) -> None:
+        if self._release is not None:
+            self._release()
+            self._release = None
+
+    async def list_dir(self, rel_path: RelPath) -> list[DirEntry]:
+        if self._pinned is None:
+            if not rel_path.parts:
+                return []
+            raise NotFoundError(f"directory not found: {rel_path.value}")
+        return await asyncio.to_thread(self._list_dir_sync, rel_path)
+
+    def _list_dir_sync(self, rel_path: RelPath) -> list[DirEntry]:
+        assert self._pinned is not None
+        target = self._storage._safe_target(self._pinned, rel_path)
+        if not target.is_dir():
+            raise NotFoundError(f"directory not found: {rel_path.value}")
+        entries = []
+        for child in sorted(target.iterdir(), key=lambda p: p.name):
+            is_dir = child.is_dir()
+            entries.append(
+                DirEntry(
+                    name=child.name,
+                    is_dir=is_dir,
+                    size=0 if is_dir else child.stat().st_size,
+                )
+            )
+        return entries
+
+    def open_file_stream(self, rel_path: RelPath) -> ByteStream:
+        if self._pinned is None:
+            raise NotFoundError(f"file not found: {rel_path.value}")
+        # Resolve the target synchronously (the pinned path is stable).
+        target = self._storage._safe_target(self._pinned, rel_path)
+        # The lease is already held by the view; stream the file without an
+        # additional per-file lease.
+        return _pinned_file_stream(target, rel_path)
