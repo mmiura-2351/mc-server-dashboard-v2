@@ -9,6 +9,7 @@ import (
 	"net"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -608,5 +609,110 @@ func TestHandleStatusCacheMissAllowedResolves(t *testing.T) {
 
 	if c := resolver.calls.Load(); c != 1 {
 		t.Errorf("resolver should have been called once, got %d calls", c)
+	}
+}
+
+// --- Serve transient-accept-error retry tests ---
+
+// scriptedListener is a fake net.Listener that returns a scripted sequence of
+// (conn, error) results from Accept. Once the sequence is exhausted, Accept
+// blocks until the test closes the done channel.
+type scriptedListener struct {
+	results []acceptResult
+	idx     int
+	done    chan struct{}
+}
+
+type acceptResult struct {
+	conn net.Conn
+	err  error
+}
+
+func (s *scriptedListener) Accept() (net.Conn, error) {
+	if s.idx < len(s.results) {
+		r := s.results[s.idx]
+		s.idx++
+		return r.conn, r.err
+	}
+	<-s.done
+	return nil, net.ErrClosed
+}
+
+func (s *scriptedListener) Close() error {
+	select {
+	case <-s.done:
+	default:
+		close(s.done)
+	}
+	return nil
+}
+
+func (s *scriptedListener) Addr() net.Addr { return addrStr("127.0.0.1:0") }
+
+// addrStr implements net.Addr for tests.
+type addrStr string
+
+func (a addrStr) Network() string { return "tcp" }
+func (a addrStr) String() string  { return string(a) }
+
+// TestServeRetriesTransientAcceptError verifies that a transient EMFILE error
+// does not cause Serve to return; Serve must retry and only return on a
+// permanent (non-transient) error.
+func TestServeRetriesTransientAcceptError(t *testing.T) {
+	permanent := errors.New("permanent listener failure")
+	sl := &scriptedListener{
+		results: []acceptResult{
+			{nil, syscall.EMFILE}, // transient: should be retried
+			{nil, syscall.ENFILE}, // transient: should be retried
+			{nil, permanent},      // permanent: Serve must return this
+		},
+		done: make(chan struct{}),
+	}
+
+	l := &Listener{
+		ln:     sl,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	err := l.Serve(context.Background())
+	if !errors.Is(err, permanent) {
+		t.Errorf("Serve returned %v, want %v", err, permanent)
+	}
+	// Serve must have consumed all 3 results (retried the transient ones).
+	if sl.idx != 3 {
+		t.Errorf("Accept called %d times, want 3", sl.idx)
+	}
+}
+
+// TestServeTransientRetryStopsOnCancel verifies that when Accept returns
+// an endless stream of transient errors, cancelling the context causes Serve
+// to return nil (clean shutdown).
+func TestServeTransientRetryStopsOnCancel(t *testing.T) {
+	// An "infinite" stream of EMFILE errors (100 is more than enough to
+	// outlast the test timeout if the cancel did not work).
+	results := make([]acceptResult, 100)
+	for i := range results {
+		results[i] = acceptResult{nil, syscall.EMFILE}
+	}
+	sl := &scriptedListener{
+		results: results,
+		done:    make(chan struct{}),
+	}
+
+	l := &Listener{
+		ln:     sl,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// Cancel after a short delay so the backoff sleep is interrupted.
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+
+	err := l.Serve(ctx)
+	if err != nil {
+		t.Errorf("Serve returned %v on ctx cancel, want nil", err)
 	}
 }
