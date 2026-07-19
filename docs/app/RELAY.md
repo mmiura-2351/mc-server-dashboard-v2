@@ -270,10 +270,13 @@ splice. Unknown, expired, or reused tokens: the relay closes the connection
 without a response. Tunnel connections that send nothing within 5 s are
 dropped.
 
-Idle policy: the relay applies no idle timeout of its own to spliced sessions
-— the Minecraft protocol has keep-alives and the server kicks dead clients;
-the relay just propagates the close from either side and half-closes the
-other.
+Idle policy: the splice enforces progress deadlines per direction — a 5-minute
+idle read timeout and a 1-minute write-stall timeout. If no bytes arrive
+within the idle window (peer is TCP-alive but silent) or a write blocks beyond
+the stall window (peer's receive buffer full, peer not reading), the splice
+closes both connections and releases all associated resources. Minecraft's
+keep-alives (every 20 s) naturally refresh both deadlines under normal
+operation.
 
 ---
 
