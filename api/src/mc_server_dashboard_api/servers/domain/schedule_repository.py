@@ -81,18 +81,22 @@ class ScheduleRepository(abc.ABC):
         self,
         schedule_id: ScheduleId,
         *,
+        fired_occurrence: dt.datetime,
         next_run_at: dt.datetime,
         last_run_at: dt.datetime | None,
     ) -> None:
         """Persist only the runner's bookkeeping columns (issue #1838).
 
         A staged UPDATE of ``next_run_at`` / ``last_run_at`` guarded ``WHERE
-        enabled``: the runner works on a row read before a possibly long
-        execution, so writing the whole entity back would clobber a concurrent
-        CRUD edit — and re-setting ``next_run_at`` on a concurrently *disabled*
-        schedule would resurrect it (a disabled row keeps ``next_run_at`` NULL,
-        the domain invariant). Zero rows affected means the schedule was
-        disabled or deleted concurrently; the advance is silently skipped.
+        enabled AND next_run_at = fired_occurrence``: the runner works on a row
+        read before a possibly long execution, so writing the whole entity back
+        would clobber a concurrent CRUD edit — and re-setting ``next_run_at`` on
+        a concurrently *disabled* schedule would resurrect it (a disabled row
+        keeps ``next_run_at`` NULL, the domain invariant). The CAS on
+        ``next_run_at`` ensures a concurrent PATCH that changed the cadence and
+        recomputed ``next_run_at`` is never overwritten by the runner's stale
+        advance. Zero rows affected means the schedule was disabled, deleted, or
+        edited concurrently; the advance is silently skipped.
         Never writes name/action/payload/cadence/enabled.
         """
 

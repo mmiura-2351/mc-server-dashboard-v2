@@ -371,7 +371,10 @@ async def test_advance_run_state_updates_only_bookkeeping(engine: AsyncEngine) -
     next_run = _NOW + dt.timedelta(hours=1)
     async with ServersUnitOfWork(factory) as uow:
         await uow.schedules.advance_run_state(
-            schedule.id, next_run_at=next_run, last_run_at=_NOW
+            schedule.id,
+            fired_occurrence=schedule.next_run_at,  # type: ignore[arg-type]
+            next_run_at=next_run,
+            last_run_at=_NOW,
         )
         await uow.commit()
 
@@ -399,7 +402,10 @@ async def test_advance_run_state_skips_a_disabled_schedule(
 
     async with ServersUnitOfWork(factory) as uow:
         await uow.schedules.advance_run_state(
-            schedule.id, next_run_at=_NOW + dt.timedelta(hours=1), last_run_at=_NOW
+            schedule.id,
+            fired_occurrence=_NOW,  # any value; the row is disabled so it won't match
+            next_run_at=_NOW + dt.timedelta(hours=1),
+            last_run_at=_NOW,
         )
         await uow.commit()
 
@@ -409,6 +415,49 @@ async def test_advance_run_state_skips_a_disabled_schedule(
     assert fetched is not None
     assert fetched.enabled is False
     assert fetched.next_run_at is None
+    assert fetched.last_run_at is None
+
+
+async def test_advance_run_state_skips_when_next_run_at_moved_concurrently(
+    engine: AsyncEngine,
+) -> None:
+    """CAS guard: a concurrent PATCH that recomputed next_run_at wins (#1963)."""
+    server_id = await _seed_server(engine)
+    factory = create_session_factory(engine)
+    original_next = _NOW - dt.timedelta(minutes=1)
+    schedule = _schedule(server_id, enabled=True, next_run_at=original_next)
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.schedules.add(schedule)
+        await uow.commit()
+
+    # Simulate a concurrent PATCH that changed the cadence and recomputed
+    # next_run_at to a new value (T1) while the runner held the old one (T0).
+    patched_next = _NOW + dt.timedelta(hours=2)
+    async with ServersUnitOfWork(factory) as uow:
+        loaded = await uow.schedules.get_by_id(schedule.id)
+        assert loaded is not None
+        loaded.next_run_at = patched_next
+        await uow.schedules.update(loaded)
+        await uow.commit()
+
+    # The runner's advance passes fired_occurrence=T0 (the stale value it read
+    # at list_due time); the CAS guard should reject the UPDATE.
+    stale_fired = original_next
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.schedules.advance_run_state(
+            schedule.id,
+            fired_occurrence=stale_fired,
+            next_run_at=_NOW + dt.timedelta(hours=1),
+            last_run_at=_NOW,
+        )
+        await uow.commit()
+
+    # The concurrent edit's value survives; the runner's stale advance is a no-op.
+    async with ServersUnitOfWork(factory) as uow:
+        fetched = await uow.schedules.get_by_id(schedule.id)
+    assert fetched is not None
+    assert fetched.next_run_at == patched_next
     assert fetched.last_run_at is None
 
 

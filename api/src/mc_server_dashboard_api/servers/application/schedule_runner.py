@@ -583,13 +583,17 @@ class RunScheduleTick:
         # Recompute now HERE, not at tick start: after a long execution the next
         # occurrence must be strictly in the future of the advance instant, or a
         # slow run could land next_run_at already in the past. The write goes
-        # through the narrow bookkeeping UPDATE (guarded WHERE enabled) so a
-        # concurrent CRUD edit is never clobbered and a concurrently disabled
-        # schedule stays disabled — 0 rows matched is the silent-skip contract.
+        # through the narrow bookkeeping UPDATE (guarded WHERE enabled AND
+        # next_run_at = fired_occurrence) so a concurrent CRUD edit that changed
+        # the cadence is never clobbered and a concurrently disabled schedule
+        # stays disabled — 0 rows matched is the silent-skip contract.
+        fired = schedule.next_run_at
+        assert fired is not None  # list_due predicate guarantees non-None
         now = self.clock.now()
         async with self.uow:
             await self.uow.schedules.advance_run_state(
                 schedule.id,
+                fired_occurrence=fired,
                 next_run_at=self._next_after(schedule, now),
                 last_run_at=last_run_at,
             )
