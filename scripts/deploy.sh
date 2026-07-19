@@ -141,6 +141,14 @@ if [ ! -f .env ]; then
 	read -rp "MCD_API_SERVER__PUBLIC_BASE_URL (e.g. https://mc.example.com): " MCD_API_SERVER__PUBLIC_BASE_URL
 	MCD_API_SERVER__PUBLIC_BASE_URL="${MCD_API_SERVER__PUBLIC_BASE_URL:-}"
 
+	if [ -n "$MCD_API_SERVER__PUBLIC_BASE_URL" ]; then
+		case "$MCD_API_SERVER__PUBLIC_BASE_URL" in
+			https://*|http://*) ;;
+			*) MCD_API_SERVER__PUBLIC_BASE_URL="https://$MCD_API_SERVER__PUBLIC_BASE_URL" ;;
+		esac
+		MCD_API_SERVER__PUBLIC_BASE_URL="${MCD_API_SERVER__PUBLIC_BASE_URL%/}"
+	fi
+
 	# --- Write .env ---
 	install -m 600 /dev/null .env
 	cat > .env << ENVEOF
