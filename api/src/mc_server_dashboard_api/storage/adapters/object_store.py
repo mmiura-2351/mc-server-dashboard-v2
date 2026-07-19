@@ -80,6 +80,7 @@ from mc_server_dashboard_api.storage.domain.port import (
     RESTORE_PUBLISHER,
     ByteStream,
     DirEntry,
+    HydrateSource,
     JarPoolEntry,
     JarPoolStats,
     SnapshotHandle,
@@ -633,20 +634,51 @@ class ObjectStorage(Storage):
 
     def open_hydrate_source(
         self, community_id: CommunityId, server_id: ServerId
-    ) -> ByteStream:
+    ) -> HydrateSource:
         # The live snapshot is resolved and leased on the FIRST iteration (not at
         # open time), mirroring the fs adapter: a stream opened but never iterated
         # never pins a prefix, and the leased prefix is exactly the one streamed
         # (Section 4.2 reader safety).
-        return self._hydrate_gen(community_id, server_id)
+        #
+        # The generation is read atomically with the lease under the per-server async
+        # lock (issue #1954): a bump between a standalone generation read and the
+        # deferred lease would mislabel the served bytes, wedging the session's
+        # publishes.
+        source = HydrateSource.__new__(HydrateSource)
+        source.generation = None
+        source._inner = self._hydrate_gen(community_id, server_id, source)
+        return source
 
     async def _hydrate_gen(
-        self, community_id: CommunityId, server_id: ServerId
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        source: HydrateSource,
     ) -> AsyncIterator[bytes]:
         async with self._client_factory() as client:
+            server_prefix = self._server_prefix(community_id, server_id)
             snapshot_prefix = await self._lease_live_snapshot(
                 client, community_id, server_id
             )
+            # Read the generation under the server lock (issue #1954): the lease is
+            # already verified above (pointer still matches), and the lock prevents a
+            # concurrent publish from bumping the marker between verification and read.
+            # Re-verify the pointer under the lock: if it changed, the generation we'd
+            # read belongs to the NEW snapshot (a publish slipped between the lease
+            # verification and here). Release and re-lease in that case.
+            while True:
+                async with self._server_lock(community_id, server_id):
+                    current_pointer = await self._read_pointer(client, server_prefix)
+                    if current_pointer == snapshot_prefix:
+                        source.generation = await self._read_generation(
+                            client, server_prefix
+                        )
+                        break
+                # A publish slipped between lease and lock — re-lease.
+                self._release_lease(snapshot_prefix)
+                snapshot_prefix = await self._lease_live_snapshot(
+                    client, community_id, server_id
+                )
             try:
                 members = sorted(
                     await client.list_objects(snapshot_prefix), key=lambda o: o.key
