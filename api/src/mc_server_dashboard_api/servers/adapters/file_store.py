@@ -33,7 +33,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     NotFoundError,
     PathTraversalError,
 )
-from mc_server_dashboard_api.storage.domain.port import Storage
+from mc_server_dashboard_api.storage.domain.port import Storage, WorkingSetView
 from mc_server_dashboard_api.storage.domain.value_objects import (
     CommunityId as StorageCommunityId,
 )
@@ -263,56 +263,67 @@ class StorageFileStoreAdapter(FileStore):
         *,
         extra: list[tuple[str, bytes]] | None = None,
     ) -> AsyncIterator[bytes]:
-        # Verify the directory exists up front so a missing/invalid path surfaces
-        # the servers error before any bytes are streamed.
-        await self.list_dir(
-            community_id=community_id, server_id=server_id, rel_path=rel_path
-        )
+        community, server = _scope(community_id, server_id)
         sink = _ZipStreamSink()
-        # An unseekable sink drives zipfile's streaming mode (data descriptors,
-        # no seek-back to patch headers), so each entry's bytes can be flushed
-        # out as soon as they are written. Peak memory is one in-flight CHUNK plus
-        # its just-written zip block, never a whole member or the whole subtree:
-        # each member is read through the Storage per-file stream and copied into
-        # the zip chunk-by-chunk (issue #265).
-        with zipfile.ZipFile(sink, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-            async for arcname, member_stream in self._walk_files(
-                community_id, server_id, rel_path
-            ):
-                with zf.open(arcname, mode="w") as member:
-                    async for chunk in member_stream:
-                        member.write(chunk)
-                        for out in sink.drain():
-                            yield out
-                for out in sink.drain():
-                    yield out
-            for arcname, content in extra or ():
-                zf.writestr(arcname, content)
-                for out in sink.drain():
-                    yield out
-        for out in sink.drain():
-            yield out
+        # Pin one snapshot for the entire walk via the active-reader lease so a
+        # concurrent restore/publish cannot tear the zip mid-stream (issue #1966).
+        async with self._storage.open_working_set_view(community, server) as view:
+            # Verify the directory exists through the PINNED view so the check
+            # and the walk see the same snapshot (issue #1966 review finding 1).
+            try:
+                await view.list_dir(_rel_path(rel_path))
+            except PathTraversalError as exc:
+                raise InvalidFilePathError(rel_path) from exc
+            except NotFoundError as exc:
+                raise ServerFileNotFoundError(str(server_id.value)) from exc
+            # An unseekable sink drives zipfile's streaming mode (data
+            # descriptors, no seek-back to patch headers), so each entry's
+            # bytes can be flushed out as soon as they are written. Peak memory
+            # is one in-flight CHUNK plus its just-written zip block, never a
+            # whole member or the whole subtree: each member is read through
+            # the Storage per-file stream and copied into the zip
+            # chunk-by-chunk (issue #265).
+            with zipfile.ZipFile(
+                sink, mode="w", compression=zipfile.ZIP_DEFLATED
+            ) as zf:
+                async for arcname, member_stream in self._walk_files(view, rel_path):
+                    with zf.open(arcname, mode="w") as member:
+                        async for chunk in member_stream:
+                            member.write(chunk)
+                            for out in sink.drain():
+                                yield out
+                    for out in sink.drain():
+                        yield out
+                for arcname, content in extra or ():
+                    zf.writestr(arcname, content)
+                    for out in sink.drain():
+                        yield out
+            for out in sink.drain():
+                yield out
 
     async def _walk_files(
-        self, community_id: CommunityId, server_id: ServerId, rel_path: str
+        self, view: WorkingSetView, rel_path: str
     ) -> AsyncIterator[tuple[str, AsyncIterator[bytes]]]:
         """Yield ``(arcname, byte_stream)`` for every file under ``rel_path``.
 
         Depth-first. Arcnames are relative to ``rel_path`` so the zip contains the
         subtree itself, not the path leading to it. Each file is handed back as
-        the Storage per-file stream so the caller copies it into the zip
-        chunk-by-chunk (bounded memory, issue #265).
+        the view's per-file stream so the caller copies it into the zip
+        chunk-by-chunk (bounded memory, issue #265). All reads go through the
+        pinned :class:`WorkingSetView` so a concurrent publish cannot tear the walk
+        (issue #1966).
         """
 
         base = "" if rel_path in ("", ".") else rel_path.rstrip("/")
         stack = [base]
         while stack:
             current = stack.pop()
-            entries = await self.list_dir(
-                community_id=community_id,
-                server_id=server_id,
-                rel_path=current or ".",
-            )
+            try:
+                entries = await view.list_dir(_rel_path(current or "."))
+            except PathTraversalError as exc:
+                raise InvalidFilePathError(current) from exc
+            except NotFoundError as exc:
+                raise ServerFileNotFoundError(current) from exc
             for entry in entries:
                 child = f"{current}/{entry.name}" if current else entry.name
                 if entry.is_dir:
@@ -321,12 +332,25 @@ class StorageFileStoreAdapter(FileStore):
                 arcname = child[len(base) + 1 :] if base else child
                 yield (
                     arcname,
-                    self.open_file_stream(
-                        community_id=community_id,
-                        server_id=server_id,
-                        rel_path=child,
-                    ),
+                    self._view_file_stream(view, child),
                 )
+
+    def _view_file_stream(
+        self, view: WorkingSetView, rel_path: str
+    ) -> AsyncIterator[bytes]:
+        """Wrap :meth:`WorkingSetView.open_file_stream` with error translation."""
+        return self._view_file_stream_gen(view, rel_path)
+
+    async def _view_file_stream_gen(
+        self, view: WorkingSetView, rel_path: str
+    ) -> AsyncIterator[bytes]:
+        try:
+            async for chunk in view.open_file_stream(_rel_path(rel_path)):
+                yield chunk
+        except PathTraversalError as exc:
+            raise InvalidFilePathError(rel_path) from exc
+        except NotFoundError as exc:
+            raise ServerFileNotFoundError(str(rel_path)) from exc
 
     async def list_versions(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str

@@ -785,3 +785,52 @@ def test_validate_rel_path_accepts_clean_path(tmp_path: Path) -> None:
     adapter = StorageFileStoreAdapter(storage=FsStorage(tmp_path))
 
     adapter.validate_rel_path("world/level.dat")
+
+
+async def test_download_dir_pins_snapshot_across_concurrent_publish(
+    tmp_path: Path,
+) -> None:
+    """Regression #1966: a concurrent publish mid-stream must not tear the zip.
+
+    Seed a tree, start draining download_dir, publish a completely different tree
+    mid-stream, finish draining, and assert the zip contains the ORIGINAL tree.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    original = {
+        "world/level.dat": b"LEVEL_OLD",
+        "world/region/r.0.0.mca": healthy_region_bytes(),
+        "server.properties": b"PROPS_OLD",
+    }
+    await publish(
+        storage,
+        StorageCommunityId(community),
+        StorageServerId(server),
+        original,
+    )
+    adapter = StorageFileStoreAdapter(storage=storage)
+    cid, sid = CommunityId(community), ServerId(server)
+
+    stream = adapter.download_dir(community_id=cid, server_id=sid, rel_path=".")
+    # Pull the first chunk to start the stream (pins the snapshot).
+    chunks: list[bytes] = []
+    async for chunk in stream:
+        chunks.append(chunk)
+        if len(chunks) == 1:
+            # Mid-stream: publish a completely different tree.
+            await publish(
+                storage,
+                StorageCommunityId(community),
+                StorageServerId(server),
+                {"totally_different.txt": b"NEW_CONTENT"},
+            )
+
+    blob = b"".join(chunks)
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        contents = {name: zf.read(name) for name in zf.namelist()}
+    assert contents == {
+        "world/level.dat": b"LEVEL_OLD",
+        "world/region/r.0.0.mca": healthy_region_bytes(),
+        "server.properties": b"PROPS_OLD",
+    }
