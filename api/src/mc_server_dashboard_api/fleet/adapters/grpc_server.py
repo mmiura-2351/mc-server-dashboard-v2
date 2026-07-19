@@ -256,7 +256,19 @@ class WorkerSessionServicer(WorkerServiceServicer):
         # The registry resets this Worker's load to zero on (re)registration;
         # rebuild it from the authoritative running-server tally so placement is
         # correct after a reconnect (epic #7 reconciliation obligation).
-        await self._rebuild_assignments(worker_id)
+        try:
+            await self._rebuild_assignments(worker_id)
+        except Exception:
+            _LOG.warning(
+                "assignment rebuild failed; tearing down registration",
+                extra={"worker_id": worker_id.value},
+                exc_info=True,
+            )
+            self._registry.mark_disconnected(worker_id, session)
+            await context.abort(
+                grpc.StatusCode.UNAVAILABLE,
+                "assignment rebuild failed during registration",
+            )
 
         # Compute which held servers the Worker advertised no longer exist (issue
         # #924). Fail-safe: any exception returns an empty list so a DB error
