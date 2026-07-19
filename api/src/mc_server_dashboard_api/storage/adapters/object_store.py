@@ -660,26 +660,29 @@ class ObjectStorage(Storage):
             snapshot_prefix = await self._lease_live_snapshot(
                 client, community_id, server_id
             )
-            # Read the generation under the server lock (issue #1954): the lease is
-            # already verified above (pointer still matches), and the lock prevents a
-            # concurrent publish from bumping the marker between verification and read.
-            # Re-verify the pointer under the lock: if it changed, the generation we'd
-            # read belongs to the NEW snapshot (a publish slipped between the lease
-            # verification and here). Release and re-lease in that case.
-            while True:
-                async with self._server_lock(community_id, server_id):
-                    current_pointer = await self._read_pointer(client, server_prefix)
-                    if current_pointer == snapshot_prefix:
-                        source.generation = await self._read_generation(
+            try:
+                # Read the generation under the server lock (issue #1954): the lease
+                # is already verified above (pointer still matches), and the lock
+                # prevents a concurrent publish from bumping the marker between
+                # verification and read. Re-verify the pointer under the lock: if it
+                # changed, the generation we'd read belongs to the NEW snapshot (a
+                # publish slipped between the lease verification and here). Release
+                # and re-lease in that case.
+                while True:
+                    async with self._server_lock(community_id, server_id):
+                        current_pointer = await self._read_pointer(
                             client, server_prefix
                         )
-                        break
-                # A publish slipped between lease and lock — re-lease.
-                self._release_lease(snapshot_prefix)
-                snapshot_prefix = await self._lease_live_snapshot(
-                    client, community_id, server_id
-                )
-            try:
+                        if current_pointer == snapshot_prefix:
+                            source.generation = await self._read_generation(
+                                client, server_prefix
+                            )
+                            break
+                    # A publish slipped between lease and lock — re-lease.
+                    self._release_lease(snapshot_prefix)
+                    snapshot_prefix = await self._lease_live_snapshot(
+                        client, community_id, server_id
+                    )
                 members = sorted(
                     await client.list_objects(snapshot_prefix), key=lambda o: o.key
                 )

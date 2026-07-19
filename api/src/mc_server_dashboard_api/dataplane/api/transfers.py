@@ -235,7 +235,12 @@ async def hydrate_working_set(
     try:
         primed = await _prime(stream)
     except NotFoundError:
-        headers = {_GENERATION_HEADER: str(await storage.current_generation(*scope))}
+        # NotFoundError from the lazy lease proves the pointer is absent (no
+        # published snapshot) — the generation is definitionally 0. Stamping a
+        # literal avoids re-reading current_generation, which would reintroduce
+        # the mislabel race if a publish lands between the NotFoundError and the
+        # read (issue #1954).
+        headers = {_GENERATION_HEADER: "0"}
         if jar_member is None:
             return StreamingResponse(
                 _empty(),

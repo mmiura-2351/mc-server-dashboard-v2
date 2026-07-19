@@ -399,7 +399,11 @@ class FsStorage(Storage):
             lock = self._server_lock(community_id, server_id)
             with lock:
                 path, release = self._lease_current(community_id, server_id)
-                source.generation = self._read_generation(server_root)
+                try:
+                    source.generation = self._read_generation(server_root)
+                except BaseException:
+                    release()
+                    raise
             return path, release
 
         source._inner = _tar_stream(_open, self._tar_member_hook)

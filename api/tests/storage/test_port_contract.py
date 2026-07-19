@@ -359,6 +359,52 @@ async def test_hydrate_streams_incrementally_not_buffered(
     assert read_tar(b"".join(chunks)) == big
 
 
+async def test_hydrate_source_generation_none_before_iteration(
+    harness: StorageHarness,
+) -> None:
+    """HydrateSource.generation is None until the first chunk is pulled (#1954)."""
+    community, server = new_scope()
+    await harness.publish(community, server, {"f": b"DATA"})
+
+    source = harness.storage.open_hydrate_source(community, server)
+    assert source.generation is None
+    await source.__anext__()
+    assert source.generation is not None
+    await drain(source)
+
+
+async def test_hydrate_source_generation_equals_current_after_iteration(
+    harness: StorageHarness,
+) -> None:
+    """After first chunk, generation matches current_generation (#1954)."""
+    community, server = new_scope()
+    await harness.publish(community, server, {"f": b"ONE"})
+    expected = await harness.storage.current_generation(community, server)
+
+    source = harness.storage.open_hydrate_source(community, server)
+    await source.__anext__()
+    assert source.generation == expected
+    await drain(source)
+
+
+async def test_hydrate_source_generation_tracks_bumps(
+    harness: StorageHarness,
+) -> None:
+    """A second publish bumps the generation; a fresh hydrate reports it (#1954)."""
+    community, server = new_scope()
+    await harness.publish(community, server, {"f": b"ONE"})
+    gen1 = await harness.storage.current_generation(community, server)
+
+    await harness.publish(community, server, {"f": b"TWO"})
+    gen2 = await harness.storage.current_generation(community, server)
+    assert gen2 > gen1
+
+    source = harness.storage.open_hydrate_source(community, server)
+    await source.__anext__()
+    assert source.generation == gen2
+    await drain(source)
+
+
 async def test_abort_discards_staging_and_leaves_current_untouched(
     harness: StorageHarness,
 ) -> None:
