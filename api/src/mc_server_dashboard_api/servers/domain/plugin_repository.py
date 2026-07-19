@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import abc
 from collections.abc import Iterable
+from typing import NamedTuple
 
 from mc_server_dashboard_api.servers.domain.plugin import (
     PluginId,
@@ -17,6 +18,15 @@ from mc_server_dashboard_api.servers.domain.plugin import (
     ServerPlugin,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
+
+
+class CatalogProvenance(NamedTuple):
+    """Structured return for catalog-provenance recovery lookups."""
+
+    source: PluginSource
+    project_id: str
+    source_version_id: str | None
+    version_number: str | None
 
 
 class PluginRepository(abc.ABC):
@@ -102,12 +112,11 @@ class PluginRepository(abc.ABC):
     @abc.abstractmethod
     async def find_catalog_provenance_by_sha512(
         self, checksum_sha512: str
-    ) -> tuple[PluginSource, str, str | None, str | None] | None:
+    ) -> CatalogProvenance | None:
         """Return catalog provenance for a known SHA-512.
 
-        Returns ``(source, source_project_id, source_version_id, version_number)``
-        when a catalog-sourced plugin with a matching checksum exists, or ``None``
-        when no match is found.
+        Returns a :class:`CatalogProvenance` when a catalog-sourced plugin with
+        a matching checksum exists, or ``None`` when no match is found.
 
         The provenance-recovery lookup behind ghost re-ingestion (issue #2059):
         a jar re-ingested after a backup restore carries no DB row of its own, so
