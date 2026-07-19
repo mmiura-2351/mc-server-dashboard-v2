@@ -45,6 +45,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import StreamingResponse
+from starlette.types import Message, Send
 
 from mc_server_dashboard_api.dependencies import (
     AssignedWorkerLookup,
@@ -125,6 +126,12 @@ _MAX_SNAPSHOT_BYTES = 50 * 1024 * 1024 * 1024  # 50 GiB
 # connection is half-open and no data flows at all (the kernel's TCP keepalive
 # would eventually clean it up, but that can take hours).
 _CHUNK_IDLE_TIMEOUT: float = 120
+
+# Per-chunk send timeout for the hydrate download stream (issue #1822). If the
+# ASGI send (pushing a body chunk to the worker) blocks longer than this, the
+# worker is assumed partitioned (TCP buffer full, no reads). The stream is
+# aborted and the reader lease released so old-snapshot reclaim is not starved.
+_CHUNK_SEND_TIMEOUT: float = 120
 
 _BEARER_PREFIX = "Bearer "
 
@@ -264,11 +271,12 @@ async def hydrate_working_set(
     # The generation was stamped atomically with the lease on first iteration.
     headers = {_GENERATION_HEADER: str(stream.generation)}
     if jar_member is None:
-        return StreamingResponse(
-            primed, media_type="application/x-tar", headers=headers
+        return _DeadlineStreamingResponse(
+            primed, server_id=server_id, media_type="application/x-tar", headers=headers
         )
-    return StreamingResponse(
+    return _DeadlineStreamingResponse(
         _with_jar_member(primed, jar_member),
+        server_id=server_id,
         media_type="application/x-tar",
         headers=headers,
     )
@@ -616,6 +624,10 @@ class _ChunkIdleTimeout(Exception):
     """No new chunk arrived within the per-chunk idle deadline (issue #1699)."""
 
 
+class _ChunkSendTimeout(Exception):
+    """Worker did not accept a response chunk within the send deadline (#1822)."""
+
+
 class _ByteCounter:
     """Tee a request body stream, tallying the bytes that pass through.
 
@@ -664,6 +676,50 @@ class _ByteCounter:
             yield chunk
 
 
+class _DeadlineStreamingResponse(StreamingResponse):
+    """StreamingResponse with a per-chunk send deadline (issue #1822).
+
+    Wraps the ASGI ``send`` callable with ``asyncio.wait_for``: if pushing a
+    body chunk back-pressures longer than ``send_timeout`` seconds (the TCP
+    send buffer is full because the worker stopped reading), the stream is
+    aborted and :class:`_ChunkSendTimeout` raised so the generator's
+    ``finally`` releases the reader lease.
+    """
+
+    def __init__(
+        self,
+        content: object,
+        *,
+        server_id: object,
+        send_timeout: float | None = None,
+        **kwargs: object,
+    ) -> None:
+        super().__init__(content, **kwargs)  # type: ignore[arg-type]
+        self._send_timeout = (
+            send_timeout if send_timeout is not None else _CHUNK_SEND_TIMEOUT
+        )
+        self._server_id = server_id
+
+    async def stream_response(self, send: Send) -> None:
+        async def _timed_send(message: Message) -> None:
+            try:
+                await asyncio.wait_for(send(message), timeout=self._send_timeout)
+            except TimeoutError:
+                raise _ChunkSendTimeout from None
+
+        try:
+            await super().stream_response(_timed_send)
+        except _ChunkSendTimeout:
+            _logger.warning(
+                "hydrate download aborted: send stall for server %s",
+                self._server_id,
+            )
+            aclose = getattr(self.body_iterator, "aclose", None)
+            if aclose is not None:
+                await aclose()
+            raise
+
+
 async def _prime(stream: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
     """Pull the first chunk now (surfacing NotFoundError), then replay the rest."""
 
@@ -671,9 +727,14 @@ async def _prime(stream: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
     first = await iterator.__anext__()
 
     async def _replay() -> AsyncIterator[bytes]:
-        yield first
-        async for chunk in iterator:
-            yield chunk
+        try:
+            yield first
+            async for chunk in iterator:
+                yield chunk
+        finally:
+            aclose = getattr(iterator, "aclose", None)
+            if aclose is not None:
+                await aclose()
 
     return _replay()
 
@@ -726,6 +787,11 @@ async def _with_jar_member(
     set's members, then one end-of-archive marker.
     """
 
-    yield jar_member
-    async for chunk in working_set:
-        yield chunk
+    try:
+        yield jar_member
+        async for chunk in working_set:
+            yield chunk
+    finally:
+        aclose = getattr(working_set, "aclose", None)
+        if aclose is not None:
+            await aclose()
