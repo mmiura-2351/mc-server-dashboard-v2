@@ -405,6 +405,45 @@ async def test_hydrate_source_generation_tracks_bumps(
     await drain(source)
 
 
+async def test_hydrate_exclude_omits_named_top_level_member(
+    harness: StorageHarness,
+) -> None:
+    """open_hydrate_source(exclude=...) filters the named members (#1942).
+
+    The resolved-JAR injection (transfers.py) prepends ``server.jar`` to the
+    hydrate stream; excluding the embedded copy from the working set prevents
+    the stale jar from overwriting the injected one (last-wins in unpack).
+    """
+    community, server = new_scope()
+    await harness.publish(
+        community,
+        server,
+        {
+            "server.jar": b"old",
+            "server.properties": b"props",
+            "world/level.dat": b"dat",
+        },
+    )
+
+    # With exclude: the named member is omitted, others present.
+    blob = await drain(
+        harness.storage.open_hydrate_source(
+            community, server, exclude=frozenset({"server.jar"})
+        )
+    )
+    members = read_tar(blob)
+    assert "server.jar" not in members
+    assert members["server.properties"] == b"props"
+    assert members["world/level.dat"] == b"dat"
+
+    # Without exclude (default): all members present (fallback preserved).
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    members = read_tar(blob)
+    assert members["server.jar"] == b"old"
+    assert members["server.properties"] == b"props"
+    assert members["world/level.dat"] == b"dat"
+
+
 async def test_abort_discards_staging_and_leaves_current_untouched(
     harness: StorageHarness,
 ) -> None:
