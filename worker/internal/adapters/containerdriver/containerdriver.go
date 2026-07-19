@@ -770,9 +770,10 @@ type instance struct {
 	beforeRetryStart func()
 
 	// beforeReadyPublish is a test-only hook fired inside awaitReady after
-	// WaitReady returns success but before taking the lock to publish running,
-	// so a test can drive a Stop into the exact ready-publish window the guard
-	// must close (issue #2022). Nil in production.
+	// state is set to Running but before emitLocked publishes the event, under
+	// i.mu. A test spawns Stop here; pre-fix Stop could interleave (the lock was
+	// released between state write and emit), post-fix Stop blocks on the held
+	// lock (issue #2022). Nil in production.
 	beforeReadyPublish func()
 
 	// beforeSurvivedReset is a test-only hook fired inside Stop after the post-kill
@@ -878,15 +879,15 @@ func (i *instance) awaitReady() {
 	if !execution.WaitReady(i.logPump.Ready(), i.exited, i.readinessTimeout) {
 		return // the container exited first; supervise owns the terminal state.
 	}
-	if i.beforeReadyPublish != nil {
-		i.beforeReadyPublish()
-	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.state != execution.StateStarting {
 		return
 	}
 	i.state = execution.StateRunning
+	if i.beforeReadyPublish != nil {
+		i.beforeReadyPublish()
+	}
 	i.emitLocked(execution.StateRunning, "")
 }
 
