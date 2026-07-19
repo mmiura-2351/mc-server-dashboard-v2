@@ -1307,8 +1307,10 @@ class StopServer:
         still assigned to that worker. No command is dispatched — the server is
         already stopped (or the worker is gone) — and no placement-load decrement
         (the stop that wedged the row already decremented). The clear is logged
-        loud: the final snapshot was never published, so a later cross-worker
-        re-placement loses progression since the last periodic snapshot (the
+        loud: the final snapshot may still be in flight and land after the clear
+        — the data-plane commit-time assignment fence (issue #1703) prevents it
+        from wedging a re-placed server, but if no re-placement occurs before
+        it lands, progression since the last periodic snapshot is preserved (the
         documented #845/#847 exposure; a same-worker start reuses the retained
         scratch, #767).
         """
