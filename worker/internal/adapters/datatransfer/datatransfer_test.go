@@ -532,6 +532,143 @@ func TestSweepSnapshotSpoolsMissingRootIsNoOp(t *testing.T) {
 	SweepSnapshotSpools(filepath.Join(t.TempDir(), "absent"))
 }
 
+// PackSnapshot creates a tar spool in the scratch root (srcDir's parent) that
+// contains the working set, and its cleanup function removes the spool (issue #1710).
+func TestPackSnapshotSpoolsToScratchRoot(t *testing.T) {
+	scratch := t.TempDir()
+	srcDir := filepath.Join(scratch, "server")
+	if err := os.MkdirAll(filepath.Join(srcDir, "world"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "server.properties"), []byte("p"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "world", "level.dat"), []byte("w"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	c := New(nil) // no http.Client needed for packing
+	spoolPath, cleanup, err := c.PackSnapshot(context.Background(), srcDir)
+	if err != nil {
+		t.Fatalf("PackSnapshot: %v", err)
+	}
+	// The spool must exist in the scratch root with the expected prefix.
+	if filepath.Dir(spoolPath) != scratch {
+		t.Fatalf("spool dir = %q, want %q (the scratch root)", filepath.Dir(spoolPath), scratch)
+	}
+	if !strings.HasPrefix(filepath.Base(spoolPath), snapshotSpoolPrefix) {
+		t.Fatalf("spool name = %q, want prefix %q", filepath.Base(spoolPath), snapshotSpoolPrefix)
+	}
+	if !strings.HasSuffix(spoolPath, ".tar") {
+		t.Fatalf("spool name = %q, want .tar suffix", filepath.Base(spoolPath))
+	}
+	// The spool must round-trip the working set.
+	f, err := os.Open(spoolPath)
+	if err != nil {
+		t.Fatalf("open spool: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	files := map[string]string{}
+	tr := tar.NewReader(f)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if h.Typeflag == tar.TypeReg {
+			b, _ := io.ReadAll(tr)
+			files[h.Name] = string(b)
+		}
+	}
+	if files["server.properties"] != "p" || files["world/level.dat"] != "w" {
+		t.Fatalf("spool tar = %v", files)
+	}
+	// Cleanup removes the spool.
+	cleanup()
+	if _, err := os.Stat(spoolPath); !os.IsNotExist(err) {
+		t.Fatalf("spool not removed by cleanup: stat err = %v", err)
+	}
+}
+
+// UploadSnapshot streams the spool file with the correct headers and returns
+// the API's generation from the response (issue #1710).
+func TestUploadSnapshotStreamsSpoolWithHeaders(t *testing.T) {
+	// Create a spool from a real working set using PackSnapshot.
+	scratch := t.TempDir()
+	srcDir := filepath.Join(scratch, "server")
+	if err := os.MkdirAll(srcDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "server.properties"), []byte("p"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	c := New(nil)
+	spoolPath, cleanup, err := c.PackSnapshot(context.Background(), srcDir)
+	if err != nil {
+		t.Fatalf("PackSnapshot: %v", err)
+	}
+	defer cleanup()
+
+	var gotLen int64
+	var gotBaseGen string
+	var gotWorkerID string
+	var gotAuth string
+	var received []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotLen = r.ContentLength
+		gotBaseGen = r.Header.Get("X-Working-Set-Base-Generation")
+		gotWorkerID = r.Header.Get("X-Worker-Id")
+		gotAuth = r.Header.Get("Authorization")
+		received, _ = io.ReadAll(r.Body)
+		w.Header().Set("X-Working-Set-Generation", "42")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	uploadClient := New(srv.Client())
+	gen, err := uploadClient.UploadSnapshot(context.Background(), srv.URL, "tok", spoolPath, 7, "worker-7")
+	if err != nil {
+		t.Fatalf("UploadSnapshot: %v", err)
+	}
+	if gen != 42 {
+		t.Fatalf("generation = %d, want 42", gen)
+	}
+	if gotAuth != "Bearer tok" {
+		t.Fatalf("Authorization = %q, want %q", gotAuth, "Bearer tok")
+	}
+	if gotBaseGen != "7" {
+		t.Fatalf("X-Working-Set-Base-Generation = %q, want %q", gotBaseGen, "7")
+	}
+	if gotWorkerID != "worker-7" {
+		t.Fatalf("X-Worker-Id = %q, want %q", gotWorkerID, "worker-7")
+	}
+	if gotLen <= 0 || gotLen != int64(len(received)) {
+		t.Fatalf("Content-Length = %d, body len = %d (must match and be > 0)", gotLen, len(received))
+	}
+	// The uploaded tar must contain the packed file.
+	files := map[string]string{}
+	tarR := tar.NewReader(bytes.NewReader(received))
+	for {
+		h, err := tarR.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if h.Typeflag == tar.TypeReg {
+			b, _ := io.ReadAll(tarR)
+			files[h.Name] = string(b)
+		}
+	}
+	if files["server.properties"] != "p" {
+		t.Fatalf("uploaded tar = %v", files)
+	}
+}
+
 func TestSnapshotEmptyDirUploadsEmptyTar(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)

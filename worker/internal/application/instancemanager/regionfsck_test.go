@@ -167,8 +167,8 @@ func TestSnapshotTriggerRunningServerFsckRetriesPastTransientCorruption(t *testi
 	if !res.Success {
 		t.Fatalf("SnapshotTrigger = %+v, want success after the transient corruption clears on retry", res)
 	}
-	if len(tr.snapshots) != 1 {
-		t.Fatalf("snapshots = %v, want one once a retry reads the set clean", tr.snapshots)
+	if len(tr.packs) != 1 {
+		t.Fatalf("packs = %v, want one once a retry reads the set clean", tr.packs)
 	}
 }
 
@@ -209,8 +209,8 @@ func TestSnapshotTriggerRunningServerSettlesThenProceeds(t *testing.T) {
 	if !res.Success {
 		t.Fatalf("SnapshotTrigger = %+v, want success once the region settles", res)
 	}
-	if len(tr.snapshots) != 1 {
-		t.Fatalf("snapshots = %v, want one once the working set settles", tr.snapshots)
+	if len(tr.packs) != 1 {
+		t.Fatalf("packs = %v, want one once the working set settles", tr.packs)
 	}
 	// The settle-wait must have polled past the changing scans before proceeding, not
 	// proceeded on the first scan: at least the prime scan + the scans up to stability.
@@ -260,8 +260,8 @@ func TestSnapshotTriggerRunningServerUnalignedTailProceeds(t *testing.T) {
 	if !res.Success {
 		t.Fatalf("SnapshotTrigger over an unaligned working set = %+v, want success", res)
 	}
-	if len(tr.snapshots) != 1 {
-		t.Fatalf("unaligned set must be uploaded; snapshots = %v", tr.snapshots)
+	if len(tr.packs) != 1 {
+		t.Fatalf("unaligned set must be uploaded; packs = %v", tr.packs)
 	}
 }
 
