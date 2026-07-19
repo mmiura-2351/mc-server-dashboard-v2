@@ -3,6 +3,7 @@ package instancemanager
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -487,4 +488,54 @@ func TestRestartMidStartStillBusy(t *testing.T) {
 	}
 
 	close(d.release)
+}
+
+// Concurrent StartServer + RestartServer on the same id must never permanently
+// leak a reservation. The pre-fix TOCTOU window between hasRunning (which
+// released mu) and the inner takeRunningReserve allowed a concurrent start to
+// commit the instance between the two calls, causing takeFound whose evicted
+// instance was discarded without release — permanently wedging the id.
+//
+// This stress test opens that window by hammering concurrent start+restart
+// pairs over many unique ids. Under the old code it reliably leaks within a few
+// thousand iterations (~0.5s); under the fix it passes deterministically.
+func TestRestartConcurrentStartNeverLeaksReservation(t *testing.T) {
+	const iterations = 30000
+	d := &fakeDriver{}
+	m := newManager(t, d, nil)
+
+	for i := 0; i < iterations; i++ {
+		id := fmt.Sprintf("srv-%d", i)
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		go func() {
+			defer wg.Done()
+			m.Handle(context.Background(), session.Command{
+				CommandID: "start-" + id, ServerID: id, Kind: "StartServer",
+				Driver: "container", MinecraftVersion: "1.21",
+			})
+		}()
+
+		go func() {
+			defer wg.Done()
+			m.Handle(context.Background(), session.Command{
+				CommandID: "restart-" + id, ServerID: id, Kind: "RestartServer",
+			})
+		}()
+
+		wg.Wait()
+
+		// The id must not be leaked as reserved: a follow-up StartServer for the
+		// same id must never return BUSY. Under the pre-fix race, takeFound inside
+		// the hasRunning-false branch discarded the evicted instance and returned
+		// SERVER_NOT_FOUND without calling release(), permanently leaking
+		// reserved[id]=true.
+		m.mu.Lock()
+		leaked := m.reserved[id]
+		m.mu.Unlock()
+		if leaked {
+			t.Fatalf("iteration %d: reserved[%s] leaked after concurrent start+restart (issue #1950)", i, id)
+		}
+	}
 }
