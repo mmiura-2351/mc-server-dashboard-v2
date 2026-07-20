@@ -292,11 +292,15 @@ class SqlAlchemyRefreshTokenRepository(RefreshTokenRepository):
     ) -> None:
         stmt = update(RefreshTokenModel).where(
             RefreshTokenModel.user_id == user_id.value,
-            RefreshTokenModel.revoked_at.is_(None),
+            (RefreshTokenModel.revoked_at.is_(None))
+            | (RefreshTokenModel.revoked_reason == REVOKED_ROTATED),
         )
         if keep_token_hash is not None:
             stmt = stmt.where(RefreshTokenModel.token_hash != keep_token_hash)
         if keep_session_id is not None:
             stmt = stmt.where(RefreshTokenModel.id != keep_session_id.value)
-        stmt = stmt.values(revoked_at=revoked_at, revoked_reason=reason)
+        stmt = stmt.values(
+            revoked_at=func.coalesce(RefreshTokenModel.revoked_at, revoked_at),
+            revoked_reason=reason,
+        )
         await self._session.execute(stmt)
