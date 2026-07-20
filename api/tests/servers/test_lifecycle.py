@@ -3515,7 +3515,9 @@ async def test_clear_stale_assignment_stopped_unknown_connected_raises() -> None
 
 
 async def test_clear_stale_assignment_stopped_stopped_still_works() -> None:
-    # The original #847 case still works: (stopped, stopped, assigned) clears.
+    # Issue #1004: (stopped, stopped, assigned) + worker connected -> snapshot
+    # dispatched THEN assignment cleared (the fix: generation advances before
+    # a cross-worker re-placement can hydrate).
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
     uow.servers.seed(
@@ -3527,13 +3529,144 @@ async def test_clear_stale_assignment_stopped_stopped_still_works() -> None:
             worker_id=worker,
         )
     )
-    cp = FakeControlPlane()
+    cp = FakeControlPlane(connected={WorkerId(worker): True})
     result = await StopServer(
         uow=uow, control_plane=cp, clock=FakeClock(_NOW)
     ).clear_stale_assignment(
         community_id=CommunityId(community), server_id=ServerId(server_id)
     )
     assert result.assigned_worker_id is None
+    # The snapshot was dispatched before clearing.
+    assert ("snapshot", WorkerId(worker), ServerId(server_id)) in cp.dispatched
+
+
+async def test_clear_stale_assignment_stopped_stopped_disconnected_skips_snapshot() -> (
+    None
+):
+    # Issue #1004: (stopped, stopped, assigned) + worker DISCONNECTED -> no
+    # snapshot dispatched (worker is gone), assignment still cleared.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.STOPPED,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(connected={WorkerId(worker): False})
+    result = await StopServer(
+        uow=uow, control_plane=cp, clock=FakeClock(_NOW)
+    ).clear_stale_assignment(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    assert result.assigned_worker_id is None
+    assert cp.dispatched == []
+
+
+async def test_clear_stale_assignment_snapshot_timeout_holds() -> None:
+    # Issue #1004: snapshot times out -> raise WorkerUnavailableError, row stays
+    # assigned so the reconciler backs off.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.STOPPED,
+            worker_id=worker,
+        )
+    )
+
+    class _SnapshotTimesOut(FakeControlPlane):
+        async def snapshot(
+            self,
+            *,
+            worker_id: WorkerId,
+            community_id: CommunityId,
+            server_id: ServerId,
+            final: bool = False,
+        ) -> CommandOutcome:
+            self.dispatched.append(("snapshot", worker_id, server_id))
+            try:
+                raise CommandTimedOutError(str(worker_id.value))
+            except CommandTimedOutError as exc:
+                raise WorkerUnavailableError(
+                    str(worker_id.value), upload_may_be_live=True
+                ) from exc
+
+    cp = _SnapshotTimesOut(connected={WorkerId(worker): True})
+    with pytest.raises(WorkerUnavailableError):
+        await StopServer(
+            uow=uow, control_plane=cp, clock=FakeClock(_NOW)
+        ).clear_stale_assignment(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+    # Assignment kept — the upload may still be live.
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.assigned_worker_id == WorkerId(worker)
+
+
+async def test_clear_stale_assignment_snapshot_failure_still_clears() -> None:
+    # Issue #1004: snapshot FAILS (e.g. TRANSFER_FAILED) -> clear still proceeds
+    # (same as today's behavior — loud log, but the wedge is recovered).
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.STOPPED,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(
+        connected={WorkerId(worker): True},
+        outcome=CommandOutcome(
+            status=CommandStatus.TRANSFER_FAILED, message="upload failed"
+        ),
+    )
+    result = await StopServer(
+        uow=uow, control_plane=cp, clock=FakeClock(_NOW)
+    ).clear_stale_assignment(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    assert result.assigned_worker_id is None
+    assert ("snapshot", WorkerId(worker), ServerId(server_id)) in cp.dispatched
+
+
+async def test_clear_stale_assignment_benign_duplicate_clears() -> None:
+    # Issue #1004: snapshot returns SERVER_NOT_FOUND with working_set_absent
+    # (benign duplicate — scratch already GC'd) -> clear proceeds.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.STOPPED,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(
+        connected={WorkerId(worker): True},
+        outcome=CommandOutcome(
+            status=CommandStatus.SERVER_NOT_FOUND,
+            message="working_set_absent: scratch GC'd",
+        ),
+    )
+    result = await StopServer(
+        uow=uow, control_plane=cp, clock=FakeClock(_NOW)
+    ).clear_stale_assignment(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    assert result.assigned_worker_id is None
+    assert ("snapshot", WorkerId(worker), ServerId(server_id)) in cp.dispatched
 
 
 # --- bedrock tunnel sync (issue #1602) --------------------------------------
