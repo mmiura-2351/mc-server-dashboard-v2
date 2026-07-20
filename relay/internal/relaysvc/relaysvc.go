@@ -42,9 +42,11 @@ type registrar interface {
 }
 
 // activeSessionSource yields the still-open session ids for re-registration
-// (the session reporter implements it).
+// (the session reporter implements it). SnapshotActive returns the ids and a
+// release function; while held, the reporter's flush is blocked so the
+// snapshot is consistent with the buffer (issue #1718).
 type activeSessionSource interface {
-	ActiveSessionIDs() []string
+	SnapshotActive() (ids []string, release func())
 }
 
 // apiConn is the subset of the gRPC client connection Run watches to re-register
@@ -101,12 +103,17 @@ func (s *Service) ResolveJoin(ctx context.Context, slug, playerIP string, intent
 
 // RegisterOnce attempts a single Register, storing the learned base_domain on
 // success. The call is bounded by registerTimeout so a black-holed API
-// connection cannot stall the loop (issue #971). Exposed for tests; Run drives
-// it with backoff.
+// connection cannot stall the loop (issue #971). The active-session snapshot
+// holds the reporter's flush barrier for the duration of the RPC so a
+// concurrent flush cannot deliver a SessionStart that the stale active set
+// omits — preventing the orphan-healing race (issue #1718). Exposed for tests;
+// Run drives it with backoff.
 func (s *Service) RegisterOnce(ctx context.Context) error {
+	ids, release := s.sessions.SnapshotActive()
+	defer release()
 	rctx, cancel := context.WithTimeout(ctx, registerTimeout)
 	defer cancel()
-	base, err := s.client.Register(rctx, s.tunnelEndpoint, s.tunnelCAPEM, s.sessions.ActiveSessionIDs())
+	base, err := s.client.Register(rctx, s.tunnelEndpoint, s.tunnelCAPEM, ids)
 	if err != nil {
 		return err
 	}

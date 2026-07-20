@@ -296,3 +296,96 @@ func (s *slowClient) ReportSessions(ctx context.Context, starts []apiclient.Sess
 	s.once.Do(func() { time.Sleep(s.delay) })
 	return s.inner.ReportSessions(ctx, starts, ends)
 }
+
+// gatedClient blocks inside ReportSessions until gate is closed, letting tests
+// observe the flush-in-flight state.
+type gatedClient struct {
+	gate  chan struct{} // close to unblock
+	inner *fakeReportClient
+}
+
+func (g *gatedClient) ReportSessions(ctx context.Context, starts []apiclient.SessionStart, ends []apiclient.SessionEnd) error {
+	<-g.gate
+	return g.inner.ReportSessions(ctx, starts, ends)
+}
+
+// TestSnapshotActiveExcludesFlush verifies the barrier: while SnapshotActive is
+// held, a concurrent flush cannot run (the Start event stays buffered).
+func TestSnapshotActiveExcludesFlush(t *testing.T) {
+	fake := &fakeReportClient{}
+	r := NewReporter(fake, discardLogger(), nil, nil)
+	r.WithFlushInterval(time.Millisecond) // tiny interval
+
+	// Hold the barrier.
+	ids, release := r.SnapshotActive()
+	if len(ids) != 0 {
+		t.Fatalf("expected no active sessions, got %v", ids)
+	}
+
+	// Start a session while the barrier is held.
+	r.Start("srv", "amber", "1.2.3.4", "Steve", "uuid", apiclient.SourceJava)
+
+	// Run the reporter briefly; flushes should be blocked.
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+	time.Sleep(50 * time.Millisecond)
+
+	s, _ := fake.counts()
+	if s != 0 {
+		t.Fatalf("flush ran while barrier held: starts=%d, want 0", s)
+	}
+
+	// Release the barrier; the flush should proceed.
+	release()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	<-done
+
+	s, _ = fake.counts()
+	if s != 1 {
+		t.Errorf("flush did not deliver after barrier released: starts=%d, want 1", s)
+	}
+}
+
+// TestSnapshotActiveWaitsForInflightFlush verifies the barrier from the other
+// direction: SnapshotActive blocks until an in-flight flush completes.
+func TestSnapshotActiveWaitsForInflightFlush(t *testing.T) {
+	gate := make(chan struct{})
+	fake := &gatedClient{gate: gate, inner: &fakeReportClient{}}
+	r := NewReporter(fake, discardLogger(), nil, nil)
+
+	r.Start("srv", "amber", "1.2.3.4", "Steve", "uuid", apiclient.SourceJava)
+
+	// Trigger a flush that will block inside ReportSessions.
+	flushDone := make(chan struct{})
+	go func() { r.flush(context.Background()); close(flushDone) }()
+	time.Sleep(20 * time.Millisecond) // let flush enter the RPC
+
+	// SnapshotActive should block because the flush holds flightMu.
+	snapped := make(chan struct{})
+	go func() {
+		_, rel := r.SnapshotActive()
+		rel()
+		close(snapped)
+	}()
+
+	// Give SnapshotActive a chance to return (it shouldn't).
+	select {
+	case <-snapped:
+		t.Fatal("SnapshotActive returned while flush was in flight")
+	case <-time.After(50 * time.Millisecond):
+		// expected: still blocked
+	}
+
+	// Unblock the flush.
+	close(gate)
+	<-flushDone
+
+	select {
+	case <-snapped:
+		// SnapshotActive returned after flush completed — correct.
+	case <-time.After(2 * time.Second):
+		t.Fatal("SnapshotActive did not return after flush completed")
+	}
+}
