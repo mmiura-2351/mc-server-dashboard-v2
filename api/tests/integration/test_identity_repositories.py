@@ -484,6 +484,106 @@ async def test_revoke_all_for_user_except_keeps_current(
     assert loaded_bob is not None and loaded_bob.revoked_at is None
 
 
+async def test_revoke_all_for_user_except_restamps_rotated_preserving_revoked_at(
+    engine: AsyncEngine,
+) -> None:
+    """#2172: rotated predecessors re-stamped, COALESCE preserves revoked_at."""
+    factory = create_session_factory(engine)
+    alice = _user(username="alice", email="alice@example.com")
+    bob = _user(username="bob", email="bob@example.com")
+    rotated_at = _NOW - dt.timedelta(seconds=30)
+    kept = RefreshToken(
+        id=RefreshTokenId.new(),
+        user_id=alice.id,
+        token_hash="kept",
+        issued_at=_NOW,
+        expires_at=_NOW + dt.timedelta(days=30),
+    )
+    active_other = RefreshToken(
+        id=RefreshTokenId.new(),
+        user_id=alice.id,
+        token_hash="active-other",
+        issued_at=_NOW,
+        expires_at=_NOW + dt.timedelta(days=30),
+    )
+    rotated = RefreshToken(
+        id=RefreshTokenId.new(),
+        user_id=alice.id,
+        token_hash="rotated",
+        issued_at=_NOW,
+        expires_at=_NOW + dt.timedelta(days=30),
+    )
+    superseded = RefreshToken(
+        id=RefreshTokenId.new(),
+        user_id=alice.id,
+        token_hash="superseded",
+        issued_at=_NOW,
+        expires_at=_NOW + dt.timedelta(days=30),
+    )
+    bobs = RefreshToken(
+        id=RefreshTokenId.new(),
+        user_id=bob.id,
+        token_hash="bobs",
+        issued_at=_NOW,
+        expires_at=_NOW + dt.timedelta(days=30),
+    )
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.users.add(alice)
+        await uow.users.add(bob)
+        await uow.commit()
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        for tok in (kept, active_other, rotated, superseded, bobs):
+            await uow.refresh_tokens.add(tok)
+        await uow.commit()
+    # Seed revoked state via revoke() — add() does not persist revoked_reason.
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.refresh_tokens.revoke(
+            "rotated", revoked_at=rotated_at, reason=REVOKED_ROTATED
+        )
+        await uow.refresh_tokens.revoke(
+            "superseded", revoked_at=rotated_at, reason=REVOKED_SUPERSEDED
+        )
+        await uow.commit()
+
+    sweep_at = _NOW + dt.timedelta(hours=1)
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.refresh_tokens.revoke_all_for_user_except(
+            alice.id,
+            keep_token_hash="kept",
+            revoked_at=sweep_at,
+            reason=REVOKED_USER,
+        )
+        await uow.commit()
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        loaded_kept = await uow.refresh_tokens.get_by_token_hash("kept")
+        loaded_active = await uow.refresh_tokens.get_by_token_hash("active-other")
+        loaded_rotated = await uow.refresh_tokens.get_by_token_hash("rotated")
+        loaded_superseded = await uow.refresh_tokens.get_by_token_hash("superseded")
+        loaded_bob = await uow.refresh_tokens.get_by_token_hash("bobs")
+
+    # Kept session: untouched.
+    assert loaded_kept is not None and loaded_kept.revoked_at is None
+
+    # Active other: newly revoked with the sweep reason and time.
+    assert loaded_active is not None
+    assert loaded_active.revoked_at == sweep_at
+    assert loaded_active.revoked_reason == REVOKED_USER
+
+    # Rotated predecessor: reason changed, revoked_at preserved (COALESCE).
+    assert loaded_rotated is not None
+    assert loaded_rotated.revoked_at == rotated_at
+    assert loaded_rotated.revoked_reason == REVOKED_USER
+
+    # Superseded: untouched (not in the WHERE clause).
+    assert loaded_superseded is not None
+    assert loaded_superseded.revoked_at == rotated_at
+    assert loaded_superseded.revoked_reason == REVOKED_SUPERSEDED
+
+    # Other user: untouched.
+    assert loaded_bob is not None and loaded_bob.revoked_at is None
+
+
 async def test_deleting_user_cascades_to_refresh_tokens(
     engine: AsyncEngine,
 ) -> None:
