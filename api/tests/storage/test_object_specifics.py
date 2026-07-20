@@ -11,10 +11,13 @@ orphan-prefix sweep (lease-aware, keyed off the live pointer).
 from __future__ import annotations
 
 import datetime as dt
+import io
 import json
+import tarfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -34,6 +37,7 @@ from mc_server_dashboard_api.storage.adapters.object_store import (
     _spool_stream,
 )
 from mc_server_dashboard_api.storage.domain.errors import (
+    ArchiveTooLargeError,
     IntegrityCheckError,
     MissingRegionsError,
     PathTraversalError,
@@ -46,6 +50,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 )
 from tests.storage.fake_s3 import FakeS3Store, close_tracking_factory, fake_s3_factory
 from tests.storage.helpers import (
+    bomb_targz,
     drain,
     healthy_region_bytes,
     mode_invariant_corrupt_region_bytes,
@@ -1144,6 +1149,92 @@ async def test_backup_pack_survives_concurrent_publish_gc() -> None:
     assert backup_key in store.objects
     blob = store.objects[backup_key]
     assert read_tar(blob) == {"f": b"OLD"}
+
+
+# --- single-pass restore regression (issue #1945) --------------------------------
+
+
+async def test_restore_opens_gzip_spool_exactly_once() -> None:
+    """Issue #1945: restore_backup must decompress the gzip spool in a single
+    sequential pass, not re-open the archive per member (O(n^2)).
+
+    Patch ``tarfile.open`` to count invocations on the spool path during
+    restore. A correct single-pass implementation opens the spool exactly once;
+    the old per-member implementation opened it 1 + N times (once for the
+    member-list scan, once per member).
+    """
+
+    from unittest.mock import patch
+
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    files = {"a": b"A", "b": b"B", "c": b"C"}
+    await _publish(storage, community, server, files)
+    key = await storage.create_backup_from_current(community, server)
+
+    open_count = {"n": 0}
+    original_open = tarfile.open
+
+    def _counting_open(*args: Any, **kwargs: Any) -> tarfile.TarFile:
+        open_count["n"] += 1
+        return original_open(*args, **kwargs)
+
+    with patch("tarfile.open", side_effect=_counting_open):
+        await storage.restore_backup(community, server, key)
+
+    assert open_count["n"] == 1, (
+        f"expected exactly 1 tarfile.open call (single pass), got {open_count['n']}"
+    )
+
+    # The restored content must still be correct.
+    blob = await drain(storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == files
+
+
+async def test_restore_single_pass_rejects_traversal_escape() -> None:
+    """The single-pass restore path must still reject hostile ``../`` members
+    with PathTraversalError, leaving no leftover staging objects (#1945)."""
+
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    await _publish(storage, community, server, {"f": b"seed"})
+
+    # Build a hostile tar.gz backup with an escaping member.
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        content = b"pwned"
+        info = tarfile.TarInfo(name="../escape.txt")
+        info.size = len(content)
+        tar.addfile(info, io.BytesIO(content))
+    hostile_targz = buf.getvalue()
+
+    backup_key = await storage.put_backup(community, server, stream_of(hostile_targz))
+
+    with pytest.raises(PathTraversalError):
+        await storage.restore_backup(community, server, backup_key)
+
+    # No leftover staging objects.
+    incoming = _server_prefix(community, server) + "incoming/"
+    assert not any(k.startswith(incoming) for k in store.objects)
+
+
+async def test_restore_single_pass_counts_cumulative_bytes() -> None:
+    """The single-pass restore path must still enforce the decompressed-bytes
+    budget across members, raising ArchiveTooLargeError (#1945, #287)."""
+
+    store = FakeS3Store()
+    storage = ObjectStorage(
+        close_tracking_factory(fake_s3_factory(store)),
+        max_restore_bytes=1024,
+    )
+    community, server = new_scope()
+    await _publish(storage, community, server, {"f": b"seed"})
+
+    bomb = bomb_targz()
+    backup_key = await storage.put_backup(community, server, stream_of(bomb))
+
+    with pytest.raises(ArchiveTooLargeError):
+        await storage.restore_backup(community, server, backup_key)
 
 
 async def test_commit_refuses_when_generation_marker_removed() -> None:

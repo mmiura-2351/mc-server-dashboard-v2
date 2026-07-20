@@ -1216,16 +1216,17 @@ class ObjectStorage(Storage):
                 # it through the same pointer-flip path as a snapshot (Section 4.1).
                 spool = await _spool_object(client, backup_key, ".restore.", ".tar.gz")
                 try:
-                    # Count cumulative DECOMPRESSED bytes across members: a gzip
-                    # member can expand ~1000x past the compressed object, so the cap
-                    # aborts a bomb before it fills the store (#287).
+                    # Single sequential pass (#1945): open the gzip spool
+                    # ONCE in stream mode and upload each member as it is
+                    # encountered. The old per-member approach re-opened the
+                    # archive for every member, re-decompressing the entire
+                    # gzip stream each time — O(n * total_decompressed_bytes).
                     budget = _RestoreBudget(self._max_restore_bytes)
-                    for name in await asyncio.to_thread(
-                        _safe_archive_members, spool, "r:gz"
+                    async for name, parts in _archive_file_member_streams(
+                        spool, "r|gz"
                     ):
                         await client.upload_multipart(
-                            incoming + name,
-                            budget.count(_archive_member_parts(spool, name, "r:gz")),
+                            incoming + name, budget.count(parts)
                         )
                     staged = await client.list_objects(incoming)
                     # Restore-direction integrity gate (issue #750), mirroring the fs
@@ -2074,6 +2075,49 @@ def _open_member(
         tar.close()
         raise NotFoundError(f"tar member not found: {name!r}")
     return tar, member_file
+
+
+async def _archive_file_member_streams(
+    spool: Path, mode: Literal["r|*", "r|gz"]
+) -> AsyncIterator[tuple[str, AsyncIterator[bytes]]]:
+    """Single-pass streaming extraction of an archive's file members (#1945).
+
+    Opens the spooled archive ONCE in tar stream mode (``r|gz`` / ``r|*``),
+    iterates members with ``tar.next()``, validates each name inline (same
+    traversal rule as ``_safe_archive_members``), and yields ``(name,
+    chunk_stream)`` pairs. The caller MUST fully consume each chunk stream
+    before advancing to the next member (stream mode reads sequentially).
+    """
+
+    tar = await asyncio.to_thread(tarfile.open, str(spool), mode)
+    try:
+        while True:
+            member = await asyncio.to_thread(tar.next)
+            if member is None:
+                return
+            if not member.isfile():
+                continue
+            pure = PurePosixPath(member.name)
+            if pure.is_absolute() or ".." in pure.parts:
+                raise PathTraversalError(
+                    f"tar member escapes the server prefix: {member.name!r}"
+                )
+            member_file = tar.extractfile(member)
+            if member_file is None:
+                continue
+            yield member.name, _fileobj_parts(member_file)
+    finally:
+        await asyncio.to_thread(tar.close)
+
+
+async def _fileobj_parts(member_file: Any) -> AsyncIterator[bytes]:
+    """Stream a tar member file object in part-sized chunks (bounded memory)."""
+
+    while True:
+        chunk = await asyncio.to_thread(member_file.read, _PART)
+        if not chunk:
+            return
+        yield chunk
 
 
 async def _file_parts(spool: Path) -> AsyncIterator[bytes]:
