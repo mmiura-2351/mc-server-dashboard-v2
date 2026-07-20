@@ -200,6 +200,16 @@ func TestFlowTableIngressSaturatesAtThreshold(t *testing.T) {
 			t.Fatalf("promote fired again at lookup %d past threshold", i)
 		}
 	}
+
+	// The counter itself must have been clamped at the threshold — on unfixed
+	// code it would be flowPromoteThreshold + flowPromoteThreshold*3 (i.e. 20),
+	// not 5.
+	ft.mu.Lock()
+	got := ft.byAddr[a.String()].ingress
+	ft.mu.Unlock()
+	if got != flowPromoteThreshold {
+		t.Errorf("ingress = %d after saturation, want %d (clamped at threshold)", got, flowPromoteThreshold)
+	}
 }
 
 func TestFlowTableEvictReturnsPromotedSessions(t *testing.T) {
