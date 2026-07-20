@@ -42,6 +42,16 @@ const authMetadataKey = "authorization"
 // warranted; it is a package var rather than a const only so tests can lower it.
 var registerAckTimeout = 30 * time.Second
 
+// sendStallTimeout bounds how long a single stream.Send may block before the
+// transport is torn down. Under sustained backpressure (log flood, slow-reading
+// API) a Send can wedge on a full HTTP/2 flow-control window. While blocked,
+// heartbeats cannot be sent; if the stall outlasts the API's heartbeat timeout
+// the watchdog kills the session. sendBounded wraps every Send with this
+// deadline so a stalled write surfaces as an error and triggers a reconnect
+// instead of a silent session kill (issue #1714). Package var so tests can
+// lower it.
+var sendStallTimeout = 10 * time.Second
+
 // Dialer opens a fresh Session stream per Dial, implementing session.Dialer.
 type Dialer struct {
 	conn       grpc.ClientConnInterface
@@ -85,6 +95,12 @@ func (d *Dialer) Dial(ctx context.Context) (session.Transport, error) {
 // the job of client-side keepalive on the underlying connection (cmd/worker
 // dial): it closes the dead transport, which errors the pending and subsequent
 // Send/Recv calls so the run loop tears down the stream and reconnects.
+//
+// However, keepalive cannot detect a live-but-window-exhausted path: the
+// connection is healthy, but the HTTP/2 flow-control window is full so Send
+// blocks indefinitely. sendBounded wraps every Send with an internal stall
+// watchdog (sendStallTimeout) that cancels the stream when a single send
+// exceeds the deadline, surfacing the stall as an error (issue #1714).
 type transport struct {
 	stream controlplanev1.WorkerService_SessionClient
 	clock  session.Clock
@@ -116,7 +132,7 @@ func (t *transport) SendRegister(_ context.Context, caps session.Capabilities) e
 			},
 		},
 	}
-	if err := t.stream.Send(msg); err != nil {
+	if err := t.sendBounded(msg); err != nil {
 		return fmt.Errorf("controlplane: send register: %w", err)
 	}
 	return nil
@@ -163,7 +179,7 @@ func (t *transport) SendHeartbeat(_ context.Context) error {
 			},
 		},
 	}
-	if err := t.stream.Send(msg); err != nil {
+	if err := t.sendBounded(msg); err != nil {
 		return fmt.Errorf("controlplane: send heartbeat: %w", err)
 	}
 	return nil
@@ -203,7 +219,7 @@ func (t *transport) SendCommandResult(_ context.Context, result session.CommandR
 		EmittedAt:     timestamppb.New(t.clock.Now()),
 		Payload:       &controlplanev1.WorkerMessage_CommandResult{CommandResult: cr},
 	}
-	if err := t.stream.Send(msg); err != nil {
+	if err := t.sendBounded(msg); err != nil {
 		return fmt.Errorf("controlplane: send command result: %w", err)
 	}
 	return nil
@@ -225,7 +241,7 @@ func (t *transport) SendStatusChange(_ context.Context, event session.StatusEven
 			},
 		},
 	}
-	if err := t.stream.Send(msg); err != nil {
+	if err := t.sendBounded(msg); err != nil {
 		return fmt.Errorf("controlplane: send status change: %w", err)
 	}
 	return nil
@@ -247,7 +263,7 @@ func (t *transport) SendLogLine(_ context.Context, event session.LogEvent) error
 			},
 		},
 	}
-	if err := t.stream.Send(msg); err != nil {
+	if err := t.sendBounded(msg); err != nil {
 		return fmt.Errorf("controlplane: send log line: %w", err)
 	}
 	return nil
@@ -270,7 +286,7 @@ func (t *transport) SendMetrics(_ context.Context, event session.MetricsEvent) e
 			},
 		},
 	}
-	if err := t.stream.Send(msg); err != nil {
+	if err := t.sendBounded(msg); err != nil {
 		return fmt.Errorf("controlplane: send metrics: %w", err)
 	}
 	return nil
@@ -319,6 +335,25 @@ func classify(err error) error {
 	default:
 		return err
 	}
+}
+
+// sendBounded wraps stream.Send with a stall watchdog: if the send does not
+// complete within sendStallTimeout, the stream context is cancelled so the
+// blocked Send returns with a context error. This prevents a single backpressured
+// send from starving the heartbeat goroutine (issue #1714).
+func (t *transport) sendBounded(msg *controlplanev1.WorkerMessage) error {
+	deadline := t.clock.NewTimer(sendStallTimeout)
+	defer deadline.Stop()
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-deadline.C():
+			t.cancel()
+		case <-done:
+		}
+	}()
+	return t.stream.Send(msg)
 }
 
 // recvClassified reads the next stream message, classifying any error so the run
