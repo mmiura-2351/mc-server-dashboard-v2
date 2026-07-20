@@ -195,13 +195,21 @@ class FakeRefreshTokenRepository(RefreshTokenRepository):
         reason: str,
     ) -> None:
         for token_hash, token in list(self.by_hash.items()):
-            if token.user_id != user_id or token.revoked_at is not None:
+            if token.user_id != user_id:
                 continue
             if keep_token_hash is not None and token_hash == keep_token_hash:
                 continue
             if keep_session_id is not None and token.id == keep_session_id:
                 continue
-            self.by_hash[token_hash] = _with_revoked(token, revoked_at, reason)
+            if token.revoked_at is None:
+                self.by_hash[token_hash] = _with_revoked(token, revoked_at, reason)
+            elif token.revoked_reason == REVOKED_ROTATED:
+                # Re-stamp rotated predecessors so the grace window no longer
+                # admits them (issue #2172). Preserve the original revoked_at
+                # (COALESCE semantics).
+                self.by_hash[token_hash] = _with_revoked(
+                    token, token.revoked_at, reason
+                )
 
 
 def _with_revoked(

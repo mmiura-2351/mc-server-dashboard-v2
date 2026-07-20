@@ -177,6 +177,11 @@ class RefreshTokenRepository(abc.ABC):
     ) -> None:
         """Revoke ``user_id``'s active tokens except the kept one (issue #387, #606).
 
+        Also re-stamps any already-revoked ``'rotated'`` predecessors to
+        ``reason``, preserving their original ``revoked_at`` via COALESCE, so
+        they are no longer eligible for the reuse grace window (mirroring the
+        ``revoke_all_for_user`` fix from issue #1960; see issue #2172).
+
         The session to keep can be identified two ways (at most one should be set):
 
         - ``keep_token_hash`` — the hash of the refresh token the caller presented
