@@ -337,3 +337,131 @@ func TestRestartStopFailureLeavesOrphan(t *testing.T) {
 		t.Fatalf("retry stop after failed restart = %+v, want success", retry)
 	}
 }
+
+// A graceful stop that fails (driver Stop returns an error — the container
+// survived Kill) must re-enable auto-save on the surviving server. The pre-stop
+// flush issued save-off; without save-on the server runs with auto-save
+// permanently disabled, silently losing player progress (issue #2021).
+func TestFailedStopRestoresSaveOn(t *testing.T) {
+	d := &flushOrphanDriver{stopAfter: 1} // first Stop fails
+	var seq []string
+	var drivers []string
+	scratch := t.TempDir()
+	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch,
+		func(_ context.Context, _ string, driver string) (execution.ServerControl, error) {
+			drivers = append(drivers, driver)
+			return &fakeControl{reply: "ok", seq: &seq}, nil
+		})
+	m.settlePollInterval = 0
+
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+
+	first := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+	if first.Success {
+		t.Fatalf("first stop = %+v, want failure (driver could not confirm termination)", first)
+	}
+
+	// The sequence must end with save-on: the flush issues save-off + save-all,
+	// then the failed-stop restore issues save-on.
+	if !containsLine(seq, "save-on") {
+		t.Fatalf("command sequence = %v, want save-on after failed graceful stop (auto-save must be restored)", seq)
+	}
+	if seq[len(seq)-1] != "save-on" {
+		t.Fatalf("last command = %q, want save-on as the final RCON command after failed stop", seq[len(seq)-1])
+	}
+	// The restore must dial openControl with the correct driver name, not empty.
+	for i, got := range drivers {
+		if got != "container" {
+			t.Fatalf("openControl call %d driver = %q, want %q", i, got, "container")
+		}
+	}
+}
+
+// When the failed-stop save-on restore cannot dial RCON (openControl errors),
+// the original stop error is still returned and the orphan is recorded so the
+// reconciler retry can still terminate the server (issue #2021).
+func TestFailedStopSaveOnDialFailureStillReturnsStopFailure(t *testing.T) {
+	d := &flushOrphanDriver{stopAfter: 1}
+	var dialCount int
+	scratch := t.TempDir()
+	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch,
+		func(_ context.Context, _ string, _ string) (execution.ServerControl, error) {
+			dialCount++
+			// The flush dial succeeds (save-off + save-all); the restore dial fails.
+			if dialCount <= 1 {
+				return &fakeControl{reply: "ok"}, nil
+			}
+			return nil, errors.New("rcon unreachable")
+		})
+	m.settlePollInterval = 0
+
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+
+	first := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+	if first.Success {
+		t.Fatalf("first stop = %+v, want failure", first)
+	}
+	// The orphan must still be recorded so a retry can terminate it.
+	retry := m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: "s1", Kind: "StopServer"})
+	if !retry.Success {
+		t.Fatalf("retry stop = %+v, want success (orphan must still be reachable)", retry)
+	}
+}
+
+// A forced stop failure must NOT issue save-on: the forced path skips the
+// flush entirely (no save-off was sent), so there is nothing to restore
+// (issue #2021).
+func TestForcedFailedStopSkipsSaveOn(t *testing.T) {
+	d := &flushOrphanDriver{stopAfter: 1}
+	var seq []string
+	scratch := t.TempDir()
+	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch,
+		func(_ context.Context, _ string, _ string) (execution.ServerControl, error) {
+			return &fakeControl{reply: "ok", seq: &seq}, nil
+		})
+	m.settlePollInterval = 0
+
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+
+	first := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer", Force: true})
+	if first.Success {
+		t.Fatalf("first force stop = %+v, want failure", first)
+	}
+	if containsLine(seq, "save-on") {
+		t.Fatalf("forced failed stop issued save-on; sequence = %v (force path must not restore auto-save)", seq)
+	}
+}
+
+// A restart whose internal stop fails must also restore save-on on the
+// survivor, just like a plain StopServer failure (issue #2021).
+func TestRestartStopFailureRestoresSaveOn(t *testing.T) {
+	d := &flushOrphanDriver{stopAfter: 1}
+	var seq []string
+	scratch := t.TempDir()
+	m := New(map[string]execution.ExecutionDriver{"container": d}, scratch,
+		func(_ context.Context, _ string, _ string) (execution.ServerControl, error) {
+			return &fakeControl{reply: "ok", seq: &seq}, nil
+		})
+	m.settlePollInterval = 0
+
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+
+	res := m.Handle(context.Background(), session.Command{CommandID: "r", ServerID: "s1", Kind: "RestartServer"})
+	if res.Success {
+		t.Fatalf("restart with failing stop = %+v, want failure", res)
+	}
+	if !containsLine(seq, "save-on") {
+		t.Fatalf("restart failed-stop sequence = %v, want save-on (auto-save must be restored on survivor)", seq)
+	}
+	if seq[len(seq)-1] != "save-on" {
+		t.Fatalf("last command = %q, want save-on as the final RCON command after failed restart stop", seq[len(seq)-1])
+	}
+}
