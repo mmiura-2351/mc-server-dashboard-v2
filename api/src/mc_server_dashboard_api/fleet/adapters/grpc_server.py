@@ -106,6 +106,13 @@ _HEARTBEAT_INTERVAL_DIVISOR = 3
 # errors without bouncing a healthy session.
 _MAX_CONSECUTIVE_HANDLER_FAILURES = 5
 
+# Backpressure limit on the queue between the inbound reader task and the
+# processor task (issue #1698). Heartbeats bypass this queue entirely, so only
+# DB-bound messages (StatusChange, CommandResult, etc.) are queued. A bounded
+# queue keeps a burst of status changes from consuming unbounded memory; the
+# size is generous enough that a healthy processor never blocks the reader.
+_INBOUND_QUEUE_MAXSIZE = 1024
+
 _DRIVER_BY_KIND: dict[int, DriverKind] = {
     pb.EXECUTION_DRIVER_KIND_CONTAINER: DriverKind.CONTAINER,
 }
@@ -188,6 +195,15 @@ def _capabilities_from_proto(caps: pb.WorkerCapabilities) -> WorkerCapabilities:
         drivers=frozenset(drivers),
         max_servers=caps.max_servers,
         resources=resources,
+    )
+
+
+def _is_heartbeat(message: pb.WorkerMessage) -> bool:
+    """True when the message is a pure heartbeat event (no DB work needed)."""
+
+    return (
+        message.WhichOneof("payload") == "event"
+        and message.event.WhichOneof("event") == "heartbeat"
     )
 
 
@@ -409,8 +425,60 @@ class WorkerSessionServicer(WorkerServiceServicer):
         worker_id: WorkerId,
         request_iterator: AsyncIterator[pb.WorkerMessage],
     ) -> None:
+        """Read the inbound stream, fast-pathing heartbeats (issue #1698).
+
+        Heartbeats are recorded immediately (no queue, no await on DB work).
+        All other messages are queued for the processor task, which runs the
+        existing failure-cap logic against the DB-bound handlers. This
+        prevents a slow DB from starving heartbeat liveness and falsely
+        evicting a healthy worker.
+        """
+
+        queue: asyncio.Queue[pb.WorkerMessage | None] = asyncio.Queue(
+            maxsize=_INBOUND_QUEUE_MAXSIZE
+        )
+        processor = asyncio.ensure_future(self._process_inbound(worker_id, queue))
+        try:
+            async for message in request_iterator:
+                if processor.done():
+                    await processor  # propagate cap-trip
+                    return
+                if _is_heartbeat(message):
+                    self._registry.record_heartbeat(worker_id, self._clock.now())
+                    continue
+                await queue.put(message)
+            await queue.put(None)  # sentinel for clean EOF
+            await processor
+        finally:
+            if not processor.done():
+                processor.cancel()
+                try:
+                    await processor
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    _LOG.warning(
+                        "inbound processor ended with an error",
+                        extra={"worker_id": worker_id.value},
+                        exc_info=True,
+                    )
+
+    async def _process_inbound(
+        self,
+        worker_id: WorkerId,
+        queue: asyncio.Queue[pb.WorkerMessage | None],
+    ) -> None:
+        """Consume queued inbound messages with the failure-cap guard.
+
+        Moved from the old ``_read_inbound`` loop body; the try/except with
+        the consecutive-failure cap (issues #776, #807) is preserved verbatim.
+        """
+
         consecutive_failures = 0
-        async for message in request_iterator:
+        while True:
+            message = await queue.get()
+            if message is None:
+                return
             # Contain a per-message handler failure (e.g. a transient DB error
             # while recording one StatusChange) so a single bad event is logged
             # and skipped rather than tearing down the whole worker session
@@ -565,9 +633,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
         # than the relay's send time. None when the Worker left it unset/zero.
         emitted_at = _emitted_at_from_proto(message)
         event = message.event.WhichOneof("event")
-        if event == "heartbeat":
-            self._registry.record_heartbeat(worker_id, self._clock.now())
-        elif event == "status_change":
+        if event == "status_change":
             await self._reconcile_status(worker_id, message.event, emitted_at)
         elif event == "log_line":
             self._relay_log(message.event, emitted_at)
