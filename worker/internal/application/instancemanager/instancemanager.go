@@ -994,6 +994,37 @@ func (m *Manager) restoreSaveOn(ctx context.Context, serverID string, ctrl execu
 	}
 }
 
+// restoreSaveOnAfterFailedStop re-enables auto-save on a server whose graceful
+// stop failed (the container/process survived Kill). The pre-stop flush issued
+// save-off to quiesce the world; because the stop never confirmed termination,
+// the server keeps running with auto-save disabled — every block edit, chest
+// open, and mob move since the flush is at risk if the JVM crashes before the
+// reconciler retries (issue #2021).
+//
+// Unlike restoreSaveOn (the snapshot path), the caller's RCON connection is
+// already closed and the instance was evicted from startCmds by
+// takeStoppableReserve, so driverFor would return empty. The helper accepts
+// driverName explicitly (captured before eviction) and dials a fresh RCON
+// connection on a context detached from the (possibly cancelled) request.
+func (m *Manager) restoreSaveOnAfterFailedStop(ctx context.Context, serverID, driverName string) {
+	restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restoreSaveTimeout)
+	defer cancel()
+	ctrl, err := m.openControl(restoreCtx, serverID, driverName)
+	if err != nil {
+		m.logger.Error("failed stop: auto-save NOT restored (rcon open failed); surviving server is running with auto-save disabled",
+			"server_id", serverID, "driver", driverName, "error", err)
+		return
+	}
+	defer func() { _ = ctrl.Close() }()
+	if _, err := ctrl.Execute(restoreCtx, "save-on"); err != nil {
+		m.logger.Error("failed stop: auto-save NOT restored (save-on failed); surviving server is running with auto-save disabled",
+			"server_id", serverID, "error", err)
+		return
+	}
+	m.logger.Warn("stop failed with the server possibly still alive; re-enabled auto-save on the survivor",
+		"server_id", serverID)
+}
+
 // settleWorkingSet waits for an asynchronous save-all to finish writing the
 // working set's region files before the fsck/copy reads them (#907). It snapshots
 // the (mtime, size) of every .mca under workingDir, re-scans every settlePollInterval,
@@ -1427,6 +1458,12 @@ func (m *Manager) attemptStop(ctx context.Context, serverID string, inst executi
 		m.mu.Lock()
 		m.orphans[serverID] = orphanEntry{inst: inst, driver: driverName}
 		m.mu.Unlock()
+		// The graceful path issued save-off before the flush; because the stop
+		// failed, the server may still be alive with auto-save disabled. Re-enable
+		// it so player progress is not silently lost (issue #2021).
+		if graceful {
+			m.restoreSaveOnAfterFailedStop(ctx, serverID, driverName)
+		}
 		return err
 	}
 	m.mu.Lock()
