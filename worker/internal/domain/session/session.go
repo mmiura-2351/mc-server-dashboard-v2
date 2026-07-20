@@ -32,6 +32,12 @@ type Runner struct {
 	// deterministic tests.
 	randFloat func() float64
 
+	// sem bounds concurrent long-running lane work worker-wide (not per-stream)
+	// so that maxConcurrentLanes is enforced even when in-flight goroutines
+	// from a dropped stream outlive the dispatcher that started them (issue
+	// #1617). Quick commands bypass it (issue #169).
+	sem chan struct{}
+
 	// dispatcher holds the per-server command lanes for the active stream. It is
 	// (re)created on every serve and torn down with the stream; nil between
 	// connections. Stored on the Runner so tests can observe lane lifecycle.
@@ -62,6 +68,7 @@ func NewRunner(dialer Dialer, caps Capabilities, clock Clock, logger *slog.Logge
 		backoff:   DefaultBackoff,
 		logger:    logger,
 		randFloat: rand.Float64,
+		sem:       make(chan struct{}, maxConcurrentLanes),
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -398,7 +405,6 @@ type dispatcher struct {
 	r       *Runner
 	ctx     context.Context
 	results chan<- CommandResult
-	sem     chan struct{}
 
 	mu    sync.Mutex
 	lanes map[string]*lane
@@ -414,7 +420,6 @@ func newDispatcher(ctx context.Context, r *Runner, results chan<- CommandResult)
 		r:       r,
 		ctx:     ctx,
 		results: results,
-		sem:     make(chan struct{}, maxConcurrentLanes),
 		lanes:   make(map[string]*lane),
 	}
 }
@@ -462,14 +467,21 @@ func (d *dispatcher) runLane(serverID string, l *lane) {
 			continue
 		}
 
+		// A dead-generation lane (stream already dropped) must not consume a
+		// worker-wide cap slot; bail before the blocking acquire (issue #1617).
+		if d.ctx.Err() != nil {
+			d.removeLane(serverID)
+			return
+		}
+
 		select {
-		case d.sem <- struct{}{}:
+		case d.r.sem <- struct{}{}:
 		case <-d.ctx.Done():
 			d.removeLane(serverID)
 			return
 		}
 		d.r.emitResult(d.ctx, d.results, d.r.handle(d.ctx, cmd))
-		<-d.sem
+		<-d.r.sem
 	}
 }
 
