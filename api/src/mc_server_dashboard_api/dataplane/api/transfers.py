@@ -302,6 +302,9 @@ async def _releasing(
             yield chunk
     finally:
         semaphore.release()
+        aclose = getattr(inner, "aclose", None)
+        if aclose is not None:
+            await aclose()
 
 
 async def _jar_member(
