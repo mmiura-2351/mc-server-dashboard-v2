@@ -37,6 +37,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     IntegrityCheckError,
     MissingRegionsError,
     PathTraversalError,
+    StaleGenerationError,
 )
 from mc_server_dashboard_api.storage.domain.value_objects import (
     CommunityId,
@@ -1143,3 +1144,29 @@ async def test_backup_pack_survives_concurrent_publish_gc() -> None:
     assert backup_key in store.objects
     blob = store.objects[backup_key]
     assert read_tar(blob) == {"f": b"OLD"}
+
+
+async def test_commit_refuses_when_generation_marker_removed() -> None:
+    """Issue #1704: after prune (or any path that removes the generation marker),
+    _read_generation returns 0. A late commit whose expected_base was the
+    pre-prune generation (>0) must fail with StaleGenerationError, not
+    silently resurrect the snapshot tree. The fix changes the stale check
+    from ``current > expected_base`` to ``current != expected_base``."""
+
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    await _publish(storage, community, server, {"f": b"v1"})
+    base = await storage.current_generation(community, server)
+    assert base >= 1
+
+    # Stage a new snapshot at the pre-removal base...
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(handle, tar_stream({"f": b"late-upload"}))
+
+    # ...then remove the generation marker (as prune does).
+    generation_key = _server_prefix(community, server) + _GENERATION
+    assert generation_key in store.objects
+    del store.objects[generation_key]
+
+    with pytest.raises(StaleGenerationError):
+        await storage.commit_snapshot(handle, expected_base=base)

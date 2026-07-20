@@ -46,6 +46,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PortOutOfRangeError,
     PortRangeExhaustedError,
     RetiredConfigKeyError,
+    ServerBusyError,
     ServerFileNotFoundError,
     ServerNameAlreadyExistsError,
     ServerNotFoundError,
@@ -73,6 +74,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerId,
     ServerName,
     ServerType,
+    WorkerId,
 )
 from mc_server_dashboard_api.servers.domain.version_validator import (
     UnknownVersionError,
@@ -2489,3 +2491,62 @@ async def test_delete_prunes_orphan_archives_without_db_rows() -> None:
     # "orphan" are both deleted by the filesystem-driven prune.
     assert {ref for _, ref in store.deleted} == {"old", "orphan"}
     assert store.archives == {"new"}
+
+
+# --- Assignment gate on DeleteServer (#1704) ---------------------------------
+
+
+async def test_delete_rejects_while_assignment_held() -> None:
+    """An at-rest server with a held worker assignment must not be deletable (#1704).
+
+    After a stop whose final snapshot timed out, the row sits at
+    (stopped, stopped, assigned_worker_id=A) while the late upload is still
+    live. Delete must refuse with ServerBusyError so the late commit can
+    finish and release the assignment.
+    """
+    uow = FakeUnitOfWork()
+    store = FakeBackupArchiveStore()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    server.assigned_worker_id = WorkerId(uuid.uuid4())
+    uow.servers.seed(server)
+
+    with pytest.raises(ServerBusyError):
+        await DeleteServer(uow=uow, backup_store=store)(
+            community_id=community, server_id=server.id
+        )
+
+    # Row untouched, working set never packed.
+    assert server.id in uow.servers.by_id
+    assert store.pruned == []
+    assert uow.commits == 0
+
+
+async def test_delete_rechecks_assignment_after_the_pack_window() -> None:
+    """A worker assignment acquired DURING the pack window must abort (#1704).
+
+    Mirrors the existing recheck pattern: the prune hook sets
+    assigned_worker_id mid-pack, and the second-transaction re-check catches
+    it and raises ServerBusyError.
+    """
+    uow = FakeUnitOfWork()
+    store = FakeBackupArchiveStore()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+
+    def _assign_during_pack() -> None:
+        server.assigned_worker_id = WorkerId(uuid.uuid4())
+
+    store.on_prune = _assign_during_pack
+
+    with pytest.raises(ServerBusyError):
+        await DeleteServer(uow=uow, backup_store=store)(
+            community_id=community, server_id=server.id
+        )
+
+    # Pack ran but the row survives; no grants swept.
+    assert store.pruned == [server.id]
+    assert server.id in uow.servers.by_id
+    assert uow.resource_grants.swept == []
+    assert uow.commits == 0

@@ -41,6 +41,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PortAlreadyTakenError,
     PortOutOfRangeError,
     RetiredConfigKeyError,
+    ServerBusyError,
     ServerFileNotFoundError,
     ServerNameAlreadyExistsError,
     ServerNotFoundError,
@@ -877,6 +878,8 @@ class DeleteServer:
                     raise ServerNotFoundError(str(server_id.value))
                 if not server.is_at_rest():
                     raise ServerNotStoppedError(str(server_id.value))
+                if server.assigned_worker_id is not None:
+                    raise ServerBusyError(str(server_id.value))
             # Pack the working set into the retained final tar.gz first. This is
             # mandatory and fail-closed (#777): if it raises, the row is untouched
             # and the whole delete fails rather than dropping the latest state.
@@ -894,6 +897,8 @@ class DeleteServer:
                     raise ServerNotFoundError(str(server_id.value))
                 if not server.is_at_rest():
                     raise ServerNotStoppedError(str(server_id.value))
+                if server.assigned_worker_id is not None:
+                    raise ServerBusyError(str(server_id.value))
                 # Filesystem-driven archive prune (#1707): list every archive
                 # ref that physically exists on storage, regardless of whether a
                 # metadata row tracks it. This catches both row-tracked archives
