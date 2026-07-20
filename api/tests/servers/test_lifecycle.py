@@ -3639,9 +3639,12 @@ async def test_clear_stale_assignment_snapshot_failure_still_clears() -> None:
     assert ("snapshot", WorkerId(worker), ServerId(server_id)) in cp.dispatched
 
 
-async def test_clear_stale_assignment_benign_duplicate_clears() -> None:
+async def test_clear_stale_assignment_benign_duplicate_clears(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     # Issue #1004: snapshot returns SERVER_NOT_FOUND with working_set_absent
-    # (benign duplicate — scratch already GC'd) -> clear proceeds.
+    # (benign duplicate — scratch already GC'd) -> clear proceeds and logs
+    # INFO (not ERROR) through _final_snapshot's benign-duplicate branch.
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
     uow.servers.seed(
@@ -3657,16 +3660,27 @@ async def test_clear_stale_assignment_benign_duplicate_clears() -> None:
         connected={WorkerId(worker): True},
         outcome=CommandOutcome(
             status=CommandStatus.SERVER_NOT_FOUND,
-            message="working_set_absent: scratch GC'd",
+            message=_WORKING_SET_ABSENT_MESSAGE,
         ),
     )
-    result = await StopServer(
-        uow=uow, control_plane=cp, clock=FakeClock(_NOW)
-    ).clear_stale_assignment(
-        community_id=CommunityId(community), server_id=ServerId(server_id)
-    )
+    with caplog.at_level(logging.INFO):
+        result = await StopServer(
+            uow=uow, control_plane=cp, clock=FakeClock(_NOW)
+        ).clear_stale_assignment(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
     assert result.assigned_worker_id is None
     assert ("snapshot", WorkerId(worker), ServerId(server_id)) in cp.dispatched
+    # The benign-duplicate path logs INFO, not ERROR (issue #1790).
+    assert not [
+        r
+        for r in caplog.records
+        if r.levelno == logging.ERROR and "final snapshot" in r.getMessage()
+    ]
+    assert any(
+        r.levelno == logging.INFO and "benign duplicate" in r.getMessage()
+        for r in caplog.records
+    )
 
 
 # --- bedrock tunnel sync (issue #1602) --------------------------------------
