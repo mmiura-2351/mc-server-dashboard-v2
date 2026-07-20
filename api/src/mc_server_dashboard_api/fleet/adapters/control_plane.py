@@ -299,9 +299,16 @@ class ControlPlaneState:
             )
             return
         del self._pending[command_id]
-        self._snapshot_servers.pop(command_id, None)
+        snapshot = self._snapshot_servers.pop(command_id, None)
         if not future.done():
             future.set_result(result)
+            return
+        # The future was cancelled by asyncio.wait_for between the cancellation
+        # and discard_pending running (issue #1996). Promote the snapshot record
+        # so the late-snapshot sink can release the held assignment.
+        if future.cancelled() and snapshot is not None:
+            self._late_snapshots[command_id] = snapshot
+            await self._clear_on_late_snapshot(command_id, worker_id, result)
 
     async def _clear_on_late_snapshot(
         self, command_id: str, worker_id: WorkerId, result: pb.CommandResult
