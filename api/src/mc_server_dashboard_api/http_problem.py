@@ -37,6 +37,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.requests import ClientDisconnect
 from starlette.responses import Response
 
 PROBLEM_CONTENT_TYPE = "application/problem+json"
@@ -228,6 +229,8 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     exception internals (no message, no path), keeping one error shape (#371).
     """
 
+    if _is_client_disconnect(exc):
+        raise  # let Starlette handle normally (issue #2161)
     _logger.exception(
         "unhandled exception serving %s %s",
         request.method,
@@ -246,6 +249,22 @@ def _generic_reason(status_code: int) -> str:
     return phrase.lower().replace(" ", "_").replace("-", "_") or "error"
 
 
+def _is_client_disconnect(exc: Exception) -> bool:
+    """Return True for exceptions that indicate a client disconnection.
+
+    These are operational non-errors — the client hung up — and must not be
+    logged at ERROR or counted as 500s (issue #2161).
+    """
+
+    if isinstance(exc, ClientDisconnect):
+        return True
+    # BaseHTTPMiddleware raises ``RuntimeError("No response returned.")`` when
+    # the inner app produces no response, which happens on client disconnect.
+    if isinstance(exc, RuntimeError) and str(exc) == "No response returned.":
+        return True
+    return False
+
+
 async def unhandled_exception_middleware(
     request: Request, call_next: Callable[[Request], Awaitable[Response]]
 ) -> Response:
@@ -261,6 +280,8 @@ async def unhandled_exception_middleware(
     try:
         return await call_next(request)
     except Exception as exc:  # noqa: BLE001 — intentional catch-all
+        if _is_client_disconnect(exc):
+            raise  # let Starlette handle normally (issue #2161)
         _logger.exception(
             "unhandled exception serving %s %s",
             request.method,
