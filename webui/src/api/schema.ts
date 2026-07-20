@@ -3679,6 +3679,8 @@ export interface components {
             config?: unknown;
             /** Game Port */
             game_port?: number | null;
+            /** Memory Limit Mb */
+            memory_limit_mb?: number | null;
             /** Name */
             name?: string | null;
             /** Slug */
