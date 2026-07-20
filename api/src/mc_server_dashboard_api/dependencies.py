@@ -8,6 +8,7 @@ FastAPI's ``Depends``; tests override the providers to inject fakes.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import uuid
 from collections.abc import Awaitable, Callable
@@ -428,6 +429,25 @@ def get_storage(request: Request) -> Storage:
 
     storage: Storage = request.app.state.storage
     return storage
+
+
+_MAX_CONCURRENT_TRANSFERS = 4
+
+
+def get_transfer_semaphore(request: Request) -> asyncio.Semaphore:
+    """Return the per-process transfer admission semaphore (issue #1696).
+
+    Caps the number of concurrent data-plane transfers (hydrate downloads +
+    snapshot uploads) so a transfer storm cannot saturate the event loop and
+    starve latency-sensitive paths (login, file reads).
+    """
+
+    state = request.app.state
+    sem: asyncio.Semaphore | None = getattr(state, "transfer_semaphore", None)
+    if sem is None:
+        sem = asyncio.Semaphore(_MAX_CONCURRENT_TRANSFERS)
+        state.transfer_semaphore = sem
+    return sem
 
 
 def get_version_catalog(request: Request) -> VersionCatalog:
