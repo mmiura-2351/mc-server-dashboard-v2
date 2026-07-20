@@ -68,15 +68,20 @@ function CommunitySwitcher() {
     setCommunityId,
     communities,
     communitiesError,
+    communitiesFetching,
     refetchCommunities,
   } = useActiveCommunity();
   const navigate = useNavigate();
 
-  if (communitiesError) {
+  if (communitiesError && communities === undefined) {
     return (
       <div className="community-switcher" role="alert">
         {t("shell.communitiesError")}{" "}
-        <button type="button" onClick={refetchCommunities}>
+        <button
+          type="button"
+          onClick={refetchCommunities}
+          disabled={communitiesFetching}
+        >
           {t("shell.communitiesRetry")}
         </button>
       </div>
