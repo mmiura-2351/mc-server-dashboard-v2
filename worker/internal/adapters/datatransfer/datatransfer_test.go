@@ -1616,9 +1616,12 @@ func TestPriorDisplacedSurvivesSwapFailure(t *testing.T) {
 	}
 }
 
-// At swap-in time, the prior displaced tree must still exist (issue #917 bug 2):
-// it must not be deleted before the swap-in rename, so a crash at that instant does
-// not lose the recovery copy.
+// At swap-in time, the prior displaced content ("prior") must still exist under
+// some name (issue #917 bug 2): it must not be deleted before the swap-in rename,
+// so a crash at that instant does not lose the recovery copy. Note that
+// .displaced-<id> itself always holds the just-displaced destDir ("current") at
+// swap time, so the test must search ALL entries for the "prior" content — checking
+// only .displaced-<id> is vacuous and would pass even with eager deletion.
 func TestPriorDisplacedNotDeletedAtSwapTime(t *testing.T) {
 	scratch := t.TempDir()
 	dest := filepath.Join(scratch, "server")
@@ -1637,25 +1640,18 @@ func TestPriorDisplacedNotDeletedAtSwapTime(t *testing.T) {
 	}
 
 	orig := swapRename
-	var priorDisplacedExistsAtSwap bool
+	var priorContentFoundAtSwap bool
 	swapRename = func(src, dst string) error {
-		// Check if the prior displaced content is still present at swap-in time.
-		if data, err := os.ReadFile(filepath.Join(scratch, ".displaced-server", "gen")); err == nil {
-			// It may hold "current" (the newly displaced destDir) or "prior" (the
-			// original prior displaced). Either way, the prior displaced was NOT deleted
-			// before swap-in. The key assertion is that the prior content is available
-			// under SOME name at this point.
-			_ = data
-			priorDisplacedExistsAtSwap = true
-		} else {
-			// Check under the aside name too.
-			entries, _ := os.ReadDir(scratch)
-			for _, e := range entries {
-				p := filepath.Join(scratch, e.Name(), "gen")
-				if d, rerr := os.ReadFile(p); rerr == nil && string(d) == "prior" {
-					priorDisplacedExistsAtSwap = true
-					break
-				}
+		// At swap-in time the filesystem state is:
+		//   .displaced-server                   → holds "current" (just-displaced destDir)
+		//   .hydrate-server-prior-displaced-*   → holds "prior"  (renamed aside)
+		// Search ALL entries under scratch for a "gen" file containing "prior".
+		entries, _ := os.ReadDir(scratch)
+		for _, e := range entries {
+			p := filepath.Join(scratch, e.Name(), "gen")
+			if d, rerr := os.ReadFile(p); rerr == nil && string(d) == "prior" {
+				priorContentFoundAtSwap = true
+				break
 			}
 		}
 		return os.Rename(src, dst)
@@ -1667,7 +1663,7 @@ func TestPriorDisplacedNotDeletedAtSwapTime(t *testing.T) {
 		t.Fatalf("unpackAndSwap: %v", err)
 	}
 
-	if !priorDisplacedExistsAtSwap {
+	if !priorContentFoundAtSwap {
 		t.Fatal("prior displaced content was deleted before swap-in (issue #917: must defer deletion)")
 	}
 }

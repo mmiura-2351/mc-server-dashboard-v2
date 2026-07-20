@@ -267,8 +267,8 @@ func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string, baseGe
 // rather than over the retained scratch — gives REPLACE semantics (files deleted
 // upstream do not survive) and means a symlink a previous run planted in destDir
 // is never traversed (the destination tree has no pre-existing entries). The
-// generation marker is intentionally NOT carried across the swap: the caller
-// rewrites it fresh from the served generation after Hydrate returns (issue #763).
+// generation marker is written into the temp tree BEFORE the swap-in rename
+// (issue #917) so it is atomic with the new destDir (issue #763).
 //
 // The temp dir is a dot-prefixed sibling in destDir's parent (the scratch root).
 // ScanHeldServers (scratchscan.go) skips the .displaced-<id> sibling and never
