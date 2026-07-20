@@ -1156,6 +1156,103 @@ async def test_stale_queued_commands_are_not_replayed_on_resume() -> None:
         await harness.stop()
 
 
+# ---------------------------------------------------------------------------
+# Cancel-to-discard window: resolve consumes final-snapshot result (issue #1996)
+# ---------------------------------------------------------------------------
+
+
+async def test_resolve_on_cancelled_future_fires_late_snapshot_sink() -> None:
+    """Core regression (issue #1996): future.cancel() then resolve() must still
+    route the result through the late-snapshot sink so the held assignment clears."""
+
+    sink = _RecordingLateSnapshotSink()
+    state = ControlPlaneState(late_snapshot_sink=sink)
+    owner = WorkerId(_WORKER)
+
+    future = state.register_pending("cmd-1", owner, snapshot_server_id=_SERVER)
+    future.cancel()
+    await state.resolve("cmd-1", owner, _failed_transfer_result())
+
+    assert sink.calls == [(_SERVER, owner.value, False)]
+
+
+async def test_resolve_on_cancelled_future_with_success_result() -> None:
+    """Same cancel-to-discard window with a SUCCESS result: the sink sees
+    succeeded=True (issue #1996)."""
+
+    sink = _RecordingLateSnapshotSink()
+    state = ControlPlaneState(late_snapshot_sink=sink)
+    owner = WorkerId(_WORKER)
+
+    future = state.register_pending("cmd-1", owner, snapshot_server_id=_SERVER)
+    future.cancel()
+    await state.resolve("cmd-1", owner, pb.CommandResult(success=True))
+
+    assert sink.calls == [(_SERVER, owner.value, True)]
+
+
+async def test_dispatch_cancel_resolve_before_discard_fires_sink() -> None:
+    """Integration-shaped: dispatch, cancel task, resolve before the cancelled
+    task's discard_pending runs (issue #1996)."""
+
+    sink = _RecordingLateSnapshotSink()
+    state = ControlPlaneState(late_snapshot_sink=sink)
+    control_plane = GrpcControlPlane(state, clock=FakeClock(_T0), timeout_seconds=5.0)
+    worker = WorkerId(_WORKER)
+    queue = state.open_session(worker, 1)
+
+    task = asyncio.create_task(
+        control_plane.dispatch(
+            worker_id=worker,
+            server_id=_SERVER,
+            command=SnapshotCommand(transfer_url="u", transfer_token="t"),
+            snapshot_is_final=True,
+        )
+    )
+    command_id = (await queue.get()).api_command.command_id
+    task.cancel()
+    # Resolve BEFORE the cancelled task is awaited (discard_pending has not run).
+    await state.resolve(command_id, worker, _failed_transfer_result())
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert sink.calls == [(_SERVER, worker.value, False)]
+
+
+async def test_resolve_cancelled_periodic_snapshot_does_not_fire_sink() -> None:
+    """Scoping guard: a cancelled PERIODIC snapshot (no snapshot_server_id) must
+    NOT route through the sink (issue #1996)."""
+
+    sink = _RecordingLateSnapshotSink()
+    state = ControlPlaneState(late_snapshot_sink=sink)
+    owner = WorkerId(_WORKER)
+
+    # Periodic snapshot: no snapshot_server_id.
+    future = state.register_pending("cmd-1", owner)
+    future.cancel()
+    await state.resolve("cmd-1", owner, _failed_transfer_result())
+
+    assert sink.calls == []
+
+
+async def test_discard_pending_after_cancelled_resolve_finds_nothing() -> None:
+    """No double-fire: after resolve consumed the cancelled future's snapshot
+    record, a subsequent discard_pending is a no-op (issue #1996)."""
+
+    sink = _RecordingLateSnapshotSink()
+    state = ControlPlaneState(late_snapshot_sink=sink)
+    owner = WorkerId(_WORKER)
+
+    future = state.register_pending("cmd-1", owner, snapshot_server_id=_SERVER)
+    future.cancel()
+    await state.resolve("cmd-1", owner, _failed_transfer_result())
+    assert sink.calls == [(_SERVER, owner.value, False)]
+
+    # discard_pending after resolve already consumed the entry — no double-fire.
+    state.discard_pending("cmd-1")
+    assert sink.calls == [(_SERVER, owner.value, False)]
+
+
 async def test_skipped_stale_final_snapshot_drops_late_record() -> None:
     """discard_if_stale for a timed-out final snapshot also cleans up the
     promoted _late_snapshots record (issue #1697)."""
