@@ -26,10 +26,19 @@ tick-level retry.
 
 Missed-run semantics: a non-``backup`` occurrence executes only while it is at
 most :data:`LATE_RUN_GRACE` past its due instant; a staler occurrence does *not*
-fire late — ``next_run_at`` is advanced past ``now`` with no execution and no
-run row (a stop that was due hours ago must not stop tonight's players). A
+fire late — ``next_run_at`` is advanced past ``now`` and a SKIPPED run row is
+recorded (a stop that was due hours ago must not stop tonight's players). A
 ``backup`` has no staleness cut-off: however late, it fires exactly once —
 advancing past ``now`` coalesces every missed occurrence into that one catch-up.
+An occurrence that became due *after* the previous tick began is never considered
+stale: its lateness is self-inflicted by a long-running sibling, not an outage
+(issue #1947).
+
+Concurrency: due schedules are dispatched concurrently (up to
+:data:`_MAX_CONCURRENT_RUNS`), grouped by server so same-server schedules remain
+serial. Each concurrent run gets its own :class:`ExecuteScheduleAction` via the
+``make_execute`` factory (#871 pattern) so UoW sessions are never shared across
+tasks.
 
 Backup-only bounded retry: a failed ``backup`` occurrence arms one in-memory
 retry ~30 minutes later (lost on restart — accepted). The retry records (and, on
@@ -48,8 +57,11 @@ One schedule's exception never stops the tick — each is isolated and logged.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import logging
+from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from mc_server_dashboard_api.audit.domain.events import AuditEvent, Outcome
@@ -116,8 +128,12 @@ _NOTIFY_KIND = "schedule_failed"
 # human-meaningful cadence (the interval floor is one minute; cron is
 # minute-granular), so a lifecycle/command occurrence missed by an outage never
 # fires hours late — a daily 04:00 stop must not stop the evening's players.
-# Anything staler advances without executing (no run row).
+# Anything staler advances with a SKIPPED run row.
 LATE_RUN_GRACE = dt.timedelta(seconds=300)
+
+# How many schedule executions may run concurrently within one tick (#1947).
+# Same-server schedules are always serial within this bound.
+_MAX_CONCURRENT_RUNS = 4
 
 # The floor of the warning-send grace: how late a due player warning may still
 # broadcast (issue #1839). The effective grace is derived at wiring time as
@@ -325,7 +341,7 @@ class RunScheduleTick:
     """
 
     uow: UnitOfWork
-    execute: ExecuteScheduleAction
+    make_execute: Callable[[], ExecuteScheduleAction]
     send_command: SendServerCommand
     calculator: NextRunCalculator
     audit: AuditRecorder
@@ -349,20 +365,45 @@ class RunScheduleTick:
     # each step fires once (issue #1839). In-memory — a restart may re-send a step
     # still within its grace window at most once. Pruned as occurrences pass.
     _warned: set[tuple[ScheduleId, dt.datetime, int]] = field(default_factory=set)
+    # When the previous tick began; used to exempt listing-time-stale occurrences
+    # that became due after the previous tick started (#1947).
+    _last_tick_at: dt.datetime | None = field(default=None, repr=False)
+    # Serializes bookkeeping writes (_record, _advance, _prune_after_backup) so
+    # concurrent server-group tasks do not interleave UoW sessions.
+    _bookkeeping_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
     async def tick(self) -> None:
         now = self.clock.now()
+        prev_tick_at = self._last_tick_at
+        self._last_tick_at = now
         async with self.uow:
             due = await self.uow.schedules.list_due(now)
         handled: set[ScheduleId] = set()
+
+        # Group due schedules by server so same-server schedules stay serial,
+        # while different servers run concurrently under a bounded semaphore.
+        by_server: dict[ServerId, list[Schedule]] = defaultdict(list)
         for schedule in due:
             handled.add(schedule.id)
-            try:
-                await self._run_due(schedule, now)
-            except Exception:  # noqa: BLE001 - one schedule must not stop the tick
-                _LOG.exception(
-                    "schedule %s failed this tick; continuing", schedule.id.value
-                )
+            by_server[schedule.server_id].append(schedule)
+
+        sem = asyncio.Semaphore(_MAX_CONCURRENT_RUNS)
+
+        async def _run_server_group(schedules: list[Schedule]) -> None:
+            async with sem:
+                for schedule in schedules:
+                    try:
+                        await self._run_due(schedule, now, prev_tick_at)
+                    except Exception:  # noqa: BLE001 - one schedule must not stop the tick
+                        _LOG.exception(
+                            "schedule %s failed this tick; continuing",
+                            schedule.id.value,
+                        )
+
+        await asyncio.gather(
+            *(_run_server_group(group) for group in by_server.values())
+        )
+
         # Fire any pending backup retry that has come due and was not already
         # superseded by a scheduled occurrence handled above.
         for schedule_id, retry_at in list(self._backup_retry.items()):
@@ -380,13 +421,33 @@ class RunScheduleTick:
         # now >= T), so ordering does not matter.
         await self._send_warnings(now)
 
-    async def _run_due(self, schedule: Schedule, now: dt.datetime) -> None:
+    async def _run_due(
+        self,
+        schedule: Schedule,
+        now: dt.datetime,
+        prev_tick_at: dt.datetime | None,
+    ) -> None:
         if schedule.action is not ScheduleAction.BACKUP and self._is_stale(
-            schedule, now
+            schedule, now, prev_tick_at
         ):
             # A stale non-backup occurrence does not fire late (module docstring):
-            # advance past now with no run row and no last_run_at change.
-            await self._advance(schedule, last_run_at=schedule.last_run_at)
+            # record a SKIPPED run row and advance past now with no last_run_at
+            # change.
+            stale_now = self.clock.now()
+            lateness = now - schedule.next_run_at if schedule.next_run_at else None
+            _LOG.warning(
+                "schedule %s: %s occurrence due %s is %s late; skipping",
+                schedule.id.value,
+                schedule.action.value,
+                schedule.next_run_at,
+                lateness,
+            )
+            stale_result = ActionResult(
+                ScheduleRunOutcome.SKIPPED, "occurrence too stale", None
+            )
+            async with self._bookkeeping_lock:
+                await self._record(schedule, stale_result, stale_now, stale_now)
+                await self._advance(schedule, last_run_at=schedule.last_run_at)
             return
         # A warning step still unsent now can never fire (a warning broadcasts
         # only strictly before its occurrence): its window fell between two
@@ -398,11 +459,13 @@ class RunScheduleTick:
                 if (schedule.id, occurrence, step.offset_minutes) not in self._warned:
                     self._log_missed_step(schedule, step)
         result, started_at, finished_at = await self._execute(schedule)
-        await self._record(schedule, result, started_at, finished_at)
-        await self._advance(schedule, last_run_at=started_at)
+        async with self._bookkeeping_lock:
+            await self._record(schedule, result, started_at, finished_at)
+            await self._advance(schedule, last_run_at=started_at)
         if schedule.action is ScheduleAction.BACKUP:
             self._reschedule_retry(schedule.id, result.outcome, finished_at)
-        await self._prune_after_backup(schedule, result)
+        async with self._bookkeeping_lock:
+            await self._prune_after_backup(schedule, result)
 
     async def _run_retry(self, schedule_id: ScheduleId, now: dt.datetime) -> None:
         # One-shot: the single retry is spent up front, REGARDLESS of its outcome
@@ -537,7 +600,8 @@ class RunScheduleTick:
         self, schedule: Schedule
     ) -> tuple[ActionResult, dt.datetime, dt.datetime]:
         started_at = self.clock.now()
-        result = await self.execute(
+        execute = self.make_execute()
+        result = await execute(
             server_id=schedule.server_id,
             action=schedule.action,
             command=schedule.command,
@@ -625,12 +689,30 @@ class RunScheduleTick:
             self._backup_retry.pop(schedule_id, None)
         # SKIPPED: leave any pending retry untouched (a skip is not a fresh failure).
 
-    def _is_stale(self, schedule: Schedule, now: dt.datetime) -> bool:
-        """Whether the due occurrence is too old to still execute (non-backup)."""
+    def _is_stale(
+        self,
+        schedule: Schedule,
+        now: dt.datetime,
+        prev_tick_at: dt.datetime | None,
+    ) -> bool:
+        """Whether the due occurrence is too old to still execute (non-backup).
+
+        An occurrence that became due after ``prev_tick_at`` is being listed at
+        the earliest possible tick; its lateness is self-inflicted by a
+        long-running sibling, not an outage, so it is never considered stale
+        (#1947).
+        """
 
         if schedule.next_run_at is None:
             return False
-        return now - schedule.next_run_at > LATE_RUN_GRACE
+        if now - schedule.next_run_at <= LATE_RUN_GRACE:
+            return False
+        # If the occurrence became due after the previous tick began, its
+        # lateness is entirely caused by this tick's own execution time — the
+        # schedule had no earlier opportunity to run.
+        if prev_tick_at is not None and schedule.next_run_at > prev_tick_at:
+            return False
+        return True
 
     def _next_after(self, schedule: Schedule, after: dt.datetime) -> dt.datetime:
         interval = schedule.cadence.interval_seconds
