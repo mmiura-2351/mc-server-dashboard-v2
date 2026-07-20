@@ -1423,3 +1423,160 @@ async def test_stale_rebuild_failure_does_not_offline_newer_session() -> None:
         await call_c.done_writing()
     finally:
         await h.stop()
+
+
+# ---------------------------------------------------------------------------
+# Heartbeat fast-path (issue #1698)
+# ---------------------------------------------------------------------------
+
+
+async def test_heartbeat_survives_slow_status_write() -> None:
+    """A slow DB write must not starve heartbeat liveness (issue #1698).
+
+    Heartbeats bypass the processing queue entirely, so even when the
+    processor is blocked on a DB-bound StatusChange the watchdog still sees
+    fresh heartbeats and keeps the session alive.
+    """
+
+    gate = asyncio.Event()
+
+    class _SlowSink(FakeServerStateSink):
+        async def record_observed_state(
+            self, *, server_id: str, worker_id: str, state: str
+        ) -> bool:
+            await gate.wait()
+            return await super().record_observed_state(
+                server_id=server_id, worker_id=worker_id, state=state
+            )
+
+    sink = _SlowSink()
+    h = _shared_clock_harness()
+    h.state_sink = sink
+    # Rebuild with the custom sink.
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=h.clock, heartbeat_timeout=_SHORT_TIMEOUT),
+        h.clock,
+        heartbeat_timeout=_SHORT_TIMEOUT,
+        state_sink=sink,
+    )
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call.write(_register_message())
+        await call.read()  # ack
+
+        server_id = "11111111-1111-1111-1111-111111111111"
+        # Send a StatusChange that will park in the slow sink.
+        await call.write(_status_message(server_id, pb.SERVER_STATE_RUNNING))
+
+        # Repeatedly advance the clock and heartbeat, staying under the
+        # timeout each step. With the old serial design these heartbeats
+        # would queue behind the blocked StatusChange and be missed.
+        for i in range(1, 5):
+            at = _T0 + dt.timedelta(seconds=0.2 * i)
+            h.clock.set(at)
+            await call.write(_heartbeat_message())
+            await _wait_for_heartbeat_at(h, at)
+
+        # The worker must still be ONLINE despite the StatusChange blocking.
+        snapshot = h.registry.list_workers()[0]
+        assert snapshot.status is WorkerStatus.ONLINE
+
+        # Release the gate so the StatusChange completes.
+        gate.set()
+        for _ in range(100):
+            if sink.observed:
+                break
+            await asyncio.sleep(0.01)
+        assert sink.observed == [(server_id, _WORKER_ID, "running")]
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+async def test_status_changes_processed_in_send_order() -> None:
+    """Status changes queued behind a gated write are delivered in order."""
+
+    gate = asyncio.Event()
+
+    class _GatedOnceSink(FakeServerStateSink):
+        def __init__(self) -> None:
+            super().__init__()
+            self._first = True
+
+        async def record_observed_state(
+            self, *, server_id: str, worker_id: str, state: str
+        ) -> bool:
+            if self._first:
+                self._first = False
+                await gate.wait()
+            return await super().record_observed_state(
+                server_id=server_id, worker_id=worker_id, state=state
+            )
+
+    sink = _GatedOnceSink()
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+    )
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call.write(_register_message())
+        await call.read()  # ack
+
+        server_a = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        server_b = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        await call.write(_status_message(server_a, pb.SERVER_STATE_RUNNING))
+        await call.write(_status_message(server_b, pb.SERVER_STATE_STOPPED))
+
+        # Release the gate so both writes complete.
+        gate.set()
+        for _ in range(200):
+            if len(sink.observed) >= 2:
+                break
+            await asyncio.sleep(0.01)
+
+        assert sink.observed == [
+            (server_a, _WORKER_ID, "running"),
+            (server_b, _WORKER_ID, "stopped"),
+        ]
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+async def test_clean_eof_drains_queued_messages() -> None:
+    """A clean client half-close drains all queued messages before returning."""
+
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+    )
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call.write(_register_message())
+        await call.read()  # ack
+
+        server_a = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        server_b = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        server_c = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+        await call.write(_status_message(server_a, pb.SERVER_STATE_RUNNING))
+        await call.write(_status_message(server_b, pb.SERVER_STATE_STOPPED))
+        await call.write(_status_message(server_c, pb.SERVER_STATE_STARTING))
+        await call.done_writing()
+
+        # Drain the server response stream to completion.
+        await _drain_to_eof(call)
+
+        # All three status changes must have been processed.
+        assert len(h.state_sink.observed) == 3
+        assert h.state_sink.observed == [
+            (server_a, _WORKER_ID, "running"),
+            (server_b, _WORKER_ID, "stopped"),
+            (server_c, _WORKER_ID, "starting"),
+        ]
+    finally:
+        await h.stop()
