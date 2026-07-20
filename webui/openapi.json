@@ -3755,6 +3755,17 @@
             ],
             "title": "Game Port"
           },
+          "memory_limit_mb": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory Limit Mb"
+          },
           "name": {
             "anyOf": [
               {
