@@ -13,7 +13,7 @@ from fastapi import FastAPI, status
 from fastapi.testclient import TestClient
 from pydantic import BaseModel, Field
 
-from mc_server_dashboard_api.core.adapters.metrics import http_requests_total
+from mc_server_dashboard_api.core.adapters.metrics import REGISTRY
 from mc_server_dashboard_api.core.adapters.metrics_middleware import metrics_middleware
 from mc_server_dashboard_api.http_problem import (
     ProblemException,
@@ -227,11 +227,108 @@ def test_unhandled_500_increments_metrics() -> None:
     # Snapshot the counter before the request. The label combination for
     # an unmatched-template GET 500 is method=GET, route=<unmatched> or
     # the actual template, status=500. We check any 500 increment.
-    before = http_requests_total.labels(
-        method="GET", route="/boom", status="500"
-    )._value.get()
+    before = (
+        REGISTRY.get_sample_value(
+            "http_requests_total",
+            {"method": "GET", "route": "/boom", "status": "500"},
+        )
+        or 0.0
+    )
     client.get("/boom")
-    after = http_requests_total.labels(
-        method="GET", route="/boom", status="500"
-    )._value.get()
+    after = (
+        REGISTRY.get_sample_value(
+            "http_requests_total",
+            {"method": "GET", "route": "/boom", "status": "500"},
+        )
+        or 0.0
+    )
     assert after == before + 1
+
+
+# -- Disconnect filtering: client disconnects must not be logged/counted as 500 --
+
+
+def test_client_disconnect_exception_is_not_swallowed() -> None:
+    """A ``ClientDisconnect`` must be re-raised, not caught and logged as a 500
+    (issue #2161). The middleware must let Starlette handle it normally."""
+
+    from starlette.requests import ClientDisconnect
+
+    app = FastAPI()
+    install_problem_handlers(app)
+    app.middleware("http")(unhandled_exception_middleware)
+
+    @app.get("/disconnect")
+    def disconnect() -> None:
+        raise ClientDisconnect()
+
+    client = TestClient(app, raise_server_exceptions=False)
+    # ClientDisconnect re-raised → Starlette's ServerErrorMiddleware handles it,
+    # which returns a plain 500 (not our problem+json 500 with internal_error
+    # reason). The key assertion is that it does NOT produce a problem+json body
+    # with reason=internal_error.
+    resp = client.get("/disconnect")
+    # It should NOT be our custom internal_error response.
+    if resp.headers.get("content-type", "").startswith("application/problem+json"):
+        body = resp.json()
+        assert body.get("reason") != "internal_error", (
+            "ClientDisconnect was caught by the middleware and logged as a 500"
+        )
+
+
+def test_no_response_returned_runtime_error_is_not_swallowed() -> None:
+    """A ``RuntimeError("No response returned.")`` from BaseHTTPMiddleware
+    internals must be re-raised, not caught and logged as a 500
+    (issue #2161)."""
+
+    app = FastAPI()
+    install_problem_handlers(app)
+    app.middleware("http")(unhandled_exception_middleware)
+
+    @app.get("/no-response")
+    def no_response() -> None:
+        raise RuntimeError("No response returned.")
+
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.get("/no-response")
+    if resp.headers.get("content-type", "").startswith("application/problem+json"):
+        body = resp.json()
+        assert body.get("reason") != "internal_error", (
+            "No-response-returned RuntimeError was caught by the middleware"
+        )
+
+
+def test_disconnect_does_not_increment_500_metrics() -> None:
+    """A client disconnect must NOT increment ``http_requests_total`` with
+    status=500 (issue #2161)."""
+
+    from starlette.requests import ClientDisconnect
+
+    app = FastAPI()
+    install_problem_handlers(app)
+    app.middleware("http")(unhandled_exception_middleware)
+    app.middleware("http")(metrics_middleware)
+
+    @app.get("/disconnect-metrics")
+    def disconnect_metrics() -> None:
+        raise ClientDisconnect()
+
+    client = TestClient(app, raise_server_exceptions=False)
+    before = (
+        REGISTRY.get_sample_value(
+            "http_requests_total",
+            {"method": "GET", "route": "/disconnect-metrics", "status": "500"},
+        )
+        or 0.0
+    )
+    client.get("/disconnect-metrics")
+    after = (
+        REGISTRY.get_sample_value(
+            "http_requests_total",
+            {"method": "GET", "route": "/disconnect-metrics", "status": "500"},
+        )
+        or 0.0
+    )
+    assert after == before, (
+        f"500 metric incremented by {after - before} for a client disconnect"
+    )
