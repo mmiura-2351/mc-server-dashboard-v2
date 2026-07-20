@@ -309,6 +309,132 @@ func (g *gatedClient) ReportSessions(ctx context.Context, starts []apiclient.Ses
 	return g.inner.ReportSessions(ctx, starts, ends)
 }
 
+// TestReporterDroppedStartSuppressesBufferedEnd verifies that when starts are
+// dropped by capOldest during a sustained outage, any already-buffered End
+// whose Start was dropped is also removed — preventing an orphan End from
+// reaching the API and creating a permanent identity-less session row.
+func TestReporterDroppedStartSuppressesBufferedEnd(t *testing.T) {
+	fake := &fakeReportClient{failN: 1 << 30} // always fail
+	r := NewReporter(fake, discardLogger(), nil, nil)
+
+	// Buffer one start+end pair (the victim: oldest start will be dropped).
+	victim := r.Start("srv", "amber", "1.2.3.4", "Steve", "", apiclient.SourceJava)
+	r.End(victim)
+
+	// Fill starts to the cap with start-only sessions (no matching ends), so
+	// only the start buffer overflows while ends stay under cap.
+	for i := 1; i < MaxBufferedEvents; i++ {
+		r.Start("srv", "amber", "1.2.3.4", "Steve", "", apiclient.SourceJava)
+	}
+
+	// Flush fails → both slices restored. Starts are at cap (exactly
+	// MaxBufferedEvents); ends have just 1.
+	r.flush(context.Background())
+
+	// One more start overflows the start buffer; victim (oldest) is dropped.
+	r.Start("srv", "amber", "1.2.3.4", "Steve", "", apiclient.SourceJava)
+	r.flush(context.Background())
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// The victim's End must have been removed from the buffer.
+	for _, e := range r.pendEnds {
+		if e.SessionID == victim {
+			t.Errorf("orphan End in buffer: session %s has no matching Start (was dropped)", victim)
+		}
+	}
+}
+
+// TestReporterDroppedStartSuppressesLaterEnd verifies that if a Start was
+// dropped from the buffer during cap overflow, a later End() call for that
+// session id is silently discarded rather than buffered as an orphan.
+func TestReporterDroppedStartSuppressesLaterEnd(t *testing.T) {
+	fake := &fakeReportClient{failN: 1 << 30}
+	r := NewReporter(fake, discardLogger(), nil, nil)
+
+	// Fill starts to cap.
+	victim := r.Start("srv", "amber", "1.2.3.4", "Steve", "", apiclient.SourceJava)
+	for i := 1; i < MaxBufferedEvents; i++ {
+		r.Start("srv", "amber", "1.2.3.4", "Steve", "", apiclient.SourceJava)
+	}
+	// Flush fails → restored at cap.
+	r.flush(context.Background())
+
+	// One more start overflows; victim (the oldest) is dropped.
+	r.Start("srv", "amber", "1.2.3.4", "Steve", "", apiclient.SourceJava)
+	r.flush(context.Background())
+
+	// Now End the victim — should be suppressed via tombstone.
+	r.End(victim)
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, e := range r.pendEnds {
+		if e.SessionID == victim {
+			t.Errorf("End for dropped-start session %s should have been suppressed", victim)
+		}
+	}
+}
+
+// TestReporterEndDroppedStartSurvivesUnaffected verifies that when Ends are
+// dropped (benign direction — healed by close_absent on next Register), the
+// Start survives and is delivered normally.
+func TestReporterEndDroppedStartSurvivesUnaffected(t *testing.T) {
+	fake := &fakeReportClient{failN: 1 << 30}
+	r := NewReporter(fake, discardLogger(), nil, nil)
+
+	// Buffer a start whose end will be dropped.
+	id := r.Start("srv", "amber", "1.2.3.4", "Steve", "", apiclient.SourceJava)
+	r.End(id)
+
+	// Fill ends to overflow.
+	for i := 0; i < MaxBufferedEvents; i++ {
+		r.End("other-" + fmt.Sprintf("%d", i))
+	}
+	r.flush(context.Background())
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// The start must survive regardless of end drops.
+	found := false
+	for _, s := range r.pendStarts {
+		if s.SessionID == id {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("Start for session %s should survive even when its End is dropped", id)
+	}
+}
+
+// TestDroppedStartsBounded verifies that the droppedStarts tombstone set is
+// cleaned up after recovery (successful flush) and does not grow without bound.
+func TestDroppedStartsBounded(t *testing.T) {
+	fake := &fakeReportClient{failN: 2}
+	r := NewReporter(fake, discardLogger(), nil, nil)
+
+	// Fill starts to overflow.
+	for i := 0; i < MaxBufferedEvents+100; i++ {
+		r.Start("srv", "amber", "1.2.3.4", "Steve", "", apiclient.SourceJava)
+	}
+	r.flush(context.Background()) // fail 1: caps + tombstones created
+	r.flush(context.Background()) // fail 2: retries, caps again
+
+	// Third flush succeeds; buffer drains.
+	r.flush(context.Background())
+
+	r.mu.Lock()
+	tombstones := len(r.droppedStarts)
+	r.mu.Unlock()
+
+	if tombstones != 0 {
+		t.Errorf("droppedStarts = %d after successful flush, want 0", tombstones)
+	}
+}
+
 // TestSnapshotActiveExcludesFlush verifies the barrier: while SnapshotActive is
 // held, a concurrent flush cannot run (the Start event stays buffered).
 func TestSnapshotActiveExcludesFlush(t *testing.T) {
