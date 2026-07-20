@@ -250,11 +250,17 @@ func (r *Reporter) flush(ctx context.Context) {
 		r.pendEnds = capOldest(allEnds, "end", r.logger)
 		r.mu.Unlock()
 	} else {
-		// Successful flush: clear tombstones — the outage is over, and any
-		// session whose start was dropped has been definitively lost. Keeping
-		// tombstones would leak memory.
+		// Successful flush: clear tombstones only for sessions that have
+		// already ended (no longer in openIDs). Sessions still open need
+		// their tombstone preserved to suppress the future End() call;
+		// without this, the sequence drop-start → successful-flush → End()
+		// produces an orphan End (permanent malformed DB row).
 		r.mu.Lock()
-		clear(r.droppedStarts)
+		for id := range r.droppedStarts {
+			if _, open := r.openIDs[id]; !open {
+				delete(r.droppedStarts, id)
+			}
+		}
 		r.mu.Unlock()
 	}
 }
