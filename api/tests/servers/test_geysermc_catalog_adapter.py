@@ -11,26 +11,22 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx2
 import pytest
 
-from mc_server_dashboard_api.servers.adapters import geysermc_catalog
 from mc_server_dashboard_api.servers.adapters.geysermc_catalog import (
     _ALLOWED_DOWNLOAD_HOSTS,
     GeyserMcCatalog,
-    _assert_no_private_ips,
 )
 from mc_server_dashboard_api.servers.domain.errors import (
     CatalogProjectNotFoundError,
     CatalogUnavailableError,
 )
 
-_LATEST_URL = (
-    "https://download.geysermc.org/v2/projects/floodgate/versions/latest/builds/latest"
-)
+_LATEST_PATH = "/v2/projects/floodgate/versions/latest/builds/latest"
 _CONCRETE_PATH = "/v2/projects/floodgate/versions/2.2.5/builds/138"
-_CONCRETE_URL = "https://download.geysermc.org" + _CONCRETE_PATH
 
 
 @contextmanager
@@ -226,13 +222,6 @@ async def test_download_rejects_disallowed_host() -> None:
         await catalog.download_file("https://evil.example.com/x")
 
 
-async def test_assert_no_private_ips_blocks_loopback() -> None:
-    with pytest.raises(CatalogUnavailableError, match="private/reserved"):
-        await _assert_no_private_ips(
-            "download.geysermc.org", _resolver=lambda _h: ["127.0.0.1"]
-        )
-
-
 def test_geysermc_host_is_the_only_allowed_download_host() -> None:
     assert _ALLOWED_DOWNLOAD_HOSTS == frozenset({"download.geysermc.org"})
 
@@ -245,17 +234,18 @@ async def test_list_versions_follows_metadata_redirect(
 ) -> None:
     # The live ``.../builds/latest`` endpoint 302-redirects to the concrete build
     # where the JSON lives; _get_json must follow it (not just error out).
+    import mc_server_dashboard_api.versions.adapters.ssrf_guard as ssrf_guard
 
     async def _public_resolver(_h: str) -> list[str]:
         return ["104.18.0.1"]
 
-    monkeypatch.setattr(geysermc_catalog, "_async_resolve_host", _public_resolver)
+    monkeypatch.setattr(ssrf_guard, "_async_resolve_host", _public_resolver)
 
     def _handler(request: httpx2.Request) -> httpx2.Response:
-        url = str(request.url)
-        if url == _LATEST_URL:
+        path = urlparse(str(request.url)).path
+        if path == _LATEST_PATH:
             return httpx2.Response(302, headers={"location": _CONCRETE_PATH})
-        if url == _CONCRETE_URL:
+        if path == _CONCRETE_PATH:
             return httpx2.Response(200, json=_BUILD)
         return httpx2.Response(404)
 
@@ -267,7 +257,16 @@ async def test_list_versions_follows_metadata_redirect(
     assert versions[0].files[0].sha256 == _SPIGOT_SHA256
 
 
-async def test_metadata_redirect_to_disallowed_host_rejected() -> None:
+async def test_metadata_redirect_to_disallowed_host_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import mc_server_dashboard_api.versions.adapters.ssrf_guard as ssrf_guard
+
+    async def _public_resolver(_h: str) -> list[str]:
+        return ["104.18.0.1"]
+
+    monkeypatch.setattr(ssrf_guard, "_async_resolve_host", _public_resolver)
+
     def _handler(request: httpx2.Request) -> httpx2.Response:
         return httpx2.Response(302, headers={"location": "https://evil.example.com/x"})
 
@@ -281,11 +280,12 @@ async def test_get_json_html_body_raises_catalog_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An HTML body on HTTP 200 raises CatalogUnavailableError."""
+    import mc_server_dashboard_api.versions.adapters.ssrf_guard as ssrf_guard
 
     async def _public_resolver(_h: str) -> list[str]:
         return ["104.18.0.1"]
 
-    monkeypatch.setattr(geysermc_catalog, "_async_resolve_host", _public_resolver)
+    monkeypatch.setattr(ssrf_guard, "_async_resolve_host", _public_resolver)
 
     def _handler(request: httpx2.Request) -> httpx2.Response:
         return httpx2.Response(
@@ -309,18 +309,47 @@ async def test_list_versions_shape_error_raises_catalog_unavailable() -> None:
 async def test_metadata_redirect_to_private_ip_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # An allowlisted host that resolves to a private IP (DNS rebinding) is still
-    # rejected on the redirect hop, not only the initial request.
+    """A host resolving to a private IP is rejected at pin time."""
+    import mc_server_dashboard_api.versions.adapters.ssrf_guard as ssrf_guard
 
     async def _private_resolver(_h: str) -> list[str]:
         return ["127.0.0.1"]
 
-    monkeypatch.setattr(geysermc_catalog, "_async_resolve_host", _private_resolver)
+    monkeypatch.setattr(ssrf_guard, "_async_resolve_host", _private_resolver)
+
+    catalog = GeyserMcCatalog()
+    with pytest.raises(CatalogUnavailableError, match="private/reserved"):
+        await catalog.list_versions("geysermc-floodgate", loader="paper")
+
+
+# -- Anti-rebinding: verify IP pinning in transport (issue #2155) --
+
+
+async def test_get_json_pins_resolved_ip_in_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_get_json connects to the resolved IP, not the hostname (anti-rebinding)."""
+    import mc_server_dashboard_api.versions.adapters.ssrf_guard as ssrf_guard
+
+    async def _public_resolver(_host: str) -> list[str]:
+        return ["104.18.0.1"]
+
+    monkeypatch.setattr(ssrf_guard, "_async_resolve_host", _public_resolver)
+
+    captured_requests: list[httpx2.Request] = []
 
     def _handler(request: httpx2.Request) -> httpx2.Response:
-        return httpx2.Response(302, headers={"location": _CONCRETE_PATH})
+        captured_requests.append(request)
+        return httpx2.Response(200, json=_BUILD)
 
     catalog = GeyserMcCatalog()
     with _mock_transport(_handler):
-        with pytest.raises(CatalogUnavailableError, match="private/reserved"):
-            await catalog.list_versions("geysermc-floodgate", loader="paper")
+        await catalog.list_versions("geysermc-floodgate", loader="paper")
+
+    assert len(captured_requests) >= 1
+    req = captured_requests[0]
+    # The request URL uses the resolved IP, not the hostname.
+    assert "104.18.0.1" in str(req.url)
+    assert "download.geysermc.org" not in str(req.url)
+    # The Host header carries the original hostname for TLS/virtual-host routing.
+    assert req.headers.get("host") == "download.geysermc.org"

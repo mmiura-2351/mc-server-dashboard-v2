@@ -7,16 +7,16 @@ descriptive User-Agent.
 
 from __future__ import annotations
 
-import asyncio
-import ipaddress
 import json
-import socket
-from collections.abc import Callable
 from typing import Any
-from urllib.parse import quote, urljoin, urlparse
+from urllib.parse import quote
 
 import httpx2
 
+from mc_server_dashboard_api.servers.adapters.catalog_ssrf import (
+    next_logical_url,
+    pin_download_url,
+)
 from mc_server_dashboard_api.servers.domain.catalog_provider import (
     CatalogDependency,
     CatalogFile,
@@ -47,46 +47,6 @@ _ALLOWED_DOWNLOAD_HOSTS = frozenset(
         "objects.githubusercontent.com",
     }
 )
-
-
-async def _async_resolve_host(hostname: str) -> list[str]:
-    """Resolve *hostname* without blocking the event loop.
-
-    Uses ``loop.getaddrinfo``, which delegates to the executor internally.
-    """
-    loop = asyncio.get_running_loop()
-    results = await loop.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
-    return list({str(addr[4][0]) for addr in results})
-
-
-async def _assert_no_private_ips(
-    hostname: str,
-    *,
-    _resolver: Callable[[str], list[str]] | None = None,
-) -> None:
-    """Raise :class:`CatalogUnavailableError` if *hostname* resolves to a private IP.
-
-    Guards against DNS-rebinding attacks where an attacker-controlled hostname
-    initially passes the allowlist check but resolves to a private/loopback
-    address.
-    """
-    try:
-        if _resolver is not None:
-            addrs = _resolver(hostname)
-        else:
-            addrs = await _async_resolve_host(hostname)
-    except (socket.gaierror, OSError) as exc:
-        raise CatalogUnavailableError(f"DNS resolution failed for {hostname}") from exc
-    if not addrs:
-        raise CatalogUnavailableError(
-            f"DNS resolution for {hostname} returned no addresses"
-        )
-    for addr in addrs:
-        ip = ipaddress.ip_address(addr)
-        if not ip.is_global:
-            raise CatalogUnavailableError(
-                f"hostname {hostname} resolved to private/reserved IP: {addr}"
-            )
 
 
 class ModrinthCatalog(CatalogProvider):
@@ -184,41 +144,29 @@ class ModrinthCatalog(CatalogProvider):
             raise CatalogUnavailableError(f"unexpected response shape: {exc}") from exc
 
     async def download_file(self, url: str) -> bytes:
-        parsed = urlparse(url)
-        if parsed.scheme != "https":
-            raise CatalogUnavailableError(f"download URL must use HTTPS: {url}")
-        if parsed.hostname not in _ALLOWED_DOWNLOAD_HOSTS:
-            raise CatalogUnavailableError(
-                f"download URL host not allowed: {parsed.hostname}"
-            )
-        await _assert_no_private_ips(parsed.hostname)
+        logical_url = url
+        pinned = await pin_download_url(logical_url, _ALLOWED_DOWNLOAD_HOSTS)
         try:
             async with httpx2.AsyncClient(
                 timeout=_DOWNLOAD_TIMEOUT,
                 headers=self._headers(),
             ) as client:
-                current_url = url
                 for _ in range(_MAX_REDIRECTS):
                     async with client.stream(
-                        "GET", current_url, follow_redirects=False
+                        "GET",
+                        pinned.url,
+                        headers=pinned.headers,
+                        extensions=pinned.extensions,
+                        follow_redirects=False,
                     ) as response:
                         if response.is_redirect:
                             location = response.headers.get("location", "")
-                            redirect_parsed = urlparse(location)
-                            if not redirect_parsed.scheme:
-                                location = urljoin(current_url, location)
-                                redirect_parsed = urlparse(location)
-                            if redirect_parsed.scheme != "https":
-                                raise CatalogUnavailableError(
-                                    f"redirect to non-HTTPS: {location}"
-                                )
-                            if redirect_parsed.hostname not in _ALLOWED_DOWNLOAD_HOSTS:
-                                raise CatalogUnavailableError(
-                                    f"redirect to disallowed host: "
-                                    f"{redirect_parsed.hostname}"
-                                )
-                            await _assert_no_private_ips(redirect_parsed.hostname)
-                            current_url = location
+                            logical_url = next_logical_url(location, logical_url)
+                            pinned = await pin_download_url(
+                                logical_url,
+                                _ALLOWED_DOWNLOAD_HOSTS,
+                                redirect=True,
+                            )
                             continue
                         response.raise_for_status()
                         chunks: list[bytes] = []
