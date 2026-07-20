@@ -496,24 +496,6 @@ class FsStorage(Storage):
             self._release_staging(staging)
             fs_handle.consumed = True
             raise IntegrityCheckError(report)
-        # Missing-region gate (issue #854): the structural check above only validates
-        # files that EXIST — a region file that vanished is structurally valid absence
-        # and would publish silently. Compare the staged region-file set against the
-        # prior ``current/`` set per region-bearing directory and refuse when a
-        # dimension that still has regions lost SOME of them (partial-loss corruption
-        # signature). A full-dimension delete (all regions gone) is allowed. First
-        # publish (no ``current``) has no prior set, so nothing is flagged.
-        try:
-            prior = self._current_dir(fs_handle.community_id, fs_handle.server_id)
-        except NotFoundError:
-            prior = None
-        if prior is not None:
-            missing = await asyncio.to_thread(check_missing_regions, staging, prior)
-            if not missing.complete:
-                await asyncio.to_thread(_rmtree, staging)
-                self._release_staging(staging)
-                fs_handle.consumed = True
-                raise MissingRegionsError(missing)
         try:
             generation = await asyncio.to_thread(
                 self._publish_and_bump,
@@ -523,12 +505,12 @@ class FsStorage(Storage):
                 publisher,
                 expected_base,
             )
-        except StaleGenerationError:
-            # The store advanced past the guard's base during the upload window
-            # (issue #899): an at-rest edit or restore landed after the pre-stream
-            # guard passed. Discard the staging exactly as the other refusal paths do
-            # (the prior ``current`` keeps the newer copy, no bump) and re-raise so the
-            # edge maps it to 409 stale_generation; the Worker re-bases on next start.
+        except (StaleGenerationError, MissingRegionsError):
+            # StaleGenerationError: the store advanced past the guard's base during
+            # the upload window (issue #899). MissingRegionsError: the staged set lost
+            # regions from a dimension that still has some (issue #854, moved under the
+            # lock by #921). Discard the staging exactly as the other refusal paths do
+            # (the prior ``current`` keeps the newer/good copy, no bump) and re-raise.
             await asyncio.to_thread(_rmtree, staging)
             self._release_staging(staging)
             fs_handle.consumed = True
@@ -584,6 +566,22 @@ class FsStorage(Storage):
                 current = self._read_generation(server_root)
                 if current != expected_base:
                     raise StaleGenerationError(expected_base, current)
+            # Missing-region gate (issue #854, #921 item 2): compare the staged
+            # region-file set against the prior ``current/`` set INSIDE the lock so
+            # a concurrent publish/restore cannot flip ``current`` between the
+            # prior-read and the publish. The object adapter evaluates this gate
+            # inside its locked section; the fs adapter must match.
+            # ``check_missing_regions`` is a sync directory-entry scan;
+            # ``_publish_and_bump`` runs on a worker thread, so calling it directly
+            # is correct.
+            try:
+                prior = self._current_dir(community_id, server_id)
+            except NotFoundError:
+                prior = None
+            if prior is not None:
+                missing = check_missing_regions(staging, prior)
+                if not missing.complete:
+                    raise MissingRegionsError(missing)
             old_snapshot = self._publish(community_id, server_id, staging)
             generation = self._read_generation(server_root) + 1
             self._write_marker(server_root, generation, publisher)
