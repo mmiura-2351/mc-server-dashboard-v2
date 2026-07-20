@@ -743,23 +743,19 @@ def test_update_memory_limit_denied_without_permission_is_403() -> None:
     assert body["permission"] == "server:update"
 
 
-def test_update_top_level_memory_limit_merges_into_config() -> None:
-    # A top-level ``memory_limit_mb`` on the PATCH body is merged into the
-    # config dict so the value reaches the use case (issue #2148). The same
-    # convenience alias that create supports.
-    community = uuid.uuid4()
-    server = _server_entity(community_id=community)
-    server.config = {**server.config, MEMORY_LIMIT_CONFIG_KEY: 2048}
-    update = _FakeUseCase(result=server)
-    app = _app(member=True, allow=True, update=update)
+def test_update_top_level_memory_limit_without_config_is_422() -> None:
+    # A top-level ``memory_limit_mb`` without a ``config`` dict is rejected:
+    # the update path does wholesale config replacement, so synthesizing a
+    # config with only the memory-limit key would wipe every other key
+    # (issue #2148).
+    app = _app(member=True, allow=True, update=_FakeUseCase())
     client = next(_client(app))
     resp = client.patch(
-        f"/api/communities/{community}/servers/{uuid.uuid4()}",
+        f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
         json={"memory_limit_mb": 2048},
     )
-    assert resp.status_code == 200
-    # The use case must receive the value inside config.
-    assert update.calls[0]["config"] == {MEMORY_LIMIT_CONFIG_KEY: 2048}
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "memory_limit_requires_config"
 
 
 def test_update_top_level_memory_limit_merges_when_config_present() -> None:

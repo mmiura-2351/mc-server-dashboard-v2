@@ -173,7 +173,7 @@ class CreateServerRequest(BaseModel):
     # Top-level convenience alias for ``config['memory_limit_mb']`` (issue #1849).
     # The response surfaces the value at the top level, so the request accepts it
     # the same way. When set, the value is merged into ``config`` before the use
-    # case runs; an explicit ``config['memory_limit_mb']`` takes precedence.
+    # case runs; 422 ``memory_limit_conflict`` when both carry different values.
     memory_limit_mb: int | None = None
 
 
@@ -193,9 +193,11 @@ class UpdateServerRequest(BaseModel):
     # (owner decision, RELAY.md Section 16).
     slug: str | None = None
     # Top-level convenience alias for ``config['memory_limit_mb']`` (issue #2148).
-    # Same semantics as the create alias (issue #1849): merged into ``config``
-    # when the key is absent; 422 ``memory_limit_conflict`` when both are present
-    # with different values.
+    # Merged into ``config`` when the key is absent; 422 ``memory_limit_conflict``
+    # when both carry different values. Requires ``config`` to be present — the
+    # update path does wholesale config replacement, so alias-only would wipe
+    # every other key; 422 ``memory_limit_requires_config`` when ``config`` is
+    # omitted.
     memory_limit_mb: int | None = None
 
 
@@ -770,12 +772,12 @@ async def update_server(
 
     authorized = authz.auth_user
     config = None if body.config is None else _validated_config(body.config)
-    # Merge the top-level convenience alias into config (issue #2148).
-    # When config was omitted and the alias is set, create a config dict so the
-    # use case receives the memory-limit change.
-    if body.memory_limit_mb is not None and config is None:
-        config = {MEMORY_LIMIT_CONFIG_KEY: body.memory_limit_mb}
-    elif body.memory_limit_mb is not None and config is not None:
+    # Merge the top-level convenience alias into config (issue #2148). The
+    # update path does wholesale config replacement, so alias-only (no config)
+    # would silently wipe every other key — reject it explicitly.
+    if body.memory_limit_mb is not None:
+        if config is None:
+            raise _unprocessable("memory_limit_requires_config")
         config = _merge_memory_limit_alias(body.memory_limit_mb, config)
     try:
         server = await use_case(
