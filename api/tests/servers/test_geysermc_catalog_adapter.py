@@ -111,7 +111,10 @@ def test_handles_url_only_geysermc_host() -> None:
 # -- search --
 
 
-@pytest.mark.parametrize("query", ["", "flood", "floodgate", "FLOOD", "gate"])
+@pytest.mark.parametrize(
+    "query",
+    ["", "flood", "floodgate", "FLOOD", "gate", "geysermc-floodgate", "geysermc"],
+)
 async def test_search_surfaces_floodgate_for_paper(query: str) -> None:
     catalog = GeyserMcCatalog()
     resp = await catalog.search(query=query, loader="paper", game_versions=["1.21.1"])

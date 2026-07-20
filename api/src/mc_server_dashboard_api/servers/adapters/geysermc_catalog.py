@@ -112,7 +112,7 @@ class GeyserMcCatalog(CatalogProvider):
         if (
             offset != 0
             or loader != _PAPER_LOADER
-            or (query and query.lower() not in _GEYSERMC_PROJECT)
+            or (query and query.lower() not in _SYNTHETIC_PROJECT_ID)
         ):
             return CatalogSearchResponse(
                 hits=[], total_hits=0, offset=offset, limit=limit
