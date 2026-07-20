@@ -21,6 +21,7 @@ from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from mc_server_dashboard_api.storage.domain.errors import (
     IntegrityCheckError,
     MissingRegionsError,
+    StaleGenerationError,
 )
 from mc_server_dashboard_api.storage.domain.value_objects import (
     BackupKey,
@@ -501,3 +502,31 @@ async def test_prune_failclosed_keeps_tree_when_pack_fails(
     assert read_tar(await drain(storage.open_hydrate_source(community, server))) == {
         "world/level.dat": b"w"
     }
+
+
+async def test_commit_refuses_when_generation_marker_removed(
+    tmp_path: Path,
+) -> None:
+    # Issue #1704: after prune (or any path that removes the generation marker),
+    # _read_generation returns 0. A late commit whose expected_base was the
+    # pre-prune generation (>0) must fail with StaleGenerationError, not
+    # silently resurrect the snapshot tree. The fix changes the stale check
+    # from ``current > expected_base`` to ``current != expected_base``.
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await _publish(storage, community, server, {"f": b"v1"})
+    base = await storage.current_generation(community, server)
+    assert base >= 1
+
+    # Stage a new snapshot at the pre-removal base...
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(handle, tar_stream({"f": b"late-upload"}))
+
+    # ...then remove the generation marker (as prune does).
+    root = _prune_server_root(tmp_path, community, server)
+    marker = root / "generation"
+    assert marker.is_file()
+    marker.unlink()
+
+    with pytest.raises(StaleGenerationError):
+        await storage.commit_snapshot(handle, expected_base=base)

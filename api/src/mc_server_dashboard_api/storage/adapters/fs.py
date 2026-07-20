@@ -582,7 +582,7 @@ class FsStorage(Storage):
         with self._server_lock(community_id, server_id):
             if expected_base is not None:
                 current = self._read_generation(server_root)
-                if current > expected_base:
+                if current != expected_base:
                     raise StaleGenerationError(expected_base, current)
             old_snapshot = self._publish(community_id, server_id, staging)
             generation = self._read_generation(server_root) + 1
@@ -1048,6 +1048,17 @@ class FsStorage(Storage):
         await asyncio.to_thread(self._prune_to_final_snapshot, community_id, server_id)
 
     def _prune_to_final_snapshot(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> None:
+        # Hold the per-server lock for the entire prune (issue #1704): this
+        # serializes against ``_publish_and_bump`` (commit_snapshot) which takes
+        # the same lock, so a late commit cannot land while the prune is removing
+        # the working-set tree and generation marker. The method already runs on
+        # a worker thread via ``asyncio.to_thread``, so blocking is fine.
+        with self._server_lock(community_id, server_id):
+            self._prune_to_final_snapshot_inner(community_id, server_id)
+
+    def _prune_to_final_snapshot_inner(
         self, community_id: CommunityId, server_id: ServerId
     ) -> None:
         server_root = self._server_root(community_id, server_id)
