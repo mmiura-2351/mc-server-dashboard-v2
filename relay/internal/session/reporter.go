@@ -61,6 +61,8 @@ type Reporter struct {
 	flushTimeout    time.Duration
 	shutdownTimeout time.Duration
 
+	flightMu sync.Mutex // held during flush and SnapshotActive to serialize them
+
 	mu          sync.Mutex
 	pendStarts  []apiclient.SessionStart
 	pendEnds    []apiclient.SessionEnd
@@ -143,6 +145,17 @@ func (r *Reporter) ActiveSessionIDs() []string {
 	return ids
 }
 
+// SnapshotActive returns the ids of sessions still open on the relay along with
+// a release function that the caller must invoke when done. While held, no flush
+// can run, so the snapshot is consistent with the buffer: any session started
+// after the snapshot has its start event still buffered and will not be flushed
+// (and therefore cannot be orphan-healed) until the caller releases. This is the
+// barrier that prevents the Register/flush race (issue #1718).
+func (r *Reporter) SnapshotActive() (ids []string, release func()) {
+	r.flightMu.Lock()
+	return r.ActiveSessionIDs(), r.flightMu.Unlock
+}
+
 // Run drives the flush loop until ctx is cancelled, then flushes once more so a
 // clean shutdown does not strand buffered events.
 func (r *Reporter) Run(ctx context.Context) {
@@ -192,6 +205,8 @@ func (r *Reporter) signalFlush() {
 // the front of the buffer so the next flush retries them (ReportSessions is
 // idempotent server-side — RELAY.md Section 6).
 func (r *Reporter) flush(ctx context.Context) {
+	r.flightMu.Lock()
+	defer r.flightMu.Unlock()
 	r.mu.Lock()
 	if len(r.pendStarts) == 0 && len(r.pendEnds) == 0 {
 		r.mu.Unlock()
