@@ -63,11 +63,12 @@ type Reporter struct {
 
 	flightMu sync.Mutex // held during flush and SnapshotActive to serialize them
 
-	mu          sync.Mutex
-	pendStarts  []apiclient.SessionStart
-	pendEnds    []apiclient.SessionEnd
-	openIDs     map[string]struct{}
-	flushSignal chan struct{}
+	mu            sync.Mutex
+	pendStarts    []apiclient.SessionStart
+	pendEnds      []apiclient.SessionEnd
+	openIDs       map[string]struct{}
+	droppedStarts map[string]struct{} // tombstones for starts dropped by capOldest
+	flushSignal   chan struct{}
 }
 
 // NewReporter builds a reporter over the API client. m carries the relay's
@@ -85,6 +86,7 @@ func NewReporter(client reportClient, logger *slog.Logger, now func() time.Time,
 		flushTimeout:    DefaultFlushTimeout,
 		shutdownTimeout: DefaultShutdownTimeout,
 		openIDs:         make(map[string]struct{}),
+		droppedStarts:   make(map[string]struct{}),
 		flushSignal:     make(chan struct{}, 1),
 	}
 }
@@ -121,11 +123,18 @@ func (r *Reporter) Start(serverID, slug, playerIP, username, playerUUID string, 
 	return id
 }
 
-// End records the close of a session by id.
+// End records the close of a session by id. If the session's Start was dropped
+// during a buffer overflow (tombstoned in droppedStarts), the End is silently
+// discarded to prevent an orphan End from reaching the API.
 func (r *Reporter) End(id string) {
 	r.mu.Lock()
-	r.pendEnds = append(r.pendEnds, apiclient.SessionEnd{SessionID: id, EndedAt: r.now()})
 	delete(r.openIDs, id)
+	if _, dropped := r.droppedStarts[id]; dropped {
+		delete(r.droppedStarts, id)
+		r.mu.Unlock()
+		return
+	}
+	r.pendEnds = append(r.pendEnds, apiclient.SessionEnd{SessionID: id, EndedAt: r.now()})
 	over := len(r.pendStarts)+len(r.pendEnds) >= FlushMaxEvents
 	r.mu.Unlock()
 	if over {
@@ -227,10 +236,66 @@ func (r *Reporter) flush(ctx context.Context) {
 		r.metrics.SessionFlushFailure()
 		r.logger.Warn("session report failed; will retry", "error", err, "starts", len(starts), "ends", len(ends))
 		r.mu.Lock()
-		r.pendStarts = capOldest(append(starts, r.pendStarts...), "start", r.logger)
-		r.pendEnds = capOldest(append(ends, r.pendEnds...), "end", r.logger)
+		merged := append(starts, r.pendStarts...)
+		merged, dropped := capOldestStarts(merged, r.logger)
+		r.pendStarts = merged
+		// Record tombstones so future End() calls for dropped sessions are
+		// suppressed.
+		for id := range dropped {
+			r.droppedStarts[id] = struct{}{}
+		}
+		allEnds := append(ends, r.pendEnds...)
+		// Remove buffered ends whose start was just dropped.
+		allEnds = dropOrphanEnds(allEnds, dropped)
+		r.pendEnds = capOldest(allEnds, "end", r.logger)
+		r.mu.Unlock()
+	} else {
+		// Successful flush: clear tombstones only for sessions that have
+		// already ended (no longer in openIDs). Sessions still open need
+		// their tombstone preserved to suppress the future End() call;
+		// without this, the sequence drop-start → successful-flush → End()
+		// produces an orphan End (permanent malformed DB row).
+		r.mu.Lock()
+		for id := range r.droppedStarts {
+			if _, open := r.openIDs[id]; !open {
+				delete(r.droppedStarts, id)
+			}
+		}
 		r.mu.Unlock()
 	}
+}
+
+// capOldestStarts bounds the pending start slice to MaxBufferedEvents and
+// returns the set of session ids that were dropped (the tombstones). These
+// tombstones are used to suppress matching Ends so an orphan End never reaches
+// the API.
+func capOldestStarts(buf []apiclient.SessionStart, logger *slog.Logger) ([]apiclient.SessionStart, map[string]struct{}) {
+	if len(buf) <= MaxBufferedEvents {
+		return buf, nil
+	}
+	dropped := len(buf) - MaxBufferedEvents
+	logger.Warn("session retry buffer full; dropping oldest events", "kind", "start", "dropped", dropped, "cap", MaxBufferedEvents)
+	tombstones := make(map[string]struct{}, dropped)
+	for _, s := range buf[:dropped] {
+		tombstones[s.SessionID] = struct{}{}
+	}
+	return buf[dropped:], tombstones
+}
+
+// dropOrphanEnds removes buffered ends whose start was just dropped
+// (tombstoned), preventing orphan Ends from reaching the API.
+func dropOrphanEnds(ends []apiclient.SessionEnd, tombstones map[string]struct{}) []apiclient.SessionEnd {
+	if len(tombstones) == 0 {
+		return ends
+	}
+	n := 0
+	for _, e := range ends {
+		if _, orphan := tombstones[e.SessionID]; !orphan {
+			ends[n] = e
+			n++
+		}
+	}
+	return ends[:n]
 }
 
 // capOldest bounds a pending-event slice to MaxBufferedEvents by dropping the
