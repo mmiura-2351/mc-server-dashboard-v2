@@ -37,6 +37,8 @@ interface ActiveCommunityValue {
   communities: Community[] | undefined;
   /** True when fetching communities has failed (all retries exhausted). */
   communitiesError: boolean;
+  /** True while a communities fetch is in flight (initial or background). */
+  communitiesFetching: boolean;
   /** Re-fetch the communities list (e.g. after an error). */
   refetchCommunities: () => void;
 }
@@ -58,6 +60,7 @@ export function ActiveCommunityProvider({ children }: { children: ReactNode }) {
   const {
     data: communities,
     isError: communitiesError,
+    isFetching: communitiesFetching,
     refetch: refetchCommunities,
   } = useCommunities(signedIn);
 
@@ -90,19 +93,25 @@ export function ActiveCommunityProvider({ children }: { children: ReactNode }) {
     }
   }, [signedIn]);
 
-  const refetch = useCallback(() => {
-    refetchCommunities();
-  }, [refetchCommunities]);
-
   const value = useMemo<ActiveCommunityValue>(
     () => ({
       communityId,
       setCommunityId,
       communities,
       communitiesError,
-      refetchCommunities: refetch,
+      communitiesFetching,
+      refetchCommunities: () => {
+        refetchCommunities();
+      },
     }),
-    [communityId, setCommunityId, communities, communitiesError, refetch],
+    [
+      communityId,
+      setCommunityId,
+      communities,
+      communitiesError,
+      communitiesFetching,
+      refetchCommunities,
+    ],
   );
 
   return (

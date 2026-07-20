@@ -48,7 +48,7 @@ describe("refreshSession", () => {
 
     const result = await refreshSession();
 
-    expect(result).toBe("ok");
+    expect(result).toEqual({ status: "ok" });
     expect(getAccessToken()).toBe("fresh");
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe("/api/auth/refresh");
@@ -61,7 +61,7 @@ describe("refreshSession", () => {
 
     const result = await refreshSession();
 
-    expect(result).toBe("auth-rejected");
+    expect(result).toEqual({ status: "auth-rejected" });
     expect(getAccessToken()).toBeNull();
   });
 
@@ -70,7 +70,7 @@ describe("refreshSession", () => {
 
     const result = await refreshSession();
 
-    expect(result).toBe("auth-rejected");
+    expect(result).toEqual({ status: "auth-rejected" });
   });
 
   it("reports transient when the network call throws", async () => {
@@ -78,7 +78,7 @@ describe("refreshSession", () => {
 
     const result = await refreshSession();
 
-    expect(result).toBe("transient");
+    expect(result).toEqual({ status: "transient" });
   });
 
   it("reports transient on a 5xx response", async () => {
@@ -86,7 +86,7 @@ describe("refreshSession", () => {
 
     const result = await refreshSession();
 
-    expect(result).toBe("transient");
+    expect(result).toEqual({ status: "transient" });
   });
 
   it("reports transient on a 200 with an invalid JSON body", async () => {
@@ -94,7 +94,7 @@ describe("refreshSession", () => {
 
     const result = await refreshSession();
 
-    expect(result).toBe("transient");
+    expect(result).toEqual({ status: "transient" });
     expect(getAccessToken()).toBeNull();
   });
 
@@ -112,7 +112,11 @@ describe("refreshSession", () => {
     const results = await Promise.all(calls);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(results).toEqual(["ok", "ok", "ok"] satisfies RefreshResult[]);
+    expect(results).toEqual([
+      { status: "ok" },
+      { status: "ok" },
+      { status: "ok" },
+    ] satisfies RefreshResult[]);
   });
 
   it("starts a fresh refresh after the previous one settles", async () => {
