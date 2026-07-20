@@ -470,8 +470,11 @@ func (m *Manager) handleHydrate(ctx context.Context, cmd session.Command) sessio
 	// the authoritative store at this generation, so the local scratch matches it.
 	// A 0 (no published snapshot, or an older API) is recorded as-is — the API then
 	// treats this set as older than any published store generation and re-hydrates,
-	// the safe direction. The marker write is best-effort: a failure only costs an
-	// extra hydrate next start, never correctness, so it is logged not propagated.
+	// the safe direction. On the 200 path the marker was already written atomically
+	// into the temp tree before the swap-in rename (issue #917), so this call is
+	// idempotent; on the 204 path it is the only write. Best-effort: a failure only
+	// costs an extra hydrate next start, never correctness, so it is logged not
+	// propagated.
 	m.recordGeneration(workingDir, cmd.ServerID, gen)
 	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
 }
