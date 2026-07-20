@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -129,5 +130,146 @@ func TestRecvRegisterAckTimesOut(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("RecvRegisterAck did not return within the deadline; no ack bound is in effect")
+	}
+}
+
+// dialSilentSmallWindow wires a silentServer onto a bufconn with small HTTP/2
+// flow-control windows and returns a Dialer over it. The small windows cause
+// Send to block quickly when the server never Recvs.
+func dialSilentSmallWindow(t *testing.T) *Dialer {
+	t.Helper()
+	lis := bufconn.Listen(1024 * 1024)
+	gs := grpc.NewServer(
+		grpc.InitialWindowSize(65535),
+		grpc.InitialConnWindowSize(65535),
+	)
+	controlplanev1.RegisterWorkerServiceServer(gs, silentServer{})
+	go func() { _ = gs.Serve(lis) }()
+
+	conn, err := grpc.NewClient(
+		"passthrough:///bufnet",
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return lis.DialContext(ctx)
+		}),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithInitialWindowSize(65535),
+		grpc.WithInitialConnWindowSize(65535),
+	)
+	if err != nil {
+		t.Fatalf("grpc.NewClient: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = conn.Close()
+		gs.Stop()
+	})
+	return NewDialer(conn, "the-secret", sysClock{})
+}
+
+// drainingServer accepts the Session stream and continuously reads messages,
+// discarding them. It models a responsive API that keeps the flow-control
+// window open.
+type drainingServer struct {
+	controlplanev1.UnimplementedWorkerServiceServer
+}
+
+func (drainingServer) Session(stream controlplanev1.WorkerService_SessionServer) error {
+	for {
+		_, err := stream.Recv()
+		if err != nil {
+			return err
+		}
+	}
+}
+
+// dialDraining wires a drainingServer onto a bufconn and returns a Dialer.
+func dialDraining(t *testing.T) *Dialer {
+	t.Helper()
+	lis := bufconn.Listen(1024 * 1024)
+	gs := grpc.NewServer()
+	controlplanev1.RegisterWorkerServiceServer(gs, drainingServer{})
+	go func() { _ = gs.Serve(lis) }()
+
+	conn, err := grpc.NewClient(
+		"passthrough:///bufnet",
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return lis.DialContext(ctx)
+		}),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		t.Fatalf("grpc.NewClient: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = conn.Close()
+		gs.Stop()
+	})
+	return NewDialer(conn, "the-secret", sysClock{})
+}
+
+// TestSendUnblocksOnFlowControlStall proves that sendBounded cancels the stream
+// when a Send blocks longer than sendStallTimeout due to HTTP/2 flow-control
+// backpressure (issue #1714). Without the watchdog, the blocked Send would
+// starve the heartbeat goroutine until the API's heartbeat timeout kills the
+// session.
+func TestSendUnblocksOnFlowControlStall(t *testing.T) {
+	prev := sendStallTimeout
+	sendStallTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { sendStallTimeout = prev })
+
+	dialer := dialSilentSmallWindow(t)
+	tr, err := dialer.Dial(context.Background())
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	t.Cleanup(func() { _ = tr.Close() })
+
+	// ~32KB payload per line fills the 65535-byte window after 2-3 sends.
+	line := strings.Repeat("x", 32*1024)
+	sendDone := make(chan error, 1)
+	go func() {
+		for i := 0; i < 100; i++ {
+			if err := tr.SendLogLine(context.Background(), session.LogEvent{
+				ServerID: "s1",
+				Line:     line,
+			}); err != nil {
+				sendDone <- err
+				return
+			}
+		}
+		sendDone <- nil
+	}()
+
+	select {
+	case err := <-sendDone:
+		if err == nil {
+			t.Fatal("SendLogLine never returned an error; the stall watchdog did not fire")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("SendLogLine did not unblock within 2s; the stall watchdog is not working")
+	}
+}
+
+// TestSendStallDoesNotFireOnFastSends proves that the stall watchdog does not
+// trip on sends that complete promptly, even when individual sends are spaced
+// past the lowered timeout (the timer is per-call, not cumulative).
+func TestSendStallDoesNotFireOnFastSends(t *testing.T) {
+	prev := sendStallTimeout
+	sendStallTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { sendStallTimeout = prev })
+
+	dialer := dialDraining(t)
+	tr, err := dialer.Dial(context.Background())
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	t.Cleanup(func() { _ = tr.Close() })
+
+	for i := 0; i < 5; i++ {
+		if i > 0 {
+			time.Sleep(sendStallTimeout + 20*time.Millisecond)
+		}
+		if err := tr.SendHeartbeat(context.Background()); err != nil {
+			t.Fatalf("SendHeartbeat #%d: %v (the stall watchdog fired on a fast send)", i, err)
+		}
 	}
 }
