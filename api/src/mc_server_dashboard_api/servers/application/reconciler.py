@@ -27,12 +27,15 @@ Divergence matrix (per candidate, after a grace window has lapsed):
   live instance on another Worker.
 - ``desired=stopped`` but observed ``running`` on a connected Worker -> re-dispatch
   the stop.
-- ``desired=stopped``, observed ``stopped``, still assigned -> clear the assignment
-  (issue #847 bug 2). A stop whose deferred unassign never ran (an API crash or an
+- ``desired=stopped``, observed ``stopped``, still assigned -> re-drive the final
+  snapshot (if the Worker is connected) THEN clear the assignment (issue #847 bug 2,
+  issue #1004). A stop whose deferred unassign never ran (an API crash or an
   HTTP-task cancellation mid final-snapshot) wedges here; no other path converges it
   (``StartServer`` 409s on ``require_unassigned`` before flipping desired, and the
-  sink no longer unassigns). DB-only, so it runs even on a disconnected Worker — the
-  deliberate replacement for #217's sink-unassign, which raced the snapshot window.
+  sink no longer unassigns). The snapshot leg dispatches to a connected Worker so the
+  store generation advances before a cross-worker re-placement can hydrate; a
+  disconnected Worker skips the snapshot and clears directly (same exposure as
+  before, logged loud).
 - ``desired=stopped``, observed ``unknown``, still assigned (issue #1599): a stop
   interrupted mid-flight (API restart maps STOPPING->unknown, or worker disconnect
   sets unknown without unassigning). Connected Worker -> redispatch the stop.
@@ -289,9 +292,10 @@ class RunReconcilerTick:
         if server.assigned_worker_id is None:
             return None
         if server.observed_state is ObservedState.STOPPED:
-            # The wedge recovery is a DB-only assignment clear (the server is
-            # already stopped); it does not need a connected Worker, so it runs even
-            # when the holding Worker is gone — exactly the crash case it recovers.
+            # The wedge recovery re-drives the final snapshot (if the Worker is
+            # connected, issue #1004) then clears the assignment. It runs even
+            # when the Worker is gone — the snapshot is skipped but the clear
+            # proceeds, exactly the crash case it recovers.
             return "clear_stale_assignment"
         if server.observed_state is ObservedState.UNKNOWN:
             # Issue #1599: API restart or worker disconnect interrupted a stop
