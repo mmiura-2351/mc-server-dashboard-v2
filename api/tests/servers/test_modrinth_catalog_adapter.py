@@ -6,7 +6,7 @@ host-allowlist enforcement — these cannot be tested through the FakeCatalogPro
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx2
@@ -17,18 +17,25 @@ from mc_server_dashboard_api.servers.adapters.modrinth_catalog import (
     _MAX_JSON_BYTES,
     _MAX_REDIRECTS,
     ModrinthCatalog,
-    _assert_no_private_ips,
 )
 from mc_server_dashboard_api.servers.domain.errors import CatalogUnavailableError
 
 # -- SSRF redirect bypass --
 
 
-async def test_download_redirect_to_disallowed_host_raises() -> None:
+async def test_download_redirect_to_disallowed_host_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A redirect from an allowed host to an internal/disallowed host is blocked."""
+    import mc_server_dashboard_api.versions.adapters.ssrf_guard as ssrf_guard
+
+    async def _public_resolver(_host: str) -> list[str]:
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(ssrf_guard, "_async_resolve_host", _public_resolver)
 
     def _handler(request: httpx2.Request) -> httpx2.Response:
-        if "cdn.modrinth.com" in str(request.url):
+        if "/data/test.jar" in str(request.url):
             return httpx2.Response(
                 302,
                 headers={"location": "https://169.254.169.254/metadata"},
@@ -37,12 +44,9 @@ async def test_download_redirect_to_disallowed_host_raises() -> None:
 
     transport = httpx2.MockTransport(_handler)
     catalog = ModrinthCatalog()
-    # Monkey-patch the client factory to inject our mock transport.
     original = catalog.download_file
 
     async def _patched_download(url: str) -> bytes:
-        # We need to inject the transport into the client created inside
-        # download_file. We do this by temporarily replacing httpx2.AsyncClient.
         real_init = httpx2.AsyncClient.__init__
 
         def patched_init(self_client: httpx2.AsyncClient, **kwargs: Any) -> None:
@@ -60,8 +64,16 @@ async def test_download_redirect_to_disallowed_host_raises() -> None:
         await _patched_download("https://cdn.modrinth.com/data/test.jar")
 
 
-async def test_download_too_many_redirects_raises() -> None:
+async def test_download_too_many_redirects_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """More than _MAX_REDIRECTS hops raises CatalogUnavailableError."""
+    import mc_server_dashboard_api.versions.adapters.ssrf_guard as ssrf_guard
+
+    async def _public_resolver(_host: str) -> list[str]:
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(ssrf_guard, "_async_resolve_host", _public_resolver)
 
     call_count = 0
 
@@ -101,8 +113,16 @@ async def test_download_too_many_redirects_raises() -> None:
     assert call_count == _MAX_REDIRECTS
 
 
-async def test_download_redirect_to_non_https_raises() -> None:
+async def test_download_redirect_to_non_https_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A redirect from HTTPS to HTTP is blocked."""
+    import mc_server_dashboard_api.versions.adapters.ssrf_guard as ssrf_guard
+
+    async def _public_resolver(_host: str) -> list[str]:
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(ssrf_guard, "_async_resolve_host", _public_resolver)
 
     def _handler(request: httpx2.Request) -> httpx2.Response:
         return httpx2.Response(
@@ -132,92 +152,68 @@ async def test_download_redirect_to_non_https_raises() -> None:
         await _patched_download("https://cdn.modrinth.com/data/test.jar")
 
 
-# -- DNS-rebinding / private-IP check (issue #1417) --
-
-
-def _resolver_for(*addrs: str) -> Callable[[str], list[str]]:
-    """Return a resolver callback that yields the given addresses."""
-
-    def _resolve(host: str) -> list[str]:
-        return list(addrs)
-
-    return _resolve
-
-
-async def test_assert_no_private_ips_allows_public() -> None:
-    """A hostname resolving to a public IP passes."""
-    await _assert_no_private_ips(
-        "example.com", _resolver=_resolver_for("93.184.216.34")
-    )
-
-
-async def test_assert_no_private_ips_rejects_loopback() -> None:
-    """A hostname resolving to 127.0.0.1 is rejected."""
-    with pytest.raises(CatalogUnavailableError, match="private"):
-        await _assert_no_private_ips(
-            "evil.example.com", _resolver=_resolver_for("127.0.0.1")
-        )
-
-
-async def test_assert_no_private_ips_rejects_rfc1918() -> None:
-    """A hostname resolving to an RFC 1918 address is rejected."""
-    with pytest.raises(CatalogUnavailableError, match="private"):
-        await _assert_no_private_ips(
-            "evil.example.com", _resolver=_resolver_for("192.168.1.1")
-        )
-
-
-async def test_assert_no_private_ips_rejects_link_local() -> None:
-    """A hostname resolving to a link-local address is rejected."""
-    with pytest.raises(CatalogUnavailableError, match="private"):
-        await _assert_no_private_ips(
-            "evil.example.com", _resolver=_resolver_for("169.254.169.254")
-        )
-
-
-async def test_assert_no_private_ips_rejects_ipv6_loopback() -> None:
-    """A hostname resolving to ::1 is rejected."""
-    with pytest.raises(CatalogUnavailableError, match="private"):
-        await _assert_no_private_ips("evil.example.com", _resolver=_resolver_for("::1"))
-
-
-async def test_assert_no_private_ips_rejects_cgnat() -> None:
-    """A hostname resolving to a CGNAT address (100.64.0.0/10) is rejected."""
-    with pytest.raises(CatalogUnavailableError, match="private"):
-        await _assert_no_private_ips(
-            "evil.example.com", _resolver=_resolver_for("100.64.0.1")
-        )
-
-
-async def test_assert_no_private_ips_rejects_empty_resolver_result() -> None:
-    """An empty resolver result must fail closed, not silently pass."""
-    with pytest.raises(CatalogUnavailableError, match="returned no addresses"):
-        await _assert_no_private_ips("evil.example.com", _resolver=_resolver_for())
-
-
-async def test_assert_no_private_ips_rejects_if_any_addr_private() -> None:
-    """If any resolved address is private, the check fails."""
-    with pytest.raises(CatalogUnavailableError, match="private"):
-        await _assert_no_private_ips(
-            "evil.example.com",
-            _resolver=_resolver_for("93.184.216.34", "10.0.0.1"),
-        )
+# -- DNS-rebinding / private-IP check (issue #1417, #2155) --
 
 
 async def test_download_rejects_hostname_resolving_to_private_ip(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """download_file rejects an allowed hostname that resolves to a private IP."""
-    import mc_server_dashboard_api.servers.adapters.modrinth_catalog as mod
+    import mc_server_dashboard_api.versions.adapters.ssrf_guard as ssrf_guard
 
     async def _private_resolver(_host: str) -> list[str]:
         return ["10.0.0.1"]
 
-    monkeypatch.setattr(mod, "_async_resolve_host", _private_resolver)
+    monkeypatch.setattr(ssrf_guard, "_async_resolve_host", _private_resolver)
     catalog = ModrinthCatalog()
 
     with pytest.raises(CatalogUnavailableError, match="private"):
         await catalog.download_file("https://cdn.modrinth.com/data/test.jar")
+
+
+async def test_download_pins_resolved_ip_in_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """download_file connects to the resolved IP, not the hostname (anti-rebinding)."""
+    import mc_server_dashboard_api.versions.adapters.ssrf_guard as ssrf_guard
+
+    async def _public_resolver(_host: str) -> list[str]:
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(ssrf_guard, "_async_resolve_host", _public_resolver)
+
+    captured_requests: list[httpx2.Request] = []
+
+    def _handler(request: httpx2.Request) -> httpx2.Response:
+        captured_requests.append(request)
+        return httpx2.Response(200, content=b"jar-content")
+
+    transport = httpx2.MockTransport(_handler)
+    catalog = ModrinthCatalog()
+    original = catalog.download_file
+
+    async def _patched_download(url: str) -> bytes:
+        real_init = httpx2.AsyncClient.__init__
+
+        def patched_init(self_client: httpx2.AsyncClient, **kwargs: Any) -> None:
+            kwargs["transport"] = transport
+            real_init(self_client, **kwargs)
+
+        httpx2.AsyncClient.__init__ = patched_init  # type: ignore[assignment]
+        try:
+            return await original(url)
+        finally:
+            httpx2.AsyncClient.__init__ = real_init  # type: ignore[method-assign]
+
+    await _patched_download("https://cdn.modrinth.com/data/test.jar")
+
+    assert len(captured_requests) == 1
+    req = captured_requests[0]
+    # The request URL uses the resolved IP, not the hostname.
+    assert "93.184.216.34" in str(req.url)
+    assert "cdn.modrinth.com" not in str(req.url)
+    # The Host header carries the original hostname for TLS/virtual-host routing.
+    assert req.headers.get("host") == "cdn.modrinth.com"
 
 
 # -- Unbounded JSON response --
