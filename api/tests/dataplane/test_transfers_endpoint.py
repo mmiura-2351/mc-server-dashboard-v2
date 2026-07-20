@@ -13,7 +13,7 @@ import asyncio
 import io
 import tarfile
 import uuid
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
 import pytest
@@ -24,6 +24,7 @@ from mc_server_dashboard_api.dependencies import (
     get_assigned_worker_lookup,
     get_resolved_jar_lookup,
     get_storage,
+    get_transfer_semaphore,
     get_worker_credential,
 )
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
@@ -70,6 +71,7 @@ def _setup(
     *,
     resolved_jar: str | None = None,
     assigned_worker_id: str | None = None,
+    transfer_semaphore: asyncio.Semaphore | None = None,
 ) -> tuple[TestClient, FsStorage]:
     # Reuse the per-worker shared app; clear overrides on entry so a helper called
     # twice in one test starts clean (the shared_app wrapper clears between tests).
@@ -92,6 +94,8 @@ def _setup(
     # no credential configured — receives the test credential through the override
     # rather than through the environment before build.
     app.dependency_overrides[get_worker_credential] = lambda: _CREDENTIAL
+    sem = transfer_semaphore if transfer_semaphore is not None else asyncio.Semaphore(1)
+    app.dependency_overrides[get_transfer_semaphore] = lambda: sem
     client = TestClient(app)
     return client, storage
 
@@ -1492,5 +1496,140 @@ def test_close_propagation_with_jar_member(tmp_path: Path) -> None:
         assert aclose is not None
         await aclose()
         assert closed
+
+    asyncio.run(_drive())
+
+
+# --- transfer semaphore admission control (issue #1696) ----------------------
+
+
+class _RecordingSemaphore:
+    """A semaphore wrapper that records acquire/release calls.
+
+    Quacks like :class:`asyncio.Semaphore` for the subset the endpoint uses
+    (``acquire``, ``release``, ``locked``, async-context-manager) so it can be
+    injected via ``dependency_overrides``. Tracks call counts so tests can
+    verify the endpoint actually acquires and releases the semaphore.
+    """
+
+    def __init__(self, value: int = 1) -> None:
+        self._sem = asyncio.Semaphore(value)
+        self.acquired = 0
+        self.released = 0
+
+    async def acquire(self) -> bool:
+        result = await self._sem.acquire()
+        self.acquired += 1
+        return result
+
+    def release(self) -> None:
+        self._sem.release()
+        self.released += 1
+
+    def locked(self) -> bool:
+        return self._sem.locked()
+
+    async def __aenter__(self) -> "_RecordingSemaphore":
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        self.release()
+
+
+def test_semaphore_acquired_and_released_after_hydrate(tmp_path: Path) -> None:
+    """The hydrate endpoint acquires then releases the semaphore."""
+    sem = _RecordingSemaphore(1)
+    client, storage = _setup(tmp_path, transfer_semaphore=sem)  # type: ignore[arg-type]
+    community, server = _scope()
+    files = {"server.properties": b"motd=hi"}
+    asyncio.run(_publish(storage, community, server, files))
+    with client:
+        resp = client.get(_url(community, server, "working-set"), headers=_auth())
+    assert resp.status_code == 200
+    assert sem.acquired >= 1, "semaphore was never acquired"
+    assert sem.acquired == sem.released
+
+
+def test_semaphore_acquired_and_released_after_hydrate_204(tmp_path: Path) -> None:
+    """The 204 (no-snapshot) path acquires then releases the semaphore."""
+    sem = _RecordingSemaphore(1)
+    client, _ = _setup(tmp_path, transfer_semaphore=sem)  # type: ignore[arg-type]
+    community, server = _scope()
+    with client:
+        resp = client.get(_url(community, server, "working-set"), headers=_auth())
+    assert resp.status_code == 204
+    assert sem.acquired >= 1, "semaphore was never acquired"
+    assert sem.acquired == sem.released
+
+
+def test_semaphore_acquired_and_released_after_snapshot_success(
+    tmp_path: Path,
+) -> None:
+    """The snapshot endpoint acquires then releases the semaphore."""
+    sem = _RecordingSemaphore(1)
+    client, _ = _setup(tmp_path, transfer_semaphore=sem)  # type: ignore[arg-type]
+    community, server = _scope()
+    body = _tar_bytes({"server.properties": b"motd=hi"})
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"),
+            content=body,
+            headers={**_auth(), "Content-Length": str(len(body))},
+        )
+    assert resp.status_code == 204
+    assert sem.acquired >= 1, "semaphore was never acquired"
+    assert sem.acquired == sem.released
+
+
+def test_semaphore_acquired_and_released_after_snapshot_length_mismatch(
+    tmp_path: Path,
+) -> None:
+    """The semaphore is acquired and released even on a failed snapshot."""
+    sem = _RecordingSemaphore(1)
+    client, _ = _setup(tmp_path, transfer_semaphore=sem)  # type: ignore[arg-type]
+    community, server = _scope()
+    body = _tar_bytes({"server.properties": b"motd=hi"})
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"),
+            content=body,
+            headers={**_auth(), "Content-Length": str(len(body) + 100)},
+        )
+    assert resp.status_code == 400
+    assert sem.acquired >= 1, "semaphore was never acquired"
+    assert sem.acquired == sem.released
+
+
+def test_releasing_propagates_aclose_to_inner_iterator() -> None:
+    """Closing _releasing propagates aclose to the inner iterator (#1696 bug 2)."""
+    from mc_server_dashboard_api.dataplane.api.transfers import _releasing
+
+    closed = False
+
+    async def _source() -> AsyncIterator[bytes]:
+        nonlocal closed
+        try:
+            yield b"chunk-1"
+            yield b"chunk-2"
+        finally:
+            closed = True
+
+    async def _drive() -> None:
+        nonlocal closed
+        sem = asyncio.Semaphore(1)
+        gen = _releasing(sem, _source())
+        # Pull one chunk then close early (simulates _DeadlineStreamingResponse
+        # aborting on a send stall — issue #1822).
+        chunk = await gen.__anext__()
+        assert chunk == b"chunk-1"
+        aclose_fn = getattr(gen, "aclose", None)
+        assert aclose_fn is not None
+        await aclose_fn()
+        # The inner iterator's finally must have run (deterministic release,
+        # not GC-dependent).
+        assert closed
+        # The semaphore must be released.
+        assert not sem.locked()
 
     asyncio.run(_drive())

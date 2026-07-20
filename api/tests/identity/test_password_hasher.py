@@ -91,8 +91,8 @@ class _ThreadProbeHasher(Argon2PasswordHasher):
     """Argon2 adapter that records which thread its KDF body runs on.
 
     The blocking work lives in the inherited (sync) helpers that the async Port
-    methods hand to ``asyncio.to_thread``; capturing the thread there proves the
-    offload actually moved the work off the event loop's thread.
+    methods hand to the dedicated KDF executor; capturing the thread there proves
+    the offload actually moved the work off the event loop's thread.
     """
 
     def __init__(self) -> None:
@@ -105,7 +105,9 @@ class _ThreadProbeHasher(Argon2PasswordHasher):
         return self._hasher.hash(plaintext)
 
     async def hash(self, plaintext: str) -> str:
-        return await asyncio.to_thread(self._hash_capture, plaintext)
+        from mc_server_dashboard_api.identity.adapters.password_hasher import _run_kdf
+
+        return await _run_kdf(self._hash_capture, plaintext)
 
     def _verify(self, plaintext: str, password_hash: str) -> bool:
         self.verify_thread = threading.current_thread()
@@ -115,8 +117,8 @@ class _ThreadProbeHasher(Argon2PasswordHasher):
 async def test_hash_and_verify_run_off_the_event_loop_thread() -> None:
     # Regression for issue #938: argon2 is CPU-bound for tens of milliseconds, so
     # it must not run on the event loop's thread (where it would stall every
-    # in-flight request). asyncio.to_thread dispatches to a *non-main* worker
-    # thread; assert the KDF body observed a different thread than the loop's.
+    # in-flight request). _run_kdf dispatches to a *non-main* worker thread;
+    # assert the KDF body observed a different thread than the loop's.
     loop_thread = threading.current_thread()
     hasher = _ThreadProbeHasher()
 
@@ -127,3 +129,46 @@ async def test_hash_and_verify_run_off_the_event_loop_thread() -> None:
     assert hasher.verify_thread is not None
     assert hasher.hash_thread is not loop_thread
     assert hasher.verify_thread is not loop_thread
+
+
+async def test_kdf_runs_on_dedicated_pool() -> None:
+    """KDF work runs on the dedicated ``password-kdf`` pool, not the default (#1696)."""
+    hasher = _ThreadProbeHasher()
+    hashed = await hasher.hash("Wm7!qz#Lp2vT")
+    await hasher.verify("Wm7!qz#Lp2vT", hashed)
+
+    assert hasher.hash_thread is not None
+    assert hasher.verify_thread is not None
+    assert hasher.hash_thread.name.startswith("password-kdf")
+    assert hasher.verify_thread.name.startswith("password-kdf")
+
+
+async def test_hasher_not_starved_by_default_executor_saturation() -> None:
+    """Starvation regression (#1696): a saturated default executor must not block KDF.
+
+    Parks every slot in asyncio's default ``ThreadPoolExecutor`` with blocking work,
+    then verifies that the password hasher still completes within 5 seconds — proving
+    it uses a separate pool.
+    """
+    import concurrent.futures
+    from concurrent.futures import ThreadPoolExecutor
+
+    loop = asyncio.get_running_loop()
+    # Saturate the default executor. asyncio uses a ThreadPoolExecutor(max_workers=…)
+    # as its default; we replace it with a small, fully-parked one.
+    blocker = threading.Event()
+    default_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="parked")
+    loop.set_default_executor(default_pool)
+    # Submit blocking tasks that hold every slot until we set the event.
+    futs = [default_pool.submit(blocker.wait) for _ in range(4)]
+    try:
+        hasher = Argon2PasswordHasher()
+        hashed = await hasher.hash("Wm7!qz#Lp2vT")
+        result = await asyncio.wait_for(
+            hasher.verify("Wm7!qz#Lp2vT", hashed), timeout=5
+        )
+        assert result is True
+    finally:
+        blocker.set()
+        concurrent.futures.wait(futs)
+        default_pool.shutdown(wait=True)
