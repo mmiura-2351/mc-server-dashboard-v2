@@ -10,6 +10,7 @@ notification emission, and per-schedule tick isolation.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import logging
 import uuid
@@ -175,31 +176,34 @@ def _env(
     cp = control_plane or FakeControlPlane()
     the_clock = clock or FakeClock(_NOW)
     store = backup_store or FakeBackupArchiveStore()
-    execute = ExecuteScheduleAction(
-        uow=uow,
-        send_command=SendServerCommand(uow=uow, control_plane=cp),
-        start_server=StartServer(
+
+    def make_execute() -> ExecuteScheduleAction:
+        return ExecuteScheduleAction(
             uow=uow,
-            control_plane=cp,
-            clock=the_clock,
-            jar_provisioner=FakeJarProvisioner(),
-            store_generation=FakeStoreGenerationReader(),
-            file_store=FakeFileStore(),
-        ),
-        stop_server=StopServer(uow=uow, control_plane=cp, clock=the_clock),
-        restart_server=RestartServer(uow=uow, control_plane=cp, clock=the_clock),
-        create_backup=CreateBackup(
-            uow=uow,
-            backup_store=store,
-            snapshot_server=SnapshotServer(uow=uow, control_plane=cp),
-            clock=the_clock,
-        ),
-    )
+            send_command=SendServerCommand(uow=uow, control_plane=cp),
+            start_server=StartServer(
+                uow=uow,
+                control_plane=cp,
+                clock=the_clock,
+                jar_provisioner=FakeJarProvisioner(),
+                store_generation=FakeStoreGenerationReader(),
+                file_store=FakeFileStore(),
+            ),
+            stop_server=StopServer(uow=uow, control_plane=cp, clock=the_clock),
+            restart_server=RestartServer(uow=uow, control_plane=cp, clock=the_clock),
+            create_backup=CreateBackup(
+                uow=uow,
+                backup_store=store,
+                snapshot_server=SnapshotServer(uow=uow, control_plane=cp),
+                clock=the_clock,
+            ),
+        )
+
     notifier = FakeServerNotifier()
     audit = RecordingAuditRecorder()
     runner = RunScheduleTick(
         uow=uow,
-        execute=execute,
+        make_execute=make_execute,
         send_command=SendServerCommand(uow=uow, control_plane=cp),
         calculator=CronsimNextRunCalculator(),
         audit=audit,
@@ -422,7 +426,7 @@ async def test_advance_does_not_resurrect_a_concurrently_disabled_schedule() -> 
     )
     env.uow.servers.seed(server)
     env.uow.schedules.seed(schedule)
-    base = env.runner.execute
+    base_factory = env.runner.make_execute
 
     class _DisableDuringRun(ExecuteScheduleAction):
         """Simulates a CRUD disable landing while the action executes."""
@@ -439,14 +443,18 @@ async def test_advance_does_not_resurrect_a_concurrently_disabled_schedule() -> 
                 self, server_id=server_id, action=action, command=command
             )
 
-    env.runner.execute = _DisableDuringRun(
-        uow=base.uow,
-        send_command=base.send_command,
-        start_server=base.start_server,
-        stop_server=base.stop_server,
-        restart_server=base.restart_server,
-        create_backup=base.create_backup,
-    )
+    def _make_disabling() -> ExecuteScheduleAction:
+        base = base_factory()
+        return _DisableDuringRun(
+            uow=base.uow,
+            send_command=base.send_command,
+            start_server=base.start_server,
+            stop_server=base.stop_server,
+            restart_server=base.restart_server,
+            create_backup=base.create_backup,
+        )
+
+    env.runner.make_execute = _make_disabling
 
     await env.runner.tick()
 
@@ -481,7 +489,9 @@ async def test_overdue_backup_fires_exactly_one_catchup() -> None:
     assert stored.next_run_at is not None and stored.next_run_at > _NOW
 
 
-async def test_overdue_lifecycle_schedule_does_not_fire_late() -> None:
+async def test_overdue_lifecycle_schedule_does_not_fire_late(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     env = _env()
     server = _running_server()
     schedule = _schedule(
@@ -494,12 +504,17 @@ async def test_overdue_lifecycle_schedule_does_not_fire_late() -> None:
 
     await env.runner.tick()
 
-    # No execution, no run row; next_run advanced past now; last_run untouched.
+    # No execution; SKIPPED run row recorded; next_run advanced past now;
+    # last_run untouched; warning logged.
     assert env.control_plane.dispatched == []
-    assert _runs(env, schedule) == []
+    assert _runs(env, schedule) == [ScheduleRunOutcome.SKIPPED]
     stored = env.uow.schedules.by_id[schedule.id]
     assert stored.last_run_at is None
     assert stored.next_run_at is not None and stored.next_run_at > _NOW
+    stale_logs = [r for r in caplog.records if "too stale" in r.message]
+    assert len(stale_logs) == 0  # "too stale" is in the run detail, not the log
+    skip_logs = [r for r in caplog.records if "skipping" in r.message]
+    assert len(skip_logs) == 1
 
 
 async def test_lifecycle_schedule_at_the_grace_boundary_still_fires() -> None:
@@ -535,7 +550,312 @@ async def test_lifecycle_schedule_just_past_the_grace_does_not_fire() -> None:
     await env.runner.tick()
 
     assert env.control_plane.dispatched == []
+    assert _runs(env, schedule) == [ScheduleRunOutcome.SKIPPED]
+    stored = env.uow.schedules.by_id[schedule.id]
+    assert stored.next_run_at is not None and stored.next_run_at > _NOW
+
+
+# --- concurrent dispatch (issue #1947) --------------------------------------
+
+
+async def test_two_due_schedules_on_different_servers_run_concurrently() -> None:
+    """Schedules on distinct servers are dispatched concurrently."""
+    env = _env()
+    server_a = _running_server()
+    server_b = _running_server()
+    sched_a = _schedule(
+        server_a,
+        action=ScheduleAction.COMMAND,
+        command="say a",
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    sched_b = _schedule(
+        server_b,
+        action=ScheduleAction.COMMAND,
+        command="say b",
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server_a)
+    env.uow.servers.seed(server_b)
+    env.uow.schedules.seed(sched_a)
+    env.uow.schedules.seed(sched_b)
+
+    # Track concurrency via an event: each execution sets a flag before
+    # yielding and checks whether the other is also in flight.
+    in_flight: set[ServerId] = set()
+    max_concurrent = 0
+    original_factory = env.runner.make_execute
+
+    def _tracking_factory() -> ExecuteScheduleAction:
+        base = original_factory()
+
+        class _Track(ExecuteScheduleAction):
+            async def __call__(
+                self,
+                *,
+                server_id: ServerId,
+                action: ScheduleAction,
+                command: str | None,
+            ) -> ActionResult:
+                nonlocal max_concurrent
+                in_flight.add(server_id)
+                max_concurrent = max(max_concurrent, len(in_flight))
+                await asyncio.sleep(0)  # yield to allow true concurrency
+                result = await ExecuteScheduleAction.__call__(
+                    self, server_id=server_id, action=action, command=command
+                )
+                in_flight.discard(server_id)
+                return result
+
+        return _Track(
+            uow=base.uow,
+            send_command=base.send_command,
+            start_server=base.start_server,
+            stop_server=base.stop_server,
+            restart_server=base.restart_server,
+            create_backup=base.create_backup,
+        )
+
+    env.runner.make_execute = _tracking_factory
+
+    await env.runner.tick()
+
+    assert max_concurrent == 2
+    assert _runs(env, sched_a) == [ScheduleRunOutcome.SUCCESS]
+    assert _runs(env, sched_b) == [ScheduleRunOutcome.SUCCESS]
+
+
+async def test_same_server_schedules_run_serially() -> None:
+    """Two schedules on the same server are executed one after the other."""
+    env = _env()
+    server = _running_server()
+    sched_a = _schedule(
+        server,
+        action=ScheduleAction.COMMAND,
+        command="say a",
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    sched_b = _schedule(
+        server,
+        action=ScheduleAction.COMMAND,
+        command="say b",
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(sched_a)
+    env.uow.schedules.seed(sched_b)
+
+    in_flight_count: list[int] = []
+    in_flight: set[ScheduleId] = set()
+    original_factory = env.runner.make_execute
+
+    def _tracking_factory() -> ExecuteScheduleAction:
+        base = original_factory()
+
+        class _Track(ExecuteScheduleAction):
+            async def __call__(
+                self,
+                *,
+                server_id: ServerId,
+                action: ScheduleAction,
+                command: str | None,
+            ) -> ActionResult:
+                # Use command line as schedule identifier since we can't get
+                # schedule id here.
+                key = ScheduleId(uuid.uuid4())  # unique per call
+                in_flight.add(key)
+                in_flight_count.append(len(in_flight))
+                await asyncio.sleep(0)
+                result = await ExecuteScheduleAction.__call__(
+                    self, server_id=server_id, action=action, command=command
+                )
+                in_flight.discard(key)
+                return result
+
+        return _Track(
+            uow=base.uow,
+            send_command=base.send_command,
+            start_server=base.start_server,
+            stop_server=base.stop_server,
+            restart_server=base.restart_server,
+            create_backup=base.create_backup,
+        )
+
+    env.runner.make_execute = _tracking_factory
+
+    await env.runner.tick()
+
+    # Both ran, but never more than 1 in flight at a time for the same server.
+    assert len(in_flight_count) == 2
+    assert max(in_flight_count) == 1
+    assert _runs(env, sched_a) == [ScheduleRunOutcome.SUCCESS]
+    assert _runs(env, sched_b) == [ScheduleRunOutcome.SUCCESS]
+
+
+async def test_concurrent_cap_limits_parallel_executions() -> None:
+    """With 5 servers due, at most _MAX_CONCURRENT_RUNS (4) run in parallel."""
+    from mc_server_dashboard_api.servers.application.schedule_runner import (
+        _MAX_CONCURRENT_RUNS,
+    )
+
+    env = _env()
+    servers = [_running_server() for _ in range(5)]
+    schedules = []
+    for srv in servers:
+        sched = _schedule(
+            srv,
+            action=ScheduleAction.COMMAND,
+            command="say x",
+            next_run_at=_NOW - dt.timedelta(seconds=10),
+        )
+        env.uow.servers.seed(srv)
+        env.uow.schedules.seed(sched)
+        schedules.append(sched)
+
+    max_concurrent = 0
+    in_flight = 0
+    original_factory = env.runner.make_execute
+
+    def _tracking_factory() -> ExecuteScheduleAction:
+        base = original_factory()
+
+        class _Track(ExecuteScheduleAction):
+            async def __call__(
+                self,
+                *,
+                server_id: ServerId,
+                action: ScheduleAction,
+                command: str | None,
+            ) -> ActionResult:
+                nonlocal max_concurrent, in_flight
+                in_flight += 1
+                max_concurrent = max(max_concurrent, in_flight)
+                await asyncio.sleep(0)  # yield to let all allowed tasks enter
+                result = await ExecuteScheduleAction.__call__(
+                    self, server_id=server_id, action=action, command=command
+                )
+                in_flight -= 1
+                return result
+
+        return _Track(
+            uow=base.uow,
+            send_command=base.send_command,
+            start_server=base.start_server,
+            stop_server=base.stop_server,
+            restart_server=base.restart_server,
+            create_backup=base.create_backup,
+        )
+
+    env.runner.make_execute = _tracking_factory
+
+    await env.runner.tick()
+
+    assert max_concurrent <= _MAX_CONCURRENT_RUNS
+    for sched in schedules:
+        assert _runs(env, sched) == [ScheduleRunOutcome.SUCCESS]
+
+
+async def test_exception_in_one_server_group_does_not_stop_others() -> None:
+    """Under concurrent gather, one server's exception is isolated."""
+    env = _env()
+    server_a = _running_server()
+    server_b = _running_server()
+    boom = _schedule(
+        server_a,
+        action=ScheduleAction.STOP,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    ok = _schedule(
+        server_b,
+        action=ScheduleAction.COMMAND,
+        command="say hi",
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server_a)
+    env.uow.servers.seed(server_b)
+    env.uow.schedules.seed(boom)
+    env.uow.schedules.seed(ok)
+
+    base_factory = env.runner.make_execute
+
+    def _make_boom() -> ExecuteScheduleAction:
+        base = base_factory()
+        return _BoomExecute(
+            uow=base.uow,
+            send_command=base.send_command,
+            start_server=base.start_server,
+            stop_server=base.stop_server,
+            restart_server=base.restart_server,
+            create_backup=base.create_backup,
+        )
+
+    env.runner.make_execute = _make_boom
+
+    await env.runner.tick()
+
+    assert _runs(env, ok) == [ScheduleRunOutcome.SUCCESS]
+    advanced = env.uow.schedules.by_id[ok.id].next_run_at
+    assert advanced is not None and advanced > _NOW
+
+
+# --- listing-time staleness (issue #1947) -----------------------------------
+
+
+async def test_listing_time_stale_schedule_still_fires() -> None:
+    """A schedule that became due after prev tick is not dropped (#1947).
+
+    Tick at T0, schedule due at T0+1min, next tick at T0+10min: the schedule
+    is >LATE_RUN_GRACE late relative to now, but it became due after the
+    previous tick started, so it fires.
+    """
+    env = _env()
+    server = _running_server()
+    env.uow.servers.seed(server)
+
+    t0 = _NOW
+    due_at = t0 + dt.timedelta(minutes=1)  # becomes due 1 minute after T0
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.COMMAND,
+        command="say hi",
+        cadence=Cadence.from_interval(_HOUR),
+        next_run_at=due_at,
+    )
+    env.uow.schedules.seed(schedule)
+
+    # First tick at T0: schedule is not yet due.
+    env.clock.set(t0)
+    await env.runner.tick()
     assert _runs(env, schedule) == []
+
+    # Make it due by setting clock 10 minutes later — well past LATE_RUN_GRACE
+    # relative to due_at, but due_at > prev_tick_at (T0), so not stale.
+    env.clock.set(t0 + dt.timedelta(minutes=10))
+    # The schedule is already stored with next_run_at = due_at which is in the
+    # past relative to clock, so list_due will return it.
+    await env.runner.tick()
+
+    assert _runs(env, schedule) == [ScheduleRunOutcome.SUCCESS]
+
+
+async def test_first_tick_with_stale_schedule_is_skipped() -> None:
+    """On the very first tick (prev_tick_at=None), stale schedules are skipped."""
+    env = _env()
+    server = _running_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.COMMAND,
+        command="say hi",
+        next_run_at=_NOW - LATE_RUN_GRACE - dt.timedelta(seconds=1),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    # First tick, no prev_tick_at: the standard staleness applies.
+    assert env.control_plane.dispatched == []
+    assert _runs(env, schedule) == [ScheduleRunOutcome.SKIPPED]
     stored = env.uow.schedules.by_id[schedule.id]
     assert stored.next_run_at is not None and stored.next_run_at > _NOW
 
@@ -664,15 +984,21 @@ class _BoomExecute(ExecuteScheduleAction):
 
 async def test_one_schedule_exception_does_not_stop_the_tick() -> None:
     env = _env()
-    # Swap in an executor that raises for the stop schedule.
-    env.runner.execute = _BoomExecute(
-        uow=env.runner.execute.uow,
-        send_command=env.runner.execute.send_command,
-        start_server=env.runner.execute.start_server,
-        stop_server=env.runner.execute.stop_server,
-        restart_server=env.runner.execute.restart_server,
-        create_backup=env.runner.execute.create_backup,
-    )
+    # Swap in an executor factory that raises for the stop schedule.
+    base_factory = env.runner.make_execute
+
+    def _make_boom() -> ExecuteScheduleAction:
+        base = base_factory()
+        return _BoomExecute(
+            uow=base.uow,
+            send_command=base.send_command,
+            start_server=base.start_server,
+            stop_server=base.stop_server,
+            restart_server=base.restart_server,
+            create_backup=base.create_backup,
+        )
+
+    env.runner.make_execute = _make_boom
     running = _running_server()
     boom = _schedule(
         running,
