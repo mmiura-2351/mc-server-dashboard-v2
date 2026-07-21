@@ -2199,6 +2199,22 @@ async def test_make_dir_running_is_unsettled() -> None:
     assert store.made_dirs == []
 
 
+@pytest.mark.parametrize("path", [".", ""])
+async def test_make_dir_root_path_is_invalid(path: str) -> None:
+    """make_dir on the root path ('.' or '') is 422: the root always exists (#1944)."""
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = MakeDir(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(InvalidFilePathError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path=path,
+        )
+    assert store.made_dirs == []
+
+
 # --- rename (issue #259) ---------------------------------------------------
 
 

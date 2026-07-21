@@ -29,9 +29,13 @@ class HttpxJsonFetcher(JsonFetcher):
 
     async def get_json(self, url: str) -> object:
         try:
-            await assert_url_allowed(url)
+            pinned = await assert_url_allowed(url)
             async with httpx2.AsyncClient(timeout=_TIMEOUT) as client:
-                response = await client.get(url)
+                response = await client.get(
+                    pinned.url,
+                    headers=pinned.headers,
+                    extensions=pinned.extensions,
+                )
                 _check_not_found(response)
                 response.raise_for_status()
                 return response.json()
@@ -42,9 +46,13 @@ class HttpxJsonFetcher(JsonFetcher):
 
     async def get_text(self, url: str) -> str:
         try:
-            await assert_url_allowed(url)
+            pinned = await assert_url_allowed(url)
             async with httpx2.AsyncClient(timeout=_TIMEOUT) as client:
-                response = await client.get(url)
+                response = await client.get(
+                    pinned.url,
+                    headers=pinned.headers,
+                    extensions=pinned.extensions,
+                )
                 _check_not_found(response)
                 response.raise_for_status()
                 return response.text

@@ -92,10 +92,12 @@ func (t *FlowTable) Lookup(addr *net.UDPAddr, counts bool) (id uint32, ok, promo
 	if !counts {
 		return e.id, true, false
 	}
+	// Saturate at the threshold so the counter can never wrap past 2^32 and
+	// re-fire promotion (issue #2011).
+	if e.ingress >= flowPromoteThreshold {
+		return e.id, true, false
+	}
 	e.ingress++
-	// == (not >=) fires exactly once: ingress increases monotonically and a
-	// single reader goroutine drives it, so Start is reported at most once per
-	// flow.
 	return e.id, true, e.ingress == flowPromoteThreshold
 }
 

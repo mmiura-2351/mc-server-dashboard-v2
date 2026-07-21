@@ -434,10 +434,13 @@ The publish step's atomicity is realized differently per adapter family, but the
   read-after-write). The prior prefix's objects are garbage-collected after the
   flip (Section 7.3).
 
-For the fs / remote-fs backends, after the symlink rename the parent directory is
-fsynced so the flip survives power loss (symmetric with the Section 4.4 single-file
-fsync note); a flip that is lost despite being complete is otherwise bounded by the
-FR-DATA-5 RPO.
+For the fs / remote-fs backends, the staged tree's file data is fsynced
+(`_fsync_tree`) before the pointer flip, and the `snapshots/` directory is
+fsynced after the staging-to-snapshots move so the rename entry is durable.
+After the symlink rename the parent directory (`server_root`) is fsynced so the
+flip itself survives power loss (symmetric with the Section 4.4 single-file
+fsync note); a flip that is lost despite being complete is otherwise bounded by
+the FR-DATA-5 RPO.
 
 ### 4.3 Crash safety
 
@@ -454,6 +457,11 @@ to one complete snapshot — never absent, never partial.** Recovery is
 idempotent: the startup sweep reclaims any `snapshots/<snapshot-id>/` not
 targeted by `current` and any leftover `incoming/` staging dir, and re-running
 `abort_snapshot` or the sweep is always safe.
+
+For the fs / remote-fs backends, the staged tree's file data is fsynced
+(`_fsync_tree`) before the flip and the superseded snapshot is reclaimed only
+after the flip, so `current` never resolves to a tree whose data blocks are
+unflushed while the prior copy is already deleted (#1943).
 
 The sweep also reclaims the **spool temp files** a crash leaves at a backup
 write site — the fs adapter's `.backup.*.tmp` (create / upload) and
@@ -715,6 +723,17 @@ pruned. Versioning applies to the **authoritative copy only** — edits to a
 running server's live working set go over the control plane (ARCHITECTURE.md
 Section 7.2) and are captured as versions when that working set is next
 snapshotted and the resulting file differs, not on each keystroke.
+
+**Crash-safe capture (issue #1955).** The version capture uses the same
+temp-sibling + fsync + atomic rename discipline as Section 4.4 single-file
+writes: the prior content is streamed into a dot-prefixed temp sibling
+(`.{version-id}.*.tmp`) in the target `versions/` directory, fsynced, then
+atomically renamed to its final name. A crash mid-capture leaves only the temp
+sibling — never a truncated file under a valid version id. The enumerators
+(`list_file_versions`, `_matches_newest_version`, `_prune_versions`) filter
+dot-prefixed entries so leftover temps are invisible to callers. The startup
+sweep (`_sweep_server`) reclaims stale `.*.tmp` files under `versions/` using
+the same mtime age threshold as backup spool litter (issue #903).
 
 **Alternatives considered.**
 1. *Whole-working-set versioning* (snapshot the entire `current/` per edit) —

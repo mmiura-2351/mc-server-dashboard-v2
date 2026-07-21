@@ -23,6 +23,7 @@ authoritative-side semantics.
 from __future__ import annotations
 
 import abc
+import contextlib
 import datetime as dt
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -40,6 +41,72 @@ from mc_server_dashboard_api.storage.integrity.region import WorkingSetReport
 # A byte stream: async so an adapter can read/transfer without buffering the whole
 # working set or JAR in memory (STORAGE.md Sections 3.1, 3.2).
 ByteStream = AsyncIterator[bytes]
+
+
+class HydrateSource:
+    """AsyncIterator[bytes] over the working-set tar with an atomic generation.
+
+    ``generation`` is ``None`` until the first chunk is pulled; after that it
+    carries the marker value read atomically with the snapshot lease (issue #1954).
+    This coupling eliminates the race between a standalone ``current_generation``
+    read and the deferred lease acquisition that ``open_hydrate_source`` performs on
+    first iteration.
+
+    Structurally satisfies ``ByteStream`` (``AsyncIterator[bytes]``), so existing
+    iteration sites keep working unchanged.
+    """
+
+    def __init__(self, inner: AsyncIterator[bytes]) -> None:
+        self._inner = inner
+        self.generation: int | None = None
+
+    def __aiter__(self) -> AsyncIterator[bytes]:
+        return self
+
+    async def __anext__(self) -> bytes:
+        return await self._inner.__anext__()
+
+    async def aclose(self) -> None:
+        aclose = getattr(self._inner, "aclose", None)
+        if aclose is not None:
+            await aclose()
+
+
+class WorkingSetView(abc.ABC):
+    """Read-only view pinned to one snapshot via an active-reader lease.
+
+    Used by export/download to ensure the entire walk reads from a single
+    consistent snapshot even when a concurrent restore/publish flips
+    ``current/`` mid-stream (issue #1966). The view is an async context
+    manager: ``__aenter__`` acquires the lease and ``__aexit__`` releases it.
+    """
+
+    @abc.abstractmethod
+    async def list_dir(self, rel_path: RelPath) -> list[DirEntry]:
+        """List a directory in the pinned snapshot.
+
+        Returns ``[]`` for the root of an unpublished server. Raises
+        :class:`~.errors.NotFoundError` for a missing subdirectory.
+        """
+
+    @abc.abstractmethod
+    def open_file_stream(self, rel_path: RelPath) -> ByteStream:
+        """Open a chunked read stream over one file in the pinned snapshot.
+
+        Raises :class:`~.errors.NotFoundError` if the file is absent.
+        """
+
+    @abc.abstractmethod
+    async def __aenter__(self) -> WorkingSetView: ...
+
+    @abc.abstractmethod
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: object,
+    ) -> None: ...
+
 
 # The publisher id recorded for an API-initiated restore (issue #873). A restore is
 # an authoritative publish with no producing Worker, so it bumps the generation like
@@ -122,13 +189,28 @@ class WorkingSetStore(abc.ABC):
 
     @abc.abstractmethod
     def open_hydrate_source(
-        self, community_id: CommunityId, server_id: ServerId
-    ) -> ByteStream:
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        *,
+        exclude: frozenset[str] = frozenset(),
+    ) -> HydrateSource:
         """Open a read stream over the current authoritative working set.
 
         The data plane reads from this to feed a Worker on start/relocation
         (hydrate). Reads ``current/``. Raises :class:`~.errors.NotFoundError` if no
         snapshot has been published for the server.
+
+        ``exclude`` names exact top-level member relpaths to omit from the stream
+        (issue #1942). When the resolved JAR is being injected, the caller passes
+        ``frozenset({"server.jar"})`` so the working set's embedded (stale) copy
+        does not overwrite the freshly injected one on unpack (last-wins).
+
+        The returned :class:`HydrateSource` exposes ``generation`` — ``None`` until
+        the first chunk is pulled, then the marker value read atomically with the
+        snapshot lease (issue #1954). The endpoint stamps this on the response header
+        instead of a separate ``current_generation`` call, closing the race where a
+        bump between the two mislabels the served bytes.
 
         POSIX semantics reliance: on fs/remote-fs the stream reads the snapshot
         directory ``current`` resolved to *at open time*. A concurrent publish flips
@@ -257,10 +339,10 @@ class WorkingSetStore(abc.ABC):
         """Structurally fsck the on-disk authoritative snapshot (issue #744).
 
         The one-shot sweep's per-snapshot probe: walk ``current/`` for corrupt
-        ``.mca`` region files (issue #738). A published snapshot is immutable and
-        quiesced, so the scan is safe in place and needs no staging. Read-only — it
-        never mutates ``current``. Raises :class:`~.errors.NotFoundError` if no
-        snapshot has been published.
+        ``.mca`` region files (issue #738). The implementation holds a reader lease
+        for the duration of the walk so a concurrent publish cannot reclaim the
+        snapshot mid-scan (issue #1702). Read-only — it never mutates ``current``.
+        Raises :class:`~.errors.NotFoundError` if no snapshot has been published.
         """
 
     @abc.abstractmethod
@@ -606,6 +688,22 @@ class FileStore(abc.ABC):
         the live working directory), is re-packed into the next snapshot, and is
         carried into backups/restores. Idempotent: creating an existing directory is
         fine. See STORAGE.md Section 3.4 for the full lifecycle note.
+        """
+
+    @abc.abstractmethod
+    def open_working_set_view(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> contextlib.AbstractAsyncContextManager[WorkingSetView]:
+        """Open a pinned read-only view of the current working set (issue #1966).
+
+        The returned async context manager acquires an active-reader lease on
+        ``__aenter__`` and releases it on ``__aexit__``. All ``list_dir`` and
+        ``open_file_stream`` calls through the view resolve against the snapshot
+        that was live at enter time, so a concurrent publish cannot tear the walk.
+
+        An unpublished server (no ``current`` pointer) yields a view whose root
+        ``list_dir(".")`` returns ``[]`` and file reads raise
+        :class:`~.errors.NotFoundError`.
         """
 
 

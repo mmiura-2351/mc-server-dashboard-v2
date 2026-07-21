@@ -24,8 +24,19 @@ from mc_server_dashboard_api.storage.adapters.failure_seam import (
     PublishPhase,
 )
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
-from mc_server_dashboard_api.storage.domain.value_objects import CommunityId, ServerId
-from tests.storage.helpers import drain, new_scope, read_tar, snapshot_dir, tar_stream
+from mc_server_dashboard_api.storage.domain.value_objects import (
+    CommunityId,
+    RelPath,
+    ServerId,
+)
+from tests.storage.helpers import (
+    drain,
+    new_scope,
+    publish,
+    read_tar,
+    snapshot_dir,
+    tar_stream,
+)
 
 
 async def _seed_initial(
@@ -464,3 +475,353 @@ async def test_sweep_spares_young_backup_tmp(tmp_path: Path) -> None:
     storage.sweep()
 
     assert young_tmp.exists(), "a young spool a live write may be filling must survive"
+
+
+async def test_commit_snapshot_fsyncs_staged_data_before_flip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Durability ordering (issue #1943): _publish_and_bump must fsync the staged
+    # tree's file data BEFORE the symlink flip. Otherwise a power cut after commit
+    # but before writeback leaves torn .mca files under the new current with the
+    # prior snapshot already reclaimed. The monkeypatch spy records fsync-file events
+    # and the flip (os.replace onto `current`) and asserts every file fsync precedes
+    # the flip.
+    import os
+    import stat as stat_module
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+
+    events: list[str] = []
+    real_fsync = os.fsync
+    real_replace = os.replace
+
+    def spy_fsync(fd: int) -> None:
+        is_dir = stat_module.S_ISDIR(os.fstat(fd).st_mode)
+        events.append("fsync-dir" if is_dir else "fsync-file")
+        real_fsync(fd)
+
+    def spy_replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        if str(dst).endswith("/current") or str(dst).endswith("\\current"):
+            events.append("flip")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "fsync", spy_fsync)
+    monkeypatch.setattr(os, "replace", spy_replace)
+
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(handle, tar_stream({"level.dat": b"data"}))
+    await storage.commit_snapshot(handle)
+
+    assert "flip" in events
+    flip_at = events.index("flip")
+    # At least one file fsync must precede the flip (the staged tree's data).
+    file_fsyncs_before_flip = [
+        i for i, e in enumerate(events) if e == "fsync-file" and i < flip_at
+    ]
+    assert file_fsyncs_before_flip, (
+        "no file fsync before the current flip — staged data is not durable"
+    )
+
+
+async def test_restore_backup_fsyncs_staged_data_before_flip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Same ordering as test_commit_snapshot_fsyncs_staged_data_before_flip but
+    # through the restore_backup path (issue #1943).
+    import os
+    import stat as stat_module
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    # Seed a snapshot so restore has a current to flip away from.
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(handle, tar_stream({"f": b"old"}))
+    await storage.commit_snapshot(handle)
+
+    # Create a backup to restore from.
+    key = await storage.create_backup_from_current(community, server)
+
+    events: list[str] = []
+    real_fsync = os.fsync
+    real_replace = os.replace
+
+    def spy_fsync(fd: int) -> None:
+        is_dir = stat_module.S_ISDIR(os.fstat(fd).st_mode)
+        events.append("fsync-dir" if is_dir else "fsync-file")
+        real_fsync(fd)
+
+    def spy_replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        if str(dst).endswith("/current") or str(dst).endswith("\\current"):
+            events.append("flip")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "fsync", spy_fsync)
+    monkeypatch.setattr(os, "replace", spy_replace)
+
+    await storage.restore_backup(community, server, key)
+
+    assert "flip" in events
+    flip_at = events.index("flip")
+    file_fsyncs_before_flip = [
+        i for i, e in enumerate(events) if e == "fsync-file" and i < flip_at
+    ]
+    assert file_fsyncs_before_flip, (
+        "no file fsync before the current flip — staged data is not durable"
+    )
+
+
+async def test_publish_fsyncs_snapshots_dir_after_move(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Durability ordering (issue #1943): _publish must fsync the snapshots/ directory
+    # after moving the staging dir into it, so the rename entry is durable before
+    # the symlink flip. We spy os.fsync and os.replace and assert a dir fsync of the
+    # snapshots/ parent occurs between the staging-to-snapshots move and the current
+    # flip.
+    import os
+    import stat as stat_module
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+
+    events: list[str] = []
+    real_fsync = os.fsync
+    real_replace = os.replace
+
+    def spy_fsync(fd: int) -> None:
+        is_dir = stat_module.S_ISDIR(os.fstat(fd).st_mode)
+        events.append("fsync-dir" if is_dir else "fsync-file")
+        real_fsync(fd)
+
+    def spy_replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        dst_s = str(dst)
+        if "/snapshots/" in dst_s or "\\snapshots\\" in dst_s:
+            events.append("move-to-snapshots")
+        elif dst_s.endswith("/current") or dst_s.endswith("\\current"):
+            events.append("flip")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "fsync", spy_fsync)
+    monkeypatch.setattr(os, "replace", spy_replace)
+
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(handle, tar_stream({"level.dat": b"data"}))
+    await storage.commit_snapshot(handle)
+
+    assert "move-to-snapshots" in events
+    assert "flip" in events
+    move_at = events.index("move-to-snapshots")
+    flip_at = events.index("flip")
+    # A directory fsync must occur between the move and the flip (snapshots/ dir).
+    dir_fsyncs_between = [
+        i for i, e in enumerate(events) if e == "fsync-dir" and move_at < i < flip_at
+    ]
+    assert dir_fsyncs_between, (
+        "no dir fsync between staging move and current flip — "
+        "the rename entry into snapshots/ is not durable"
+    )
+
+
+# --- Version capture crash safety (issue #1955) ----------------------------
+
+
+async def test_crash_mid_version_capture_leaves_no_visible_version(
+    tmp_path: Path,
+) -> None:
+    """A crash after the version temp is fsynced but before the rename leaves no
+    visible version entry. The in-process exception path cleans the temp (the
+    except-BaseException clause), but in a real SIGKILL it would survive as
+    dot-prefixed litter — tested by the sweep tests below.
+    """
+
+    community, server = new_scope()
+    storage = FsStorage(tmp_path)
+    await publish(storage, community, server, {"cfg": b"v0"})
+
+    crashed = FsStorage(
+        tmp_path,
+        failure_seam=CrashAt(PublishPhase.AFTER_VERSION_TEMP_WRITE),
+    )
+    with pytest.raises(InjectedCrash):
+        await crashed.write_file(community, server, RelPath("cfg"), b"v1")
+
+    # current/ must still hold the OLD content (the atomic overwrite never renamed).
+    recovered = FsStorage(tmp_path)
+    content = await recovered.read_file(community, server, RelPath("cfg"))
+    assert content == b"v0"
+
+    # No visible version listed — the temp never renamed into place.
+    versions = await recovered.list_file_versions(community, server, RelPath("cfg"))
+    assert versions == []
+
+
+async def test_sweep_reclaims_stale_version_capture_litter(tmp_path: Path) -> None:
+    """Sweep removes version-capture temp siblings older than the age threshold."""
+
+    import os
+    import time
+
+    community, server = new_scope()
+    storage = FsStorage(tmp_path)
+    await publish(storage, community, server, {"cfg": b"v0"})
+
+    # Plant a stale version litter file.
+    server_root = (
+        tmp_path / "communities" / str(community.value) / "servers" / str(server.value)
+    )
+    versions_dir = server_root / "versions" / "cfg"
+    versions_dir.mkdir(parents=True, exist_ok=True)
+    stale = versions_dir / ".some-id.deadbeef.tmp"
+    stale.write_bytes(b"partial")
+    old = time.time() - 7200
+    os.utime(stale, (old, old))
+
+    storage.sweep()
+
+    assert not stale.exists()
+
+
+async def test_sweep_spares_young_version_capture_litter(tmp_path: Path) -> None:
+    """Sweep leaves version-capture temp siblings younger than the age threshold."""
+
+    community, server = new_scope()
+    storage = FsStorage(tmp_path)
+    await publish(storage, community, server, {"cfg": b"v0"})
+
+    server_root = (
+        tmp_path / "communities" / str(community.value) / "servers" / str(server.value)
+    )
+    versions_dir = server_root / "versions" / "cfg"
+    versions_dir.mkdir(parents=True, exist_ok=True)
+    young = versions_dir / ".some-id.cafef00d.tmp"
+    young.write_bytes(b"in-flight")
+
+    storage.sweep()
+
+    assert young.exists(), (
+        "young version litter a live capture may be filling must survive"
+    )
+
+
+async def test_sweep_skips_dot_tmp_shaped_version_directory(
+    tmp_path: Path,
+) -> None:
+    """A rel_path like ``.env.tmp`` creates a ``versions/.env.tmp/`` directory.
+
+    The rglob ``.*.tmp`` matches it, but sweep must not attempt to unlink a
+    directory — that would raise IsADirectoryError and crash startup.
+    """
+
+    import os
+    import time
+
+    community, server = new_scope()
+    storage = FsStorage(tmp_path)
+    await publish(storage, community, server, {".env.tmp": b"SECRET=x"})
+
+    # Plant the versions directory for that rel_path (mimics a prior capture).
+    server_root = (
+        tmp_path / "communities" / str(community.value) / "servers" / str(server.value)
+    )
+    dot_tmp_dir = server_root / "versions" / ".env.tmp"
+    dot_tmp_dir.mkdir(parents=True, exist_ok=True)
+    # Place a real version file inside it.
+    version_file = dot_tmp_dir / "00000000000000001-abcdefab"
+    version_file.write_bytes(b"SECRET=old")
+    # Age the directory past the sweep threshold so it would be a candidate.
+    old = time.time() - 7200
+    os.utime(dot_tmp_dir, (old, old))
+
+    # Must not raise IsADirectoryError.
+    storage.sweep()
+
+    # The directory and its contents survive.
+    assert dot_tmp_dir.is_dir()
+    assert version_file.exists()
+
+
+async def test_version_capture_fsyncs_before_rename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """_atomic_copy fsyncs the temp data before renaming it into versions/ and
+    fsyncs the versions directory after the rename.
+    """
+
+    import os
+    import stat as stat_module
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"cfg": b"v0"})
+
+    events: list[str] = []
+    real_fsync = os.fsync
+    real_replace = os.replace
+
+    def spy_fsync(fd: int) -> None:
+        is_dir = stat_module.S_ISDIR(os.fstat(fd).st_mode)
+        events.append("fsync-dir" if is_dir else "fsync-file")
+        real_fsync(fd)
+
+    def spy_replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        dst_str = str(dst)
+        # The version rename target is inside a versions/ directory and is NOT a
+        # .tmp file (the temp is the source).
+        if "/versions/" in dst_str and not dst_str.endswith(".tmp"):
+            events.append("rename-version")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "fsync", spy_fsync)
+    monkeypatch.setattr(os, "replace", spy_replace)
+
+    await storage.write_file(community, server, RelPath("cfg"), b"v1")
+
+    assert "rename-version" in events
+    rename_at = events.index("rename-version")
+    # The temp-file fsync precedes the rename (data is durable).
+    assert "fsync-file" in events and events.index("fsync-file") < rename_at
+    # The directory fsync follows the rename (rename entry is durable).
+    dir_fsyncs_after = [
+        i for i, e in enumerate(events) if e == "fsync-dir" and i > rename_at
+    ]
+    assert dir_fsyncs_after, "no dir fsync after version rename — entry not durable"
+
+
+async def test_version_litter_does_not_consume_retention_slots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dot-prefixed leftover must not count toward the retention limit and must
+    not cause legitimate versions to be pruned away.
+    """
+
+    import mc_server_dashboard_api.storage.adapters.fs as fs_module
+
+    storage = FsStorage(tmp_path, version_retention=2)
+    community, server = new_scope()
+    await publish(storage, community, server, {"cfg": b"v0"})
+
+    # Use crafted ids to control ordering.
+    crafted = iter([f"{n:020d}-aaaaaaaa" for n in range(1, 100)])
+    monkeypatch.setattr(fs_module, "_new_version_id", lambda: next(crafted))
+
+    # Write v1 (captures v0), then v2 (captures v1) — retention=2 keeps both.
+    await storage.write_file(community, server, RelPath("cfg"), b"v1")
+    await storage.write_file(community, server, RelPath("cfg"), b"v2")
+
+    # Plant litter in the versions directory.
+    server_root = (
+        tmp_path / "communities" / str(community.value) / "servers" / str(server.value)
+    )
+    versions_dir = server_root / "versions" / "cfg"
+    litter = versions_dir / ".fake-id.tmp"
+    litter.write_bytes(b"leftover")
+
+    # Write v3 (captures v2) — retention=2 means oldest of [v0, v1, v2] pruned.
+    await storage.write_file(community, server, RelPath("cfg"), b"v3")
+
+    # Still exactly 2 visible versions (the litter is not counted).
+    versions = await storage.list_file_versions(community, server, RelPath("cfg"))
+    assert len(versions) == 2
+    # Litter still on disk (not removed by prune, only by sweep).
+    assert litter.exists()

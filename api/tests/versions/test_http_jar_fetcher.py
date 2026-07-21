@@ -94,18 +94,40 @@ async def test_does_not_follow_redirect(monkeypatch: pytest.MonkeyPatch) -> None
     redirect target must never be streamed. A future httpx2 default flip or an
     accidental ``follow_redirects=True`` would issue a second request to the
     ``Location`` target through the same transport, which the handler would see.
+
+    The request URL is the pinned-IP form (SSRF guard pins the resolved address
+    into the URL), so the handler matches on that (#1989).
     """
 
     requested: list[str] = []
     redirect_target = "https://redirect-target.test/internal"
+    pinned_url = "https://93.184.216.34/server.jar"
 
     def handler(request: httpx2.Request) -> httpx2.Response:
         requested.append(str(request.url))
-        if str(request.url) == _URL:
+        if str(request.url) == pinned_url:
             return httpx2.Response(302, headers={"Location": redirect_target})
         return httpx2.Response(200, content=b"PK\x03\x04 redirect target jar")
 
     _install_transport(monkeypatch, handler)
     with pytest.raises(JarDownloadError):
         await HttpxJarFetcher().fetch(_URL)
-    assert requested == [_URL]
+    assert requested == [pinned_url]
+
+
+@pytest.mark.asyncio
+async def test_connects_to_pinned_ip(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The HTTP request goes to the resolver-stubbed IP, not the hostname (#1989).
+
+    Anti-rebinding regression: the SSRF guard resolves DNS and pins the IP into
+    the request URL. A second DNS lookup (which could return a different, internal
+    address) must never happen.
+    """
+    body = b"PK\x03\x04 pinned jar"
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        assert request.url.host == "93.184.216.34"
+        return httpx2.Response(200, content=body)
+
+    _install_transport(monkeypatch, handler)
+    assert await HttpxJarFetcher().fetch(_URL) == body

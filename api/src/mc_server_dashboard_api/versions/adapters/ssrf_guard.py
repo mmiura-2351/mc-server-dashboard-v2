@@ -5,7 +5,11 @@ Mirrors the private-address guard the Modrinth download path enforces
 shares one policy. Applied to the shared JAR/JSON fetchers, a fetch is refused
 unless the URL uses HTTPS and its host resolves only to global (public)
 addresses — blocking a compromised or future user-influenced catalog URL from
-reaching a private/loopback/link-local target (and DNS-rebinding to one).
+reaching a private/loopback/link-local target.
+
+DNS-rebinding is defeated by pinning the resolved IP into the request URL so
+the subsequent HTTP client connection goes to the already-validated address
+rather than re-resolving the hostname (issue #1989).
 
 No host allowlist: the upstream bases (Mojang / PaperMC / Fabric / Forge) and
 their download CDNs are public but not a closed, enumerable set, so an allowlist
@@ -20,14 +24,29 @@ Modrinth download path does.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import ipaddress
 import socket
 from collections.abc import Callable
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 
 class BlockedHostError(Exception):
     """A URL was refused by the SSRF guard (non-HTTPS or a private/reserved IP)."""
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class PinnedRequest:
+    """A validated request with the hostname replaced by its resolved IP.
+
+    Callers pass *url*, *headers*, and *extensions* to the HTTP client so the
+    connection goes to the already-validated address (no second DNS lookup) while
+    TLS SNI and the ``Host`` header still carry the original hostname.
+    """
+
+    url: str
+    headers: dict[str, str]
+    extensions: dict[str, str]
 
 
 async def _async_resolve_host(hostname: str) -> list[str]:
@@ -44,12 +63,15 @@ async def assert_url_allowed(
     url: str,
     *,
     _resolver: Callable[[str], list[str]] | None = None,
-) -> None:
-    """Raise :class:`BlockedHostError` unless *url* is HTTPS to a public host.
+) -> PinnedRequest:
+    """Validate *url* and return a :class:`PinnedRequest` pinned to the resolved IP.
 
     The URL must use HTTPS and its hostname must not resolve to a private,
-    loopback, link-local, or otherwise non-global address (``ip.is_global``),
-    which also blocks a hostname that rebinds to an internal target.
+    loopback, link-local, or otherwise non-global address (``ip.is_global``).
+
+    The returned :class:`PinnedRequest` replaces the hostname with the resolved
+    IP so callers connect to the validated address, closing the DNS-rebinding
+    TOCTOU window (issue #1989).
     """
     parsed = urlparse(url)
     if parsed.scheme != "https":
@@ -72,3 +94,13 @@ async def assert_url_allowed(
             raise BlockedHostError(
                 f"host {hostname} resolved to private/reserved IP: {addr}"
             )
+
+    # Pin to the first IPv4 address; fall back to the first IPv6 if none.
+    pinned_addr = next((a for a in addrs if ":" not in a), addrs[0])
+    host = f"[{pinned_addr}]" if ":" in pinned_addr else pinned_addr
+    netloc = host if parsed.port is None else f"{host}:{parsed.port}"
+    return PinnedRequest(
+        url=urlunparse(parsed._replace(netloc=netloc)),
+        headers={"Host": hostname},
+        extensions={"sni_hostname": hostname},
+    )

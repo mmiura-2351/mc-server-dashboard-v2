@@ -42,13 +42,19 @@ export function setHardLogoutHandler(fn: LogoutHandler): void {
 }
 
 /**
- * Outcome of a refresh attempt. `"ok"` means the access token was
- * re-established; `"auth-rejected"` means the server authoritatively rejected
- * the session (401/403 — the refresh cookie is dead); `"transient"` means a
- * network error, proxy 5xx, or garbled body prevented the attempt but the
- * session may still be valid.
+ * Outcome of a refresh attempt. Wrapped in an object so that callers cannot
+ * accidentally rely on truthiness — all string values would be truthy, making
+ * `if (await refreshSession())` silently wrong (issue #2160). Callers must
+ * inspect `.status` explicitly.
+ *
+ * - `"ok"` — access token re-established.
+ * - `"auth-rejected"` — server authoritatively rejected the session (401/403).
+ * - `"transient"` — network error, proxy 5xx, or garbled body; session may
+ *   still be valid.
  */
-export type RefreshResult = "ok" | "auth-rejected" | "transient";
+export type RefreshResult = {
+  status: "ok" | "auth-rejected" | "transient";
+};
 
 /** The shared in-flight refresh, or null when none is running. */
 let inFlightRefresh: Promise<RefreshResult> | null = null;
@@ -60,9 +66,10 @@ function isAuthDefinitive(status: number): boolean {
 
 /**
  * POST /api/auth/refresh riding the httpOnly cookie (empty JSON body). 200
- * stores the rotated access token and resolves `"ok"`; 401/403 resolves
- * `"auth-rejected"` (session is genuinely dead); network errors and other
- * non-2xx responses resolve `"transient"` (session may still be valid).
+ * stores the rotated access token and resolves `{ status: "ok" }`; 401/403
+ * resolves `{ status: "auth-rejected" }` (session is genuinely dead); network
+ * errors and other non-2xx responses resolve `{ status: "transient" }` (session
+ * may still be valid).
  */
 async function doRefresh(): Promise<RefreshResult> {
   let response: Response;
@@ -74,10 +81,12 @@ async function doRefresh(): Promise<RefreshResult> {
       body: "{}",
     });
   } catch {
-    return "transient";
+    return { status: "transient" };
   }
   if (!response.ok) {
-    return isAuthDefinitive(response.status) ? "auth-rejected" : "transient";
+    return {
+      status: isAuthDefinitive(response.status) ? "auth-rejected" : "transient",
+    };
   }
   let data: TokenResponse;
   try {
@@ -86,10 +95,10 @@ async function doRefresh(): Promise<RefreshResult> {
     // A 200 with a malformed/empty body yields no usable token; this is not an
     // auth rejection (the server said 200), so treat it as transient rather
     // than forcing a hard logout.
-    return "transient";
+    return { status: "transient" };
   }
   setAccessToken(data.access_token);
-  return "ok";
+  return { status: "ok" };
 }
 
 /**
@@ -136,8 +145,9 @@ export async function restoreSession(): Promise<boolean> {
  * Single-flight refresh: all concurrent callers (e.g. several requests that
  * 401ed at once) share one in-flight `/api/auth/refresh`, so the client never
  * replays a stale predecessor past the API's reuse grace window (AUTH_API.md
- * 4). Resolves `"ok"` when the session was re-established, `"auth-rejected"`
- * when the server says it is dead, or `"transient"` on network/proxy errors.
+ * 4). Resolves `{ status: "ok" }` when the session was re-established,
+ * `{ status: "auth-rejected" }` when the server says it is dead, or
+ * `{ status: "transient" }` on network/proxy errors.
  */
 export function refreshSession(): Promise<RefreshResult> {
   if (inFlightRefresh === null) {
@@ -156,11 +166,11 @@ export function refreshSession(): Promise<RefreshResult> {
  * a later retry. On success it reports true to trigger a request retry.
  */
 export async function refreshForRetry(): Promise<boolean> {
-  const result = await refreshSession();
-  if (result === "auth-rejected") {
+  const { status } = await refreshSession();
+  if (status === "auth-rejected") {
     hardLogout("expired");
   }
-  return result === "ok";
+  return status === "ok";
 }
 
 /**

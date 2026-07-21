@@ -21,6 +21,7 @@ from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from mc_server_dashboard_api.storage.domain.errors import (
     IntegrityCheckError,
     MissingRegionsError,
+    StaleGenerationError,
 )
 from mc_server_dashboard_api.storage.domain.value_objects import (
     BackupKey,
@@ -501,3 +502,90 @@ async def test_prune_failclosed_keeps_tree_when_pack_fails(
     assert read_tar(await drain(storage.open_hydrate_source(community, server))) == {
         "world/level.dat": b"w"
     }
+
+
+async def test_commit_refuses_when_generation_marker_removed(
+    tmp_path: Path,
+) -> None:
+    # Issue #1704: after prune (or any path that removes the generation marker),
+    # _read_generation returns 0. A late commit whose expected_base was the
+    # pre-prune generation (>0) must fail with StaleGenerationError, not
+    # silently resurrect the snapshot tree. The fix changes the stale check
+    # from ``current > expected_base`` to ``current != expected_base``.
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await _publish(storage, community, server, {"f": b"v1"})
+    base = await storage.current_generation(community, server)
+    assert base >= 1
+
+    # Stage a new snapshot at the pre-removal base...
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(handle, tar_stream({"f": b"late-upload"}))
+
+    # ...then remove the generation marker (as prune does).
+    root = _prune_server_root(tmp_path, community, server)
+    marker = root / "generation"
+    assert marker.is_file()
+    marker.unlink()
+
+    with pytest.raises(StaleGenerationError):
+        await storage.commit_snapshot(handle, expected_base=base)
+
+
+async def test_missing_region_gate_runs_under_server_lock(tmp_path: Path) -> None:
+    """TOCTOU regression (issue #921 item 2): check_missing_regions must run inside
+    the per-server publish lock, not before it.
+
+    Monkeypatch ``check_missing_regions`` to probe whether the server lock is held
+    at call time: a non-blocking ``acquire()`` that returns ``False`` proves the gate
+    runs inside the locked section (the same lock ``_publish_and_bump`` takes).
+    """
+
+    import mc_server_dashboard_api.storage.adapters.fs as fs_mod
+    from mc_server_dashboard_api.storage.integrity.region import check_missing_regions
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await _publish(
+        storage,
+        community,
+        server,
+        {
+            "world/region/r.0.0.mca": healthy_region_bytes(),
+            "world/region/r.0.1.mca": healthy_region_bytes(),
+        },
+    )
+
+    lock = storage._server_lock(community, server)
+    lock_was_held = False
+
+    _original = check_missing_regions
+
+    def _probe(staging: Path, prior: Path) -> object:
+        nonlocal lock_was_held
+        # A non-blocking acquire returns False when the lock is already held by the
+        # current thread (threading.Lock is not reentrant), proving this call site is
+        # inside the locked section.
+        acquired = lock.acquire(blocking=False)
+        if acquired:
+            lock.release()
+        else:
+            lock_was_held = True
+        return _original(staging, prior)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(fs_mod, "check_missing_regions", _probe)
+    try:
+        # Stage a partial-loss snapshot so the gate runs (and raises).
+        handle = await storage.begin_snapshot(community, server)
+        await storage.write_snapshot(
+            handle, tar_stream({"world/region/r.0.0.mca": healthy_region_bytes()})
+        )
+        with pytest.raises(MissingRegionsError):
+            await storage.commit_snapshot(handle)
+
+        assert lock_was_held, (
+            "check_missing_regions ran outside the per-server lock — TOCTOU is open"
+        )
+    finally:
+        monkeypatch.undo()

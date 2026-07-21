@@ -38,6 +38,21 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/tunnel"
 )
 
+// firstFailure records the first non-nil error from a Serve goroutine
+// (sync.Once-guarded so concurrent failures do not race).
+type firstFailure struct {
+	once sync.Once
+	err  error
+}
+
+func (f *firstFailure) set(err error) {
+	f.once.Do(func() { f.err = err })
+}
+
+func (f *firstFailure) get() error {
+	return f.err
+}
+
 // tokenTTL is the single-use tunnel token lifetime. The API mints tokens with a
 // 10 s TTL (RELAY.md Section 4); the relay's table tracks the same window so a
 // late dial-back finds no waiter.
@@ -64,7 +79,8 @@ func main() {
 }
 
 // run wires the relay and blocks until shutdown. It returns nil on a
-// signal-driven clean shutdown and an error on a fatal config/bind failure.
+// signal-driven clean shutdown, and an error on a fatal config/bind failure
+// or a failure-driven listener shutdown (non-transient Accept error).
 func run(ctx context.Context) error {
 	cfg, err := config.Load(os.Getenv(configPathEnv), os.Getenv)
 	if err != nil {
@@ -172,6 +188,7 @@ func run(ctx context.Context) error {
 	// when Bedrock is disabled, making the game goroutine's wait below a no-op.
 	bedrockDrained := make(chan struct{})
 
+	var fail firstFailure
 	var wg sync.WaitGroup
 	wg.Add(4)
 	go func() { defer wg.Done(); svc.Run(svcCtx) }()
@@ -180,6 +197,7 @@ func run(ctx context.Context) error {
 		defer wg.Done()
 		if err := tunnelLn.Serve(sigCtx); err != nil {
 			logger.Error("tunnel listener stopped", "error", err)
+			fail.set(err)
 			stop()
 		}
 	}()
@@ -190,6 +208,7 @@ func run(ctx context.Context) error {
 			defer close(bedrockDrained)
 			if err := bedrockLn.Serve(sigCtx); err != nil {
 				logger.Error("bedrock tunnel listener stopped", "error", err)
+				fail.set(err)
 				stop()
 			}
 
@@ -209,6 +228,7 @@ func run(ctx context.Context) error {
 		defer wg.Done()
 		if err := gameLn.Serve(sigCtx); err != nil {
 			logger.Error("game listener stopped", "error", err)
+			fail.set(err)
 			stop()
 		}
 
@@ -262,7 +282,7 @@ func run(ctx context.Context) error {
 	}
 
 	wg.Wait()
-	return nil
+	return fail.get()
 }
 
 // metricsShutdownTimeout bounds the metrics HTTP server's graceful shutdown on

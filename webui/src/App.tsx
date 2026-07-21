@@ -162,17 +162,26 @@ function RequireAdmin() {
 // hold on the session loading state (no flicker); a caller with no communities
 // stays here and the shell shows the no-communities hint.
 function Landing() {
-  const { communityId, communities, communitiesError, refetchCommunities } =
-    useActiveCommunity();
+  const {
+    communityId,
+    communities,
+    communitiesError,
+    communitiesFetching,
+    refetchCommunities,
+  } = useActiveCommunity();
   if (communityId !== null) {
     return <Navigate to={dashboardPath(communityId)} replace />;
   }
-  if (communitiesError) {
+  if (communitiesError && communities === undefined) {
     return (
       <div className="auth-wrap" role="alert">
         <div style={{ textAlign: "center" }}>
           <p>{t("shell.communitiesError")}</p>
-          <button type="button" onClick={refetchCommunities}>
+          <button
+            type="button"
+            onClick={refetchCommunities}
+            disabled={communitiesFetching}
+          >
             {t("shell.communitiesRetry")}
           </button>
         </div>

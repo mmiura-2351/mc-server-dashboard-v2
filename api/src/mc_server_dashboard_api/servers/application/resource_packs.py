@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import uuid
 from dataclasses import dataclass
 from urllib.parse import quote
@@ -55,6 +56,8 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     ServerId,
 )
+
+logger = logging.getLogger(__name__)
 
 # 256 MiB upload cap for resource packs (issue #1176).
 MAX_RESOURCE_PACK_BYTES = 256 * 1024 * 1024
@@ -158,9 +161,21 @@ class DeleteResourcePack:
             if assignments:
                 raise ResourcePackInUseError(str(resource_pack_id.value))
 
-            await self.store.delete(resource_pack_id)
+            # Commit the DB delete first: an orphaned blob on later failure is
+            # benign, but destroyed bytes with a surviving row strand a
+            # still-referenced pack (issue #1962).
             await self.uow.resource_packs.delete(resource_pack_id)
             await self.uow.commit()
+
+        # Best-effort blob removal — the DB row is already gone, so a failure
+        # here leaves an orphaned blob which is harmless.
+        try:
+            await self.store.delete(resource_pack_id)
+        except Exception:
+            logger.warning(
+                "blob delete failed for resource pack %s; orphaned",
+                resource_pack_id.value,
+            )
 
 
 @dataclass(frozen=True)

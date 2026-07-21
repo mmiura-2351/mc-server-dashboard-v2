@@ -19,8 +19,11 @@ const generationFile = ".mcsd_generation"
 
 // writeGeneration records gen as the working-set generation in workingDir. It is
 // best-effort from the caller's view: a write failure is returned for logging but
-// must not fail the hydrate/snapshot it follows (a missing/stale marker only costs
-// an extra hydrate, never correctness). The file is written atomically (temp
+// must not fail the hydrate/snapshot it follows. On the 200 hydrate path the marker
+// was already written atomically into the temp tree before the swap-in rename
+// (issue #917), so this call is idempotent; on the 204 path and the snapshot path a
+// missing/stale marker only costs an extra hydrate, never correctness. The file is
+// written atomically (temp
 // sibling + rename) so a crash mid-write never leaves a torn generation, and the
 // temp contents are fsynced before the rename so a crash cannot surface an EMPTY
 // marker — a durable rename over unflushed bytes would read as gen 0, and combined

@@ -80,10 +80,12 @@ from mc_server_dashboard_api.storage.domain.port import (
     RESTORE_PUBLISHER,
     ByteStream,
     DirEntry,
+    HydrateSource,
     JarPoolEntry,
     JarPoolStats,
     SnapshotHandle,
     Storage,
+    WorkingSetView,
 )
 from mc_server_dashboard_api.storage.domain.value_objects import (
     BackupKey,
@@ -93,6 +95,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     ServerId,
     SnapshotId,
     VersionId,
+    is_version_ring_member,
 )
 from mc_server_dashboard_api.storage.integrity.region import (
     RegionFinding,
@@ -632,25 +635,85 @@ class ObjectStorage(Storage):
     # --- working-set hydrate / snapshot (Section 3.1) ----------------------
 
     def open_hydrate_source(
-        self, community_id: CommunityId, server_id: ServerId
-    ) -> ByteStream:
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        *,
+        exclude: frozenset[str] = frozenset(),
+    ) -> HydrateSource:
         # The live snapshot is resolved and leased on the FIRST iteration (not at
         # open time), mirroring the fs adapter: a stream opened but never iterated
         # never pins a prefix, and the leased prefix is exactly the one streamed
         # (Section 4.2 reader safety).
-        return self._hydrate_gen(community_id, server_id)
+        #
+        # The generation is read atomically with the lease under the per-server async
+        # lock (issue #1954): a bump between a standalone generation read and the
+        # deferred lease would mislabel the served bytes, wedging the session's
+        # publishes.
+        source = HydrateSource.__new__(HydrateSource)
+        source.generation = None
+        source._inner = self._hydrate_gen(community_id, server_id, source, exclude)
+        return source
 
     async def _hydrate_gen(
-        self, community_id: CommunityId, server_id: ServerId
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        source: HydrateSource,
+        exclude: frozenset[str] = frozenset(),
     ) -> AsyncIterator[bytes]:
         async with self._client_factory() as client:
+            server_prefix = self._server_prefix(community_id, server_id)
             snapshot_prefix = await self._lease_live_snapshot(
                 client, community_id, server_id
             )
             try:
+                # Read the generation under the server lock (issue #1954): the lease
+                # is already verified above (pointer still matches), and the lock
+                # prevents a concurrent publish from bumping the marker between
+                # verification and read. Re-verify the pointer under the lock: if it
+                # changed, the generation we'd read belongs to the NEW snapshot (a
+                # publish slipped between the lease verification and here). Release
+                # and re-lease in that case.
+                while True:
+                    async with self._server_lock(community_id, server_id):
+                        current_pointer = await self._read_pointer(
+                            client, server_prefix
+                        )
+                        if current_pointer == snapshot_prefix:
+                            source.generation = await self._read_generation(
+                                client, server_prefix
+                            )
+                            break
+                    # A publish slipped between lease and lock — acquire the new
+                    # lease BEFORE releasing the old so a cancellation between
+                    # the two cannot leave snapshot_prefix pointing at an
+                    # already-released prefix (double-release in the finally).
+                    new_prefix = await self._lease_live_snapshot(
+                        client, community_id, server_id
+                    )
+                    self._release_lease(snapshot_prefix)
+                    snapshot_prefix = new_prefix
                 members = sorted(
                     await client.list_objects(snapshot_prefix), key=lambda o: o.key
                 )
+                # Scrub poisoned keys whose relative name starts with ``/``
+                # (issue #1944): a prior root ``make_dir`` bug could write
+                # ``<prefix>//.dir`` whose tar member ``/.dir`` is absolute and
+                # the worker's ``safeJoin`` rejects, blocking hydrate forever.
+                members = [
+                    m
+                    for m in members
+                    if not m.key[len(snapshot_prefix) :].startswith("/")
+                ]
+                # Filter out excluded top-level members (issue #1942): the
+                # relative key's first path segment is checked against the set.
+                if exclude:
+                    members = [
+                        m
+                        for m in members
+                        if m.key[len(snapshot_prefix) :].split("/", 1)[0] not in exclude
+                    ]
                 async for chunk in _tar_stream_from_objects(
                     client, snapshot_prefix, members
                 ):
@@ -744,10 +807,11 @@ class ObjectStorage(Storage):
             async with self._server_lock(h.community_id, h.server_id):
                 if expected_base is not None:
                     current = await self._read_generation(client, server_prefix)
-                    if current > expected_base:
-                        # The store advanced past the guard's base during the upload
+                    if current != expected_base:
+                        # The store diverged from the guard's base during the upload
                         # window: an at-rest edit or restore landed after the
-                        # pre-stream guard passed. Discard the staging AND the copied
+                        # pre-stream guard passed, or a prune removed the generation
+                        # marker (issue #1704). Discard the staging AND the copied
                         # (never-pointed-at) snapshot prefix exactly as the other
                         # refusal paths do (the prior ``current`` keeps the newer
                         # copy, no bump) and raise so the edge maps it to 409
@@ -849,45 +913,54 @@ class ObjectStorage(Storage):
         # working-set objects (snapshots/, incoming/, versions/) plus the pointer and
         # generation markers. ``backups/`` is left untouched — the caller prunes
         # archives through its own seam.
-        server_prefix = self._server_prefix(community_id, server_id)
-        async with self._client_factory() as client:
-            snapshot_prefix = await self._read_pointer(client, server_prefix)
-            if snapshot_prefix is not None:
-                objs = sorted(
-                    await client.list_objects(snapshot_prefix), key=lambda o: o.key
-                )
-                # Build the self-contained tar.gz to local scratch (gzip streams, so
-                # the bodies are not all held at once), then upload it as one object.
-                # The upload makes ``final.tar.gz`` appear atomically BEFORE any
-                # working-set object is deleted, so a pack/upload failure leaves the
-                # working set intact and the error propagates (fail-closed, #777).
-                fd, spool_name = await asyncio.to_thread(
-                    tempfile.mkstemp, prefix=".final.", suffix=".tar.gz"
-                )
-                await asyncio.to_thread(_close_fd, fd)
-                spool = Path(spool_name)
-                try:
-                    await _write_backup_targz(client, snapshot_prefix, objs, spool)
-                    await client.upload_multipart(
-                        server_prefix + "final.tar.gz", _file_parts(spool)
+        #
+        # Hold the per-server lock for the entire prune (issue #1704): this
+        # serializes against ``commit_snapshot`` which takes the same lock, so a
+        # late commit cannot land while the prune is removing the working-set
+        # objects and generation marker.
+        async with self._server_lock(community_id, server_id):
+            server_prefix = self._server_prefix(community_id, server_id)
+            async with self._client_factory() as client:
+                snapshot_prefix = await self._read_pointer(client, server_prefix)
+                if snapshot_prefix is not None:
+                    objs = sorted(
+                        await client.list_objects(snapshot_prefix),
+                        key=lambda o: o.key,
                     )
-                finally:
-                    await asyncio.to_thread(spool.unlink, missing_ok=True)
-                # Invalidate the pointer FIRST, the instant final.tar.gz is durable:
-                # it is the one marker that says the working set is still live and
-                # re-packable. A crash after this point leaves no pointer, so a
-                # retried delete reads ``snapshot_prefix is None`` and takes the GC-
-                # only branch below — it never re-lists a half-deleted prefix and
-                # overwrites the good final.tar.gz with an empty/partial pack (#777).
-                await client.delete_object(server_prefix + _POINTER)
-            # The final archive is durable and the pointer is gone (or nothing was
-            # published); reclaim the remaining working-set objects and the generation
-            # marker. Idempotent: a retry that found no pointer arrives here directly
-            # and completes the GC without re-packing.
-            await _delete_prefix(client, server_prefix + "snapshots/")
-            await _delete_prefix(client, server_prefix + "incoming/")
-            await _delete_prefix(client, server_prefix + "versions/")
-            await client.delete_object(server_prefix + _GENERATION)
+                    # Build the self-contained tar.gz to local scratch (gzip streams,
+                    # so the bodies are not all held at once), then upload it as one
+                    # object. The upload makes ``final.tar.gz`` appear atomically
+                    # BEFORE any working-set object is deleted, so a pack/upload
+                    # failure leaves the working set intact and the error propagates
+                    # (fail-closed, #777).
+                    fd, spool_name = await asyncio.to_thread(
+                        tempfile.mkstemp, prefix=".final.", suffix=".tar.gz"
+                    )
+                    await asyncio.to_thread(_close_fd, fd)
+                    spool = Path(spool_name)
+                    try:
+                        await _write_backup_targz(client, snapshot_prefix, objs, spool)
+                        await client.upload_multipart(
+                            server_prefix + "final.tar.gz", _file_parts(spool)
+                        )
+                    finally:
+                        await asyncio.to_thread(spool.unlink, missing_ok=True)
+                    # Invalidate the pointer FIRST, the instant final.tar.gz is
+                    # durable: it is the one marker that says the working set is still
+                    # live and re-packable. A crash after this point leaves no pointer,
+                    # so a retried delete reads ``snapshot_prefix is None`` and takes
+                    # the GC-only branch below — it never re-lists a half-deleted
+                    # prefix and overwrites the good final.tar.gz with an
+                    # empty/partial pack (#777).
+                    await client.delete_object(server_prefix + _POINTER)
+                # The final archive is durable and the pointer is gone (or nothing was
+                # published); reclaim the remaining working-set objects and the
+                # generation marker. Idempotent: a retry that found no pointer arrives
+                # here directly and completes the GC without re-packing.
+                await _delete_prefix(client, server_prefix + "snapshots/")
+                await _delete_prefix(client, server_prefix + "incoming/")
+                await _delete_prefix(client, server_prefix + "versions/")
+                await client.delete_object(server_prefix + _GENERATION)
 
     async def _check_staged_regions(
         self,
@@ -1069,36 +1142,43 @@ class ObjectStorage(Storage):
         if key is None:
             key = BackupKey(uuid.uuid4().hex)
         async with self._client_factory() as client:
-            snapshot_prefix = await self._live_snapshot_prefix(
+            # Lease the live snapshot for the duration of the integrity check + pack
+            # so a concurrent publish cannot GC the prefix mid-operation (#1702).
+            snapshot_prefix = await self._lease_live_snapshot(
                 client, community_id, server_id
             )
-            objs = sorted(
-                await client.list_objects(snapshot_prefix), key=lambda o: o.key
-            )
-            # Content-integrity gate (issue #750): never archive a known-corrupt
-            # world, mirroring the fs adapter (#739). Walk the live snapshot's
-            # ``.mca`` region bodies BEFORE writing the archive; any corrupt region
-            # refuses the backup and no ``.tar.gz`` object is uploaded (fail-closed,
-            # #703). The single region rule set (issue #927): a snapshot may hold a
-            # legitimate unpadded set (gated when it published), so the at-rest backup
-            # gate tolerates the unpadded tail, mirroring the fs adapter.
-            report = await self._check_staged_regions(client, snapshot_prefix, objs)
-            if not report.healthy:
-                raise IntegrityCheckError(report)
-            # Build the self-contained tar.gz to local scratch (gzip streams, so the
-            # bodies are not all held at once), then upload it as one object.
-            fd, spool_name = await asyncio.to_thread(
-                tempfile.mkstemp, prefix=".backup.", suffix=".tar.gz"
-            )
-            await asyncio.to_thread(_close_fd, fd)
-            spool = Path(spool_name)
             try:
-                await _write_backup_targz(client, snapshot_prefix, objs, spool)
-                await client.upload_multipart(
-                    self._backup_key(community_id, server_id, key), _file_parts(spool)
+                objs = sorted(
+                    await client.list_objects(snapshot_prefix), key=lambda o: o.key
                 )
+                # Content-integrity gate (issue #750): never archive a known-corrupt
+                # world, mirroring the fs adapter (#739). Walk the live snapshot's
+                # ``.mca`` region bodies BEFORE writing the archive; any corrupt
+                # region refuses the backup and no ``.tar.gz`` object is uploaded
+                # (fail-closed, #703). The single region rule set (issue #927): a
+                # snapshot may hold a legitimate unpadded set (gated when it
+                # published), so the at-rest backup gate tolerates the unpadded tail,
+                # mirroring the fs adapter.
+                report = await self._check_staged_regions(client, snapshot_prefix, objs)
+                if not report.healthy:
+                    raise IntegrityCheckError(report)
+                # Build the self-contained tar.gz to local scratch (gzip streams, so
+                # the bodies are not all held at once), then upload it as one object.
+                fd, spool_name = await asyncio.to_thread(
+                    tempfile.mkstemp, prefix=".backup.", suffix=".tar.gz"
+                )
+                await asyncio.to_thread(_close_fd, fd)
+                spool = Path(spool_name)
+                try:
+                    await _write_backup_targz(client, snapshot_prefix, objs, spool)
+                    await client.upload_multipart(
+                        self._backup_key(community_id, server_id, key),
+                        _file_parts(spool),
+                    )
+                finally:
+                    await asyncio.to_thread(spool.unlink, missing_ok=True)
             finally:
-                await asyncio.to_thread(spool.unlink, missing_ok=True)
+                self._release_lease(snapshot_prefix)
         return key
 
     async def list_backups(
@@ -1136,16 +1216,17 @@ class ObjectStorage(Storage):
                 # it through the same pointer-flip path as a snapshot (Section 4.1).
                 spool = await _spool_object(client, backup_key, ".restore.", ".tar.gz")
                 try:
-                    # Count cumulative DECOMPRESSED bytes across members: a gzip
-                    # member can expand ~1000x past the compressed object, so the cap
-                    # aborts a bomb before it fills the store (#287).
+                    # Single sequential pass (#1945): open the gzip spool
+                    # ONCE in stream mode and upload each member as it is
+                    # encountered. The old per-member approach re-opened the
+                    # archive for every member, re-decompressing the entire
+                    # gzip stream each time — O(n * total_decompressed_bytes).
                     budget = _RestoreBudget(self._max_restore_bytes)
-                    for name in await asyncio.to_thread(
-                        _safe_archive_members, spool, "r:gz"
+                    async for name, parts in _archive_file_member_streams(
+                        spool, "r|gz"
                     ):
                         await client.upload_multipart(
-                            incoming + name,
-                            budget.count(_archive_member_parts(spool, name, "r:gz")),
+                            incoming + name, budget.count(parts)
                         )
                     staged = await client.list_objects(incoming)
                     # Restore-direction integrity gate (issue #750), mirroring the fs
@@ -1275,15 +1356,21 @@ class ObjectStorage(Storage):
     async def read_file(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
     ) -> bytes:
+        # Lease the live snapshot so a concurrent publish's post-flip GC cannot
+        # delete the resolved prefix between resolve and get_object (issue #1953),
+        # mirroring open_file_stream's lease discipline.
         sub = self._safe_subkey(rel_path)
         async with self._client_factory() as client:
-            snapshot_prefix = await self._live_snapshot_prefix(
+            snapshot_prefix = await self._lease_live_snapshot(
                 client, community_id, server_id
             )
-            key = snapshot_prefix + sub
-            if await client.head_object(key) is None:
-                raise NotFoundError(f"file not found: {rel_path.value}")
-            return await _read_all(client, key)
+            try:
+                key = snapshot_prefix + sub
+                if await client.head_object(key) is None:
+                    raise NotFoundError(f"file not found: {rel_path.value}")
+                return await _read_all(client, key)
+            finally:
+                self._release_lease(snapshot_prefix)
 
     def open_file_stream(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
@@ -1325,18 +1412,31 @@ class ObjectStorage(Storage):
         dir_suffix = sub + "/" if sub else ""
         async with self._client_factory() as client:
             server_prefix = self._server_prefix(community_id, server_id)
-            snapshot_prefix = await self._read_pointer(client, server_prefix)
             # A never-snapshotted server has an empty working set, not a missing one
             # (issue #205): list it as empty rather than raising, mirroring the data
             # plane's JAR-only hydrate posture for the unpublished state.
-            if snapshot_prefix is None:
+            if await self._read_pointer(client, server_prefix) is None:
                 return []
-            objs = await client.list_objects(snapshot_prefix + dir_suffix)
+            # Lease the live snapshot so a concurrent publish's post-flip GC cannot
+            # delete the resolved prefix between resolve and list (issue #1953),
+            # mirroring open_file_stream's lease discipline.
+            snapshot_prefix = await self._lease_live_snapshot(
+                client, community_id, server_id
+            )
+            try:
+                objs = await client.list_objects(snapshot_prefix + dir_suffix)
+            finally:
+                self._release_lease(snapshot_prefix)
         if not objs and sub:
             # A prefix with no members is an empty (non-existent) directory; the
             # root (sub == "") always lists, even when empty.
             raise NotFoundError(f"directory not found: {rel_path.value}")
         return _entries_at_level(objs, snapshot_prefix + dir_suffix)
+
+    def open_working_set_view(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> AbstractAsyncContextManager[WorkingSetView]:
+        return _ObjectWorkingSetView(self, community_id, server_id)
 
     async def write_file(
         self,
@@ -1604,6 +1704,11 @@ class ObjectStorage(Storage):
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
     ) -> None:
         sub = self._safe_subkey(rel_path)
+        if not sub:
+            # Root path — the root always exists; writing a marker here would
+            # produce a ``//.dir`` key whose hydrate tar member ``/.dir`` the
+            # worker's safeJoin rejects as absolute (issue #1944).
+            return
         # Write a zero-byte marker object so the empty directory is visible in
         # listings (issue #1125). The marker is filtered out by ``_entries_at_level``
         # so it never appears as a file entry.
@@ -1631,8 +1736,22 @@ class ObjectStorage(Storage):
         await client.copy_object(source_key, versions + _new_version_id())
         await self._prune_versions(client, versions)
 
+    @staticmethod
+    def _ring_members(objs: list[S3Object], versions_prefix: str) -> list[S3Object]:
+        """Filter to objects whose tail matches the version-id format.
+
+        Child-ring objects (``versions/config/paper.yml/<id>``) share
+        the same prefix scan as the parent ring (``versions/config/``)
+        and must be excluded (issue #1952).
+        """
+
+        return sorted(
+            (o for o in objs if is_version_ring_member(o.key[len(versions_prefix) :])),
+            key=lambda o: o.key,
+        )
+
     async def _prune_versions(self, client: S3Client, versions: str) -> None:
-        objs = sorted(await client.list_objects(versions), key=lambda o: o.key)
+        objs = self._ring_members(await client.list_objects(versions), versions)
         excess = len(objs) - self._version_retention
         for obj in objs[:excess] if excess > 0 else []:
             await client.delete_object(obj.key)
@@ -1645,20 +1764,28 @@ class ObjectStorage(Storage):
         # the frozen authoritative copy before each edit, and without this dedup
         # repeated edits to one file would push identical copies into the bounded
         # ring and evict distinct at-rest versions.
+        #
+        # The pointer read + head + dedup + copy must run under the per-server lock
+        # (issue #1953): without it, a concurrent snapshot commit can flip the
+        # pointer and GC the old prefix between resolve and copy, yielding an
+        # untranslated ClientError → 500 on the edit request.
         sub = self._safe_subkey(rel_path)
         async with self._client_factory() as client:
-            snapshot_prefix = await self._read_pointer(
-                client, self._server_prefix(community_id, server_id)
-            )
-            if snapshot_prefix is None:
-                return  # never-published server: nothing authoritative to retain
-            key = snapshot_prefix + sub
-            if await client.head_object(key) is None:
-                return  # no authoritative copy yet: nothing to retain
-            versions = self._versions_prefix(community_id, server_id, rel_path)
-            if await self._matches_newest_version(client, versions, key):
-                return  # unchanged since the newest retained version: skip churn
-            await self._capture_version(client, community_id, server_id, rel_path, key)
+            async with self._server_lock(community_id, server_id):
+                snapshot_prefix = await self._read_pointer(
+                    client, self._server_prefix(community_id, server_id)
+                )
+                if snapshot_prefix is None:
+                    return  # never-published server: nothing authoritative to retain
+                key = snapshot_prefix + sub
+                if await client.head_object(key) is None:
+                    return  # no authoritative copy yet: nothing to retain
+                versions = self._versions_prefix(community_id, server_id, rel_path)
+                if await self._matches_newest_version(client, versions, key):
+                    return  # unchanged since the newest retained version: skip churn
+                await self._capture_version(
+                    client, community_id, server_id, rel_path, key
+                )
 
     async def _matches_newest_version(
         self, client: S3Client, versions: str, source_key: str
@@ -1670,7 +1797,7 @@ class ObjectStorage(Storage):
         rather than both held in memory.
         """
 
-        objs = sorted(await client.list_objects(versions), key=lambda o: o.key)
+        objs = self._ring_members(await client.list_objects(versions), versions)
         if not objs:
             return False
         newest = objs[-1].key  # ids are time-ordered (_new_version_id)
@@ -1686,7 +1813,7 @@ class ObjectStorage(Storage):
     ) -> list[VersionId]:
         versions = self._versions_prefix(community_id, server_id, rel_path)
         async with self._client_factory() as client:
-            objs = sorted(await client.list_objects(versions), key=lambda o: o.key)
+            objs = self._ring_members(await client.list_objects(versions), versions)
         # Newest-first (Section 3.5); version ids are time-ordered (_new_version_id).
         return [VersionId(obj.key[len(versions) :]) for obj in reversed(objs)]
 
@@ -1839,7 +1966,7 @@ async def _spool_stream(
                     hasher.update(chunk)
                 await asyncio.to_thread(out.write, chunk)
     except BaseException:
-        await asyncio.to_thread(spool.unlink, missing_ok=True)
+        spool.unlink(missing_ok=True)
         raise
     return spool
 
@@ -1847,16 +1974,8 @@ async def _spool_stream(
 async def _spool_object(client: S3Client, key: str, prefix: str, suffix: str) -> Path:
     """Spool one object's body to a local temp file (bounded disk)."""
 
-    fd, name = await asyncio.to_thread(tempfile.mkstemp, prefix=prefix, suffix=suffix)
-    spool = Path(name)
-    try:
-        with open(fd, "wb") as out:
-            async for chunk in await client.get_object(key):
-                await asyncio.to_thread(out.write, chunk)
-    except BaseException:
-        await asyncio.to_thread(spool.unlink, missing_ok=True)
-        raise
-    return spool
+    stream = await client.get_object(key)
+    return await _spool_stream(stream, prefix, suffix)
 
 
 # --- tar streaming (bounded memory, one member-chunk at a time) -------------
@@ -1958,6 +2077,49 @@ def _open_member(
     return tar, member_file
 
 
+async def _archive_file_member_streams(
+    spool: Path, mode: Literal["r|*", "r|gz"]
+) -> AsyncIterator[tuple[str, AsyncIterator[bytes]]]:
+    """Single-pass streaming extraction of an archive's file members (#1945).
+
+    Opens the spooled archive ONCE in tar stream mode (``r|gz`` / ``r|*``),
+    iterates members with ``tar.next()``, validates each name inline (same
+    traversal rule as ``_safe_archive_members``), and yields ``(name,
+    chunk_stream)`` pairs. The caller MUST fully consume each chunk stream
+    before advancing to the next member (stream mode reads sequentially).
+    """
+
+    tar = await asyncio.to_thread(tarfile.open, str(spool), mode)
+    try:
+        while True:
+            member = await asyncio.to_thread(tar.next)
+            if member is None:
+                return
+            if not member.isfile():
+                continue
+            pure = PurePosixPath(member.name)
+            if pure.is_absolute() or ".." in pure.parts:
+                raise PathTraversalError(
+                    f"tar member escapes the server prefix: {member.name!r}"
+                )
+            member_file = tar.extractfile(member)
+            if member_file is None:
+                continue
+            yield member.name, _fileobj_parts(member_file)
+    finally:
+        await asyncio.to_thread(tar.close)
+
+
+async def _fileobj_parts(member_file: Any) -> AsyncIterator[bytes]:
+    """Stream a tar member file object in part-sized chunks (bounded memory)."""
+
+    while True:
+        chunk = await asyncio.to_thread(member_file.read, _PART)
+        if not chunk:
+            return
+        yield chunk
+
+
 async def _file_parts(spool: Path) -> AsyncIterator[bytes]:
     """Stream a local spool file in part-sized chunks (bounded memory)."""
 
@@ -1993,3 +2155,78 @@ async def _write_backup_targz(
             await asyncio.to_thread(tar.addfile, info, buf)
     finally:
         await asyncio.to_thread(tar.close)
+
+
+class _ObjectWorkingSetView(WorkingSetView):
+    """Pinned read-only view of a working set for the object adapter (issue #1966).
+
+    Acquires an active-reader lease on ``__aenter__``, capturing the snapshot prefix.
+    All reads resolve against that pinned prefix; a concurrent publish cannot change
+    what this view sees. ``__aexit__`` releases the lease.
+    """
+
+    def __init__(
+        self,
+        storage: ObjectStorage,
+        community_id: CommunityId,
+        server_id: ServerId,
+    ) -> None:
+        self._storage = storage
+        self._community_id = community_id
+        self._server_id = server_id
+        self._snapshot_prefix: str | None = None
+        self._leased = False
+
+    async def __aenter__(self) -> WorkingSetView:
+        async with self._storage._client_factory() as client:
+            server_prefix = self._storage._server_prefix(
+                self._community_id, self._server_id
+            )
+            pointer = await self._storage._read_pointer(client, server_prefix)
+            if pointer is None:
+                # Unpublished server — no snapshot to pin.
+                self._snapshot_prefix = None
+                return self
+            self._snapshot_prefix = await self._storage._lease_live_snapshot(
+                client, self._community_id, self._server_id
+            )
+            self._leased = True
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: object,
+    ) -> None:
+        if self._leased and self._snapshot_prefix is not None:
+            self._storage._release_lease(self._snapshot_prefix)
+            self._leased = False
+
+    async def list_dir(self, rel_path: RelPath) -> list[DirEntry]:
+        if self._snapshot_prefix is None:
+            if not rel_path.parts:
+                return []
+            raise NotFoundError(f"directory not found: {rel_path.value}")
+        sub = self._storage._safe_subkey(rel_path)
+        dir_suffix = sub + "/" if sub else ""
+        async with self._storage._client_factory() as client:
+            objs = await client.list_objects(self._snapshot_prefix + dir_suffix)
+        if not objs and sub:
+            raise NotFoundError(f"directory not found: {rel_path.value}")
+        return _entries_at_level(objs, self._snapshot_prefix + dir_suffix)
+
+    def open_file_stream(self, rel_path: RelPath) -> ByteStream:
+        if self._snapshot_prefix is None:
+            raise NotFoundError(f"file not found: {rel_path.value}")
+        sub = self._storage._safe_subkey(rel_path)
+        return self._stream_file(sub, rel_path)
+
+    async def _stream_file(self, sub: str, rel_path: RelPath) -> AsyncIterator[bytes]:
+        assert self._snapshot_prefix is not None
+        async with self._storage._client_factory() as client:
+            key = self._snapshot_prefix + sub
+            if await client.head_object(key) is None:
+                raise NotFoundError(f"file not found: {rel_path.value}")
+            async for chunk in await client.get_object(key):
+                yield chunk

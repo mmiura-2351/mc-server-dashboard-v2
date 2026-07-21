@@ -482,6 +482,8 @@ async def test_find_catalog_provenance_by_sha512_matches_catalog_install(
         _plugin(server_id, rel_path="mods/catalog.jar", filename="catalog.jar"),
         source=PluginSource.MODRINTH,
         source_project_id="P7dR8mSH",
+        source_version_id="v1a2b3c4",
+        version_number="2.0.0",
         checksum_sha512="cafebabe",
     )
 
@@ -491,7 +493,7 @@ async def test_find_catalog_provenance_by_sha512_matches_catalog_install(
 
     async with ServersUnitOfWork(factory) as uow:
         found = await uow.plugins.find_catalog_provenance_by_sha512("cafebabe")
-    assert found == (PluginSource.MODRINTH, "P7dR8mSH")
+    assert found == (PluginSource.MODRINTH, "P7dR8mSH", "v1a2b3c4", "2.0.0")
 
 
 async def test_find_catalog_provenance_by_sha512_ignores_local_and_misses(

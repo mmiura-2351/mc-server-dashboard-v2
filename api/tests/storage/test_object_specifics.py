@@ -11,9 +11,13 @@ orphan-prefix sweep (lease-aware, keyed off the live pointer).
 from __future__ import annotations
 
 import datetime as dt
+import io
 import json
+import tarfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -28,13 +32,16 @@ from mc_server_dashboard_api.storage.adapters.object_store import (
     _POINTER,
     ObjectStorage,
     S3Client,
+    S3Object,
     _spool_object,
     _spool_stream,
 )
 from mc_server_dashboard_api.storage.domain.errors import (
+    ArchiveTooLargeError,
     IntegrityCheckError,
     MissingRegionsError,
     PathTraversalError,
+    StaleGenerationError,
 )
 from mc_server_dashboard_api.storage.domain.value_objects import (
     CommunityId,
@@ -43,6 +50,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 )
 from tests.storage.fake_s3 import FakeS3Store, close_tracking_factory, fake_s3_factory
 from tests.storage.helpers import (
+    bomb_targz,
     drain,
     healthy_region_bytes,
     mode_invariant_corrupt_region_bytes,
@@ -464,6 +472,21 @@ async def test_make_dir_writes_marker_and_dir_is_visible() -> None:
     assert entries == []
 
 
+async def test_make_dir_root_path_is_noop_guard() -> None:
+    """make_dir with an empty-parts RelPath (root) is a no-op (#1944).
+
+    Defence-in-depth: the use-case layer already rejects the root path, but if
+    something bypasses it the adapter must not write the poisoned ``//.dir`` key.
+    """
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    await _publish(storage, community, server, {"server.properties": b"x"})
+
+    keys_before = set(store.objects)
+    await storage.make_dir(community, server, RelPath("."))
+    assert set(store.objects) == keys_before  # no new objects written
+
+
 async def test_subkey_traversal_is_confined_to_server_prefix() -> None:
     # RelPath blocks .. at construction; assert the adapter's read path rejects it
     # too (defence in depth at the key-derivation step, Section 6).
@@ -815,6 +838,34 @@ async def test_hydrate_reader_rereads_when_gc_lands_in_lease_gap() -> None:
     assert read_tar(blob) == {"f": b"NEW"}
 
 
+async def test_hydrate_skips_poisoned_root_dir_marker() -> None:
+    """A pre-existing ``//.dir`` key (from a prior root make_dir) is excluded from
+    the hydrate tar so already-poisoned snapshots self-heal (issue #1944).
+
+    The poisoned key produces a ``/.dir`` tar member (absolute path) that the
+    worker's ``safeJoin`` rejects, blocking the server start permanently. The
+    hydrate stream must silently skip it.
+    """
+
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    await _publish(storage, community, server, {"server.properties": b"x"})
+
+    # Plant the poisoned key directly into the store (simulates the old bug).
+    prefix = _server_prefix(community, server)
+    pointer_raw = store.objects[prefix + _POINTER]
+    snapshot_prefix = json.loads(pointer_raw)["snapshot"]
+    poisoned_key = snapshot_prefix + "/" + _DIR_MARKER  # produces ``//.dir``
+    store.objects[poisoned_key] = b""
+
+    # The hydrate must NOT include the poisoned member.
+    blob = await drain(storage.open_hydrate_source(community, server))
+    members = read_tar(blob)
+    assert "/.dir" not in members
+    # The legitimate file must still be present.
+    assert "server.properties" in members
+
+
 async def test_file_stream_rereads_when_gc_lands_in_lease_gap() -> None:
     """Same as hydrate but for open_file_stream (issue #1607): a concurrent
     restore in the resolve-lease gap must not yield a stale/deleted file."""
@@ -920,3 +971,293 @@ async def test_spool_object_unlinks_on_stream_error() -> None:
     after = set(glob.glob(f"{tmp_dir}/.leak-obj.*"))
     leaked = after - before
     assert not leaked, f"spool file leaked: {leaked}"
+
+
+# --- unleased read paths concurrency (issue #1953) ----------------------------
+
+
+async def test_read_file_survives_concurrent_pointer_flip() -> None:
+    """read_file must not yield stale/deleted content when a concurrent publish
+    flips the pointer between resolve and get_object (issue #1953)."""
+
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    await _publish(storage, community, server, {"f": b"OLD"})
+
+    call_count = {"n": 0}
+    original = ObjectStorage._live_snapshot_prefix
+
+    async def _racing(
+        self: ObjectStorage, client: S3Client, cid: CommunityId, sid: ServerId
+    ) -> str:
+        result = await original(self, client, cid, sid)
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            # Concurrent publish: flips pointer and GCs old prefix.
+            old_prefix = result
+            await _publish(storage, community, server, {"f": b"NEW"})
+            # Remove all keys from the old prefix to simulate GC.
+            for k in list(store.objects):
+                if k.startswith(old_prefix):
+                    del store.objects[k]
+                    store.mtimes.pop(k, None)
+        return result
+
+    storage._live_snapshot_prefix = _racing.__get__(storage, ObjectStorage)  # type: ignore[method-assign]
+
+    content = await storage.read_file(community, server, RelPath("f"))
+    assert content == b"NEW"
+
+
+async def test_list_dir_survives_concurrent_pointer_flip() -> None:
+    """list_dir must not raise NotFoundError when a concurrent publish flips
+    the pointer between resolve and list_objects (issue #1953)."""
+
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    await _publish(storage, community, server, {"sub/a": b"A", "sub/b": b"B"})
+
+    call_count = {"n": 0}
+    original_read_pointer = ObjectStorage._read_pointer
+
+    async def _racing_read_pointer(
+        self: ObjectStorage, client: S3Client, server_prefix: str
+    ) -> str | None:
+        result = await original_read_pointer(self, client, server_prefix)
+        expected_prefix = _server_prefix(community, server)
+        if server_prefix == expected_prefix and result is not None:
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                old_prefix = result
+                await _publish(
+                    storage, community, server, {"sub/a": b"A2", "sub/b": b"B2"}
+                )
+                for k in list(store.objects):
+                    if k.startswith(old_prefix):
+                        del store.objects[k]
+                        store.mtimes.pop(k, None)
+        return result
+
+    storage._read_pointer = _racing_read_pointer.__get__(storage, ObjectStorage)  # type: ignore[method-assign]
+
+    entries = await storage.list_dir(community, server, RelPath("sub"))
+    names = sorted(e.name for e in entries)
+    assert names == ["a", "b"]
+
+
+async def test_retain_file_version_survives_concurrent_pointer_flip() -> None:
+    """The per-server lock in retain_file_version serializes against a
+    concurrent publish whose post-flip GC would otherwise delete the resolved
+    prefix between head_object and copy_object (issue #1953).
+
+    Coordination: retain signals it has entered the critical section (past
+    head_object), then waits for the concurrent publish to attempt completion.
+    With the lock the publish is blocked and the wait times out — the prefix
+    is still intact. Without the lock (pre-fix), the publish completes and GCs
+    the old prefix, so copy_object would raise NotFoundError."""
+
+    import asyncio
+
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    await _publish(storage, community, server, {"f": b"CONTENT"})
+
+    retain_entered = asyncio.Event()
+    publish_done = asyncio.Event()
+
+    original_matches = ObjectStorage._matches_newest_version
+
+    async def _wait_for_publish(
+        self: ObjectStorage, client: S3Client, versions: str, source_key: str
+    ) -> bool:
+        # Signal that retain is past head_object() and about to hash/copy.
+        retain_entered.set()
+        # Wait for the concurrent publish to complete. With the lock: publish
+        # is blocked by the same lock, so this times out and the prefix is
+        # intact. Without the lock (pre-fix): publish completes and GCs the
+        # old prefix, so the copy in _capture_version would crash.
+        try:
+            await asyncio.wait_for(publish_done.wait(), timeout=1.0)
+        except asyncio.TimeoutError:
+            pass
+        return await original_matches(self, client, versions, source_key)
+
+    storage._matches_newest_version = _wait_for_publish.__get__(  # type: ignore[method-assign]
+        storage, ObjectStorage
+    )
+
+    async def _concurrent_publish() -> None:
+        await retain_entered.wait()
+        await _publish(storage, community, server, {"f": b"CONTENT2"})
+        publish_done.set()
+
+    # Both run concurrently. The lock serializes them: retain finishes first
+    # (publish is blocked on the same lock), then publish proceeds.
+    await asyncio.gather(
+        storage.retain_file_version(community, server, RelPath("f")),
+        _concurrent_publish(),
+    )
+
+
+async def test_backup_pack_survives_concurrent_publish_gc() -> None:
+    """A concurrent publish during the backup pack must not destroy the source.
+
+    Without a reader lease, the concurrent publish flips the pointer and GCs the
+    old snapshot prefix (the backup source), yielding either NotFoundError or a
+    silently incomplete archive recorded HEALTHY (issue #1702).
+
+    With the lease, the publish's ``_gc_after_flip`` sees the prefix is leased
+    and skips GC, so the backup reads the complete OLD content.
+    """
+
+    from unittest.mock import patch
+
+    from mc_server_dashboard_api.storage.adapters import object_store as _os_mod
+
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    await _publish(storage, community, server, {"f": b"OLD"})
+
+    # Record the OLD prefix for later assertions.
+    server_prefix = _server_prefix(community, server)
+    old_prefix = json.loads(store.objects[server_prefix + _POINTER])["snapshot"]
+
+    # Monkeypatch the module-level _write_backup_targz to inject a concurrent
+    # publish mid-pack (after the lease is acquired). The publish's GC respects
+    # the lease and must NOT delete the old prefix.
+    original_write = _os_mod._write_backup_targz
+
+    async def _racing_write(
+        client: S3Client, prefix: str, objs: list[S3Object], spool: "Path"
+    ) -> None:
+        # A concurrent publish flips the pointer. Its GC checks _is_leased.
+        await _publish(storage, community, server, {"f": b"NEW"})
+        await original_write(client, prefix, objs, spool)
+
+    with patch.object(_os_mod, "_write_backup_targz", _racing_write):
+        key = await storage.create_backup_from_current(community, server)
+
+    # The OLD prefix must still exist (lease prevented GC).
+    old_keys = [k for k in store.objects if k.startswith(old_prefix)]
+    assert old_keys, "lease must prevent GC of old prefix"
+
+    # The backup must contain the complete OLD content.
+    backup_key = (
+        f"communities/{community.value}/servers/{server.value}/"
+        f"backups/{key.value}.tar.gz"
+    )
+    assert backup_key in store.objects
+    blob = store.objects[backup_key]
+    assert read_tar(blob) == {"f": b"OLD"}
+
+
+# --- single-pass restore regression (issue #1945) --------------------------------
+
+
+async def test_restore_opens_gzip_spool_exactly_once() -> None:
+    """Issue #1945: restore_backup must decompress the gzip spool in a single
+    sequential pass, not re-open the archive per member (O(n^2)).
+
+    Patch ``tarfile.open`` to count invocations on the spool path during
+    restore. A correct single-pass implementation opens the spool exactly once;
+    the old per-member implementation opened it 1 + N times (once for the
+    member-list scan, once per member).
+    """
+
+    from unittest.mock import patch
+
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    files = {"a": b"A", "b": b"B", "c": b"C"}
+    await _publish(storage, community, server, files)
+    key = await storage.create_backup_from_current(community, server)
+
+    open_count = {"n": 0}
+    original_open = tarfile.open
+
+    def _counting_open(*args: Any, **kwargs: Any) -> tarfile.TarFile:
+        open_count["n"] += 1
+        return original_open(*args, **kwargs)
+
+    with patch("tarfile.open", side_effect=_counting_open):
+        await storage.restore_backup(community, server, key)
+
+    assert open_count["n"] == 1, (
+        f"expected exactly 1 tarfile.open call (single pass), got {open_count['n']}"
+    )
+
+    # The restored content must still be correct.
+    blob = await drain(storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == files
+
+
+async def test_restore_single_pass_rejects_traversal_escape() -> None:
+    """The single-pass restore path must still reject hostile ``../`` members
+    with PathTraversalError, leaving no leftover staging objects (#1945)."""
+
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    await _publish(storage, community, server, {"f": b"seed"})
+
+    # Build a hostile tar.gz backup with an escaping member.
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        content = b"pwned"
+        info = tarfile.TarInfo(name="../escape.txt")
+        info.size = len(content)
+        tar.addfile(info, io.BytesIO(content))
+    hostile_targz = buf.getvalue()
+
+    backup_key = await storage.put_backup(community, server, stream_of(hostile_targz))
+
+    with pytest.raises(PathTraversalError):
+        await storage.restore_backup(community, server, backup_key)
+
+    # No leftover staging objects.
+    incoming = _server_prefix(community, server) + "incoming/"
+    assert not any(k.startswith(incoming) for k in store.objects)
+
+
+async def test_restore_single_pass_counts_cumulative_bytes() -> None:
+    """The single-pass restore path must still enforce the decompressed-bytes
+    budget across members, raising ArchiveTooLargeError (#1945, #287)."""
+
+    store = FakeS3Store()
+    storage = ObjectStorage(
+        close_tracking_factory(fake_s3_factory(store)),
+        max_restore_bytes=1024,
+    )
+    community, server = new_scope()
+    await _publish(storage, community, server, {"f": b"seed"})
+
+    bomb = bomb_targz()
+    backup_key = await storage.put_backup(community, server, stream_of(bomb))
+
+    with pytest.raises(ArchiveTooLargeError):
+        await storage.restore_backup(community, server, backup_key)
+
+
+async def test_commit_refuses_when_generation_marker_removed() -> None:
+    """Issue #1704: after prune (or any path that removes the generation marker),
+    _read_generation returns 0. A late commit whose expected_base was the
+    pre-prune generation (>0) must fail with StaleGenerationError, not
+    silently resurrect the snapshot tree. The fix changes the stale check
+    from ``current > expected_base`` to ``current != expected_base``."""
+
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    await _publish(storage, community, server, {"f": b"v1"})
+    base = await storage.current_generation(community, server)
+    assert base >= 1
+
+    # Stage a new snapshot at the pre-removal base...
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(handle, tar_stream({"f": b"late-upload"}))
+
+    # ...then remove the generation marker (as prune does).
+    generation_key = _server_prefix(community, server) + _GENERATION
+    assert generation_key in store.objects
+    del store.objects[generation_key]
+
+    with pytest.raises(StaleGenerationError):
+        await storage.commit_snapshot(handle, expected_base=base)

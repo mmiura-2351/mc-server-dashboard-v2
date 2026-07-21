@@ -361,3 +361,25 @@ async def test_effective_initiated_survives_parts_no_such_bucket_race() -> None:
 
     assert len(uploads) == 1
     assert uploads[0].initiated >= before
+
+
+# --- copy_object NotFound translation (issue #1953) -----------------------
+
+
+class _CopyRaisingClient:
+    """An aioboto3-client double whose ``copy_object`` raises a ClientError."""
+
+    def __init__(self, code: str) -> None:
+        self._code = code
+
+    async def copy_object(self, **_kwargs: object) -> None:
+        raise ClientError({"Error": {"Code": self._code}}, "CopyObject")
+
+
+@pytest.mark.parametrize("code", ["404", "NoSuchKey", "NotFound"])
+async def test_copy_object_translates_not_found(code: str) -> None:
+    """copy_object must translate the same error codes as get_object (#1953)."""
+
+    client = _Aioboto3S3Client(_CopyRaisingClient(code), "bucket")
+    with pytest.raises(NotFoundError):
+        await client.copy_object("src/key", "dst/key")
