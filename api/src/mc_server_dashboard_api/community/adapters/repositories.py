@@ -272,7 +272,8 @@ class SqlAlchemyMembershipRepository(MembershipRepository):
                 MembershipRoleModel.role_id == role_id.value,
                 MembershipModel.community_id == community_id.value,
             )
-            .with_for_update()
+            .order_by(MembershipRoleModel.membership_id)
+            .with_for_update(of=MembershipRoleModel)
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         return [MembershipId(row) for row in rows]
