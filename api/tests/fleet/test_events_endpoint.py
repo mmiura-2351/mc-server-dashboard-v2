@@ -501,6 +501,57 @@ def test_mid_stream_revocation_closes_with_policy_code(
     assert exc.value.code == 4403
 
 
+def test_mid_stream_revocation_closes_despite_busy_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A revoked member on a busy stream is disconnected within the re-authz interval.
+
+    Pre-fix: the fresh timeout resets on every delivered frame, so reauthorize()
+    never runs and the revoked member keeps receiving indefinitely.
+    Post-fix: the wall-clock deadline elapses regardless of frame traffic and the
+    gate re-runs, closing the socket with 4403.
+    """
+
+    from mc_server_dashboard_api.fleet.api import events as events_module
+
+    monkeypatch.setattr(events_module, "_REAUTHZ_INTERVAL_SECONDS", 0.5)
+
+    bus = InProcessRealTimeEvents()
+    community, server = uuid.uuid4(), uuid.uuid4()
+    checker = _FlippableChecker()
+    app = _shared_app
+    app.dependency_overrides.clear()
+    user = make_user()
+    app.dependency_overrides[get_current_user_ws] = lambda: user
+    app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(
+        member=True
+    )
+    app.dependency_overrides[get_permission_checker] = lambda: checker
+    app.dependency_overrides[get_read_server] = lambda: _FakeReadServer(found=True)
+    app.dependency_overrides[get_real_time_events] = lambda: bus
+    client = next(_client(app))
+
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(_url(community, server)) as ws:
+            # Revoke immediately — the stream will stay busy the whole time.
+            checker.revoke()
+            # Pump frames faster than the re-authz interval so the old code's
+            # timeout would reset on every iteration. The client reads each frame
+            # so the server loop progresses without send-buffer back-pressure.
+            for i in range(30):
+                bus.publish(
+                    server_id=str(server),
+                    event=RealTimeEvent(
+                        stream=EventStream.STATUS, payload={"state": str(i)}
+                    ),
+                )
+                time.sleep(0.05)
+                ws.receive_json()
+            # If we get here the socket was never closed — fail explicitly.
+            pytest.fail("socket was not closed despite revocation")
+    assert exc.value.code == 4403
+
+
 def test_disconnect_cleans_up_subscription() -> None:
     bus = InProcessRealTimeEvents()
     community, server = uuid.uuid4(), uuid.uuid4()

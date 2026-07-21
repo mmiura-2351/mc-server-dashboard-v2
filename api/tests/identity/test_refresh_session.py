@@ -356,3 +356,65 @@ async def test_unknown_superseded_token_is_ignored() -> None:
 
     assert pair.refresh_token == "refresh-secret-1"
     assert "hash::never-issued" not in uow.refresh_tokens.by_hash
+
+
+async def test_rotated_predecessor_after_family_revoke_is_rejected() -> None:
+    # Issue #1960 regression: a token rotated *before* a family revoke (password
+    # change) must not be graced after the family revoke re-stamps it to 'family'.
+    # Attack scenario: attacker holds stolen token A; legitimate client rotates
+    # A->B at T0; user changes password at T0+10s (revokes B, re-stamps A to
+    # 'family'); attacker presents A at T0+20s -- must be rejected.
+    uow = FakeUnitOfWork()
+    t0 = _NOW - dt.timedelta(seconds=20)
+
+    # Token A: rotated at T0 (predecessor of the legitimate rotation A->B).
+    _seed_token(uow, secret="stolen-A", revoked_at=t0, revoked_reason=REVOKED_ROTATED)
+    # Token B: the successor, still active until the family revoke.
+    _seed_token(uow, secret="successor-B")
+
+    # Simulate the password change at T0+10s: revoke_all_for_user re-stamps
+    # rotated tokens to 'family' (the fix) and revokes active ones.
+    family_revoke_time = t0 + dt.timedelta(seconds=10)
+    await uow.refresh_tokens.revoke_all_for_user(_USER, revoked_at=family_revoke_time)
+
+    # Attacker presents A at T0+20s (== _NOW), within original grace of T0.
+    clock = FakeClock(_NOW)
+    with pytest.raises(RefreshTokenReuseError):
+        await _refresh(uow, clock)(refresh_token="stolen-A")
+
+    # No fresh pair issued.
+    assert "hash::refresh-secret-1" not in uow.refresh_tokens.by_hash
+
+
+async def test_revoke_all_restamps_rotated_to_family_preserving_revoked_at() -> None:
+    # After revoke_all_for_user, a 'rotated' row is restamped to 'family' keeping
+    # its original revoked_at; a 'superseded' row is untouched.
+    uow = FakeUnitOfWork()
+    t0 = _NOW - dt.timedelta(seconds=30)
+
+    _seed_token(
+        uow, secret="rotated-tok", revoked_at=t0, revoked_reason=REVOKED_ROTATED
+    )
+    _seed_token(
+        uow, secret="superseded-tok", revoked_at=t0, revoked_reason=REVOKED_SUPERSEDED
+    )
+    _seed_token(uow, secret="active-tok")
+
+    sweep_at = _NOW
+    await uow.refresh_tokens.revoke_all_for_user(_USER, revoked_at=sweep_at)
+
+    rotated = uow.refresh_tokens.by_hash["hash::rotated-tok"]
+    superseded = uow.refresh_tokens.by_hash["hash::superseded-tok"]
+    active = uow.refresh_tokens.by_hash["hash::active-tok"]
+
+    # Rotated: reason changed to 'family', revoked_at preserved (COALESCE).
+    assert rotated.revoked_reason == REVOKED_FAMILY
+    assert rotated.revoked_at == t0
+
+    # Superseded: untouched (not in the new WHERE clause).
+    assert superseded.revoked_reason == REVOKED_SUPERSEDED
+    assert superseded.revoked_at == t0
+
+    # Active: newly revoked as 'family'.
+    assert active.revoked_reason == REVOKED_FAMILY
+    assert active.revoked_at == sweep_at

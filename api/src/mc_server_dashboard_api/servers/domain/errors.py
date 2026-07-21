@@ -7,6 +7,9 @@ errors at the edge.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+
 
 class ServerError(Exception):
     """Base class for servers-domain invariant/policy violations."""
@@ -496,6 +499,24 @@ class CatalogUnavailableError(ServerError):
 
     The edge maps this to 502 ``catalog_unavailable``.
     """
+
+
+@contextmanager
+def wrap_shape_errors(source_name: str) -> Iterator[None]:
+    """Wrap parse-level exceptions from malformed upstream payloads.
+
+    Catches ``AttributeError``, ``KeyError``, ``TypeError``, and ``IndexError``
+    raised while destructuring a catalog response and re-raises them as
+    :class:`CatalogUnavailableError`.  A ``CatalogUnavailableError`` already in
+    flight is passed through unchanged.
+    """
+
+    try:
+        yield
+    except CatalogUnavailableError:
+        raise
+    except (AttributeError, KeyError, TypeError, IndexError) as exc:
+        raise CatalogUnavailableError(f"unexpected response shape: {exc}") from exc
 
 
 class CatalogProjectNotFoundError(ServerError):

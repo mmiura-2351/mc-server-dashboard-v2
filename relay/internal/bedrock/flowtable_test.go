@@ -173,6 +173,45 @@ func TestFlowTableLookupPromotesAtThreshold(t *testing.T) {
 	}
 }
 
+func TestFlowTableIngressSaturatesAtThreshold(t *testing.T) {
+	ft := NewFlowTable(time.Minute, nil)
+	a := udpAddr(t, "203.0.113.1:12345")
+	ft.Create(a, false)
+
+	// Drive the flow to exactly the promotion threshold.
+	for i := 1; i <= flowPromoteThreshold; i++ {
+		_, ok, promote := ft.Lookup(a, true)
+		if !ok {
+			t.Fatalf("Lookup %d: want ok=true", i)
+		}
+		if i < flowPromoteThreshold && promote {
+			t.Fatalf("Lookup %d: premature promote", i)
+		}
+		if i == flowPromoteThreshold && !promote {
+			t.Fatalf("Lookup %d: expected promote=true at threshold", i)
+		}
+	}
+
+	// Many more connected lookups past the threshold: promote must never fire
+	// again, even if the counter were to wrap a uint32. We simulate by
+	// hammering well beyond the threshold.
+	for i := 0; i < flowPromoteThreshold*3; i++ {
+		if _, _, promote := ft.Lookup(a, true); promote {
+			t.Fatalf("promote fired again at lookup %d past threshold", i)
+		}
+	}
+
+	// The counter itself must have been clamped at the threshold — on unfixed
+	// code it would be flowPromoteThreshold + flowPromoteThreshold*3 (i.e. 20),
+	// not 5.
+	ft.mu.Lock()
+	got := ft.byAddr[a.String()].ingress
+	ft.mu.Unlock()
+	if got != flowPromoteThreshold {
+		t.Errorf("ingress = %d after saturation, want %d (clamped at threshold)", got, flowPromoteThreshold)
+	}
+}
+
 func TestFlowTableEvictReturnsPromotedSessions(t *testing.T) {
 	now := time.Now()
 	clock := func() time.Time { return now }

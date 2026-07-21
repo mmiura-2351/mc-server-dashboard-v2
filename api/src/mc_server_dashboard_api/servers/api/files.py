@@ -769,9 +769,10 @@ async def make_directory(
     """Create an (empty) directory at rest (file:edit, FR-FILE-*).
 
     At rest only (Section 6.9): a running server is 409 ``server_unsettled``. The
-    path is traversal-validated (422). Backend-dependent: object storage cannot
-    represent an empty directory (the seam is a no-op there) — the directory
-    becomes observable once a file is written under it.
+    path is traversal-validated (422); the root path is rejected since the root
+    always exists (issue #1944). Both backends materialize the directory
+    (fs: real empty directory; object storage: zero-byte ``.dir`` marker,
+    issue #1125).
     """
 
     try:

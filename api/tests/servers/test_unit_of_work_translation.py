@@ -1,24 +1,28 @@
 """Unit tests for the servers adapters' integrity-error translation (no DB).
 
-A duplicate server name, game port, Bedrock port, slug, or schedule name that
-races past the use-case pre-check surfaces as an IntegrityError; the adapters
-must translate the unique-violation to the matching domain error
+A duplicate server name, game port, Bedrock port, slug, schedule name, or
+group name that races past the use-case pre-check surfaces as an
+IntegrityError; the adapters must translate the unique-violation to the
+matching domain error
 (``uq_server_community_name`` -> :class:`ServerNameAlreadyExistsError`,
 ``uq_server_game_port`` / ``uq_server_bedrock_port`` ->
 :class:`PortAlreadyTakenError`, ``uq_server_slug`` ->
 :class:`SlugAlreadyTakenError`, ``uq_schedule_server_id_name`` ->
-:class:`ScheduleNameAlreadyExistsError`) so the API returns 409, not 500. An
+:class:`ScheduleNameAlreadyExistsError`,
+``uq_player_group_community_kind_name`` ->
+:class:`GroupNameAlreadyExistsError`) so the API returns 409, not 500. An
 unrelated violation is re-raised untranslated.
 
 The call sites share the translation (adapters/integrity.py): the UnitOfWork's
-``commit`` (an INSERT racer flushes at commit) and the server / schedule
-repositories' ``update`` (an UPDATE racer violates at execute time, inside the
-transaction — the re-port/slug-rename/Bedrock-allocation write path, issue
-#1541, and the schedule rename path, issue #1837).
+``commit`` (an INSERT racer flushes at commit) and the server / schedule /
+group repositories' ``update`` / ``add`` (an UPDATE racer violates at execute
+time, inside the transaction — the re-port/slug-rename/Bedrock-allocation
+write path, issue #1541, the schedule rename path, issue #1837, and the group
+create flush path, issue #2000).
 
 The asyncpg/SQLAlchemy stack is faked: a session whose ``commit`` (or
-``execute``) raises a prebuilt IntegrityError carrying the violated constraint
-name, mirroring the shape ``_constraint_name`` reads at runtime.
+``execute`` / ``flush``) raises a prebuilt IntegrityError carrying the violated
+constraint name, mirroring the shape ``_constraint_name`` reads at runtime.
 """
 
 from __future__ import annotations
@@ -29,6 +33,9 @@ import uuid
 import pytest
 from sqlalchemy.exc import IntegrityError
 
+from mc_server_dashboard_api.servers.adapters.group_repository import (
+    SqlAlchemyGroupRepository,
+)
 from mc_server_dashboard_api.servers.adapters.repositories import (
     SqlAlchemyServerRepository,
 )
@@ -38,10 +45,18 @@ from mc_server_dashboard_api.servers.adapters.schedule_repository import (
 from mc_server_dashboard_api.servers.adapters.unit_of_work import SqlAlchemyUnitOfWork
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
+    GroupNameAlreadyExistsError,
     PortAlreadyTakenError,
+    ResourcePackInUseError,
     ScheduleNameAlreadyExistsError,
     ServerNameAlreadyExistsError,
     SlugAlreadyTakenError,
+)
+from mc_server_dashboard_api.servers.domain.groups import (
+    GroupId,
+    GroupKind,
+    GroupName,
+    PlayerGroup,
 )
 from mc_server_dashboard_api.servers.domain.schedule import (
     Cadence,
@@ -225,3 +240,73 @@ async def test_schedule_update_reraises_unknown_violation_untranslated() -> None
     repo = SqlAlchemyScheduleRepository(session)  # type: ignore[arg-type]
     with pytest.raises(IntegrityError):
         await repo.update(_schedule_entity())
+
+
+# --- group commit path (issue #2000, rename) ----------------------------------
+# A group rename (ORM attribute update) flushes at commit, so the UnitOfWork
+# commit backstop must translate the constraint.
+
+
+async def test_commit_translates_group_name_violation() -> None:
+    # issue #2000: a group-rename racer flushing at commit surfaces typed.
+    uow, session = _uow_with_commit_error("uq_player_group_community_kind_name")
+    with pytest.raises(GroupNameAlreadyExistsError):
+        await uow.commit()
+    assert session.rolled_back is True
+
+
+# --- group repository flush path (issue #2000, create) ------------------------
+# SqlAlchemyGroupRepository.add flushes explicitly (the parent row must exist
+# before child rows), so the violation surfaces at that flush, not at commit.
+
+
+class _FakeFlushSession:
+    """A session whose ``flush`` raises an IntegrityError; ``add`` is a no-op."""
+
+    def __init__(self, error: IntegrityError) -> None:
+        self._error = error
+
+    def add(self, instance: object) -> None:
+        pass
+
+    async def flush(self) -> None:
+        raise self._error
+
+
+def _group_entity() -> PlayerGroup:
+    return PlayerGroup(
+        id=GroupId(uuid.uuid4()),
+        community_id=CommunityId(uuid.uuid4()),
+        name=GroupName("vip"),
+        kind=GroupKind.WHITELIST,
+        players=[],
+    )
+
+
+async def test_group_add_translates_name_violation_at_flush() -> None:
+    # issue #2000: a group-create racer violates at flush time.
+    session = _FakeFlushSession(_integrity_error("uq_player_group_community_kind_name"))
+    repo = SqlAlchemyGroupRepository(session)  # type: ignore[arg-type]
+    with pytest.raises(GroupNameAlreadyExistsError):
+        await repo.add(_group_entity())
+
+
+async def test_group_add_reraises_unknown_violation_untranslated() -> None:
+    session = _FakeFlushSession(_integrity_error("uq_some_other_constraint"))
+    repo = SqlAlchemyGroupRepository(session)  # type: ignore[arg-type]
+    with pytest.raises(IntegrityError):
+        await repo.add(_group_entity())
+
+
+# --- FK violation path (issue #1962) ------------------------------------------
+# A concurrent assignment races past the delete pre-check; the FK violation on
+# the resource_packs row delete surfaces as ResourcePackInUseError (409), not 500.
+
+
+async def test_commit_translates_resource_pack_fk_violation() -> None:
+    uow, session = _uow_with_commit_error(
+        "fk_srv_rp_assignments_resource_pack_id_resource_packs"
+    )
+    with pytest.raises(ResourcePackInUseError):
+        await uow.commit()
+    assert session.rolled_back is True

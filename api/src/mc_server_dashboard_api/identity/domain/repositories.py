@@ -130,6 +130,10 @@ class RefreshTokenRepository(abc.ABC):
     ) -> None:
         """Revoke every still-active token of ``user_id`` (family revoke).
 
+        Also re-stamps any already-revoked ``'rotated'`` predecessors to
+        ``'family'``, preserving their original ``revoked_at`` via COALESCE, so
+        they are no longer eligible for the reuse grace window (issue #1960).
+
         Stamps ``revoked_reason = 'family'`` so none of the revoked tokens is
         graceable in the reuse window: a family revoke is the theft response (or
         a password change / deactivate / delete), never a rotation (issue #369).
@@ -172,6 +176,11 @@ class RefreshTokenRepository(abc.ABC):
         reason: str,
     ) -> None:
         """Revoke ``user_id``'s active tokens except the kept one (issue #387, #606).
+
+        Also re-stamps any already-revoked ``'rotated'`` predecessors to
+        ``reason``, preserving their original ``revoked_at`` via COALESCE, so
+        they are no longer eligible for the reuse grace window (mirroring the
+        ``revoke_all_for_user`` fix from issue #1960; see issue #2172).
 
         The session to keep can be identified two ways (at most one should be set):
 

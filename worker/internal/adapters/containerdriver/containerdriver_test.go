@@ -2245,6 +2245,79 @@ func TestSweepBoundsWedgedStop(t *testing.T) {
 	}
 }
 
+// A running orphan receives a best-effort RCON save-on before the docker stop
+// (issue #1710): a worker crash mid-snapshot may have left auto-save disabled.
+// The save-on must precede the stop so the MC shutdown hook can auto-save.
+func TestSweepIssuesSaveOnToRunningOrphanBeforeStop(t *testing.T) {
+	docker := newFakeDocker()
+	docker.listResult = []Container{{ID: "a", Name: "/mcsd-s1", State: "running"}}
+	var rconLines []string
+	ctrl := &fakeRconControl{reply: "ok", lines: &rconLines}
+	d := New(docker, images(), func(_ context.Context, _ execution.InstanceSpec, _ string) (execution.ServerControl, error) {
+		return ctrl, nil
+	}, Options{
+		WorkerID:        "w1",
+		StopTimeout:     50 * time.Millisecond,
+		ScratchDir:      t.TempDir(),
+		SweepCallMargin: 50 * time.Millisecond,
+	})
+
+	if err := d.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	// save-on must have been issued via RCON.
+	if len(rconLines) != 1 || rconLines[0] != "save-on" {
+		t.Fatalf("rcon lines = %v, want [save-on]", rconLines)
+	}
+	// The stop and remove must still proceed.
+	if len(docker.stopped) != 1 || docker.stopped[0] != "a" {
+		t.Fatalf("stopped = %v, want [a]", docker.stopped)
+	}
+	if len(docker.removed) != 1 || docker.removed[0] != "a" {
+		t.Fatalf("removed = %v, want [a]", docker.removed)
+	}
+}
+
+// A failed save-on must not prevent the stop or removal (issue #1710): the pre-fix
+// behavior was no save-on at all, so any save-on failure degrades gracefully.
+func TestSweepSaveOnFailureStillStopsAndRemoves(t *testing.T) {
+	docker := newFakeDocker()
+	docker.listResult = []Container{{ID: "a", Name: "/mcsd-s1", State: "running"}}
+	d := New(docker, images(), func(_ context.Context, _ execution.InstanceSpec, _ string) (execution.ServerControl, error) {
+		return nil, errors.New("rcon: connection refused")
+	}, Options{
+		WorkerID:        "w1",
+		StopTimeout:     50 * time.Millisecond,
+		ScratchDir:      t.TempDir(),
+		SweepCallMargin: 50 * time.Millisecond,
+		Logger:          slog.New(slog.DiscardHandler),
+	})
+
+	if err := d.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	// The stop and remove must still proceed despite save-on failure.
+	if len(docker.stopped) != 1 || docker.stopped[0] != "a" {
+		t.Fatalf("stopped = %v, want [a]", docker.stopped)
+	}
+	if len(docker.removed) != 1 || docker.removed[0] != "a" {
+		t.Fatalf("removed = %v, want [a]", docker.removed)
+	}
+}
+
+// fakeRconControl is a simple ServerControl for Sweep tests that records RCON lines.
+type fakeRconControl struct {
+	reply string
+	lines *[]string
+}
+
+func (c *fakeRconControl) Execute(_ context.Context, line string) (string, error) {
+	*c.lines = append(*c.lines, line)
+	return c.reply, nil
+}
+
+func (c *fakeRconControl) Close() error { return nil }
+
 // The wait-for-name-free loop (issue #233) heals every interleaving of the
 // create-vs-async-remover race on the deterministic name. The five tests below
 // drive the loop branches; a foreign label or a running own container still
@@ -2550,5 +2623,90 @@ func drainStates(ch <-chan execution.StatusEvent) []execution.ServerState {
 		default:
 			return states
 		}
+	}
+}
+
+// A Stop that lands between awaitReady's state write and event publish must not
+// cause running to appear after stopping on the event channel. The
+// beforeReadyPublish hook fires inside awaitReady after state=Running is written
+// but before the event is published (under i.mu in the fix). Pre-fix the lock
+// was released between those two steps, so Stop could acquire it and emit
+// stopping first; post-fix both happen under one lock hold so Stop blocks until
+// running is already enqueued (issue #2022).
+//
+// stopNoExit + killNoExit prevent the container from exiting during the window,
+// which would set terminalLatched and mask the ordering violation.
+func TestStopDuringReadyPublishWindowDoesNotEmitRunning(t *testing.T) {
+	pr, pw := io.Pipe()
+	docker := newFakeDocker()
+	docker.logBody = pr
+	docker.stopNoExit = true
+	docker.killNoExit = true
+	d := newReadinessTestDriver(docker, 10*time.Second)
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	in := inst.(*instance)
+
+	// The hook fires after state=Running is written. In the fixed code i.mu is
+	// held, so Stop blocks; in the broken code the lock was already released, so
+	// Stop acquires it immediately and emits stopping before running.
+	stopDone := make(chan error, 1)
+	in.beforeReadyPublish = func() {
+		go func() { stopDone <- inst.Stop(context.Background(), true) }()
+		// Yield to let the Stop goroutine schedule and attempt the lock.
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Feed the readiness marker to trigger WaitReady → awaitReady → hook.
+	if _, err := pw.Write(frame(dockerStreamStdout,
+		`[12:00:03] [Server thread/INFO]: Done (3.210s)! For help, type "help"`+"\n")); err != nil {
+		t.Fatalf("write done frame: %v", err)
+	}
+
+	// Collect events until we have seen both running and stopping (the order is
+	// what we assert). The container never exits (killNoExit), so no terminal
+	// state arrives; use a deadline.
+	var seq []execution.ServerState
+	sawRunning, sawStopping := false, false
+	deadline := time.After(5 * time.Second)
+	for !sawRunning || !sawStopping {
+		select {
+		case ev := <-inst.Events():
+			seq = append(seq, ev.State)
+			if ev.State == execution.StateRunning {
+				sawRunning = true
+			}
+			if ev.State == execution.StateStopping {
+				sawStopping = true
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for running+stopping; collected %v", seq)
+		}
+	}
+
+	// Assert no running appears after stopping in the collected sequence.
+	stoppingIdx, runningIdx := -1, -1
+	for i, s := range seq {
+		if s == execution.StateStopping && stoppingIdx == -1 {
+			stoppingIdx = i
+		}
+		if s == execution.StateRunning && runningIdx == -1 {
+			runningIdx = i
+		}
+	}
+	if runningIdx > stoppingIdx {
+		t.Fatalf("running appeared after stopping in event sequence %v (issue #2022)", seq)
+	}
+
+	// Clean up: let the container exit so supervise and Stop can finish.
+	docker.exit(137, nil)
+	_ = pw.Close()
+	select {
+	case <-stopDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for Stop to return")
 	}
 }

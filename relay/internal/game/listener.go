@@ -124,14 +124,23 @@ func (l *Listener) Serve(ctx context.Context) error {
 		<-ctx.Done()
 		_ = l.ln.Close()
 	}()
+	var backoff netutil.AcceptBackoff
 	for {
 		conn, err := l.ln.Accept()
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
+			if netutil.IsTransientAcceptError(err) {
+				l.logger.Warn("accept failed; retrying", "error", err)
+				if !backoff.Sleep(ctx) {
+					return nil
+				}
+				continue
+			}
 			return err
 		}
+		backoff.Reset()
 		l.inflight.Add(1)
 		go func() {
 			defer l.inflight.Done()
@@ -336,8 +345,8 @@ func (l *Listener) handleLogin(ctx context.Context, conn net.Conn, r *bufio.Read
 		_ = conn.Close()
 		return
 	}
-	// Clear the pre-route deadline before the splice (RELAY.md Section 5: no idle
-	// timeout on spliced sessions).
+	// Clear the pre-route deadline before the splice; the splice installs its own
+	// progress deadlines per-read/write (RELAY.md Section 5).
 	_ = conn.SetReadDeadline(time.Time{})
 
 	rctx, cancel := context.WithTimeout(ctx, resolveJoinTimeout)

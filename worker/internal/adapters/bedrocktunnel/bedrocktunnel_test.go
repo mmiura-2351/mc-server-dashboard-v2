@@ -103,6 +103,29 @@ func sendFlowDatagram(t *testing.T, conn *quic.Conn, id uint32, payload string) 
 	}
 }
 
+// waitPumpRunning round-trips one datagram through the Worker's pump and
+// blocks until the echo comes back. Returning proves the Worker finished the
+// handshake and entered pump — waitAccepted alone does not, because the relay
+// hands the conn to the test right after writing the ack, before the Worker
+// has read it.
+func waitPumpRunning(t *testing.T, conn *quic.Conn) {
+	t.Helper()
+	sendFlowDatagram(t, conn, 1, "ping")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	data, err := conn.ReceiveDatagram(ctx)
+	if err != nil {
+		t.Fatalf("waiting for pump echo: %v", err)
+	}
+	if len(data) < flowIDSize {
+		t.Fatalf("pump echo frame too short: %d bytes", len(data))
+	}
+	if got := string(data[flowIDSize:]); got != "echo:ping" {
+		t.Fatalf("pump echo = %q, want echo:ping", got)
+	}
+}
+
 // Open dials the relay, sends TunnelHello with the spec's fields, and — on
 // acceptance — the tunnel is established (docs/app/BEDROCK_TUNNEL.md
 // Section 4).
@@ -461,6 +484,172 @@ func TestRetryBackoffOnRejectedRedial(t *testing.T) {
 	}
 	if n := atomic.LoadInt32(&attempts); n < 3 {
 		t.Fatalf("relay saw %d attempts, want at least 3 (2 rejections then an accept)", n)
+	}
+}
+
+// After a successful handshake whose connection drops immediately (pump
+// returns), the run loop must apply a backoff delay before redialing
+// rather than looping with zero delay — the fix for the duel hot-loop
+// described in issue #1988. Mirrors session.Runner.Run, which delays
+// before every redial regardless of whether the previous attempt succeeded.
+func TestRedialAfterPumpDropAppliesBackoff(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	relay := newFakeRelay(t, nil)
+	m := newTestManager(ctx, t)
+	m.randFloat = func() float64 { return 0.5 }
+
+	// afterFunc is called by the run loop's unified backoff path. Capture
+	// every delay it receives after the connection drops so we can verify
+	// the delay is applied, with the correct value, on the pump-return
+	// path — not just the handshake-error path.
+	var dropped atomic.Bool
+	afterCalled := make(chan time.Duration, 8)
+	m.afterFunc = func(d time.Duration) <-chan time.Time {
+		if dropped.Load() {
+			afterCalled <- d
+		}
+		ch := make(chan time.Time, 1)
+		ch <- time.Now() // unblock immediately
+		return ch
+	}
+
+	if err := m.Open(specFor(relay, "s1", "tok")); err != nil {
+		t.Fatalf("Open = %v, want nil", err)
+	}
+
+	// First connection: accept, then drop from the relay side so pump
+	// returns and the run loop must redial.
+	first := relay.waitAccepted(t)
+	dropped.Store(true)
+	_ = first.conn.CloseWithError(0, "simulated drop")
+
+	// The run loop must call afterFunc with the correct backoff delay
+	// after the pump returns. With fastBackoff (Initial=1ms) and
+	// randFloat=0.5, Delay(0, 0.5) = 500ns (attempt starts at 0; an instant
+	// pump drop does not reset it, but it was already 0).
+	want := m.backoff.Delay(0, 0.5)
+	select {
+	case got := <-afterCalled:
+		if got != want {
+			t.Fatalf("backoff delay after pump drop = %v, want %v", got, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("afterFunc was not called after pump drop (issue #1988)")
+	}
+
+	// The redial must succeed after the delay.
+	second := relay.waitAccepted(t)
+	if second.hello.GetToken() != first.hello.GetToken() {
+		t.Fatalf("redial token = %q, want %q", second.hello.GetToken(), first.hello.GetToken())
+	}
+}
+
+// Repeated instant displacements (pump returns well under minStableDuration)
+// must escalate the backoff delay rather than staying at Delay(0) forever
+// (issue #2153: two workers with the same token displacing each other).
+func TestInstantDisplacementEscalatesBackoff(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	relay := newFakeRelay(t, nil)
+	geyser := newFakeGeyser(t)
+	m := newTestManager(ctx, t)
+	m.dialUDP = dialToGeyser(geyser)
+	m.randFloat = func() float64 { return 0.5 }
+
+	afterCalled := make(chan time.Duration, 16)
+	m.afterFunc = func(d time.Duration) <-chan time.Time {
+		afterCalled <- d
+		ch := make(chan time.Time, 1)
+		ch <- time.Now()
+		return ch
+	}
+
+	if err := m.Open(specFor(relay, "s1", "tok")); err != nil {
+		t.Fatalf("Open = %v, want nil", err)
+	}
+
+	// Drop three successive connections; the pump runs for less than
+	// minStableDuration each time, so the backoff must escalate. Wait for
+	// the pump's echo before each drop, so the Worker is provably past the
+	// handshake — otherwise the drop lands in dialAndHandshake, which never
+	// reset attempt even before this fix and so would not pin it.
+	for i := range 3 {
+		conn := relay.waitAccepted(t)
+		waitPumpRunning(t, conn.conn)
+		_ = conn.conn.CloseWithError(0, "simulated displacement")
+
+		want := m.backoff.Delay(i, 0.5)
+		select {
+		case got := <-afterCalled:
+			if got != want {
+				t.Fatalf("drop %d: backoff delay = %v, want %v (attempt %d)", i, got, want, i)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("drop %d: afterFunc not called within 5s", i)
+		}
+	}
+}
+
+// A connection that survives longer than minStableDuration resets the backoff
+// counter, so the next drop starts the sequence over (issue #2153).
+func TestStableConnectionResetsBackoff(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	relay := newFakeRelay(t, nil)
+	geyser := newFakeGeyser(t)
+	m := newTestManager(ctx, t)
+	m.dialUDP = dialToGeyser(geyser)
+	m.randFloat = func() float64 { return 0.5 }
+	// Set a short stable threshold so the test can sleep past it.
+	m.minStableDuration = 50 * time.Millisecond
+
+	afterCalled := make(chan time.Duration, 16)
+	m.afterFunc = func(d time.Duration) <-chan time.Time {
+		afterCalled <- d
+		ch := make(chan time.Time, 1)
+		ch <- time.Now()
+		return ch
+	}
+
+	if err := m.Open(specFor(relay, "s1", "tok")); err != nil {
+		t.Fatalf("Open = %v, want nil", err)
+	}
+
+	// First connection: instant drop → attempt escalates (delay at attempt 0).
+	first := relay.waitAccepted(t)
+	waitPumpRunning(t, first.conn)
+	_ = first.conn.CloseWithError(0, "instant drop")
+
+	select {
+	case got := <-afterCalled:
+		if want := m.backoff.Delay(0, 0.5); got != want {
+			t.Fatalf("first drop: backoff = %v, want %v", got, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("first drop: afterFunc not called")
+	}
+
+	// Second connection: let the pump run past minStableDuration so the
+	// backoff resets on drop.
+	second := relay.waitAccepted(t)
+	// The echo proves connStart is already set, so the sleep below is fully
+	// inside the connection's lifetime and clears the 50ms threshold.
+	waitPumpRunning(t, second.conn)
+	time.Sleep(100 * time.Millisecond) // > 50ms threshold
+	_ = second.conn.CloseWithError(0, "drop after stable")
+
+	select {
+	case got := <-afterCalled:
+		// After a stable connection, attempt resets to 0.
+		if want := m.backoff.Delay(0, 0.5); got != want {
+			t.Fatalf("stable drop: backoff = %v, want %v (should have reset)", got, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stable drop: afterFunc not called")
 	}
 }
 

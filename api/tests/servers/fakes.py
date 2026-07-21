@@ -73,7 +73,6 @@ from mc_server_dashboard_api.servers.domain.notifier import ServerNotifier
 from mc_server_dashboard_api.servers.domain.plugin import (
     CATALOG_SOURCES,
     PluginId,
-    PluginSource,
     ServerPlugin,
     has_enabled_geyser,
 )
@@ -81,7 +80,10 @@ from mc_server_dashboard_api.servers.domain.plugin_cache_store import (
     CacheEntry,
     PluginCacheStore,
 )
-from mc_server_dashboard_api.servers.domain.plugin_repository import PluginRepository
+from mc_server_dashboard_api.servers.domain.plugin_repository import (
+    CatalogProvenance,
+    PluginRepository,
+)
 from mc_server_dashboard_api.servers.domain.repositories import (
     ResourceGrantSweeper,
     ServerRepository,
@@ -854,14 +856,19 @@ class FakePluginRepository(PluginRepository):
 
     async def find_catalog_provenance_by_sha512(
         self, checksum_sha512: str
-    ) -> tuple[PluginSource, str] | None:
+    ) -> CatalogProvenance | None:
         for plugin in self.by_id.values():
             if (
                 plugin.checksum_sha512 == checksum_sha512
                 and plugin.source in CATALOG_SOURCES
                 and plugin.source_project_id is not None
             ):
-                return plugin.source, plugin.source_project_id
+                return CatalogProvenance(
+                    source=plugin.source,
+                    project_id=plugin.source_project_id,
+                    source_version_id=plugin.source_version_id,
+                    version_number=plugin.version_number,
+                )
         return None
 
     async def find_sha256_by_sha512(self, checksum_sha512: str) -> str | None:
@@ -971,13 +978,18 @@ class FakeScheduleRepository(ScheduleRepository):
         self,
         schedule_id: ScheduleId,
         *,
+        fired_occurrence: dt.datetime,
         next_run_at: dt.datetime,
         last_run_at: dt.datetime | None,
     ) -> None:
         # Mirror the adapter's guarded bookkeeping UPDATE: only an enabled row
-        # matches; a disabled/deleted schedule is silently left untouched.
+        # whose next_run_at still matches the fired occurrence is advanced; a
+        # disabled/deleted/concurrently-edited schedule is silently left
+        # untouched.
         schedule = self.by_id.get(schedule_id)
         if schedule is None or not schedule.enabled:
+            return
+        if schedule.next_run_at != fired_occurrence:
             return
         self.by_id[schedule_id] = replace(
             schedule, next_run_at=next_run_at, last_run_at=last_run_at

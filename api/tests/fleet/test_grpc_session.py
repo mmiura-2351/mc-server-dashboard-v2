@@ -546,11 +546,11 @@ async def test_success_resets_consecutive_failure_counter(harness: _Harness) -> 
 
         async def record_observed_state(
             self, *, server_id: str, worker_id: str, state: str
-        ) -> None:
+        ) -> bool:
             self.calls += 1
             if server_id == bad_server:
                 raise RuntimeError("observed-state sink unavailable")
-            await super().record_observed_state(
+            return await super().record_observed_state(
                 server_id=server_id, worker_id=worker_id, state=state
             )
 
@@ -784,6 +784,35 @@ async def test_status_change_is_published_to_real_time_events(
     assert event.stream is EventStream.STATUS
     assert event.payload["state"] == "running"
     await call.done_writing()
+
+
+async def test_dropped_status_change_is_not_published() -> None:
+    """A StatusChange whose sink write is rejected (applied=False) must NOT be
+    relayed to real-time subscribers (issue #1957)."""
+    sink = FakeServerStateSink(reject_observed_for={_SERVER_ID})
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+    )
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call.write(_register_message())
+        await call.read()  # ack
+
+        await call.write(_status_message(_SERVER_ID, pb.SERVER_STATE_RUNNING))
+        # Wait for the sink to have processed the message.
+        for _ in range(100):
+            if sink.observed or sink.rejected:
+                break
+            await asyncio.sleep(0.01)
+
+        assert sink.rejected == [(_SERVER_ID, _WORKER_ID, "running")]
+        assert h.real_time_events.published == []
+        await call.done_writing()
+    finally:
+        await h.stop()
 
 
 async def test_log_line_is_published_to_real_time_events(harness: _Harness) -> None:
@@ -1122,5 +1151,432 @@ async def test_register_ack_unparseable_held_id_treated_as_existing() -> None:
         # not classified as deleted.
         assert list(response.register_ack.unknown_held_server_ids) == []
         await call.done_writing()
+    finally:
+        await h.stop()
+
+
+# ---------------------------------------------------------------------------
+# Reconnect-race regression (issue #1694)
+# ---------------------------------------------------------------------------
+
+
+async def test_superseded_registration_cannot_divorce_control_plane_from_registry() -> (
+    None
+):
+    """A stale session that resumes its DB awaits after a newer session's
+    open_session must be aborted, leaving the current session's outbound queue
+    intact (issue #1694).
+
+    The race: session B registers (gets a registry token), then stalls in its
+    DB awaits. Session C registers (gets a higher token), finishes its awaits
+    first, and calls open_session. When B resumes, its is_current_session check
+    must fail and the session must be aborted with ABORTED, so it never calls
+    open_session to overwrite C's queue.
+    """
+
+    # Gate the first session's DB await so we can control interleaving.
+    gate = asyncio.Event()
+
+    class _GatedSink(FakeServerStateSink):
+        """Stalls running_assignment_ids until the gate is set."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._first_call = True
+
+        async def running_assignment_ids(self, *, worker_id: str) -> dict[str, int]:
+            if self._first_call:
+                self._first_call = False
+                await gate.wait()
+            return await super().running_assignment_ids(worker_id=worker_id)
+
+    sink = _GatedSink()
+    control_plane = ControlPlaneState()
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+        control_plane=control_plane,
+    )
+    try:
+        stub = await h.start()
+
+        # Session B registers; its _rebuild_assignments stalls on the gate.
+        call_b = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call_b.write(_register_message())
+        # Do NOT read the ack yet; B is stalled in its awaits.
+
+        # Wait until B's registration has landed in the registry (the register
+        # call itself is synchronous and happens before the stalled await).
+        for _ in range(200):
+            if h.registry.list_workers():
+                break
+            await asyncio.sleep(0.01)
+        assert h.registry.list_workers(), "B should have registered"
+
+        # Session C registers the same worker; its awaits complete immediately
+        # because the gate only blocks the FIRST call.
+        call_c = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call_c.write(_register_message())
+        ack_c = await call_c.read()
+        assert ack_c.WhichOneof("payload") == "register_ack"
+
+        # Wait until C's open_session has populated the outbound queue.
+        worker = WorkerId(_WORKER_ID)
+        for _ in range(200):
+            if control_plane.outbound_for(worker) is not None:
+                break
+            await asyncio.sleep(0.01)
+        queue_c = control_plane.outbound_for(worker)
+        assert queue_c is not None, "C's outbound queue should exist"
+
+        # Release the gate: B resumes its awaits, hits the is_current_session
+        # check, and should be aborted.
+        gate.set()
+
+        # B's stream must end with ABORTED (superseded by C).
+        code_b = await asyncio.wait_for(call_b.code(), timeout=5)
+        assert code_b == grpc.StatusCode.ABORTED
+
+        # C's outbound queue must still be the current one — not overwritten.
+        assert control_plane.outbound_for(worker) is queue_c
+
+        # C's worker is still ONLINE.
+        snapshot = h.registry.list_workers()[0]
+        assert snapshot.status is WorkerStatus.ONLINE
+        await call_c.done_writing()
+    finally:
+        await h.stop()
+
+
+# ---------------------------------------------------------------------------
+# Rebuild-failure teardown regression (issue #1958)
+# ---------------------------------------------------------------------------
+
+
+async def test_rebuild_failure_tears_down_registration() -> None:
+    """A DB error in _rebuild_assignments must not leave a phantom ONLINE worker.
+
+    After register succeeds but the subsequent running_assignment_ids raises,
+    the session must abort with UNAVAILABLE, the worker must read OFFLINE (not
+    placeable), and no outbound queue should exist (issue #1958).
+    """
+
+    class _FailingRebuildSink(FakeServerStateSink):
+        async def running_assignment_ids(self, *, worker_id: str) -> dict[str, int]:
+            raise RuntimeError("transient DB error")
+
+    sink = _FailingRebuildSink()
+    control_plane = ControlPlaneState()
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+        control_plane=control_plane,
+    )
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call.write(_register_message())
+
+        # The stream should end with UNAVAILABLE.
+        code = await asyncio.wait_for(call.code(), timeout=5)
+        assert code == grpc.StatusCode.UNAVAILABLE
+
+        # The worker must not be ONLINE / placeable.
+        worker = WorkerId(_WORKER_ID)
+        candidates = h.registry.candidates_for_placement()
+        assert candidates == []
+
+        # No outbound queue should exist (open_session never ran).
+        assert control_plane.outbound_for(worker) is None
+    finally:
+        await h.stop()
+
+
+async def test_reconnect_after_rebuild_failure_succeeds() -> None:
+    """After a rebuild failure, the next Session from the same worker succeeds.
+
+    The first call raises in running_assignment_ids; the second completes
+    normally: RegisterAck is returned, the worker is ONLINE, and load reflects
+    the rebuilt assignments (issue #1958).
+    """
+
+    class _FailOnceSink(FakeServerStateSink):
+        def __init__(self) -> None:
+            super().__init__(running_ids={_WORKER_ID: {"srv-1"}})
+            self._first_call = True
+
+        async def running_assignment_ids(self, *, worker_id: str) -> dict[str, int]:
+            if self._first_call:
+                self._first_call = False
+                raise RuntimeError("transient DB error")
+            return await super().running_assignment_ids(worker_id=worker_id)
+
+    sink = _FailOnceSink()
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+    )
+    try:
+        stub = await h.start()
+
+        # First attempt fails.
+        call1 = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call1.write(_register_message())
+        code1 = await asyncio.wait_for(call1.code(), timeout=5)
+        assert code1 == grpc.StatusCode.UNAVAILABLE
+
+        # Second attempt succeeds.
+        call2 = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call2.write(_register_message())
+        ack = await call2.read()
+        assert ack.WhichOneof("payload") == "register_ack"
+
+        # Worker is ONLINE with rebuilt load.
+        snapshots = h.registry.list_workers()
+        assert len(snapshots) == 1
+        assert snapshots[0].status is WorkerStatus.ONLINE
+        candidates = h.registry.candidates_for_placement()
+        assert len(candidates) == 1
+        assert candidates[0].load == 1
+        await call2.done_writing()
+    finally:
+        await h.stop()
+
+
+async def test_stale_rebuild_failure_does_not_offline_newer_session() -> None:
+    """A rebuild failure on a stale session must not offline a newer session.
+
+    Session B's rebuild stalls then raises AFTER session C has registered and
+    opened successfully. Because mark_disconnected is token-guarded, C stays
+    ONLINE and its outbound queue is intact (issue #1958).
+    """
+
+    gate = asyncio.Event()
+
+    class _GatedFailSink(FakeServerStateSink):
+        """First call waits on gate then raises; subsequent calls succeed."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._first_call = True
+
+        async def running_assignment_ids(self, *, worker_id: str) -> dict[str, int]:
+            if self._first_call:
+                self._first_call = False
+                await gate.wait()
+                raise RuntimeError("stale rebuild failure")
+            return await super().running_assignment_ids(worker_id=worker_id)
+
+    sink = _GatedFailSink()
+    control_plane = ControlPlaneState()
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+        control_plane=control_plane,
+    )
+    try:
+        stub = await h.start()
+        worker = WorkerId(_WORKER_ID)
+
+        # Session B registers; its _rebuild_assignments stalls on the gate.
+        call_b = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call_b.write(_register_message())
+
+        # Wait for B's registration to land.
+        for _ in range(200):
+            if h.registry.list_workers():
+                break
+            await asyncio.sleep(0.01)
+        assert h.registry.list_workers(), "B should have registered"
+
+        # Session C registers; its rebuild completes immediately.
+        call_c = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call_c.write(_register_message())
+        ack_c = await call_c.read()
+        assert ack_c.WhichOneof("payload") == "register_ack"
+
+        # Wait for C's outbound queue.
+        for _ in range(200):
+            if control_plane.outbound_for(worker) is not None:
+                break
+            await asyncio.sleep(0.01)
+        queue_c = control_plane.outbound_for(worker)
+        assert queue_c is not None, "C's outbound queue should exist"
+
+        # Release B: its rebuild raises after C is fully open.
+        gate.set()
+
+        # B's stream must end non-OK.
+        code_b = await asyncio.wait_for(call_b.code(), timeout=5)
+        assert code_b != grpc.StatusCode.OK
+
+        # C stays ONLINE.
+        snapshot = h.registry.list_workers()[0]
+        assert snapshot.status is WorkerStatus.ONLINE
+
+        # C's outbound queue is still intact.
+        assert control_plane.outbound_for(worker) is queue_c
+        await call_c.done_writing()
+    finally:
+        await h.stop()
+
+
+# ---------------------------------------------------------------------------
+# Heartbeat fast-path (issue #1698)
+# ---------------------------------------------------------------------------
+
+
+async def test_heartbeat_survives_slow_status_write() -> None:
+    """A slow DB write must not starve heartbeat liveness (issue #1698).
+
+    Heartbeats bypass the processing queue entirely, so even when the
+    processor is blocked on a DB-bound StatusChange the watchdog still sees
+    fresh heartbeats and keeps the session alive.
+    """
+
+    gate = asyncio.Event()
+
+    class _SlowSink(FakeServerStateSink):
+        async def record_observed_state(
+            self, *, server_id: str, worker_id: str, state: str
+        ) -> bool:
+            await gate.wait()
+            return await super().record_observed_state(
+                server_id=server_id, worker_id=worker_id, state=state
+            )
+
+    sink = _SlowSink()
+    h = _shared_clock_harness()
+    h.state_sink = sink
+    # Rebuild with the custom sink.
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=h.clock, heartbeat_timeout=_SHORT_TIMEOUT),
+        h.clock,
+        heartbeat_timeout=_SHORT_TIMEOUT,
+        state_sink=sink,
+    )
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call.write(_register_message())
+        await call.read()  # ack
+
+        server_id = "11111111-1111-1111-1111-111111111111"
+        # Send a StatusChange that will park in the slow sink.
+        await call.write(_status_message(server_id, pb.SERVER_STATE_RUNNING))
+
+        # Repeatedly advance the clock and heartbeat, staying under the
+        # timeout each step. With the old serial design these heartbeats
+        # would queue behind the blocked StatusChange and be missed.
+        for i in range(1, 5):
+            at = _T0 + dt.timedelta(seconds=0.2 * i)
+            h.clock.set(at)
+            await call.write(_heartbeat_message())
+            await _wait_for_heartbeat_at(h, at)
+
+        # The worker must still be ONLINE despite the StatusChange blocking.
+        snapshot = h.registry.list_workers()[0]
+        assert snapshot.status is WorkerStatus.ONLINE
+
+        # Release the gate so the StatusChange completes.
+        gate.set()
+        for _ in range(100):
+            if sink.observed:
+                break
+            await asyncio.sleep(0.01)
+        assert sink.observed == [(server_id, _WORKER_ID, "running")]
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+async def test_status_changes_processed_in_send_order() -> None:
+    """Status changes queued behind a gated write are delivered in order."""
+
+    gate = asyncio.Event()
+
+    class _GatedOnceSink(FakeServerStateSink):
+        def __init__(self) -> None:
+            super().__init__()
+            self._first = True
+
+        async def record_observed_state(
+            self, *, server_id: str, worker_id: str, state: str
+        ) -> bool:
+            if self._first:
+                self._first = False
+                await gate.wait()
+            return await super().record_observed_state(
+                server_id=server_id, worker_id=worker_id, state=state
+            )
+
+    sink = _GatedOnceSink()
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+    )
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call.write(_register_message())
+        await call.read()  # ack
+
+        server_a = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        server_b = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        await call.write(_status_message(server_a, pb.SERVER_STATE_RUNNING))
+        await call.write(_status_message(server_b, pb.SERVER_STATE_STOPPED))
+
+        # Release the gate so both writes complete.
+        gate.set()
+        for _ in range(200):
+            if len(sink.observed) >= 2:
+                break
+            await asyncio.sleep(0.01)
+
+        assert sink.observed == [
+            (server_a, _WORKER_ID, "running"),
+            (server_b, _WORKER_ID, "stopped"),
+        ]
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+async def test_clean_eof_drains_queued_messages() -> None:
+    """A clean client half-close drains all queued messages before returning."""
+
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+    )
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call.write(_register_message())
+        await call.read()  # ack
+
+        server_a = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        server_b = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        server_c = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+        await call.write(_status_message(server_a, pb.SERVER_STATE_RUNNING))
+        await call.write(_status_message(server_b, pb.SERVER_STATE_STOPPED))
+        await call.write(_status_message(server_c, pb.SERVER_STATE_STARTING))
+        await call.done_writing()
+
+        # Drain the server response stream to completion.
+        await _drain_to_eof(call)
+
+        # All three status changes must have been processed.
+        assert len(h.state_sink.observed) == 3
+        assert h.state_sink.observed == [
+            (server_a, _WORKER_ID, "running"),
+            (server_b, _WORKER_ID, "stopped"),
+            (server_c, _WORKER_ID, "starting"),
+        ]
     finally:
         await h.stop()

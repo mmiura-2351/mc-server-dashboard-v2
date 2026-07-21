@@ -60,6 +60,10 @@ async def _guard_last_owner(
     If ``membership`` holds the preset Owner role and is the only member that
     does, raise :class:`LastOwnerRemovalError`; otherwise return. When the
     community has no preset Owner role the guard is a no-op.
+
+    The holder query locks the ``membership_role`` rows ``FOR UPDATE`` so
+    concurrent removals/unassignments serialize (#1959): the second transaction
+    blocks until the first commits, then re-reads the decremented set.
     """
     owner_role = next(
         (
@@ -71,15 +75,12 @@ async def _guard_last_owner(
     )
     if owner_role is None:
         return
-    held = await uow.memberships.list_role_ids(membership.id)
-    if owner_role.id not in held:
+    # Lock the owner-role holders FOR UPDATE, serializing concurrent guards.
+    holders = await uow.memberships.lock_owner_role_holders(community_id, owner_role.id)
+    if membership.id not in holders:
         return
-    # The member holds Owner; refuse if they are the only such holder.
-    for other in await uow.memberships.list_for_community(community_id):
-        if other.id == membership.id:
-            continue
-        if owner_role.id in await uow.memberships.list_role_ids(other.id):
-            return
+    if len(holders) > 1:
+        return
     raise LastOwnerRemovalError(str(membership.user_id.value))
 
 

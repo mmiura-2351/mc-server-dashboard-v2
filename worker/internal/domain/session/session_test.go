@@ -662,13 +662,16 @@ func TestIdleLaneIsTornDown(t *testing.T) {
 // gateHandler blocks every command whose Kind is in slowKinds until released,
 // recording handling order. Commands whose Kind is not slow (e.g. ServerCommand)
 // return immediately. It models long-running lane work (hydrate/stop) saturating
-// the concurrency cap while an instant ServerCommand wants to run.
+// the concurrency cap while an instant ServerCommand wants to run. When detached
+// is true, slow commands block only on release (ignoring ctx cancellation),
+// modeling a ctx-detached stop that outlives its stream (issue #1617).
 type gateHandler struct {
 	mu        sync.Mutex
 	handled   []Command
 	inflight  int
 	slowKinds map[string]bool
 	release   chan struct{}
+	detached  bool
 }
 
 func newGateHandler(slowKinds ...string) *gateHandler {
@@ -684,9 +687,13 @@ func (h *gateHandler) Handle(ctx context.Context, cmd Command) CommandResult {
 		h.mu.Lock()
 		h.inflight++
 		h.mu.Unlock()
-		select {
-		case <-h.release:
-		case <-ctx.Done():
+		if h.detached {
+			<-h.release
+		} else {
+			select {
+			case <-h.release:
+			case <-ctx.Done():
+			}
 		}
 	}
 	h.mu.Lock()
@@ -1354,9 +1361,9 @@ func TestRegisterAckEmptyUnknownHeldServerIDsSkipsReclaimer(t *testing.T) {
 	done := make(chan struct{})
 	go func() { _ = r.Run(ctx); close(done) }()
 
-	waitFor(t, func() bool { return transport.registerCount() == 1 })
-	// Give a small window for any erroneous reclaimer call to land.
-	time.Sleep(50 * time.Millisecond)
+	// Wait for ResyncStatus (called after the reclaimer check in the register
+	// flow) to confirm ack processing completed.
+	waitFor(t, func() bool { return handler.resyncCallsCopy() > 0 })
 	if got := handler.reclaimedIDsCopy(); len(got) != 0 {
 		t.Fatalf("reclaimed ids = %v, want empty", got)
 	}
@@ -1444,6 +1451,83 @@ func TestReRegistrationRefreshesHeldServers(t *testing.T) {
 	if byID["server-b"] != 2 {
 		t.Errorf("server-b generation = %d, want 2", byID["server-b"])
 	}
+
+	cancel()
+	<-done
+}
+
+// TestLaneCapEnforcedAcrossReconnect verifies that maxConcurrentLanes is
+// enforced worker-wide, not per-connection generation. When a stream drops
+// mid-command, the in-flight lane goroutines (detached stops) still hold their
+// cap slots, so the new dispatcher must not allow more than maxConcurrentLanes
+// total (issue #1617).
+func TestLaneCapEnforcedAcrossReconnect(t *testing.T) {
+	t1 := newFakeTransport(acceptedAck())
+	t2 := newFakeTransport(acceptedAck())
+	dialer := &fakeDialer{transports: []*fakeTransport{t1, t2}}
+	clock := newFakeClock()
+	handler := newGateHandler("HydrateTrigger")
+	handler.detached = true
+	r := NewRunner(dialer, testCaps(), clock, discardLogger(),
+		WithCommandHandler(handler), WithRandFloat(func() float64 { return 0 }))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+
+	// Wait for first registration.
+	waitFor(t, func() bool { return t1.registerCount() == 1 })
+
+	// Saturate the cap with maxConcurrentLanes slow hydrates on distinct servers.
+	for i := 0; i < maxConcurrentLanes; i++ {
+		id := fmt.Sprintf("slow-%d", i)
+		t1.commands <- Command{CommandID: id, ServerID: id, Kind: "HydrateTrigger"}
+	}
+	waitFor(t, func() bool { return handler.inflightCount() == maxConcurrentLanes })
+
+	// Drop stream 1 (close commands channel). The in-flight detached hydrates
+	// continue running (they ignore ctx cancellation).
+	close(t1.commands)
+
+	// Fire backoff timer to trigger reconnect onto t2.
+	waitFor(t, func() bool {
+		clock.fireNext()
+		return t2.registerCount() == 1
+	})
+
+	// On the new stream, send a 5th hydrate (should be blocked by the worker-wide
+	// cap since maxConcurrentLanes slots are still held) and a quick command (which
+	// bypasses the cap).
+	t2.commands <- Command{CommandID: "excess", ServerID: "new-server", Kind: "HydrateTrigger"}
+	t2.commands <- Command{CommandID: "quick", ServerID: "quick-server", Kind: "ServerCommand"}
+
+	// The quick command must complete (it bypasses the cap).
+	waitFor(t, func() bool {
+		for _, res := range t2.resultsCopy() {
+			if res.CommandID == "quick" && res.Success {
+				return true
+			}
+		}
+		return false
+	})
+
+	// The 5th hydrate must NOT have started: inflightCount should still be
+	// maxConcurrentLanes (the 4 from stream 1), not maxConcurrentLanes+1.
+	if got := handler.inflightCount(); got != maxConcurrentLanes {
+		t.Fatalf("inflight after reconnect = %d, want %d (excess hydrate should be blocked)", got, maxConcurrentLanes)
+	}
+
+	// Release the gate; all hydrates (including the excess) complete.
+	close(handler.release)
+	waitFor(t, func() bool {
+		for _, res := range t2.resultsCopy() {
+			if res.CommandID == "excess" && res.Success {
+				return true
+			}
+		}
+		return false
+	})
 
 	cancel()
 	<-done

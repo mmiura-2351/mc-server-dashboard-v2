@@ -41,15 +41,37 @@ export function setHardLogoutHandler(fn: LogoutHandler): void {
   onHardLogout = fn;
 }
 
+/**
+ * Outcome of a refresh attempt. Wrapped in an object so that callers cannot
+ * accidentally rely on truthiness — all string values would be truthy, making
+ * `if (await refreshSession())` silently wrong (issue #2160). Callers must
+ * inspect `.status` explicitly.
+ *
+ * - `"ok"` — access token re-established.
+ * - `"auth-rejected"` — server authoritatively rejected the session (401/403).
+ * - `"transient"` — network error, proxy 5xx, or garbled body; session may
+ *   still be valid.
+ */
+export type RefreshResult = {
+  status: "ok" | "auth-rejected" | "transient";
+};
+
 /** The shared in-flight refresh, or null when none is running. */
-let inFlightRefresh: Promise<boolean> | null = null;
+let inFlightRefresh: Promise<RefreshResult> | null = null;
+
+/** Auth-definitive status codes: the server says the session is dead. */
+function isAuthDefinitive(status: number): boolean {
+  return status === 401 || status === 403;
+}
 
 /**
  * POST /api/auth/refresh riding the httpOnly cookie (empty JSON body). 200
- * stores the rotated access token and resolves true; 401 (signed out) resolves
- * false.
+ * stores the rotated access token and resolves `{ status: "ok" }`; 401/403
+ * resolves `{ status: "auth-rejected" }` (session is genuinely dead); network
+ * errors and other non-2xx responses resolve `{ status: "transient" }` (session
+ * may still be valid).
  */
-async function doRefresh(): Promise<boolean> {
+async function doRefresh(): Promise<RefreshResult> {
   let response: Response;
   try {
     response = await fetch("/api/auth/refresh", {
@@ -59,22 +81,24 @@ async function doRefresh(): Promise<boolean> {
       body: "{}",
     });
   } catch {
-    return false;
+    return { status: "transient" };
   }
   if (!response.ok) {
-    return false;
+    return {
+      status: isAuthDefinitive(response.status) ? "auth-rejected" : "transient",
+    };
   }
   let data: TokenResponse;
   try {
     data = (await response.json()) as TokenResponse;
   } catch {
-    // A 200 with a malformed/empty body yields no usable token; treat it as a
-    // failed refresh so callers hard-log-out instead of rejecting the shared
-    // single-flight promise (which would strand the bootstrap).
-    return false;
+    // A 200 with a malformed/empty body yields no usable token; this is not an
+    // auth rejection (the server said 200), so treat it as transient rather
+    // than forcing a hard logout.
+    return { status: "transient" };
   }
   setAccessToken(data.access_token);
-  return true;
+  return { status: "ok" };
 }
 
 /**
@@ -121,9 +145,11 @@ export async function restoreSession(): Promise<boolean> {
  * Single-flight refresh: all concurrent callers (e.g. several requests that
  * 401ed at once) share one in-flight `/api/auth/refresh`, so the client never
  * replays a stale predecessor past the API's reuse grace window (AUTH_API.md
- * 4). Resolves true when the session was re-established, false otherwise.
+ * 4). Resolves `{ status: "ok" }` when the session was re-established,
+ * `{ status: "auth-rejected" }` when the server says it is dead, or
+ * `{ status: "transient" }` on network/proxy errors.
  */
-export function refreshSession(): Promise<boolean> {
+export function refreshSession(): Promise<RefreshResult> {
   if (inFlightRefresh === null) {
     inFlightRefresh = doRefresh().finally(() => {
       inFlightRefresh = null;
@@ -133,17 +159,18 @@ export function refreshSession(): Promise<boolean> {
 }
 
 /**
- * The refresh the API client retries 401s through. On failure it drives a hard
- * logout (clear token + reset session state + navigate) and reports false so
- * the original request is not retried.
+ * The refresh the API client retries 401s through. On an auth-definitive
+ * rejection (401/403) it drives a hard logout and reports false. On a
+ * transient failure (network error, 5xx) it reports false WITHOUT logging out,
+ * so the original request surfaces its own error and the session survives for
+ * a later retry. On success it reports true to trigger a request retry.
  */
 export async function refreshForRetry(): Promise<boolean> {
-  const ok = await refreshSession();
-  if (!ok) {
-    // Involuntary: the session died under the user, so flag it as expired.
+  const { status } = await refreshSession();
+  if (status === "auth-rejected") {
     hardLogout("expired");
   }
-  return ok;
+  return status === "ok";
 }
 
 /**

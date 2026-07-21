@@ -223,16 +223,12 @@ async def test_stopped_intent_observed_running_redispatches_stop() -> None:
 async def test_wedged_stopped_stopped_assigned_clears_assignment(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # Issue #847 (bug 2): a stop whose final-snapshot window was interrupted by an
-    # API crash or an HTTP-task cancellation leaves the row wedged at
-    # (desired=stopped, observed=stopped, assigned) — the deferred unassign never
-    # ran. No other path converges this triple: StartServer's require_unassigned CAS
-    # 409s before flipping desired, so it never becomes reconcilable any other way,
-    # and the sink no longer unassigns (bug 1). The reconciler's stale-stop arm is
-    # the deliberate recovery: once past grace it clears the assignment (no command
-    # dispatched — the worker is already stopped) so a later start can re-place.
-    # Cross-worker re-placement loses the never-published final snapshot, so it is
-    # logged loud.
+    # Issue #847 (bug 2), issue #1004: a stop whose final-snapshot window was
+    # interrupted by an API crash or an HTTP-task cancellation leaves the row wedged
+    # at (desired=stopped, observed=stopped, assigned) — the deferred unassign never
+    # ran. The reconciler's stale-stop arm re-drives the final snapshot (when the
+    # worker is connected) then clears the assignment so a later start can re-place
+    # with the correct store generation.
     uow = FakeUnitOfWork()
     server = _server(
         desired=DesiredState.STOPPED,
@@ -242,14 +238,13 @@ async def test_wedged_stopped_stopped_assigned_clears_assignment(
     uow.servers.seed(server)
     cp = FakeControlPlane()
     clock = FakeClock(_NOW)
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.INFO):
         await _reconciler(uow, cp, clock).tick()
-    # No command is dispatched: the server is already stopped, only the assignment
-    # is released.
-    assert cp.dispatched == []
+    # Issue #1004: the final snapshot is re-driven before clearing.
+    assert [k for k, _, _ in cp.dispatched] == ["snapshot"]
     assert uow.servers.by_id[server.id].assigned_worker_id is None
     assert any(
-        "stale" in record.message.lower() or "wedge" in record.message.lower()
+        "recovered" in record.message.lower() or "wedge" in record.message.lower()
         for record in caplog.records
     )
 

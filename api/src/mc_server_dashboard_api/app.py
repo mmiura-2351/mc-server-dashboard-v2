@@ -46,6 +46,7 @@ from mc_server_dashboard_api.dependencies import (
     build_brute_force_config,
     build_registration_config,
 )
+from mc_server_dashboard_api.docs import mount_docs
 from mc_server_dashboard_api.fleet.adapters.clock import SystemClock as FleetSystemClock
 from mc_server_dashboard_api.fleet.adapters.control_plane import (
     ControlPlaneState,
@@ -64,7 +65,10 @@ from mc_server_dashboard_api.fleet.adapters.relay_state import (
 )
 from mc_server_dashboard_api.fleet.api import events as server_events
 from mc_server_dashboard_api.fleet.api import workers
-from mc_server_dashboard_api.http_problem import install_problem_handlers
+from mc_server_dashboard_api.http_problem import (
+    install_problem_handlers,
+    unhandled_exception_middleware,
+)
 from mc_server_dashboard_api.identity.adapters.clock import (
     SystemClock as IdentitySystemClock,
 )
@@ -501,6 +505,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     if settings is None:
         settings = load_settings(_resolve_config_file())
 
+    # Install the configured log handler/formatter BEFORE any validation that
+    # logs, so warnings (bedrock_enabled-without-relay, reconciler grace-floor)
+    # respect log.format=json instead of falling through to logging.lastResort
+    # as plain text (issue #1992).
+    configure_logging(settings.log.level, settings.log.format)
+
     # The token signing key is a required secret whenever the auth endpoints are
     # mounted (CONFIGURATION.md Section 5.3); fail fast at boot rather than
     # starting unable to issue or verify tokens (Section 3).
@@ -581,8 +591,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # cannot fail at boot; it is stored on app state below.
     version_catalog, version_fetcher = _build_version_catalog()
 
-    configure_logging(settings.log.level, settings.log.format)
-
     heartbeat_timeout = dt.timedelta(seconds=settings.control.heartbeat_timeout_seconds)
     # Worker-side data-plane transfer bound advertised in RegisterAck (issue #874):
     # the larger of the two API transfer budgets plus a margin, so it is always
@@ -661,6 +669,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         control_plane_state = ControlPlaneState()
         app.state.control_plane = GrpcControlPlane(
             control_plane_state,
+            clock=FleetSystemClock(),
             timeout_seconds=settings.control.command_timeout_seconds,
         )
         # Bedrock relay tunnel dispatch (issue #1544) shares the relay's
@@ -869,16 +878,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 snapshot_timeout_seconds=settings.control.snapshot_timeout_seconds,
                 stop_timeout_seconds=settings.control.stop_timeout_seconds,
             )
-            schedule_runner = RunScheduleTick(
-                uow=ServersUnitOfWork(create_session_factory(engine)),
-                # Player warnings broadcast a fixed ``say <message>`` before a
-                # stop/restart occurrence — its own SendServerCommand (fresh UoW),
-                # kept out of the trigger-agnostic ExecuteScheduleAction (#653).
-                send_command=SendServerCommand(
-                    uow=ServersUnitOfWork(create_session_factory(engine)),
-                    control_plane=schedule_control_plane,
-                ),
-                execute=ExecuteScheduleAction(
+
+            def _make_schedule_execute() -> ExecuteScheduleAction:
+                return ExecuteScheduleAction(
                     uow=ServersUnitOfWork(create_session_factory(engine)),
                     send_command=SendServerCommand(
                         uow=ServersUnitOfWork(create_session_factory(engine)),
@@ -925,7 +927,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         # ``current`` mid-tar (the #827 tear).
                         lifecycle_lock=PgLifecycleLock(engine=engine),
                     ),
+                )
+
+            schedule_runner = RunScheduleTick(
+                uow=ServersUnitOfWork(create_session_factory(engine)),
+                # Player warnings broadcast a fixed ``say <message>`` before a
+                # stop/restart occurrence — its own SendServerCommand (fresh UoW),
+                # kept out of the trigger-agnostic ExecuteScheduleAction (#653).
+                send_command=SendServerCommand(
+                    uow=ServersUnitOfWork(create_session_factory(engine)),
+                    control_plane=schedule_control_plane,
                 ),
+                make_execute=_make_schedule_execute,
                 calculator=CronsimNextRunCalculator(),
                 audit=LoggingAuditRecorder(
                     SqlAlchemyAuditWriter(
@@ -1139,15 +1152,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         title="mc-server-dashboard API",
         lifespan=lifespan,
         openapi_url="/api/openapi.json",
-        docs_url="/api/docs",
-        redoc_url="/api/redoc",
+        # Docs routes are self-hosted (issue #1990): the default CDN-backed
+        # routes are disabled; mount_docs() below adds same-origin equivalents.
+        docs_url=None,
+        redoc_url=None,
     )
+    mount_docs(app)
     # Render every error response as RFC 9457 problem+json (issue #371): one body
     # shape for application errors, framework HTTPExceptions, and 422 validation.
     install_problem_handlers(app)
-    # Middleware is applied outermost-last: adding the metrics middleware after the
-    # correlation-id one makes it the outer wrapper, so it times the full request
-    # handling and labels by route template (issue #282).
+    # Middleware is applied outermost-last: the catch-all exception middleware is
+    # registered FIRST so it is the innermost user middleware, just outside routing.
+    # An unhandled exception caught here returns a problem+json 500 that flows
+    # outward through correlation-ID, security-headers, and metrics middleware —
+    # unlike the belt-and-braces add_exception_handler(Exception, ...) path, which
+    # Starlette attaches to ServerErrorMiddleware outside all user middleware
+    # (issue #1951).
+    app.middleware("http")(unhandled_exception_middleware)
+    # Adding the correlation-id middleware after the catch-all makes it wrap it,
+    # so the correlation contextvar is set when the catch-all runs and the 500
+    # response carries the correlation ID header.
     app.middleware("http")(correlation_id_middleware)
     # Defence-in-depth security headers (issue #635): CSP, X-Frame-Options,
     # nosniff, Referrer-Policy, Permissions-Policy, conditional Cache-Control

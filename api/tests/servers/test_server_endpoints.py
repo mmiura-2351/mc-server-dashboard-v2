@@ -335,6 +335,66 @@ def test_create_forwards_and_reads_back_memory_limit() -> None:
     assert use_case.calls[0]["config"] == {"motd": "hi", MEMORY_LIMIT_CONFIG_KEY: 2048}
 
 
+def test_create_top_level_memory_limit_merges_into_config() -> None:
+    # A top-level ``memory_limit_mb`` on the request body is merged into the
+    # config dict so the value round-trips through create (#1849). Clients see
+    # the field at the top level of the response and naturally send it the same
+    # way — the endpoint must accept both locations.
+    community = uuid.uuid4()
+    server = _server_entity(community_id=community)
+    server.config = {**server.config, MEMORY_LIMIT_CONFIG_KEY: 2048}
+    use_case = _FakeUseCase(result=server)
+    app = _app(member=True, allow=True, create=use_case)
+    client = next(_client(app))
+    resp = client.post(
+        f"/api/communities/{community}/servers",
+        json={**_create_body(), "memory_limit_mb": 2048},
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["memory_limit_mb"] == 2048
+    # The use case must receive the value inside config, not as a separate kwarg.
+    assert use_case.calls[0]["config"] == {"motd": "hi", MEMORY_LIMIT_CONFIG_KEY: 2048}
+
+
+def test_create_memory_limit_conflict_is_422() -> None:
+    # When both the top-level field and the config key are present with
+    # different values, the endpoint rejects the ambiguity (issue #2148).
+    app = _app(member=True, allow=True, create=_FakeUseCase())
+    client = next(_client(app))
+    resp = client.post(
+        f"/api/communities/{uuid.uuid4()}/servers",
+        json={
+            **_create_body(),
+            "memory_limit_mb": 2048,
+            "config": {"motd": "hi", MEMORY_LIMIT_CONFIG_KEY: 4096},
+        },
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "memory_limit_conflict"
+
+
+def test_create_memory_limit_same_in_both_locations_is_accepted() -> None:
+    # When both the top-level field and the config key are present with the
+    # same value, the request is accepted (no ambiguity) — issue #2148.
+    community = uuid.uuid4()
+    server = _server_entity(community_id=community)
+    server.config = {**server.config, MEMORY_LIMIT_CONFIG_KEY: 2048}
+    use_case = _FakeUseCase(result=server)
+    app = _app(member=True, allow=True, create=use_case)
+    client = next(_client(app))
+    resp = client.post(
+        f"/api/communities/{community}/servers",
+        json={
+            **_create_body(),
+            "memory_limit_mb": 2048,
+            "config": {"motd": "hi", MEMORY_LIMIT_CONFIG_KEY: 2048},
+        },
+    )
+    assert resp.status_code == 201
+    assert use_case.calls[0]["config"] == {"motd": "hi", MEMORY_LIMIT_CONFIG_KEY: 2048}
+
+
 def test_create_without_memory_limit_reads_back_none() -> None:
     # Default-unset: no key, memory_limit_mb is null (#705).
     community = uuid.uuid4()
@@ -681,6 +741,80 @@ def test_update_memory_limit_denied_without_permission_is_403() -> None:
     body = resp.json()
     assert body["reason"] == "forbidden"
     assert body["permission"] == "server:update"
+
+
+def test_update_top_level_memory_limit_without_config_is_422() -> None:
+    # A top-level ``memory_limit_mb`` without a ``config`` dict is rejected:
+    # the update path does wholesale config replacement, so synthesizing a
+    # config with only the memory-limit key would wipe every other key
+    # (issue #2148).
+    app = _app(member=True, allow=True, update=_FakeUseCase())
+    client = next(_client(app))
+    resp = client.patch(
+        f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        json={"memory_limit_mb": 2048},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "memory_limit_requires_config"
+
+
+def test_update_top_level_memory_limit_merges_when_config_present() -> None:
+    # When a config dict is supplied without the key, the top-level alias is
+    # merged in (issue #2148).
+    community = uuid.uuid4()
+    server = _server_entity(community_id=community)
+    server.config = {**server.config, MEMORY_LIMIT_CONFIG_KEY: 4096}
+    update = _FakeUseCase(result=server)
+    app = _app(member=True, allow=True, update=update)
+    client = next(_client(app))
+    resp = client.patch(
+        f"/api/communities/{community}/servers/{uuid.uuid4()}",
+        json={"memory_limit_mb": 4096, "config": {"motd": "hello"}},
+    )
+    assert resp.status_code == 200
+    assert update.calls[0]["config"] == {
+        "motd": "hello",
+        MEMORY_LIMIT_CONFIG_KEY: 4096,
+    }
+
+
+def test_update_memory_limit_conflict_is_422() -> None:
+    # When both the top-level field and config key are present with different
+    # values, the endpoint rejects the request as ambiguous (issue #2148).
+    app = _app(member=True, allow=True, update=_FakeUseCase())
+    client = next(_client(app))
+    resp = client.patch(
+        f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        json={
+            "memory_limit_mb": 2048,
+            "config": {MEMORY_LIMIT_CONFIG_KEY: 4096},
+        },
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "memory_limit_conflict"
+
+
+def test_update_memory_limit_same_in_both_locations_is_accepted() -> None:
+    # When both the top-level field and config key are present with the same
+    # value, the request is accepted (no ambiguity) — issue #2148.
+    community = uuid.uuid4()
+    server = _server_entity(community_id=community)
+    server.config = {**server.config, MEMORY_LIMIT_CONFIG_KEY: 2048}
+    update = _FakeUseCase(result=server)
+    app = _app(member=True, allow=True, update=update)
+    client = next(_client(app))
+    resp = client.patch(
+        f"/api/communities/{community}/servers/{uuid.uuid4()}",
+        json={
+            "memory_limit_mb": 2048,
+            "config": {"motd": "hello", MEMORY_LIMIT_CONFIG_KEY: 2048},
+        },
+    )
+    assert resp.status_code == 200
+    assert update.calls[0]["config"] == {
+        "motd": "hello",
+        MEMORY_LIMIT_CONFIG_KEY: 2048,
+    }
 
 
 def test_update_invalid_cpu_allocation_is_422() -> None:

@@ -28,7 +28,10 @@ from urllib.parse import quote
 
 from mc_server_dashboard_api.versions.domain.catalog import VersionCatalog
 from mc_server_dashboard_api.versions.domain.errors import UnknownVersionError
-from mc_server_dashboard_api.versions.domain.fetcher import JsonFetcher
+from mc_server_dashboard_api.versions.domain.fetcher import (
+    FetchNotFoundError,
+    JsonFetcher,
+)
 from mc_server_dashboard_api.versions.domain.value_objects import (
     JarSource,
     ServerType,
@@ -71,7 +74,12 @@ class FabricCatalog(VersionCatalog):
 
     async def resolve(self, server_type: ServerType, version: str) -> JarSource:
         _require_fabric(server_type)
-        loaders_for_game = await self.fetcher.get_json(_loader_for_game_url(version))
+        try:
+            loaders_for_game = await self.fetcher.get_json(
+                _loader_for_game_url(version)
+            )
+        except FetchNotFoundError as exc:
+            raise UnknownVersionError(f"fabric {version}") from exc
         if not _entries(loaders_for_game):
             raise UnknownVersionError(f"fabric {version}")
         loaders = await self.fetcher.get_json(_LOADER_URL)

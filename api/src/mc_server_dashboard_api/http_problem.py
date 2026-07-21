@@ -30,13 +30,15 @@ from __future__ import annotations
 
 import http
 import logging
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.requests import ClientDisconnect
+from starlette.responses import Response
 
 PROBLEM_CONTENT_TYPE = "application/problem+json"
 
@@ -227,6 +229,8 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     exception internals (no message, no path), keeping one error shape (#371).
     """
 
+    if _is_client_disconnect(exc):
+        raise  # let Starlette handle normally (issue #2161)
     _logger.exception(
         "unhandled exception serving %s %s",
         request.method,
@@ -245,13 +249,59 @@ def _generic_reason(status_code: int) -> str:
     return phrase.lower().replace(" ", "_").replace("-", "_") or "error"
 
 
+def _is_client_disconnect(exc: Exception) -> bool:
+    """Return True for exceptions that indicate a client disconnection.
+
+    These are operational non-errors — the client hung up — and must not be
+    logged at ERROR or counted as 500s (issue #2161).
+    """
+
+    if isinstance(exc, ClientDisconnect):
+        return True
+    # BaseHTTPMiddleware raises ``RuntimeError("No response returned.")`` when
+    # the inner app produces no response, which happens on client disconnect.
+    if isinstance(exc, RuntimeError) and str(exc) == "No response returned.":
+        return True
+    return False
+
+
+async def unhandled_exception_middleware(
+    request: Request, call_next: Callable[[Request], Awaitable[Response]]
+) -> Response:
+    """Catch-all middleware for unhandled exceptions (issue #1951).
+
+    Registered as the innermost user middleware (first ``app.middleware("http")``
+    call, just outside routing) so the 500 response flows outward through all
+    user middleware — correlation-ID, security headers, metrics — which the
+    ``add_exception_handler(Exception, ...)`` belt-and-braces path bypasses
+    (Starlette attaches it to ``ServerErrorMiddleware``, outside user middleware).
+    """
+
+    try:
+        return await call_next(request)
+    except Exception as exc:  # noqa: BLE001 — intentional catch-all
+        if _is_client_disconnect(exc):
+            raise  # let Starlette handle normally (issue #2161)
+        _logger.exception(
+            "unhandled exception serving %s %s",
+            request.method,
+            request.url.path,
+            exc_info=exc,
+        )
+        return problem_response(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, INTERNAL_ERROR_REASON
+        )
+
+
 def install_problem_handlers(app: FastAPI) -> None:
     """Wire the problem+json handlers onto ``app`` (called from the app factory)."""
 
     app.add_exception_handler(ProblemException, problem_exception_handler)  # type: ignore[arg-type]
     app.add_exception_handler(StarletteHTTPException, http_exception_handler)  # type: ignore[arg-type]
     app.add_exception_handler(RequestValidationError, validation_exception_handler)  # type: ignore[arg-type]
-    # Last-resort catch-all so an unexpected exception (e.g. an OSError escaping a
-    # route) is normalized to problem+json instead of a bare text/plain 500 that
-    # breaks the RFC 9457 contract (issue #542).
+    # Belt-and-braces: keep the exception-handler registration so an exception
+    # that somehow escapes the middleware (e.g. during lifespan) still renders
+    # problem+json instead of a bare text/plain 500. The middleware registered
+    # in app.py (``unhandled_exception_middleware``) is the primary catch-all
+    # and runs inside user middleware (issue #1951).
     app.add_exception_handler(Exception, unhandled_exception_handler)

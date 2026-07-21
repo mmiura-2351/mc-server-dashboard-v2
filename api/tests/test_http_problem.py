@@ -13,10 +13,17 @@ from fastapi import FastAPI, status
 from fastapi.testclient import TestClient
 from pydantic import BaseModel, Field
 
+from mc_server_dashboard_api.core.adapters.metrics import REGISTRY
+from mc_server_dashboard_api.core.adapters.metrics_middleware import metrics_middleware
 from mc_server_dashboard_api.http_problem import (
     ProblemException,
     install_problem_handlers,
     problem,
+    unhandled_exception_middleware,
+)
+from mc_server_dashboard_api.middleware import (
+    correlation_id_middleware,
+    security_headers_middleware,
 )
 
 
@@ -151,3 +158,177 @@ def test_validation_error_entries_omit_input_and_ctx() -> None:
     assert entry["loc"] == ["body", "password"]
     assert entry["type"] == "string_too_long"
     assert isinstance(entry["msg"], str) and entry["msg"]
+
+
+# -- Regression tests: unhandled 500 must flow through user middleware (#1951) --
+
+
+def _client_with_middleware() -> TestClient:
+    """Build a test app with the full user middleware stack.
+
+    Mirrors the ``app.py`` registration order so the 500 response produced by
+    ``unhandled_exception_middleware`` flows through correlation-ID, security
+    headers, and metrics middleware — the exact path that was broken before
+    issue #1951.
+    """
+
+    app = FastAPI()
+    install_problem_handlers(app)
+    # Same registration order as app.py: innermost first.
+    app.middleware("http")(unhandled_exception_middleware)
+    app.middleware("http")(correlation_id_middleware)
+    app.middleware("http")(security_headers_middleware)
+    app.middleware("http")(metrics_middleware)
+
+    @app.get("/boom")
+    def boom() -> None:
+        raise RuntimeError("kaboom")
+
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def test_unhandled_500_carries_security_headers() -> None:
+    """An unhandled-exception 500 must carry the defence-in-depth security
+    headers (issue #1951). Before the fix, ``add_exception_handler(Exception)``
+    ran outside all user middleware, so the 500 had no security headers."""
+
+    resp = _client_with_middleware().get("/boom")
+    assert resp.status_code == 500
+    assert resp.headers["content-type"] == "application/problem+json"
+    assert resp.headers["Content-Security-Policy"]
+    assert resp.headers["X-Frame-Options"] == "DENY"
+    assert resp.headers["X-Content-Type-Options"] == "nosniff"
+    assert resp.headers["Referrer-Policy"] == "strict-origin-when-cross-origin"
+    assert resp.headers["Permissions-Policy"]
+
+
+def test_unhandled_500_carries_correlation_id() -> None:
+    """An unhandled-exception 500 must echo back the correlation ID
+    (issue #1951). Before the fix, the 500 bypassed the correlation-ID
+    middleware so no X-Correlation-ID header was set."""
+
+    client = _client_with_middleware()
+    # With an inbound correlation ID.
+    resp = client.get("/boom", headers={"X-Correlation-ID": "trace-abc"})
+    assert resp.status_code == 500
+    assert resp.headers["X-Correlation-ID"] == "trace-abc"
+    # Without an inbound correlation ID — one must still be minted.
+    resp = client.get("/boom")
+    assert resp.status_code == 500
+    assert resp.headers.get("X-Correlation-ID")
+
+
+def test_unhandled_500_increments_metrics() -> None:
+    """An unhandled-exception 500 must be visible to ``http_requests_total``
+    (issue #1951). Before the fix, the 500 bypassed the metrics middleware
+    so it was invisible to the counter."""
+
+    client = _client_with_middleware()
+    # Snapshot the counter before the request. The label combination for
+    # an unmatched-template GET 500 is method=GET, route=<unmatched> or
+    # the actual template, status=500. We check any 500 increment.
+    before = (
+        REGISTRY.get_sample_value(
+            "http_requests_total",
+            {"method": "GET", "route": "/boom", "status": "500"},
+        )
+        or 0.0
+    )
+    client.get("/boom")
+    after = (
+        REGISTRY.get_sample_value(
+            "http_requests_total",
+            {"method": "GET", "route": "/boom", "status": "500"},
+        )
+        or 0.0
+    )
+    assert after == before + 1
+
+
+# -- Disconnect filtering: client disconnects must not be logged/counted as 500 --
+
+
+def test_client_disconnect_exception_is_not_swallowed() -> None:
+    """A ``ClientDisconnect`` must be re-raised, not caught and logged as a 500
+    (issue #2161). The middleware must let Starlette handle it normally."""
+
+    from starlette.requests import ClientDisconnect
+
+    app = FastAPI()
+    install_problem_handlers(app)
+    app.middleware("http")(unhandled_exception_middleware)
+
+    @app.get("/disconnect")
+    def disconnect() -> None:
+        raise ClientDisconnect()
+
+    client = TestClient(app, raise_server_exceptions=False)
+    # ClientDisconnect re-raised → Starlette's ServerErrorMiddleware handles it,
+    # which returns a plain 500 (not our problem+json 500 with internal_error
+    # reason). The key assertion is that it does NOT produce a problem+json body
+    # with reason=internal_error.
+    resp = client.get("/disconnect")
+    # It should NOT be our custom internal_error response.
+    if resp.headers.get("content-type", "").startswith("application/problem+json"):
+        body = resp.json()
+        assert body.get("reason") != "internal_error", (
+            "ClientDisconnect was caught by the middleware and logged as a 500"
+        )
+
+
+def test_no_response_returned_runtime_error_is_not_swallowed() -> None:
+    """A ``RuntimeError("No response returned.")`` from BaseHTTPMiddleware
+    internals must be re-raised, not caught and logged as a 500
+    (issue #2161)."""
+
+    app = FastAPI()
+    install_problem_handlers(app)
+    app.middleware("http")(unhandled_exception_middleware)
+
+    @app.get("/no-response")
+    def no_response() -> None:
+        raise RuntimeError("No response returned.")
+
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.get("/no-response")
+    if resp.headers.get("content-type", "").startswith("application/problem+json"):
+        body = resp.json()
+        assert body.get("reason") != "internal_error", (
+            "No-response-returned RuntimeError was caught by the middleware"
+        )
+
+
+def test_disconnect_does_not_increment_500_metrics() -> None:
+    """A client disconnect must NOT increment ``http_requests_total`` with
+    status=500 (issue #2161)."""
+
+    from starlette.requests import ClientDisconnect
+
+    app = FastAPI()
+    install_problem_handlers(app)
+    app.middleware("http")(unhandled_exception_middleware)
+    app.middleware("http")(metrics_middleware)
+
+    @app.get("/disconnect-metrics")
+    def disconnect_metrics() -> None:
+        raise ClientDisconnect()
+
+    client = TestClient(app, raise_server_exceptions=False)
+    before = (
+        REGISTRY.get_sample_value(
+            "http_requests_total",
+            {"method": "GET", "route": "/disconnect-metrics", "status": "500"},
+        )
+        or 0.0
+    )
+    client.get("/disconnect-metrics")
+    after = (
+        REGISTRY.get_sample_value(
+            "http_requests_total",
+            {"method": "GET", "route": "/disconnect-metrics", "status": "500"},
+        )
+        or 0.0
+    )
+    assert after == before, (
+        f"500 metric incremented by {after - before} for a client disconnect"
+    )

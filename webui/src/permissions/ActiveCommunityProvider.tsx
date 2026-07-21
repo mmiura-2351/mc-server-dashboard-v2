@@ -35,6 +35,12 @@ interface ActiveCommunityValue {
    * top-bar switcher so it reuses the same query instead of re-fetching.
    */
   communities: Community[] | undefined;
+  /** True when fetching communities has failed (all retries exhausted). */
+  communitiesError: boolean;
+  /** True while a communities fetch is in flight (initial or background). */
+  communitiesFetching: boolean;
+  /** Re-fetch the communities list (e.g. after an error). */
+  refetchCommunities: () => void;
 }
 
 const ActiveCommunityContext = createContext<ActiveCommunityValue | null>(null);
@@ -51,38 +57,61 @@ function useCommunities(signedIn: boolean) {
 export function ActiveCommunityProvider({ children }: { children: ReactNode }) {
   const { status } = useSession();
   const signedIn = status === "signed-in";
-  const { data: communities } = useCommunities(signedIn);
+  const {
+    data: communities,
+    isError: communitiesError,
+    isFetching: communitiesFetching,
+    refetch: refetchCommunities,
+  } = useCommunities(signedIn);
 
-  // null = no explicit selection yet; we fall back to the first community once
-  // the list arrives. An explicit setCommunityId(...) wins over the default.
+  // null = no explicit selection yet; we derive the default from the community
+  // list at render time. An explicit setCommunityId(...) wins over the default.
   const [selected, setSelected] = useState<string | null>(null);
-  const [touched, setTouched] = useState(false);
 
   const setCommunityId = useCallback((id: string | null) => {
-    setTouched(true);
     setSelected(id);
   }, []);
 
-  // Default to the first community once the list loads, unless the user (or a
-  // future switcher) has already chosen one.
-  useEffect(() => {
-    if (!touched && communities !== undefined) {
-      setSelected(communities.length > 0 ? communities[0].id : null);
-    }
-  }, [touched, communities]);
+  // Derive the effective community id at render time. When the user has
+  // explicitly selected a community, verify it still exists in the list; if it
+  // vanished (removed by an owner, or community deleted) fall back to the first
+  // community (or null when the list is empty). This also handles the
+  // self-delete flow where setCommunityId(null) is called while the user still
+  // belongs to other communities (issue #2015).
+  const communityId =
+    communities !== undefined &&
+    selected !== null &&
+    communities.some((c) => c.id === selected)
+      ? selected
+      : (communities?.[0]?.id ?? null);
 
   // Dropping out of the signed-in state clears the selection so a later
   // sign-in re-derives the default rather than reusing a stale id.
   useEffect(() => {
     if (!signedIn) {
       setSelected(null);
-      setTouched(false);
     }
   }, [signedIn]);
 
   const value = useMemo<ActiveCommunityValue>(
-    () => ({ communityId: selected, setCommunityId, communities }),
-    [selected, setCommunityId, communities],
+    () => ({
+      communityId,
+      setCommunityId,
+      communities,
+      communitiesError,
+      communitiesFetching,
+      refetchCommunities: () => {
+        refetchCommunities();
+      },
+    }),
+    [
+      communityId,
+      setCommunityId,
+      communities,
+      communitiesError,
+      communitiesFetching,
+      refetchCommunities,
+    ],
   );
 
   return (

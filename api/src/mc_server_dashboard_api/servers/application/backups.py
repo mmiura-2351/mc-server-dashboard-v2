@@ -588,10 +588,12 @@ async def _ingest_ghost(
     # claiming a manual upload.
     recovered = await uow.plugins.find_catalog_provenance_by_sha512(checksum)
     if recovered is not None:
-        source, source_project_id = recovered
+        source, source_project_id, source_version_id, version_number = recovered
     else:
         source = PluginSource.UNKNOWN
         source_project_id = None
+        source_version_id = None
+        version_number = None
 
     plugin = ServerPlugin(
         id=PluginId.new(),
@@ -603,8 +605,8 @@ async def _ingest_ghost(
         loader_type=loader_type,
         source=source,
         source_project_id=source_project_id,
-        source_version_id=None,
-        version_number=None,
+        source_version_id=source_version_id,
+        version_number=version_number,
         checksum_sha512=checksum,
         sha256=sha256,
         size_bytes=len(jar_bytes),

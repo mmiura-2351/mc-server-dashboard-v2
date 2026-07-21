@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -530,6 +531,143 @@ func TestSweepSnapshotSpoolsRemovesLeftoverSpools(t *testing.T) {
 func TestSweepSnapshotSpoolsMissingRootIsNoOp(t *testing.T) {
 	// A worker with no scratch root yet must not panic or error (best-effort).
 	SweepSnapshotSpools(filepath.Join(t.TempDir(), "absent"))
+}
+
+// PackSnapshot creates a tar spool in the scratch root (srcDir's parent) that
+// contains the working set, and its cleanup function removes the spool (issue #1710).
+func TestPackSnapshotSpoolsToScratchRoot(t *testing.T) {
+	scratch := t.TempDir()
+	srcDir := filepath.Join(scratch, "server")
+	if err := os.MkdirAll(filepath.Join(srcDir, "world"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "server.properties"), []byte("p"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "world", "level.dat"), []byte("w"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	c := New(nil) // no http.Client needed for packing
+	spoolPath, cleanup, err := c.PackSnapshot(context.Background(), srcDir)
+	if err != nil {
+		t.Fatalf("PackSnapshot: %v", err)
+	}
+	// The spool must exist in the scratch root with the expected prefix.
+	if filepath.Dir(spoolPath) != scratch {
+		t.Fatalf("spool dir = %q, want %q (the scratch root)", filepath.Dir(spoolPath), scratch)
+	}
+	if !strings.HasPrefix(filepath.Base(spoolPath), snapshotSpoolPrefix) {
+		t.Fatalf("spool name = %q, want prefix %q", filepath.Base(spoolPath), snapshotSpoolPrefix)
+	}
+	if !strings.HasSuffix(spoolPath, ".tar") {
+		t.Fatalf("spool name = %q, want .tar suffix", filepath.Base(spoolPath))
+	}
+	// The spool must round-trip the working set.
+	f, err := os.Open(spoolPath)
+	if err != nil {
+		t.Fatalf("open spool: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	files := map[string]string{}
+	tr := tar.NewReader(f)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if h.Typeflag == tar.TypeReg {
+			b, _ := io.ReadAll(tr)
+			files[h.Name] = string(b)
+		}
+	}
+	if files["server.properties"] != "p" || files["world/level.dat"] != "w" {
+		t.Fatalf("spool tar = %v", files)
+	}
+	// Cleanup removes the spool.
+	cleanup()
+	if _, err := os.Stat(spoolPath); !os.IsNotExist(err) {
+		t.Fatalf("spool not removed by cleanup: stat err = %v", err)
+	}
+}
+
+// UploadSnapshot streams the spool file with the correct headers and returns
+// the API's generation from the response (issue #1710).
+func TestUploadSnapshotStreamsSpoolWithHeaders(t *testing.T) {
+	// Create a spool from a real working set using PackSnapshot.
+	scratch := t.TempDir()
+	srcDir := filepath.Join(scratch, "server")
+	if err := os.MkdirAll(srcDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "server.properties"), []byte("p"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	c := New(nil)
+	spoolPath, cleanup, err := c.PackSnapshot(context.Background(), srcDir)
+	if err != nil {
+		t.Fatalf("PackSnapshot: %v", err)
+	}
+	defer cleanup()
+
+	var gotLen int64
+	var gotBaseGen string
+	var gotWorkerID string
+	var gotAuth string
+	var received []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotLen = r.ContentLength
+		gotBaseGen = r.Header.Get("X-Working-Set-Base-Generation")
+		gotWorkerID = r.Header.Get("X-Worker-Id")
+		gotAuth = r.Header.Get("Authorization")
+		received, _ = io.ReadAll(r.Body)
+		w.Header().Set("X-Working-Set-Generation", "42")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	uploadClient := New(srv.Client())
+	gen, err := uploadClient.UploadSnapshot(context.Background(), srv.URL, "tok", spoolPath, 7, "worker-7")
+	if err != nil {
+		t.Fatalf("UploadSnapshot: %v", err)
+	}
+	if gen != 42 {
+		t.Fatalf("generation = %d, want 42", gen)
+	}
+	if gotAuth != "Bearer tok" {
+		t.Fatalf("Authorization = %q, want %q", gotAuth, "Bearer tok")
+	}
+	if gotBaseGen != "7" {
+		t.Fatalf("X-Working-Set-Base-Generation = %q, want %q", gotBaseGen, "7")
+	}
+	if gotWorkerID != "worker-7" {
+		t.Fatalf("X-Worker-Id = %q, want %q", gotWorkerID, "worker-7")
+	}
+	if gotLen <= 0 || gotLen != int64(len(received)) {
+		t.Fatalf("Content-Length = %d, body len = %d (must match and be > 0)", gotLen, len(received))
+	}
+	// The uploaded tar must contain the packed file.
+	files := map[string]string{}
+	tarR := tar.NewReader(bytes.NewReader(received))
+	for {
+		h, err := tarR.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if h.Typeflag == tar.TypeReg {
+			b, _ := io.ReadAll(tarR)
+			files[h.Name] = string(b)
+		}
+	}
+	if files["server.properties"] != "p" {
+		t.Fatalf("uploaded tar = %v", files)
+	}
 }
 
 func TestSnapshotEmptyDirUploadsEmptyTar(t *testing.T) {
@@ -1110,7 +1248,7 @@ func TestHydrateRestoresOldCopyWhenSwapRenameFails(t *testing.T) {
 	}
 
 	body := tarOf(map[string]string{"level.dat": "new-world"})
-	err := unpackAndSwap(bytes.NewReader(body), dest)
+	err := unpackAndSwap(bytes.NewReader(body), dest, 0)
 	if err == nil {
 		t.Fatal("expected unpackAndSwap to fail when the swap rename fails")
 	}
@@ -1292,7 +1430,7 @@ func TestSwapAsidesOldCopyToDisplacedNotTrash(t *testing.T) {
 	defer func() { swapRename = orig }()
 
 	body := tarOf(map[string]string{"server.properties": "fresh"})
-	if err := unpackAndSwap(bytes.NewReader(body), dest); err == nil {
+	if err := unpackAndSwap(bytes.NewReader(body), dest, 0); err == nil {
 		t.Fatal("expected unpackAndSwap to fail when the swap rename fails")
 	}
 
@@ -1367,7 +1505,7 @@ func TestHydrateNeverDeletesOnlyCopyOnSwapFailure(t *testing.T) {
 	}
 
 	body := tarOf(map[string]string{"level.dat": "new-world"})
-	if err := unpackAndSwap(bytes.NewReader(body), dest); err == nil {
+	if err := unpackAndSwap(bytes.NewReader(body), dest, 0); err == nil {
 		t.Fatal("expected unpackAndSwap to fail when the swap rename fails")
 	}
 
@@ -1381,5 +1519,151 @@ func TestHydrateNeverDeletesOnlyCopyOnSwapFailure(t *testing.T) {
 	if !recovered {
 		t.Fatalf("only copy of the world lost on swap failure (issue #910): dest=%v/%q displaced=%v/%q",
 			errDest, atDest, errDisp, atDisplaced)
+	}
+}
+
+// The generation marker must be present in the temp tree BEFORE the swap-in rename
+// (issue #917 bug 1): if it is written after the swap, a crash between swap-in and
+// marker write leaves a destDir with no marker — the API reads gen 0, re-dispatches
+// hydrate, and the retry's RemoveAll destroys the recovery copy.
+func TestGenerationMarkerPresentAtSwapTime(t *testing.T) {
+	const servedGen uint64 = 42
+	body := tarOf(map[string]string{"server.properties": "new"})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Working-Set-Generation", strconv.FormatUint(servedGen, 10))
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	scratch := t.TempDir()
+	dest := filepath.Join(scratch, "server")
+
+	// Inject a swapRename that inspects the temp tree for the marker at swap-in
+	// time, then proceeds with the real rename.
+	orig := swapRename
+	var markerAtSwap string
+	swapRename = func(src, dst string) error {
+		data, err := os.ReadFile(filepath.Join(src, generationMarkerFile))
+		if err != nil {
+			markerAtSwap = ""
+		} else {
+			markerAtSwap = string(data)
+		}
+		return os.Rename(src, dst)
+	}
+	defer func() { swapRename = orig }()
+
+	c := New(srv.Client())
+	gen, err := c.Hydrate(context.Background(), srv.URL, "tok", dest)
+	if err != nil {
+		t.Fatalf("Hydrate: %v", err)
+	}
+	if gen != servedGen {
+		t.Fatalf("generation = %d, want %d", gen, servedGen)
+	}
+	if markerAtSwap != strconv.FormatUint(servedGen, 10) {
+		t.Fatalf("marker at swap-in time = %q, want %q (issue #917: marker must be written before swap)",
+			markerAtSwap, strconv.FormatUint(servedGen, 10))
+	}
+}
+
+// Prior displaced tree must survive a swap failure when both destDir and
+// .displaced-<id> exist (issue #917 bug 2): the prior displaced must not be deleted
+// before the swap-in succeeds, so a swap failure leaves both the old destDir and the
+// prior displaced recoverable.
+func TestPriorDisplacedSurvivesSwapFailure(t *testing.T) {
+	orig := swapRename
+	swapRename = func(_, _ string) error { return errors.New("forced swap failure") }
+	defer func() { swapRename = orig }()
+
+	scratch := t.TempDir()
+	dest := filepath.Join(scratch, "server")
+	if err := os.MkdirAll(dest, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dest, "gen"), []byte("current"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	// A prior displaced tree from a previous hydrate.
+	displaced := filepath.Join(scratch, ".displaced-server")
+	if err := os.MkdirAll(displaced, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(displaced, "gen"), []byte("prior-displaced"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	body := tarOf(map[string]string{"server.properties": "new"})
+	if err := unpackAndSwap(bytes.NewReader(body), dest, 99); err == nil {
+		t.Fatal("expected unpackAndSwap to fail when the swap rename fails")
+	}
+
+	// The prior displaced tree must survive (not be deleted before the swap succeeded).
+	got, err := os.ReadFile(filepath.Join(displaced, "gen"))
+	if err != nil {
+		t.Fatalf("prior displaced tree lost on swap failure (issue #917): %v", err)
+	}
+	if string(got) != "prior-displaced" {
+		t.Fatalf("prior displaced content = %q, want %q", got, "prior-displaced")
+	}
+	// The current working set must also be restored.
+	got, err = os.ReadFile(filepath.Join(dest, "gen"))
+	if err != nil {
+		t.Fatalf("current working set not restored: %v", err)
+	}
+	if string(got) != "current" {
+		t.Fatalf("destDir content = %q, want %q", got, "current")
+	}
+}
+
+// At swap-in time, the prior displaced content ("prior") must still exist under
+// some name (issue #917 bug 2): it must not be deleted before the swap-in rename,
+// so a crash at that instant does not lose the recovery copy. Note that
+// .displaced-<id> itself always holds the just-displaced destDir ("current") at
+// swap time, so the test must search ALL entries for the "prior" content — checking
+// only .displaced-<id> is vacuous and would pass even with eager deletion.
+func TestPriorDisplacedNotDeletedAtSwapTime(t *testing.T) {
+	scratch := t.TempDir()
+	dest := filepath.Join(scratch, "server")
+	if err := os.MkdirAll(dest, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dest, "gen"), []byte("current"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	displaced := filepath.Join(scratch, ".displaced-server")
+	if err := os.MkdirAll(displaced, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(displaced, "gen"), []byte("prior"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := swapRename
+	var priorContentFoundAtSwap bool
+	swapRename = func(src, dst string) error {
+		// At swap-in time the filesystem state is:
+		//   .displaced-server                   → holds "current" (just-displaced destDir)
+		//   .hydrate-server-prior-displaced-*   → holds "prior"  (renamed aside)
+		// Search ALL entries under scratch for a "gen" file containing "prior".
+		entries, _ := os.ReadDir(scratch)
+		for _, e := range entries {
+			p := filepath.Join(scratch, e.Name(), "gen")
+			if d, rerr := os.ReadFile(p); rerr == nil && string(d) == "prior" {
+				priorContentFoundAtSwap = true
+				break
+			}
+		}
+		return os.Rename(src, dst)
+	}
+	defer func() { swapRename = orig }()
+
+	body := tarOf(map[string]string{"server.properties": "new"})
+	if err := unpackAndSwap(bytes.NewReader(body), dest, 99); err != nil {
+		t.Fatalf("unpackAndSwap: %v", err)
+	}
+
+	if !priorContentFoundAtSwap {
+		t.Fatal("prior displaced content was deleted before swap-in (issue #917: must defer deletion)")
 	}
 }

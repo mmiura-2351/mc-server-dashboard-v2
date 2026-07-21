@@ -107,7 +107,14 @@ class EnsureJar:
             # source fingerprint matches (same build) OR when we can prove
             # identity via SHA-256 (Paper back-compat shortcut: the pool key IS
             # the published sha256, so no recorded fingerprint is needed).
-            if known_source == fingerprint:
+            # Defense-in-depth (#1965): when the source publishes a SHA-256
+            # digest, additionally verify that known_key matches the expected
+            # hash, so a tampered key cannot hijack the fingerprint fast path.
+            if known_source == fingerprint and not (
+                source.hash_algorithm is HashAlgorithm.SHA256
+                and source.expected_hash is not None
+                and known_key.lower() != source.expected_hash.lower()
+            ):
                 return EnsuredJar(known_key, fingerprint)
             if (
                 source.hash_algorithm is HashAlgorithm.SHA256
