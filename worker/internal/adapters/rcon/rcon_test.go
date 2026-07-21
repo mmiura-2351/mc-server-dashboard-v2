@@ -5,7 +5,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"math"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -431,6 +433,90 @@ func TestExecuteFragmentedThenNormal(t *testing.T) {
 	}
 	if want := "There are 0 players online"; out2 != want {
 		t.Fatalf("Execute(list) = %q, want %q", out2, want)
+	}
+}
+
+// Execute must reject a reassembled response whose total size exceeds
+// maxResponseSize, returning ErrResponseTooLarge.
+func TestExecuteRejectsOversizedResponse(t *testing.T) {
+	srv, cli := net.Pipe()
+	t.Cleanup(func() { _ = cli.Close() })
+
+	go func() {
+		defer func() { _ = srv.Close() }()
+		// Read the command and marker packets from Execute.
+		cmdID, _, _, err := readPacket(srv)
+		if err != nil {
+			return
+		}
+		_, _, _, err = readPacket(srv) // marker
+		if err != nil {
+			return
+		}
+		// Send fragments totalling > maxResponseSize.
+		frag := strings.Repeat("X", 4096)
+		for i := 0; i < 300; i++ {
+			if err := writePacket(srv, cmdID, typeResponseValue, frag); err != nil {
+				return
+			}
+		}
+	}()
+
+	c := &Client{conn: cli, nextID: 1}
+	_, err := c.Execute(context.Background(), "list")
+	if !errors.Is(err, ErrResponseTooLarge) {
+		t.Fatalf("Execute error = %v, want ErrResponseTooLarge", err)
+	}
+}
+
+// id() must stay positive and never return -1 (the auth-failure sentinel),
+// even after int32 overflow.
+func TestIDWrapsPositiveAndSkipsNegativeOne(t *testing.T) {
+	c := &Client{nextID: math.MaxInt32 - 1}
+
+	ids := make([]int32, 5)
+	for i := range ids {
+		ids[i] = c.id()
+	}
+	for i, id := range ids {
+		if id < 0 {
+			t.Fatalf("id() call %d returned negative id %d", i, id)
+		}
+		if id == -1 {
+			t.Fatalf("id() call %d returned -1 (auth-failure sentinel)", i)
+		}
+	}
+}
+
+// The reassembly loop must reject a fragment whose packet type is not
+// typeResponseValue, surfacing a protocol desync error.
+func TestExecuteRejectsWrongPacketType(t *testing.T) {
+	srv, cli := net.Pipe()
+	t.Cleanup(func() { _ = cli.Close() })
+
+	go func() {
+		defer func() { _ = srv.Close() }()
+		// Read the command and marker packets.
+		cmdID, _, _, err := readPacket(srv)
+		if err != nil {
+			return
+		}
+		_, _, _, err = readPacket(srv) // marker
+		if err != nil {
+			return
+		}
+		// Send one valid fragment, then a fragment with the wrong packet type.
+		_ = writePacket(srv, cmdID, typeResponseValue, "good")
+		_ = writePacket(srv, cmdID, typeAuth, "bad-type")
+	}()
+
+	c := &Client{conn: cli, nextID: 1}
+	_, err := c.Execute(context.Background(), "list")
+	if err == nil {
+		t.Fatal("Execute accepted a fragment with wrong packet type, want error")
+	}
+	if !strings.Contains(err.Error(), "unexpected packet type") {
+		t.Fatalf("Execute error = %v, want error mentioning unexpected packet type", err)
 	}
 }
 
