@@ -504,8 +504,8 @@ func TestRedialAfterPumpDropAppliesBackoff(t *testing.T) {
 
 	// The run loop must call afterFunc with the correct backoff delay
 	// after the pump returns. With fastBackoff (Initial=1ms) and
-	// randFloat=0.5, Delay(0, 0.5) = 500ns (attempt is 0 because a
-	// successful handshake resets it).
+	// randFloat=0.5, Delay(0, 0.5) = 500ns (attempt starts at 0; an instant
+	// pump drop does not reset it, but it was already 0).
 	want := m.backoff.Delay(0, 0.5)
 	select {
 	case got := <-afterCalled:
@@ -520,6 +520,110 @@ func TestRedialAfterPumpDropAppliesBackoff(t *testing.T) {
 	second := relay.waitAccepted(t)
 	if second.hello.GetToken() != first.hello.GetToken() {
 		t.Fatalf("redial token = %q, want %q", second.hello.GetToken(), first.hello.GetToken())
+	}
+}
+
+// Repeated instant displacements (pump returns well under minStableDuration)
+// must escalate the backoff delay rather than staying at Delay(0) forever
+// (issue #2153: two workers with the same token displacing each other).
+func TestInstantDisplacementEscalatesBackoff(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	relay := newFakeRelay(t, nil)
+	geyser := newFakeGeyser(t)
+	m := newTestManager(ctx, t)
+	m.dialUDP = dialToGeyser(geyser)
+	m.randFloat = func() float64 { return 0.5 }
+
+	afterCalled := make(chan time.Duration, 16)
+	m.afterFunc = func(d time.Duration) <-chan time.Time {
+		afterCalled <- d
+		ch := make(chan time.Time, 1)
+		ch <- time.Now()
+		return ch
+	}
+
+	if err := m.Open(specFor(relay, "s1", "tok")); err != nil {
+		t.Fatalf("Open = %v, want nil", err)
+	}
+
+	// Drop three successive connections; the pump runs for less than
+	// minStableDuration (fastBackoff's default) each time, so the backoff
+	// must escalate. Send a datagram before each drop to prove the pump is
+	// running (the Worker finished handshake and entered pump).
+	for i := range 3 {
+		conn := relay.waitAccepted(t)
+		sendFlowDatagram(t, conn.conn, 1, "ping")
+		_ = conn.conn.CloseWithError(0, "simulated displacement")
+
+		want := m.backoff.Delay(i, 0.5)
+		select {
+		case got := <-afterCalled:
+			if got != want {
+				t.Fatalf("drop %d: backoff delay = %v, want %v (attempt %d)", i, got, want, i)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("drop %d: afterFunc not called within 5s", i)
+		}
+	}
+}
+
+// A connection that survives longer than minStableDuration resets the backoff
+// counter, so the next drop starts the sequence over (issue #2153).
+func TestStableConnectionResetsBackoff(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	relay := newFakeRelay(t, nil)
+	geyser := newFakeGeyser(t)
+	m := newTestManager(ctx, t)
+	m.dialUDP = dialToGeyser(geyser)
+	m.randFloat = func() float64 { return 0.5 }
+	// Set a short stable threshold so the test can sleep past it.
+	m.minStableDuration = 50 * time.Millisecond
+
+	afterCalled := make(chan time.Duration, 16)
+	m.afterFunc = func(d time.Duration) <-chan time.Time {
+		afterCalled <- d
+		ch := make(chan time.Time, 1)
+		ch <- time.Now()
+		return ch
+	}
+
+	if err := m.Open(specFor(relay, "s1", "tok")); err != nil {
+		t.Fatalf("Open = %v, want nil", err)
+	}
+
+	// First connection: instant drop → attempt escalates (delay at attempt 0).
+	first := relay.waitAccepted(t)
+	sendFlowDatagram(t, first.conn, 1, "ping")
+	_ = first.conn.CloseWithError(0, "instant drop")
+
+	select {
+	case got := <-afterCalled:
+		if want := m.backoff.Delay(0, 0.5); got != want {
+			t.Fatalf("first drop: backoff = %v, want %v", got, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("first drop: afterFunc not called")
+	}
+
+	// Second connection: let the pump run past minStableDuration so the
+	// backoff resets on drop.
+	second := relay.waitAccepted(t)
+	sendFlowDatagram(t, second.conn, 1, "ping")
+	time.Sleep(100 * time.Millisecond) // > 50ms threshold
+	_ = second.conn.CloseWithError(0, "drop after stable")
+
+	select {
+	case got := <-afterCalled:
+		// After a stable connection, attempt resets to 0.
+		if want := m.backoff.Delay(0, 0.5); got != want {
+			t.Fatalf("stable drop: backoff = %v, want %v (should have reset)", got, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stable drop: afterFunc not called")
 	}
 }
 

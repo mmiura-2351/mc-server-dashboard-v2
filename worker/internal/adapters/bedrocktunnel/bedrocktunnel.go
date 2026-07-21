@@ -70,6 +70,13 @@ const flowIDSize = 4
 // message to buffer (mirrors relay/internal/bedrock.maxHandshakeMessageBytes).
 const maxHandshakeMessageBytes = 256
 
+// defaultMinStableDuration is the minimum time a connection must survive
+// pumping before it is considered stable enough to reset the backoff counter.
+// Without this, two Workers with the same token displace each other on every
+// handshake, each connection succeeds briefly then drops, and the backoff
+// stays at Delay(0) forever (issue #2153).
+const defaultMinStableDuration = 10 * time.Second
+
 // Spec is everything one OpenBedrockTunnel command needs to open (or redial) a
 // tunnel (docs/app/BEDROCK_TUNNEL.md Section 3).
 type Spec struct {
@@ -124,6 +131,9 @@ type Manager struct {
 	// tests verify delay behavior without wall-clock waits. Defaults to
 	// time.After.
 	afterFunc func(time.Duration) <-chan time.Time
+	// minStableDuration is the minimum pump lifetime before a connection is
+	// considered stable enough to reset the backoff counter (issue #2153).
+	minStableDuration time.Duration
 
 	mu      sync.Mutex
 	tunnels map[string]*tunnelHandle
@@ -166,6 +176,7 @@ func New(baseCtx context.Context, gameBindIP string, gameHost func(serverID stri
 		return d.DialContext(ctx, "udp", addr)
 	}
 	m.afterFunc = time.After
+	m.minStableDuration = defaultMinStableDuration
 	return m
 }
 
@@ -251,14 +262,17 @@ func (m *Manager) run(ctx context.Context, handle *tunnelHandle, spec Spec, tlsC
 			m.logger.Warn("bedrock tunnel dial/handshake failed; retrying",
 				"server_id", spec.ServerID, "error", err)
 		} else {
-			// A successful handshake resets the backoff counter, mirroring
-			// session.Runner.Run: the next drop starts the sequence over
-			// rather than inheriting the growth from earlier failures.
-			attempt = 0
 			m.logger.Info("bedrock tunnel established", "server_id", spec.ServerID, "bedrock_port", spec.BedrockPort)
+			connStart := time.Now()
 			m.pump(ctx, conn, spec)
 			// pump returned: either ctx was cancelled (checked below) or
 			// the connection dropped — both fall through to the backoff.
+			// Only reset the backoff when the connection survived long
+			// enough to be considered stable; an instant displacement
+			// (the duel scenario, issue #2153) keeps escalating.
+			if time.Since(connStart) > m.minStableDuration {
+				attempt = 0
+			}
 		}
 
 		if ctx.Err() != nil {
