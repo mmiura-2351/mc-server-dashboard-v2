@@ -78,8 +78,8 @@ class FabricCatalog(VersionCatalog):
             loaders_for_game = await self.fetcher.get_json(
                 _loader_for_game_url(version)
             )
-        except FetchNotFoundError:
-            raise UnknownVersionError(f"fabric {version}")
+        except FetchNotFoundError as exc:
+            raise UnknownVersionError(f"fabric {version}") from exc
         if not _entries(loaders_for_game):
             raise UnknownVersionError(f"fabric {version}")
         loaders = await self.fetcher.get_json(_LOADER_URL)
