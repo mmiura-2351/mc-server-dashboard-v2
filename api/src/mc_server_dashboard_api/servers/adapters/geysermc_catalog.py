@@ -40,6 +40,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     CatalogProjectNotFoundError,
     CatalogUnavailableError,
     FileTooLargeError,
+    wrap_shape_errors,
 )
 
 _BASE_URL = "https://download.geysermc.org/v2"
@@ -165,10 +166,8 @@ class GeyserMcCatalog(CatalogProvider):
         build = await self._get_json(
             f"/projects/{_GEYSERMC_PROJECT}/versions/latest/builds/latest"
         )
-        try:
+        with wrap_shape_errors("geysermc"):
             return [self._parse_latest_build(build)]
-        except (AttributeError, KeyError, TypeError) as exc:
-            raise CatalogUnavailableError(f"unexpected response shape: {exc}") from exc
 
     async def download_file(self, url: str) -> bytes:
         logical_url = url

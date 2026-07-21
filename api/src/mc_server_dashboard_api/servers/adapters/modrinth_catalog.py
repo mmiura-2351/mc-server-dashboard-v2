@@ -30,6 +30,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     CatalogProjectNotFoundError,
     CatalogUnavailableError,
     FileTooLargeError,
+    wrap_shape_errors,
 )
 
 _BASE_URL = "https://api.modrinth.com/v2"
@@ -78,7 +79,7 @@ class ModrinthCatalog(CatalogProvider):
             "offset": offset,
         }
         data = await self._get_json("/search", params=params)
-        try:
+        with wrap_shape_errors("modrinth"):
             hits = [
                 CatalogSearchResult(
                     project_id=h["project_id"],
@@ -99,12 +100,10 @@ class ModrinthCatalog(CatalogProvider):
                 offset=data.get("offset", offset),
                 limit=data.get("limit", limit),
             )
-        except (AttributeError, KeyError, TypeError) as exc:
-            raise CatalogUnavailableError(f"unexpected response shape: {exc}") from exc
 
     async def get_project(self, project_id_or_slug: str) -> CatalogProject:
         data = await self._get_json(f"/project/{quote(project_id_or_slug, safe='')}")
-        try:
+        with wrap_shape_errors("modrinth"):
             return CatalogProject(
                 project_id=data["id"],
                 slug=data.get("slug", ""),
@@ -120,8 +119,6 @@ class ModrinthCatalog(CatalogProvider):
                 client_side=data.get("client_side", "unknown"),
                 server_side=data.get("server_side", "unknown"),
             )
-        except (AttributeError, KeyError, TypeError) as exc:
-            raise CatalogUnavailableError(f"unexpected response shape: {exc}") from exc
 
     async def list_versions(
         self,
@@ -138,10 +135,8 @@ class ModrinthCatalog(CatalogProvider):
         data = await self._get_json(
             f"/project/{quote(project_id_or_slug, safe='')}/version", params=params
         )
-        try:
+        with wrap_shape_errors("modrinth"):
             return [self._parse_version(v) for v in data]
-        except (AttributeError, KeyError, TypeError) as exc:
-            raise CatalogUnavailableError(f"unexpected response shape: {exc}") from exc
 
     async def download_file(self, url: str) -> bytes:
         logical_url = url
