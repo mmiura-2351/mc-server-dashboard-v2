@@ -103,6 +103,29 @@ func sendFlowDatagram(t *testing.T, conn *quic.Conn, id uint32, payload string) 
 	}
 }
 
+// waitPumpRunning round-trips one datagram through the Worker's pump and
+// blocks until the echo comes back. Returning proves the Worker finished the
+// handshake and entered pump — waitAccepted alone does not, because the relay
+// hands the conn to the test right after writing the ack, before the Worker
+// has read it.
+func waitPumpRunning(t *testing.T, conn *quic.Conn) {
+	t.Helper()
+	sendFlowDatagram(t, conn, 1, "ping")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	data, err := conn.ReceiveDatagram(ctx)
+	if err != nil {
+		t.Fatalf("waiting for pump echo: %v", err)
+	}
+	if len(data) < flowIDSize {
+		t.Fatalf("pump echo frame too short: %d bytes", len(data))
+	}
+	if got := string(data[flowIDSize:]); got != "echo:ping" {
+		t.Fatalf("pump echo = %q, want echo:ping", got)
+	}
+}
+
 // Open dials the relay, sends TunnelHello with the spec's fields, and — on
 // acceptance — the tunnel is established (docs/app/BEDROCK_TUNNEL.md
 // Section 4).
@@ -549,12 +572,13 @@ func TestInstantDisplacementEscalatesBackoff(t *testing.T) {
 	}
 
 	// Drop three successive connections; the pump runs for less than
-	// minStableDuration (fastBackoff's default) each time, so the backoff
-	// must escalate. Send a datagram before each drop to prove the pump is
-	// running (the Worker finished handshake and entered pump).
+	// minStableDuration each time, so the backoff must escalate. Wait for
+	// the pump's echo before each drop, so the Worker is provably past the
+	// handshake — otherwise the drop lands in dialAndHandshake, which never
+	// reset attempt even before this fix and so would not pin it.
 	for i := range 3 {
 		conn := relay.waitAccepted(t)
-		sendFlowDatagram(t, conn.conn, 1, "ping")
+		waitPumpRunning(t, conn.conn)
 		_ = conn.conn.CloseWithError(0, "simulated displacement")
 
 		want := m.backoff.Delay(i, 0.5)
@@ -597,7 +621,7 @@ func TestStableConnectionResetsBackoff(t *testing.T) {
 
 	// First connection: instant drop → attempt escalates (delay at attempt 0).
 	first := relay.waitAccepted(t)
-	sendFlowDatagram(t, first.conn, 1, "ping")
+	waitPumpRunning(t, first.conn)
 	_ = first.conn.CloseWithError(0, "instant drop")
 
 	select {
@@ -612,7 +636,9 @@ func TestStableConnectionResetsBackoff(t *testing.T) {
 	// Second connection: let the pump run past minStableDuration so the
 	// backoff resets on drop.
 	second := relay.waitAccepted(t)
-	sendFlowDatagram(t, second.conn, 1, "ping")
+	// The echo proves connStart is already set, so the sleep below is fully
+	// inside the connection's lifetime and clears the 50ms threshold.
+	waitPumpRunning(t, second.conn)
 	time.Sleep(100 * time.Millisecond) // > 50ms threshold
 	_ = second.conn.CloseWithError(0, "drop after stable")
 
