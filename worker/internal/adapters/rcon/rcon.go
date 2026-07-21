@@ -48,6 +48,14 @@ var ErrAuthFailed = errors.New("rcon: authentication failed")
 // forever on a deadline-less lane ctx — the same wedge shape one step earlier.
 var defaultExecuteTimeout = 30 * time.Second
 
+// maxResponseSize bounds the total reassembled response body. A misbehaving
+// server streaming fragments for the full deadline cannot grow memory past this.
+const maxResponseSize = 1 << 20 // 1 MiB
+
+// ErrResponseTooLarge is returned when the reassembled response exceeds
+// maxResponseSize.
+var ErrResponseTooLarge = errors.New("rcon: response too large")
+
 // ErrConnBroken is returned by Execute when a prior round trip failed mid-stream
 // (timeout or cancel), which can leave the connection mis-framed. The connection
 // is poisoned on such a failure so reuse fails fast and forces a redial rather
@@ -114,7 +122,7 @@ func (c *Client) Execute(ctx context.Context, line string) (string, error) {
 		}
 		var buf strings.Builder
 		for {
-			respID, _, b, err := c.read()
+			respID, typ, b, err := c.read()
 			if err != nil {
 				return err
 			}
@@ -124,7 +132,13 @@ func (c *Client) Execute(ctx context.Context, line string) (string, error) {
 			if respID != cmdID {
 				return fmt.Errorf("rcon: response id %d did not match request id %d or marker id %d", respID, cmdID, markerID)
 			}
+			if typ != typeResponseValue {
+				return fmt.Errorf("rcon: unexpected packet type %d in response stream", typ)
+			}
 			buf.WriteString(b)
+			if buf.Len() > maxResponseSize {
+				return ErrResponseTooLarge
+			}
 		}
 		body = buf.String()
 		return nil
@@ -212,10 +226,11 @@ func (c *Client) authenticate(password string) error {
 	}
 }
 
-// id allocates the next request id.
+// id allocates the next request id, keeping it positive and avoiding -1 (the
+// auth-failure sentinel) across int32 wraparound.
 func (c *Client) id() int32 {
 	id := c.nextID
-	c.nextID++
+	c.nextID = (c.nextID + 1) & 0x7FFFFFFF
 	return id
 }
 
