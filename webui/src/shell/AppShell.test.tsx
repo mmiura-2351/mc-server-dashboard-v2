@@ -242,6 +242,83 @@ describe("AppShell community switcher", () => {
     expect(dashboard).toHaveAttribute("aria-label", t("nav.dashboard"));
   });
 
+  it("shows an error with retry in the switcher when GET /communities fails", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === "/api/communities") {
+        return Promise.resolve(
+          new Response("", {
+            status: 500,
+            statusText: "Internal Server Error",
+          }),
+        );
+      }
+      return Promise.resolve(tokenResponse());
+    });
+
+    renderAt("/communities/alpha");
+
+    // The switcher renders the error message and a retry button instead of the
+    // permanent loading placeholder (the content area also shows the error, so
+    // multiple elements may match).
+    const errors = await screen.findAllByText(t("shell.communitiesError"));
+    expect(errors.length).toBeGreaterThanOrEqual(1);
+    // The switcher's error element is inside a `.community-switcher` div.
+    const switcherError = errors.find(
+      (el) => el.closest(".community-switcher") !== null,
+    );
+    expect(switcherError).toBeDefined();
+    const retries = screen.getAllByRole("button", {
+      name: t("shell.communitiesRetry"),
+    });
+    expect(retries.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("keeps the working switcher when a background refetch fails", async () => {
+    let failCommunities = false;
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === "/api/communities") {
+        if (failCommunities) {
+          return Promise.resolve(new Response("", { status: 500 }));
+        }
+        return Promise.resolve(jsonResponse([ALPHA, BETA]));
+      }
+      if (url.endsWith("/me/permissions")) {
+        return Promise.resolve(jsonResponse({}));
+      }
+      if (url.endsWith("/servers")) {
+        return Promise.resolve(jsonResponse([]));
+      }
+      return Promise.resolve(tokenResponse());
+    });
+
+    const { queryClient } = renderApp({ path: "/communities/alpha" });
+
+    // Wait for the switcher to render with cached data.
+    const switcher = await screen.findByRole("combobox", {
+      name: t("shell.switchCommunity"),
+    });
+    expect((switcher as HTMLSelectElement).value).toBe("alpha");
+
+    // Simulate a background refetch failure (e.g. network blip on window focus).
+    failCommunities = true;
+    queryClient.invalidateQueries({ queryKey: ["communities"] });
+
+    // Give react-query time to process the failed refetch.
+    await waitFor(() =>
+      expect(queryClient.getQueryState(["communities"])?.status).toBe("error"),
+    );
+
+    // The switcher must still show the working select — not the error state.
+    expect(
+      screen.getByRole("combobox", { name: t("shell.switchCommunity") }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("shell.communitiesError")),
+    ).not.toBeInTheDocument();
+  });
+
   it("clicking the brand navigates to the landing page", async () => {
     signedInWith([ALPHA, BETA]);
 

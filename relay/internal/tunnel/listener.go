@@ -64,14 +64,23 @@ func (l *Listener) Serve(ctx context.Context) error {
 		<-ctx.Done()
 		_ = l.ln.Close()
 	}()
+	var backoff netutil.AcceptBackoff
 	for {
 		conn, err := l.ln.Accept()
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
+			if netutil.IsTransientAcceptError(err) {
+				l.logger.Warn("accept failed; retrying", "error", err)
+				if !backoff.Sleep(ctx) {
+					return nil
+				}
+				continue
+			}
 			return err
 		}
+		backoff.Reset()
 		go l.handle(conn)
 	}
 }
@@ -114,7 +123,7 @@ func (l *Listener) handle(conn net.Conn) {
 
 // readHandshake parses the "MCSD-TUNNEL/1\n<token>\n" handshake within the
 // deadline. It returns the token on success. The connection's read deadline is
-// cleared on success so the subsequent splice is not bounded.
+// cleared on success so the splice can install its own progress deadlines.
 func readHandshake(conn net.Conn) (string, bool) {
 	_ = conn.SetReadDeadline(time.Now().Add(dialHandshakeDeadline))
 	// Hard-cap the pre-auth read: a bufio.Reader sized to maxHandshakeBytes over a

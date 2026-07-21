@@ -28,6 +28,7 @@ error rather than a silent EOF.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as dt
 import hashlib
 import os
@@ -59,10 +60,12 @@ from mc_server_dashboard_api.storage.domain.port import (
     RESTORE_PUBLISHER,
     ByteStream,
     DirEntry,
+    HydrateSource,
     JarPoolEntry,
     JarPoolStats,
     SnapshotHandle,
     Storage,
+    WorkingSetView,
 )
 from mc_server_dashboard_api.storage.domain.value_objects import (
     BackupKey,
@@ -72,6 +75,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     ServerId,
     SnapshotId,
     VersionId,
+    is_version_ring_member,
 )
 from mc_server_dashboard_api.storage.integrity.region import (
     WorkingSetReport,
@@ -359,6 +363,14 @@ class FsStorage(Storage):
             for stale in backups.glob(".backup.*.tmp"):
                 if _is_stale_spool(stale):
                     stale.unlink(missing_ok=True)
+        # Sweep stale version-capture temp siblings (``.*.tmp``) left by a crash
+        # mid-_atomic_copy (issue #1955). These sit inside ``versions/`` subtrees;
+        # rglob covers arbitrarily nested rel_path directories.
+        versions_root = server_root / "versions"
+        if versions_root.is_dir():
+            for stale in versions_root.rglob(".*.tmp"):
+                if stale.is_file() and _is_stale_spool(stale):
+                    stale.unlink(missing_ok=True)
 
     def _live_snapshot_name(self, server_root: Path) -> str | None:
         link = server_root / "current"
@@ -371,17 +383,38 @@ class FsStorage(Storage):
     # --- working-set hydrate / snapshot (Section 3.1) ----------------------
 
     def open_hydrate_source(
-        self, community_id: CommunityId, server_id: ServerId
-    ) -> ByteStream:
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        *,
+        exclude: frozenset[str] = frozenset(),
+    ) -> HydrateSource:
         # The live snapshot is resolved and leased on the FIRST iteration, not at
         # open time: a caller that opens the stream but never iterates/closes it
         # must not pin a snapshot forever (otherwise reclaim + sweep are starved).
         # Re-resolving on first read also means the leased snapshot is exactly the
         # one whose bytes are streamed (Section 4.2 reader safety).
-        def _open() -> tuple[Path, Callable[[], None]]:
-            return self._lease_current(community_id, server_id)
+        #
+        # The generation is read atomically with the lease under the per-server lock
+        # (issue #1954): a bump between a standalone generation read and the deferred
+        # lease would mislabel the served bytes, wedging the session's publishes.
+        source = HydrateSource.__new__(HydrateSource)
+        source.generation = None
 
-        return _tar_stream(_open, self._tar_member_hook)
+        def _open() -> tuple[Path, Callable[[], None]]:
+            server_root = self._server_root(community_id, server_id)
+            lock = self._server_lock(community_id, server_id)
+            with lock:
+                path, release = self._lease_current(community_id, server_id)
+                try:
+                    source.generation = self._read_generation(server_root)
+                except BaseException:
+                    release()
+                    raise
+            return path, release
+
+        source._inner = _tar_stream(_open, self._tar_member_hook, exclude)
+        return source
 
     async def begin_snapshot(
         self, community_id: CommunityId, server_id: ServerId
@@ -463,24 +496,6 @@ class FsStorage(Storage):
             self._release_staging(staging)
             fs_handle.consumed = True
             raise IntegrityCheckError(report)
-        # Missing-region gate (issue #854): the structural check above only validates
-        # files that EXIST — a region file that vanished is structurally valid absence
-        # and would publish silently. Compare the staged region-file set against the
-        # prior ``current/`` set per region-bearing directory and refuse when a
-        # dimension that still has regions lost SOME of them (partial-loss corruption
-        # signature). A full-dimension delete (all regions gone) is allowed. First
-        # publish (no ``current``) has no prior set, so nothing is flagged.
-        try:
-            prior = self._current_dir(fs_handle.community_id, fs_handle.server_id)
-        except NotFoundError:
-            prior = None
-        if prior is not None:
-            missing = await asyncio.to_thread(check_missing_regions, staging, prior)
-            if not missing.complete:
-                await asyncio.to_thread(_rmtree, staging)
-                self._release_staging(staging)
-                fs_handle.consumed = True
-                raise MissingRegionsError(missing)
         try:
             generation = await asyncio.to_thread(
                 self._publish_and_bump,
@@ -490,12 +505,12 @@ class FsStorage(Storage):
                 publisher,
                 expected_base,
             )
-        except StaleGenerationError:
-            # The store advanced past the guard's base during the upload window
-            # (issue #899): an at-rest edit or restore landed after the pre-stream
-            # guard passed. Discard the staging exactly as the other refusal paths do
-            # (the prior ``current`` keeps the newer copy, no bump) and re-raise so the
-            # edge maps it to 409 stale_generation; the Worker re-bases on next start.
+        except (StaleGenerationError, MissingRegionsError):
+            # StaleGenerationError: the store advanced past the guard's base during
+            # the upload window (issue #899). MissingRegionsError: the staged set lost
+            # regions from a dimension that still has some (issue #854, moved under the
+            # lock by #921). Discard the staging exactly as the other refusal paths do
+            # (the prior ``current`` keeps the newer/good copy, no bump) and re-raise.
             await asyncio.to_thread(_rmtree, staging)
             self._release_staging(staging)
             fs_handle.consumed = True
@@ -540,12 +555,33 @@ class FsStorage(Storage):
         and the flip. ``None`` skips the re-check (no base claim).
         """
 
+        # Make the staged tree's file data durable BEFORE acquiring the lock and
+        # flipping current (issue #1943). Runs pre-lock per the #920 discipline —
+        # staging is complete and leased, so no concurrent writer can mutate it.
+        _fsync_tree(staging)
+
         server_root = self._server_root(community_id, server_id)
         with self._server_lock(community_id, server_id):
             if expected_base is not None:
                 current = self._read_generation(server_root)
-                if current > expected_base:
+                if current != expected_base:
                     raise StaleGenerationError(expected_base, current)
+            # Missing-region gate (issue #854, #921 item 2): compare the staged
+            # region-file set against the prior ``current/`` set INSIDE the lock so
+            # a concurrent publish/restore cannot flip ``current`` between the
+            # prior-read and the publish. The object adapter evaluates this gate
+            # inside its locked section; the fs adapter must match.
+            # ``check_missing_regions`` is a sync directory-entry scan;
+            # ``_publish_and_bump`` runs on a worker thread, so calling it directly
+            # is correct.
+            try:
+                prior = self._current_dir(community_id, server_id)
+            except NotFoundError:
+                prior = None
+            if prior is not None:
+                missing = check_missing_regions(staging, prior)
+                if not missing.complete:
+                    raise MissingRegionsError(missing)
             old_snapshot = self._publish(community_id, server_id, staging)
             generation = self._read_generation(server_root) + 1
             self._write_marker(server_root, generation, publisher)
@@ -571,10 +607,14 @@ class FsStorage(Storage):
     ) -> Path | None:
         """The atomic-publish core (Section 4.2), driven on a worker thread.
 
+        The caller has already made the staged tree's file data durable
+        (``_fsync_tree`` in ``_publish_and_bump``, issue #1943).
+
         Steps, each followed by a failure-seam boundary so a crash at any of them
         leaves ``current`` resolving to one complete snapshot (Section 4.3):
-        move staging -> ``snapshots/<id>/``; create a temp symlink; atomically
-        replace ``current`` with it; fsync the parent dir.
+        move staging -> ``snapshots/<id>/``; fsync ``snapshots/`` (the rename entry);
+        create a temp symlink; atomically replace ``current`` with it; fsync the
+        parent dir.
 
         The move + symlink flip are fast metadata ops (same-filesystem rename), so
         they run under the caller's per-server lock. The superseded snapshot's
@@ -596,6 +636,9 @@ class FsStorage(Storage):
         # Same-filesystem rename: staging (incoming/) and snapshots/ share <root>
         # (Section 7.1 caveat), so this is an atomic move, never a copy.
         os.replace(staging, snapshot_dir)
+        # Make the rename entry durable so a crash after the flip cannot lose the
+        # directory the new symlink points at (issue #1943).
+        _fsync_dir(snapshots)
 
         self._seam.reach(PublishPhase.AFTER_MOVE)
 
@@ -786,24 +829,31 @@ class FsStorage(Storage):
         server_id: ServerId,
         key: BackupKey | None = None,
     ) -> BackupKey:
-        current = await asyncio.to_thread(self._current_dir, community_id, server_id)
-        # Content-integrity gate (issue #739): never archive a known-corrupt world.
-        # Walk the authoritative ``current/`` working set for structurally corrupt
-        # ``.mca`` region files (issue #738) BEFORE writing the archive; any corrupt
-        # region refuses the backup and no ``.tar.gz`` is written (fail-closed, #703).
-        # The single region rule set (issue #927) tolerates ``current/``'s legitimate
-        # unpadded (live-format) tail — its content was already gated at publish — while
-        # still catching realistic tears.
-        report = await asyncio.to_thread(check_working_set, current)
-        if not report.healthy:
-            raise IntegrityCheckError(report)
-        backups = self._server_root(community_id, server_id) / "backups"
-        await asyncio.to_thread(backups.mkdir, parents=True, exist_ok=True)
-        if key is None:
-            key = BackupKey(uuid.uuid4().hex)
-        archive = backups / f"{key.value}.tar.gz"
-        await asyncio.to_thread(self._write_backup_archive, current, archive)
-        return key
+        # Lease the live snapshot for the duration of the integrity walk + pack so a
+        # concurrent publish cannot reclaim it mid-operation (issue #1702).
+        current, release = await asyncio.to_thread(
+            self._lease_current, community_id, server_id
+        )
+        try:
+            # Content-integrity gate (issue #739): never archive a known-corrupt
+            # world. Walk the authoritative ``current/`` working set for structurally
+            # corrupt ``.mca`` region files (issue #738) BEFORE writing the archive;
+            # any corrupt region refuses the backup and no ``.tar.gz`` is written
+            # (fail-closed, #703). The single region rule set (issue #927) tolerates
+            # ``current/``'s legitimate unpadded (live-format) tail — its content was
+            # already gated at publish — while still catching realistic tears.
+            report = await asyncio.to_thread(check_working_set, current)
+            if not report.healthy:
+                raise IntegrityCheckError(report)
+            backups = self._server_root(community_id, server_id) / "backups"
+            await asyncio.to_thread(backups.mkdir, parents=True, exist_ok=True)
+            if key is None:
+                key = BackupKey(uuid.uuid4().hex)
+            archive = backups / f"{key.value}.tar.gz"
+            await asyncio.to_thread(self._write_backup_archive, current, archive)
+            return key
+        finally:
+            release()
 
     @staticmethod
     def _write_backup_archive(source: Path, archive: Path) -> None:
@@ -973,14 +1023,19 @@ class FsStorage(Storage):
     async def check_current_health(
         self, community_id: CommunityId, server_id: ServerId
     ) -> WorkingSetReport:
-        # One-shot fsck of the on-disk authoritative snapshot (issue #744). A
-        # published snapshot is immutable/quiesced, so scanning ``current/`` in place
-        # is safe and needs no staging. Read-only: it never mutates ``current``.
-        # Raises NotFoundError if nothing is published. The single region rule set
-        # (issue #927) tolerates a published snapshot's legitimate unpadded tail or the
-        # sweep would falsely quarantine a healthy live-format snapshot.
-        current = await asyncio.to_thread(self._current_dir, community_id, server_id)
-        return await asyncio.to_thread(check_working_set, current)
+        # One-shot fsck of the on-disk authoritative snapshot (issue #744). Lease the
+        # snapshot so a concurrent publish cannot reclaim it mid-walk (issue #1702).
+        # Read-only: it never mutates ``current``. Raises NotFoundError if nothing is
+        # published. The single region rule set (issue #927) tolerates a published
+        # snapshot's legitimate unpadded tail or the sweep would falsely quarantine a
+        # healthy live-format snapshot.
+        current, release = await asyncio.to_thread(
+            self._lease_current, community_id, server_id
+        )
+        try:
+            return await asyncio.to_thread(check_working_set, current)
+        finally:
+            release()
 
     async def prune_to_final_snapshot(
         self, community_id: CommunityId, server_id: ServerId
@@ -991,6 +1046,17 @@ class FsStorage(Storage):
         await asyncio.to_thread(self._prune_to_final_snapshot, community_id, server_id)
 
     def _prune_to_final_snapshot(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> None:
+        # Hold the per-server lock for the entire prune (issue #1704): this
+        # serializes against ``_publish_and_bump`` (commit_snapshot) which takes
+        # the same lock, so a late commit cannot land while the prune is removing
+        # the working-set tree and generation marker. The method already runs on
+        # a worker thread via ``asyncio.to_thread``, so blocking is fine.
+        with self._server_lock(community_id, server_id):
+            self._prune_to_final_snapshot_inner(community_id, server_id)
+
+    def _prune_to_final_snapshot_inner(
         self, community_id: CommunityId, server_id: ServerId
     ) -> None:
         server_root = self._server_root(community_id, server_id)
@@ -1138,11 +1204,17 @@ class FsStorage(Storage):
     def _read_file(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
     ) -> bytes:
-        current = self._current_dir(community_id, server_id)
-        target = self._safe_target(current, rel_path)
-        if not target.is_file():
-            raise NotFoundError(f"file not found: {rel_path.value}")
-        return target.read_bytes()
+        # Resolve and lease the live snapshot so a concurrent publish's post-flip
+        # GC cannot delete the snapshot between resolve and read (issue #1953),
+        # mirroring open_file_stream's lease discipline.
+        current, release = self._lease_current(community_id, server_id)
+        try:
+            target = self._safe_target(current, rel_path)
+            if not target.is_file():
+                raise NotFoundError(f"file not found: {rel_path.value}")
+            return target.read_bytes()
+        finally:
+            release()
 
     def open_file_stream(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
@@ -1181,21 +1253,32 @@ class FsStorage(Storage):
         # plane's JAR-only hydrate posture for the unpublished state.
         if not self._current_link(community_id, server_id).is_symlink():
             return []
-        current = self._current_dir(community_id, server_id)
-        target = self._safe_target(current, rel_path)
-        if not target.is_dir():
-            raise NotFoundError(f"directory not found: {rel_path.value}")
-        entries = []
-        for child in sorted(target.iterdir(), key=lambda p: p.name):
-            is_dir = child.is_dir()
-            entries.append(
-                DirEntry(
-                    name=child.name,
-                    is_dir=is_dir,
-                    size=0 if is_dir else child.stat().st_size,
+        # Lease the live snapshot so a concurrent publish's post-flip GC cannot
+        # delete the snapshot between resolve and iterdir/stat (issue #1953),
+        # mirroring open_file_stream's lease discipline.
+        current, release = self._lease_current(community_id, server_id)
+        try:
+            target = self._safe_target(current, rel_path)
+            if not target.is_dir():
+                raise NotFoundError(f"directory not found: {rel_path.value}")
+            entries = []
+            for child in sorted(target.iterdir(), key=lambda p: p.name):
+                is_dir = child.is_dir()
+                entries.append(
+                    DirEntry(
+                        name=child.name,
+                        is_dir=is_dir,
+                        size=0 if is_dir else child.stat().st_size,
+                    )
                 )
-            )
-        return entries
+            return entries
+        finally:
+            release()
+
+    def open_working_set_view(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> contextlib.AbstractAsyncContextManager[WorkingSetView]:
+        return _FsWorkingSetView(self, community_id, server_id)
 
     async def write_file(
         self,
@@ -1498,6 +1581,26 @@ class FsStorage(Storage):
             tmp.unlink(missing_ok=True)
             raise
 
+    def _atomic_copy(self, source: Path, target: Path) -> None:
+        """temp-sibling + copyfileobj + fsync + atomic rename (Section 4.4/5)."""
+
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp"
+        )
+        tmp = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "wb") as out:
+                with source.open("rb") as src:
+                    shutil.copyfileobj(src, out)
+                out.flush()
+                os.fsync(out.fileno())
+            self._seam.reach(PublishPhase.AFTER_VERSION_TEMP_WRITE)
+            os.replace(tmp, target)
+            _fsync_dir(target.parent)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+
     # --- file version retention / rollback (Section 3.5, Section 5) ---------
 
     def _versions_dir(
@@ -1519,7 +1622,7 @@ class FsStorage(Storage):
         versions = self._versions_dir(community_id, server_id, rel_path)
         versions.mkdir(parents=True, exist_ok=True)
         version_id = _new_version_id()
-        shutil.copyfile(source, versions / version_id)
+        self._atomic_copy(source, versions / version_id)
         self._prune_versions(versions)
 
     async def retain_file_version(
@@ -1537,17 +1640,23 @@ class FsStorage(Storage):
         # the frozen authoritative copy before each edit, and without this dedup
         # repeated edits to one file would push identical copies into the bounded
         # ring and evict distinct at-rest versions.
-        try:
-            current = self._current_dir(community_id, server_id)
-        except NotFoundError:
-            return  # never-published server: nothing authoritative to retain
-        target = self._safe_target(current, rel_path)
-        if not target.is_file():
-            return  # no authoritative copy yet: nothing to retain
-        versions = self._versions_dir(community_id, server_id, rel_path)
-        if self._matches_newest_version(versions, target):
-            return  # unchanged since the newest retained version: skip the churn
-        self._capture_version(community_id, server_id, rel_path, target)
+        #
+        # The resolve + stat + hash + copy must run under the per-server lock
+        # (issue #1953): without it, a concurrent snapshot commit can flip
+        # ``current`` and rmtree the resolved snapshot between resolve and
+        # read, yielding a FileNotFoundError → 500 on the edit request.
+        with self._server_lock(community_id, server_id):
+            try:
+                current = self._current_dir(community_id, server_id)
+            except NotFoundError:
+                return  # never-published server: nothing authoritative to retain
+            target = self._safe_target(current, rel_path)
+            if not target.is_file():
+                return  # no authoritative copy yet: nothing to retain
+            versions = self._versions_dir(community_id, server_id, rel_path)
+            if self._matches_newest_version(versions, target):
+                return  # unchanged since the newest retained version: skip the churn
+            self._capture_version(community_id, server_id, rel_path, target)
 
     def _matches_newest_version(self, versions: Path, source: Path) -> bool:
         """True if ``source`` equals the newest retained version under ``versions``.
@@ -1558,7 +1667,7 @@ class FsStorage(Storage):
 
         if not versions.is_dir():
             return False
-        names = sorted(p.name for p in versions.iterdir())
+        names = _ring_members(versions)
         if not names:
             return False
         newest = versions / names[-1]  # ids are time-ordered (_new_version_id)
@@ -1567,7 +1676,7 @@ class FsStorage(Storage):
         return _file_sha256(source) == _file_sha256(newest)
 
     def _prune_versions(self, versions: Path) -> None:
-        existing = sorted(p.name for p in versions.iterdir())
+        existing = _ring_members(versions)
         excess = len(existing) - self._version_retention
         for name in existing[:excess] if excess > 0 else []:
             (versions / name).unlink(missing_ok=True)
@@ -1578,9 +1687,7 @@ class FsStorage(Storage):
         versions = self._versions_dir(community_id, server_id, rel_path)
         if not await asyncio.to_thread(versions.is_dir):
             return []
-        names = await asyncio.to_thread(
-            lambda: sorted(p.name for p in versions.iterdir())
-        )
+        names = await asyncio.to_thread(_ring_members, versions)
         # Newest-first (Section 3.5); version ids are time-ordered (_new_version_id).
         return [VersionId(name) for name in reversed(names)]
 
@@ -1650,6 +1757,20 @@ def _new_version_id() -> str:
     return f"{time.time_ns():020d}-{uuid.uuid4().hex[:8]}"
 
 
+def _ring_members(versions_dir: Path) -> list[str]:
+    """Return sorted names of direct-child files matching the version-id format.
+
+    Excludes child directories (whose names may collide with the prefix scan)
+    and dotfiles (temp files), preventing cross-ring pollution (issue #1952).
+    """
+
+    return sorted(
+        p.name
+        for p in versions_dir.iterdir()
+        if is_version_ring_member(p.name) and p.is_file()
+    )
+
+
 def _file_sha256(path: Path) -> str:
     """SHA-256 of a file, read in bounded chunks (never the whole file in RAM)."""
 
@@ -1688,9 +1809,34 @@ def _fsync_dir(path: Path) -> None:
         os.close(fd)
 
 
+def _fsync_tree(root: Path) -> None:
+    """fsync every regular file and directory under ``root`` (post-order).
+
+    Mirrors the worker's ``fsyncTree``: child data is made durable before parent
+    directory entries, so a power loss after this returns cannot leave torn files
+    under a directory whose entry survived. Symlinks are skipped (their target is
+    not owned by the tree).
+    """
+
+    for dirpath, _dirnames, filenames in os.walk(
+        root, topdown=False, followlinks=False
+    ):
+        for name in filenames:
+            filepath = os.path.join(dirpath, name)
+            if os.path.islink(filepath):
+                continue
+            fd = os.open(filepath, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        _fsync_dir(Path(dirpath))
+
+
 def _tar_stream(
     open_source: Callable[[], tuple[Path, Callable[[], None]]],
     member_hook: Callable[[Path], None] | None = None,
+    exclude: frozenset[str] = frozenset(),
 ) -> AsyncIterator[bytes]:
     """Stream a tar of the hydrate working set (incremental, error-surfacing).
 
@@ -1698,6 +1844,8 @@ def _tar_stream(
     snapshot directory and takes the active-reader lease, returning the directory
     and the matching lease-release callback. Deferring it to first iteration
     means a stream that is opened but never consumed never pins a snapshot.
+
+    ``exclude`` names top-level children to skip (issue #1942).
 
     The tar is generated incrementally in stream mode (``w|``) by a worker thread
     writing into one end of an ``os.pipe``; the generator reads bounded ``_CHUNK``
@@ -1717,7 +1865,7 @@ def _tar_stream(
             holder: list[BaseException] = []
             writer = threading.Thread(
                 target=_tar_into_fd,
-                args=(directory, write_fd, member_hook, holder),
+                args=(directory, write_fd, member_hook, holder, exclude),
                 daemon=True,
             )
             writer.start()
@@ -1748,8 +1896,11 @@ def _tar_into_fd(
     write_fd: int,
     member_hook: Callable[[Path], None] | None,
     holder: list[BaseException],
+    exclude: frozenset[str] = frozenset(),
 ) -> None:
     """Write a tar of ``directory`` into ``write_fd`` (stream mode), then close it.
+
+    ``exclude`` names top-level children to skip (issue #1942).
 
     Any failure other than the consumer closing early is recorded in ``holder``
     so the consumer can re-raise it instead of mistaking the closed pipe for a
@@ -1762,6 +1913,8 @@ def _tar_into_fd(
             tarfile.open(fileobj=out, mode="w|") as tar,
         ):
             for child in sorted(directory.iterdir(), key=lambda p: p.name):
+                if child.name in exclude:
+                    continue
                 if member_hook is not None:
                     member_hook(child)
                 tar.add(child, arcname=child.name)
@@ -1902,3 +2055,99 @@ def _extract_member_capped(
     os.chmod(target, safe.mode)
     os.utime(target, (safe.mtime, safe.mtime))
     return total
+
+
+def _pinned_file_stream(target: Path, rel_path: RelPath) -> AsyncIterator[bytes]:
+    """Stream one file's bytes without taking a lease (caller already holds one)."""
+
+    async def _gen() -> AsyncIterator[bytes]:
+        if not target.is_file():
+            raise NotFoundError(f"file not found: {rel_path.value}")
+        handle = await asyncio.to_thread(open, target, "rb")
+        try:
+            while True:
+                chunk = await asyncio.to_thread(handle.read, _CHUNK)
+                if not chunk:
+                    return
+                yield chunk
+        finally:
+            await asyncio.to_thread(handle.close)
+
+    return _gen()
+
+
+class _FsWorkingSetView(WorkingSetView):
+    """Pinned read-only view of a working set for the fs adapter (issue #1966).
+
+    Acquires an active-reader lease on ``__aenter__`` and resolves the snapshot
+    directory once. All reads go through the pinned path; a concurrent publish
+    cannot change what this view sees. ``__aexit__`` releases the lease.
+    """
+
+    def __init__(
+        self,
+        storage: FsStorage,
+        community_id: CommunityId,
+        server_id: ServerId,
+    ) -> None:
+        self._storage = storage
+        self._community_id = community_id
+        self._server_id = server_id
+        self._pinned: Path | None = None
+        self._release: Callable[[], None] | None = None
+
+    async def __aenter__(self) -> WorkingSetView:
+        link = self._storage._current_link(self._community_id, self._server_id)
+        if not link.is_symlink():
+            # Unpublished server — no snapshot to pin.
+            self._pinned = None
+            return self
+        pinned, release = await asyncio.to_thread(
+            self._storage._lease_current, self._community_id, self._server_id
+        )
+        self._pinned = pinned
+        self._release = release
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: object,
+    ) -> None:
+        if self._release is not None:
+            self._release()
+            self._release = None
+
+    async def list_dir(self, rel_path: RelPath) -> list[DirEntry]:
+        if self._pinned is None:
+            if not rel_path.parts:
+                return []
+            raise NotFoundError(f"directory not found: {rel_path.value}")
+        return await asyncio.to_thread(self._list_dir_sync, rel_path)
+
+    def _list_dir_sync(self, rel_path: RelPath) -> list[DirEntry]:
+        assert self._pinned is not None
+        target = self._storage._safe_target(self._pinned, rel_path)
+        if not target.is_dir():
+            raise NotFoundError(f"directory not found: {rel_path.value}")
+        entries = []
+        for child in sorted(target.iterdir(), key=lambda p: p.name):
+            is_dir = child.is_dir()
+            entries.append(
+                DirEntry(
+                    name=child.name,
+                    is_dir=is_dir,
+                    size=0 if is_dir else child.stat().st_size,
+                )
+            )
+        return entries
+
+    def open_file_stream(self, rel_path: RelPath) -> ByteStream:
+        if self._pinned is None:
+            raise NotFoundError(f"file not found: {rel_path.value}")
+        # Resolve the target synchronously (the pinned path is stable).
+        target = self._storage._safe_target(self._pinned, rel_path)
+        # The lease is already held by the view; stream the file without an
+        # additional per-file lease.
+        return _pinned_file_stream(target, rel_path)

@@ -137,11 +137,15 @@ is unique per community, because the hostname namespace is global).
 
 - **Charset**: a valid lowercase DNS label — `^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`
   (1–63 chars, no leading/trailing hyphen).
-- **Auto-generated on create** (owner decision): `<word>-<word>-<NN>` from a
-  small embedded wordlist plus two digits (e.g. `amber-falcon-42`). Retry on
-  the (unlikely) uniqueness collision. Generation does not derive from
-  `server.name` — names are free-form display text (often non-ASCII) and do
-  not slugify reliably.
+- **Auto-generated on create** by default: a 6-character random
+  lowercase-alphanumeric string (`[a-z0-9]{6}`, e.g. `k7m2p9`) via
+  `secrets.choice` (changed by issue #981). Retry on the (unlikely) uniqueness
+  collision. Generation does not derive from `server.name` — names are
+  free-form display text (often non-ASCII) and do not slugify reliably.
+- **Optional explicit slug at create** (issue #981): `CreateServerRequest`
+  accepts an optional `slug` field. When supplied, it is validated (422
+  invalid/reserved) and checked for global uniqueness (409 taken); when
+  omitted or blank, a slug is auto-generated as above.
 - **Renameable** by anyone holding `server:update`, via the server update
   endpoint. Validation: charset, global uniqueness (friendly 409), and a
   reserved-word list (`www`, `api`, `mail`, `relay`, `admin`, `ns1`, `ns2`,
@@ -266,10 +270,13 @@ splice. Unknown, expired, or reused tokens: the relay closes the connection
 without a response. Tunnel connections that send nothing within 5 s are
 dropped.
 
-Idle policy: the relay applies no idle timeout of its own to spliced sessions
-— the Minecraft protocol has keep-alives and the server kicks dead clients;
-the relay just propagates the close from either side and half-closes the
-other.
+Idle policy: the splice enforces progress deadlines per direction — a 5-minute
+idle read timeout and a 1-minute write-stall timeout. If no bytes arrive
+within the idle window (peer is TCP-alive but silent) or a write blocks beyond
+the stall window (peer's receive buffer full, peer not reading), the splice
+closes both connections and releases all associated resources. Minecraft's
+keep-alives (every 20 s) naturally refresh both deadlines under normal
+operation.
 
 ---
 
@@ -290,6 +297,8 @@ service RelayService {
   rpc Register(RegisterRequest) returns (RegisterResponse);
   rpc ResolveJoin(ResolveJoinRequest) returns (ResolveJoinResponse);
   rpc ReportSessions(ReportSessionsRequest) returns (ReportSessionsResponse);
+  rpc ValidateBedrockTunnel(ValidateBedrockTunnelRequest)
+      returns (ValidateBedrockTunnelResponse);
 }
 ```
 
@@ -315,6 +324,12 @@ service RelayService {
   username, player_uuid?, started_at}` and `SessionEnd {session_id,
   ended_at}`. Idempotent upserts keyed on the relay-minted `session_id`
   (UUID), so retries after transient API errors are safe.
+- **`ValidateBedrockTunnel`** — called when the relay accepts a Worker's QUIC
+  dial-out for a Bedrock tunnel (BEDROCK_TUNNEL.md). The relay has no prior
+  waiter to match against (unlike the per-player join token from
+  `ResolveJoin`), so it asks the API to confirm the credential. This keeps
+  the relay free of a persistent server list; its own state stays limited to
+  in-flight tunnel connections.
 
 ---
 
@@ -401,8 +416,9 @@ forwarder and accepted: `player_uuid` / `username` are null (Floodgate identity
 is Geyser-side, invisible to the relay) while `player_ip` is the client's true
 UDP source; and `started_at` is the promotion time (~≤1 s after connect) while
 `ended_at` lags the true disconnect by up to `flowIdleTimeout` (60 s, the
-idle-eviction window). Honest Java-vs-Bedrock labelling is a deferred follow-up
-(#1912, which needs a proto + migration change).
+idle-eviction window). Honest Java-vs-Bedrock labelling shipped with #1912:
+`SessionStart.source` (a `SessionSource` enum — `JAVA` / `BEDROCK`) is set by
+the relay and persisted in the `game_session.source` column (migration 0034).
 
 **Access control** (owner decision): a new permission **`session:read`**,
 granted to the seeded Owner role by default (DATABASE.md role seeding). The
@@ -582,6 +598,7 @@ a later migration with issue #957.
 | `player_uuid` | UUID NULL | Claimed; present on protocols that send it. |
 | `started_at` | timestamptz | |
 | `ended_at` | timestamptz NULL | NULL = still open (or relay crashed; healed on `Register`). |
+| `source` | TEXT NULL | Relay ingress path (`java` / `bedrock`); NULL for sessions predating #1912 (migration 0034). |
 
 - **Permission seeding**: add `session:read` to the seeded Owner role
   (DATABASE.md role model). Existing deployments: the migration appends
@@ -596,6 +613,9 @@ a later migration with issue #957.
 
 - `ServerResponse` gains `slug` and `join_hostname` (`<slug>.<base_domain>`
   when `relay.enabled`, else `null` — the UI's display switch).
+- Server create (`POST`) accepts an optional `slug` (issue #981): omitted or
+  blank auto-generates a 6-char random slug; supplied, it is validated (422
+  invalid/reserved) and checked for global uniqueness (409 taken).
 - Server update (`PATCH`) accepts `slug` (permission `server:update`;
   422 invalid / 409 taken).
 - `GET /api/communities/{cid}/servers/{sid}/sessions` — paginated, newest
@@ -621,7 +641,7 @@ Owner decisions, 2026-06-12 (issue #659 comments):
 |---|---|---|
 | DNS | Single wildcard record; hostname mapping in DB | Per-server DNS records via provider API (propagation waits, more failure modes) |
 | Player-IP moderation | Record at relay, surface in dashboard | PROXY protocol passthrough (Paper-only, misses vanilla) |
-| Slug origin | Auto-generated, owner-renameable | User-mandatory at create; ID-derived fixed |
+| Slug origin | Auto-generated (6-char random `[a-z0-9]{6}`), owner-renameable; optional user-supplied slug at create (issue #981) | ID-derived fixed |
 | Direct path | Kept, config-selectable; relay default-off | Tunnel-only (forces domain ownership on single-host operators) |
 | Relay placement | Separate Go service | In-API asyncio (couples data path to control plane, API restart drops players); separate Python service |
 | Stopped-server UX | In-protocol status MOTD + disconnect reason | Silent drop (indistinguishable from a typo) |

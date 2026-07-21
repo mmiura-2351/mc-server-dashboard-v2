@@ -326,6 +326,56 @@ async def test_paper_sha256_shortcut_skips_download_without_known_source() -> No
     assert jar_fetcher.calls == []  # no download
 
 
+@pytest.mark.asyncio
+async def test_fingerprint_match_rejects_mismatched_sha256_key() -> None:
+    """Defense-in-depth (#1965): when the source publishes a SHA-256 digest and
+    known_source matches the fingerprint, but known_key does NOT equal the
+    expected hash, the fast path must be skipped and the JAR re-downloaded."""
+    from mc_server_dashboard_api.versions.adapters.paper import (
+        _BASE,
+        PaperCatalog,
+    )
+
+    real_sha256 = hashlib.sha256(_JAR).hexdigest()
+    download_url = "https://fill-data.papermc.io/paper-1.21.1-42.jar"
+    fingerprint = f"sha256:{real_sha256}"
+    # The attacker set known_key to a DIFFERENT pooled JAR's hash.
+    evil_key = hashlib.sha256(b"evil JAR content").hexdigest()
+
+    json_fetcher = FakeJsonFetcher(
+        {
+            f"{_BASE}/versions/1.21.1/builds/latest": {
+                "downloads": {
+                    "server:default": {
+                        "name": "paper-1.21.1-42.jar",
+                        "url": download_url,
+                        "checksums": {"sha256": real_sha256},
+                    }
+                },
+            },
+        }
+    )
+    catalog = CompositeCatalog(
+        by_type={ServerType.PAPER: PaperCatalog(fetcher=json_fetcher)}
+    )
+    pool = FakeJarPool()
+    pool.stored[evil_key] = b"evil JAR content"  # attacker's JAR is pooled
+    jar_fetcher = FakeJarFetcher({download_url: _JAR})
+    ensure = EnsureJar(catalog=catalog, fetcher=jar_fetcher, pool=pool)
+
+    result = await ensure(
+        server_type=ServerType.PAPER,
+        version="1.21.1",
+        known_key=evil_key,
+        known_source=fingerprint,  # matches the catalog's fingerprint
+    )
+
+    # Must NOT return the evil key; must re-download and return the real key.
+    assert result.key == real_sha256
+    assert result.key != evil_key
+    assert jar_fetcher.calls == [download_url]  # re-downloaded
+
+
 class _FailingCatalog(CompositeCatalog):
     """A catalog that raises CatalogUnavailableError on resolve."""
 

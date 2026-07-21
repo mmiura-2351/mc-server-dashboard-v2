@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"time"
 )
 
@@ -46,6 +47,14 @@ var ErrAuthFailed = errors.New("rcon: authentication failed")
 // TCP-accepts but never sends an AUTH_RESPONSE would otherwise block the read
 // forever on a deadline-less lane ctx — the same wedge shape one step earlier.
 var defaultExecuteTimeout = 30 * time.Second
+
+// maxResponseSize bounds the total reassembled response body. A misbehaving
+// server streaming fragments for the full deadline cannot grow memory past this.
+const maxResponseSize = 1 << 20 // 1 MiB
+
+// ErrResponseTooLarge is returned when the reassembled response exceeds
+// maxResponseSize.
+var ErrResponseTooLarge = errors.New("rcon: response too large")
 
 // ErrConnBroken is returned by Execute when a prior round trip failed mid-stream
 // (timeout or cancel), which can leave the connection mis-framed. The connection
@@ -85,30 +94,53 @@ func Dial(ctx context.Context, addr, password string) (*Client, error) {
 	return c, nil
 }
 
-// Execute sends one command line and returns the server's reply body. It honours
-// ctx's deadline for the round trip, and falls back to defaultExecuteTimeout when
-// ctx carries none, so a server that accepts the connection but never replies
-// cannot block the call forever. It returns ctx.Err() when ctx cancellation
-// caused the failure, and ErrConnBroken when the connection was poisoned by a
-// prior failed round trip.
+// Execute sends one command line and returns the server's reply body. Vanilla
+// Minecraft's RCON server fragments replies longer than 4096 bytes into multiple
+// RESPONSE_VALUE packets with the same request id, with no end marker. Execute
+// sends a second marker command (empty body) with its own id after the real
+// command: the arrival of the marker's reply deterministically signals that all
+// fragments for the real command have been received.
+//
+// It honours ctx's deadline for the round trip, and falls back to
+// defaultExecuteTimeout when ctx carries none, so a server that accepts the
+// connection but never replies cannot block the call forever. It returns
+// ctx.Err() when ctx cancellation caused the failure, and ErrConnBroken when
+// the connection was poisoned by a prior failed round trip.
 func (c *Client) Execute(ctx context.Context, line string) (string, error) {
 	if c.broken {
 		return "", ErrConnBroken
 	}
 	var body string
 	err := c.withDeadline(ctx, func() error {
-		id := c.id()
-		if err := c.write(id, typeExecCommand, line); err != nil {
+		cmdID := c.id()
+		markerID := c.id()
+		if err := c.write(cmdID, typeExecCommand, line); err != nil {
 			return err
 		}
-		respID, _, b, err := c.read()
-		if err != nil {
+		if err := c.write(markerID, typeExecCommand, ""); err != nil {
 			return err
 		}
-		if respID != id {
-			return fmt.Errorf("rcon: response id %d did not match request id %d", respID, id)
+		var buf strings.Builder
+		for {
+			respID, typ, b, err := c.read()
+			if err != nil {
+				return err
+			}
+			if respID == markerID {
+				break
+			}
+			if respID != cmdID {
+				return fmt.Errorf("rcon: response id %d did not match request id %d or marker id %d", respID, cmdID, markerID)
+			}
+			if typ != typeResponseValue {
+				return fmt.Errorf("rcon: unexpected packet type %d in response stream", typ)
+			}
+			buf.WriteString(b)
+			if buf.Len() > maxResponseSize {
+				return ErrResponseTooLarge
+			}
 		}
-		body = b
+		body = buf.String()
 		return nil
 	})
 	if err != nil {
@@ -194,10 +226,11 @@ func (c *Client) authenticate(password string) error {
 	}
 }
 
-// id allocates the next request id.
+// id allocates the next request id, keeping it positive and avoiding -1 (the
+// auth-failure sentinel) across int32 wraparound.
 func (c *Client) id() int32 {
 	id := c.nextID
-	c.nextID++
+	c.nextID = (c.nextID + 1) & 0x7FFFFFFF
 	return id
 }
 

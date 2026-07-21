@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import datetime as dt
 
+import pytest
+
 from mc_server_dashboard_api.identity.application.list_sessions import ListSessions
 from mc_server_dashboard_api.identity.application.refresh_session import RefreshSession
 from mc_server_dashboard_api.identity.application.revoke_other_sessions import (
@@ -20,9 +22,12 @@ from mc_server_dashboard_api.identity.application.revoke_other_sessions import (
 )
 from mc_server_dashboard_api.identity.application.revoke_session import RevokeSession
 from mc_server_dashboard_api.identity.domain.entities import (
+    REVOKED_ROTATED,
+    REVOKED_SUPERSEDED,
     REVOKED_USER,
     RefreshToken,
 )
+from mc_server_dashboard_api.identity.domain.errors import RefreshTokenReuseError
 from mc_server_dashboard_api.identity.domain.value_objects import (
     RefreshTokenId,
     UserId,
@@ -40,6 +45,7 @@ def _token(
     issued_at: dt.datetime = _NOW,
     expires_at: dt.datetime | None = None,
     revoked_at: dt.datetime | None = None,
+    revoked_reason: str | None = None,
     token_id: RefreshTokenId | None = None,
 ) -> RefreshToken:
     return RefreshToken(
@@ -49,6 +55,7 @@ def _token(
         issued_at=issued_at,
         expires_at=expires_at or (issued_at + _TTL),
         revoked_at=revoked_at,
+        revoked_reason=revoked_reason,
     )
 
 
@@ -257,3 +264,153 @@ async def test_revoke_others_keep_session_id_without_refresh_token_revokes_rest(
     assert uow.refresh_tokens.by_hash["hash::kept"].revoked_at is None
     assert uow.refresh_tokens.by_hash["hash::gone1"].revoked_at == _NOW
     assert uow.refresh_tokens.by_hash["hash::gone2"].revoked_at == _NOW
+
+
+# --- Issue #2172: revoke-others closes the rotated-predecessor grace escape --
+
+
+async def test_revoke_others_stolen_rotated_predecessor_rejected() -> None:
+    """A stolen rotated predecessor cannot replay after revoke-others (#2172).
+
+    Scenario: token A was rotated to B at T0. A is stolen. The user triggers
+    "log out other devices" keeping session C at T0+10s. The attacker presents
+    A at T0+20s (within the 60s grace window). Because revoke_all_for_user_except
+    re-stamps A from 'rotated' to 'user_revoked', the grace check rejects it.
+    """
+    uow = FakeUnitOfWork()
+    alice = UserId.new()
+    t0 = _NOW
+    grace = dt.timedelta(seconds=60)
+
+    # A was rotated at T0 — the stolen predecessor.
+    stolen_a = _token(
+        user_id=alice,
+        secret="stolen-a",
+        revoked_at=t0,
+        revoked_reason=REVOKED_ROTATED,
+    )
+    # B is A's successor, still active.
+    successor_b = _token(user_id=alice, secret="successor-b")
+    # C is the session the user keeps.
+    kept_c = _token(user_id=alice, secret="kept-c")
+    for tok in (stolen_a, successor_b, kept_c):
+        uow.refresh_tokens.seed(tok)
+
+    # T0+10s: user triggers "log out other devices" keeping C.
+    t_revoke = t0 + dt.timedelta(seconds=10)
+    await RevokeOtherSessions(
+        uow=uow, tokens=FakeTokenService(), clock=FakeClock(t_revoke)
+    )(user_id=alice, current_refresh_token="kept-c")
+
+    # T0+20s: attacker presents stolen token A — still within the 60s window
+    # since A's original revoked_at (T0), but reason is now 'user_revoked'
+    # so the grace check must reject it.
+    t_attack = t0 + dt.timedelta(seconds=20)
+    refresh = RefreshSession(
+        uow=uow,
+        tokens=FakeTokenService(),
+        clock=FakeClock(t_attack),
+        refresh_ttl=_TTL,
+        reuse_grace=grace,
+    )
+    with pytest.raises(RefreshTokenReuseError):
+        await refresh(refresh_token="stolen-a")
+
+
+async def test_revoke_others_restamps_rotated_preserving_revoked_at() -> None:
+    """After revoke-others: rotated predecessor's reason changes, revoked_at stays;
+    superseded rows untouched; other users untouched (#2172)."""
+    uow = FakeUnitOfWork()
+    alice = UserId.new()
+    bob = UserId.new()
+    t_rotated = _NOW - dt.timedelta(seconds=30)
+
+    rotated_pred = _token(
+        user_id=alice,
+        secret="rotated-pred",
+        revoked_at=t_rotated,
+        revoked_reason=REVOKED_ROTATED,
+    )
+    superseded_tok = _token(
+        user_id=alice,
+        secret="superseded-tok",
+        revoked_at=t_rotated,
+        revoked_reason=REVOKED_SUPERSEDED,
+    )
+    active_other = _token(user_id=alice, secret="active-other")
+    kept = _token(user_id=alice, secret="kept")
+    bobs = _token(user_id=bob, secret="bobs")
+    for tok in (rotated_pred, superseded_tok, active_other, kept, bobs):
+        uow.refresh_tokens.seed(tok)
+
+    await _revoke_others(uow)(user_id=alice, current_refresh_token="kept")
+
+    # Rotated predecessor: reason changed to 'user_revoked', revoked_at preserved.
+    rp = uow.refresh_tokens.by_hash["hash::rotated-pred"]
+    assert rp.revoked_at == t_rotated
+    assert rp.revoked_reason == REVOKED_USER
+
+    # Superseded: untouched (not in the WHERE clause).
+    sp = uow.refresh_tokens.by_hash["hash::superseded-tok"]
+    assert sp.revoked_at == t_rotated
+    assert sp.revoked_reason == REVOKED_SUPERSEDED
+
+    # Active other: newly revoked.
+    ao = uow.refresh_tokens.by_hash["hash::active-other"]
+    assert ao.revoked_at == _NOW
+    assert ao.revoked_reason == REVOKED_USER
+
+    # Kept session: untouched.
+    assert uow.refresh_tokens.by_hash["hash::kept"].revoked_at is None
+
+    # Other user: untouched.
+    assert uow.refresh_tokens.by_hash["hash::bobs"].revoked_at is None
+
+
+async def test_revoke_others_kept_sessions_rotated_predecessor_restamped() -> None:
+    """Tradeoff: the kept session C's own rotated predecessor P is re-stamped;
+    retrying with P raises RefreshTokenReuseError (#2172).
+
+    This is an accepted regression vs. the predecessor being graceable -- the
+    security fix (closing the grace escape) takes priority over preserving
+    retry semantics for the kept session's predecessor chain.
+    """
+    uow = FakeUnitOfWork()
+    alice = UserId.new()
+    grace = dt.timedelta(seconds=60)
+
+    # P was rotated to C at T0.
+    t0 = _NOW
+    predecessor_p = _token(
+        user_id=alice,
+        secret="predecessor-p",
+        revoked_at=t0,
+        revoked_reason=REVOKED_ROTATED,
+    )
+    kept_c = _token(user_id=alice, secret="kept-c")
+    other = _token(user_id=alice, secret="other")
+    for tok in (predecessor_p, kept_c, other):
+        uow.refresh_tokens.seed(tok)
+
+    # T0+5s: user revokes other sessions, keeping C.
+    t_revoke = t0 + dt.timedelta(seconds=5)
+    await RevokeOtherSessions(
+        uow=uow, tokens=FakeTokenService(), clock=FakeClock(t_revoke)
+    )(user_id=alice, current_refresh_token="kept-c")
+
+    # P is re-stamped to 'user_revoked' (no longer graceable).
+    p = uow.refresh_tokens.by_hash["hash::predecessor-p"]
+    assert p.revoked_reason == REVOKED_USER
+    assert p.revoked_at == t0  # preserved
+
+    # T0+10s: retry with P (within the original 60s window) is rejected.
+    t_retry = t0 + dt.timedelta(seconds=10)
+    refresh = RefreshSession(
+        uow=uow,
+        tokens=FakeTokenService(),
+        clock=FakeClock(t_retry),
+        refresh_ttl=_TTL,
+        reuse_grace=grace,
+    )
+    with pytest.raises(RefreshTokenReuseError):
+        await refresh(refresh_token="predecessor-p")

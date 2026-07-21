@@ -190,3 +190,54 @@ async def test_open_file_stream_aclose_releases_lease_and_sweep_reclaims(
 
     storage.sweep()
     assert not old_snapshot.exists()
+
+
+# --- HydrateSource.generation contract (issue #1954) -------------------------
+
+
+async def test_hydrate_source_generation_is_none_before_iteration(
+    tmp_path: Path,
+) -> None:
+    """generation is None until the first chunk is pulled."""
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"DATA"})
+
+    source = storage.open_hydrate_source(community, server)
+    assert source.generation is None
+
+    # After first chunk, generation is populated.
+    await source.__anext__()
+    assert source.generation is not None
+    await drain(source)
+
+
+async def test_hydrate_source_generation_matches_current_after_iteration(
+    tmp_path: Path,
+) -> None:
+    """After first chunk, generation equals what current_generation reports."""
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"ONE"})
+    expected = await storage.current_generation(community, server)
+
+    source = storage.open_hydrate_source(community, server)
+    await source.__anext__()
+    assert source.generation == expected
+
+
+async def test_hydrate_source_generation_tracks_bumps(tmp_path: Path) -> None:
+    """A second publish bumps the generation; a fresh hydrate reports it."""
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"ONE"})
+    gen1 = await storage.current_generation(community, server)
+
+    await publish(storage, community, server, {"f": b"TWO"})
+    gen2 = await storage.current_generation(community, server)
+    assert gen2 > gen1
+
+    source = storage.open_hydrate_source(community, server)
+    await source.__anext__()
+    assert source.generation == gen2
+    await drain(source)

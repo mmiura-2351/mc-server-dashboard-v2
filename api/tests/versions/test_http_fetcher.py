@@ -33,7 +33,11 @@ def _install_transport(monkeypatch: pytest.MonkeyPatch, handler: object) -> None
     transport = httpx2.MockTransport(handler)  # type: ignore[arg-type]
     patched = functools.partial(httpx2.AsyncClient, transport=transport)
     monkeypatch.setattr(httpx2, "AsyncClient", patched)
-    monkeypatch.setattr(ssrf_guard, "_resolve_host", lambda _host: ["93.184.216.34"])
+
+    async def _public_resolver(_host: str) -> list[str]:
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(ssrf_guard, "_async_resolve_host", _public_resolver)
 
 
 @pytest.mark.asyncio
@@ -72,7 +76,10 @@ async def test_get_json_private_ip_is_fetch_error(
 ) -> None:
     """A URL resolving to a private IP is refused before any request (#1598)."""
 
-    monkeypatch.setattr(ssrf_guard, "_resolve_host", lambda _host: ["169.254.169.254"])
+    async def _private_resolver(_host: str) -> list[str]:
+        return ["169.254.169.254"]
+
+    monkeypatch.setattr(ssrf_guard, "_async_resolve_host", _private_resolver)
     with pytest.raises(FetchError, match="private"):
         await HttpxJsonFetcher().get_json(_URL)
 
@@ -81,7 +88,10 @@ async def test_get_json_private_ip_is_fetch_error(
 async def test_get_text_private_ip_is_fetch_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(ssrf_guard, "_resolve_host", lambda _host: ["127.0.0.1"])
+    async def _private_resolver(_host: str) -> list[str]:
+        return ["127.0.0.1"]
+
+    monkeypatch.setattr(ssrf_guard, "_async_resolve_host", _private_resolver)
     with pytest.raises(FetchError, match="private"):
         await HttpxJsonFetcher().get_text(_URL)
 
@@ -116,7 +126,10 @@ async def test_get_text_404_is_fetch_not_found_error(
 async def test_get_json_non_https_is_fetch_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(ssrf_guard, "_resolve_host", lambda _host: ["93.184.216.34"])
+    async def _public_resolver(_host: str) -> list[str]:
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(ssrf_guard, "_async_resolve_host", _public_resolver)
     with pytest.raises(FetchError, match="HTTPS"):
         await HttpxJsonFetcher().get_json("http://example.test/manifest.json")
 
@@ -131,18 +144,41 @@ async def test_get_json_does_not_follow_redirect(
     redirect target must never be requested. A future httpx2 default flip or an
     accidental ``follow_redirects=True`` would issue a second request to the
     ``Location`` target through the same transport, which the handler would see.
+
+    The request URL is the pinned-IP form (SSRF guard pins the resolved address
+    into the URL), so the handler matches on that (#1989).
     """
 
     requested: list[str] = []
     redirect_target = "https://redirect-target.test/internal"
+    pinned_url = "https://93.184.216.34/manifest.json"
 
     def handler(request: httpx2.Request) -> httpx2.Response:
         requested.append(str(request.url))
-        if str(request.url) == _URL:
+        if str(request.url) == pinned_url:
             return httpx2.Response(302, headers={"Location": redirect_target})
         return httpx2.Response(200, json={"followed": True})
 
     _install_transport(monkeypatch, handler)
     with pytest.raises(FetchError):
         await HttpxJsonFetcher().get_json(_URL)
-    assert requested == [_URL]
+    assert requested == [pinned_url]
+
+
+@pytest.mark.asyncio
+async def test_get_json_connects_to_pinned_ip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The HTTP request goes to the resolver-stubbed IP, not the hostname (#1989).
+
+    Anti-rebinding regression: the SSRF guard resolves DNS and pins the IP into
+    the request URL. A second DNS lookup (which could return a different, internal
+    address) must never happen.
+    """
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        assert request.url.host == "93.184.216.34"
+        return httpx2.Response(200, json={"ok": True})
+
+    _install_transport(monkeypatch, handler)
+    await HttpxJsonFetcher().get_json(_URL)

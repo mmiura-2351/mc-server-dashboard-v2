@@ -7,15 +7,16 @@ descriptive User-Agent.
 
 from __future__ import annotations
 
-import ipaddress
 import json
-import socket
-from collections.abc import Callable
 from typing import Any
-from urllib.parse import quote, urljoin, urlparse
+from urllib.parse import quote
 
 import httpx2
 
+from mc_server_dashboard_api.servers.adapters.catalog_ssrf import (
+    next_logical_url,
+    pin_download_url,
+)
 from mc_server_dashboard_api.servers.domain.catalog_provider import (
     CatalogDependency,
     CatalogFile,
@@ -29,6 +30,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     CatalogProjectNotFoundError,
     CatalogUnavailableError,
     FileTooLargeError,
+    wrap_shape_errors,
 )
 
 _BASE_URL = "https://api.modrinth.com/v2"
@@ -46,43 +48,6 @@ _ALLOWED_DOWNLOAD_HOSTS = frozenset(
         "objects.githubusercontent.com",
     }
 )
-
-
-def _default_resolve_host(hostname: str) -> list[str]:
-    """Resolve *hostname* to a list of IP address strings via DNS."""
-    results = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
-    return list({str(addr[4][0]) for addr in results})
-
-
-_resolve_host: Callable[[str], list[str]] = _default_resolve_host
-
-
-def _assert_no_private_ips(
-    hostname: str,
-    *,
-    _resolver: Callable[[str], list[str]] | None = None,
-) -> None:
-    """Raise :class:`CatalogUnavailableError` if *hostname* resolves to a private IP.
-
-    Guards against DNS-rebinding attacks where an attacker-controlled hostname
-    initially passes the allowlist check but resolves to a private/loopback
-    address.
-    """
-    resolver = _resolver or _resolve_host
-    try:
-        addrs = resolver(hostname)
-    except (socket.gaierror, OSError) as exc:
-        raise CatalogUnavailableError(f"DNS resolution failed for {hostname}") from exc
-    if not addrs:
-        raise CatalogUnavailableError(
-            f"DNS resolution for {hostname} returned no addresses"
-        )
-    for addr in addrs:
-        ip = ipaddress.ip_address(addr)
-        if not ip.is_global:
-            raise CatalogUnavailableError(
-                f"hostname {hostname} resolved to private/reserved IP: {addr}"
-            )
 
 
 class ModrinthCatalog(CatalogProvider):
@@ -114,44 +79,46 @@ class ModrinthCatalog(CatalogProvider):
             "offset": offset,
         }
         data = await self._get_json("/search", params=params)
-        hits = [
-            CatalogSearchResult(
-                project_id=h["project_id"],
-                slug=h.get("slug", ""),
-                title=h.get("title", ""),
-                description=h.get("description", ""),
-                author=h.get("author", ""),
-                icon_url=h.get("icon_url"),
-                downloads=h.get("downloads", 0),
-                categories=h.get("categories", []),
-                latest_game_versions=h.get("versions", []),
+        with wrap_shape_errors("modrinth"):
+            hits = [
+                CatalogSearchResult(
+                    project_id=h["project_id"],
+                    slug=h.get("slug", ""),
+                    title=h.get("title", ""),
+                    description=h.get("description", ""),
+                    author=h.get("author", ""),
+                    icon_url=h.get("icon_url"),
+                    downloads=h.get("downloads", 0),
+                    categories=h.get("categories", []),
+                    latest_game_versions=h.get("versions", []),
+                )
+                for h in data.get("hits", [])
+            ]
+            return CatalogSearchResponse(
+                hits=hits,
+                total_hits=data.get("total_hits", 0),
+                offset=data.get("offset", offset),
+                limit=data.get("limit", limit),
             )
-            for h in data.get("hits", [])
-        ]
-        return CatalogSearchResponse(
-            hits=hits,
-            total_hits=data.get("total_hits", 0),
-            offset=data.get("offset", offset),
-            limit=data.get("limit", limit),
-        )
 
     async def get_project(self, project_id_or_slug: str) -> CatalogProject:
         data = await self._get_json(f"/project/{quote(project_id_or_slug, safe='')}")
-        return CatalogProject(
-            project_id=data["id"],
-            slug=data.get("slug", ""),
-            title=data.get("title", ""),
-            description=data.get("description", ""),
-            body=data.get("body", ""),
-            author=data.get("team", None),
-            icon_url=data.get("icon_url"),
-            downloads=data.get("downloads", 0),
-            categories=data.get("categories", []),
-            game_versions=data.get("game_versions", []),
-            loaders=data.get("loaders", []),
-            client_side=data.get("client_side", "unknown"),
-            server_side=data.get("server_side", "unknown"),
-        )
+        with wrap_shape_errors("modrinth"):
+            return CatalogProject(
+                project_id=data["id"],
+                slug=data.get("slug", ""),
+                title=data.get("title", ""),
+                description=data.get("description", ""),
+                body=data.get("body", ""),
+                author=None,
+                icon_url=data.get("icon_url"),
+                downloads=data.get("downloads", 0),
+                categories=data.get("categories", []),
+                game_versions=data.get("game_versions", []),
+                loaders=data.get("loaders", []),
+                client_side=data.get("client_side", "unknown"),
+                server_side=data.get("server_side", "unknown"),
+            )
 
     async def list_versions(
         self,
@@ -168,44 +135,33 @@ class ModrinthCatalog(CatalogProvider):
         data = await self._get_json(
             f"/project/{quote(project_id_or_slug, safe='')}/version", params=params
         )
-        return [self._parse_version(v) for v in data]
+        with wrap_shape_errors("modrinth"):
+            return [self._parse_version(v) for v in data]
 
     async def download_file(self, url: str) -> bytes:
-        parsed = urlparse(url)
-        if parsed.scheme != "https":
-            raise CatalogUnavailableError(f"download URL must use HTTPS: {url}")
-        if parsed.hostname not in _ALLOWED_DOWNLOAD_HOSTS:
-            raise CatalogUnavailableError(
-                f"download URL host not allowed: {parsed.hostname}"
-            )
-        _assert_no_private_ips(parsed.hostname)
+        logical_url = url
+        pinned = await pin_download_url(logical_url, _ALLOWED_DOWNLOAD_HOSTS)
         try:
             async with httpx2.AsyncClient(
                 timeout=_DOWNLOAD_TIMEOUT,
                 headers=self._headers(),
             ) as client:
-                current_url = url
                 for _ in range(_MAX_REDIRECTS):
                     async with client.stream(
-                        "GET", current_url, follow_redirects=False
+                        "GET",
+                        pinned.url,
+                        headers=pinned.headers,
+                        extensions=pinned.extensions,
+                        follow_redirects=False,
                     ) as response:
                         if response.is_redirect:
                             location = response.headers.get("location", "")
-                            redirect_parsed = urlparse(location)
-                            if not redirect_parsed.scheme:
-                                location = urljoin(current_url, location)
-                                redirect_parsed = urlparse(location)
-                            if redirect_parsed.scheme != "https":
-                                raise CatalogUnavailableError(
-                                    f"redirect to non-HTTPS: {location}"
-                                )
-                            if redirect_parsed.hostname not in _ALLOWED_DOWNLOAD_HOSTS:
-                                raise CatalogUnavailableError(
-                                    f"redirect to disallowed host: "
-                                    f"{redirect_parsed.hostname}"
-                                )
-                            _assert_no_private_ips(redirect_parsed.hostname)
-                            current_url = location
+                            logical_url = next_logical_url(location, logical_url)
+                            pinned = await pin_download_url(
+                                logical_url,
+                                _ALLOWED_DOWNLOAD_HOSTS,
+                                redirect=True,
+                            )
                             continue
                         response.raise_for_status()
                         chunks: list[bytes] = []
@@ -257,7 +213,7 @@ class ModrinthCatalog(CatalogProvider):
             raise
         except httpx2.HTTPStatusError as exc:
             raise CatalogUnavailableError(str(exc)) from exc
-        except httpx2.TransportError as exc:
+        except (httpx2.TransportError, ValueError) as exc:
             raise CatalogUnavailableError(str(exc)) from exc
 
     @staticmethod

@@ -13,7 +13,7 @@ import asyncio
 import io
 import tarfile
 import uuid
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
 import pytest
@@ -21,8 +21,10 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from mc_server_dashboard_api.dependencies import (
+    get_assigned_worker_lookup,
     get_resolved_jar_lookup,
     get_storage,
+    get_transfer_semaphore,
     get_worker_credential,
 )
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
@@ -65,7 +67,11 @@ def _read_tar(blob: bytes) -> dict[str, bytes]:
 
 
 def _setup(
-    tmp_path: Path, *, resolved_jar: str | None = None
+    tmp_path: Path,
+    *,
+    resolved_jar: str | None = None,
+    assigned_worker_id: str | None = None,
+    transfer_semaphore: asyncio.Semaphore | None = None,
 ) -> tuple[TestClient, FsStorage]:
     # Reuse the per-worker shared app; clear overrides on entry so a helper called
     # twice in one test starts clean (the shared_app wrapper clears between tests).
@@ -78,11 +84,18 @@ def _setup(
         return resolved_jar
 
     app.dependency_overrides[get_resolved_jar_lookup] = lambda: _lookup
+
+    async def _assigned(_c: uuid.UUID, _s: uuid.UUID) -> str | None:
+        return assigned_worker_id
+
+    app.dependency_overrides[get_assigned_worker_lookup] = lambda: _assigned
     # The Worker credential the data plane authenticates against is injected via
     # Depends(get_worker_credential) (issue #1753), so the shared app — built with
     # no credential configured — receives the test credential through the override
     # rather than through the environment before build.
     app.dependency_overrides[get_worker_credential] = lambda: _CREDENTIAL
+    sem = transfer_semaphore if transfer_semaphore is not None else asyncio.Semaphore(1)
+    app.dependency_overrides[get_transfer_semaphore] = lambda: sem
     client = TestClient(app)
     return client, storage
 
@@ -1131,3 +1144,492 @@ def test_snapshot_chunk_idle_timeout_aborts_staging_and_returns_408(
 
     published = asyncio.run(_read())
     assert _read_tar(published) == {"keep.txt": b"prior"}
+
+
+def test_hydrate_resolved_jar_supersedes_stale_embedded_jar(tmp_path: Path) -> None:
+    """The resolved JAR must overwrite the stale embedded server.jar in the snapshot.
+
+    Regression test for issue #1942: when a working set embeds its own
+    ``server.jar`` (from a prior snapshot), a version change must still take
+    effect — the hydrate tar must contain exactly ONE ``server.jar`` with the
+    resolved content, not the stale embedded one.
+    """
+    import asyncio
+
+    jar_bytes = b"PK\x03\x04 resolved JAR B (version 1.22)"
+    sha256 = asyncio.run(_store_jar(FsStorage(tmp_path), jar_bytes))
+
+    client, storage = _setup(tmp_path, resolved_jar=sha256)
+    community, server = _scope()
+    # The working set embeds a STALE server.jar (from a prior snapshot that
+    # ran version 1.21). The hydrate must NOT serve it.
+    files = {
+        "server.jar": b"PK\x03\x04 stale JAR A (version 1.21)",
+        "server.properties": b"motd=hi",
+        "world/level.dat": b"\x00\x01",
+    }
+    asyncio.run(_publish(storage, community, server, files))
+    with client:
+        resp = client.get(_url(community, server, "working-set"), headers=_auth())
+    assert resp.status_code == 200
+    members = _read_tar(resp.content)
+    # Exactly one server.jar in the output, carrying the RESOLVED content.
+    assert members["server.jar"] == jar_bytes
+    # Other working-set files still round-trip.
+    assert members["server.properties"] == b"motd=hi"
+    assert members["world/level.dat"] == b"\x00\x01"
+
+
+def test_hydrate_generation_header_matches_leased_snapshot(tmp_path: Path) -> None:
+    """Issue #1954: the generation header must match the served content.
+
+    Previously, a standalone ``current_generation`` read BEFORE the hydrate stream
+    leased the snapshot left a window where a concurrent bump mislabeled the served
+    bytes. After the fix, generation is read atomically with the lease, so the header
+    always matches the content's generation.
+    """
+    import asyncio
+
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    c, s = CommunityId(community), ServerId(server)
+
+    asyncio.run(_publish(storage, community, server, {"f": b"v1"}))
+    gen1 = asyncio.run(storage.current_generation(c, s))
+
+    with client:
+        resp = client.get(_url(community, server, "working-set"), headers=_auth())
+    assert resp.status_code == 200
+    assert resp.headers["X-Working-Set-Generation"] == str(gen1)
+
+    # Publish a second snapshot and verify the generation header advances.
+    asyncio.run(_publish(storage, community, server, {"f": b"v2"}))
+    gen2 = asyncio.run(storage.current_generation(c, s))
+    assert gen2 > gen1
+
+    with client:
+        resp = client.get(_url(community, server, "working-set"), headers=_auth())
+    assert resp.status_code == 200
+    assert resp.headers["X-Working-Set-Generation"] == str(gen2)
+    assert _read_tar(resp.content) == {"f": b"v2"}
+
+
+def test_hydrate_generation_header_on_204_is_zero(tmp_path: Path) -> None:
+    """On 204 (no published snapshot) the generation header is 0."""
+    client, _ = _setup(tmp_path)
+    community, server = _scope()
+    with client:
+        resp = client.get(_url(community, server, "working-set"), headers=_auth())
+    assert resp.status_code == 204
+    assert resp.headers["X-Working-Set-Generation"] == "0"
+
+
+# --- assignment-aware publisher guard (issue #1703) ----------------------------
+
+
+def test_snapshot_stale_base_from_assigned_worker_is_allowed(tmp_path: Path) -> None:
+    # Issue #1703 unwedge: worker A published the current generation (a late final
+    # snapshot after being re-placed). Worker B is now the assigned worker and tries
+    # to publish with base < current (because A advanced the store after B hydrated).
+    # The guard sees current_publisher=A != publisher=B, but B IS the assigned worker,
+    # so the publish must be ALLOWED — refusing it would wedge B's entire session.
+    import asyncio
+
+    worker_a = str(uuid.uuid4())
+    worker_b = str(uuid.uuid4())
+
+    client, storage = _setup(tmp_path, assigned_worker_id=worker_b)
+    community, server = _scope()
+    # A published gen1, then A published gen2 (late final snapshot).
+    asyncio.run(_publish(storage, community, server, {"k": b"g1"}, publisher=worker_a))
+    asyncio.run(_publish(storage, community, server, {"k": b"g2"}, publisher=worker_a))
+    current = asyncio.run(
+        storage.current_generation(CommunityId(community), ServerId(server))
+    )
+
+    body = _tar_bytes({"world/level.dat": b"from-b"})
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"),
+            content=body,
+            headers={
+                **_auth(),
+                "X-Working-Set-Base-Generation": str(current - 1),
+                "X-Worker-Id": worker_b,
+            },
+        )
+    assert resp.status_code == 204
+
+    async def _read() -> bytes:
+        return b"".join(
+            [
+                chunk
+                async for chunk in storage.open_hydrate_source(
+                    CommunityId(community), ServerId(server)
+                )
+            ]
+        )
+
+    assert _read_tar(asyncio.run(_read())) == {"world/level.dat": b"from-b"}
+
+
+def test_snapshot_commit_fenced_when_assignment_moved_during_upload(
+    tmp_path: Path,
+) -> None:
+    # Issue #1703 fence: worker A's upload starts with base==current (pre-stream guard
+    # passes). During the upload the server is re-placed on B (assignment changed).
+    # At commit time the fence re-reads the assignment: assigned=B != publisher=A, so
+    # the staging is aborted and A's late commit never wedges B's session.
+    import asyncio
+
+    worker_a = str(uuid.uuid4())
+    worker_b = str(uuid.uuid4())
+
+    # The assignment lookup is hooked to return worker_b (simulating re-placement
+    # during the upload window). The pre-stream guard passes because base==current.
+    client, storage = _setup(tmp_path, assigned_worker_id=worker_b)
+    community, server = _scope()
+    asyncio.run(_publish(storage, community, server, {"k": b"g1"}, publisher=worker_a))
+    current = asyncio.run(
+        storage.current_generation(CommunityId(community), ServerId(server))
+    )
+
+    body = _tar_bytes({"world/level.dat": b"late-from-a"})
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"),
+            content=body,
+            headers={
+                **_auth(),
+                "X-Working-Set-Base-Generation": str(current),
+                "X-Worker-Id": worker_a,
+            },
+        )
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "publisher_not_assigned"
+
+    # The prior authoritative copy survives.
+    async def _read() -> bytes:
+        return b"".join(
+            [
+                chunk
+                async for chunk in storage.open_hydrate_source(
+                    CommunityId(community), ServerId(server)
+                )
+            ]
+        )
+
+    assert _read_tar(asyncio.run(_read())) == {"k": b"g1"}
+
+
+def test_snapshot_late_publish_after_clear_with_no_replacement_still_lands(
+    tmp_path: Path,
+) -> None:
+    # Regression guard: when no worker is currently assigned (the stale-stop arm
+    # cleared the assignment, and no new placement happened yet), a publish from the
+    # old worker must still land — the fence is permissive when assigned is None,
+    # because refusing would discard the final snapshot the held-assignment window
+    # was designed to protect. This case is the normal path for a stop whose final
+    # snapshot completes within the grace window.
+    import asyncio
+
+    worker_a = str(uuid.uuid4())
+
+    # assigned_worker_id=None simulates the cleared-no-replacement state.
+    client, storage = _setup(tmp_path, assigned_worker_id=None)
+    community, server = _scope()
+    asyncio.run(_publish(storage, community, server, {"k": b"g1"}, publisher=worker_a))
+    current = asyncio.run(
+        storage.current_generation(CommunityId(community), ServerId(server))
+    )
+
+    body = _tar_bytes({"world/level.dat": b"final-from-a"})
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"),
+            content=body,
+            headers={
+                **_auth(),
+                "X-Working-Set-Base-Generation": str(current),
+                "X-Worker-Id": worker_a,
+            },
+        )
+    assert resp.status_code == 204
+
+    async def _read() -> bytes:
+        return b"".join(
+            [
+                chunk
+                async for chunk in storage.open_hydrate_source(
+                    CommunityId(community), ServerId(server)
+                )
+            ]
+        )
+
+    assert _read_tar(asyncio.run(_read())) == {"world/level.dat": b"final-from-a"}
+
+
+# --- hydrate send deadline (issue #1822) --------------------------------------
+
+
+def test_hydrate_send_stall_releases_reader_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stalled ASGI send triggers _ChunkSendTimeout and releases the lease."""
+    from mc_server_dashboard_api.dataplane.api.transfers import (
+        _ChunkSendTimeout,
+        _DeadlineStreamingResponse,
+    )
+
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    # Publish a working set large enough to produce at least one body chunk.
+    files = {"world/level.dat": b"x" * 200_000}
+    asyncio.run(_publish(storage, community, server, files))
+
+    # Exercise the response's stream_response directly with a stalling send,
+    # bypassing middleware (which proxies the send through internal queues).
+    # This proves the mechanism: the send deadline fires, the body iterator is
+    # closed, and the generator's finally releases the lease.
+    async def _drive() -> None:
+        hydrate_source = storage.open_hydrate_source(
+            CommunityId(community), ServerId(server)
+        )
+        resp = _DeadlineStreamingResponse(
+            hydrate_source,
+            server_id=server,
+            media_type="application/x-tar",
+            send_timeout=0.05,
+        )
+
+        from collections.abc import MutableMapping
+        from typing import Any
+
+        async def stalling_send(message: MutableMapping[str, Any]) -> None:
+            if message.get("type") == "http.response.body" and message.get("body"):
+                await asyncio.sleep(3600)
+
+        with pytest.raises(_ChunkSendTimeout):
+            await asyncio.wait_for(resp.stream_response(stalling_send), timeout=5.0)
+
+    asyncio.run(_drive())
+
+    # The reader lease must have been released (the generator's finally ran).
+    # FsStorage exposes _leases; an empty dict means all leases are released.
+    assert storage._leases == {}
+
+
+def test_hydrate_send_no_false_positive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A normal fast send delivers the full body without triggering a timeout."""
+    from mc_server_dashboard_api.dataplane.api import transfers
+
+    # Even with a short timeout, a fast send must not fire.
+    monkeypatch.setattr(transfers, "_CHUNK_SEND_TIMEOUT", 5.0)
+
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    files = {"world/level.dat": b"y" * 100_000}
+    asyncio.run(_publish(storage, community, server, files))
+    with client:
+        resp = client.get(_url(community, server, "working-set"), headers=_auth())
+    assert resp.status_code == 200
+    assert _read_tar(resp.content) == files
+
+
+def test_close_propagation_replay(tmp_path: Path) -> None:
+    """Closing _replay propagates to the inner iterator (lease release)."""
+
+    closed = False
+
+    async def _source() -> object:
+        nonlocal closed
+        try:
+            yield b"first-chunk"
+            yield b"second-chunk"
+        finally:
+            closed = True
+
+    from mc_server_dashboard_api.dataplane.api.transfers import _prime
+
+    async def _drive() -> None:
+        nonlocal closed
+        primed = await _prime(_source())  # type: ignore[arg-type]
+        # Pull one chunk then close early.
+        chunk = await primed.__anext__()
+        assert chunk == b"first-chunk"
+        aclose = getattr(primed, "aclose", None)
+        assert aclose is not None
+        await aclose()
+        assert closed
+
+    asyncio.run(_drive())
+
+
+def test_close_propagation_with_jar_member(tmp_path: Path) -> None:
+    """Closing _with_jar_member propagates to the inner working_set iterator."""
+
+    closed = False
+
+    async def _source() -> object:
+        nonlocal closed
+        try:
+            yield b"ws-chunk-1"
+            yield b"ws-chunk-2"
+        finally:
+            closed = True
+
+    from mc_server_dashboard_api.dataplane.api.transfers import _with_jar_member
+
+    async def _drive() -> None:
+        nonlocal closed
+        gen = _with_jar_member(_source(), b"jar-member-bytes")  # type: ignore[arg-type]
+        # Pull the jar member and one ws chunk, then close early.
+        chunk1 = await gen.__anext__()
+        assert chunk1 == b"jar-member-bytes"
+        chunk2 = await gen.__anext__()
+        assert chunk2 == b"ws-chunk-1"
+        aclose = getattr(gen, "aclose", None)
+        assert aclose is not None
+        await aclose()
+        assert closed
+
+    asyncio.run(_drive())
+
+
+# --- transfer semaphore admission control (issue #1696) ----------------------
+
+
+class _RecordingSemaphore:
+    """A semaphore wrapper that records acquire/release calls.
+
+    Quacks like :class:`asyncio.Semaphore` for the subset the endpoint uses
+    (``acquire``, ``release``, ``locked``, async-context-manager) so it can be
+    injected via ``dependency_overrides``. Tracks call counts so tests can
+    verify the endpoint actually acquires and releases the semaphore.
+    """
+
+    def __init__(self, value: int = 1) -> None:
+        self._sem = asyncio.Semaphore(value)
+        self.acquired = 0
+        self.released = 0
+
+    async def acquire(self) -> bool:
+        result = await self._sem.acquire()
+        self.acquired += 1
+        return result
+
+    def release(self) -> None:
+        self._sem.release()
+        self.released += 1
+
+    def locked(self) -> bool:
+        return self._sem.locked()
+
+    async def __aenter__(self) -> "_RecordingSemaphore":
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        self.release()
+
+
+def test_semaphore_acquired_and_released_after_hydrate(tmp_path: Path) -> None:
+    """The hydrate endpoint acquires then releases the semaphore."""
+    sem = _RecordingSemaphore(1)
+    client, storage = _setup(tmp_path, transfer_semaphore=sem)  # type: ignore[arg-type]
+    community, server = _scope()
+    files = {"server.properties": b"motd=hi"}
+    asyncio.run(_publish(storage, community, server, files))
+    with client:
+        resp = client.get(_url(community, server, "working-set"), headers=_auth())
+    assert resp.status_code == 200
+    assert sem.acquired >= 1, "semaphore was never acquired"
+    assert sem.acquired == sem.released
+
+
+def test_semaphore_acquired_and_released_after_hydrate_204(tmp_path: Path) -> None:
+    """The 204 (no-snapshot) path acquires then releases the semaphore."""
+    sem = _RecordingSemaphore(1)
+    client, _ = _setup(tmp_path, transfer_semaphore=sem)  # type: ignore[arg-type]
+    community, server = _scope()
+    with client:
+        resp = client.get(_url(community, server, "working-set"), headers=_auth())
+    assert resp.status_code == 204
+    assert sem.acquired >= 1, "semaphore was never acquired"
+    assert sem.acquired == sem.released
+
+
+def test_semaphore_acquired_and_released_after_snapshot_success(
+    tmp_path: Path,
+) -> None:
+    """The snapshot endpoint acquires then releases the semaphore."""
+    sem = _RecordingSemaphore(1)
+    client, _ = _setup(tmp_path, transfer_semaphore=sem)  # type: ignore[arg-type]
+    community, server = _scope()
+    body = _tar_bytes({"server.properties": b"motd=hi"})
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"),
+            content=body,
+            headers={**_auth(), "Content-Length": str(len(body))},
+        )
+    assert resp.status_code == 204
+    assert sem.acquired >= 1, "semaphore was never acquired"
+    assert sem.acquired == sem.released
+
+
+def test_semaphore_acquired_and_released_after_snapshot_length_mismatch(
+    tmp_path: Path,
+) -> None:
+    """The semaphore is acquired and released even on a failed snapshot."""
+    sem = _RecordingSemaphore(1)
+    client, _ = _setup(tmp_path, transfer_semaphore=sem)  # type: ignore[arg-type]
+    community, server = _scope()
+    body = _tar_bytes({"server.properties": b"motd=hi"})
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"),
+            content=body,
+            headers={**_auth(), "Content-Length": str(len(body) + 100)},
+        )
+    assert resp.status_code == 400
+    assert sem.acquired >= 1, "semaphore was never acquired"
+    assert sem.acquired == sem.released
+
+
+def test_releasing_propagates_aclose_to_inner_iterator() -> None:
+    """Closing _releasing propagates aclose to the inner iterator (#1696 bug 2)."""
+    from mc_server_dashboard_api.dataplane.api.transfers import _releasing
+
+    closed = False
+
+    async def _source() -> AsyncIterator[bytes]:
+        nonlocal closed
+        try:
+            yield b"chunk-1"
+            yield b"chunk-2"
+        finally:
+            closed = True
+
+    async def _drive() -> None:
+        nonlocal closed
+        sem = asyncio.Semaphore(1)
+        gen = _releasing(sem, _source())
+        # Pull one chunk then close early (simulates _DeadlineStreamingResponse
+        # aborting on a send stall — issue #1822).
+        chunk = await gen.__anext__()
+        assert chunk == b"chunk-1"
+        aclose_fn = getattr(gen, "aclose", None)
+        assert aclose_fn is not None
+        await aclose_fn()
+        # The inner iterator's finally must have run (deterministic release,
+        # not GC-dependent).
+        assert closed
+        # The semaphore must be released.
+        assert not sem.locked()
+
+    asyncio.run(_drive())

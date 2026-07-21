@@ -359,6 +359,91 @@ async def test_hydrate_streams_incrementally_not_buffered(
     assert read_tar(b"".join(chunks)) == big
 
 
+async def test_hydrate_source_generation_none_before_iteration(
+    harness: StorageHarness,
+) -> None:
+    """HydrateSource.generation is None until the first chunk is pulled (#1954)."""
+    community, server = new_scope()
+    await harness.publish(community, server, {"f": b"DATA"})
+
+    source = harness.storage.open_hydrate_source(community, server)
+    assert source.generation is None
+    await source.__anext__()
+    assert source.generation is not None
+    await drain(source)
+
+
+async def test_hydrate_source_generation_equals_current_after_iteration(
+    harness: StorageHarness,
+) -> None:
+    """After first chunk, generation matches current_generation (#1954)."""
+    community, server = new_scope()
+    await harness.publish(community, server, {"f": b"ONE"})
+    expected = await harness.storage.current_generation(community, server)
+
+    source = harness.storage.open_hydrate_source(community, server)
+    await source.__anext__()
+    assert source.generation == expected
+    await drain(source)
+
+
+async def test_hydrate_source_generation_tracks_bumps(
+    harness: StorageHarness,
+) -> None:
+    """A second publish bumps the generation; a fresh hydrate reports it (#1954)."""
+    community, server = new_scope()
+    await harness.publish(community, server, {"f": b"ONE"})
+    gen1 = await harness.storage.current_generation(community, server)
+
+    await harness.publish(community, server, {"f": b"TWO"})
+    gen2 = await harness.storage.current_generation(community, server)
+    assert gen2 > gen1
+
+    source = harness.storage.open_hydrate_source(community, server)
+    await source.__anext__()
+    assert source.generation == gen2
+    await drain(source)
+
+
+async def test_hydrate_exclude_omits_named_top_level_member(
+    harness: StorageHarness,
+) -> None:
+    """open_hydrate_source(exclude=...) filters the named members (#1942).
+
+    The resolved-JAR injection (transfers.py) prepends ``server.jar`` to the
+    hydrate stream; excluding the embedded copy from the working set prevents
+    the stale jar from overwriting the injected one (last-wins in unpack).
+    """
+    community, server = new_scope()
+    await harness.publish(
+        community,
+        server,
+        {
+            "server.jar": b"old",
+            "server.properties": b"props",
+            "world/level.dat": b"dat",
+        },
+    )
+
+    # With exclude: the named member is omitted, others present.
+    blob = await drain(
+        harness.storage.open_hydrate_source(
+            community, server, exclude=frozenset({"server.jar"})
+        )
+    )
+    members = read_tar(blob)
+    assert "server.jar" not in members
+    assert members["server.properties"] == b"props"
+    assert members["world/level.dat"] == b"dat"
+
+    # Without exclude (default): all members present (fallback preserved).
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    members = read_tar(blob)
+    assert members["server.jar"] == b"old"
+    assert members["server.properties"] == b"props"
+    assert members["world/level.dat"] == b"dat"
+
+
 async def test_abort_discards_staging_and_leaves_current_untouched(
     harness: StorageHarness,
 ) -> None:
@@ -1393,6 +1478,160 @@ async def test_retain_file_version_before_any_publish_is_noop(
     assert (
         await harness.storage.list_file_versions(community, server, RelPath("cfg"))
         == []
+    )
+
+
+# --- version ring isolation (issue #1952) -----------------------------------
+
+
+async def test_file_history_isolated_from_same_named_directory_children(
+    harness: StorageHarness,
+) -> None:
+    """list_file_versions for a parent does not pick up a child ring's versions.
+
+    Scenario: file ``config`` has retained versions, is deleted, then a directory
+    ``config/`` is created and ``config/paper.yml`` is edited.  The parent's
+    history endpoint must only return its own ring members, not the child's.
+    """
+
+    community, server = new_scope()
+    # Publish file ``config``, edit it so it gains a retained version, then delete.
+    await harness.publish(community, server, {"config": b"v1"})
+    await harness.storage.write_file(community, server, RelPath("config"), b"v2")
+    await harness.storage.delete_file(community, server, RelPath("config"))
+
+    # Create directory ``config/`` and write a file inside it twice (gains a version).
+    await harness.storage.make_dir(community, server, RelPath("config"))
+    await harness.storage.write_file(
+        community, server, RelPath("config/paper.yml"), b"child-v1"
+    )
+    await harness.storage.write_file(
+        community, server, RelPath("config/paper.yml"), b"child-v2"
+    )
+
+    # The parent's ring must only contain its own 2 versions (v1 retained by the
+    # v2 write, v2 retained by the delete).
+    parent_versions = await harness.storage.list_file_versions(
+        community, server, RelPath("config")
+    )
+    assert len(parent_versions) == 2
+    parent_contents = [
+        await harness.storage.read_file_version(community, server, RelPath("config"), v)
+        for v in parent_versions
+    ]
+    assert b"v2" in parent_contents
+    assert b"v1" in parent_contents
+
+    # The child's ring must only contain its own 1 version.
+    child_versions = await harness.storage.list_file_versions(
+        community, server, RelPath("config/paper.yml")
+    )
+    assert len(child_versions) == 1
+    assert (
+        await harness.storage.read_file_version(
+            community, server, RelPath("config/paper.yml"), child_versions[0]
+        )
+        == b"child-v1"
+    )
+
+
+async def test_child_ring_does_not_count_against_parent_retention(
+    backend: str, tmp_path: Path
+) -> None:
+    """A child ring's versions must not inflate the parent's count in pruning.
+
+    With retention=3, writing the parent 6 times (4 versions retained from the
+    first 4 edits, then pruned to 3) must leave exactly 3 newest parent versions
+    regardless of how many child-ring objects exist under the same prefix.
+    """
+
+    harness = build_harness(backend, tmp_path, version_retention=3)
+    community, server = new_scope()
+
+    # Build a child ring first: publish config/paper.yml, edit it to gain versions.
+    await harness.publish(community, server, {"config/paper.yml": b"child-v0"})
+    await harness.storage.write_file(
+        community, server, RelPath("config/paper.yml"), b"child-v1"
+    )
+    await harness.storage.write_file(
+        community, server, RelPath("config/paper.yml"), b"child-v2"
+    )
+
+    # Remove the child file and its parent directory from the live tree so
+    # ``config`` can be written as a file (the versions persist).
+    await harness.storage.delete_file(community, server, RelPath("config/paper.yml"))
+    try:
+        await harness.storage.delete_dir(community, server, RelPath("config"))
+    except NotFoundError:
+        pass  # object backend: dir prefix already gone after file delete
+
+    # Now create the parent file and write it multiple times.
+    await harness.storage.write_file(community, server, RelPath("config"), b"p1")
+    for i in range(2, 7):
+        await harness.storage.write_file(
+            community, server, RelPath("config"), f"p{i}".encode()
+        )
+
+    parent_versions = await harness.storage.list_file_versions(
+        community, server, RelPath("config")
+    )
+    assert len(parent_versions) == 3
+    parent_contents = [
+        await harness.storage.read_file_version(community, server, RelPath("config"), v)
+        for v in parent_versions
+    ]
+    # Newest-first: p5, p4, p3 (the edits that produced retained versions are
+    # one behind the write that triggered the retain).
+    assert parent_contents == [b"p5", b"p4", b"p3"]
+
+    # Child ring must be intact (3 versions: two from writes + one from delete).
+    child_versions = await harness.storage.list_file_versions(
+        community, server, RelPath("config/paper.yml")
+    )
+    assert len(child_versions) == 3
+
+
+async def test_retain_dedup_ignores_child_ring_versions(
+    backend: str, tmp_path: Path
+) -> None:
+    """_matches_newest_version must not match against a child ring's version.
+
+    If a child ring has content X and the parent file is (re)created with the
+    same content X, retain must still produce a version — the child's newest
+    is irrelevant to the parent's dedup.
+    """
+
+    harness = build_harness(backend, tmp_path, version_retention=5)
+    community, server = new_scope()
+
+    # Create a child file with content "shared" so the child ring has it.
+    await harness.publish(community, server, {"config/paper.yml": b"shared"})
+    await harness.storage.write_file(
+        community, server, RelPath("config/paper.yml"), b"other"
+    )
+    # Child ring now has one version with content b"shared".
+
+    # Remove the child from the live tree so the parent can be written as a file.
+    await harness.storage.delete_file(community, server, RelPath("config/paper.yml"))
+    try:
+        await harness.storage.delete_dir(community, server, RelPath("config"))
+    except NotFoundError:
+        pass  # object backend: dir prefix already gone after file delete
+
+    # Create parent file with the same content and retain.
+    await harness.storage.write_file(community, server, RelPath("config"), b"shared")
+    await harness.storage.retain_file_version(community, server, RelPath("config"))
+
+    parent_versions = await harness.storage.list_file_versions(
+        community, server, RelPath("config")
+    )
+    # The retain must produce a version (not falsely dedup against child).
+    assert len(parent_versions) == 1
+    assert (
+        await harness.storage.read_file_version(
+            community, server, RelPath("config"), parent_versions[0]
+        )
+        == b"shared"
     )
 
 

@@ -63,8 +63,30 @@ function NavItem({ to, icon, labelKey }: NavSpec) {
 // While the list is loading it renders a non-interactive placeholder so the bar
 // does not flicker; with no communities it shows a disabled hint.
 function CommunitySwitcher() {
-  const { communityId, setCommunityId, communities } = useActiveCommunity();
+  const {
+    communityId,
+    setCommunityId,
+    communities,
+    communitiesError,
+    communitiesFetching,
+    refetchCommunities,
+  } = useActiveCommunity();
   const navigate = useNavigate();
+
+  if (communitiesError && communities === undefined) {
+    return (
+      <div className="community-switcher" role="alert">
+        {t("shell.communitiesError")}{" "}
+        <button
+          type="button"
+          onClick={refetchCommunities}
+          disabled={communitiesFetching}
+        >
+          {t("shell.communitiesRetry")}
+        </button>
+      </div>
+    );
+  }
 
   if (communities === undefined) {
     return (

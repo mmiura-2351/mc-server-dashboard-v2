@@ -5,7 +5,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"math"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -18,6 +20,9 @@ type fakeServer struct {
 	password string
 	// reply maps a received command body to the reply body it returns.
 	reply map[string]string
+	// fragmentReply maps a received command body to multiple reply fragments
+	// sent as separate RESPONSE_VALUE packets with the same id.
+	fragmentReply map[string][]string
 	// authFails forces the auth handshake to reject (id=-1).
 	authFails bool
 	// silent makes the server authenticate but never reply to an EXEC_COMMAND,
@@ -38,10 +43,11 @@ func newFakeServer(t *testing.T, password string) *fakeServer {
 		t.Fatalf("listen: %v", err)
 	}
 	fs := &fakeServer{
-		ln:       ln,
-		password: password,
-		reply:    map[string]string{},
-		got:      make(chan string, 8),
+		ln:            ln,
+		password:      password,
+		reply:         map[string]string{},
+		fragmentReply: map[string][]string{},
+		got:           make(chan string, 8),
 	}
 	go fs.serve()
 	t.Cleanup(func() { _ = ln.Close() })
@@ -79,7 +85,13 @@ func (fs *fakeServer) serve() {
 			if fs.silent {
 				continue // Deliberately never reply.
 			}
-			_ = writePacket(conn, id, typeResponseValue, fs.reply[body])
+			if fragments, ok := fs.fragmentReply[body]; ok {
+				for _, frag := range fragments {
+					_ = writePacket(conn, id, typeResponseValue, frag)
+				}
+			} else {
+				_ = writePacket(conn, id, typeResponseValue, fs.reply[body])
+			}
 		}
 	}
 }
@@ -121,11 +133,12 @@ func newSilentFakeServer(t *testing.T, password string) *fakeServer {
 		t.Fatalf("listen: %v", err)
 	}
 	fs := &fakeServer{
-		ln:       ln,
-		password: password,
-		reply:    map[string]string{},
-		silent:   true,
-		got:      make(chan string, 8),
+		ln:            ln,
+		password:      password,
+		reply:         map[string]string{},
+		fragmentReply: map[string][]string{},
+		silent:        true,
+		got:           make(chan string, 8),
 	}
 	go fs.serve()
 	t.Cleanup(func() { _ = ln.Close() })
@@ -366,6 +379,144 @@ func TestReadRejectsTruncatedFrame(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("read hung on a truncated frame")
+	}
+}
+
+// A fragmented reply (multiple RESPONSE_VALUE packets with the same id) is
+// reassembled into a single string by Execute.
+func TestExecuteFragmentedReply(t *testing.T) {
+	fs := newFakeServer(t, "secret")
+	fs.fragmentReply["help"] = []string{"fragment-1-", "fragment-2-", "fragment-3"}
+
+	ctx := context.Background()
+	c, err := Dial(ctx, fs.addr(), "secret")
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	out, err := c.Execute(ctx, "help")
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	want := "fragment-1-fragment-2-fragment-3"
+	if out != want {
+		t.Fatalf("Execute reply = %q, want %q", out, want)
+	}
+}
+
+// After a fragmented reply, the next Execute on the same connection must return
+// the correct reply with no desync from leftover fragments.
+func TestExecuteFragmentedThenNormal(t *testing.T) {
+	fs := newFakeServer(t, "secret")
+	fs.fragmentReply["help"] = []string{"frag-a-", "frag-b"}
+	fs.reply["list"] = "There are 0 players online"
+
+	ctx := context.Background()
+	c, err := Dial(ctx, fs.addr(), "secret")
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	out1, err := c.Execute(ctx, "help")
+	if err != nil {
+		t.Fatalf("Execute(help): %v", err)
+	}
+	if want := "frag-a-frag-b"; out1 != want {
+		t.Fatalf("Execute(help) = %q, want %q", out1, want)
+	}
+
+	out2, err := c.Execute(ctx, "list")
+	if err != nil {
+		t.Fatalf("Execute(list): %v", err)
+	}
+	if want := "There are 0 players online"; out2 != want {
+		t.Fatalf("Execute(list) = %q, want %q", out2, want)
+	}
+}
+
+// Execute must reject a reassembled response whose total size exceeds
+// maxResponseSize, returning ErrResponseTooLarge.
+func TestExecuteRejectsOversizedResponse(t *testing.T) {
+	srv, cli := net.Pipe()
+	t.Cleanup(func() { _ = cli.Close() })
+
+	go func() {
+		defer func() { _ = srv.Close() }()
+		// Read the command and marker packets from Execute.
+		cmdID, _, _, err := readPacket(srv)
+		if err != nil {
+			return
+		}
+		_, _, _, err = readPacket(srv) // marker
+		if err != nil {
+			return
+		}
+		// Send fragments totalling > maxResponseSize.
+		frag := strings.Repeat("X", 4096)
+		for i := 0; i < 300; i++ {
+			if err := writePacket(srv, cmdID, typeResponseValue, frag); err != nil {
+				return
+			}
+		}
+	}()
+
+	c := &Client{conn: cli, nextID: 1}
+	_, err := c.Execute(context.Background(), "list")
+	if !errors.Is(err, ErrResponseTooLarge) {
+		t.Fatalf("Execute error = %v, want ErrResponseTooLarge", err)
+	}
+}
+
+// id() must stay positive and never return -1 (the auth-failure sentinel),
+// even after int32 overflow.
+func TestIDWrapsPositiveAndSkipsNegativeOne(t *testing.T) {
+	c := &Client{nextID: math.MaxInt32 - 1}
+
+	ids := make([]int32, 5)
+	for i := range ids {
+		ids[i] = c.id()
+	}
+	for i, id := range ids {
+		if id < 0 {
+			t.Fatalf("id() call %d returned negative id %d", i, id)
+		}
+		if id == -1 {
+			t.Fatalf("id() call %d returned -1 (auth-failure sentinel)", i)
+		}
+	}
+}
+
+// The reassembly loop must reject a fragment whose packet type is not
+// typeResponseValue, surfacing a protocol desync error.
+func TestExecuteRejectsWrongPacketType(t *testing.T) {
+	srv, cli := net.Pipe()
+	t.Cleanup(func() { _ = cli.Close() })
+
+	go func() {
+		defer func() { _ = srv.Close() }()
+		// Read the command and marker packets.
+		cmdID, _, _, err := readPacket(srv)
+		if err != nil {
+			return
+		}
+		_, _, _, err = readPacket(srv) // marker
+		if err != nil {
+			return
+		}
+		// Send one valid fragment, then a fragment with the wrong packet type.
+		_ = writePacket(srv, cmdID, typeResponseValue, "good")
+		_ = writePacket(srv, cmdID, typeAuth, "bad-type")
+	}()
+
+	c := &Client{conn: cli, nextID: 1}
+	_, err := c.Execute(context.Background(), "list")
+	if err == nil {
+		t.Fatal("Execute accepted a fragment with wrong packet type, want error")
+	}
+	if !strings.Contains(err.Error(), "unexpected packet type") {
+		t.Fatalf("Execute error = %v, want error mentioning unexpected packet type", err)
 	}
 }
 

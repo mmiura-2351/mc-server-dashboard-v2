@@ -4,6 +4,10 @@ Mirrors the Modrinth guard tests (``tests/servers/test_modrinth_catalog_adapter`
 a public address passes, private/loopback/link-local/CGNAT/IPv6-loopback are
 refused, a non-HTTPS URL is refused, and DNS failure surfaces as a blocked host.
 The resolver is injected so the tests never touch the network.
+
+The returned :class:`PinnedRequest` pins the resolved IP into the request URL so
+callers connect to the validated address, closing the DNS-rebinding TOCTOU window
+(issue #1989).
 """
 
 from __future__ import annotations
@@ -30,68 +34,115 @@ def _resolver_for(*addrs: str) -> Callable[[str], list[str]]:
     return _resolve
 
 
-def test_allows_public_host() -> None:
-    """An HTTPS URL whose host resolves to a public IP passes."""
-    assert_url_allowed(_PUBLIC, _resolver=_resolver_for("93.184.216.34"))
+async def test_allows_public_host() -> None:
+    """An HTTPS URL whose host resolves to a public IP returns a PinnedRequest."""
+    result = await assert_url_allowed(_PUBLIC, _resolver=_resolver_for("93.184.216.34"))
+    assert result.url == "https://93.184.216.34/server.jar"
+    assert result.headers == {"Host": "example.com"}
+    assert result.extensions == {"sni_hostname": "example.com"}
 
 
-def test_rejects_loopback() -> None:
+async def test_rejects_loopback() -> None:
     with pytest.raises(BlockedHostError, match="private"):
-        assert_url_allowed(_PUBLIC, _resolver=_resolver_for("127.0.0.1"))
+        await assert_url_allowed(_PUBLIC, _resolver=_resolver_for("127.0.0.1"))
 
 
-def test_rejects_rfc1918() -> None:
+async def test_rejects_rfc1918() -> None:
     with pytest.raises(BlockedHostError, match="private"):
-        assert_url_allowed(_PUBLIC, _resolver=_resolver_for("192.168.1.1"))
+        await assert_url_allowed(_PUBLIC, _resolver=_resolver_for("192.168.1.1"))
 
 
-def test_rejects_link_local() -> None:
+async def test_rejects_link_local() -> None:
     with pytest.raises(BlockedHostError, match="private"):
-        assert_url_allowed(_PUBLIC, _resolver=_resolver_for("169.254.169.254"))
+        await assert_url_allowed(_PUBLIC, _resolver=_resolver_for("169.254.169.254"))
 
 
-def test_rejects_ipv6_loopback() -> None:
+async def test_rejects_ipv6_loopback() -> None:
     with pytest.raises(BlockedHostError, match="private"):
-        assert_url_allowed(_PUBLIC, _resolver=_resolver_for("::1"))
+        await assert_url_allowed(_PUBLIC, _resolver=_resolver_for("::1"))
 
 
-def test_rejects_cgnat() -> None:
+async def test_rejects_cgnat() -> None:
     with pytest.raises(BlockedHostError, match="private"):
-        assert_url_allowed(_PUBLIC, _resolver=_resolver_for("100.64.0.1"))
+        await assert_url_allowed(_PUBLIC, _resolver=_resolver_for("100.64.0.1"))
 
 
-def test_rejects_if_any_addr_private() -> None:
+async def test_rejects_if_any_addr_private() -> None:
     """If any resolved address is private, the check fails."""
     with pytest.raises(BlockedHostError, match="private"):
-        assert_url_allowed(
+        await assert_url_allowed(
             _PUBLIC, _resolver=_resolver_for("93.184.216.34", "10.0.0.1")
         )
 
 
-def test_rejects_non_https() -> None:
+async def test_rejects_non_https() -> None:
     with pytest.raises(BlockedHostError, match="HTTPS"):
-        assert_url_allowed(
+        await assert_url_allowed(
             "http://example.com/server.jar", _resolver=_resolver_for("93.184.216.34")
         )
 
 
-def test_rejects_dns_failure() -> None:
+async def test_rejects_dns_failure() -> None:
     def _boom(_: str) -> list[str]:
         raise socket.gaierror("no such host")
 
     with pytest.raises(BlockedHostError, match="DNS resolution failed"):
-        assert_url_allowed(_PUBLIC, _resolver=_boom)
+        await assert_url_allowed(_PUBLIC, _resolver=_boom)
 
 
-def test_rejects_empty_resolver_result() -> None:
+async def test_rejects_empty_resolver_result() -> None:
     """An empty resolver result must fail closed, not silently pass."""
     with pytest.raises(BlockedHostError, match="returned no addresses"):
-        assert_url_allowed(_PUBLIC, _resolver=_resolver_for())
+        await assert_url_allowed(_PUBLIC, _resolver=_resolver_for())
 
 
-def test_rejects_url_without_host() -> None:
+async def test_rejects_url_without_host() -> None:
     """An HTTPS URL with no hostname is refused."""
     with pytest.raises(BlockedHostError, match="no host"):
-        assert_url_allowed(
+        await assert_url_allowed(
             "https:///server.jar", _resolver=_resolver_for("93.184.216.34")
         )
+
+
+# --- PinnedRequest IP-pinning tests (#1989) ---
+
+
+async def test_pinned_request_ipv6_brackets() -> None:
+    """An IPv6-only result is bracketed in the pinned URL."""
+    result = await assert_url_allowed(
+        _PUBLIC, _resolver=_resolver_for("2606:2800:21f:cb07:6820:80da:af6b:8b2c")
+    )
+    assert result.url == "https://[2606:2800:21f:cb07:6820:80da:af6b:8b2c]/server.jar"
+    assert result.headers == {"Host": "example.com"}
+    assert result.extensions == {"sni_hostname": "example.com"}
+
+
+async def test_pinned_request_preserves_port() -> None:
+    """An explicit port in the URL is preserved in the pinned URL."""
+    result = await assert_url_allowed(
+        "https://example.com:8443/server.jar",
+        _resolver=_resolver_for("93.184.216.34"),
+    )
+    assert result.url == "https://93.184.216.34:8443/server.jar"
+
+
+async def test_pinned_request_prefers_ipv4() -> None:
+    """When both IPv4 and IPv6 are resolved, the pinned URL uses IPv4."""
+    result = await assert_url_allowed(
+        _PUBLIC,
+        _resolver=_resolver_for(
+            "2606:2800:21f:cb07:6820:80da:af6b:8b2c", "93.184.216.34"
+        ),
+    )
+    assert result.url == "https://93.184.216.34/server.jar"
+
+
+async def test_pinned_request_ipv6_with_port() -> None:
+    """An IPv6 address with a port is correctly bracketed."""
+    result = await assert_url_allowed(
+        "https://example.com:8443/server.jar",
+        _resolver=_resolver_for("2606:2800:21f:cb07:6820:80da:af6b:8b2c"),
+    )
+    assert (
+        result.url == "https://[2606:2800:21f:cb07:6820:80da:af6b:8b2c]:8443/server.jar"
+    )

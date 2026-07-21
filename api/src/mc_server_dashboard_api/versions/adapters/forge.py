@@ -29,11 +29,11 @@ from urllib.parse import quote
 from xml.etree import ElementTree
 
 from mc_server_dashboard_api.versions.domain.catalog import VersionCatalog
-from mc_server_dashboard_api.versions.domain.errors import (
-    CatalogUnavailableError,
-    UnknownVersionError,
+from mc_server_dashboard_api.versions.domain.errors import UnknownVersionError
+from mc_server_dashboard_api.versions.domain.fetcher import (
+    FetchNotFoundError,
+    JsonFetcher,
 )
-from mc_server_dashboard_api.versions.domain.fetcher import FetchError, JsonFetcher
 from mc_server_dashboard_api.versions.domain.value_objects import (
     HashAlgorithm,
     JarSource,
@@ -84,12 +84,19 @@ class ForgeCatalog(VersionCatalog):
         try:
             url = _installer_sha1_url(full_version)
             sha1 = (await self.fetcher.get_text(url)).strip()
-        except (FetchError, CatalogUnavailableError):
+        except FetchNotFoundError:
             # Legacy Maven naming: some old Forge versions
-            # (1.7.10, 1.8.9, 1.9.4) append the MC version.
+            # (1.7.10, 1.8.9, 1.9.4) append the MC version. Only a 404 is a
+            # definitive "no artifact under this name" — a transient failure
+            # must propagate (as a 503) rather than fall through to the legacy
+            # URL, whose own 404 would misreport an existing modern version as
+            # unknown (issue #2147).
             full_version = f"{version}-{forge_version}-{version}"
             url = _installer_sha1_url(full_version)
-            sha1 = (await self.fetcher.get_text(url)).strip()
+            try:
+                sha1 = (await self.fetcher.get_text(url)).strip()
+            except FetchNotFoundError as exc:
+                raise UnknownVersionError(f"forge {version}") from exc
         return JarSource(
             server_type=ServerType.FORGE,
             version=version,

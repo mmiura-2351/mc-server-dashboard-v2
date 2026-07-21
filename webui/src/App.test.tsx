@@ -1,8 +1,10 @@
 import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { useRef } from "react";
 import { useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAccessToken } from "./auth/tokenStore.ts";
 import { t } from "./i18n/index.ts";
+import { useActiveCommunity } from "./permissions/ActiveCommunityProvider.tsx";
 import { renderApp } from "./test/render.tsx";
 
 // Suspend the account route indefinitely so the lazy-chunk loading frame is
@@ -79,6 +81,72 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("Landing communities error state", () => {
+  it("shows an error with a retry button when GET /communities fails", async () => {
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === "/api/communities") {
+        return Promise.resolve(
+          new Response("", {
+            status: 500,
+            statusText: "Internal Server Error",
+          }),
+        );
+      }
+      return Promise.resolve(tokenResponse());
+    });
+
+    renderAt("/");
+
+    // The error message appears in the Landing content area (the CommunitySwitcher
+    // also shows the error, so multiple elements match — use findAllByText).
+    const errors = await screen.findAllByText(t("shell.communitiesError"));
+    expect(errors.length).toBeGreaterThanOrEqual(1);
+    // At least one retry button is present.
+    const retries = screen.getAllByRole("button", {
+      name: t("shell.communitiesRetry"),
+    });
+    expect(retries.length).toBeGreaterThanOrEqual(1);
+    // The loading indicator must not be showing.
+    expect(screen.queryByText(t("auth.loading"))).not.toBeInTheDocument();
+  });
+
+  it("retry button re-fetches communities after an error", async () => {
+    let callCount = 0;
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === "/api/communities") {
+        callCount++;
+        if (callCount <= 1) {
+          return Promise.resolve(new Response("", { status: 500 }));
+        }
+        return Promise.resolve(jsonResponse([{ id: "alpha", name: "Alpha" }]));
+      }
+      if (url.endsWith("/me/permissions")) {
+        return Promise.resolve(jsonResponse({}));
+      }
+      if (url.endsWith("/servers")) {
+        return Promise.resolve(jsonResponse([]));
+      }
+      return Promise.resolve(tokenResponse());
+    });
+
+    renderApp({ path: "/", extras: <LocationProbe /> });
+
+    // Wait for the error state (multiple retry buttons: switcher + landing).
+    const retryButtons = await screen.findAllByRole("button", {
+      name: t("shell.communitiesRetry"),
+    });
+
+    // Click the first retry — the second attempt succeeds and redirects to the dashboard.
+    fireEvent.click(retryButtons[0]);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("url").textContent).toBe("/communities/alpha"),
+    );
+  });
 });
 
 describe("App route guards", () => {
@@ -214,6 +282,49 @@ describe("App route guards", () => {
       ).toBeInTheDocument(),
     );
     expect(screen.getByText(t("auth.loading"))).toBeInTheDocument();
+  });
+
+  it("never flashes NoCommunityPage while the default community resolves", async () => {
+    signedInWith([{ id: "alpha", name: "Alpha" }]);
+
+    // A probe that records every (communityId, communities) pair it observes
+    // across renders. If the provider exposes a frame where communities are
+    // loaded but communityId is still null, this probe captures it (issue #2014).
+    function CommunityProbe() {
+      const { communityId, communities } = useActiveCommunity();
+      const log = useRef<Array<{ id: string | null; len: number | undefined }>>(
+        [],
+      );
+      log.current.push({ id: communityId, len: communities?.length });
+      return (
+        <span data-testid="community-log">{JSON.stringify(log.current)}</span>
+      );
+    }
+
+    renderApp({
+      path: "/",
+      extras: (
+        <>
+          <LocationProbe />
+          <CommunityProbe />
+        </>
+      ),
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("url").textContent).toBe("/communities/alpha"),
+    );
+
+    // Parse the render log and verify no frame had communities loaded (len > 0)
+    // while communityId was null — that would be the NoCommunityPage flash.
+    const log = JSON.parse(
+      screen.getByTestId("community-log").textContent ?? "[]",
+    );
+    const flash = log.some(
+      (entry: { id: string | null; len: number | undefined }) =>
+        entry.len !== undefined && entry.len > 0 && entry.id === null,
+    );
+    expect(flash).toBe(false);
   });
 
   it("renders the login page for signed-out users without shell chrome", async () => {

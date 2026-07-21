@@ -14,6 +14,7 @@ from mc_server_dashboard_api.servers.adapters.version_validator import (
     CatalogVersionValidator,
 )
 from mc_server_dashboard_api.servers.domain.version_validator import (
+    CatalogUnavailableError,
     UnknownVersionError,
 )
 from mc_server_dashboard_api.versions.adapters.composite import CompositeCatalog
@@ -75,3 +76,22 @@ async def test_accepts_offered_forge_version() -> None:
 async def test_unknown_forge_version_rejected() -> None:
     with pytest.raises(UnknownVersionError):
         await _validator().validate(server_type="forge", version="9.9.9")
+
+
+@pytest.mark.asyncio
+async def test_malformed_catalog_payload_raises_catalog_unavailable() -> None:
+    """Versions-domain UnknownVersionError from a malformed upstream body
+    translates to the servers-domain CatalogUnavailableError (issue #1991)."""
+    catalog = CompositeCatalog(
+        by_type={
+            ServerType.FORGE: ForgeCatalog(
+                fetcher=FakeDocumentFetcher(
+                    texts={_METADATA_URL: "not xml at all"},
+                    payloads={},
+                )
+            ),
+        }
+    )
+    validator = CatalogVersionValidator(catalog=catalog)
+    with pytest.raises(CatalogUnavailableError):
+        await validator.validate(server_type="forge", version="1.21.8")

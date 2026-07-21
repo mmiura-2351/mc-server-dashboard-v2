@@ -46,6 +46,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PortOutOfRangeError,
     PortRangeExhaustedError,
     RetiredConfigKeyError,
+    ServerBusyError,
     ServerFileNotFoundError,
     ServerNameAlreadyExistsError,
     ServerNotFoundError,
@@ -65,12 +66,15 @@ from mc_server_dashboard_api.servers.domain.plugin import (
 )
 from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.value_objects import (
+    JAR_KEY_CONFIG_FIELD,
+    JAR_SOURCE_CONFIG_FIELD,
     CommunityId,
     DesiredState,
     ObservedState,
     ServerId,
     ServerName,
     ServerType,
+    WorkerId,
 )
 from mc_server_dashboard_api.servers.domain.version_validator import (
     UnknownVersionError,
@@ -911,6 +915,34 @@ async def test_create_seed_failure_surfaces_after_commit() -> None:
     assert len(uow.servers.by_id) == 1
 
 
+async def test_create_strips_system_jar_keys_from_config() -> None:
+    # Client-supplied JAR keys (resolved_jar_sha256, resolved_jar_source) are
+    # system-managed and must be silently stripped from config on create (#1965).
+    uow = FakeUnitOfWork()
+    server = await CreateServer(
+        uow=uow,
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=FakeFileStore(),
+        port_range=_PORTS,
+    )(
+        community_id=CommunityId(uuid.uuid4()),
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        config={
+            "motd": "hi",
+            JAR_KEY_CONFIG_FIELD: "deadbeef" * 8,
+            JAR_SOURCE_CONFIG_FIELD: "sha256:deadbeef",
+        },
+    )
+    assert JAR_KEY_CONFIG_FIELD not in server.config
+    assert JAR_SOURCE_CONFIG_FIELD not in server.config
+    assert server.config["motd"] == "hi"
+    assert uow.commits == 1
+
+
 # --- read / list -----------------------------------------------------------
 
 
@@ -1441,6 +1473,39 @@ async def test_update_safe_key_only_succeeds_while_running() -> None:
     assert uow.commits == 1
 
 
+async def test_update_safe_key_only_succeeds_while_running_with_jar_keys() -> None:
+    # A safe-keys-only edit must not be blocked by the at-rest gate even when the
+    # server already carries system-managed JAR keys in its config (#1965). The
+    # stripping logic must not cause JAR keys to appear as "changed" in the diff.
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(
+        community_id=community,
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.RUNNING,
+    )
+    server.config = {
+        "motd": "hi",
+        JAR_KEY_CONFIG_FIELD: "abcd1234" * 8,
+        JAR_SOURCE_CONFIG_FIELD: "sha1:abcd1234",
+    }
+    uow.servers.seed(server)
+    updated = await _updater(uow, min_interval_seconds=300)(
+        community_id=community,
+        server_id=server.id,
+        config={
+            "motd": "hi",
+            "snapshot_interval_seconds": 600,
+            JAR_KEY_CONFIG_FIELD: "abcd1234" * 8,
+            JAR_SOURCE_CONFIG_FIELD: "sha1:abcd1234",
+        },
+    )
+    assert updated.config["snapshot_interval_seconds"] == 600
+    # JAR keys preserved from old config.
+    assert updated.config[JAR_KEY_CONFIG_FIELD] == "abcd1234" * 8
+    assert uow.commits == 1
+
+
 async def test_update_unsafe_key_rejected_while_running() -> None:
     uow = FakeUnitOfWork()
     community = CommunityId(uuid.uuid4())
@@ -1702,6 +1767,58 @@ async def test_update_config_overrides_skips_resource_pack_keys() -> None:
     assert "resource-pack-prompt=" not in props_text
     # Legitimate user overrides still apply.
     assert "motd=bye" in props_text
+    assert uow.commits == 1
+
+
+async def test_update_strips_system_jar_keys_from_config() -> None:
+    # Client-supplied JAR keys are silently stripped on update (#1965).
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    server.config = {"motd": "hi"}
+    uow.servers.seed(server)
+    updated = await _updater(uow)(
+        community_id=community,
+        server_id=server.id,
+        config={
+            "motd": "bye",
+            JAR_KEY_CONFIG_FIELD: "deadbeef" * 8,
+            JAR_SOURCE_CONFIG_FIELD: "sha256:deadbeef",
+        },
+    )
+    assert JAR_KEY_CONFIG_FIELD not in updated.config
+    assert JAR_SOURCE_CONFIG_FIELD not in updated.config
+    assert updated.config["motd"] == "bye"
+    assert uow.commits == 1
+
+
+async def test_update_preserves_existing_jar_keys() -> None:
+    # When a server already has system-managed JAR keys, an update must preserve
+    # them from the old config even if the client supplies different values (#1965).
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    existing_key = "abcd1234" * 8
+    existing_source = "sha1:abcd1234"
+    server.config = {
+        "motd": "hi",
+        JAR_KEY_CONFIG_FIELD: existing_key,
+        JAR_SOURCE_CONFIG_FIELD: existing_source,
+    }
+    uow.servers.seed(server)
+    updated = await _updater(uow)(
+        community_id=community,
+        server_id=server.id,
+        config={
+            "motd": "bye",
+            JAR_KEY_CONFIG_FIELD: "deadbeef" * 8,
+            JAR_SOURCE_CONFIG_FIELD: "sha256:evil",
+        },
+    )
+    # The JAR keys are preserved from the OLD config, not the client input.
+    assert updated.config[JAR_KEY_CONFIG_FIELD] == existing_key
+    assert updated.config[JAR_SOURCE_CONFIG_FIELD] == existing_source
+    assert updated.config["motd"] == "bye"
     assert uow.commits == 1
 
 
@@ -2374,3 +2491,62 @@ async def test_delete_prunes_orphan_archives_without_db_rows() -> None:
     # "orphan" are both deleted by the filesystem-driven prune.
     assert {ref for _, ref in store.deleted} == {"old", "orphan"}
     assert store.archives == {"new"}
+
+
+# --- Assignment gate on DeleteServer (#1704) ---------------------------------
+
+
+async def test_delete_rejects_while_assignment_held() -> None:
+    """An at-rest server with a held worker assignment must not be deletable (#1704).
+
+    After a stop whose final snapshot timed out, the row sits at
+    (stopped, stopped, assigned_worker_id=A) while the late upload is still
+    live. Delete must refuse with ServerBusyError so the late commit can
+    finish and release the assignment.
+    """
+    uow = FakeUnitOfWork()
+    store = FakeBackupArchiveStore()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    server.assigned_worker_id = WorkerId(uuid.uuid4())
+    uow.servers.seed(server)
+
+    with pytest.raises(ServerBusyError):
+        await DeleteServer(uow=uow, backup_store=store)(
+            community_id=community, server_id=server.id
+        )
+
+    # Row untouched, working set never packed.
+    assert server.id in uow.servers.by_id
+    assert store.pruned == []
+    assert uow.commits == 0
+
+
+async def test_delete_rechecks_assignment_after_the_pack_window() -> None:
+    """A worker assignment acquired DURING the pack window must abort (#1704).
+
+    Mirrors the existing recheck pattern: the prune hook sets
+    assigned_worker_id mid-pack, and the second-transaction re-check catches
+    it and raises ServerBusyError.
+    """
+    uow = FakeUnitOfWork()
+    store = FakeBackupArchiveStore()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+
+    def _assign_during_pack() -> None:
+        server.assigned_worker_id = WorkerId(uuid.uuid4())
+
+    store.on_prune = _assign_during_pack
+
+    with pytest.raises(ServerBusyError):
+        await DeleteServer(uow=uow, backup_store=store)(
+            community_id=community, server_id=server.id
+        )
+
+    # Pack ran but the row survives; no grants swept.
+    assert store.pruned == [server.id]
+    assert server.id in uow.servers.by_id
+    assert uow.resource_grants.swept == []
+    assert uow.commits == 0

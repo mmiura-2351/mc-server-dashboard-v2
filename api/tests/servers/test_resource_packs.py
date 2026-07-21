@@ -322,6 +322,82 @@ class TestDeleteResourcePack:
                 is_platform_admin=False,
             )
 
+    async def test_delete_commits_db_before_blob(self) -> None:
+        """DB delete + commit must precede blob delete (issue #1962)."""
+        uow = FakeUnitOfWork()
+        store = FakeResourcePackStore()
+        upload_uc = _make_upload(uow=uow, store=store)
+        user_id = uuid.uuid4()
+
+        pack = await upload_uc(
+            filename="order.zip",
+            display_name="Order Test",
+            content=_ZIP_CONTENT,
+            uploaded_by=user_id,
+        )
+
+        # Instrument the fakes to record call order.
+        call_log: list[str] = []
+        orig_repo_delete = uow.resource_packs.delete
+        orig_commit = uow.commit
+        orig_store_delete = store.delete
+
+        async def _log_repo_delete(pack_id: ResourcePackId) -> None:
+            call_log.append("db_delete")
+            await orig_repo_delete(pack_id)
+
+        async def _log_commit() -> None:
+            call_log.append("commit")
+            await orig_commit()
+
+        async def _log_store_delete(pack_id: ResourcePackId) -> None:
+            call_log.append("blob_delete")
+            await orig_store_delete(pack_id)
+
+        uow.resource_packs.delete = _log_repo_delete  # type: ignore[method-assign]
+        uow.commit = _log_commit  # type: ignore[method-assign]
+        store.delete = _log_store_delete  # type: ignore[method-assign]
+
+        delete_uc = DeleteResourcePack(uow=uow, store=store)
+        await delete_uc(
+            resource_pack_id=pack.id,
+            caller_id=user_id,
+            is_platform_admin=False,
+        )
+
+        assert call_log == ["db_delete", "commit", "blob_delete"]
+
+    async def test_delete_tolerates_blob_delete_failure(self) -> None:
+        """A blob store failure after DB commit does not propagate (best-effort)."""
+        uow = FakeUnitOfWork()
+        store = FakeResourcePackStore()
+        upload_uc = _make_upload(uow=uow, store=store)
+        user_id = uuid.uuid4()
+
+        pack = await upload_uc(
+            filename="fail-blob.zip",
+            display_name="Fail Blob",
+            content=_ZIP_CONTENT,
+            uploaded_by=user_id,
+        )
+
+        # Make the blob store raise on delete.
+        async def _failing_delete(pack_id: ResourcePackId) -> None:
+            raise RuntimeError("S3 unavailable")
+
+        store.delete = _failing_delete  # type: ignore[method-assign]
+
+        delete_uc = DeleteResourcePack(uow=uow, store=store)
+        # Must NOT raise — DB row gone, blob orphan is benign.
+        await delete_uc(
+            resource_pack_id=pack.id,
+            caller_id=user_id,
+            is_platform_admin=False,
+        )
+
+        # DB row deleted despite blob failure.
+        assert pack.id not in uow.resource_packs.packs
+
 
 class TestDownloadResourcePack:
     async def test_download_happy_path(self) -> None:

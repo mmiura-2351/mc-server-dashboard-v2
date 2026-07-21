@@ -158,6 +158,12 @@ type Options struct {
 	// deadline so a wedged daemon cannot hang worker startup (issue #338). Zero uses
 	// defaultSweepCallMargin; tests set a short value to keep the suite fast.
 	SweepCallMargin time.Duration
+	// ScratchDir is the working-set scratch root. When set, the startup Sweep issues
+	// a best-effort RCON save-on to running orphans before stopping them (issue
+	// #1710): a worker crash mid-snapshot may have left auto-save disabled, and
+	// stopping without restore would leave the server permanently save-off. Empty
+	// skips the save-on (the pre-fix behavior).
+	ScratchDir string
 	// Logger records the lazy base-image pull (image name, duration) at INFO (issue
 	// #904). Nil uses a discard logger.
 	Logger *slog.Logger
@@ -172,6 +178,7 @@ type Driver struct {
 	stopTimeout time.Duration
 	gameBindIP  string
 	network     string
+	scratchDir  string
 	// conflictPoll and conflictDeadline bound the wait-for-name-free loop (#233).
 	conflictPoll     time.Duration
 	conflictDeadline time.Duration
@@ -225,6 +232,7 @@ func New(docker dockerAPI, images *ImageSelector, openControl controlFunc, opts 
 		stopTimeout:      timeout,
 		gameBindIP:       gameBindIP,
 		network:          opts.Network,
+		scratchDir:       opts.ScratchDir,
 		conflictPoll:     conflictPoll,
 		conflictDeadline: conflictDeadline,
 		readinessTimeout: readinessTimeout,
@@ -651,6 +659,13 @@ func (d *Driver) Sweep(ctx context.Context) error {
 	var errs []error
 	for _, c := range containers {
 		if c.State == containerStateRunning {
+			// Best-effort save-on (issue #1710): a worker crash mid-snapshot may have
+			// left auto-save disabled via the quiesce bracket's save-off. Issuing save-on
+			// before stop ensures the MC server's shutdown hook (triggered by the SIGTERM
+			// from docker stop) can auto-save the world. Failure is logged and does not
+			// block the stop — the pre-fix behavior was no save-on at all.
+			d.sweepSaveOn(ctx, c.Name)
+
 			// This bare docker.Stop is the orphan-sweep stop leg observed in the #927
 			// incident (a redeploy sweep stopped a running 26.x server, then the stop-leg
 			// snapshot found unpadded regions). The daemon-internal SIGTERM→SIGKILL
@@ -673,6 +688,55 @@ func (d *Driver) Sweep(ctx context.Context) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// sweepSaveOn issues a best-effort RCON save-on to a running orphan container
+// before it is stopped (issue #1710). A worker crash mid-snapshot leaves the MC
+// server with auto-save disabled; restoring it before the SIGTERM ensures the
+// shutdown save captures the world. Install containers (suffix "-install") are
+// skipped — they are not MC servers. Failure is logged and never blocks the stop.
+func (d *Driver) sweepSaveOn(ctx context.Context, containerName string) {
+	if d.openControl == nil || d.scratchDir == "" {
+		return
+	}
+	serverID := d.serverIDFromName(containerName)
+	if serverID == "" {
+		return
+	}
+	// Skip install containers — they are not MC servers.
+	if strings.HasSuffix(serverID, "-install") {
+		return
+	}
+	rconHost := d.networkHost(serverID)
+	spec := execution.InstanceSpec{
+		ServerID:   serverID,
+		WorkingDir: filepath.Join(d.scratchDir, serverID),
+	}
+	saveOnCtx, cancel := context.WithTimeout(ctx, d.sweepCallMargin)
+	defer cancel()
+	ctrl, err := d.openControl(saveOnCtx, spec, rconHost)
+	if err != nil {
+		d.logger.Warn("sweep save-on: open rcon failed; stopping without restore",
+			"server_id", serverID, "error", err)
+		return
+	}
+	defer func() { _ = ctrl.Close() }()
+	if _, err := ctrl.Execute(saveOnCtx, "save-on"); err != nil {
+		d.logger.Warn("sweep save-on: save-on failed; stopping without restore",
+			"server_id", serverID, "error", err)
+	}
+}
+
+// serverIDFromName extracts the server ID from a Docker container name. Docker
+// List returns names prefixed with "/" (e.g. "/mcsd-abc123"). Returns empty when
+// the name does not match the expected prefix.
+func (d *Driver) serverIDFromName(name string) string {
+	// Strip the leading "/" Docker prefixes.
+	name = strings.TrimPrefix(name, "/")
+	if !strings.HasPrefix(name, containerNamePrefix) {
+		return ""
+	}
+	return strings.TrimPrefix(name, containerNamePrefix)
 }
 
 // labels are attached to every container: a worker-id label scopes the orphan
@@ -762,6 +826,19 @@ type instance struct {
 	// install-exit→launch window the section must close (issue #306). Nil in
 	// production.
 	beforeLaunch func()
+
+	// beforeRetryStart is a test-only hook fired inside superviseInstall after the
+	// retry install container is created but before the latch-check-and-start
+	// critical section, so a test can drive a Stop into the exact retry-setup
+	// window (issue #1987). Nil in production.
+	beforeRetryStart func()
+
+	// beforeReadyPublish is a test-only hook fired inside awaitReady after
+	// state is set to Running but before emitLocked publishes the event, under
+	// i.mu. A test spawns Stop here; pre-fix Stop could interleave (the lock was
+	// released between state write and emit), post-fix Stop blocks on the held
+	// lock (issue #2022). Nil in production.
+	beforeReadyPublish func()
 
 	// beforeSurvivedReset is a test-only hook fired inside Stop after the post-kill
 	// confirm wait times out but before re-acquiring the lock to reset the latch, so
@@ -867,13 +944,15 @@ func (i *instance) awaitReady() {
 		return // the container exited first; supervise owns the terminal state.
 	}
 	i.mu.Lock()
+	defer i.mu.Unlock()
 	if i.state != execution.StateStarting {
-		i.mu.Unlock()
 		return
 	}
 	i.state = execution.StateRunning
-	i.mu.Unlock()
-	i.emit(execution.StateRunning, "")
+	if i.beforeReadyPublish != nil {
+		i.beforeReadyPublish()
+	}
+	i.emitLocked(execution.StateRunning, "")
 }
 
 // superviseInstall waits for the supervised install container to exit, captures
@@ -885,6 +964,13 @@ func (i *instance) awaitReady() {
 // it as the current container until then gives a concurrent Stop a valid target
 // through the install-exit→launch handoff window (issue #306). Its distinct name
 // (mcsd-<id>-install) means the launch create never contends with it.
+//
+// Retry-publish invariant (issue #1987): the retry container is created outside
+// the lock, then {stop re-check, docker.Start, containerID publish,
+// exitObserved reset} form one critical section — mirroring the install→launch
+// handoff (issue #306). This prevents Stop from capturing a stale containerID
+// and returning false success against a removed container while the retried
+// installer keeps running.
 func (i *instance) superviseInstall(installID string) {
 	// Retry loop: on a non-zero install exit, clean artifacts and re-run the
 	// install container up to maxInstallRetries additional times before giving
@@ -958,21 +1044,40 @@ func (i *instance) superviseInstall(installID string) {
 			return
 		}
 
-		// Clean stale artifacts and re-run install (issue #1127).
+		// Clean stale artifacts and create (but do not start) the retry container
+		// outside the lock (issue #1127). The latch re-check, Start, containerID
+		// publish, and exitObserved reset are one critical section — mirroring the
+		// install→launch handoff (issue #306) — so a Stop racing this window either
+		// wins the lock first (aborting and removing the unstarted container) or
+		// blocks for the one Start call and then acts on the already-started retry
+		// container. There is therefore no published-but-unstarted sub-window for
+		// Stop to mishandle (issue #1987).
 		_ = execution.CleanForgeInstallArtifacts(i.spec.WorkingDir)
-		newID, err := i.rerunInstallContainer()
+		newID, err := i.createInstallRetryContainer()
 		if err != nil {
 			i.finishTerminal(execution.StateCrashed, "forge install retry failed: "+err.Error())
 			return
 		}
-		installID = newID
-		i.setContainerID(newID)
-		// Reset exitObserved for the new container: the old container's exit must
-		// not prevent the survived-kill restore from running against the new one
-		// (issue #595).
+		if i.beforeRetryStart != nil {
+			i.beforeRetryStart()
+		}
 		i.mu.Lock()
+		if i.stopRequested {
+			i.mu.Unlock()
+			_ = i.docker.Remove(context.Background(), newID)
+			i.finishTerminal(execution.StateStopped, "")
+			return
+		}
+		if err := i.docker.Start(context.Background(), newID); err != nil {
+			i.mu.Unlock()
+			_ = i.docker.Remove(context.Background(), newID)
+			i.finishTerminal(execution.StateCrashed, "forge install retry failed: "+err.Error())
+			return
+		}
+		i.containerID = newID
 		i.exitObserved = false
 		i.mu.Unlock()
+		installID = newID
 	}
 
 	// The install exited cleanly. A Stop that arrived after the wait returned
@@ -1120,11 +1225,13 @@ func (i *instance) installBackoffOrStopping(d time.Duration) bool {
 	return false
 }
 
-// rerunInstallContainer creates and starts a new install container for a retry
-// attempt, reusing the instance's captured fields. It mirrors
-// Driver.runInstallContainer but runs from the instance after the driver has
-// returned (issue #1128).
-func (i *instance) rerunInstallContainer() (string, error) {
+// createInstallRetryContainer creates (but does not start) a new install
+// container for a retry attempt, reusing the instance's captured fields. Starting
+// is deferred to the latch-guarded critical section so a Stop can abort the retry
+// before it starts (issue #1987). It mirrors Driver.runInstallContainer's create
+// but omits Start, like createLaunchContainer for the install→launch handoff
+// (issue #306).
+func (i *instance) createInstallRetryContainer() (string, error) {
 	plan, err := execution.BuildLaunchPlan(i.spec, i.spec.WorkingDir, containerPathResolver(i.spec.WorkingDir))
 	if err != nil {
 		return "", err
@@ -1139,15 +1246,7 @@ func (i *instance) rerunInstallContainer() (string, error) {
 		MemoryLimitBytes: memoryLimitBytes(i.spec.MemoryLimitMB),
 		CPUShares:        cpuShares(i.spec.CPUMillis),
 	}
-	id, err := i.createFn(context.Background(), create)
-	if err != nil {
-		return "", err
-	}
-	if err := i.docker.Start(context.Background(), id); err != nil {
-		_ = i.docker.Remove(context.Background(), id)
-		return "", err
-	}
-	return id, nil
+	return i.createFn(context.Background(), create)
 }
 
 // captureInstallOutput follows the install container's log stream and writes it to
@@ -1712,6 +1811,11 @@ func (i *instance) set(s execution.ServerState) {
 func (i *instance) emit(state execution.ServerState, detail string) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	i.emitLocked(state, detail)
+}
+
+// emitLocked is the lock-free core of emit. Caller must hold i.mu.
+func (i *instance) emitLocked(state execution.ServerState, detail string) {
 	if i.closed {
 		return
 	}

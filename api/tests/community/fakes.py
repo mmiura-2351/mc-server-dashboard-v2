@@ -129,6 +129,16 @@ class FakeMembershipRepository(MembershipRepository):
     async def list_role_ids(self, membership_id: MembershipId) -> list[RoleId]:
         return list(self.role_ids.get(membership_id, []))
 
+    async def lock_owner_role_holders(
+        self, community_id: CommunityId, role_id: RoleId
+    ) -> list[MembershipId]:
+        # In-memory equivalent: no actual locking, just return the holders.
+        return [
+            m.id
+            for m in self.by_id.values()
+            if m.community_id == community_id and role_id in self.role_ids.get(m.id, [])
+        ]
+
 
 class FakeRoleRepository(RoleRepository):
     def __init__(self) -> None:

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import abc
 from collections.abc import Iterable
+from typing import NamedTuple
 
 from mc_server_dashboard_api.servers.domain.plugin import (
     PluginId,
@@ -17,6 +18,15 @@ from mc_server_dashboard_api.servers.domain.plugin import (
     ServerPlugin,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
+
+
+class CatalogProvenance(NamedTuple):
+    """Structured return for catalog-provenance recovery lookups."""
+
+    source: PluginSource
+    project_id: str
+    source_version_id: str | None
+    version_number: str | None
 
 
 class PluginRepository(abc.ABC):
@@ -102,14 +112,19 @@ class PluginRepository(abc.ABC):
     @abc.abstractmethod
     async def find_catalog_provenance_by_sha512(
         self, checksum_sha512: str
-    ) -> tuple[PluginSource, str] | None:
-        """Return the catalog ``(source, source_project_id)`` for a known SHA-512.
+    ) -> CatalogProvenance | None:
+        """Return catalog provenance for a known SHA-512.
+
+        Returns a :class:`CatalogProvenance` when a catalog-sourced plugin with
+        a matching checksum exists, or ``None`` when no match is found.
 
         The provenance-recovery lookup behind ghost re-ingestion (issue #2059):
         a jar re-ingested after a backup restore carries no DB row of its own, so
         its origin is matched against the checksum of any catalog-sourced plugin
         (``source`` in ``CATALOG_SOURCES``, non-null ``source_project_id``)
         installed anywhere, using the ``ix_server_plugin_checksum_sha512`` index.
+        ``source_version_id`` and ``version_number`` are recovered alongside
+        (issue #2068) so that the update check does not report a spurious update.
         Returns ``None`` when no catalog install shares the checksum, so the
         caller marks the row provenance-unknown instead of asserting ``local``.
         """

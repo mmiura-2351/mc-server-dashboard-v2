@@ -810,7 +810,7 @@ function ImportForm({ communityId }: { communityId: string }) {
     const form = new FormData();
     form.append("file", file);
     form.append("name", name);
-    progress.start(file.size);
+    const signal = progress.start(file.size);
     try {
       const server = await postFormWithProgress(
         apiPath("/api/communities/{community_id}/servers/import", {
@@ -818,7 +818,7 @@ function ImportForm({ communityId }: { communityId: string }) {
         }),
         form,
         progress.onProgress,
-        progress.signal,
+        signal,
       );
       progress.reset();
       navigate(`${dashboardPath(communityId)}/servers/${server.id}`);

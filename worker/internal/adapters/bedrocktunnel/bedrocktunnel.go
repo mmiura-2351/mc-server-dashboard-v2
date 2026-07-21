@@ -70,6 +70,13 @@ const flowIDSize = 4
 // message to buffer (mirrors relay/internal/bedrock.maxHandshakeMessageBytes).
 const maxHandshakeMessageBytes = 256
 
+// defaultMinStableDuration is the minimum time a connection must survive
+// pumping before it is considered stable enough to reset the backoff counter.
+// Without this, two Workers with the same token displace each other on every
+// handshake, each connection succeeds briefly then drops, and the backoff
+// stays at Delay(0) forever (issue #2153).
+const defaultMinStableDuration = 10 * time.Second
+
 // Spec is everything one OpenBedrockTunnel command needs to open (or redial) a
 // tunnel (docs/app/BEDROCK_TUNNEL.md Section 3).
 type Spec struct {
@@ -120,6 +127,13 @@ type Manager struct {
 	// port for one flow; injectable so tests point flows at a fake local
 	// listener instead of a real container.
 	dialUDP func(ctx context.Context, addr string) (net.Conn, error)
+	// afterFunc creates a timer channel for backoff delays; injectable so
+	// tests verify delay behavior without wall-clock waits. Defaults to
+	// time.After.
+	afterFunc func(time.Duration) <-chan time.Time
+	// minStableDuration is the minimum pump lifetime before a connection is
+	// considered stable enough to reset the backoff counter (issue #2153).
+	minStableDuration time.Duration
 
 	mu      sync.Mutex
 	tunnels map[string]*tunnelHandle
@@ -161,6 +175,8 @@ func New(baseCtx context.Context, gameBindIP string, gameHost func(serverID stri
 		var d net.Dialer
 		return d.DialContext(ctx, "udp", addr)
 	}
+	m.afterFunc = time.After
+	m.minStableDuration = defaultMinStableDuration
 	return m
 }
 
@@ -225,6 +241,11 @@ func (m *Manager) forget(serverID string, handle *tunnelHandle) {
 // (docs/app/BEDROCK_TUNNEL.md Section 3.1: a redial can be rejected for up to
 // ~15s while the relay's stale prior connection times out — backoff treats
 // that as retryable, never terminal).
+//
+// Backoff is applied before every redial, including after a successful
+// handshake whose connection then drops (mirroring session.Runner.Run) —
+// without this, two Workers holding the same token duel at network speed,
+// each displacing the other's connection on every handshake (issue #1988).
 func (m *Manager) run(ctx context.Context, handle *tunnelHandle, spec Spec, tlsCfg *tls.Config) {
 	defer m.forget(spec.ServerID, handle)
 
@@ -240,21 +261,31 @@ func (m *Manager) run(ctx context.Context, handle *tunnelHandle, spec Spec, tlsC
 			}
 			m.logger.Warn("bedrock tunnel dial/handshake failed; retrying",
 				"server_id", spec.ServerID, "error", err)
-			delay := m.backoff.Delay(attempt, m.randFloat())
-			attempt++
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(delay):
+		} else {
+			m.logger.Info("bedrock tunnel established", "server_id", spec.ServerID, "bedrock_port", spec.BedrockPort)
+			connStart := time.Now()
+			m.pump(ctx, conn, spec)
+			// pump returned: either ctx was cancelled (checked below) or
+			// the connection dropped — both fall through to the backoff.
+			// Only reset the backoff when the connection survived long
+			// enough to be considered stable; an instant displacement
+			// (the duel scenario, issue #2153) keeps escalating.
+			if time.Since(connStart) > m.minStableDuration {
+				attempt = 0
 			}
-			continue
 		}
-		attempt = 0
-		m.logger.Info("bedrock tunnel established", "server_id", spec.ServerID, "bedrock_port", spec.BedrockPort)
-		m.pump(ctx, conn, spec)
-		// pump returns either because ctx was cancelled (graceful close already
-		// sent) or the connection dropped on its own; the loop re-checks ctx.Err()
-		// at the top either way, redialing in the latter case.
+
+		if ctx.Err() != nil {
+			return
+		}
+
+		delay := m.backoff.Delay(attempt, m.randFloat())
+		attempt++
+		select {
+		case <-ctx.Done():
+			return
+		case <-m.afterFunc(delay):
+		}
 	}
 }
 

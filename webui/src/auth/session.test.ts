@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   hardLogout,
   logout,
+  type RefreshResult,
   refreshForRetry,
   refreshSession,
   resetForTesting,
@@ -45,9 +46,9 @@ describe("refreshSession", () => {
   it("stores the rotated access token on a 200", async () => {
     fetchMock.mockResolvedValue(tokenResponse());
 
-    const ok = await refreshSession();
+    const result = await refreshSession();
 
-    expect(ok).toBe(true);
+    expect(result).toEqual({ status: "ok" });
     expect(getAccessToken()).toBe("fresh");
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe("/api/auth/refresh");
@@ -55,29 +56,45 @@ describe("refreshSession", () => {
     expect(init.body).toBe("{}");
   });
 
-  it("reports signed out on a 401 and stores no token", async () => {
+  it("reports auth-rejected on a 401 and stores no token", async () => {
     fetchMock.mockResolvedValue(new Response("", { status: 401 }));
 
-    const ok = await refreshSession();
+    const result = await refreshSession();
 
-    expect(ok).toBe(false);
+    expect(result).toEqual({ status: "auth-rejected" });
     expect(getAccessToken()).toBeNull();
   });
 
-  it("reports signed out when the network call throws", async () => {
-    fetchMock.mockRejectedValue(new Error("offline"));
+  it("reports auth-rejected on a 403", async () => {
+    fetchMock.mockResolvedValue(new Response("", { status: 403 }));
 
-    const ok = await refreshSession();
+    const result = await refreshSession();
 
-    expect(ok).toBe(false);
+    expect(result).toEqual({ status: "auth-rejected" });
   });
 
-  it("resolves signed out on a 200 with an invalid JSON body", async () => {
+  it("reports transient when the network call throws", async () => {
+    fetchMock.mockRejectedValue(new Error("offline"));
+
+    const result = await refreshSession();
+
+    expect(result).toEqual({ status: "transient" });
+  });
+
+  it("reports transient on a 5xx response", async () => {
+    fetchMock.mockResolvedValue(new Response("Bad Gateway", { status: 502 }));
+
+    const result = await refreshSession();
+
+    expect(result).toEqual({ status: "transient" });
+  });
+
+  it("reports transient on a 200 with an invalid JSON body", async () => {
     fetchMock.mockResolvedValue(new Response("not json", { status: 200 }));
 
-    const ok = await refreshSession();
+    const result = await refreshSession();
 
-    expect(ok).toBe(false);
+    expect(result).toEqual({ status: "transient" });
     expect(getAccessToken()).toBeNull();
   });
 
@@ -95,7 +112,11 @@ describe("refreshSession", () => {
     const results = await Promise.all(calls);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(results).toEqual([true, true, true]);
+    expect(results).toEqual([
+      { status: "ok" },
+      { status: "ok" },
+      { status: "ok" },
+    ] satisfies RefreshResult[]);
   });
 
   it("starts a fresh refresh after the previous one settles", async () => {
@@ -186,7 +207,7 @@ describe("restoreSession", () => {
 });
 
 describe("refreshForRetry", () => {
-  it("hard-logs-out when the refresh fails", async () => {
+  it("hard-logs-out on an auth-definitive 401", async () => {
     fetchMock.mockResolvedValue(new Response("", { status: 401 }));
     const onLogout = vi.fn();
     setHardLogoutHandler(onLogout);
@@ -196,11 +217,11 @@ describe("refreshForRetry", () => {
 
     expect(ok).toBe(false);
     expect(getAccessToken()).toBeNull();
-    expect(onLogout).toHaveBeenCalledTimes(1);
+    expect(onLogout).toHaveBeenCalledWith("expired");
   });
 
-  it("hard-logs-out on a 200 with an invalid JSON body", async () => {
-    fetchMock.mockResolvedValue(new Response("not json", { status: 200 }));
+  it("hard-logs-out on an auth-definitive 403", async () => {
+    fetchMock.mockResolvedValue(new Response("", { status: 403 }));
     const onLogout = vi.fn();
     setHardLogoutHandler(onLogout);
     setAccessToken("stale");
@@ -209,7 +230,43 @@ describe("refreshForRetry", () => {
 
     expect(ok).toBe(false);
     expect(getAccessToken()).toBeNull();
-    expect(onLogout).toHaveBeenCalledTimes(1);
+    expect(onLogout).toHaveBeenCalledWith("expired");
+  });
+
+  it("does not hard-logout on a network error (transient)", async () => {
+    fetchMock.mockRejectedValue(new Error("offline"));
+    const onLogout = vi.fn();
+    setHardLogoutHandler(onLogout);
+    setAccessToken("stale");
+
+    const ok = await refreshForRetry();
+
+    expect(ok).toBe(false);
+    expect(onLogout).not.toHaveBeenCalled();
+  });
+
+  it("does not hard-logout on a 5xx response (transient)", async () => {
+    fetchMock.mockResolvedValue(new Response("Bad Gateway", { status: 502 }));
+    const onLogout = vi.fn();
+    setHardLogoutHandler(onLogout);
+    setAccessToken("stale");
+
+    const ok = await refreshForRetry();
+
+    expect(ok).toBe(false);
+    expect(onLogout).not.toHaveBeenCalled();
+  });
+
+  it("does not hard-logout on a 200 with an invalid JSON body (transient)", async () => {
+    fetchMock.mockResolvedValue(new Response("not json", { status: 200 }));
+    const onLogout = vi.fn();
+    setHardLogoutHandler(onLogout);
+    setAccessToken("stale");
+
+    const ok = await refreshForRetry();
+
+    expect(ok).toBe(false);
+    expect(onLogout).not.toHaveBeenCalled();
   });
 
   it("does not log out when the refresh succeeds", async () => {

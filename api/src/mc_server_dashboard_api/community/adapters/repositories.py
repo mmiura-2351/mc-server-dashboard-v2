@@ -256,6 +256,28 @@ class SqlAlchemyMembershipRepository(MembershipRepository):
         rows = (await self._session.execute(stmt)).scalars().all()
         return [RoleId(row) for row in rows]
 
+    async def lock_owner_role_holders(
+        self, community_id: CommunityId, role_id: RoleId
+    ) -> list[MembershipId]:
+        # Lock the matched membership_role rows FOR UPDATE so concurrent
+        # last-owner guards serialize on them (#1959): the second transaction
+        # blocks until the first commits, then re-reads the decremented set.
+        stmt = (
+            select(MembershipRoleModel.membership_id)
+            .join(
+                MembershipModel,
+                MembershipRoleModel.membership_id == MembershipModel.id,
+            )
+            .where(
+                MembershipRoleModel.role_id == role_id.value,
+                MembershipModel.community_id == community_id.value,
+            )
+            .order_by(MembershipRoleModel.membership_id)
+            .with_for_update(of=MembershipRoleModel)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [MembershipId(row) for row in rows]
+
 
 class SqlAlchemyRoleRepository(RoleRepository):
     """:class:`RoleRepository` adapter over an ``AsyncSession``."""
