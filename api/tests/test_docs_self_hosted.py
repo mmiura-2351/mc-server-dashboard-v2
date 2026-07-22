@@ -31,6 +31,10 @@ def _img_src(csp: str) -> str:
     return csp.split("img-src")[1].split(";")[0]
 
 
+def _worker_src(csp: str) -> str:
+    return csp.split("worker-src")[1].split(";")[0]
+
+
 # -- Swagger UI (/api/docs) --
 
 
@@ -122,6 +126,41 @@ def test_redoc_favicon_self_hosted(client: TestClient) -> None:
     resp = client.get("/api/redoc")
     assert "fastapi.tiangolo.com" not in resp.text
     assert 'href="data:image/svg+xml' in resp.text
+
+
+def test_redoc_hides_default_logo(client: TestClient) -> None:
+    """ReDoc's default logo fetches from cdn.redoc.ly, which ``img-src``
+    correctly blocks. The page must pass ``hide-logo`` so the request is
+    never made (issue #2234)."""
+    resp = client.get("/api/redoc")
+    assert "cdn.redoc.ly" not in resp.text
+    assert "hide-logo" in resp.text
+
+
+def test_docs_csp_worker_src_allows_blob(client: TestClient) -> None:
+    """ReDoc creates a search web-worker from a ``blob:`` URL. Without
+    ``worker-src ... blob:`` the browser falls back to ``script-src`` and
+    blocks it (issue #2234)."""
+    resp = client.get("/api/redoc")
+    csp = resp.headers["content-security-policy"]
+    worker_src = _worker_src(csp)
+    assert "blob:" in worker_src
+
+
+def test_swagger_csp_worker_src_allows_blob(client: TestClient) -> None:
+    """The docs CSP is shared; verify worker-src is present on /api/docs
+    as well (issue #2234)."""
+    resp = client.get("/api/docs")
+    csp = resp.headers["content-security-policy"]
+    worker_src = _worker_src(csp)
+    assert "blob:" in worker_src
+
+
+def test_non_docs_csp_no_worker_src(client: TestClient) -> None:
+    """Non-docs paths must not have the worker-src relaxation."""
+    resp = client.get("/api/healthz")
+    csp = resp.headers["content-security-policy"]
+    assert "worker-src" not in csp
 
 
 # -- Non-docs paths retain the strict CSP --
