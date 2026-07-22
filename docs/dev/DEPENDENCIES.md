@@ -47,10 +47,12 @@ any release published within the last 7 days**. Holding a 7-day window absorbs
 most public-incident timelines.
 
 - The cooldown applies to **both** ecosystems.
-- It is enforced at dependency-resolution and at the automated-update layer; the
-  exact mechanism is per-tool *(forthcoming)* (e.g. an "exclude releases newer
-  than N days" resolver option for `api/`, and the automated-updater's cooldown
-  setting for both).
+- It is enforced at dependency-resolution and at the automated-update layer. The
+  automated-updater layer is configured: `.github/dependabot.yml` sets
+  `cooldown: {default-days: 7}` on every ecosystem, so Dependabot never opens a
+  version-update PR for a release younger than 7 days. The dependency-resolution
+  mechanism for `api/` (an "exclude releases newer than N days" resolver option)
+  is per-tool *(forthcoming)*.
 - **Security updates bypass the cooldown** (see Section 4); a known-exploited
   vulnerability outweighs the supply-chain risk window.
 
@@ -105,9 +107,10 @@ Grouping and PR rules:
 - All Dependabot PRs carry the `dependencies` label and use the
   `chore(deps):` commit-message prefix.
 
-The 7-day supply-chain cooldown (Section 3) is enforced at review time;
-Dependabot has no native "exclude releases newer than N days" setting.
-Security updates bypass the cooldown per Section 3.
+The 7-day supply-chain cooldown (Section 3) is enforced automatically: every
+ecosystem entry sets `cooldown: {default-days: 7}`, so Dependabot does not open
+a version-update PR for any release younger than 7 days. Cooldown applies to
+version updates only; security updates bypass it per Section 3.
 
 **`pip` ecosystem and `uv.lock`:** Dependabot updates `pyproject.toml` but does
 not regenerate `uv.lock`. The `dependabot-uv-lock` workflow
