@@ -19,6 +19,7 @@ from collections.abc import Awaitable, Callable
 from starlette.requests import Request
 from starlette.responses import Response
 
+from mc_server_dashboard_api.docs import SWAGGER_INIT_SCRIPT_CSP_HASH
 from mc_server_dashboard_api.logging import correlation_id
 
 _HEADER = "X-Correlation-ID"
@@ -68,16 +69,18 @@ _CSP = (
 )
 
 # Docs pages (issue #1990): the self-hosted swagger-ui init HTML emitted by
-# ``get_swagger_ui_html`` contains an inline ``<script>`` block, which the
-# strict ``script-src 'self'`` blocks. A path-scoped relaxation adds
-# ``'unsafe-inline'`` only on the two docs pages; every other path keeps the
-# strict policy.
+# ``get_swagger_ui_html`` contains a fixed inline ``<script>`` block, which the
+# strict ``script-src 'self'`` blocks. A path-scoped relaxation allows exactly
+# that one script via its SHA-256 hash source (issue #2154) — narrower than
+# ``'unsafe-inline'`` — only on the two docs pages; every other path keeps the
+# strict policy. ``img-src`` drops the docs-irrelevant cdn.modrinth.com entry;
+# the ``data:`` source permits the inline-SVG favicon.
 _DOCS_PATHS = frozenset({"/api/docs", "/api/redoc"})
 _DOCS_CSP = (
     "default-src 'self'; "
-    "script-src 'self' 'unsafe-inline'; "
+    f"script-src 'self' '{SWAGGER_INIT_SCRIPT_CSP_HASH}'; "
     "style-src 'self' 'unsafe-inline'; "
-    "img-src 'self' data: https://cdn.modrinth.com; "
+    "img-src 'self' data:; "
     "frame-ancestors 'none'"
 )
 

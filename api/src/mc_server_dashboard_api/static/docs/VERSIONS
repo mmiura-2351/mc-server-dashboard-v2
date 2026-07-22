@@ -1,3 +1,30 @@
-swagger-ui-bundle.js  swagger-ui v5.32.9
-swagger-ui.css        swagger-ui v5.32.9
-redoc.standalone.js   redoc v2.5.3
+# Vendored API-docs assets (issue #1990, #2154)
+#
+# These bundles are checked in and served same-origin from /api/docs-assets/ so
+# the Swagger UI and ReDoc pages comply with the strict CSP without a CDN
+# carve-out. Record upstream source, version, license, and a SHA-256 integrity
+# hash of each file so CVE-driven upgrades are traceable. To upgrade: replace
+# the file from the source URL, bump the version, and refresh the sha256
+# (`sha256sum <file>`).
+
+swagger-ui-bundle.js
+  version: swagger-ui-dist 5.32.9
+  source:  https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.32.9/swagger-ui-bundle.js
+  project: https://github.com/swagger-api/swagger-ui
+  license: Apache-2.0
+  sha256:  303f48967313bee56f30c651b6b90467482a99d2cf1571cde4e44527912eceea
+
+swagger-ui.css
+  version: swagger-ui-dist 5.32.9
+  source:  https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.32.9/swagger-ui.css
+  project: https://github.com/swagger-api/swagger-ui
+  license: Apache-2.0
+  sha256:  ca238f7d7c2cf4480c1e77a9c3b9da915ab216e96ffd354e69076560c650c6de
+
+redoc.standalone.js
+  version: redoc 2.5.3
+  source:  https://cdn.jsdelivr.net/npm/redoc@2.5.3/bundles/redoc.standalone.js
+  project: https://github.com/Redocly/redoc
+  license: MIT
+  sha256:  1320f442151c57c447d3b70c7ffc6c4f86d08464020fe34c8cc5d3164e9944f0
+</content>

@@ -5,6 +5,9 @@ same-origin static files instead of CDN, and that their CSP headers permit the
 page scripts to execute.
 """
 
+import base64
+import hashlib
+import re
 from collections.abc import Iterator
 
 import pytest
@@ -18,6 +21,14 @@ def client(shared_app: FastAPI) -> Iterator[TestClient]:
     app.dependency_overrides.clear()
     with TestClient(app) as c:
         yield c
+
+
+def _script_src(csp: str) -> str:
+    return csp.split("script-src")[1].split(";")[0]
+
+
+def _img_src(csp: str) -> str:
+    return csp.split("img-src")[1].split(";")[0]
 
 
 # -- Swagger UI (/api/docs) --
@@ -38,11 +49,43 @@ def test_swagger_ui_loads_css_from_self(client: TestClient) -> None:
     assert "/api/docs-assets/swagger-ui.css" in body
 
 
-def test_swagger_ui_csp_permits_inline_script(client: TestClient) -> None:
-    """The swagger-ui init script is inline; the CSP must allow it."""
+def test_swagger_ui_csp_uses_hash_not_unsafe_inline(client: TestClient) -> None:
+    """The swagger-ui init script is inline; the docs CSP allows exactly it via
+    a SHA-256 hash source, not the broader ``'unsafe-inline'`` (issue #2154)."""
     resp = client.get("/api/docs")
-    csp = resp.headers["content-security-policy"]
-    assert "'unsafe-inline'" in csp.split("script-src")[1].split(";")[0]
+    script_src = _script_src(resp.headers["content-security-policy"])
+    assert "'unsafe-inline'" not in script_src
+    assert "'sha256-" in script_src
+
+
+def test_docs_csp_hash_matches_rendered_init_script(client: TestClient) -> None:
+    """The ``'sha256-...'`` in the docs CSP must equal the hash the browser
+    computes over the exact bytes of the emitted inline ``<script>`` — so a
+    future FastAPI bump that changes the init script fails CI here instead of
+    silently blocking the page (issue #2154)."""
+    resp = client.get("/api/docs")
+    match = re.search(r"<script>(.*?)</script>", resp.text, re.DOTALL)
+    assert match is not None
+    digest = hashlib.sha256(match.group(1).encode()).digest()
+    expected = "sha256-" + base64.b64encode(digest).decode()
+    script_src = _script_src(resp.headers["content-security-policy"])
+    assert f"'{expected}'" in script_src
+
+
+def test_swagger_ui_favicon_self_hosted(client: TestClient) -> None:
+    """The favicon must not point at the CDN default that ``img-src`` blocks;
+    a ``data:`` URI (permitted by ``img-src ... data:``) is used (issue #2154)."""
+    resp = client.get("/api/docs")
+    assert "fastapi.tiangolo.com" not in resp.text
+    assert 'href="data:image/svg+xml' in resp.text
+    assert "data:" in _img_src(resp.headers["content-security-policy"])
+
+
+def test_docs_csp_img_src_has_no_modrinth(client: TestClient) -> None:
+    """cdn.modrinth.com is irrelevant to docs pages and must be dropped from
+    the docs CSP img-src (issue #2154)."""
+    resp = client.get("/api/docs")
+    assert "cdn.modrinth.com" not in _img_src(resp.headers["content-security-policy"])
 
 
 def test_swagger_ui_no_google_fonts(client: TestClient) -> None:
@@ -66,11 +109,19 @@ def test_redoc_no_google_fonts(client: TestClient) -> None:
     assert "fonts.googleapis.com" not in resp.text
 
 
-def test_redoc_csp_permits_inline_script(client: TestClient) -> None:
-    """ReDoc itself needs no inline script, but keep the docs CSP uniform."""
+def test_redoc_csp_uses_hash_not_unsafe_inline(client: TestClient) -> None:
+    """ReDoc needs no inline script, but the docs CSP is uniform across both
+    pages: hash source, no ``'unsafe-inline'`` (issue #2154)."""
     resp = client.get("/api/redoc")
-    csp = resp.headers["content-security-policy"]
-    assert "'unsafe-inline'" in csp.split("script-src")[1].split(";")[0]
+    script_src = _script_src(resp.headers["content-security-policy"])
+    assert "'unsafe-inline'" not in script_src
+    assert "'sha256-" in script_src
+
+
+def test_redoc_favicon_self_hosted(client: TestClient) -> None:
+    resp = client.get("/api/redoc")
+    assert "fastapi.tiangolo.com" not in resp.text
+    assert 'href="data:image/svg+xml' in resp.text
 
 
 # -- Non-docs paths retain the strict CSP --
