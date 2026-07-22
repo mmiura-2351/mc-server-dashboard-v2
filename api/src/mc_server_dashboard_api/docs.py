@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
+from fastapi.openapi.docs import get_swagger_ui_html
 from starlette.responses import HTMLResponse
 from starlette.staticfiles import StaticFiles
 
@@ -93,10 +93,34 @@ def mount_docs(app: FastAPI) -> None:
 
     @app.get("/api/redoc", include_in_schema=False)
     async def redoc_html() -> HTMLResponse:
-        return get_redoc_html(
-            openapi_url=app.openapi_url or _OPENAPI_URL,
-            title=f"{app.title} - ReDoc",
-            redoc_js_url=f"{_ASSETS_PATH}/redoc.standalone.js",
-            redoc_favicon_url=_FAVICON_URL,
-            with_google_fonts=False,
-        )
+        title = f"{app.title} - ReDoc"
+        openapi_url = app.openapi_url or _OPENAPI_URL
+        redoc_js_url = f"{_ASSETS_PATH}/redoc.standalone.js"
+        # Render manually instead of ``get_redoc_html`` so we can pass
+        # ``hide-logo`` — ReDoc's default logo points at cdn.redoc.ly,
+        # which ``img-src 'self' data:`` correctly blocks (issue #2234).
+        html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+    <title>{title}</title>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="shortcut icon" href="{_FAVICON_URL}">
+    <style>
+      body {{
+        margin: 0;
+        padding: 0;
+      }}
+    </style>
+    </head>
+    <body>
+    <noscript>
+        ReDoc requires Javascript to function.
+    </noscript>
+    <redoc spec-url="{openapi_url}" hide-logo></redoc>
+    <script src="{redoc_js_url}"> </script>
+    </body>
+    </html>
+    """
+        return HTMLResponse(html)
