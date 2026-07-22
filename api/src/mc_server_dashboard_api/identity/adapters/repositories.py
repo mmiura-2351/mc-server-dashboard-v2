@@ -182,10 +182,13 @@ class SqlAlchemyUserRepository(UserRepository):
         # serialize on them (#260): the second transaction blocks until the first
         # commits, then this re-read under READ COMMITTED sees the decremented
         # set. A bare count(*) cannot be row-locked, so select the rows under the
-        # lock and count them here.
+        # lock and count them here. ORDER BY id gives every transaction the same
+        # deterministic lock-acquisition order, so concurrent guards cannot
+        # deadlock by locking the matched rows in different scan orders (#2226).
         stmt = (
             select(UserModel.id)
             .where(UserModel.is_platform_admin.is_(True), UserModel.active.is_(True))
+            .order_by(UserModel.id)
             .with_for_update()
         )
         return len((await self._session.execute(stmt)).all())
