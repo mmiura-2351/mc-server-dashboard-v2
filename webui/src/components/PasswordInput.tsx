@@ -27,7 +27,7 @@ export function PasswordInput(props: PasswordInputProps) {
         aria-pressed={visible}
         onClick={() => setVisible((v) => !v)}
       >
-        {visible ? <EyeOffIcon /> : <EyeIcon />}
+        {visible ? <EyeIcon /> : <EyeOffIcon />}
       </button>
     </div>
   );
