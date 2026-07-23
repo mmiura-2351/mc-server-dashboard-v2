@@ -37,6 +37,9 @@ jobs:
       - name: Migration guard (single head, no number collisions)
         run: (cd api && python3 ../scripts/check_migrations.py)
 
+      - name: Supply-chain cooldown self-test
+        run: python3 scripts/supply_chain_cooldown.py --self-test
+
       - name: Docs checker self-test
         run: python3 scripts/check_docs.py --self-test
 
