@@ -27,6 +27,21 @@ describe("PasswordInput", () => {
     expect(toggle).toHaveAttribute("aria-pressed", "false");
   });
 
+  it("shows the slashed-eye icon when masked and the open-eye icon when revealed", () => {
+    render(<PasswordInput id="pw" value="" onChange={() => {}} />);
+
+    const toggle = screen.getByRole("button");
+    const svg = () => toggle.querySelector("svg") as SVGElement;
+
+    // Masked: slashed-eye (EyeOffIcon contains a <line> slash element)
+    expect(svg().querySelector("line")).not.toBeNull();
+
+    fireEvent.click(toggle);
+
+    // Revealed: open-eye (EyeIcon has no <line> element)
+    expect(svg().querySelector("line")).toBeNull();
+  });
+
   it("labels the toggle for assistive tech and updates the label with state", () => {
     render(<PasswordInput id="pw" value="" onChange={() => {}} />);
 

@@ -72,7 +72,7 @@ services:
     # CopyObject-heavy and small-object-heavy (thousands of region/.mca per world).
     # Pinned to an explicit version tag (never `latest`) so a rebuild is
     # reproducible.
-    image: chrislusf/seaweedfs:4.33
+    image: chrislusf/seaweedfs:4.39
     restart: unless-stopped
     # Gated behind the `object` compose profile so an fs-backend operator can drop
     # the service entirely (issue #940). `.env.example` ships COMPOSE_PROFILES=object
@@ -339,7 +339,7 @@ services:
         condition: service_healthy
 
   cloudflared:
-    image: cloudflare/cloudflared:2026.6.1
+    image: cloudflare/cloudflared:2026.7.1
     restart: unless-stopped
     # Gated behind the `tunnel` compose profile so default bring-up is unchanged
     # (issue #1090). Add `tunnel` to COMPOSE_PROFILES in .env to enable it, then
