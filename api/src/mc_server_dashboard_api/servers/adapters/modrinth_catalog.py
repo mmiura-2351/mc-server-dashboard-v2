@@ -108,8 +108,8 @@ class ModrinthCatalog(CatalogProvider):
 
     async def get_project(self, project_id_or_slug: str) -> CatalogProject:
         data = await self._get_json(f"/project/{quote(project_id_or_slug, safe='')}")
-        author = await self._resolve_author(data.get("team"))
         with wrap_shape_errors("modrinth"):
+            author = await self._resolve_author(data.get("team"))
             return CatalogProject(
                 project_id=data["id"],
                 slug=data.get("slug", ""),

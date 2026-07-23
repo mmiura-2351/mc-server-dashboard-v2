@@ -562,6 +562,64 @@ async def test_get_project_caches_team_owner_resolution() -> None:
     assert members_calls == 1
 
 
+async def test_get_project_non_dict_json_raises_catalog_unavailable() -> None:
+    """A top-level project response that is not a JSON object is wrapped.
+
+    Author resolution reads ``data.get("team")``; a list body would raise a
+    raw AttributeError unless the lookup is guarded (issue #2163).
+    """
+
+    def _handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, content=b'["unexpected", "array"]')
+
+    transport = httpx2.MockTransport(_handler)
+    catalog = ModrinthCatalog(base_url="https://api.modrinth.com/v2")
+
+    real_init = httpx2.AsyncClient.__init__
+
+    def patched_init(self_client: httpx2.AsyncClient, **kwargs: Any) -> None:
+        kwargs["transport"] = transport
+        real_init(self_client, **kwargs)
+
+    httpx2.AsyncClient.__init__ = patched_init  # type: ignore[assignment]
+    try:
+        with pytest.raises(CatalogUnavailableError):
+            await catalog.get_project("test")
+    finally:
+        httpx2.AsyncClient.__init__ = real_init  # type: ignore[method-assign]
+
+
+async def test_get_project_non_string_team_raises_catalog_unavailable() -> None:
+    """A non-string ``team`` field is wrapped rather than escaping (issue #2163).
+
+    ``quote()`` on a non-string raises TypeError inside author resolution; it
+    must surface as CatalogUnavailableError like any other bad-shape response.
+    """
+
+    def _handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            200,
+            content=b'{"id":"abc","slug":"x","title":"X","team":123,'
+            b'"description":"","body":""}',
+        )
+
+    transport = httpx2.MockTransport(_handler)
+    catalog = ModrinthCatalog(base_url="https://api.modrinth.com/v2")
+
+    real_init = httpx2.AsyncClient.__init__
+
+    def patched_init(self_client: httpx2.AsyncClient, **kwargs: Any) -> None:
+        kwargs["transport"] = transport
+        real_init(self_client, **kwargs)
+
+    httpx2.AsyncClient.__init__ = patched_init  # type: ignore[assignment]
+    try:
+        with pytest.raises(CatalogUnavailableError):
+            await catalog.get_project("x")
+    finally:
+        httpx2.AsyncClient.__init__ = real_init  # type: ignore[method-assign]
+
+
 async def test_list_versions_encodes_slug_in_url_path() -> None:
     """list_versions also percent-encodes the slug in the URL path."""
     captured_urls: list[str] = []
