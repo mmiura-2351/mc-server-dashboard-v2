@@ -1449,20 +1449,20 @@ describe("ServerPluginsTab Bedrock discovery hint (issue #1543)", () => {
     );
   });
 
-  it.each([
-    "wKkoqHrH",
-    "geyser",
-  ])("shows the hint when Geyser is a Modrinth catalog install (%s)", async (projectId) => {
-    renderTabFor("paper", true, [
-      plugin({
-        display_name: "Geyser",
-        mod_identifier: null,
-        source_project_id: projectId,
-      }),
-    ]);
+  it.each(["wKkoqHrH", "geyser"])(
+    "shows the hint when Geyser is a Modrinth catalog install (%s)",
+    async (projectId) => {
+      renderTabFor("paper", true, [
+        plugin({
+          display_name: "Geyser",
+          mod_identifier: null,
+          source_project_id: projectId,
+        }),
+      ]);
 
-    expect(await screen.findByText(HINT_TEXT)).toBeInTheDocument();
-  });
+      expect(await screen.findByText(HINT_TEXT)).toBeInTheDocument();
+    },
+  );
 
   it("hides the hint when paper + flag on but no Geyser plugin is installed", async () => {
     renderTabFor("paper", true, [plugin()]);
