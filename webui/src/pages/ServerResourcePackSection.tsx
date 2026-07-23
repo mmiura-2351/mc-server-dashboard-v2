@@ -73,30 +73,25 @@ export function ServerResourcePackSection({
     queryFn: async ({
       signal,
     }): Promise<ResourcePackAssignmentResponse | null> => {
-      try {
-        const result = await api.get(
-          apiPath(
-            "/api/communities/{community_id}/servers/{server_id}/resource-pack",
-            { community_id: communityId, server_id: serverId },
-          ),
-          { signal },
-        );
-        // Guard: the API returns 404 when no pack is assigned, caught below.
-        // A non-assignment response (missing resource_pack) is treated as null.
-        if (
-          result === undefined ||
-          typeof result !== "object" ||
-          !("resource_pack" in (result as object))
-        ) {
-          return null;
-        }
-        return result as ResourcePackAssignmentResponse;
-      } catch (error) {
-        if (error instanceof ApiError && error.status === 404) {
-          return null;
-        }
-        throw error;
+      // "No pack assigned" is a normal state of a valid server: the API returns
+      // 200 with a null body, so no 404 special-casing is needed (issue #2238).
+      const result = await api.get(
+        apiPath(
+          "/api/communities/{community_id}/servers/{server_id}/resource-pack",
+          { community_id: communityId, server_id: serverId },
+        ),
+        { signal },
+      );
+      // The body is either a full assignment or null; anything else is treated
+      // as "unassigned".
+      if (
+        result !== null &&
+        typeof result === "object" &&
+        "resource_pack" in result
+      ) {
+        return result;
       }
+      return null;
     },
   });
 

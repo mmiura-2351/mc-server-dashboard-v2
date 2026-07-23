@@ -1488,6 +1488,10 @@ export interface paths {
         /**
          * Get Resource Pack Assignment
          * @description Get the resource pack assignment for a server (server:read, issue #1177).
+         *
+         *     "No pack assigned" is a normal state of a valid server, so it returns 200
+         *     with a null body rather than 404; 404 is reserved for an unknown or
+         *     forbidden server (issue #2238).
          */
         get: operations["get_resource_pack_assignment_api_communities__community_id__servers__server_id__resource_pack_get"];
         put?: never;
@@ -6804,7 +6808,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ResourcePackAssignmentResponse"];
+                    "application/json": components["schemas"]["ResourcePackAssignmentResponse"] | null;
                 };
             };
             /** @description Validation Error */
