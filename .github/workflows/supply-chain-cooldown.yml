@@ -1,0 +1,66 @@
+name: supply-chain-cooldown
+
+# Enforce the 7-day supply-chain cooldown (docs/dev/DEPENDENCIES.md Section 3) on
+# Dependabot PRs. Dependabot's own `cooldown: {default-days: 7}` is a best-effort
+# setting on the PR-opening side; this is the enforcing gate on the merge side.
+#
+# scripts/supply_chain_cooldown.py posts a `supply-chain-cooldown` COMMIT STATUS
+# (not a job check) on the PR head SHA -- failure + label while a release is
+# younger than 7 days, success once it ages out. A commit status is used
+# deliberately: the daily `schedule` run re-posts it on the existing head SHA
+# with no new commit, so a blocked PR unblocks itself after 7 days. Add
+# `supply-chain-cooldown` as a REQUIRED status check in branch protection
+# (alongside `check`) to make it enforceable -- a repo-admin step, see the PR.
+#
+# `pull_request_target` (not `pull_request`) is required: a Dependabot
+# `pull_request` run gets a read-only token, which cannot post a status or set a
+# label. `pull_request_target` runs the BASE branch's workflow with a writable
+# token; it never checks out or executes PR head code (only reads PR metadata via
+# the API and queries public registries), so there is no pwn-request exposure.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  schedule:
+    # Daily re-evaluation so blocked PRs unblock automatically after 7 days.
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  statuses: write
+
+# One evaluation per PR at a time; a fresh push supersedes an in-flight run.
+concurrency:
+  group: supply-chain-cooldown-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  cooldown:
+    # On a PR event, only Dependabot's PRs are gated; scheduled / manual runs
+    # sweep every open Dependabot PR.
+    if: >-
+      github.event_name != 'pull_request_target' ||
+      github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      # Action versions are pinned to a commit SHA per
+      # docs/dev/DEPENDENCIES.md (pinning + 7-day cooldown). Checks out the base
+      # branch (the default for pull_request_target) -- trusted workflow code,
+      # never the PR head.
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # scripts/supply_chain_cooldown.py is pure stdlib python3 (ubuntu-latest
+      # ships it) and uses gh for GitHub auth; no setup or install step, mirroring
+      # sanity.yml.
+      - name: Evaluate cooldown
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request_target" ]; then
+            python3 scripts/supply_chain_cooldown.py --pr "${{ github.event.pull_request.number }}"
+          else
+            python3 scripts/supply_chain_cooldown.py --all-open
+          fi

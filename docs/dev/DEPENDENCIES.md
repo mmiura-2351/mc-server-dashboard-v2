@@ -53,8 +53,23 @@ most public-incident timelines.
   version-update PR for a release younger than 7 days. The dependency-resolution
   mechanism for `api/` (an "exclude releases newer than N days" resolver option)
   is per-tool *(forthcoming)*.
+- It is also enforced at **merge time** as a backstop to the opening-side
+  `cooldown` setting. The `supply-chain-cooldown` workflow
+  (`.github/workflows/supply-chain-cooldown.yml`, driving
+  `scripts/supply_chain_cooldown.py`) reads each Dependabot PR's bumped packages
+  from its commit trailer, looks up each release's publish date in the upstream
+  registry (PyPI, npm, `proxy.golang.org`, GitHub Releases for actions and
+  `ghcr.io` images, Docker Hub for Docker Hub images), and posts a
+  `supply-chain-cooldown` commit status: `failure` (plus a `supply-chain-cooldown`
+  label) while any release is younger than 7 days, `success` once it ages out. A
+  daily schedule re-runs it so blocked PRs unblock themselves with no new commit.
+  Add `supply-chain-cooldown` as a required status check in `main` branch
+  protection to make it enforceable.
 - **Security updates bypass the cooldown** (see Section 4); a known-exploited
-  vulnerability outweighs the supply-chain risk window.
+  vulnerability outweighs the supply-chain risk window. The merge-time gate
+  detects them from the advisory reference (GHSA id) Dependabot emits and lets
+  them pass immediately; this relies on Dependabot alerts being enabled, without
+  which Dependabot opens no security-update PRs.
 
 When a cooldown bypass is required outside a security update, document the reason
 (advisory link / rationale) in the PR.
