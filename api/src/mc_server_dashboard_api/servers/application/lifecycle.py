@@ -1302,17 +1302,24 @@ class StopServer:
         time — if it reconnected between list_reconcilable and now, this raises
         InvalidLifecycleTransitionError so the next tick can redispatch_stop.
 
-        Clears ONLY the assignment via the same guard the deferred clear uses
+        For observed=stopped with a CONNECTED worker (issue #1004), the final
+        snapshot is re-driven before clearing the assignment — the original stop
+        wedged between observed=stopped and the post-snapshot clear, so the
+        generation was never advanced. Without this, a cross-worker re-placement
+        hydrates stale store-gen and rolls back. A DISCONNECTED worker skips the
+        snapshot (the worker is gone; same exposure as today, logged loud). A
+        snapshot TIMEOUT raises ``WorkerUnavailableError`` so the reconciler backs
+        off. A snapshot failure (TRANSFER_FAILED, etc.) or a benign duplicate
+        (working_set_absent) proceeds to clear — the loud log from
+        ``_final_snapshot`` records the loss or non-loss.
+
+        The clear uses the same guard the deferred clear uses
         (``clear_assignment_after_final_snapshot``): a still desired=stopped row
-        still assigned to that worker. No command is dispatched — the server is
-        already stopped (or the worker is gone) — and no placement-load decrement
-        (the stop that wedged the row already decremented). The clear is logged
-        loud: the final snapshot was never published, so a later cross-worker
-        re-placement loses progression since the last periodic snapshot (the
-        documented #845/#847 exposure; a same-worker start reuses the retained
-        scratch, #767).
+        still assigned to that worker. No placement-load decrement (the stop that
+        wedged the row already decremented).
         """
 
+        # --- Step A: validate the triple ----------------------------------
         async with self.uow:
             server = await _load(self.uow, community_id, server_id)
             worker_id = server.assigned_worker_id
@@ -1331,6 +1338,24 @@ class StopServer:
             if server.observed_state is ObservedState.UNKNOWN:
                 if self.control_plane.is_worker_connected(worker_id=worker_id):
                     raise InvalidLifecycleTransitionError(str(server_id.value))
+
+        # --- Step B: re-drive the final snapshot for stopped+connected ----
+        if (
+            server.observed_state is ObservedState.STOPPED
+            and self.control_plane.is_worker_connected(worker_id=worker_id)
+        ):
+            upload_may_be_live = await self._final_snapshot(
+                worker_id=worker_id,
+                community_id=community_id,
+                server_id=server_id,
+            )
+            if upload_may_be_live:
+                raise WorkerUnavailableError(
+                    str(worker_id.value), upload_may_be_live=True
+                )
+
+        # --- Step C: clear the assignment ---------------------------------
+        async with self.uow:
             cleared = await self.uow.servers.clear_assignment_after_final_snapshot(
                 server_id, worker_id
             )
@@ -1345,13 +1370,22 @@ class StopServer:
                     server_id.value,
                     worker_id.value,
                 )
+            elif self.control_plane.is_worker_connected(worker_id=worker_id):
+                _LOG.info(
+                    "recovered a stop wedged at (stopped, stopped, assigned) for "
+                    "server %s: re-drove the final snapshot and released worker %s "
+                    "(issue #1004)",
+                    server_id.value,
+                    worker_id.value,
+                )
             else:
                 _LOG.warning(
                     "recovered a stop wedged at (stopped, stopped, assigned) for "
-                    "server %s: released worker %s. The final snapshot was never "
-                    "published, so a cross-worker re-placement loses progression "
-                    "since the last periodic snapshot (#845/#847); a same-worker "
-                    "start reuses the retained scratch (#767)",
+                    "server %s: released worker %s. The worker was disconnected so "
+                    "the final snapshot was not re-driven; a cross-worker "
+                    "re-placement loses progression since the last periodic "
+                    "snapshot (#845/#847); a same-worker start reuses the retained "
+                    "scratch (#767)",
                     server_id.value,
                     worker_id.value,
                 )

@@ -56,7 +56,7 @@ func (f *fakeRegistrar) ResolveJoin(_ context.Context, _, _ string, _ apiclient.
 
 type fakeSessions struct{ ids []string }
 
-func (f fakeSessions) ActiveSessionIDs() []string { return f.ids }
+func (f fakeSessions) SnapshotActive() ([]string, func()) { return f.ids, func() {} }
 
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
@@ -272,6 +272,71 @@ func TestRegisterOnceRespectsDeadline(t *testing.T) {
 	}
 	if elapsed > 500*time.Millisecond {
 		t.Fatalf("RegisterOnce took %v; expected it to honour the %v deadline", elapsed, registerTimeout)
+	}
+}
+
+// trackingSessions records the order of SnapshotActive acquire/release relative
+// to Register calls, so we can assert the barrier is held across the RPC.
+type trackingSessions struct {
+	mu     sync.Mutex
+	ids    []string
+	events []string // "snapshot", "release", interleaved with registrar events
+}
+
+func (ts *trackingSessions) SnapshotActive() ([]string, func()) {
+	ts.mu.Lock()
+	ts.events = append(ts.events, "snapshot")
+	ids := ts.ids
+	ts.mu.Unlock()
+	return ids, func() {
+		ts.mu.Lock()
+		ts.events = append(ts.events, "release")
+		ts.mu.Unlock()
+	}
+}
+
+func (ts *trackingSessions) getEvents() []string {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	out := make([]string, len(ts.events))
+	copy(out, ts.events)
+	return out
+}
+
+// trackingRegistrar records a "register" event so ordering can be verified.
+type trackingRegistrar struct {
+	sessions *trackingSessions
+	base     string
+}
+
+func (tr *trackingRegistrar) Register(_ context.Context, _, _ string, _ []string) (string, error) {
+	tr.sessions.mu.Lock()
+	tr.sessions.events = append(tr.sessions.events, "register")
+	tr.sessions.mu.Unlock()
+	return tr.base, nil
+}
+
+func (tr *trackingRegistrar) ResolveJoin(_ context.Context, _, _ string, _ apiclient.Intent) (apiclient.ResolveResult, error) {
+	return apiclient.ResolveResult{}, nil
+}
+
+// TestRegisterOnceBarrierOrdering asserts that RegisterOnce acquires the barrier
+// (SnapshotActive) before the Register RPC and releases it after.
+func TestRegisterOnceBarrierOrdering(t *testing.T) {
+	ts := &trackingSessions{ids: []string{"s1"}}
+	reg := &trackingRegistrar{sessions: ts, base: "mc.example.com"}
+	svc := New(reg, nil, ts, "relay:25665", "CA", discardLogger())
+
+	if err := svc.RegisterOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	events := ts.getEvents()
+	if len(events) != 3 {
+		t.Fatalf("events = %v, want [snapshot register release]", events)
+	}
+	if events[0] != "snapshot" || events[1] != "register" || events[2] != "release" {
+		t.Errorf("ordering = %v, want [snapshot register release]", events)
 	}
 }
 

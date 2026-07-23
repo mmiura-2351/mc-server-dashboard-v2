@@ -31,7 +31,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-X main.version=${VERSION}" -o /
 # deployment dials the API in plaintext, so these are unused there; they are
 # provisioned for the cross-host path (docs/dev/DEPLOYMENT.md).
 # ---------------------------------------------------------------------------
-FROM debian:bookworm-20260623-slim AS runtime
+FROM debian:bookworm-20260713-slim AS runtime
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \

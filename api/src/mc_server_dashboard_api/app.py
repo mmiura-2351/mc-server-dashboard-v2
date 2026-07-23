@@ -669,6 +669,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         control_plane_state = ControlPlaneState()
         app.state.control_plane = GrpcControlPlane(
             control_plane_state,
+            clock=FleetSystemClock(),
             timeout_seconds=settings.control.command_timeout_seconds,
         )
         # Bedrock relay tunnel dispatch (issue #1544) shares the relay's
@@ -877,16 +878,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 snapshot_timeout_seconds=settings.control.snapshot_timeout_seconds,
                 stop_timeout_seconds=settings.control.stop_timeout_seconds,
             )
-            schedule_runner = RunScheduleTick(
-                uow=ServersUnitOfWork(create_session_factory(engine)),
-                # Player warnings broadcast a fixed ``say <message>`` before a
-                # stop/restart occurrence — its own SendServerCommand (fresh UoW),
-                # kept out of the trigger-agnostic ExecuteScheduleAction (#653).
-                send_command=SendServerCommand(
-                    uow=ServersUnitOfWork(create_session_factory(engine)),
-                    control_plane=schedule_control_plane,
-                ),
-                execute=ExecuteScheduleAction(
+
+            def _make_schedule_execute() -> ExecuteScheduleAction:
+                return ExecuteScheduleAction(
                     uow=ServersUnitOfWork(create_session_factory(engine)),
                     send_command=SendServerCommand(
                         uow=ServersUnitOfWork(create_session_factory(engine)),
@@ -933,7 +927,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         # ``current`` mid-tar (the #827 tear).
                         lifecycle_lock=PgLifecycleLock(engine=engine),
                     ),
+                )
+
+            schedule_runner = RunScheduleTick(
+                uow=ServersUnitOfWork(create_session_factory(engine)),
+                # Player warnings broadcast a fixed ``say <message>`` before a
+                # stop/restart occurrence — its own SendServerCommand (fresh UoW),
+                # kept out of the trigger-agnostic ExecuteScheduleAction (#653).
+                send_command=SendServerCommand(
+                    uow=ServersUnitOfWork(create_session_factory(engine)),
+                    control_plane=schedule_control_plane,
                 ),
+                make_execute=_make_schedule_execute,
                 calculator=CronsimNextRunCalculator(),
                 audit=LoggingAuditRecorder(
                     SqlAlchemyAuditWriter(

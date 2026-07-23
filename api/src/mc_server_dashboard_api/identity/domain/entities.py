@@ -49,7 +49,9 @@ class User:
 # retry. A ``FAMILY``-revoked token (theft response, password change, deactivate,
 # delete) or a ``LOGOUT``-revoked token must never be graced -- re-presenting it
 # stays on the theft path -- so an attacker cannot escape a family revoke by
-# re-presenting a just-revoked successor within the window.
+# re-presenting a just-revoked successor within the window. ``revoke_all_for_user``
+# re-stamps ``ROTATED`` predecessors to ``FAMILY`` so the grace cannot be used to
+# escape a later family revoke (issue #1960).
 REVOKED_ROTATED = "rotated"
 REVOKED_FAMILY = "family"
 REVOKED_LOGOUT = "logout"

@@ -24,6 +24,9 @@ import asyncio
 import logging
 import uuid
 
+from google.protobuf.timestamp_pb2 import Timestamp
+
+from mc_server_dashboard_api.fleet.domain.clock import Clock
 from mc_server_dashboard_api.fleet.domain.control_plane import (
     CloseBedrockTunnelCommand,
     Command,
@@ -56,6 +59,24 @@ from mc_server_dashboard_api.fleet.domain.value_objects import DriverKind, Worke
 from mcsd.controlplane.v1 import control_plane_pb2 as pb
 
 _LOG = logging.getLogger(__name__)
+
+
+class StaleSessionError(RuntimeError):
+    """Raised when ``open_session`` receives a token older than the latest opened.
+
+    Defense-in-depth against the reconnect race (issue #1694): a stale session
+    that resumes its DB awaits after a newer session already opened must not
+    overwrite the current outbound queue.
+    """
+
+    def __init__(self, worker_id: str, session: int) -> None:
+        super().__init__(
+            f"worker {worker_id}: session {session} is stale "
+            "(a newer session was already opened)"
+        )
+        self.worker_id = worker_id
+        self.session = session
+
 
 # Map the domain driver kind to the wire enum at the transport edge (the servers
 # context's underscore spelling is mapped to ``DriverKind`` upstream; here we go
@@ -138,6 +159,11 @@ class ControlPlaneState:
         # collides).
         self._late_snapshots: dict[str, tuple[WorkerId, str]] = {}
         self._late_snapshot_sink = late_snapshot_sink
+        # Monotonic high-water mark of the latest session token opened per worker
+        # (issue #1694). A stale session that resumes its awaits after a newer one
+        # already called open_session is refused, preventing it from overwriting the
+        # current outbound queue.
+        self._latest_opened: dict[WorkerId, SessionToken] = {}
 
     def set_late_snapshot_sink(self, sink: LateSnapshotResultSink) -> None:
         """Bind the late-snapshot sink after construction (issue #891).
@@ -167,6 +193,9 @@ class ControlPlaneState:
         it on the superseding session keeps the map from accreting.
         """
 
+        if session < self._latest_opened.get(worker_id, session):
+            raise StaleSessionError(worker_id.value, session)
+        self._latest_opened[worker_id] = session
         for command_id in [
             cid for cid, (wid, _) in self._late_snapshots.items() if wid == worker_id
         ]:
@@ -270,9 +299,16 @@ class ControlPlaneState:
             )
             return
         del self._pending[command_id]
-        self._snapshot_servers.pop(command_id, None)
+        snapshot = self._snapshot_servers.pop(command_id, None)
         if not future.done():
             future.set_result(result)
+            return
+        # The future was cancelled by asyncio.wait_for between the cancellation
+        # and discard_pending running (issue #1996). Promote the snapshot record
+        # so the late-snapshot sink can release the held assignment.
+        if future.cancelled() and snapshot is not None:
+            self._late_snapshots[command_id] = snapshot
+            await self._clear_on_late_snapshot(command_id, worker_id, result)
 
     async def _clear_on_late_snapshot(
         self, command_id: str, worker_id: WorkerId, result: pb.CommandResult
@@ -351,6 +387,24 @@ class ControlPlaneState:
             cid for cid, (wid, _) in self._late_snapshots.items() if wid == worker_id
         ]:
             del self._late_snapshots[command_id]
+
+    def discard_if_stale(self, command_id: str) -> bool:
+        """Return True when ``command_id``'s dispatch was abandoned (issue #1697).
+
+        A command whose ``correlation_id`` has no entry in ``_pending`` was
+        abandoned (timeout or cancellation). The Session generator calls this
+        before yielding a dequeued ``ApiMessage`` so stale commands are dropped
+        instead of being replayed when a stalled worker reader resumes.
+
+        Also cleans up any promoted late-snapshot record for the command so a
+        stale message that carried a final-snapshot payload does not leave an
+        orphan entry in ``_late_snapshots``.
+        """
+
+        if command_id in self._pending:
+            return False
+        self._late_snapshots.pop(command_id, None)
+        return True
 
     def outbound_for(self, worker_id: WorkerId) -> asyncio.Queue[pb.ApiMessage] | None:
         return self._outbound.get(worker_id)
@@ -458,10 +512,19 @@ def _to_listing(message: pb.FileListing) -> FileListing:
 class GrpcControlPlane(ControlPlane):
     """:class:`ControlPlane` adapter over the shared :class:`ControlPlaneState`."""
 
-    def __init__(self, state: ControlPlaneState, *, timeout_seconds: float) -> None:
+    def __init__(
+        self, state: ControlPlaneState, *, clock: Clock, timeout_seconds: float
+    ) -> None:
         self._state = state
+        self._clock = clock
         self._timeout = timeout_seconds
         self._background_tasks: set[asyncio.Task[None]] = set()
+
+    def _now_timestamp(self) -> Timestamp:
+        """Return a protobuf Timestamp from the injected clock."""
+        ts = Timestamp()
+        ts.FromDatetime(self._clock.now())
+        return ts
 
     async def dispatch(
         self,
@@ -494,9 +557,9 @@ class GrpcControlPlane(ControlPlane):
             command_id, worker_id, snapshot_server_id=snapshot_server_id
         )
         api_command = _to_api_command(command_id, server_id, command)
-        await queue.put(
-            pb.ApiMessage(correlation_id=command_id, api_command=api_command)
-        )
+        msg = pb.ApiMessage(correlation_id=command_id, api_command=api_command)
+        msg.sent_at.CopyFrom(self._now_timestamp())
+        await queue.put(msg)
         # A longer per-command budget (the start's hydrate phase, issue #822)
         # overrides the default command deadline for this one dispatch.
         timeout = self._timeout if timeout_override is None else timeout_override
@@ -539,9 +602,9 @@ class GrpcControlPlane(ControlPlane):
         command_id = str(uuid.uuid4())
         future = self._state.register_pending(command_id, worker_id)
         api_command = _to_api_command(command_id, server_id, command)
-        await queue.put(
-            pb.ApiMessage(correlation_id=command_id, api_command=api_command)
-        )
+        msg = pb.ApiMessage(correlation_id=command_id, api_command=api_command)
+        msg.sent_at.CopyFrom(self._now_timestamp())
+        await queue.put(msg)
         # Fire-and-forget: the result is not awaited here. The task is held in
         # _background_tasks so it is not GC-collected mid-flight; a done callback
         # removes it once the coroutine finishes.

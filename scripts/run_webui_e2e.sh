@@ -48,6 +48,7 @@ fi
 
 PG_CONTAINER="mcsd-webui-e2e-pg-${wt_hash:0:8}"
 PG_PORT="${MCD_E2E_PG_PORT:-$((10000 + 16#${wt_hash:8:8} % 5000))}"
+UVICORN_LOG="/tmp/webui-e2e-uvicorn-${wt_hash:0:8}.log"
 # postgres:17.6-alpine, the api.yml-vetted digest (docs/dev/DEPENDENCIES.md).
 PG_IMAGE="postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94"
 
@@ -72,6 +73,12 @@ trap cleanup EXIT
 if [ "${MCD_E2E_REUSE_DB:-}" = "1" ]; then
   DB_URL="${MCD_E2E_DATABASE_URL:?MCD_E2E_DATABASE_URL required when MCD_E2E_REUSE_DB=1}"
 else
+  # Fail fast if the PG port is already taken, mirroring the API port check
+  # above: a hash collision surfaces as a raw docker bind failure otherwise.
+  if (exec 3<>"/dev/tcp/127.0.0.1/${PG_PORT}") 2>/dev/null; then
+    echo "PG port $PG_PORT is already in use; set MCD_E2E_PG_PORT to a free port" >&2
+    exit 1
+  fi
   echo "==> starting Postgres ($PG_CONTAINER on :$PG_PORT)"
   docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
   docker run -d --name "$PG_CONTAINER" \
@@ -120,7 +127,7 @@ done
 
 echo "==> booting the API on $API_URL"
 setsid bash -c "cd api && exec uv run uvicorn mc_server_dashboard_api.app:create_app \
-  --factory --host 127.0.0.1 --port '$API_PORT'" >/tmp/webui-e2e-uvicorn.log 2>&1 &
+  --factory --host 127.0.0.1 --port '$API_PORT'" >"$UVICORN_LOG" 2>&1 &
 uvicorn_pid=$!
 
 echo "==> waiting for the API to be ready"
@@ -131,7 +138,7 @@ for _ in $(seq 1 60); do
   # and report a false ready (observed against the live deployment on :8000).
   if ! kill -0 "$uvicorn_pid" 2>/dev/null; then
     echo "uvicorn exited before becoming ready (port $API_PORT already in use?); log:" >&2
-    cat /tmp/webui-e2e-uvicorn.log >&2
+    cat "$UVICORN_LOG" >&2
     exit 1
   fi
   if curl -fsS "$API_URL/api/healthz" 2>/dev/null | grep -q '"ok":true'; then
@@ -142,7 +149,7 @@ for _ in $(seq 1 60); do
 done
 if [ -z "$ready" ]; then
   echo "API did not become ready; uvicorn log:" >&2
-  cat /tmp/webui-e2e-uvicorn.log >&2
+  cat "$UVICORN_LOG" >&2
   exit 1
 fi
 

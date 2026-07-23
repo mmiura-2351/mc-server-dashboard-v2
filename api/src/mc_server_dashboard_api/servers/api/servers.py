@@ -173,7 +173,7 @@ class CreateServerRequest(BaseModel):
     # Top-level convenience alias for ``config['memory_limit_mb']`` (issue #1849).
     # The response surfaces the value at the top level, so the request accepts it
     # the same way. When set, the value is merged into ``config`` before the use
-    # case runs; an explicit ``config['memory_limit_mb']`` takes precedence.
+    # case runs; 422 ``memory_limit_conflict`` when both carry different values.
     memory_limit_mb: int | None = None
 
 
@@ -192,6 +192,13 @@ class UpdateServerRequest(BaseModel):
     # at-rest gate was removed in PR #966); released slugs are immediately reusable
     # (owner decision, RELAY.md Section 16).
     slug: str | None = None
+    # Top-level convenience alias for ``config['memory_limit_mb']`` (issue #2148).
+    # Merged into ``config`` when the key is absent; 422 ``memory_limit_conflict``
+    # when both carry different values. Requires ``config`` to be present — the
+    # update path does wholesale config replacement, so alias-only would wipe
+    # every other key; 422 ``memory_limit_requires_config`` when ``config`` is
+    # omitted.
+    memory_limit_mb: int | None = None
 
 
 class ServerCommandRequest(BaseModel):
@@ -372,10 +379,9 @@ async def create_server(
     bedrock: Annotated[BedrockJoinability, Depends(get_bedrock_joinability)],
 ) -> ServerResponse:
     config = _validated_config(body.config)
-    # Merge the top-level convenience field into config when present and the
-    # caller did not also set the key inside config (issue #1849).
-    if body.memory_limit_mb is not None and MEMORY_LIMIT_CONFIG_KEY not in config:
-        config[MEMORY_LIMIT_CONFIG_KEY] = body.memory_limit_mb
+    # Merge the top-level convenience field into config (issue #1849). When
+    # both locations carry different values, reject the ambiguity (#2148).
+    config = _merge_memory_limit_alias(body.memory_limit_mb, config)
     try:
         server = await use_case(
             community_id=CommunityId(community_id),
@@ -766,6 +772,13 @@ async def update_server(
 
     authorized = authz.auth_user
     config = None if body.config is None else _validated_config(body.config)
+    # Merge the top-level convenience alias into config (issue #2148). The
+    # update path does wholesale config replacement, so alias-only (no config)
+    # would silently wipe every other key — reject it explicitly.
+    if body.memory_limit_mb is not None:
+        if config is None:
+            raise _unprocessable("memory_limit_requires_config")
+        config = _merge_memory_limit_alias(body.memory_limit_mb, config)
     try:
         server = await use_case(
             community_id=CommunityId(community_id),
@@ -1168,6 +1181,26 @@ def _validated_config(config: Any) -> dict[str, Any]:
         raise _unprocessable("config_null_value") from exc
     except ConfigInvalidShapeError as exc:
         raise _unprocessable("config_invalid_shape") from exc
+
+
+def _merge_memory_limit_alias(
+    top_level: int | None, config: dict[str, Any]
+) -> dict[str, Any]:
+    """Merge the top-level ``memory_limit_mb`` alias into *config* (#1849/#2148).
+
+    When both the alias and ``config['memory_limit_mb']`` are present with
+    *different* values, raise 422 ``memory_limit_conflict``; identical values
+    are harmless and accepted silently.
+    """
+
+    if top_level is None:
+        return config
+    if MEMORY_LIMIT_CONFIG_KEY in config:
+        if config[MEMORY_LIMIT_CONFIG_KEY] != top_level:
+            raise _unprocessable("memory_limit_conflict")
+        return config
+    config[MEMORY_LIMIT_CONFIG_KEY] = top_level
+    return config
 
 
 def _unprocessable(reason: str) -> ProblemException:

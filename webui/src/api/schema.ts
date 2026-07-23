@@ -1009,9 +1009,10 @@ export interface paths {
          * @description Create an (empty) directory at rest (file:edit, FR-FILE-*).
          *
          *     At rest only (Section 6.9): a running server is 409 ``server_unsettled``. The
-         *     path is traversal-validated (422). Backend-dependent: object storage cannot
-         *     represent an empty directory (the seam is a no-op there) — the directory
-         *     becomes observable once a file is written under it.
+         *     path is traversal-validated (422); the root path is rejected since the root
+         *     always exists (issue #1944). Both backends materialize the directory
+         *     (fs: real empty directory; object storage: zero-byte ``.dir`` marker,
+         *     issue #1125).
          */
         post: operations["make_directory_api_communities__community_id__servers__server_id__files_directories_post"];
         delete?: never;
@@ -1771,6 +1772,17 @@ export interface paths {
          *     contract as the pre-stream refusal) when it advanced past that base. The staging
          *     is discarded and the newer ``current`` is kept, so the Worker re-bases on its next
          *     start — the same convergence as the pre-stream refusal.
+         *
+         *     An assignment-aware fence (issue #1703) adds a second input: the server's
+         *     currently-assigned worker id. The pre-stream guard ALLOWS a stale-base publish
+         *     from a different publisher when that publisher IS the assigned worker (the wedge
+         *     case: the old worker's late final snapshot advanced the store, and the new assigned
+         *     worker's base now lags). A commit-time fence re-reads the assignment AFTER the
+         *     upload stream and refuses when the publisher is NOT the currently-assigned worker
+         *     (409 ``publisher_not_assigned``): this prevents a late commit from a re-placed
+         *     worker from wedging the new session. The fence is permissive when no worker is
+         *     assigned (``None``): the held-assignment final-snapshot window and the post-clear
+         *     no-replacement case must still land.
          *
          *     The content-integrity gate uses the single region rule set (issue #927): a
          *     non-4096-aligned tail is the normal on-disk shape of a 26.x world, not a tear, on
@@ -3667,6 +3679,8 @@ export interface components {
             config?: unknown;
             /** Game Port */
             game_port?: number | null;
+            /** Memory Limit Mb */
+            memory_limit_mb?: number | null;
             /** Name */
             name?: string | null;
             /** Slug */

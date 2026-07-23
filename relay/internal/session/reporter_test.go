@@ -296,3 +296,294 @@ func (s *slowClient) ReportSessions(ctx context.Context, starts []apiclient.Sess
 	s.once.Do(func() { time.Sleep(s.delay) })
 	return s.inner.ReportSessions(ctx, starts, ends)
 }
+
+// gatedClient blocks inside ReportSessions until gate is closed, letting tests
+// observe the flush-in-flight state.
+type gatedClient struct {
+	gate  chan struct{} // close to unblock
+	inner *fakeReportClient
+}
+
+func (g *gatedClient) ReportSessions(ctx context.Context, starts []apiclient.SessionStart, ends []apiclient.SessionEnd) error {
+	<-g.gate
+	return g.inner.ReportSessions(ctx, starts, ends)
+}
+
+// TestReporterDroppedStartSuppressesBufferedEnd verifies that when starts are
+// dropped by capOldest during a sustained outage, any already-buffered End
+// whose Start was dropped is also removed — preventing an orphan End from
+// reaching the API and creating a permanent identity-less session row.
+func TestReporterDroppedStartSuppressesBufferedEnd(t *testing.T) {
+	fake := &fakeReportClient{failN: 1 << 30} // always fail
+	r := NewReporter(fake, discardLogger(), nil, nil)
+
+	// Buffer one start+end pair (the victim: oldest start will be dropped).
+	victim := r.Start("srv", "amber", "1.2.3.4", "Steve", "", apiclient.SourceJava)
+	r.End(victim)
+
+	// Fill starts to the cap with start-only sessions (no matching ends), so
+	// only the start buffer overflows while ends stay under cap.
+	for i := 1; i < MaxBufferedEvents; i++ {
+		r.Start("srv", "amber", "1.2.3.4", "Steve", "", apiclient.SourceJava)
+	}
+
+	// Flush fails → both slices restored. Starts are at cap (exactly
+	// MaxBufferedEvents); ends have just 1.
+	r.flush(context.Background())
+
+	// One more start overflows the start buffer; victim (oldest) is dropped.
+	r.Start("srv", "amber", "1.2.3.4", "Steve", "", apiclient.SourceJava)
+	r.flush(context.Background())
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// The victim's End must have been removed from the buffer.
+	for _, e := range r.pendEnds {
+		if e.SessionID == victim {
+			t.Errorf("orphan End in buffer: session %s has no matching Start (was dropped)", victim)
+		}
+	}
+}
+
+// TestReporterDroppedStartSuppressesLaterEnd verifies that if a Start was
+// dropped from the buffer during cap overflow, a later End() call for that
+// session id is silently discarded rather than buffered as an orphan.
+func TestReporterDroppedStartSuppressesLaterEnd(t *testing.T) {
+	fake := &fakeReportClient{failN: 1 << 30}
+	r := NewReporter(fake, discardLogger(), nil, nil)
+
+	// Fill starts to cap.
+	victim := r.Start("srv", "amber", "1.2.3.4", "Steve", "", apiclient.SourceJava)
+	for i := 1; i < MaxBufferedEvents; i++ {
+		r.Start("srv", "amber", "1.2.3.4", "Steve", "", apiclient.SourceJava)
+	}
+	// Flush fails → restored at cap.
+	r.flush(context.Background())
+
+	// One more start overflows; victim (the oldest) is dropped.
+	r.Start("srv", "amber", "1.2.3.4", "Steve", "", apiclient.SourceJava)
+	r.flush(context.Background())
+
+	// Now End the victim — should be suppressed via tombstone.
+	r.End(victim)
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, e := range r.pendEnds {
+		if e.SessionID == victim {
+			t.Errorf("End for dropped-start session %s should have been suppressed", victim)
+		}
+	}
+}
+
+// TestReporterEndDroppedStartSurvivesUnaffected verifies that when Ends are
+// dropped (benign direction — healed by close_absent on next Register), the
+// Start survives and is delivered normally.
+func TestReporterEndDroppedStartSurvivesUnaffected(t *testing.T) {
+	fake := &fakeReportClient{failN: 1 << 30}
+	r := NewReporter(fake, discardLogger(), nil, nil)
+
+	// Buffer a start whose end will be dropped.
+	id := r.Start("srv", "amber", "1.2.3.4", "Steve", "", apiclient.SourceJava)
+	r.End(id)
+
+	// Fill ends to overflow.
+	for i := 0; i < MaxBufferedEvents; i++ {
+		r.End("other-" + fmt.Sprintf("%d", i))
+	}
+	r.flush(context.Background())
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// The start must survive regardless of end drops.
+	found := false
+	for _, s := range r.pendStarts {
+		if s.SessionID == id {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("Start for session %s should survive even when its End is dropped", id)
+	}
+}
+
+// TestDroppedStartsBounded verifies that the droppedStarts tombstone set is
+// cleaned up after recovery and does not grow without bound. Tombstones for
+// sessions that have ended (consumed by End()) are gone immediately;
+// tombstones for sessions still open survive the flush but are cleared once
+// the session ends.
+func TestDroppedStartsBounded(t *testing.T) {
+	fake := &fakeReportClient{failN: 2}
+	r := NewReporter(fake, discardLogger(), nil, nil)
+
+	// Fill starts to overflow, tracking all ids.
+	ids := make([]string, 0, MaxBufferedEvents+100)
+	for i := 0; i < MaxBufferedEvents+100; i++ {
+		ids = append(ids, r.Start("srv", "amber", "1.2.3.4", "Steve", "", apiclient.SourceJava))
+	}
+	r.flush(context.Background()) // fail 1: caps + tombstones created
+	r.flush(context.Background()) // fail 2: retries, caps again
+
+	// End all sessions — this consumes tombstones for dropped starts and
+	// removes them from openIDs.
+	for _, id := range ids {
+		r.End(id)
+	}
+
+	// Third flush succeeds; tombstones for ended sessions are cleaned up.
+	r.flush(context.Background())
+
+	r.mu.Lock()
+	tombstones := len(r.droppedStarts)
+	r.mu.Unlock()
+
+	if tombstones != 0 {
+		t.Errorf("droppedStarts = %d after successful flush, want 0", tombstones)
+	}
+}
+
+// TestDroppedStartTombstoneSurvivesFlushForOpenSession verifies that when a
+// Start is dropped during an outage for a session that is still open (still in
+// openIDs), its tombstone survives a successful flush so the future End() call
+// is suppressed. Without this, the sequence: drop start → successful flush →
+// End() produces an orphan End (permanent malformed DB row).
+func TestDroppedStartTombstoneSurvivesFlushForOpenSession(t *testing.T) {
+	fake := &fakeReportClient{failN: 2}
+	r := NewReporter(fake, discardLogger(), nil, nil)
+
+	// Create the victim session (oldest, will be dropped).
+	victim := r.Start("srv", "amber", "1.2.3.4", "Steve", "", apiclient.SourceJava)
+
+	// Fill starts to the cap with other sessions.
+	for i := 1; i < MaxBufferedEvents; i++ {
+		r.Start("srv", "amber", "1.2.3.4", "Steve", "", apiclient.SourceJava)
+	}
+	// Flush fails → restored at cap.
+	r.flush(context.Background())
+
+	// One more start overflows; victim (the oldest) is dropped → tombstone created.
+	r.Start("srv", "amber", "1.2.3.4", "Steve", "", apiclient.SourceJava)
+	r.flush(context.Background()) // still fails; tombstone exists
+
+	// Verify tombstone exists and victim is still open.
+	r.mu.Lock()
+	_, hasTombstone := r.droppedStarts[victim]
+	_, isOpen := r.openIDs[victim]
+	r.mu.Unlock()
+	if !hasTombstone {
+		t.Fatal("precondition: tombstone for victim should exist")
+	}
+	if !isOpen {
+		t.Fatal("precondition: victim should still be in openIDs")
+	}
+
+	// Now the API recovers — next flush succeeds (failN exhausted).
+	// Clear the buffer so the flush has something to send.
+	r.mu.Lock()
+	r.pendStarts = r.pendStarts[:1] // keep one event to flush
+	r.mu.Unlock()
+	r.flush(context.Background())
+
+	// The tombstone for the still-open victim must survive the successful flush.
+	r.mu.Lock()
+	_, tombstoneAfter := r.droppedStarts[victim]
+	r.mu.Unlock()
+	if !tombstoneAfter {
+		t.Error("tombstone for still-open session was cleared by successful flush; End() will produce orphan")
+	}
+
+	// Now End the victim — it should be suppressed (no orphan End buffered).
+	r.End(victim)
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, e := range r.pendEnds {
+		if e.SessionID == victim {
+			t.Errorf("End for dropped-start session %s should have been suppressed, but was buffered", victim)
+		}
+	}
+}
+
+// TestSnapshotActiveExcludesFlush verifies the barrier: while SnapshotActive is
+// held, a concurrent flush cannot run (the Start event stays buffered).
+func TestSnapshotActiveExcludesFlush(t *testing.T) {
+	fake := &fakeReportClient{}
+	r := NewReporter(fake, discardLogger(), nil, nil)
+	r.WithFlushInterval(time.Millisecond) // tiny interval
+
+	// Hold the barrier.
+	ids, release := r.SnapshotActive()
+	if len(ids) != 0 {
+		t.Fatalf("expected no active sessions, got %v", ids)
+	}
+
+	// Start a session while the barrier is held.
+	r.Start("srv", "amber", "1.2.3.4", "Steve", "uuid", apiclient.SourceJava)
+
+	// Run the reporter briefly; flushes should be blocked.
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+	time.Sleep(50 * time.Millisecond)
+
+	s, _ := fake.counts()
+	if s != 0 {
+		t.Fatalf("flush ran while barrier held: starts=%d, want 0", s)
+	}
+
+	// Release the barrier; the flush should proceed.
+	release()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	<-done
+
+	s, _ = fake.counts()
+	if s != 1 {
+		t.Errorf("flush did not deliver after barrier released: starts=%d, want 1", s)
+	}
+}
+
+// TestSnapshotActiveWaitsForInflightFlush verifies the barrier from the other
+// direction: SnapshotActive blocks until an in-flight flush completes.
+func TestSnapshotActiveWaitsForInflightFlush(t *testing.T) {
+	gate := make(chan struct{})
+	fake := &gatedClient{gate: gate, inner: &fakeReportClient{}}
+	r := NewReporter(fake, discardLogger(), nil, nil)
+
+	r.Start("srv", "amber", "1.2.3.4", "Steve", "uuid", apiclient.SourceJava)
+
+	// Trigger a flush that will block inside ReportSessions.
+	flushDone := make(chan struct{})
+	go func() { r.flush(context.Background()); close(flushDone) }()
+	time.Sleep(20 * time.Millisecond) // let flush enter the RPC
+
+	// SnapshotActive should block because the flush holds flightMu.
+	snapped := make(chan struct{})
+	go func() {
+		_, rel := r.SnapshotActive()
+		rel()
+		close(snapped)
+	}()
+
+	// Give SnapshotActive a chance to return (it shouldn't).
+	select {
+	case <-snapped:
+		t.Fatal("SnapshotActive returned while flush was in flight")
+	case <-time.After(50 * time.Millisecond):
+		// expected: still blocked
+	}
+
+	// Unblock the flush.
+	close(gate)
+	<-flushDone
+
+	select {
+	case <-snapped:
+		// SnapshotActive returned after flush completed — correct.
+	case <-time.After(2 * time.Second):
+		t.Fatal("SnapshotActive did not return after flush completed")
+	}
+}

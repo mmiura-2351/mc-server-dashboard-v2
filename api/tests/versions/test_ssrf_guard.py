@@ -4,6 +4,10 @@ Mirrors the Modrinth guard tests (``tests/servers/test_modrinth_catalog_adapter`
 a public address passes, private/loopback/link-local/CGNAT/IPv6-loopback are
 refused, a non-HTTPS URL is refused, and DNS failure surfaces as a blocked host.
 The resolver is injected so the tests never touch the network.
+
+The returned :class:`PinnedRequest` pins the resolved IP into the request URL so
+callers connect to the validated address, closing the DNS-rebinding TOCTOU window
+(issue #1989).
 """
 
 from __future__ import annotations
@@ -31,8 +35,11 @@ def _resolver_for(*addrs: str) -> Callable[[str], list[str]]:
 
 
 async def test_allows_public_host() -> None:
-    """An HTTPS URL whose host resolves to a public IP passes."""
-    await assert_url_allowed(_PUBLIC, _resolver=_resolver_for("93.184.216.34"))
+    """An HTTPS URL whose host resolves to a public IP returns a PinnedRequest."""
+    result = await assert_url_allowed(_PUBLIC, _resolver=_resolver_for("93.184.216.34"))
+    assert result.url == "https://93.184.216.34/server.jar"
+    assert result.headers == {"Host": "example.com"}
+    assert result.extensions == {"sni_hostname": "example.com"}
 
 
 async def test_rejects_loopback() -> None:
@@ -95,3 +102,47 @@ async def test_rejects_url_without_host() -> None:
         await assert_url_allowed(
             "https:///server.jar", _resolver=_resolver_for("93.184.216.34")
         )
+
+
+# --- PinnedRequest IP-pinning tests (#1989) ---
+
+
+async def test_pinned_request_ipv6_brackets() -> None:
+    """An IPv6-only result is bracketed in the pinned URL."""
+    result = await assert_url_allowed(
+        _PUBLIC, _resolver=_resolver_for("2606:2800:21f:cb07:6820:80da:af6b:8b2c")
+    )
+    assert result.url == "https://[2606:2800:21f:cb07:6820:80da:af6b:8b2c]/server.jar"
+    assert result.headers == {"Host": "example.com"}
+    assert result.extensions == {"sni_hostname": "example.com"}
+
+
+async def test_pinned_request_preserves_port() -> None:
+    """An explicit port in the URL is preserved in the pinned URL."""
+    result = await assert_url_allowed(
+        "https://example.com:8443/server.jar",
+        _resolver=_resolver_for("93.184.216.34"),
+    )
+    assert result.url == "https://93.184.216.34:8443/server.jar"
+
+
+async def test_pinned_request_prefers_ipv4() -> None:
+    """When both IPv4 and IPv6 are resolved, the pinned URL uses IPv4."""
+    result = await assert_url_allowed(
+        _PUBLIC,
+        _resolver=_resolver_for(
+            "2606:2800:21f:cb07:6820:80da:af6b:8b2c", "93.184.216.34"
+        ),
+    )
+    assert result.url == "https://93.184.216.34/server.jar"
+
+
+async def test_pinned_request_ipv6_with_port() -> None:
+    """An IPv6 address with a port is correctly bracketed."""
+    result = await assert_url_allowed(
+        "https://example.com:8443/server.jar",
+        _resolver=_resolver_for("2606:2800:21f:cb07:6820:80da:af6b:8b2c"),
+    )
+    assert (
+        result.url == "https://[2606:2800:21f:cb07:6820:80da:af6b:8b2c]:8443/server.jar"
+    )

@@ -24,6 +24,7 @@ from mc_server_dashboard_api.identity.adapters.models import (
 )
 from mc_server_dashboard_api.identity.domain.entities import (
     REVOKED_FAMILY,
+    REVOKED_ROTATED,
     RefreshToken,
     User,
 )
@@ -181,10 +182,13 @@ class SqlAlchemyUserRepository(UserRepository):
         # serialize on them (#260): the second transaction blocks until the first
         # commits, then this re-read under READ COMMITTED sees the decremented
         # set. A bare count(*) cannot be row-locked, so select the rows under the
-        # lock and count them here.
+        # lock and count them here. ORDER BY id gives every transaction the same
+        # deterministic lock-acquisition order, so concurrent guards cannot
+        # deadlock by locking the matched rows in different scan orders (#2226).
         stmt = (
             select(UserModel.id)
             .where(UserModel.is_platform_admin.is_(True), UserModel.active.is_(True))
+            .order_by(UserModel.id)
             .with_for_update()
         )
         return len((await self._session.execute(stmt)).all())
@@ -232,9 +236,13 @@ class SqlAlchemyRefreshTokenRepository(RefreshTokenRepository):
             update(RefreshTokenModel)
             .where(
                 RefreshTokenModel.user_id == user_id.value,
-                RefreshTokenModel.revoked_at.is_(None),
+                (RefreshTokenModel.revoked_at.is_(None))
+                | (RefreshTokenModel.revoked_reason == REVOKED_ROTATED),
             )
-            .values(revoked_at=revoked_at, revoked_reason=REVOKED_FAMILY)
+            .values(
+                revoked_at=func.coalesce(RefreshTokenModel.revoked_at, revoked_at),
+                revoked_reason=REVOKED_FAMILY,
+            )
         )
         await self._session.execute(stmt)
 
@@ -287,11 +295,15 @@ class SqlAlchemyRefreshTokenRepository(RefreshTokenRepository):
     ) -> None:
         stmt = update(RefreshTokenModel).where(
             RefreshTokenModel.user_id == user_id.value,
-            RefreshTokenModel.revoked_at.is_(None),
+            (RefreshTokenModel.revoked_at.is_(None))
+            | (RefreshTokenModel.revoked_reason == REVOKED_ROTATED),
         )
         if keep_token_hash is not None:
             stmt = stmt.where(RefreshTokenModel.token_hash != keep_token_hash)
         if keep_session_id is not None:
             stmt = stmt.where(RefreshTokenModel.id != keep_session_id.value)
-        stmt = stmt.values(revoked_at=revoked_at, revoked_reason=reason)
+        stmt = stmt.values(
+            revoked_at=func.coalesce(RefreshTokenModel.revoked_at, revoked_at),
+            revoked_reason=reason,
+        )
         await self._session.execute(stmt)

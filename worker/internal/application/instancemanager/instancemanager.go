@@ -83,6 +83,16 @@ type Transfer interface {
 	// API served (the value of its response header, issue #763); 0 when the header
 	// is absent (a server with no published snapshot, or an older API).
 	Hydrate(ctx context.Context, url, token, workingDir string) (uint64, error)
+	// PackSnapshot packs workingDir into a tar spool file and returns its path.
+	// The returned cleanup function removes the spool; the caller must invoke it
+	// when the spool is no longer needed. Only the pack reads the working
+	// directory, so the caller can release the quiesce bracket after PackSnapshot
+	// returns (issue #1710).
+	PackSnapshot(ctx context.Context, workingDir string) (spoolPath string, cleanup func(), err error)
+	// UploadSnapshot streams the spool file at spoolPath to url, declaring
+	// baseGeneration and workerID for the API's publish-time generation guard
+	// (issue #847). It returns the NEW store generation the publish produced.
+	UploadSnapshot(ctx context.Context, url, token, spoolPath string, baseGeneration uint64, workerID string) (uint64, error)
 	// Snapshot packs workingDir and uploads it to url, declaring baseGeneration as
 	// the store generation this working set was hydrated from (issue #847) and
 	// workerID as this Worker's own id (issue #847 bug 3): the API refuses the publish
@@ -460,8 +470,11 @@ func (m *Manager) handleHydrate(ctx context.Context, cmd session.Command) sessio
 	// the authoritative store at this generation, so the local scratch matches it.
 	// A 0 (no published snapshot, or an older API) is recorded as-is — the API then
 	// treats this set as older than any published store generation and re-hydrates,
-	// the safe direction. The marker write is best-effort: a failure only costs an
-	// extra hydrate next start, never correctness, so it is logged not propagated.
+	// the safe direction. On the 200 path the marker was already written atomically
+	// into the temp tree before the swap-in rename (issue #917), so this call is
+	// idempotent; on the 204 path it is the only write. Best-effort: a failure only
+	// costs an extra hydrate next start, never correctness, so it is logged not
+	// propagated.
 	m.recordGeneration(workingDir, cmd.ServerID, gen)
 	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
 }
@@ -567,11 +580,12 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	m.mu.Lock()
 	_, running := m.instances[cmd.ServerID]
 	m.mu.Unlock()
+	// restore re-enables auto-save after the quiesce. Declared here so it is
+	// accessible after the if/else for the explicit restore() call between pack and
+	// upload (issue #1710). Made idempotent via sync.Once so the deferred safety-net
+	// and the explicit call do not double-issue save-on.
+	var restore func()
 	if running {
-		// restore is always non-nil; it re-enables auto-save (when it was disabled)
-		// and releases the RCON connection. Deferring it guarantees save-on runs on
-		// every return path below, including the transfer-error path and a panic.
-		//
 		// The running-id snapshot takes NO reservation across its quiesce window, and
 		// that is safe (issue #829, item 4):
 		//   - Same stream: SnapshotTrigger and a StopServer/RestartServer for one id are
@@ -599,7 +613,11 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// A reservation would only convert that refused-and-retried outcome into a
 		// BUSY-rejected one — same net effect, more coordination state — so it
 		// is intentionally not taken.
-		quiesced, restore := m.quiesceRunning(ctx, cmd.ServerID, filepath.Join(m.scratchDir, cmd.ServerID))
+		var quiesced bool
+		var rawRestore func()
+		quiesced, rawRestore = m.quiesceRunning(ctx, cmd.ServerID, filepath.Join(m.scratchDir, cmd.ServerID))
+		var once sync.Once
+		restore = func() { once.Do(rawRestore) }
 		defer restore()
 		if !quiesced {
 			// The world could not be quiesced (RCON down, save-off/save-all failed, or the
@@ -693,18 +711,34 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	// can refuse the publish if the store advanced past it. 0 (an unknown/never-
 	// hydrated set) leaves the guard to compare against the store's current value.
 	baseGeneration := readGeneration(workingDir)
-	// Bound the upload with the per-transfer deadline (issue #874): without it the
-	// upload has no deadline at all and could outlive the API's snapshot_timeout
+	// Bound the pack+upload with the per-transfer deadline (issue #874): without it
+	// the upload has no deadline at all and could outlive the API's snapshot_timeout
 	// indefinitely (#869). The bound is the API budget + a margin (the ack value),
 	// so the API-side timeout fires first and this is the cleanup backstop.
 	transferCtx, cancel := m.transferContext(ctx)
 	defer cancel()
-	gen, err := m.transfer.Snapshot(transferCtx, cmd.TransferURL, cmd.TransferToken, workingDir, baseGeneration, m.workerID)
-	if err != nil {
-		return fail(cmd.CommandID, session.CommandErrorTransferFailed,
-			fmt.Sprintf("instancemanager: snapshot: %v", err))
-	}
+
 	if running {
+		// Running-server snapshot (issue #1710): split pack from upload so save-on is
+		// restored as soon as the pack (the only phase that reads the live working dir)
+		// completes. The upload reads only the spool file and does not need the server
+		// quiesced. A multi-GB upload can take minutes; keeping auto-save disabled for
+		// that entire window risked permanent save-off on a worker crash mid-upload.
+		spoolPath, cleanup, err := m.transfer.PackSnapshot(transferCtx, workingDir)
+		if err != nil {
+			return fail(cmd.CommandID, session.CommandErrorTransferFailed,
+				fmt.Sprintf("instancemanager: snapshot pack: %v", err))
+		}
+		defer cleanup()
+		// Restore save-on immediately after the pack — the working dir is no longer
+		// being read, so auto-save can safely resume. The deferred restore() is still
+		// in place as a safety net for early returns above this point.
+		restore()
+		gen, err := m.transfer.UploadSnapshot(transferCtx, cmd.TransferURL, cmd.TransferToken, spoolPath, baseGeneration, m.workerID)
+		if err != nil {
+			return fail(cmd.CommandID, session.CommandErrorTransferFailed,
+				fmt.Sprintf("instancemanager: snapshot upload: %v", err))
+		}
 		// Record the NEW generation the publish produced (issue #763): the scratch we
 		// just pushed is the source of this store generation, so its local generation
 		// advances to match. This keeps a same-Worker restart's held generation equal to
@@ -716,6 +750,13 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// recovery copy is no longer needed. Mirrors the #845 GC-on-success pattern.
 		m.sweepDisplaced(cmd.ServerID)
 	} else {
+		// Stopped-id snapshot: the set is at rest, no quiesce bracket needed. Use the
+		// combined Snapshot (pack+upload) — there is no save-off to release between them.
+		_, err := m.transfer.Snapshot(transferCtx, cmd.TransferURL, cmd.TransferToken, workingDir, baseGeneration, m.workerID)
+		if err != nil {
+			return fail(cmd.CommandID, session.CommandErrorTransferFailed,
+				fmt.Sprintf("instancemanager: snapshot: %v", err))
+		}
 		// Stopped-id snapshot succeeded: this is the post-stop FINAL snapshot (or a
 		// snapshot of an at-rest set). The working set is now captured authoritatively
 		// and the API has typically already unassigned this Worker, so the local scratch
@@ -954,6 +995,37 @@ func (m *Manager) restoreSaveOn(ctx context.Context, serverID string, ctrl execu
 		m.logger.Error("snapshot save-on NOT restored after redial; server left with auto-save disabled",
 			"server_id", serverID, "error", err)
 	}
+}
+
+// restoreSaveOnAfterFailedStop re-enables auto-save on a server whose graceful
+// stop failed (the container/process survived Kill). The pre-stop flush issued
+// save-off to quiesce the world; because the stop never confirmed termination,
+// the server keeps running with auto-save disabled — every block edit, chest
+// open, and mob move since the flush is at risk if the JVM crashes before the
+// reconciler retries (issue #2021).
+//
+// Unlike restoreSaveOn (the snapshot path), the caller's RCON connection is
+// already closed and the instance was evicted from startCmds by
+// takeStoppableReserve, so driverFor would return empty. The helper accepts
+// driverName explicitly (captured before eviction) and dials a fresh RCON
+// connection on a context detached from the (possibly cancelled) request.
+func (m *Manager) restoreSaveOnAfterFailedStop(ctx context.Context, serverID, driverName string) {
+	restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restoreSaveTimeout)
+	defer cancel()
+	ctrl, err := m.openControl(restoreCtx, serverID, driverName)
+	if err != nil {
+		m.logger.Error("failed stop: auto-save NOT restored (rcon open failed); surviving server is running with auto-save disabled",
+			"server_id", serverID, "driver", driverName, "error", err)
+		return
+	}
+	defer func() { _ = ctrl.Close() }()
+	if _, err := ctrl.Execute(restoreCtx, "save-on"); err != nil {
+		m.logger.Error("failed stop: auto-save NOT restored (save-on failed); surviving server is running with auto-save disabled",
+			"server_id", serverID, "error", err)
+		return
+	}
+	m.logger.Warn("stop failed with the server possibly still alive; re-enabled auto-save on the survivor",
+		"server_id", serverID)
 }
 
 // settleWorkingSet waits for an asynchronous save-all to finish writing the
@@ -1389,6 +1461,12 @@ func (m *Manager) attemptStop(ctx context.Context, serverID string, inst executi
 		m.mu.Lock()
 		m.orphans[serverID] = orphanEntry{inst: inst, driver: driverName}
 		m.mu.Unlock()
+		// The graceful path issued save-off before the flush; because the stop
+		// failed, the server may still be alive with auto-save disabled. Re-enable
+		// it so player progress is not silently lost (issue #2021).
+		if graceful {
+			m.restoreSaveOnAfterFailedStop(ctx, serverID, driverName)
+		}
 		return err
 	}
 	m.mu.Lock()
@@ -1425,32 +1503,9 @@ func (m *Manager) takeRunningReserve(serverID string) (execution.Instance, sessi
 	return inst, start, takeFound
 }
 
-// hasRunning reports whether a running instance is tracked for serverID WITHOUT
-// evicting or reserving it. handleRestart uses it as a cheap existence check so
-// the early-out failure paths leave the instance tracked and live.
-func (m *Manager) hasRunning(serverID string) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	_, ok := m.instances[serverID]
-	return ok
-}
-
 func (m *Manager) handleRestart(ctx context.Context, cmd session.Command) session.CommandResult {
-	// Quick existence check: is there a running instance tracked for this id?
-	// We peek without evicting so the early-out failure paths ("not found" vs
-	// "in-flight") leave the instance tracked and live.
-	if !m.hasRunning(cmd.ServerID) {
-		// No tracked running instance: takeRunningReserve distinguishes a genuinely
-		// unknown id (SERVER_NOT_FOUND) from a reserved in-flight command — a detached
-		// stop or a start/hydrate mid-operation (BUSY, issue #780/#824).
-		_, _, outcome := m.takeRunningReserve(cmd.ServerID)
-		if outcome == takeInFlight {
-			return fail(cmd.CommandID, session.CommandErrorBusy,
-				"instancemanager: a lifecycle command is already in flight for this server")
-		}
-		return fail(cmd.CommandID, session.CommandErrorServerNotFound,
-			"instancemanager: server not running")
-	}
+	// Single atomic take: this is the sole decision point for the restart path.
+	// It distinguishes all three outcomes without a TOCTOU window (issue #1950).
 	inst, start, outcome := m.takeRunningReserve(cmd.ServerID)
 	switch outcome {
 	case takeNotFound:

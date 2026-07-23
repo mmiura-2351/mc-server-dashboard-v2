@@ -23,11 +23,13 @@ import uuid
 from collections.abc import AsyncIterator
 
 import pytest
+from google.protobuf.timestamp_pb2 import Timestamp
 from grpc import aio
 
 from mc_server_dashboard_api.fleet.adapters.control_plane import (
     ControlPlaneState,
     GrpcControlPlane,
+    StaleSessionError,
     _to_result,
 )
 from mc_server_dashboard_api.fleet.adapters.grpc_server import WorkerSessionServicer
@@ -83,8 +85,9 @@ def _register_message() -> pb.WorkerMessage:
 class _Harness:
     def __init__(self, *, command_timeout: float = 5.0) -> None:
         self.state = ControlPlaneState()
+        self.clock = FakeClock(_T0)
         self.control_plane = GrpcControlPlane(
-            self.state, timeout_seconds=command_timeout
+            self.state, clock=self.clock, timeout_seconds=command_timeout
         )
         self.registry = InMemoryWorkerRegistry(
             clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT
@@ -815,7 +818,9 @@ async def test_periodic_snapshot_timeout_does_not_clear_final_snapshot_hold() ->
     sink = _RecordingLateSnapshotSink()
     harness = _Harness(command_timeout=0.2)
     harness.state = ControlPlaneState(late_snapshot_sink=sink)
-    harness.control_plane = GrpcControlPlane(harness.state, timeout_seconds=0.2)
+    harness.control_plane = GrpcControlPlane(
+        harness.state, clock=harness.clock, timeout_seconds=0.2
+    )
     try:
         stub = await harness.start()
         call = await _registered_call(harness, stub)
@@ -866,7 +871,7 @@ async def test_cancelled_final_snapshot_dispatch_clears_on_late_result() -> None
     # being dropped on the matched path and waiting out the grace arm.
     sink = _RecordingLateSnapshotSink()
     state = ControlPlaneState(late_snapshot_sink=sink)
-    control_plane = GrpcControlPlane(state, timeout_seconds=5.0)
+    control_plane = GrpcControlPlane(state, clock=FakeClock(_T0), timeout_seconds=5.0)
     worker = WorkerId(_WORKER)
     queue = state.open_session(worker, 1)
 
@@ -896,7 +901,7 @@ async def test_cancelled_periodic_snapshot_dispatch_leaves_no_late_record() -> N
     # dispatch is simply forgotten — its late result clears nothing.
     sink = _RecordingLateSnapshotSink()
     state = ControlPlaneState(late_snapshot_sink=sink)
-    control_plane = GrpcControlPlane(state, timeout_seconds=5.0)
+    control_plane = GrpcControlPlane(state, clock=FakeClock(_T0), timeout_seconds=5.0)
     worker = WorkerId(_WORKER)
     queue = state.open_session(worker, 1)
 
@@ -925,7 +930,7 @@ async def test_cancelled_fire_and_forget_logger_discards_pending_entry() -> None
     # surface — map boundedness IS the observable — and the shutdown scenario
     # is precisely "the holder of the private task set cancels the task".
     state = ControlPlaneState()
-    control_plane = GrpcControlPlane(state, timeout_seconds=5.0)
+    control_plane = GrpcControlPlane(state, clock=FakeClock(_T0), timeout_seconds=5.0)
     worker = WorkerId(_WORKER)
     queue = state.open_session(worker, 1)
 
@@ -968,4 +973,302 @@ async def test_reconnect_sweeps_promoted_late_snapshot_from_prior_session() -> N
 
     # A spurious later result for the old command routes nowhere — the record is gone.
     await state.resolve("cmd-1", owner, _failed_transfer_result())
+    assert sink.calls == []
+
+
+async def test_register_ack_echoes_correlation_id_and_sets_sent_at(
+    harness: _Harness,
+) -> None:
+    """RegisterAck echoes the Register's correlation_id and populates sent_at
+    (issue #2002, NFR-OBS-1)."""
+
+    stub = await harness.start()
+    call = stub.Session(metadata=_auth())
+    reg = pb.WorkerMessage(
+        correlation_id="trace-register-42",
+        register=pb.Register(
+            worker_id=_WORKER,
+            worker_version="1.0.0",
+            capabilities=pb.WorkerCapabilities(
+                drivers=[pb.EXECUTION_DRIVER_KIND_CONTAINER]
+            ),
+        ),
+    )
+    await call.write(reg)
+    ack_msg = await call.read()
+
+    assert ack_msg.correlation_id == "trace-register-42"
+    assert ack_msg.HasField("sent_at")
+    assert ack_msg.sent_at.seconds > 0
+    await call.done_writing()
+
+
+async def test_dispatched_command_carries_sent_at(harness: _Harness) -> None:
+    """Every dispatched ApiMessage populates sent_at from the injected clock
+    (issue #2002, issue #2166)."""
+
+    stub = await harness.start()
+    call = await _registered_call(harness, stub)
+    expected = Timestamp()
+    expected.FromDatetime(_T0)
+
+    async def worker_echo() -> None:
+        msg = await call.read()
+        assert msg.HasField("sent_at")
+        assert msg.sent_at == expected
+        await call.write(
+            pb.WorkerMessage(
+                correlation_id=msg.api_command.command_id,
+                command_result=pb.CommandResult(success=True),
+            )
+        )
+
+    echo = asyncio.ensure_future(worker_echo())
+    await harness.control_plane.dispatch(
+        worker_id=WorkerId(_WORKER),
+        server_id=str(uuid.uuid4()),
+        command=ServerCommandCommand(line="list"),
+    )
+    await echo
+    await call.done_writing()
+
+
+# ---------------------------------------------------------------------------
+# Reconnect-race defense-in-depth: StaleSessionError (issue #1694)
+# ---------------------------------------------------------------------------
+
+
+async def test_open_session_refuses_a_stale_token_after_a_newer_open() -> None:
+    """open_session(W, 2) then open_session(W, 1) raises StaleSessionError;
+    outbound_for(W) still returns session-2's queue (issue #1694)."""
+
+    state = ControlPlaneState()
+    worker = WorkerId(_WORKER)
+
+    queue_2 = state.open_session(worker, 2)
+    with pytest.raises(StaleSessionError):
+        state.open_session(worker, 1)
+
+    # The current outbound queue must still be the one from session 2.
+    assert state.outbound_for(worker) is queue_2
+
+
+async def test_open_session_refuses_a_stale_token_after_close() -> None:
+    """open_session(W, 2), close(W, q2), then open_session(W, 1) still refuses.
+
+    The high-water mark is monotonic: closing a session does not reset it, so a
+    stale session arriving after the current one closed is still rejected.
+    """
+
+    state = ControlPlaneState()
+    worker = WorkerId(_WORKER)
+
+    queue_2 = state.open_session(worker, 2)
+    state.close_session(worker, queue_2)
+
+    with pytest.raises(StaleSessionError):
+        state.open_session(worker, 1)
+
+
+# ---------------------------------------------------------------------------
+# Stale queued command skip (issue #1697)
+# ---------------------------------------------------------------------------
+
+
+async def test_timed_out_dispatch_message_is_stale() -> None:
+    """A command whose dispatch timed out has no pending entry; discard_if_stale
+    returns True for it and False for a live pending command (issue #1697)."""
+
+    state = ControlPlaneState()
+    worker = WorkerId(_WORKER)
+    state.open_session(worker, 1)
+
+    # A live pending command is NOT stale.
+    future = state.register_pending("live-cmd", worker)
+    assert state.discard_if_stale("live-cmd") is False
+    assert not future.done()
+
+    # A timed-out command (discarded pending) IS stale.
+    state.register_pending("stale-cmd", worker)
+    state.discard_pending("stale-cmd")
+    assert state.discard_if_stale("stale-cmd") is True
+
+
+async def test_stale_queued_commands_are_not_replayed_on_resume() -> None:
+    """After timed-out commands accrue in the outbound queue, the worker's first
+    received message must be the live command — stale ones are skipped at send
+    time by the Session generator (issue #1697).
+
+    The scenario: a stalled worker reader causes messages to pile up in the
+    outbound asyncio.Queue. When the Session generator resumes dequeuing, it must
+    skip stale messages (those whose pending entry was discarded on timeout).
+    """
+
+    harness = _Harness(command_timeout=5.0)
+    try:
+        stub = await harness.start()
+        call = await _registered_call(harness, stub)
+        worker = WorkerId(_WORKER)
+        queue = harness.state.outbound_for(worker)
+        assert queue is not None
+
+        # Simulate 3 timed-out commands: manually enqueue messages and discard
+        # their pending entries. All operations are synchronous (no awaits
+        # between put_nowait and discard_pending), so the Session generator
+        # does not get a scheduling slot to dequeue them between the two steps.
+        for i in range(3):
+            cmd_id = f"stale-{i}"
+            harness.state.register_pending(cmd_id, worker)
+            api_cmd = pb.ApiCommand(
+                command_id=cmd_id,
+                server_id="s",
+                server_command=pb.ServerCommand(line="stale"),
+            )
+            msg = pb.ApiMessage(correlation_id=cmd_id, api_command=api_cmd)
+            queue.put_nowait(msg)
+            harness.state.discard_pending(cmd_id)
+
+        # Now dispatch a live command whose result the worker answers.
+        async def worker_read_and_answer() -> str:
+            msg = await call.read()
+            await call.write(
+                pb.WorkerMessage(
+                    correlation_id=msg.api_command.command_id,
+                    command_result=pb.CommandResult(success=True),
+                )
+            )
+            line: str = msg.api_command.server_command.line
+            return line
+
+        echo = asyncio.ensure_future(worker_read_and_answer())
+        result = await harness.control_plane.dispatch(
+            worker_id=worker,
+            server_id=str(uuid.uuid4()),
+            command=ServerCommandCommand(line="live"),
+        )
+        received_line = await echo
+
+        # The worker must see the live command first, not a stale one.
+        assert received_line == "live"
+        assert result.success
+        await call.done_writing()
+    finally:
+        await harness.stop()
+
+
+# ---------------------------------------------------------------------------
+# Cancel-to-discard window: resolve consumes final-snapshot result (issue #1996)
+# ---------------------------------------------------------------------------
+
+
+async def test_resolve_on_cancelled_future_fires_late_snapshot_sink() -> None:
+    """Core regression (issue #1996): future.cancel() then resolve() must still
+    route the result through the late-snapshot sink so the held assignment clears."""
+
+    sink = _RecordingLateSnapshotSink()
+    state = ControlPlaneState(late_snapshot_sink=sink)
+    owner = WorkerId(_WORKER)
+
+    future = state.register_pending("cmd-1", owner, snapshot_server_id=_SERVER)
+    future.cancel()
+    await state.resolve("cmd-1", owner, _failed_transfer_result())
+
+    assert sink.calls == [(_SERVER, owner.value, False)]
+
+
+async def test_resolve_on_cancelled_future_with_success_result() -> None:
+    """Same cancel-to-discard window with a SUCCESS result: the sink sees
+    succeeded=True (issue #1996)."""
+
+    sink = _RecordingLateSnapshotSink()
+    state = ControlPlaneState(late_snapshot_sink=sink)
+    owner = WorkerId(_WORKER)
+
+    future = state.register_pending("cmd-1", owner, snapshot_server_id=_SERVER)
+    future.cancel()
+    await state.resolve("cmd-1", owner, pb.CommandResult(success=True))
+
+    assert sink.calls == [(_SERVER, owner.value, True)]
+
+
+async def test_dispatch_cancel_resolve_before_discard_fires_sink() -> None:
+    """Integration-shaped: dispatch, cancel task, resolve before the cancelled
+    task's discard_pending runs (issue #1996)."""
+
+    sink = _RecordingLateSnapshotSink()
+    state = ControlPlaneState(late_snapshot_sink=sink)
+    control_plane = GrpcControlPlane(state, clock=FakeClock(_T0), timeout_seconds=5.0)
+    worker = WorkerId(_WORKER)
+    queue = state.open_session(worker, 1)
+
+    task = asyncio.create_task(
+        control_plane.dispatch(
+            worker_id=worker,
+            server_id=_SERVER,
+            command=SnapshotCommand(transfer_url="u", transfer_token="t"),
+            snapshot_is_final=True,
+        )
+    )
+    command_id = (await queue.get()).api_command.command_id
+    task.cancel()
+    # Resolve BEFORE the cancelled task is awaited (discard_pending has not run).
+    await state.resolve(command_id, worker, _failed_transfer_result())
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert sink.calls == [(_SERVER, worker.value, False)]
+
+
+async def test_resolve_cancelled_periodic_snapshot_does_not_fire_sink() -> None:
+    """Scoping guard: a cancelled PERIODIC snapshot (no snapshot_server_id) must
+    NOT route through the sink (issue #1996)."""
+
+    sink = _RecordingLateSnapshotSink()
+    state = ControlPlaneState(late_snapshot_sink=sink)
+    owner = WorkerId(_WORKER)
+
+    # Periodic snapshot: no snapshot_server_id.
+    future = state.register_pending("cmd-1", owner)
+    future.cancel()
+    await state.resolve("cmd-1", owner, _failed_transfer_result())
+
+    assert sink.calls == []
+
+
+async def test_discard_pending_after_cancelled_resolve_finds_nothing() -> None:
+    """No double-fire: after resolve consumed the cancelled future's snapshot
+    record, a subsequent discard_pending is a no-op (issue #1996)."""
+
+    sink = _RecordingLateSnapshotSink()
+    state = ControlPlaneState(late_snapshot_sink=sink)
+    owner = WorkerId(_WORKER)
+
+    future = state.register_pending("cmd-1", owner, snapshot_server_id=_SERVER)
+    future.cancel()
+    await state.resolve("cmd-1", owner, _failed_transfer_result())
+    assert sink.calls == [(_SERVER, owner.value, False)]
+
+    # discard_pending after resolve already consumed the entry — no double-fire.
+    state.discard_pending("cmd-1")
+    assert sink.calls == [(_SERVER, owner.value, False)]
+
+
+async def test_skipped_stale_final_snapshot_drops_late_record() -> None:
+    """discard_if_stale for a timed-out final snapshot also cleans up the
+    promoted _late_snapshots record (issue #1697)."""
+
+    sink = _RecordingLateSnapshotSink()
+    state = ControlPlaneState(late_snapshot_sink=sink)
+    worker = WorkerId(_WORKER)
+    state.open_session(worker, 1)
+
+    state.register_pending("cmd-1", worker, snapshot_server_id=_SERVER)
+    state.discard_pending("cmd-1")  # timeout: promoted to _late_snapshots
+
+    # The Session loop would call discard_if_stale when it dequeues the message.
+    assert state.discard_if_stale("cmd-1") is True
+
+    # The late-snapshot record must have been cleaned up — a late result routes
+    # nowhere.
+    await state.resolve("cmd-1", worker, _failed_transfer_result())
     assert sink.calls == []

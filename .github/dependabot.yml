@@ -11,6 +11,8 @@ updates:
       prefix: "chore(deps):"
     labels:
       - dependencies
+    cooldown:
+      default-days: 7
     ignore:
       - dependency-name: "protobuf"
         update-types: ["version-update:semver-major"]
@@ -37,6 +39,8 @@ updates:
       prefix: "chore(deps):"
     labels:
       - dependencies
+    cooldown:
+      default-days: 7
     groups:
       production:
         dependency-type: production
@@ -60,6 +64,8 @@ updates:
       prefix: "chore(deps):"
     labels:
       - dependencies
+    cooldown:
+      default-days: 7
     groups:
       production:
         dependency-type: production
@@ -83,6 +89,8 @@ updates:
       prefix: "chore(deps):"
     labels:
       - dependencies
+    cooldown:
+      default-days: 7
     groups:
       production:
         dependency-type: production
@@ -106,6 +114,8 @@ updates:
       prefix: "chore(deps):"
     labels:
       - dependencies
+    cooldown:
+      default-days: 7
     groups:
       actions:
         patterns:
@@ -125,6 +135,8 @@ updates:
       prefix: "chore(deps):"
     labels:
       - dependencies
+    cooldown:
+      default-days: 7
     ignore:
       - dependency-name: "python"
         versions: [">=3.14"]
@@ -147,6 +159,8 @@ updates:
       prefix: "chore(deps):"
     labels:
       - dependencies
+    cooldown:
+      default-days: 7
     groups:
       docker:
         patterns:
@@ -166,6 +180,8 @@ updates:
       prefix: "chore(deps):"
     labels:
       - dependencies
+    cooldown:
+      default-days: 7
     groups:
       docker:
         patterns:
@@ -185,6 +201,8 @@ updates:
       prefix: "chore(deps):"
     labels:
       - dependencies
+    cooldown:
+      default-days: 7
     groups:
       docker:
         patterns:

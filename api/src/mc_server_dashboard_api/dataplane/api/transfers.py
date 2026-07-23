@@ -45,11 +45,15 @@ from fastapi import (
     status,
 )
 from fastapi.responses import StreamingResponse
+from starlette.types import Message, Send
 
 from mc_server_dashboard_api.dependencies import (
+    AssignedWorkerLookup,
     ResolvedJarLookup,
+    get_assigned_worker_lookup,
     get_resolved_jar_lookup,
     get_storage,
+    get_transfer_semaphore,
     get_worker_credential,
 )
 from mc_server_dashboard_api.http_problem import problem
@@ -123,6 +127,12 @@ _MAX_SNAPSHOT_BYTES = 50 * 1024 * 1024 * 1024  # 50 GiB
 # connection is half-open and no data flows at all (the kernel's TCP keepalive
 # would eventually clean it up, but that can take hours).
 _CHUNK_IDLE_TIMEOUT: float = 120
+
+# Per-chunk send timeout for the hydrate download stream (issue #1822). If the
+# ASGI send (pushing a body chunk to the worker) blocks longer than this, the
+# worker is assumed partitioned (TCP buffer full, no reads). The stream is
+# aborted and the reader lease released so old-snapshot reclaim is not starved.
+_CHUNK_SEND_TIMEOUT: float = 120
 
 _BEARER_PREFIX = "Bearer "
 
@@ -200,6 +210,7 @@ async def hydrate_working_set(
     server_id: uuid.UUID,
     storage: Annotated[Storage, Depends(get_storage)],
     resolved_jar: Annotated[ResolvedJarLookup, Depends(get_resolved_jar_lookup)],
+    transfer_semaphore: Annotated[asyncio.Semaphore, Depends(get_transfer_semaphore)],
 ) -> StreamingResponse:
     """Stream the authoritative working set + resolved JAR as a tar (hydrate).
 
@@ -217,48 +228,83 @@ async def hydrate_working_set(
     just ``server.jar`` so the Worker can still launch.
     """
 
-    scope = (CommunityId(community_id), ServerId(server_id))
-    jar_member = await _jar_member(storage, resolved_jar, community_id, server_id)
-
-    # Stamp the authoritative working-set generation the hydrate serves (issue #763)
-    # so the Worker records the generation its scratch is now at. 0 when no snapshot
-    # has been published (the Worker then treats the set as older than any store
-    # generation and re-hydrates later), matching the Worker's "nothing held"
-    # default. The header rides every response, including the 204 (no working set).
-    headers = {_GENERATION_HEADER: str(await storage.current_generation(*scope))}
-
-    stream = storage.open_hydrate_source(*scope)
-    # The hydrate stream resolves + leases the snapshot on its FIRST iteration,
-    # so a NotFoundError (no published snapshot) only surfaces once we pull a
-    # chunk. Peek the first chunk here, before sending response headers, so an
-    # unpublished server becomes a clean 204 rather than a stream that aborts
-    # mid-body with headers already committed.
+    await transfer_semaphore.acquire()
     try:
-        primed = await _prime(stream)
-    except NotFoundError:
-        if jar_member is None:
+        scope = (CommunityId(community_id), ServerId(server_id))
+        jar_member = await _jar_member(storage, resolved_jar, community_id, server_id)
+
+        # When a resolved JAR is being injected, exclude the working set's embedded
+        # copy so the stale jar cannot overwrite the freshly injected one (the Worker
+        # unpacks last-wins). Issue #1942.
+        exclude = frozenset({_JAR_RELPATH}) if jar_member is not None else frozenset()
+        stream = storage.open_hydrate_source(*scope, exclude=exclude)
+        # The hydrate stream resolves + leases the snapshot on its FIRST iteration,
+        # so a NotFoundError (no published snapshot) only surfaces once we pull a
+        # chunk. Peek the first chunk here, before sending response headers, so an
+        # unpublished server becomes a clean 204 rather than a stream that aborts
+        # mid-body with headers already committed.
+        #
+        # The generation is read atomically with the snapshot lease inside the stream
+        # (issue #1954): after priming, ``stream.generation`` carries the marker value
+        # that corresponds to the leased snapshot. On the 204/JAR-only path (no
+        # published snapshot) the stream never leased, so fall back to
+        # ``current_generation`` (which returns 0 for an unpublished server).
+        try:
+            primed = await _prime(stream)
+        except NotFoundError:
+            # NotFoundError from the lazy lease proves the pointer is absent (no
+            # published snapshot) — the generation is definitionally 0. Stamping a
+            # literal avoids re-reading current_generation, which would reintroduce
+            # the mislabel race if a publish lands between the NotFoundError and the
+            # read (issue #1954).
+            headers = {_GENERATION_HEADER: "0"}
+            if jar_member is None:
+                transfer_semaphore.release()
+                return StreamingResponse(
+                    _empty(),
+                    status_code=status.HTTP_204_NO_CONTENT,
+                    media_type="application/x-tar",
+                    headers=headers,
+                )
+            # No published working set, but a JAR is resolved: send a tar with only the
+            # JAR member so the Worker can still launch.
             return StreamingResponse(
-                _empty(),
-                status_code=status.HTTP_204_NO_CONTENT,
+                _releasing(transfer_semaphore, _single_member_tar(jar_member)),
                 media_type="application/x-tar",
                 headers=headers,
             )
-        # No published working set, but a JAR is resolved: send a tar with only the
-        # JAR member so the Worker can still launch.
-        return StreamingResponse(
-            _single_member_tar(jar_member),
+        # The generation was stamped atomically with the lease on first iteration.
+        headers = {_GENERATION_HEADER: str(stream.generation)}
+        if jar_member is None:
+            return _DeadlineStreamingResponse(
+                _releasing(transfer_semaphore, primed),
+                server_id=server_id,
+                media_type="application/x-tar",
+                headers=headers,
+            )
+        return _DeadlineStreamingResponse(
+            _releasing(transfer_semaphore, _with_jar_member(primed, jar_member)),
+            server_id=server_id,
             media_type="application/x-tar",
             headers=headers,
         )
-    if jar_member is None:
-        return StreamingResponse(
-            primed, media_type="application/x-tar", headers=headers
-        )
-    return StreamingResponse(
-        _with_jar_member(primed, jar_member),
-        media_type="application/x-tar",
-        headers=headers,
-    )
+    except BaseException:
+        transfer_semaphore.release()
+        raise
+
+
+async def _releasing(
+    semaphore: asyncio.Semaphore, inner: AsyncIterator[bytes]
+) -> AsyncIterator[bytes]:
+    """Wrap *inner* so the semaphore is released when iteration ends (#1696)."""
+    try:
+        async for chunk in inner:
+            yield chunk
+    finally:
+        semaphore.release()
+        aclose = getattr(inner, "aclose", None)
+        if aclose is not None:
+            await aclose()
 
 
 async def _jar_member(
@@ -296,6 +342,10 @@ async def publish_snapshot(
     request: Request,
     response: Response,
     storage: Annotated[Storage, Depends(get_storage)],
+    assigned_worker: Annotated[
+        AssignedWorkerLookup, Depends(get_assigned_worker_lookup)
+    ],
+    transfer_semaphore: Annotated[asyncio.Semaphore, Depends(get_transfer_semaphore)],
     content_length: Annotated[int | None, Header()] = None,
     base_generation: Annotated[
         int | None, Header(alias=_BASE_GENERATION_HEADER)
@@ -347,6 +397,17 @@ async def publish_snapshot(
     is discarded and the newer ``current`` is kept, so the Worker re-bases on its next
     start — the same convergence as the pre-stream refusal.
 
+    An assignment-aware fence (issue #1703) adds a second input: the server's
+    currently-assigned worker id. The pre-stream guard ALLOWS a stale-base publish
+    from a different publisher when that publisher IS the assigned worker (the wedge
+    case: the old worker's late final snapshot advanced the store, and the new assigned
+    worker's base now lags). A commit-time fence re-reads the assignment AFTER the
+    upload stream and refuses when the publisher is NOT the currently-assigned worker
+    (409 ``publisher_not_assigned``): this prevents a late commit from a re-placed
+    worker from wedging the new session. The fence is permissive when no worker is
+    assigned (``None``): the held-assignment final-snapshot window and the post-clear
+    no-replacement case must still land.
+
     The content-integrity gate uses the single region rule set (issue #927): a
     non-4096-aligned tail is the normal on-disk shape of a 26.x world, not a tear, on
     every snapshot source. The earlier source-keyed strict/live split (issue #923)
@@ -362,188 +423,239 @@ async def publish_snapshot(
     if content_length > _MAX_SNAPSHOT_BYTES:
         raise problem(status.HTTP_413_CONTENT_TOO_LARGE, "snapshot_too_large")
 
-    scope = (CommunityId(community_id), ServerId(server_id))
-    # Read the store's ``current`` once here (guard time) and ALWAYS thread it into
-    # ``commit_snapshot`` as ``expected_base`` (issue #899/#920): the commit re-checks
-    # it AFTER the upload stream, so an at-rest edit (issue #889) or backup restore
-    # (issue #873) that advances the store during the (multi-minute) upload window is
-    # caught at publish time. This re-check is derived purely server-side, so it
-    # applies even to a publish that declares no base generation (older Worker / never
-    # hydrated) — previously that path skipped the re-check and left the clobber window
-    # open (#920 review). The port still accepts ``expected_base=None`` for callers
-    # genuinely outside this upload guard (e.g. an initial publish / restore performed
-    # by storage internals, which read ``current`` under the same lock themselves).
-    current = await storage.current_generation(*scope)
-    expected_base: int | None = current
-    if base_generation is not None:
-        if base_generation < current:
-            # The publisher's working set was hydrated from generation
-            # ``base_generation`` but the store has since moved to ``current``. Refuse
-            # ONLY when current was published by a DIFFERENT Worker — that is the
-            # A->B->A stale-scratch case where committing would clobber another
-            # Worker's newer authoritative copy. When the SAME Worker (or an unknown
-            # publisher) produced current, the lag is a lost publish-response and the
-            # publish is allowed to self-heal (issue #847 bug 3). Nothing was staged
-            # yet, so a refused ``current/`` is untouched.
-            current_publisher = await storage.current_publisher(*scope)
-            if (
-                current_publisher is not None
-                and publisher is not None
-                and current_publisher != publisher
-            ):
-                _logger.warning(
-                    "snapshot publish refused: stale base generation for server %s "
-                    "from a different worker (publisher %s held %d, store at %d "
-                    "published by %s)",
-                    server_id,
-                    publisher,
-                    base_generation,
-                    current,
-                    current_publisher,
-                )
-                raise problem(
-                    status.HTTP_409_CONFLICT,
-                    "stale_generation",
-                    extensions={
-                        "base_generation": base_generation,
-                        "current": current,
-                    },
-                )
-    handle = await storage.begin_snapshot(*scope)
-    counter = _ByteCounter(request.stream(), declared=content_length)
-    try:
-        await storage.write_snapshot(handle, counter.stream())
-        if counter.count != content_length:
-            # The transfer was truncated (or over-long): refuse to publish. Storage
-            # only made staging authoritative on commit, so an abort leaves the
-            # prior snapshot intact.
+    async with transfer_semaphore:
+        scope = (CommunityId(community_id), ServerId(server_id))
+        # Read the store's ``current`` once here (guard time) and ALWAYS
+        # thread it into ``commit_snapshot`` as ``expected_base`` (issue
+        # #899/#920): the commit re-checks it AFTER the upload stream, so
+        # an at-rest edit (issue #889) or backup restore (issue #873) that
+        # advances the store during the (multi-minute) upload window is
+        # caught at publish time. This re-check is derived purely
+        # server-side, so it applies even to a publish that declares no
+        # base generation (older Worker / never hydrated) -- previously
+        # that path skipped the re-check and left the clobber window open
+        # (#920 review). The port still accepts ``expected_base=None`` for
+        # callers genuinely outside this upload guard (e.g. an initial
+        # publish / restore performed by storage internals, which read
+        # ``current`` under the same lock themselves).
+        current = await storage.current_generation(*scope)
+        expected_base: int | None = current
+        if base_generation is not None:
+            if base_generation < current:
+                # The publisher's working set was hydrated from
+                # generation ``base_generation`` but the store has since
+                # moved to ``current``. Refuse ONLY when current was
+                # published by a DIFFERENT Worker -- that is the A->B->A
+                # stale-scratch case where committing would clobber
+                # another Worker's newer authoritative copy. When the
+                # SAME Worker (or an unknown publisher) produced current,
+                # the lag is a lost publish-response and the publish is
+                # allowed to self-heal (issue #847 bug 3). Nothing was
+                # staged yet, so a refused ``current/`` is untouched.
+                current_publisher = await storage.current_publisher(*scope)
+                if (
+                    current_publisher is not None
+                    and publisher is not None
+                    and current_publisher != publisher
+                ):
+                    # The publisher differs from the last recorder of current. Before
+                    # refusing, check whether the publisher is the CURRENTLY-ASSIGNED
+                    # worker (issue #1703): a re-placed worker whose base lags because
+                    # the old worker's late final snapshot advanced the store is the
+                    # authoritative session — refusing it would wedge the server.
+                    assigned = await assigned_worker(community_id, server_id)
+                    if assigned != publisher:
+                        _logger.warning(
+                            "snapshot publish refused: stale base "
+                            "generation for server %s from a different "
+                            "worker (publisher %s held %d, store at "
+                            "%d published by %s)",
+                            server_id,
+                            publisher,
+                            base_generation,
+                            current,
+                            current_publisher,
+                        )
+                        raise problem(
+                            status.HTTP_409_CONFLICT,
+                            "stale_generation",
+                            extensions={
+                                "base_generation": base_generation,
+                                "current": current,
+                            },
+                        )
+        handle = await storage.begin_snapshot(*scope)
+        counter = _ByteCounter(request.stream(), declared=content_length)
+        try:
+            await storage.write_snapshot(handle, counter.stream())
+            if counter.count != content_length:
+                # The transfer was truncated (or over-long): refuse to publish. Storage
+                # only made staging authoritative on commit, so an abort leaves the
+                # prior snapshot intact.
+                await storage.abort_snapshot(handle)
+                raise problem(status.HTTP_400_BAD_REQUEST, "length_mismatch")
+            # Commit-time assignment fence (issue #1703): after the (multi-minute)
+            # upload stream completes, re-read the server's assignment. If the
+            # publisher is known AND a different worker is now assigned, this is the
+            # late final snapshot from an old worker whose assignment was cleared and
+            # the server was re-placed — committing it would wedge the new session.
+            # Abort the staging and refuse. Cases that still pass: the publisher IS
+            # the assigned worker (normal); no assignment exists (post-clear with no
+            # replacement yet, or the held-assignment final-snapshot window); absent
+            # publisher header (older worker, permissive).
+            if publisher is not None:
+                assigned = await assigned_worker(community_id, server_id)
+                if assigned is not None and assigned != publisher:
+                    await storage.abort_snapshot(handle)
+                    _logger.warning(
+                        "snapshot publish refused: publisher %s is not the assigned "
+                        "worker (%s) for server %s at commit time",
+                        publisher,
+                        assigned,
+                        server_id,
+                    )
+                    raise problem(
+                        status.HTTP_409_CONFLICT,
+                        "publisher_not_assigned",
+                    )
+            generation = await storage.commit_snapshot(
+                handle,
+                publisher=publisher,
+                expected_base=expected_base,
+            )
+            # Stamp the new authoritative generation on the response (issue #763): the
+            # Worker records the header as the generation its scratch is now at (the
+            # source of this published snapshot). The reconciler reads the authoritative
+            # value back from Storage directly, so there is no DB mirror to write here.
+            response.headers[_GENERATION_HEADER] = str(generation)
+        except HTTPException:
+            raise
+        except _CapExceeded:
+            # Counted bytes ran past the 50 GiB cap mid-stream: abort and reject before
+            # the disk fills. (An over-run that stays under the cap surfaces as the
+            # length mismatch above.)
             await storage.abort_snapshot(handle)
-            raise problem(status.HTTP_400_BAD_REQUEST, "length_mismatch")
-        generation = await storage.commit_snapshot(
-            handle,
-            publisher=publisher,
-            expected_base=expected_base,
-        )
-        # Stamp the new authoritative generation on the response (issue #763): the
-        # Worker records the header as the generation its scratch is now at (the
-        # source of this published snapshot). The reconciler reads the authoritative
-        # value back from Storage directly, so there is no DB mirror to write here.
-        response.headers[_GENERATION_HEADER] = str(generation)
-    except HTTPException:
-        raise
-    except _CapExceeded:
-        # Counted bytes ran past the 50 GiB cap mid-stream: abort and reject before
-        # the disk fills. (An over-run that stays under the cap surfaces as the
-        # length mismatch above.)
-        await storage.abort_snapshot(handle)
-        raise problem(status.HTTP_413_CONTENT_TOO_LARGE, "snapshot_too_large") from None
-    except _DeclaredLengthExceeded:
-        # An under-declaring client streamed more than its Content-Length: abort
-        # mid-stream rather than spooling the whole over-long body first.
-        await storage.abort_snapshot(handle)
-        raise problem(status.HTTP_400_BAD_REQUEST, "length_mismatch") from None
-    except _ChunkIdleTimeout:
-        # No new chunk arrived within the per-chunk idle deadline (issue #1699):
-        # the worker is likely silently partitioned. Abort the staging so it does
-        # not pin the staging directory (and block sweep reclamation) for hours.
-        _logger.warning(
-            "snapshot upload aborted: no chunk received within %ds for server %s",
-            _CHUNK_IDLE_TIMEOUT,
-            server_id,
-        )
-        await storage.abort_snapshot(handle)
-        raise problem(status.HTTP_408_REQUEST_TIMEOUT, "chunk_idle_timeout") from None
-    except StaleGenerationError as exc:
-        # The store advanced past the base the pre-stream guard validated against
-        # DURING the upload window (issue #899): an at-rest edit or a backup restore
-        # landed after the guard passed, so committing the just-uploaded staging would
-        # clobber that newer authoritative copy with stale progression. commit_snapshot
-        # already discarded the staging (the prior ``current`` keeps the newer copy, no
-        # bump), exactly as the pre-stream guard leaves it untouched. Surface the SAME
-        # 409 stale_generation contract the pre-stream refusal uses so the Worker
-        # re-bases on its next start, and log the refusal in the same shape.
-        # NOTE: unlike the pre-stream refusal (whose ``base_generation`` is the
-        # Worker's DECLARED base), here ``base_generation`` carries the guard-time
-        # ``current`` (= ``expected_base``) the commit re-checked against. Same field,
-        # subtly different semantics: there is no worker-declared base on the no-base
-        # path, and the value the Worker needs to re-base on is ``current`` anyway.
-        _logger.warning(
-            "snapshot publish refused: working-set generation advanced during upload "
-            "for server %s (guard base %d, store now at %d)",
-            server_id,
-            exc.expected_base,
-            exc.current,
-        )
-        raise problem(
-            status.HTTP_409_CONFLICT,
-            "stale_generation",
-            extensions={
-                "base_generation": exc.expected_base,
-                "current": exc.current,
-            },
-        ) from None
-    except IncompleteTransferError:
-        # The body cleared the length gate but staged zero files: an empty working
-        # set is not a publishable snapshot (STORAGE.md Section 4.1). A worker
-        # packing an empty working dir is a bug signal, so reject it loudly; the
-        # abort leaves the prior authoritative copy intact.
-        await storage.abort_snapshot(handle)
-        raise problem(status.HTTP_400_BAD_REQUEST, "empty_snapshot") from None
-    except IntegrityCheckError as exc:
-        # The byte-complete body staged a structurally corrupt working set (a
-        # crash-during-save truncation, #703): the content-integrity gate (#739)
-        # refused to publish it, so ``current`` keeps the prior good snapshot.
-        # commit_snapshot already cleaned the corrupt staging area. Surface a clear
-        # non-2xx with a machine-readable reason and the corrupt-file count so the
-        # worker/operator sees *why* the publish was refused, and log the refusal.
-        corrupt = len(exc.report.corrupt)
-        _logger.warning(
-            "snapshot publish refused: corrupt working set for server %s "
-            "(%d corrupt region file(s))",
-            server_id,
-            corrupt,
-        )
-        raise problem(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            "working_set_corrupt",
-            extensions={"corrupt_count": corrupt},
-        ) from None
-    except MissingRegionsError as exc:
-        # The byte-complete, structurally-clean body DROPPED region files from a
-        # dimension that still exists (issue #854): MC would silently regenerate the
-        # missing chunks, so the missing-region gate refused to publish and ``current``
-        # keeps the prior good snapshot. commit_snapshot already cleaned the staging
-        # area. A legitimate full-dimension delete is not flagged; this is a
-        # partial-loss corruption signature, so surface it loudly and log it. The
-        # documented recovery (STORAGE.md) requires the LOST NAMES — delete them from
-        # ``current/`` via the file API at-rest, then re-publish — so carry a bounded
-        # per-directory list in the extensions and the log line (capped so a
-        # pathologically corrupt set cannot produce an unbounded body, flagged when
-        # truncated).
-        affected = len(exc.report.partial_loss)
-        directories, truncated = _bounded_missing_regions(exc)
-        _logger.warning(
-            "snapshot publish refused: incomplete working set for server %s "
-            "(%d dimension(s) lost region files; missing=%s%s)",
-            server_id,
-            affected,
-            directories,
-            " [truncated]" if truncated else "",
-        )
-        raise problem(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            "working_set_incomplete",
-            extensions={
-                "affected_count": affected,
-                "directories": directories,
-                "truncated": truncated,
-            },
-        ) from None
-    except BaseException:
-        # Any failure mid-transfer (client disconnect, extraction error) discards
-        # staging; the authoritative copy is never touched.
-        await storage.abort_snapshot(handle)
-        raise
+            raise problem(
+                status.HTTP_413_CONTENT_TOO_LARGE, "snapshot_too_large"
+            ) from None
+        except _DeclaredLengthExceeded:
+            # An under-declaring client streamed more than its Content-Length: abort
+            # mid-stream rather than spooling the whole over-long body first.
+            await storage.abort_snapshot(handle)
+            raise problem(status.HTTP_400_BAD_REQUEST, "length_mismatch") from None
+        except _ChunkIdleTimeout:
+            # No new chunk arrived within the per-chunk idle deadline (issue #1699):
+            # the worker is likely silently partitioned. Abort the staging so it does
+            # not pin the staging directory (and block sweep reclamation) for hours.
+            _logger.warning(
+                "snapshot upload aborted: no chunk received within %ds for server %s",
+                _CHUNK_IDLE_TIMEOUT,
+                server_id,
+            )
+            await storage.abort_snapshot(handle)
+            raise problem(
+                status.HTTP_408_REQUEST_TIMEOUT, "chunk_idle_timeout"
+            ) from None
+        except StaleGenerationError as exc:
+            # The store advanced past the base the pre-stream guard
+            # validated against DURING the upload window (issue #899):
+            # an at-rest edit or a backup restore landed after the guard
+            # passed, so committing the just-uploaded staging would
+            # clobber that newer authoritative copy with stale
+            # progression. commit_snapshot already discarded the staging
+            # (the prior ``current`` keeps the newer copy, no bump),
+            # exactly as the pre-stream guard leaves it untouched.
+            # Surface the SAME 409 stale_generation contract the
+            # pre-stream refusal uses so the Worker re-bases on its
+            # next start, and log the refusal in the same shape.
+            # NOTE: unlike the pre-stream refusal (whose
+            # ``base_generation`` is the Worker's DECLARED base), here
+            # ``base_generation`` carries the guard-time ``current``
+            # (= ``expected_base``) the commit re-checked against. Same
+            # field, subtly different semantics: there is no
+            # worker-declared base on the no-base path, and the value
+            # the Worker needs to re-base on is ``current`` anyway.
+            _logger.warning(
+                "snapshot publish refused: working-set generation "
+                "advanced during upload for server %s "
+                "(guard base %d, store now at %d)",
+                server_id,
+                exc.expected_base,
+                exc.current,
+            )
+            raise problem(
+                status.HTTP_409_CONFLICT,
+                "stale_generation",
+                extensions={
+                    "base_generation": exc.expected_base,
+                    "current": exc.current,
+                },
+            ) from None
+        except IncompleteTransferError:
+            # The body cleared the length gate but staged zero files: an empty working
+            # set is not a publishable snapshot (STORAGE.md Section 4.1). A worker
+            # packing an empty working dir is a bug signal, so reject it loudly; the
+            # abort leaves the prior authoritative copy intact.
+            await storage.abort_snapshot(handle)
+            raise problem(status.HTTP_400_BAD_REQUEST, "empty_snapshot") from None
+        except IntegrityCheckError as exc:
+            # The byte-complete body staged a structurally corrupt working set (a
+            # crash-during-save truncation, #703): the content-integrity gate (#739)
+            # refused to publish it, so ``current`` keeps the prior good snapshot.
+            # commit_snapshot already cleaned the corrupt staging area. Surface a clear
+            # non-2xx with a machine-readable reason and the corrupt-file count so the
+            # worker/operator sees *why* the publish was refused, and log the refusal.
+            corrupt = len(exc.report.corrupt)
+            _logger.warning(
+                "snapshot publish refused: corrupt working set for server %s "
+                "(%d corrupt region file(s))",
+                server_id,
+                corrupt,
+            )
+            raise problem(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "working_set_corrupt",
+                extensions={"corrupt_count": corrupt},
+            ) from None
+        except MissingRegionsError as exc:
+            # The byte-complete, structurally-clean body DROPPED region
+            # files from a dimension that still exists (issue #854): MC
+            # would silently regenerate the missing chunks, so the
+            # missing-region gate refused to publish and ``current``
+            # keeps the prior good snapshot. commit_snapshot already
+            # cleaned the staging area. A legitimate full-dimension
+            # delete is not flagged; this is a partial-loss corruption
+            # signature, so surface it loudly and log it. The documented
+            # recovery (STORAGE.md) requires the LOST NAMES -- delete
+            # them from ``current/`` via the file API at-rest, then
+            # re-publish -- so carry a bounded per-directory list in the
+            # extensions and the log line (capped so a pathologically
+            # corrupt set cannot produce an unbounded body, flagged when
+            # truncated).
+            affected = len(exc.report.partial_loss)
+            directories, truncated = _bounded_missing_regions(exc)
+            _logger.warning(
+                "snapshot publish refused: incomplete working set for server %s "
+                "(%d dimension(s) lost region files; missing=%s%s)",
+                server_id,
+                affected,
+                directories,
+                " [truncated]" if truncated else "",
+            )
+            raise problem(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "working_set_incomplete",
+                extensions={
+                    "affected_count": affected,
+                    "directories": directories,
+                    "truncated": truncated,
+                },
+            ) from None
+        except BaseException:
+            # Any failure mid-transfer (client disconnect, extraction error) discards
+            # staging; the authoritative copy is never touched.
+            await storage.abort_snapshot(handle)
+            raise
 
 
 class _CapExceeded(Exception):
@@ -556,6 +668,10 @@ class _DeclaredLengthExceeded(Exception):
 
 class _ChunkIdleTimeout(Exception):
     """No new chunk arrived within the per-chunk idle deadline (issue #1699)."""
+
+
+class _ChunkSendTimeout(Exception):
+    """Worker did not accept a response chunk within the send deadline (#1822)."""
 
 
 class _ByteCounter:
@@ -606,6 +722,50 @@ class _ByteCounter:
             yield chunk
 
 
+class _DeadlineStreamingResponse(StreamingResponse):
+    """StreamingResponse with a per-chunk send deadline (issue #1822).
+
+    Wraps the ASGI ``send`` callable with ``asyncio.wait_for``: if pushing a
+    body chunk back-pressures longer than ``send_timeout`` seconds (the TCP
+    send buffer is full because the worker stopped reading), the stream is
+    aborted and :class:`_ChunkSendTimeout` raised so the generator's
+    ``finally`` releases the reader lease.
+    """
+
+    def __init__(
+        self,
+        content: object,
+        *,
+        server_id: object,
+        send_timeout: float | None = None,
+        **kwargs: object,
+    ) -> None:
+        super().__init__(content, **kwargs)  # type: ignore[arg-type]
+        self._send_timeout = (
+            send_timeout if send_timeout is not None else _CHUNK_SEND_TIMEOUT
+        )
+        self._server_id = server_id
+
+    async def stream_response(self, send: Send) -> None:
+        async def _timed_send(message: Message) -> None:
+            try:
+                await asyncio.wait_for(send(message), timeout=self._send_timeout)
+            except TimeoutError:
+                raise _ChunkSendTimeout from None
+
+        try:
+            await super().stream_response(_timed_send)
+        except _ChunkSendTimeout:
+            _logger.warning(
+                "hydrate download aborted: send stall for server %s",
+                self._server_id,
+            )
+            aclose = getattr(self.body_iterator, "aclose", None)
+            if aclose is not None:
+                await aclose()
+            raise
+
+
 async def _prime(stream: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
     """Pull the first chunk now (surfacing NotFoundError), then replay the rest."""
 
@@ -613,9 +773,14 @@ async def _prime(stream: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
     first = await iterator.__anext__()
 
     async def _replay() -> AsyncIterator[bytes]:
-        yield first
-        async for chunk in iterator:
-            yield chunk
+        try:
+            yield first
+            async for chunk in iterator:
+                yield chunk
+        finally:
+            aclose = getattr(iterator, "aclose", None)
+            if aclose is not None:
+                await aclose()
 
     return _replay()
 
@@ -668,6 +833,11 @@ async def _with_jar_member(
     set's members, then one end-of-archive marker.
     """
 
-    yield jar_member
-    async for chunk in working_set:
-        yield chunk
+    try:
+        yield jar_member
+        async for chunk in working_set:
+            yield chunk
+    finally:
+        aclose = getattr(working_set, "aclose", None)
+        if aclose is not None:
+            await aclose()

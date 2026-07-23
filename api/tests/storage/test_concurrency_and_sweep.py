@@ -300,3 +300,258 @@ async def test_file_stream_rereads_current_when_reclaim_lands_in_lease_gap(
 
     blob = await drain(storage.open_file_stream(community, server, RelPath("f")))
     assert blob == b"NEW"
+
+
+async def test_read_file_survives_concurrent_publish_reclaim(
+    tmp_path: Path,
+) -> None:
+    """read_file must not raise FileNotFoundError when a concurrent publish flips
+    and reclaims the old snapshot between resolve and read_bytes (issue #1953)."""
+
+    from mc_server_dashboard_api.storage.domain.value_objects import RelPath
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"OLD"})
+
+    old_snapshot = snapshot_dir(tmp_path, community, server)
+    server_root = old_snapshot.parent.parent
+
+    new_snap_dir = server_root / "snapshots" / "new-snap"
+    new_snap_dir.mkdir(parents=True)
+    (new_snap_dir / "f").write_bytes(b"NEW")
+
+    call_count = {"n": 0}
+    original_current_dir = FsStorage._current_dir
+
+    def _racing_current_dir(self: FsStorage, cid: object, sid: object) -> Path:
+        call_count["n"] += 1
+        result = original_current_dir(self, cid, sid)  # type: ignore[arg-type]
+        if call_count["n"] == 1:
+            # Simulate concurrent publish: flip pointer and reclaim old snapshot.
+            link = server_root / "current"
+            tmp_link = server_root / ".current.race"
+            os.symlink(os.path.join("snapshots", "new-snap"), tmp_link)
+            os.replace(tmp_link, link)
+            import shutil
+
+            shutil.rmtree(old_snapshot)
+        return result
+
+    storage._current_dir = _racing_current_dir.__get__(storage, FsStorage)  # type: ignore[method-assign]
+
+    content = await storage.read_file(community, server, RelPath("f"))
+    assert content == b"NEW"
+
+
+async def test_list_dir_survives_concurrent_publish_reclaim(
+    tmp_path: Path,
+) -> None:
+    """list_dir must not raise FileNotFoundError when a concurrent publish flips
+    and reclaims the old snapshot between resolve and iterdir (issue #1953)."""
+
+    from mc_server_dashboard_api.storage.domain.value_objects import RelPath
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"sub/a": b"A", "sub/b": b"B"})
+
+    old_snapshot = snapshot_dir(tmp_path, community, server)
+    server_root = old_snapshot.parent.parent
+
+    new_snap_dir = server_root / "snapshots" / "new-snap"
+    new_snap_dir.mkdir(parents=True)
+    sub = new_snap_dir / "sub"
+    sub.mkdir()
+    (sub / "a").write_bytes(b"A2")
+    (sub / "b").write_bytes(b"B2")
+
+    call_count = {"n": 0}
+    original_current_dir = FsStorage._current_dir
+
+    def _racing_current_dir(self: FsStorage, cid: object, sid: object) -> Path:
+        call_count["n"] += 1
+        result = original_current_dir(self, cid, sid)  # type: ignore[arg-type]
+        if call_count["n"] == 1:
+            link = server_root / "current"
+            tmp_link = server_root / ".current.race"
+            os.symlink(os.path.join("snapshots", "new-snap"), tmp_link)
+            os.replace(tmp_link, link)
+            import shutil
+
+            shutil.rmtree(old_snapshot)
+        return result
+
+    storage._current_dir = _racing_current_dir.__get__(storage, FsStorage)  # type: ignore[method-assign]
+
+    entries = await storage.list_dir(community, server, RelPath("sub"))
+    names = sorted(e.name for e in entries)
+    assert names == ["a", "b"]
+
+
+async def test_retain_file_version_survives_concurrent_publish_reclaim(
+    tmp_path: Path,
+) -> None:
+    """The per-server lock in _retain_file_version serializes against a
+    concurrent publish whose post-flip GC would otherwise delete the resolved
+    snapshot between is_file() and _capture_version (issue #1953).
+
+    Coordination: retain signals it has entered the critical section (past
+    is_file), then waits for the concurrent publish to attempt completion.
+    With the lock the publish is blocked and the wait times out — the snapshot
+    is still intact. Without the lock (pre-fix), the publish completes and
+    rmtrees the snapshot, so the stat/hash in _matches_newest_version would
+    raise FileNotFoundError."""
+
+    import asyncio
+    import threading
+
+    from mc_server_dashboard_api.storage.domain.value_objects import RelPath
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"OLD"})
+
+    retain_entered = threading.Event()
+    publish_done = threading.Event()
+
+    original_matches = FsStorage._matches_newest_version
+
+    def _wait_for_publish(self: FsStorage, versions: object, source: object) -> bool:
+        # Signal that retain is past is_file() and about to stat/hash source.
+        retain_entered.set()
+        # Wait for the concurrent publish to complete. With the lock: publish
+        # is blocked by the same lock, so this times out and source is intact.
+        # Without the lock (pre-fix): publish completes and rmtrees the source
+        # dir, so the original_matches call would crash on source.stat().
+        publish_done.wait(timeout=1.0)
+        return original_matches(self, versions, source)  # type: ignore[arg-type]
+
+    storage._matches_newest_version = _wait_for_publish.__get__(storage, FsStorage)  # type: ignore[method-assign]
+
+    async def _concurrent_publish() -> None:
+        await asyncio.to_thread(retain_entered.wait, 5.0)
+        await publish(storage, community, server, {"f": b"NEW"})
+        publish_done.set()
+
+    # Both run concurrently. The lock serializes them: retain finishes first
+    # (publish is blocked on the same lock), then publish proceeds.
+    await asyncio.gather(
+        storage.retain_file_version(community, server, RelPath("f")),
+        _concurrent_publish(),
+    )
+
+
+async def test_backup_pack_survives_concurrent_publish_reclaim(
+    tmp_path: Path,
+) -> None:
+    """A concurrent publish during the backup pack must not destroy the source.
+
+    Without a reader lease, the concurrent publish flips ``current`` and rmtrees
+    the old snapshot (the backup source), yielding either a FileNotFoundError or
+    a silently incomplete archive recorded HEALTHY (issue #1702).
+    """
+
+    import gzip
+    import io
+    import shutil
+    import tarfile
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"OLD"})
+    old_snapshot = snapshot_dir(tmp_path, community, server)
+    server_root = old_snapshot.parent.parent
+
+    # Monkeypatch _write_backup_archive to simulate a concurrent publish mid-pack:
+    # flip the pointer to a new snapshot and rmtree the old one.
+    original_write = FsStorage._write_backup_archive
+
+    def _racing_write(source: Path, archive: Path) -> None:
+        # Create a new snapshot and flip current to it.
+        new_snap = server_root / "snapshots" / "new-snap"
+        new_snap.mkdir(parents=True, exist_ok=True)
+        (new_snap / "f").write_bytes(b"NEW")
+        link = server_root / "current"
+        tmp_link = server_root / ".current.race"
+        os.symlink(os.path.join("snapshots", "new-snap"), tmp_link)
+        os.replace(tmp_link, link)
+        # Reclaim the old snapshot if it is not leased.
+        if not storage._is_leased(old_snapshot):
+            shutil.rmtree(old_snapshot)
+        # Now proceed with the original write from `source`.
+        original_write(source, archive)
+
+    storage._write_backup_archive = staticmethod(_racing_write)  # type: ignore[method-assign]
+
+    key = await storage.create_backup_from_current(community, server)
+
+    # The backup must contain the complete OLD content (the leased snapshot).
+    archive = (
+        tmp_path
+        / "communities"
+        / str(community.value)
+        / "servers"
+        / str(server.value)
+        / "backups"
+        / f"{key.value}.tar.gz"
+    )
+    with tarfile.open(fileobj=io.BytesIO(gzip.decompress(archive.read_bytes()))) as tar:
+        handle = tar.extractfile("f")
+        assert handle is not None
+        assert handle.read() == b"OLD"
+
+
+async def test_check_current_health_survives_concurrent_publish_reclaim(
+    tmp_path: Path,
+) -> None:
+    """check_current_health must hold a lease so the walk sees a consistent dir.
+
+    Without a lease, a concurrent publish deletes the snapshot directory
+    mid-walk, yielding a false-healthy report with scanned=0 (issue #1702).
+    """
+
+    import shutil
+    from unittest.mock import patch
+
+    from mc_server_dashboard_api.storage.adapters import fs as _fs_mod
+    from mc_server_dashboard_api.storage.integrity.region import (
+        WorkingSetReport,
+        check_working_set,
+    )
+    from tests.storage.helpers import mode_invariant_corrupt_region_bytes
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    # Publish valid content first, then inject a corrupt region into the snapshot.
+    await publish(storage, community, server, {"f": b"VALID"})
+    snap = snapshot_dir(tmp_path, community, server)
+    region_dir = snap / "world" / "region"
+    region_dir.mkdir(parents=True, exist_ok=True)
+    (region_dir / "r.0.0.mca").write_bytes(mode_invariant_corrupt_region_bytes())
+
+    server_root = snap.parent.parent
+
+    # Monkeypatch check_working_set in the fs module to simulate a concurrent
+    # publish: flip the pointer to a new snapshot and rmtree the old one (only
+    # if the old snapshot is not leased, mirroring the real publish reclaim logic).
+    def _racing_check(root: Path) -> WorkingSetReport:
+        # Create a new snapshot with healthy content and flip current to it.
+        new_snap = server_root / "snapshots" / "new-snap"
+        new_snap.mkdir(parents=True, exist_ok=True)
+        (new_snap / "f").write_bytes(b"HEALTHY")
+        link = server_root / "current"
+        tmp_link = server_root / ".current.race"
+        os.symlink(os.path.join("snapshots", "new-snap"), tmp_link)
+        os.replace(tmp_link, link)
+        # Reclaim the old snapshot only if not leased (mirrors real publish).
+        if not storage._is_leased(snap):
+            shutil.rmtree(snap)
+        return check_working_set(root)
+
+    with patch.object(_fs_mod, "check_working_set", _racing_check):
+        report = await storage.check_current_health(community, server)
+
+    # The report must reflect the OLD corrupt content (scanned >= 1, not healthy).
+    assert report.scanned >= 1
+    assert not report.healthy

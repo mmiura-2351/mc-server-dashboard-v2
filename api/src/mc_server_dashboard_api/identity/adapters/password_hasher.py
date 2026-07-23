@@ -6,16 +6,22 @@ Each algorithm generates and embeds its own per-user salt, so the Port surface
 stays a single ``hash`` call. Both libraries use their own secure defaults.
 
 The KDF work is CPU-bound and blocks for tens of milliseconds, so each method
-offloads it to a worker thread via :func:`asyncio.to_thread` rather than running
-it inline on the event loop (issue #938). The offloaded callables keep the exact
-synchronous logic — same return values and same raised exceptions (e.g. bcrypt's
->72-byte ``ValueError``, which propagates out of ``to_thread`` unchanged).
+offloads it to a dedicated :data:`_KDF_EXECUTOR` thread pool rather than running
+it inline on the event loop (issue #938). A dedicated pool isolates the KDF work
+from asyncio's shared default ``ThreadPoolExecutor``, so data-plane transfer
+storms cannot starve password hashing (issue #1696). The offloaded callables keep
+the exact synchronous logic — same return values and same raised exceptions (e.g.
+bcrypt's >72-byte ``ValueError``, which propagates out of the executor unchanged).
 """
 
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from typing import TypeVar
 
 import argon2
 import bcrypt
@@ -23,6 +29,18 @@ import bcrypt
 from mc_server_dashboard_api.identity.domain.password_hasher import PasswordHasher
 
 _LOG = logging.getLogger(__name__)
+
+_KDF_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="password-kdf")
+
+_T = TypeVar("_T")
+
+
+async def _run_kdf(func: Callable[..., _T], *args: object) -> _T:
+    """Run a blocking KDF call on the dedicated password-hashing pool (#1696)."""
+    return await asyncio.get_running_loop().run_in_executor(
+        _KDF_EXECUTOR, functools.partial(func, *args)
+    )
+
 
 # bcrypt ignores bytes past 72, so two passwords sharing a 72-byte prefix would
 # verify identically. The password policy rejects >72-byte input when bcrypt is
@@ -38,10 +56,10 @@ class Argon2PasswordHasher(PasswordHasher):
         self._hasher = argon2.PasswordHasher()
 
     async def hash(self, plaintext: str) -> str:
-        return await asyncio.to_thread(self._hasher.hash, plaintext)
+        return await _run_kdf(self._hasher.hash, plaintext)
 
     async def verify(self, plaintext: str, password_hash: str) -> bool:
-        return await asyncio.to_thread(self._verify, plaintext, password_hash)
+        return await _run_kdf(self._verify, plaintext, password_hash)
 
     def _verify(self, plaintext: str, password_hash: str) -> bool:
         try:
@@ -63,10 +81,10 @@ class BcryptPasswordHasher(PasswordHasher):
     """:class:`PasswordHasher` adapter over bcrypt (library default cost)."""
 
     async def hash(self, plaintext: str) -> str:
-        return await asyncio.to_thread(self._hash, plaintext)
+        return await _run_kdf(self._hash, plaintext)
 
     async def verify(self, plaintext: str, password_hash: str) -> bool:
-        return await asyncio.to_thread(self._verify, plaintext, password_hash)
+        return await _run_kdf(self._verify, plaintext, password_hash)
 
     def _hash(self, plaintext: str) -> str:
         encoded = self._encode(plaintext)

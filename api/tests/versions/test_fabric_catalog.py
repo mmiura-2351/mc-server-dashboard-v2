@@ -21,6 +21,7 @@ from mc_server_dashboard_api.versions.adapters.fabric import (
     _server_jar_url,
 )
 from mc_server_dashboard_api.versions.domain.errors import UnknownVersionError
+from mc_server_dashboard_api.versions.domain.fetcher import FetchNotFoundError
 from mc_server_dashboard_api.versions.domain.value_objects import ServerType
 from tests.versions.fakes import FakeJsonFetcher
 
@@ -96,8 +97,9 @@ async def test_resolve_raises_unknown_when_loader_for_game_404s() -> None:
         not_found_urls={_loader_for_game_url("1.21.1")},
     )
     catalog = FabricCatalog(fetcher=fetcher)
-    with pytest.raises(UnknownVersionError):
+    with pytest.raises(UnknownVersionError) as excinfo:
         await catalog.resolve(ServerType.FABRIC, "1.21.1")
+    assert isinstance(excinfo.value.__cause__, FetchNotFoundError)
 
 
 @pytest.mark.asyncio

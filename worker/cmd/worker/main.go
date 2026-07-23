@@ -173,7 +173,7 @@ func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.L
 				docker,
 				containerdriver.NewImageSelector(cfg.Driver.Container.Images),
 				openContainerControl,
-				containerdriver.Options{WorkerID: wc.ID, StopTimeout: 30 * time.Second, GameBindIP: cfg.Driver.Container.GameBindIP, Network: cfg.Driver.Container.Network, Logger: logger},
+				containerdriver.Options{WorkerID: wc.ID, StopTimeout: 30 * time.Second, GameBindIP: cfg.Driver.Container.GameBindIP, Network: cfg.Driver.Container.Network, ScratchDir: wc.ScratchDir, Logger: logger},
 			)
 			containerRconHost = cd.RconHost
 			containerGameHost = cd.GameHost

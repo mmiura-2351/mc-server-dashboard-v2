@@ -109,14 +109,12 @@ class RelayServicer(RelayServiceServicer):
         # rows the relay no longer tracks — sessions a relay crash dropped without
         # a SessionEnd. The registration's active set is authoritative.
         #
-        # There is a benign millisecond race between this healing (the relay
-        # re-Registers its active set every 60 s) and a concurrent start flush: a
-        # session that started just after the relay snapshotted its active set is
-        # absent from active_session_ids and gets a premature ended_at here. The
-        # next ReportSessions end is a no-op (ended_at already set), and the
-        # following 60 s Register carries the session in its active set, so the
-        # worst case is one session showing a slightly-early ended_at — acceptable
-        # healed semantics, not a correctness break.
+        # The relay holds a flush barrier across Register (issue #1718), so a
+        # live session cannot be closed here: any session started after the
+        # active-set snapshot has its start event still buffered and will not be
+        # flushed until the RPC completes. The remaining case is sessions that
+        # ended with the end event still buffered, where close_absent gives a
+        # slightly-early ended_at and the later end is a no-op.
         closed = await self._session_sink.close_absent(
             active_session_ids=list(request.active_session_ids),
             ended_at=self._clock.now(),
