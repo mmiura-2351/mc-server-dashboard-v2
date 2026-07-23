@@ -522,12 +522,15 @@ class TestGetAssignmentEndpoint:
         body = resp.json()
         assert body["resource_pack"]["id"] == str(p.id.value)
 
-    def test_get_not_found_404(self) -> None:
+    def test_get_unassigned_200_null(self) -> None:
+        # "No pack assigned" is a normal state of a valid server, not a missing
+        # resource: return 200 with a null body, not 404 (issue #2238).
         uc = _FakeUseCase(result=None)
         app = _assignment_app(get_assignment=uc)
         with TestClient(app) as client:  # type: ignore[arg-type]
             resp = client.get(_ASSIGN_PATH)
-        assert resp.status_code == 404
+        assert resp.status_code == 200
+        assert resp.json() is None
 
     def test_get_server_not_found_404(self) -> None:
         uc = _FakeUseCase(error=ServerNotFoundError("nope"))
