@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -46,6 +47,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from typing import Callable
 
 COOLDOWN_DAYS = 7
 STATUS_CONTEXT = "supply-chain-cooldown"
@@ -66,9 +68,20 @@ _ECOSYSTEM_BY_TOKEN = {
     "docker_compose": "docker",
 }
 
+# A GHSA identifier -- ``GHSA-xxxx-xxxx-xxxx``. Dependabot embeds the advisory
+# reference in a security-update's commit message; a version update's commit
+# message does not carry one (the changelog that might mention a CVE lives in the
+# PR body's ``<details>`` block, not the commit).
+_GHSA = re.compile(r"GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}", re.IGNORECASE)
+
 
 class CooldownError(Exception):
     """A release date could not be determined -- treated as blocking."""
+
+
+# A transport takes a URL / gh-api path and returns parsed JSON, raising on
+# failure. Injected so release_date's per-ecosystem field extraction is testable.
+Transport = Callable[[str], dict]
 
 
 # --------------------------------------------------------------------------- #
@@ -135,18 +148,26 @@ def parse_updated_dependencies(messages: list[str]) -> list[tuple[str, str]]:
 def is_security_update(messages: list[str], body: str) -> bool:
     """Detect a Dependabot security update (bypasses the cooldown).
 
-    Two signals per DEPENDENCIES.md Section 4:
+    A Dependabot *security* update only exists when Dependabot alerts are
+    enabled for the repository; it references the advisory it fixes. We look, in
+    priority order, at signals Dependabot itself emits:
 
-    * ``dependabot_security_updates`` metadata in a commit message, or
-    * a ``Security`` heading in the PR's own summary.
-
-    The body is truncated at the first ``<details>`` block before the heading
-    scan: everything below it is verbatim *upstream* release notes, whose own
-    "Security" headings must not be mistaken for a Dependabot security update.
+    1. **Commit message** (immutable, cryptographically attributed to
+       ``dependabot[bot]``): a GHSA identifier, or the legacy
+       ``dependabot_security_updates`` metadata token. This is the primary
+       signal -- the commit is not re-editable the way a PR body is.
+    2. **PR body summary** (fallback only): a GHSA identifier or a ``Security``
+       heading in the Dependabot-authored summary. The body is truncated at the
+       first ``<details>`` block so verbatim *upstream* release notes -- whose
+       own "Security" headings or CVE mentions are not evidence of a Dependabot
+       security update -- cannot spoof a bypass.
     """
-    if any("dependabot_security_updates" in m for m in messages):
-        return True
+    for message in messages:
+        if _GHSA.search(message) or "dependabot_security_updates" in message:
+            return True
     summary = body.split("<details>", 1)[0]
+    if _GHSA.search(summary):
+        return True
     return bool(
         re.search(r"(?im)^\s*(?:#{1,6}\s+|<h[1-6][^>]*>\s*)security\b", summary)
     )
@@ -195,21 +216,45 @@ def _npm_url(name: str) -> str:
     return "https://registry.npmjs.org/" + name.replace("/", "%2F")
 
 
-def _docker_namespace_repo(image: str) -> tuple[str, str]:
-    """Docker Hub namespace/repo for an image (official images -> library/*)."""
-    if "/" in image:
-        namespace, repo = image.split("/", 1)
-    else:
-        namespace, repo = "library", image
-    return namespace, repo
-
-
 def _github_tag_candidates(version: str) -> list[str]:
     return [f"v{version}", version] if not version.startswith("v") else [version]
 
 
+def parse_docker_ref(image: str) -> tuple[str, str, str]:
+    """Resolve a Docker image reference to (registry, owner_or_ns, repo).
+
+    Docker images are not all on Docker Hub, and the registry host determines the
+    lookup:
+
+    * ``ghcr.io/<owner>/<image>`` -> ``("ghcr", owner, image)`` -- resolved via
+      the GitHub Releases API on ``<owner>/<image>`` (e.g. the repo's own
+      ``ghcr.io/astral-sh/uv`` base image).
+    * ``docker.io/<ns>/<repo>``, bare ``<ns>/<repo>``, or bare ``<image>``
+      (official -> ``library``) -> ``("dockerhub", ns, repo)``.
+
+    A host token is the first path segment when it contains a ``.`` or ``:``
+    (e.g. ``ghcr.io``, ``registry:5000``). An unsupported registry raises
+    ``CooldownError`` (fail closed) rather than fabricating a Docker Hub URL.
+    """
+    first = image.split("/", 1)[0]
+    if "." in first or ":" in first:
+        host, rest = first, image.split("/", 1)[1]
+        if host == "ghcr.io":
+            owner, repo = rest.split("/", 1)
+            return ("ghcr", owner, repo)
+        if host in ("docker.io", "index.docker.io", "registry-1.docker.io"):
+            return _dockerhub_ref(rest)
+        raise CooldownError(f"unsupported container registry: {host}")
+    return _dockerhub_ref(image)
+
+
+def _dockerhub_ref(path: str) -> tuple[str, str, str]:
+    namespace, repo = path.split("/", 1) if "/" in path else ("library", path)
+    return ("dockerhub", namespace, repo)
+
+
 # --------------------------------------------------------------------------- #
-# Live lookups (network / gh -- not exercised by --self-test)                 #
+# Live transports (network / gh -- swapped for stubs in --self-test)          #
 # --------------------------------------------------------------------------- #
 
 
@@ -229,42 +274,58 @@ def _gh_json(path: str) -> dict:
     return json.loads(out)
 
 
-def release_date(ecosystem: str, name: str, version: str) -> datetime:
-    """Upstream publish date for name@version, per docs/dev/DEPENDENCIES.md."""
+def _github_release_date(gh_get: Transport, repo: str, version: str) -> datetime:
+    """``published_at`` of ``repo``'s release for ``version`` (tries v-prefix)."""
+    for tag in _github_tag_candidates(version):
+        try:
+            data = gh_get(f"repos/{repo}/releases/tags/{tag}")
+        except subprocess.CalledProcessError:
+            continue  # No such tag -- try the next candidate.
+        if data.get("published_at"):
+            return parse_iso(data["published_at"])
+    raise CooldownError(f"no GitHub release for {repo}@{version}")
+
+
+def release_date(
+    ecosystem: str,
+    name: str,
+    version: str,
+    *,
+    http_get: Transport = _http_json,
+    gh_get: Transport = _gh_json,
+) -> datetime:
+    """Upstream publish date for name@version, per docs/dev/DEPENDENCIES.md.
+
+    ``http_get`` / ``gh_get`` are injected so the per-ecosystem field extraction
+    (the part that historically hid a bug) is exercised offline in --self-test.
+    """
     try:
         if ecosystem == "pip":
-            data = _http_json(
-                f"https://pypi.org/pypi/{urllib.parse.quote(name)}/json"
-            )
+            data = http_get(f"https://pypi.org/pypi/{urllib.parse.quote(name)}/json")
             files = data.get("releases", {}).get(version)
             if not files:
                 raise CooldownError(f"no PyPI files for {name}@{version}")
             return parse_iso(files[0]["upload_time_iso_8601"])
         if ecosystem == "npm":
-            data = _http_json(_npm_url(name))
+            data = http_get(_npm_url(name))
             stamp = data.get("time", {}).get(version)
             if not stamp:
                 raise CooldownError(f"no npm publish time for {name}@{version}")
             return parse_iso(stamp)
         if ecosystem == "gomod":
-            data = _http_json(
+            data = http_get(
                 f"https://proxy.golang.org/{_gomod_escape(name)}"
                 f"/@v/{_go_version(version)}.info"
             )
             return parse_iso(data["Time"])
         if ecosystem == "github-actions":
-            for tag in _github_tag_candidates(version):
-                try:
-                    data = _gh_json(f"repos/{name}/releases/tags/{tag}")
-                except subprocess.CalledProcessError:
-                    continue
-                if data.get("published_at"):
-                    return parse_iso(data["published_at"])
-            raise CooldownError(f"no GitHub release for {name}@{version}")
+            return _github_release_date(gh_get, name, version)
         if ecosystem == "docker":
-            namespace, repo = _docker_namespace_repo(name)
-            data = _http_json(
-                f"https://hub.docker.com/v2/repositories/{namespace}/{repo}"
+            registry, owner, repo = parse_docker_ref(name)
+            if registry == "ghcr":
+                return _github_release_date(gh_get, f"{owner}/{repo}", version)
+            data = http_get(
+                f"https://hub.docker.com/v2/repositories/{owner}/{repo}"
                 f"/tags/{urllib.parse.quote(version)}"
             )
             stamp = data.get("tag_last_pushed") or data.get("last_updated")
@@ -346,8 +407,6 @@ def remove_label(repo: str, pr: int) -> None:
 
 
 def _repo() -> str:
-    import os
-
     env = os.environ.get("GITHUB_REPOSITORY")
     if env:
         return env
@@ -355,17 +414,36 @@ def _repo() -> str:
 
 
 def evaluate_pr(repo: str, pr: int, now: datetime | None = None) -> str:
-    """Evaluate one PR, post its status/label, and return the outcome string."""
+    """Evaluate one PR, post its status/label, and return the outcome string.
+
+    Fail closed: once the head SHA is known, any unexpected error still posts a
+    blocking status (and re-raises so the run surfaces it) -- a check that dies
+    silently would leave the required context unset and let the PR merge.
+    """
     now = now or datetime.now(timezone.utc)
     meta = _gh_json(f"repos/{repo}/pulls/{pr}")
     if meta["user"]["login"] != BOT:
         return "skipped: not a Dependabot PR"
-
     sha = meta["head"]["sha"]
+    try:
+        return _evaluate_head(repo, pr, sha, meta, now)
+    except Exception as exc:  # noqa: BLE001 -- fail closed with a posted status
+        set_status(repo, sha, "failure", f"cooldown check error: {exc}")
+        add_label(repo, pr)
+        raise
+
+
+def _evaluate_head(
+    repo: str, pr: int, sha: str, meta: dict, now: datetime
+) -> str:
     branch = meta["head"]["ref"]
     body = meta.get("body") or ""
     ecosystem = ecosystem_from_branch(branch)
     if ecosystem is None:
+        # An ungated ecosystem (none configured today): don't wedge the PR on a
+        # required context we cannot evaluate.
+        set_status(repo, sha, "success", f"ecosystem not gated ({branch}).")
+        remove_label(repo, pr)
         return f"skipped: unrecognized branch {branch}"
 
     commits = _gh_json(f"repos/{repo}/pulls/{pr}/commits")
@@ -452,7 +530,11 @@ def main() -> int:
     repo = _repo()
     if args.all_open:
         return evaluate_all_open(repo)
-    print(f"PR #{args.pr}: {evaluate_pr(repo, args.pr)}")
+    try:
+        print(f"PR #{args.pr}: {evaluate_pr(repo, args.pr)}")
+    except Exception as exc:  # noqa: BLE001 -- status already posted by evaluate_pr
+        print(f"PR #{args.pr}: ERROR {exc}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -461,7 +543,7 @@ def main() -> int:
 # --------------------------------------------------------------------------- #
 
 
-def _self_test() -> int:
+def _self_test() -> int:  # noqa: C901 -- a flat table of independent assertions
     failures: list[str] = []
 
     def check(name: str, got: object, want: object) -> None:
@@ -513,25 +595,32 @@ def _self_test() -> int:
     check("trailer dedupe", parse_updated_dependencies([single, single]), [("@biomejs/biome", "2.5.4")])
 
     # Security detection.
-    check("sec commit-token", is_security_update(["... dependabot_security_updates ..."], ""), True)
+    ghsa_commit = "chore(deps): bump lib\n\nFixes GHSA-abcd-ef12-3456.\n"
+    check("sec ghsa-commit", is_security_update([ghsa_commit], ""), True)
+    check("sec legacy-token", is_security_update(["... dependabot_security_updates ..."], ""), True)
+    check("sec ghsa-body", is_security_update([""], "Bumps foo.\nSee GHSA-abcd-ef12-3456."), True)
     check("sec body-heading", is_security_update([""], "## Security\nfixes a CVE"), True)
     check(
-        "sec release-notes-only",
+        "sec release-notes-only",  # upstream notes below <details> must not spoof
         is_security_update(
-            [""], "Bumps foo.\n<details>\n<summary>Release notes</summary>\n<h2>Security</h2>\n"
+            [""],
+            "Bumps foo.\n<details>\n<summary>Release notes</summary>\n"
+            "<h2>Security</h2>\nSee GHSA-abcd-ef12-3456\n",
         ),
         False,
     )
-    check("sec none", is_security_update([""], "Bumps foo from 1 to 2."), False)
+    check("sec none", is_security_update(["chore(deps): bump foo"], "Bumps foo from 1 to 2."), False)
 
     # Registry-address helpers.
     check("gomod escape", _gomod_escape("github.com/Azure/go-ansiterm"), "github.com/!azure/go-ansiterm")
     check("go version", _go_version("1.24.0"), "v1.24.0")
     check("go version keep-v", _go_version("v1.24.0"), "v1.24.0")
     check("npm url", _npm_url("@biomejs/biome"), "https://registry.npmjs.org/@biomejs%2Fbiome")
-    check("docker official", _docker_namespace_repo("python"), ("library", "python"))
-    check("docker namespaced", _docker_namespace_repo("chrislusf/seaweedfs"), ("chrislusf", "seaweedfs"))
     check("gh tags", _github_tag_candidates("7.0.1"), ["v7.0.1", "7.0.1"])
+    check("docker official", parse_docker_ref("python"), ("dockerhub", "library", "python"))
+    check("docker namespaced", parse_docker_ref("chrislusf/seaweedfs"), ("dockerhub", "chrislusf", "seaweedfs"))
+    check("docker docker.io", parse_docker_ref("docker.io/library/redis"), ("dockerhub", "library", "redis"))
+    check("docker ghcr", parse_docker_ref("ghcr.io/astral-sh/uv"), ("ghcr", "astral-sh", "uv"))
 
     # ISO parsing (Z suffix, fractional seconds).
     check("iso z", parse_iso("2024-01-01T12:00:00Z"), datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc))
@@ -540,6 +629,83 @@ def _self_test() -> int:
         parse_iso("2024-01-01T12:00:00.123456Z"),
         datetime(2024, 1, 1, 12, 0, 0, 123456, tzinfo=timezone.utc),
     )
+
+    # release_date field extraction, per ecosystem, with injected transports.
+    def boom_http(url: str) -> dict:
+        raise AssertionError(f"unexpected HTTP call: {url}")
+
+    def boom_gh(path: str) -> dict:
+        raise AssertionError(f"unexpected gh call: {path}")
+
+    def http_stub(payload: dict, expect: str) -> Transport:
+        def transport(url: str) -> dict:
+            assert expect in url, f"expected {expect!r} in {url!r}"
+            return payload
+        return transport
+
+    def gh_stub(path_map: dict[str, dict]) -> Transport:
+        def transport(path: str) -> dict:
+            for key, value in path_map.items():
+                if key in path:
+                    return value
+            raise subprocess.CalledProcessError(1, ["gh", "api", path])
+        return transport
+
+    def rd(eco: str, name: str, ver: str, **kw: object) -> datetime:
+        return release_date(eco, name, ver, **kw)  # type: ignore[arg-type]
+
+    check(
+        "rd pip",
+        rd("pip", "requests", "2.31.0",
+           http_get=http_stub(
+               {"releases": {"2.31.0": [{"upload_time_iso_8601": "2024-05-20T10:00:00.000000Z"}]}},
+               "pypi.org/pypi/requests/json"),
+           gh_get=boom_gh),
+        datetime(2024, 5, 20, 10, tzinfo=timezone.utc),
+    )
+    check(
+        "rd npm",
+        rd("npm", "@biomejs/biome", "2.5.4",
+           http_get=http_stub({"time": {"2.5.4": "2026-07-15T08:30:00.000Z"}}, "@biomejs%2Fbiome"),
+           gh_get=boom_gh),
+        datetime(2026, 7, 15, 8, 30, tzinfo=timezone.utc),
+    )
+    check(
+        "rd gomod",
+        rd("gomod", "github.com/prometheus/client_golang", "1.24.0",
+           http_get=http_stub({"Time": "2025-01-02T03:04:05Z"}, "/@v/v1.24.0.info"),
+           gh_get=boom_gh),
+        datetime(2025, 1, 2, 3, 4, 5, tzinfo=timezone.utc),
+    )
+    check(
+        "rd github-actions",  # v-prefixed tag tried first
+        rd("github-actions", "actions/checkout", "7.0.1",
+           http_get=boom_http,
+           gh_get=gh_stub({"repos/actions/checkout/releases/tags/v7.0.1": {"published_at": "2025-06-01T00:00:00Z"}})),
+        datetime(2025, 6, 1, tzinfo=timezone.utc),
+    )
+    check(
+        "rd docker hub",  # official image -> library/*, Docker Hub transport only
+        rd("docker", "python", "3.13-slim",
+           http_get=http_stub({"tag_last_pushed": "2026-07-01T00:00:00Z"},
+                              "hub.docker.com/v2/repositories/library/python/tags/3.13-slim"),
+           gh_get=boom_gh),
+        datetime(2026, 7, 1, tzinfo=timezone.utc),
+    )
+    check(
+        "rd docker ghcr",  # ghcr.io -> GitHub Releases, never Docker Hub
+        rd("docker", "ghcr.io/astral-sh/uv", "0.11.28",
+           http_get=boom_http,
+           gh_get=gh_stub({"repos/astral-sh/uv/releases/tags/0.11.28": {"published_at": "2026-07-07T23:14:13Z"}})),
+        datetime(2026, 7, 7, 23, 14, 13, tzinfo=timezone.utc),
+    )
+
+    # An unsupported registry fails closed rather than fabricating a URL.
+    try:
+        parse_docker_ref("quay.io/prometheus/busybox")
+        failures.append("quay.io: expected CooldownError, got none")
+    except CooldownError:
+        pass
 
     # Cooldown message.
     released = datetime(2026, 7, 20, 0, 0, tzinfo=timezone.utc)
