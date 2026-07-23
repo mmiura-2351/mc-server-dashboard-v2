@@ -25,10 +25,13 @@ describe("lifecycleErrorMessage", () => {
     "transition_conflict",
     "command_failed",
     "server_not_running",
-  ])("gives an unknown 409 reason (%s) the state-changed treatment", (reason) => {
-    const error = new ApiError(409, { reason });
-    expect(lifecycleErrorMessage(error)).toBe("dashboard.stateChanged");
-  });
+  ])(
+    "gives an unknown 409 reason (%s) the state-changed treatment",
+    (reason) => {
+      const error = new ApiError(409, { reason });
+      expect(lifecycleErrorMessage(error)).toBe("dashboard.stateChanged");
+    },
+  );
 
   it("treats a 409 with no reason as state-changed", () => {
     const error = new ApiError(409, undefined);
