@@ -9389,7 +9389,7 @@
         "summary": "Unassign Resource Pack"
       },
       "get": {
-        "description": "Get the resource pack assignment for a server (server:read, issue #1177).",
+        "description": "Get the resource pack assignment for a server (server:read, issue #1177).\n\n\"No pack assigned\" is a normal state of a valid server, so it returns 200\nwith a null body rather than 404; 404 is reserved for an unknown or\nforbidden server (issue #2238).",
         "operationId": "get_resource_pack_assignment_api_communities__community_id__servers__server_id__resource_pack_get",
         "parameters": [
           {
@@ -9418,7 +9418,15 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ResourcePackAssignmentResponse"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ResourcePackAssignmentResponse"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Response Get Resource Pack Assignment Api Communities  Community Id  Servers  Server Id  Resource Pack Get"
                 }
               }
             },

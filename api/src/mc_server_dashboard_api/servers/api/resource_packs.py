@@ -492,8 +492,13 @@ async def get_resource_pack_assignment(
         GetResourcePackAssignment, Depends(get_get_resource_pack_assignment)
     ],
     base_url: Annotated[str, Depends(_public_base_url)],
-) -> ResourcePackAssignmentResponse:
-    """Get the resource pack assignment for a server (server:read, issue #1177)."""
+) -> ResourcePackAssignmentResponse | None:
+    """Get the resource pack assignment for a server (server:read, issue #1177).
+
+    "No pack assigned" is a normal state of a valid server, so it returns 200
+    with a null body rather than 404; 404 is reserved for an unknown or
+    forbidden server (issue #2238).
+    """
 
     from mc_server_dashboard_api.servers.domain.value_objects import (
         CommunityId,
@@ -509,7 +514,7 @@ async def get_resource_pack_assignment(
         raise _not_found() from exc
 
     if result is None:
-        raise _not_found()
+        return None
 
     assignment, pack = result
 

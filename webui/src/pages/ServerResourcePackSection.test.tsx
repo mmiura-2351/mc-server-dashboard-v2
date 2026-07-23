@@ -97,9 +97,7 @@ function routeGet(
   const packs = opts.packs ?? [PACK];
   mockApi.get.mockImplementation((path: string) => {
     if (path.endsWith("/resource-pack")) {
-      if (assignment === null) {
-        return Promise.reject(new ApiError(404, { reason: "not_found" }));
-      }
+      // "No pack assigned" is a 200 with a null body, not a 404 (issue #2238).
       return Promise.resolve(assignment);
     }
     if (path === "/api/resource-packs") {
