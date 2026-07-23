@@ -412,6 +412,20 @@ class PluginCacheGcSettings(_Section):
     interval_seconds: int = Field(default=86400, gt=0)
 
 
+class StorageSweepSettings(_Section):
+    """Crash-recovery storage sweep cadence (issue #2252).
+
+    The sweep is the backend-agnostic GC of orphan staging/snapshot prefixes
+    plus orphan in-progress multipart aborts (STORAGE.md Section 4.3). It ran
+    only once at startup; on an interval it bounds accumulation without a
+    restart. ``interval_seconds`` is how often the loop wakes to sweep; a daily
+    default matches the sibling GC loops and keeps the loop cold, so overlap
+    with a live publish stays rare. Runs for both backends unconditionally.
+    """
+
+    interval_seconds: int = Field(default=86400, gt=0)
+
+
 class PortsSettings(_Section):
     """Game-port range for create-time auto-assignment (issue #243).
 
@@ -775,6 +789,7 @@ class Settings(BaseSettings):
     plugin_cache_gc: PluginCacheGcSettings = Field(
         default_factory=PluginCacheGcSettings
     )
+    storage_sweep: StorageSweepSettings = Field(default_factory=StorageSweepSettings)
     ports: PortsSettings = Field(default_factory=PortsSettings)
     memory_limit: MemoryLimitSettings = Field(default_factory=MemoryLimitSettings)
     webui: WebuiSettings = Field(default_factory=WebuiSettings)
@@ -835,6 +850,7 @@ class Settings(BaseSettings):
             "reconciler": self.reconciler.model_dump(),
             "jar_gc": self.jar_gc.model_dump(),
             "plugin_cache_gc": self.plugin_cache_gc.model_dump(),
+            "storage_sweep": self.storage_sweep.model_dump(),
             "ports": self.ports.model_dump(),
             "memory_limit": self.memory_limit.model_dump(),
             "webui": self.webui.model_dump(),
