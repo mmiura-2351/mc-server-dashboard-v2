@@ -195,6 +195,9 @@ from mc_server_dashboard_api.storage.adapters.object_client import (
     make_s3_client_factory,
 )
 from mc_server_dashboard_api.storage.adapters.object_store import ObjectStorage
+from mc_server_dashboard_api.storage.adapters.sweep_loop import (
+    run_storage_sweep_loop,
+)
 from mc_server_dashboard_api.versions.adapters.clock import (
     SystemClock as VersionsSystemClock,
 )
@@ -740,6 +743,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         reconciler_task: asyncio.Task[None] | None = None
         jar_gc_task: asyncio.Task[None] | None = None
         plugin_cache_gc_task: asyncio.Task[None] | None = None
+        storage_sweep_task: asyncio.Task[None] | None = None
         session_prune_task: asyncio.Task[None] | None = None
         # Periodic login_attempt prune (SECURITY.md Section 3). Ungated on the
         # control plane: unlike the snapshot/backup loops it drives only the
@@ -1105,6 +1109,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
             )
             logging.getLogger(__name__).info("plugin-cache GC started")
+        # Run the crash-recovery storage sweep on an interval (issue #2252), not
+        # just the one-shot startup sweep above. Started unconditionally for both
+        # backends — like the startup sweep, and NOT gated on control.enabled —
+        # so orphan staging/snapshot prefixes and orphan in-progress multipart
+        # parts are reclaimed without a restart. Dispatched sync/async by the
+        # loop exactly as the startup hook does.
+        storage_sweep_task = asyncio.create_task(
+            run_storage_sweep_loop(
+                storage.sweep,
+                tick_seconds=settings.storage_sweep.interval_seconds,
+            )
+        )
+        logging.getLogger(__name__).info("storage sweep loop started")
         try:
             yield
         finally:
@@ -1115,6 +1132,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 session_prune_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await session_prune_task
+            if storage_sweep_task is not None:
+                storage_sweep_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await storage_sweep_task
             if plugin_cache_gc_task is not None:
                 plugin_cache_gc_task.cancel()
                 with suppress(asyncio.CancelledError):
