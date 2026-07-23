@@ -16,6 +16,7 @@ from mc_server_dashboard_api.servers.adapters.modrinth_catalog import (
     _ALLOWED_DOWNLOAD_HOSTS,
     _MAX_JSON_BYTES,
     _MAX_REDIRECTS,
+    _TEAM_OWNER_CACHE,
     ModrinthCatalog,
 )
 from mc_server_dashboard_api.servers.domain.errors import CatalogUnavailableError
@@ -475,6 +476,90 @@ async def test_get_project_author_is_none_not_team_id() -> None:
         httpx2.AsyncClient.__init__ = real_init  # type: ignore[method-assign]
 
     assert project.author is None
+
+
+async def test_get_project_resolves_author_from_team_owner() -> None:
+    """get_project resolves author to the team owner's username (issue #2163)."""
+
+    def _handler(request: httpx2.Request) -> httpx2.Response:
+        url = str(request.url)
+        if "/team/" in url and url.endswith("/members"):
+            return httpx2.Response(
+                200,
+                content=b'[{"role":"Member","user":{"username":"helper"}},'
+                b'{"role":"Owner","user":{"username":"jellysquid3"}}]',
+            )
+        return httpx2.Response(
+            200,
+            content=b'{"id":"abc","slug":"sodium","title":"Sodium",'
+            b'"team":"team-resolve-1","description":"","body":""}',
+        )
+
+    transport = httpx2.MockTransport(_handler)
+    catalog = ModrinthCatalog(base_url="https://api.modrinth.com/v2")
+    _TEAM_OWNER_CACHE.clear()
+
+    real_init = httpx2.AsyncClient.__init__
+
+    def patched_init(self_client: httpx2.AsyncClient, **kwargs: Any) -> None:
+        kwargs["transport"] = transport
+        real_init(self_client, **kwargs)
+
+    httpx2.AsyncClient.__init__ = patched_init  # type: ignore[assignment]
+    try:
+        project = await catalog.get_project("sodium")
+    finally:
+        httpx2.AsyncClient.__init__ = real_init  # type: ignore[method-assign]
+
+    assert project.author == "jellysquid3"
+
+
+async def test_get_project_caches_team_owner_resolution() -> None:
+    """The team owner is resolved once and reused across get_project calls.
+
+    A fresh adapter instance per call still hits the cache (issue #2163): the
+    members endpoint is queried only once for the same team.
+    """
+    members_calls = 0
+
+    def _handler(request: httpx2.Request) -> httpx2.Response:
+        nonlocal members_calls
+        url = str(request.url)
+        if "/team/" in url and url.endswith("/members"):
+            members_calls += 1
+            return httpx2.Response(
+                200,
+                content=b'[{"role":"Owner","user":{"username":"owner-x"}}]',
+            )
+        return httpx2.Response(
+            200,
+            content=b'{"id":"abc","slug":"proj","title":"Proj",'
+            b'"team":"team-cache-1","description":"","body":""}',
+        )
+
+    transport = httpx2.MockTransport(_handler)
+    _TEAM_OWNER_CACHE.clear()
+
+    real_init = httpx2.AsyncClient.__init__
+
+    def patched_init(self_client: httpx2.AsyncClient, **kwargs: Any) -> None:
+        kwargs["transport"] = transport
+        real_init(self_client, **kwargs)
+
+    httpx2.AsyncClient.__init__ = patched_init  # type: ignore[assignment]
+    try:
+        first = await ModrinthCatalog(
+            base_url="https://api.modrinth.com/v2"
+        ).get_project("proj")
+        second = await ModrinthCatalog(
+            base_url="https://api.modrinth.com/v2"
+        ).get_project("proj")
+    finally:
+        httpx2.AsyncClient.__init__ = real_init  # type: ignore[method-assign]
+
+    assert first.author == "owner-x"
+    assert second.author == "owner-x"
+    assert members_calls == 1
 
 
 async def test_list_versions_encodes_slug_in_url_path() -> None:

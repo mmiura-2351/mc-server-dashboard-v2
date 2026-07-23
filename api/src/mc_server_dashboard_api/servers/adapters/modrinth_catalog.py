@@ -49,6 +49,11 @@ _ALLOWED_DOWNLOAD_HOSTS = frozenset(
     }
 )
 
+# Resolved team-owner usernames, keyed by opaque Modrinth team ID (issue #2163).
+# Team membership rarely changes, so a project's author is resolved once and
+# reused across requests (each request builds a fresh adapter instance).
+_TEAM_OWNER_CACHE: dict[str, str] = {}
+
 
 class ModrinthCatalog(CatalogProvider):
     """Modrinth API v2 implementation of :class:`CatalogProvider`."""
@@ -103,6 +108,7 @@ class ModrinthCatalog(CatalogProvider):
 
     async def get_project(self, project_id_or_slug: str) -> CatalogProject:
         data = await self._get_json(f"/project/{quote(project_id_or_slug, safe='')}")
+        author = await self._resolve_author(data.get("team"))
         with wrap_shape_errors("modrinth"):
             return CatalogProject(
                 project_id=data["id"],
@@ -110,7 +116,7 @@ class ModrinthCatalog(CatalogProvider):
                 title=data.get("title", ""),
                 description=data.get("description", ""),
                 body=data.get("body", ""),
-                author=None,
+                author=author,
                 icon_url=data.get("icon_url"),
                 downloads=data.get("downloads", 0),
                 categories=data.get("categories", []),
@@ -185,6 +191,44 @@ class ModrinthCatalog(CatalogProvider):
             raise CatalogUnavailableError(str(exc)) from exc
 
     # -- internal helpers --
+
+    async def _resolve_author(self, team_id: str | None) -> str | None:
+        """Resolve a project's author to its team owner's username (issue #2163).
+
+        A Modrinth project object carries only an opaque ``team`` ID, while
+        search results expose the owner's username. Look it up via the team
+        members endpoint and cache the result so repeated views do not incur
+        an extra API call. Author is cosmetic metadata, so any lookup failure
+        falls back to ``None`` rather than failing the whole request.
+        """
+        if not team_id:
+            return None
+        cached = _TEAM_OWNER_CACHE.get(team_id)
+        if cached is not None:
+            return cached
+        try:
+            members = await self._get_json(f"/team/{quote(team_id, safe='')}/members")
+        except (CatalogProjectNotFoundError, CatalogUnavailableError):
+            return None
+        owner = self._owner_username(members)
+        if owner is not None:
+            _TEAM_OWNER_CACHE[team_id] = owner
+        return owner
+
+    @staticmethod
+    def _owner_username(members: Any) -> str | None:
+        """Return the username of the member with the ``Owner`` role, if any."""
+        if not isinstance(members, list):
+            return None
+        for member in members:
+            if not isinstance(member, dict) or member.get("role") != "Owner":
+                continue
+            user = member.get("user")
+            if isinstance(user, dict):
+                username = user.get("username")
+                if isinstance(username, str) and username:
+                    return username
+        return None
 
     async def _get_json(
         self, path: str, *, params: dict[str, str | int] | None = None
