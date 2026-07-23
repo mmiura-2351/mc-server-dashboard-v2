@@ -420,6 +420,19 @@ the poll cadence; the schedules themselves are per-server rows.
 |---|---|---|---|
 | `schedule.tick_seconds` | `20` | | Loop resolution of the scheduler runner: how often it wakes to poll `next_run_at` over enabled schedules. Fine because a schedule can fire as often as every minute (the domain interval floor), and it must stay well under the runner's fixed 300 s late-run grace so an on-time occurrence is never judged stale. Must be positive and at most 300 (the grace itself): a coarser tick would render every non-backup occurrence perpetually stale, never executed. Player warnings on stop/restart schedules (issue #1839) key off this cadence too: their send grace is derived as max(60 s, `tick_seconds`), so warnings are reliable whenever the tick is at most 60. With a coarser tick a warning fires up to one tick late (always strictly before the action), and a warning offset smaller than the tick may be skipped entirely — logged, never silent. |
 
+### 5.15 Crash-recovery storage sweep
+
+The API runs the backend-agnostic crash-recovery sweep — GC of orphan
+staging/snapshot prefixes plus orphan in-progress multipart aborts (STORAGE.md
+Section 4.3) — on an interval, not just once at startup (issue #2252). Started
+**unconditionally** for both storage backends (not gated on the control plane),
+mirroring the one-shot startup sweep. A daily default keeps the loop cold so
+overlap with a live publish stays rare.
+
+| Key | Default | Secret | Meaning |
+|---|---|---|---|
+| `storage_sweep.interval_seconds` | `86400` | | Loop resolution: how often the sweep wakes to reclaim orphan staging/snapshot prefixes and abort orphan in-progress multipart uploads. A daily default matches the sibling GC loops and bounds accumulation without a restart. Must be positive. |
+
 ---
 
 ## 6. Worker configuration

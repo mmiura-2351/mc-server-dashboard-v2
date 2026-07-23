@@ -29,6 +29,8 @@ def test_defaults_apply_when_only_required_supplied(
     assert settings.log.format == "json"
     # JAR-pool GC defaults to daily (issue #293).
     assert settings.jar_gc.interval_seconds == 86400
+    # Crash-recovery storage sweep defaults to daily (issue #2252).
+    assert settings.storage_sweep.interval_seconds == 86400
     # The graceful-stop worker round-trip gets its own generous budget (#930),
     # mirroring the hydrate (#822) and final-snapshot (#847) budgets, so a slow
     # host's stop does not time out under the general 30s command deadline.
@@ -277,6 +279,7 @@ def test_token_ttl_must_be_positive(
         ("reconciler", "backoff_base_seconds", 0),
         ("reconciler", "backoff_max_seconds", 0),
         ("jar_gc", "interval_seconds", 0),
+        ("storage_sweep", "interval_seconds", 0),
     ],
 )
 def test_numeric_setting_rejects_out_of_range(
@@ -1123,6 +1126,25 @@ def test_masked_dump_includes_plugin_cache_gc_section(
     settings = load_settings(config_file=None)
     dump = settings.masked_dump()
     assert dump["plugin_cache_gc"]["interval_seconds"] == 86400
+
+
+def test_masked_dump_includes_storage_sweep_section(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    monkeypatch.setenv("MCD_API_STORAGE_SWEEP__INTERVAL_SECONDS", "3600")
+    settings = load_settings(config_file=None)
+    dump = settings.masked_dump()
+    assert dump["storage_sweep"]["interval_seconds"] == 3600
+
+
+def test_storage_sweep_rejects_unknown_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(tmp_path, "[storage_sweep]\nbogus_key = 1\n")
+    with pytest.raises(ValueError):
+        load_settings(config_file=cfg)
 
 
 def test_masked_dump_database_includes_pool_fields(
