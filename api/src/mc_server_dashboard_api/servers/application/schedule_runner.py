@@ -490,20 +490,23 @@ class RunScheduleTick:
     async def _prune_after_backup(
         self, schedule: Schedule, result: ActionResult
     ) -> None:
-        """Prune per the retention policy after a successful backup run (#1841).
+        """Prune per the retention policy after a backup run acted (#1841, #2253).
 
-        Fires only for a ``backup`` action that succeeded (never on a skip or
-        failure — nothing new was archived). Isolated: a prune error is logged
-        and swallowed so it cannot turn the successful backup run into a
-        failure, and nothing is emitted on the notification stream for prune
-        (owner spec: notifications are for run failures only). What was pruned
-        is logged and audited inside :class:`PruneScheduledBackups`.
+        Fires for a ``backup`` action that SUCCEEDED **or** FAILED — never on a
+        skip (nothing acted). Pruning on failure keeps retention progressing
+        through a run of failures and frees space, which can help break a
+        disk-full failure cycle (the 2026-07-23 incident, #2253): a stretch of
+        failures must not halt retention. Isolated: a prune error is logged and
+        swallowed so it cannot change the recorded run outcome, and nothing is
+        emitted on the notification stream for prune (owner spec: notifications
+        are for run failures only). What was pruned is logged and audited inside
+        :class:`PruneScheduledBackups`.
         """
 
         if (
             self.prune_backups is None
             or schedule.action is not ScheduleAction.BACKUP
-            or result.outcome is not ScheduleRunOutcome.SUCCESS
+            or result.outcome is ScheduleRunOutcome.SKIPPED
             or result.community_id is None
         ):
             return
