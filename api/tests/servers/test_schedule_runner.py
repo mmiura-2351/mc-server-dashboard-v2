@@ -415,6 +415,106 @@ async def test_unexpected_exception_is_classified_as_failure() -> None:
     assert stored.next_run_at is not None and stored.next_run_at > _NOW
 
 
+def _run_details(env: _Env, schedule: Schedule) -> list[str | None]:
+    return [
+        run.detail
+        for run in env.uow.schedule_runs.rows
+        if run.schedule_id == schedule.id
+    ]
+
+
+class _StorageTimeoutBackupStore(FakeBackupArchiveStore):
+    """Raises a botocore read timeout mid-archive (the storage-timeout case)."""
+
+    async def create_from_current(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> None:
+        from botocore.exceptions import ReadTimeoutError
+
+        raise ReadTimeoutError(endpoint_url="http://seaweedfs:8333/bucket/key")
+
+
+class _StorageInternalErrorBackupStore(FakeBackupArchiveStore):
+    """Raises a botocore ClientError 500 mid-archive (the SeaweedFS disk-full case)."""
+
+    async def create_from_current(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> None:
+        from botocore.exceptions import ClientError
+
+        raise ClientError(
+            {"Error": {"Code": "InternalError", "Message": "s3://bucket/secret-key"}},
+            "UploadPart",
+        )
+
+
+class _CorruptBackupStore(FakeBackupArchiveStore):
+    """Raises BackupCorruptError mid-archive (the corrupt-working-set refusal)."""
+
+    async def create_from_current(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> None:
+        from mc_server_dashboard_api.servers.domain.errors import BackupCorruptError
+
+        raise BackupCorruptError(str(server_id.value), corrupt_count=2)
+
+
+async def test_backup_storage_timeout_records_distinguishable_detail() -> None:
+    env = _env(backup_store=_StorageTimeoutBackupStore())
+    server = _stopped_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
+    assert _run_details(env, schedule) == ["storage timeout"]
+
+
+async def test_backup_storage_internal_error_records_sanitized_detail() -> None:
+    env = _env(backup_store=_StorageInternalErrorBackupStore())
+    server = _stopped_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
+    detail = _run_details(env, schedule)[0]
+    # A distinguishable storage-backend category, not the generic fallback, and
+    # never the raw endpoint/key that the botocore message carries.
+    assert detail == "storage error"
+    assert "bucket" not in (detail or "")
+    assert "secret-key" not in (detail or "")
+
+
+async def test_corrupt_backup_records_backup_corrupt_detail() -> None:
+    env = _env(backup_store=_CorruptBackupStore())
+    server = _stopped_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
+    assert _run_details(env, schedule) == ["backup corrupt"]
+
+
 async def test_advance_does_not_resurrect_a_concurrently_disabled_schedule() -> None:
     env = _env()
     server = _running_server()

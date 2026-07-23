@@ -85,6 +85,7 @@ from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.control_plane import WorkerUnavailableError
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
+    BackupCorruptError,
     BackupUnsettledError,
     CommandDispatchError,
     InvalidLifecycleTransitionError,
@@ -223,7 +224,42 @@ def _failure_detail(exc: ServerError) -> str:
         return "worker unavailable"
     if isinstance(exc, NoEligibleWorkerError):
         return "no eligible worker"
+    if isinstance(exc, BackupCorruptError):
+        return "backup corrupt"
     return "action failed"
+
+
+def _is_storage_backend_error(exc: BaseException) -> bool:
+    """Whether ``exc`` originates from the storage backend's S3 client (botocore).
+
+    Detected by module rather than an ``import`` so the servers application layer
+    keeps no dependency on the storage adapter's S3 library. Covers both
+    ``botocore`` and its async wrapper ``aiobotocore``.
+    """
+
+    return any(
+        cls.__module__.split(".", 1)[0] in ("botocore", "aiobotocore")
+        for cls in type(exc).__mro__
+    )
+
+
+def _unexpected_detail(exc: BaseException) -> str:
+    """Sanitized category for a non-``ServerError`` raised mid-execution (#2248).
+
+    The backup seam only translates NotFound/IntegrityCheck; a raw storage-backend
+    fault propagates here — a botocore read/connect timeout, or a 5xx like the
+    SeaweedFS disk-full ``InternalError`` on ``UploadPart`` (the 2026-07-23 prod
+    incident). Return a short, secret-free category so the dashboard can tell a
+    storage timeout from a storage-backend error from any other fault; never an
+    endpoint URL, key, or bucket path (those ride the botocore message, which stays
+    in the traceback logged separately). Anything unrecognized falls back to the
+    exception's class name — itself a safe, stable category.
+    """
+
+    if _is_storage_backend_error(exc):
+        name = type(exc).__name__
+        return "storage timeout" if "Timeout" in name else "storage error"
+    return type(exc).__name__
 
 
 @dataclass(frozen=True)
@@ -287,21 +323,23 @@ class ExecuteScheduleAction:
             return ActionResult(
                 ScheduleRunOutcome.FAILURE, _failure_detail(exc), community_id
             )
-        except Exception:  # noqa: BLE001 - every execution error is a run outcome
+        except Exception as exc:  # noqa: BLE001 - every execution error is a run outcome
             # An unexpected error (a Storage/OS failure mid-archive, a DB error
             # inside the use case) is still a *failure of this occurrence*: it
             # must produce a run row + audit + notification and let next_run_at
             # advance like any other failure. Letting it escape would bypass the
             # taxonomy and re-execute the occurrence every tick (no tick-level
             # retry exists by design). The traceback is logged here; the recorded
-            # detail stays a sanitized category.
+            # detail stays a sanitized category derived from the exception type
+            # (#2248) so a storage timeout / backend error is distinguishable on
+            # the dashboard without leaking secrets or paths.
             _LOG.exception(
                 "scheduled %s for server %s raised unexpectedly",
                 action.value,
                 server_id.value,
             )
             return ActionResult(
-                ScheduleRunOutcome.FAILURE, "action failed", community_id
+                ScheduleRunOutcome.FAILURE, _unexpected_detail(exc), community_id
             )
         return ActionResult(ScheduleRunOutcome.SUCCESS, None, community_id)
 
