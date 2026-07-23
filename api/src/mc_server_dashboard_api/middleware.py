@@ -81,6 +81,7 @@ _DOCS_CSP = (
     f"script-src 'self' '{SWAGGER_INIT_SCRIPT_CSP_HASH}'; "
     "style-src 'self' 'unsafe-inline'; "
     "img-src 'self' data:; "
+    "worker-src 'self' blob:; "
     "frame-ancestors 'none'"
 )
 
