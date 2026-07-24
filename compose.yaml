@@ -107,7 +107,15 @@ services:
         mkdir -p /etc/seaweedfs
         printf '{"identities":[{"name":"mcsd","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Admin","Read","Write","List","Tagging"]}]}' \
           "$$MCD_API_STORAGE__OBJECT__ACCESS_KEY" "$$MCD_API_STORAGE__OBJECT__SECRET_KEY" > /etc/seaweedfs/s3.json
-        exec weed server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json
+        # -master.garbageThreshold=0.1 lowers SeaweedFS's vacuum trigger from its
+        # 0.3 default so the built-in periodic auto-vacuum reclaims garbage earlier —
+        # before compaction loses the free-disk headroom it needs to write the
+        # compacted volume (2026-07-23 incident: garbage was ~63%, already above the
+        # 0.3 default, yet the host still spiraled to 97%). This workload's
+        # write-heavy CopyObject/multipart snapshot churn favors more frequent,
+        # smaller compactions (docs/dev/DEPLOYMENT.md Section 5, "Vacuum tuning and
+        # manual recovery").
+        exec weed server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json -master.garbageThreshold=0.1
     environment:
       # `:-` (empty default), NOT `:?`: compose interpolates a service's env even
       # when its profile is inactive, so a `:?` here would break the fs opt-out

@@ -318,6 +318,37 @@ cd api && MCD_TEST_S3_ENDPOINT=http://localhost:8333 \
 docker rm -f swfs-test
 ```
 
+### Vacuum tuning and manual recovery
+
+SeaweedFS reclaims the space left behind by overwrites and deletes (every
+snapshot's CopyObject churn and pointer overwrites generate this garbage) by
+**vacuuming** — compacting a volume into a fresh copy that drops the dead data.
+A built-in vacuum runs periodically and fires only once a volume's garbage ratio
+crosses `-master.garbageThreshold`. `compose.yaml` sets this to **`0.1`** (10%),
+down from SeaweedFS's `0.3` (30%) default, so compaction kicks in earlier and
+runs more often against smaller amounts of garbage.
+
+The lower threshold is a response to the 2026-07-23 incident: garbage had reached
+~63% — already well above the `0.3` default — yet the host still spiraled to 97%
+disk. Compaction is not free space, it *needs* free space: it writes the
+compacted volume alongside the original before swapping, so once headroom is gone
+the auto-vacuum can no longer complete. Triggering it earlier (at 10%) keeps the
+garbage — and the peak disk needed to compact it — small enough that headroom is
+always available.
+
+If a deployment has already run out of headroom and the auto-vacuum can no longer
+keep up, reclaim space **on demand** from the SeaweedFS shell:
+
+```sh
+docker compose exec seaweedfs weed shell
+> volume.vacuum -garbageThreshold=0.1
+```
+
+This forces a vacuum pass immediately instead of waiting for the next periodic
+run. It is an **incident-recovery lever, not a second scheduled mechanism** — the
+`-master.garbageThreshold=0.1` flag already handles the steady state; run
+`volume.vacuum` only to recover a store that has fallen behind.
+
 ## 6. First-run bootstrap (create the platform admin)
 
 There is no seeded admin and **no manual database step**. The first user
