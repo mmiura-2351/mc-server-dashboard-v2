@@ -37,13 +37,13 @@ import (
 	"syscall"
 )
 
-// generationMarkerFile is the Worker-private marker at the scratch root recording
-// the local working-set generation (issue #763). THIS ADAPTER writes it on the 200
-// hydrate path: unpackAndSwap puts it into the temp tree before the swap-in rename so
-// it is atomic with the new destDir (issue #917). That write is a correctness
-// dependency, not a corrective touch-up — a destDir carrying no marker reads as
-// generation 0, so the API re-dispatches hydrate and the retry's displacement would
-// destroy the recovery copy. The instance manager's writeGeneration still covers the
+// generationMarkerFile is the Worker-private marker at the working-set root (inside
+// scratchDir/<id>, NOT its parent) recording the local generation (issue #763). THIS
+// ADAPTER writes it on the 200 hydrate path: unpackAndSwap puts it into the temp tree
+// before the swap-in rename so it is atomic with the new destDir (issue #917). That
+// write is a correctness dependency, not a corrective touch-up — a destDir with no
+// marker reads as generation 0, so the API re-dispatches hydrate and the retry's
+// displacement would destroy the recovery copy. writeGeneration still covers the
 // 204 and snapshot paths (and is idempotent on the 200 path). The marker is excluded
 // from a snapshot pack so this Worker-private state never lands in the authoritative
 // stored working set (and is never re-hydrated to another Worker or the live
@@ -382,10 +382,12 @@ func unpackAndSwap(r io.Reader, destDir string, gen uint64) error {
 	// sweepable temp name; if the swap fails the prior displaced is reinstated. This
 	// prevents a swap failure from leaving no recovery copy at all.
 	//
-	// Disk cost of that deferral: at the swap moment the scratch volume holds up to
-	// THREE world-sized copies of this one server at once — the unpacked temp tree, the
-	// displaced live set, and the prior displaced parked aside — where the pre-deferral
-	// code held two. Scratch capacity planning must budget for the third copy.
+	// Disk cost of that deferral: THREE world-sized copies of this one server — the
+	// unpacked temp tree, the displaced live set, and the prior displaced parked aside —
+	// are now live ACROSS the swap. The pre-deferral code also transiently reached three
+	// (it deleted the prior displaced only after the temp tree was built), but freed the
+	// third before the renames; scratch capacity planning must now budget for it through
+	// swap completion.
 	displaced := displacedDir(destDir)
 	swapped := false
 	priorAside := "" // non-empty when a prior displaced tree was parked aside

@@ -623,6 +623,12 @@ server. Note: the issue #924 scratch reclaim (`ReclaimDeletedScratches`)
 intentionally does **not** reclaim `.displaced-<id>` trees — only the scratch dir
 and `.hydrate-<id>-*` leftovers.
 
+**Scratch capacity.** A hydrate that displaces a live working set holds up to three
+world-sized copies of the same server at once — the unpacked temp tree, the displaced
+live set, and a prior `.displaced-<id>` kept parked aside until the swap-in succeeds
+(#917) — so size `worker.scratch_dir` for 3× the largest world it hosts, on top of any
+retained displaced trees.
+
 **Boot detection.** At Worker boot, after the held-server scan,
 `WarnOrphanDisplacedTrees` logs a `WARN` for each `.displaced-<id>` tree whose
 server id is **not** in the held-server set. A tree is "assigned" (not logged) if
@@ -700,6 +706,21 @@ genuinely torn new scratch is refused and the displaced tree is retained until a
 clean snapshot lands. This sequence is a non-regression micro-edge: the recovery
 insurance (`sweepDisplaced` only on success) and the integrity gate together keep
 the displaced tree alive exactly as long as it is needed.
+
+A second, narrower edge is accepted in the same spirit (#917). A running-id snapshot
+takes no per-server reservation, so the success that triggers `sweepDisplaced` for S
+may belong to an **older, already-dropped Worker stream** rather than to the stream
+that currently owns S — and the tree it removes may be one a NEW stream's re-placement
+hydrate has just created. The exposed window is small (the dropped stream's upload is
+cancelled with its stream, so only the brief post-upload tail can still sweep), but
+when it happens the removed tree is not redundant: it holds the published state **plus**
+whatever the world progressed since that snapshot's *pack* — auto-save resumes before
+the upload, and the racing stop's shutdown save lands after it. The store still holds a
+real generation of the world, so the server itself recovers by re-hydrating; the loss is
+bounded to that delta. Practical consequence for operators: a `.displaced-<id>` tree can
+occasionally disappear without a snapshot of the *current* stream having succeeded, so
+recover from a displaced tree you care about promptly (the procedure above) rather than
+leaving it in place indefinitely.
 
 ---
 
