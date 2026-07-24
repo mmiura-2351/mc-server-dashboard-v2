@@ -87,6 +87,32 @@ func TestScanHeldServersReportsNonEmptyDirsWithGeneration(t *testing.T) {
 	}
 }
 
+// TestScanHeldServersSkipsGenerationMarkerTempLeftover verifies a scratch dir whose
+// only content is a ".mcsd_generation-XXXXXX" temp leftover is NOT reported as held
+// (issue #2279). writeGeneration writes the marker atomically via such a temp sibling
+// + rename, so a crash before the rename leaves one behind in an otherwise-EMPTY
+// scratch; an exact-name marker comparison reads that leftover as a real working set
+// and makes the Worker advertise holding a world it does not hold.
+func TestScanHeldServersSkipsGenerationMarkerTempLeftover(t *testing.T) {
+	scratch := t.TempDir()
+
+	// A scratch dir holding ONLY a crashed-writeGeneration temp sibling -> skipped.
+	leftover := filepath.Join(scratch, "leftover-server")
+	if err := os.MkdirAll(leftover, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(leftover, generationFile+"-123456"), []byte("7"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := ScanHeldServers(scratch, nil); len(got) != 0 {
+		t.Fatalf("ScanHeldServers = %v, want empty (only a generation-marker temp leftover)", got)
+	}
+	if got := New(nil, scratch, nil).HeldServers(); len(got) != 0 {
+		t.Fatalf("HeldServers = %v, want empty (only a generation-marker temp leftover)", got)
+	}
+}
+
 // TestScanHeldServersMissingScratchRoot verifies an absent scratch root yields an
 // empty list (a fresh Worker holds nothing), not a panic or error.
 func TestScanHeldServersMissingScratchRoot(t *testing.T) {

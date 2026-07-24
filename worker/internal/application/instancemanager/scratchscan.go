@@ -193,13 +193,22 @@ func WarnOrphanDisplacedTrees(scratchDir string, held []session.HeldServer, log 
 // hasWorkingSet reports whether workingDir holds a real working set: at least one
 // child that is NOT the generation marker. A dir holding only the marker (or no
 // children, or unreadable) holds no working set.
+//
+// The marker match is by PREFIX, not exact name (issue #2279), the same convention
+// the snapshot pack path applies for the same reason (issue #834): writeGeneration
+// writes the marker atomically via a ".mcsd_generation-XXXX" temp sibling + rename,
+// so a crash before the rename leaves such a temp in the scratch dir. An exact-name
+// comparison would read that leftover as a working set and make the Worker advertise
+// holding a world it does not hold. Only the marker and its temp siblings live
+// directly under workingDir, so the prefix cannot mask a real world file (the scan
+// does not recurse).
 func hasWorkingSet(workingDir string) bool {
 	children, err := os.ReadDir(workingDir)
 	if err != nil {
 		return false
 	}
 	for _, child := range children {
-		if child.Name() != generationFile {
+		if !strings.HasPrefix(child.Name(), generationFile) {
 			return true
 		}
 	}
