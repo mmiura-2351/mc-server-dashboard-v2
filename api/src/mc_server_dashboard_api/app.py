@@ -284,6 +284,9 @@ def _build_storage(settings: Settings) -> FsStorage | ObjectStorage:
             bucket=obj.bucket,
             access_key=obj.access_key,
             secret_key=obj.secret_key,
+            connect_timeout=obj.connect_timeout_seconds,
+            read_timeout=obj.read_timeout_seconds,
+            retry_max_attempts=obj.retry_max_attempts,
         ),
         version_retention=settings.storage.version_retention,
     )
@@ -312,6 +315,9 @@ def _build_resource_pack_store(
             bucket=obj.bucket,
             access_key=obj.access_key,
             secret_key=obj.secret_key,
+            connect_timeout=obj.connect_timeout_seconds,
+            read_timeout=obj.read_timeout_seconds,
+            retry_max_attempts=obj.retry_max_attempts,
         )
     )
 
@@ -339,6 +345,9 @@ def _build_plugin_cache_store(
             bucket=obj.bucket,
             access_key=obj.access_key,
             secret_key=obj.secret_key,
+            connect_timeout=obj.connect_timeout_seconds,
+            read_timeout=obj.read_timeout_seconds,
+            retry_max_attempts=obj.retry_max_attempts,
         )
     )
 

@@ -228,6 +228,9 @@ it.
 | `storage.object.bucket` | — | | Object-store bucket/container. |
 | `storage.object.access_key` | — | secret | Object-store access key. |
 | `storage.object.secret_key` | — | secret | Object-store secret key. |
+| `storage.object.connect_timeout_seconds` | `10` | | Per-operation TCP connect timeout for the object-store client (STORAGE.md Section 7.3). Explicit so a stalled connect fails fast rather than inheriting botocore's hidden 60s default (issue #2249). Must be positive. |
+| `storage.object.read_timeout_seconds` | `60` | | Per-operation single-socket-read timeout for the object-store client. Bounds one streamed chunk, not a whole transfer, so a multi-GB hydrate/snapshot/backup is unaffected while a genuinely stalled read still fails within a known ceiling (issue #2249). Must be positive. |
+| `storage.object.retry_max_attempts` | `5` | | Total attempts (initial + retries) the object-store client makes per operation under botocore's `standard` retry mode. Replaces botocore's legacy retry defaults with capped exponential backoff (issue #2249). Must be at least 1 (`1` disables retries). |
 
 Only the keys for the selected `storage.backend` are read; the rest are ignored
 (Section 4). The authoritative per-backend key list and the atomic-snapshot

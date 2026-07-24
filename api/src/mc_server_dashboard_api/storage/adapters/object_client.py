@@ -21,6 +21,7 @@ from contextlib import asynccontextmanager, suppress
 from typing import Any
 
 import aioboto3
+import botocore.config
 from botocore.exceptions import ClientError
 
 from mc_server_dashboard_api.storage.adapters.object_store import (
@@ -302,22 +303,41 @@ async def _iter_body(body: Any) -> AsyncIterator[bytes]:
 
 
 def make_s3_client_factory(
-    *, endpoint: str, bucket: str, access_key: str, secret_key: str
+    *,
+    endpoint: str,
+    bucket: str,
+    access_key: str,
+    secret_key: str,
+    connect_timeout: float,
+    read_timeout: float,
+    retry_max_attempts: int,
 ) -> S3ClientFactory:
     """Build an :class:`S3ClientFactory` over an aioboto3 session.
 
     See STORAGE.md Section 7.3. Each returned context manager opens an S3 client
     against the configured S3-compatible endpoint and yields a bucket-scoped
     :class:`S3Client`.
+
+    The client is built with an explicit :class:`botocore.config.Config` so every
+    object operation runs against an operator-sized budget rather than botocore's
+    hidden defaults (60s connect/read + legacy retries): a stalled read then fails
+    within a known ceiling instead of silently hanging (issue #2249). The three
+    values are threaded from :class:`StorageObjectSettings`; ``retry_max_attempts``
+    is the total attempt count under the ``standard`` retry mode.
     """
 
+    config = botocore.config.Config(
+        connect_timeout=connect_timeout,
+        read_timeout=read_timeout,
+        retries={"mode": "standard", "max_attempts": retry_max_attempts},
+    )
     session = aioboto3.Session(
         aws_access_key_id=access_key, aws_secret_access_key=secret_key
     )
 
     @asynccontextmanager
     async def _factory() -> AsyncIterator[S3Client]:
-        async with session.client("s3", endpoint_url=endpoint) as client:
+        async with session.client("s3", endpoint_url=endpoint, config=config) as client:
             yield _Aioboto3S3Client(client, bucket)
 
     return _factory

@@ -717,6 +717,52 @@ def test_token_access_ttl_below_refresh_is_accepted(
     assert settings.auth.token.refresh_ttl_seconds == 901
 
 
+def test_storage_object_transport_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The object-store client's timeout/retry budget is explicit and operator-sized
+    # rather than botocore's hidden 60s + legacy-retry defaults (issue #2249).
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    settings = load_settings(config_file=None)
+    assert settings.storage.object.connect_timeout_seconds == 10.0
+    assert settings.storage.object.read_timeout_seconds == 60.0
+    assert settings.storage.object.retry_max_attempts == 5
+
+
+def test_storage_object_transport_from_toml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(
+        tmp_path,
+        "[storage.object]\n"
+        "connect_timeout_seconds = 5\n"
+        "read_timeout_seconds = 120\n"
+        "retry_max_attempts = 8\n",
+    )
+    settings = load_settings(config_file=cfg)
+    assert settings.storage.object.connect_timeout_seconds == 5.0
+    assert settings.storage.object.read_timeout_seconds == 120.0
+    assert settings.storage.object.retry_max_attempts == 8
+
+
+@pytest.mark.parametrize("field", ["connect_timeout_seconds", "read_timeout_seconds"])
+def test_storage_object_timeouts_must_be_positive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(tmp_path, f"[storage.object]\n{field} = 0\n")
+    with pytest.raises(ValidationError, match=field):
+        load_settings(config_file=cfg)
+
+
+def test_storage_object_retry_max_attempts_must_be_at_least_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(tmp_path, "[storage.object]\nretry_max_attempts = 0\n")
+    with pytest.raises(ValidationError, match="retry_max_attempts"):
+        load_settings(config_file=cfg)
+
+
 def test_ports_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
     settings = load_settings(config_file=None)

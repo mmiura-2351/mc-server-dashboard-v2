@@ -13,9 +13,13 @@ import datetime as dt
 from collections.abc import AsyncIterator
 
 import pytest
+from botocore.config import Config
 from botocore.exceptions import ClientError
 
-from mc_server_dashboard_api.storage.adapters.object_client import _Aioboto3S3Client
+from mc_server_dashboard_api.storage.adapters.object_client import (
+    _Aioboto3S3Client,
+    make_s3_client_factory,
+)
 from mc_server_dashboard_api.storage.domain.errors import NotFoundError
 
 
@@ -383,3 +387,61 @@ async def test_copy_object_translates_not_found(code: str) -> None:
     client = _Aioboto3S3Client(_CopyRaisingClient(code), "bucket")
     with pytest.raises(NotFoundError):
         await client.copy_object("src/key", "dst/key")
+
+
+# --- Explicit, settings-sourced timeouts + retries (issue #2249) -----------
+
+
+class _ConfigCapturingClientCtx:
+    async def __aenter__(self) -> object:
+        return object()
+
+    async def __aexit__(self, *_exc: object) -> bool:
+        return False
+
+
+class _ConfigCapturingSession:
+    """An ``aioboto3.Session`` double recording the ``config`` passed to ``client``.
+
+    The factory builds the ``botocore.config.Config`` from settings; capturing it
+    here proves the built client carries explicit timeouts/retries rather than
+    inheriting botocore's hidden 60s + legacy-retry defaults (issue #2249).
+    """
+
+    captured: dict[str, Config] = {}
+
+    def __init__(self, **_kwargs: object) -> None:
+        pass
+
+    def client(
+        self, _service: str, *, endpoint_url: str, config: Config
+    ) -> _ConfigCapturingClientCtx:
+        type(self).captured["config"] = config
+        return _ConfigCapturingClientCtx()
+
+
+async def test_factory_passes_settings_sourced_timeouts_and_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ConfigCapturingSession.captured = {}
+    monkeypatch.setattr(
+        "mc_server_dashboard_api.storage.adapters.object_client.aioboto3.Session",
+        _ConfigCapturingSession,
+    )
+
+    factory = make_s3_client_factory(
+        endpoint="http://localhost:8333",
+        bucket="bucket",
+        access_key="ak",
+        secret_key="sk",
+        connect_timeout=7.0,
+        read_timeout=42.0,
+        retry_max_attempts=3,
+    )
+    async with factory():
+        pass
+
+    config = _ConfigCapturingSession.captured["config"]
+    assert config.connect_timeout == 7.0
+    assert config.read_timeout == 42.0
+    assert config.retries == {"mode": "standard", "max_attempts": 3}
