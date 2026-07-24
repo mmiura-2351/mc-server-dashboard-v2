@@ -87,6 +87,53 @@ func TestScanHeldServersReportsNonEmptyDirsWithGeneration(t *testing.T) {
 	}
 }
 
+// TestScanHeldServersSkipsGenerationMarkerTempLeftover verifies a scratch dir whose
+// only content is a ".mcsd_generation-XXXXXX" temp leftover is NOT reported as held
+// (issue #2279). writeGeneration writes the marker atomically via such a temp sibling
+// + rename, so a crash before the rename leaves one behind in an otherwise-EMPTY
+// scratch; an exact-name marker comparison reads that leftover as a real working set
+// and makes the Worker advertise holding a world it does not hold.
+//
+// The same fixture pins the opposite direction: the identical leftover NEXT TO real
+// world content is still reported held. The prefix skip must ignore only the marker
+// and its temp siblings — a wider prefix, or a skip hoisted to the whole dir, would
+// make the Worker DROP a world it does hold from its advertisement, a worse failure
+// than the one this fixes.
+func TestScanHeldServersSkipsGenerationMarkerTempLeftover(t *testing.T) {
+	scratch := t.TempDir()
+
+	// A scratch dir holding ONLY a crashed-writeGeneration temp sibling -> skipped.
+	leftover := filepath.Join(scratch, "leftover-only")
+	if err := os.MkdirAll(leftover, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(leftover, generationFile+"-123456"), []byte("7"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	// The same leftover alongside a real working set -> still reported held.
+	withWorld := filepath.Join(scratch, "leftover-plus-world")
+	if err := os.MkdirAll(withWorld, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(withWorld, generationFile+"-654321"), []byte("7"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(withWorld, "level.dat"), []byte("x"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	// Both callers share hasWorkingSet, so both are asserted — non-fatally, so a
+	// regression names every caller it broke in one run.
+	want := session.HeldServer{ServerID: "leftover-plus-world", Generation: 0}
+	if got := ScanHeldServers(scratch, nil); len(got) != 1 || got[0] != want {
+		t.Errorf("ScanHeldServers = %v, want [%v]", got, want)
+	}
+	if got := New(nil, scratch, nil).HeldServers(); len(got) != 1 || got[0] != want {
+		t.Errorf("HeldServers = %v, want [%v]", got, want)
+	}
+}
+
 // TestScanHeldServersMissingScratchRoot verifies an absent scratch root yields an
 // empty list (a fresh Worker holds nothing), not a panic or error.
 func TestScanHeldServersMissingScratchRoot(t *testing.T) {
