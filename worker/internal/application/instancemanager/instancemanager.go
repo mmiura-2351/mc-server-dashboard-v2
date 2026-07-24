@@ -630,9 +630,11 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		//
 		// Accepted, not closed — but note what the snapshot's success does NOT prove. It
 		// publishes the state as of its PACK, not the tree the sweep removes: restore()
-		// re-enables auto-save at the pack/upload split (below), and the racing stream's
-		// stop drives a shutdown save into the same dir before the hydrate displaces it, so
-		// the removed tree is the published prefix PLUS an unpublished delta. The loss is
+		// re-enables auto-save at the pack/upload split (below), and a GRACEFUL stop on the
+		// racing stream additionally drives a shutdown save into the same dir before the
+		// hydrate displaces it (a forced stop does not, but the resumed auto-save has
+		// already written), so the removed tree is the published prefix PLUS an unpublished
+		// delta. The loss is
 		// bounded to progression since that pack — the store still holds a real generation
 		// of this world, so the server itself is recoverable by re-hydrating — but the bound
 		// is that pack, not the displacement, and if two hydrate cycles fit inside one

@@ -623,11 +623,18 @@ server. Note: the issue #924 scratch reclaim (`ReclaimDeletedScratches`)
 intentionally does **not** reclaim `.displaced-<id>` trees — only the scratch dir
 and `.hydrate-<id>-*` leftovers.
 
-**Scratch capacity.** A hydrate that displaces a live working set holds up to three
-world-sized copies of the same server at once — the unpacked temp tree, the displaced
-live set, and a prior `.displaced-<id>` kept parked aside until the swap-in succeeds
-(#917) — so size `worker.scratch_dir` for 3× the largest world it hosts, on top of any
-retained displaced trees.
+**Scratch capacity.** One hydrate that displaces a live working set peaks at **three
+world-sized copies of that server**: the unpacked temp tree, the displaced live set, and
+a prior `.displaced-<id>` parked aside until the swap-in succeeds (#917). The prior
+displaced tree is one of the three, not a fourth term. Hydrates for distinct servers can
+be at that peak simultaneously — the Worker runs up to `maxConcurrentLanes` (4) command
+lanes concurrently — so budget `worker.scratch_dir` as **3× the largest world × the
+number of overlapping hydrates** (4 in the worst case), plus one world-sized copy per
+retained `.displaced-<id>` belonging to a server that is *not* currently hydrating, plus
+the ordinary scratch dirs of the servers this Worker holds. Running out of space is not
+data loss: the unpack, the generation-marker write and the fsync all complete before the
+first rename, so an `ENOSPC` fails the hydrate with the live working set (and any
+existing displaced tree) untouched and the transfer is simply retried.
 
 **Boot detection.** At Worker boot, after the held-server scan,
 `WarnOrphanDisplacedTrees` logs a `WARN` for each `.displaced-<id>` tree whose
