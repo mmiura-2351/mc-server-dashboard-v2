@@ -17,8 +17,13 @@ Outcome taxonomy (owner-confirmed):
   that is not at rest, or any action while the server is transitional. Recorded
   as an honest history row, *not* notified (nothing was attempted).
 * **failure** — the dispatch reached the Worker / use case and was refused or the
-  Worker was unavailable. Recorded, audited, and notified.
-* **success** — otherwise.
+  Worker was unavailable. Recorded and audited every occurrence; notified only on
+  the failing *edge* (issue #2269): a schedule stuck failing every interval emits
+  one operator toast for the whole incident, keyed by ``schedule_id`` in the
+  in-memory ``_notifying`` set (no time window), and one recovery toast when the
+  next success clears it. Skips leave that state untouched.
+* **success** — otherwise. Clears any ``_notifying`` state and fires exactly one
+  recovery notification when it ends a run of failures.
 
 ``next_run_at`` advances to the first occurrence strictly after the advance
 instant on every fired occurrence (success, failure, or skip) — there is no
@@ -123,6 +128,10 @@ _HISTORY_CAP = 50
 _BACKUP_RETRY_DELAY = dt.timedelta(minutes=30)
 # The notification discriminator a client routes on (issue #1836 payload).
 _NOTIFY_KIND = "schedule_failed"
+# The one-shot recovery discriminator, fired when a schedule that was notifying
+# failures produces a success again (issue #2269). Rendered generically by the
+# webui like any other {kind, title, detail} frame — no frontend change.
+_NOTIFY_KIND_RECOVERED = "schedule_recovered"
 
 # How late a non-backup occurrence may still execute. Generous against the
 # runner's tick resolution (~20 s) and a brief API restart, yet small against any
@@ -399,6 +408,12 @@ class RunScheduleTick:
     prune_backups: PruneScheduledBackups | None = None
     # Per-schedule pending backup-retry instant; in-memory (lost on restart).
     _backup_retry: dict[ScheduleId, dt.datetime] = field(default_factory=dict)
+    # Schedules currently in a failing state, so a sustained failure notifies once
+    # rather than every occurrence (issue #2269). A FAILURE notifies only when the
+    # id is absent, then records it; the next SUCCESS clears it and fires one
+    # recovery notification. In-memory — same accepted "lost on api restart" trade
+    # as _backup_retry / _warned above (a restart may re-notify one failure).
+    _notifying: set[ScheduleId] = field(default_factory=set)
     # Warnings already sent this process, keyed by (schedule, occurrence, offset):
     # each step fires once (issue #1839). In-memory — a restart may re-send a step
     # still within its grace window at most once. Pruned as occurrences pass.
@@ -670,14 +685,29 @@ class RunScheduleTick:
             await self.uow.commit()
         if result.outcome is ScheduleRunOutcome.SUCCESS:
             await self._audit(schedule, result.community_id, Outcome.SUCCESS)
+            # A success that ends a run of failures clears the notifying state and
+            # fires exactly one recovery notification (issue #2269).
+            if schedule.id in self._notifying:
+                self._notifying.discard(schedule.id)
+                self.notifier.notify(
+                    server_id=schedule.server_id,
+                    kind=_NOTIFY_KIND_RECOVERED,
+                    title=f"Scheduled {schedule.action.value} recovered",
+                    detail=result.detail or "",
+                )
         elif result.outcome is ScheduleRunOutcome.FAILURE:
             await self._audit(schedule, result.community_id, Outcome.ERROR)
-            self.notifier.notify(
-                server_id=schedule.server_id,
-                kind=_NOTIFY_KIND,
-                title=f"Scheduled {schedule.action.value} failed",
-                detail=result.detail or "",
-            )
+            # State-transition suppression (issue #2269): notify only on the
+            # failing edge; sustained failures record run rows every occurrence
+            # (above) but emit a single toast until the schedule recovers.
+            if schedule.id not in self._notifying:
+                self._notifying.add(schedule.id)
+                self.notifier.notify(
+                    server_id=schedule.server_id,
+                    kind=_NOTIFY_KIND,
+                    title=f"Scheduled {schedule.action.value} failed",
+                    detail=result.detail or "",
+                )
 
     async def _advance(
         self, schedule: Schedule, *, last_run_at: dt.datetime | None
