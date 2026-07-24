@@ -27,12 +27,17 @@ from mc_server_dashboard_api.servers.adapters.backup_store import (
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
     BackupNotFoundError,
+    BackupStorageUnavailableError,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     ServerId,
 )
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
+from mc_server_dashboard_api.storage.domain.errors import ObjectStoreUnavailableError
+from mc_server_dashboard_api.storage.domain.value_objects import (
+    BackupKey,
+)
 from mc_server_dashboard_api.storage.domain.value_objects import (
     CommunityId as StorageCommunityId,
 )
@@ -161,6 +166,41 @@ async def test_create_against_corrupt_working_set_raises_and_writes_no_archive(
     backups = server_root / "backups"
     archives = list(backups.glob("*.tar.gz")) if backups.is_dir() else []
     assert archives == []
+
+
+class _UnavailableStorage(FsStorage):
+    """An ``FsStorage`` whose backup create fails with a storage-backend error.
+
+    Models the object-store adapter's translated ``ObjectStoreUnavailableError`` (the
+    2026-07-23 SeaweedFS ``UploadPart`` 500 incident, issue #2270) — a *storage* type
+    that the servers seam must not let cross back into the servers layer.
+    """
+
+    async def create_backup_from_current(
+        self,
+        community_id: StorageCommunityId,
+        server_id: StorageServerId,
+        key: BackupKey | None = None,
+    ) -> BackupKey:
+        raise ObjectStoreUnavailableError("object store upload failed")
+
+
+async def test_create_storage_backend_failure_translates_to_backup_storage_unavailable(
+    tmp_path: Path,
+) -> None:
+    """The seam (issue #2270): a storage ``ObjectStoreUnavailableError`` from the
+    backup upload is translated to :class:`BackupStorageUnavailableError`, so no raw
+    storage type crosses back into the servers layer (the seam's documented contract,
+    mirroring the ``IntegrityCheckError`` -> ``BackupCorruptError`` translation)."""
+
+    storage = _UnavailableStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+
+    with pytest.raises(BackupStorageUnavailableError):
+        await adapter.create_from_current(
+            community_id=community, server_id=server, storage_ref=_ref()
+        )
 
 
 async def _put_backup(

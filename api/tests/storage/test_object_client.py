@@ -13,13 +13,21 @@ import datetime as dt
 from collections.abc import AsyncIterator
 
 import pytest
-from botocore.exceptions import ClientError
+from botocore.exceptions import (
+    ClientError,
+    ConnectTimeoutError,
+    EndpointConnectionError,
+    ReadTimeoutError,
+)
 
 from mc_server_dashboard_api.storage.adapters.object_client import (
     _Aioboto3S3Client,
     make_s3_client_factory,
 )
-from mc_server_dashboard_api.storage.domain.errors import NotFoundError
+from mc_server_dashboard_api.storage.domain.errors import (
+    NotFoundError,
+    ObjectStoreUnavailableError,
+)
 
 
 def _client_error(code: str) -> ClientError:
@@ -159,35 +167,123 @@ async def test_upload_multipart_cleanup_abort_no_such_upload_surfaces() -> None:
     # periodic sweep aborted the upload, so complete returns NoSuchUpload) must
     # surface — NOT be masked by the cleanup abort's own NoSuchUpload. Routing cleanup
     # through the translated idempotent abort makes that abort a no-op, so the original
-    # error wins. ``operation_name`` distinguishes the two errors below.
+    # error wins. The escaping type is the translated ObjectStoreUnavailableError
+    # (issue #2270), and its ``__cause__`` is the ORIGINAL complete error — proving the
+    # cleanup abort did not mask it. ``operation_name`` distinguishes the two errors.
     complete_error = ClientError(
         {"Error": {"Code": "NoSuchUpload"}}, "CompleteMultipartUpload"
     )
     upload = _UploadClient(complete_error, "NoSuchUpload")
     client = _Aioboto3S3Client(upload, "bucket")
 
-    with pytest.raises(ClientError) as excinfo:
+    with pytest.raises(ObjectStoreUnavailableError) as excinfo:
         await client.upload_multipart("jars/x.jar", _one_part())
 
-    assert excinfo.value is complete_error
+    assert excinfo.value.__cause__ is complete_error
     assert upload.abort_calls == 1
 
 
 async def test_upload_multipart_cleanup_abort_other_error_does_not_mask() -> None:
     # If the cleanup abort fails with a DIFFERENT error (e.g. AccessDenied), the
     # original upload error must still win — the orphan upload is recoverable by the
-    # sweep, masking the cause is not (issue #935).
+    # sweep, masking the cause is not (issue #935). The escaping type is the translated
+    # ObjectStoreUnavailableError (issue #2270) whose ``__cause__`` is the original
+    # complete error, not the cleanup abort's AccessDenied.
     complete_error = ClientError(
         {"Error": {"Code": "InternalError"}}, "CompleteMultipartUpload"
     )
     upload = _UploadClient(complete_error, "AccessDenied")
     client = _Aioboto3S3Client(upload, "bucket")
 
-    with pytest.raises(ClientError) as excinfo:
+    with pytest.raises(ObjectStoreUnavailableError) as excinfo:
         await client.upload_multipart("jars/x.jar", _one_part())
 
-    assert excinfo.value is complete_error
+    assert excinfo.value.__cause__ is complete_error
     assert upload.abort_calls == 1
+
+
+class _UploadPartRaisingClient:
+    """An upload_multipart double whose ``upload_part`` raises a set error.
+
+    ``create_multipart_upload`` and the cleanup ``abort_multipart_upload`` succeed, so
+    the error under test is exactly the ``UploadPart`` failure the adapter must
+    translate (issue #2270 — the 2026-07-23 SeaweedFS ``UploadPart`` incident)."""
+
+    def __init__(self, error: BaseException) -> None:
+        self._error = error
+        self.abort_calls = 0
+
+    async def create_multipart_upload(self, **_kwargs: object) -> dict[str, object]:
+        return {"UploadId": "u"}
+
+    async def upload_part(self, **_kwargs: object) -> dict[str, object]:
+        raise self._error
+
+    async def abort_multipart_upload(self, **_kwargs: object) -> None:
+        self.abort_calls += 1
+
+
+async def test_upload_multipart_translates_client_error_on_upload_part() -> None:
+    # The 2026-07-23 incident: SeaweedFS returns an HTTP 500 ``InternalError`` on
+    # UploadPart. The raw botocore ``ClientError`` must NOT cross the Storage Port
+    # boundary (the object-store adapter's contract): it is translated to
+    # ObjectStoreUnavailableError so upstream receives a typed, categorizable storage
+    # error instead of an untranslated third-party exception. The original error is
+    # preserved as the cause, and the orphan upload is cleaned up via the abort.
+    error = ClientError({"Error": {"Code": "InternalError"}}, "UploadPart")
+    upload = _UploadPartRaisingClient(error)
+    client = _Aioboto3S3Client(upload, "bucket")
+
+    with pytest.raises(ObjectStoreUnavailableError) as excinfo:
+        await client.upload_multipart("communities/k/backups/x.tar.gz", _one_part())
+
+    assert excinfo.value.__cause__ is error
+    assert upload.abort_calls == 1
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        EndpointConnectionError(endpoint_url="http://store:8333"),
+        ConnectTimeoutError(endpoint_url="http://store:8333"),
+        ReadTimeoutError(endpoint_url="http://store:8333"),
+    ],
+)
+async def test_upload_multipart_translates_transport_errors(
+    error: BaseException,
+) -> None:
+    # A connection/timeout transport failure mid-upload is likewise a botocore type
+    # that must not cross the boundary (issue #2270): it is translated to
+    # ObjectStoreUnavailableError, preserving the transport error as the cause.
+    upload = _UploadPartRaisingClient(error)
+    client = _Aioboto3S3Client(upload, "bucket")
+
+    with pytest.raises(ObjectStoreUnavailableError) as excinfo:
+        await client.upload_multipart("communities/k/backups/x.tar.gz", _one_part())
+
+    assert excinfo.value.__cause__ is error
+
+
+class _CreateRaisingClient:
+    """A double whose ``create_multipart_upload`` raises — the upload never starts."""
+
+    def __init__(self, error: BaseException) -> None:
+        self._error = error
+
+    async def create_multipart_upload(self, **_kwargs: object) -> dict[str, object]:
+        raise self._error
+
+
+async def test_upload_multipart_translates_client_error_on_create() -> None:
+    # A backend failure initiating the multipart upload (CreateMultipartUpload) is
+    # translated too (issue #2270); there is no upload id yet, so no cleanup abort.
+    error = ClientError({"Error": {"Code": "InternalError"}}, "CreateMultipartUpload")
+    client = _Aioboto3S3Client(_CreateRaisingClient(error), "bucket")
+
+    with pytest.raises(ObjectStoreUnavailableError) as excinfo:
+        await client.upload_multipart("communities/k/backups/x.tar.gz", _one_part())
+
+    assert excinfo.value.__cause__ is error
 
 
 async def test_list_multipart_uploads_reads_initiated_when_present() -> None:
