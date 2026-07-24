@@ -613,6 +613,40 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// A reservation would only convert that refused-and-retried outcome into a
 		// BUSY-rejected one — same net effect, more coordination state — so it
 		// is intentionally not taken.
+		//
+		// The same no-reservation choice leaves a second, narrower cross-stream edge
+		// (issue #917 item 3): an old dropped stream's snapshot can SUCCEED and call
+		// sweepDisplaced(serverID) below while a NEW stream's re-placement hydrate for the
+		// same id has just renamed the live working set aside to .displaced-<id>
+		// (datatransfer.unpackAndSwap step (2)) — the sweep then deletes THAT hydrate's
+		// recovery copy. Same-stream overlap is excluded by the per-server FIFO lanes as
+		// above. Cross-stream is bounded by a ctx asymmetry: the upload runs on
+		// transferContext, derived from the stream's serveCtx, so a stream drop cancels the
+		// in-flight upload and the snapshot fails before any sweep. Only the post-upload
+		// tail (recordGeneration -> sweepDisplaced) is exposed, and the new stream must
+		// meanwhile reconnect, register, and download+unpack a whole working set to reach
+		// its displace. PackSnapshot ignores ctx, which is why the torn-capture case above
+		// stays wide while this one does not.
+		//
+		// Accepted, not closed — but note what the snapshot's success does NOT prove. It
+		// publishes the state as of its PACK, not the tree the sweep removes: restore()
+		// re-enables auto-save at the pack/upload split (below), and a GRACEFUL stop on the
+		// racing stream additionally drives a shutdown save into the same dir before the
+		// hydrate displaces it (a forced stop does not, but the resumed auto-save has
+		// already written), so the removed tree is the published prefix PLUS an unpublished
+		// delta. The loss is
+		// bounded to progression since that pack — the store still holds a real generation
+		// of this world, so the server itself is recoverable by re-hydrating — but the bound
+		// is that pack, not the displacement, and if two hydrate cycles fit inside one
+		// upload window the delta can be an entire session. If the concurrent swap-in then
+		// fails, its restore rename can find the displaced tree gone (ENOENT), leaving
+		// destDir absent: recoverable by re-hydrating, at the same bound. Closing this
+		// window means taking a per-id reservation on running-id snapshots, reversing the
+		// item-4 decision above; for THIS edge that buys only the bounded delta just
+		// described. The prior-displaced deferral added for #917 item 2 does NOT cover it:
+		// that protects only the PRIOR displaced tree parked aside in unpackAndSwap step
+		// (1), while the NEW .displaced-<id> created by step (2) is exactly what
+		// sweepDisplaced removes.
 		var quiesced bool
 		var rawRestore func()
 		quiesced, rawRestore = m.quiesceRunning(ctx, cmd.ServerID, filepath.Join(m.scratchDir, cmd.ServerID))
@@ -1288,6 +1322,13 @@ func (m *Manager) removeScratch(serverID string) {
 // (".displaced-<id>"), so only this id's displaced tree is touched. Best-effort: a
 // removal failure is ignored (the leftover is wasted disk, never a correctness
 // problem). A missing tree is a no-op (os.RemoveAll returns nil).
+//
+// Cross-stream caveat (issue #917 item 3): a running-id snapshot holds no per-id
+// reservation (#829 item 4), so an old dropped stream's success can call this
+// concurrently with a NEW stream's re-placement hydrate and remove the .displaced-<id>
+// that hydrate just created. That tree holds the published state plus whatever the world
+// progressed since that snapshot's PACK, so the removal is not loss-free. Accepted, not
+// closed — the bound and the rationale are in handleSnapshot's running branch.
 func (m *Manager) sweepDisplaced(serverID string) {
 	_ = os.RemoveAll(filepath.Join(m.scratchDir, ".displaced-"+serverID))
 }
