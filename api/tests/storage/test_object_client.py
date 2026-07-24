@@ -15,7 +15,10 @@ from collections.abc import AsyncIterator
 import pytest
 from botocore.exceptions import ClientError
 
-from mc_server_dashboard_api.storage.adapters.object_client import _Aioboto3S3Client
+from mc_server_dashboard_api.storage.adapters.object_client import (
+    _Aioboto3S3Client,
+    make_s3_client_factory,
+)
 from mc_server_dashboard_api.storage.domain.errors import NotFoundError
 
 
@@ -383,3 +386,36 @@ async def test_copy_object_translates_not_found(code: str) -> None:
     client = _Aioboto3S3Client(_CopyRaisingClient(code), "bucket")
     with pytest.raises(NotFoundError):
         await client.copy_object("src/key", "dst/key")
+
+
+# --- Explicit, settings-sourced timeouts + retries (issue #2249) -----------
+
+
+async def test_factory_builds_client_with_settings_sourced_timeouts_and_retries() -> (
+    None
+):
+    # The built client must carry the explicit, settings-sourced transport budget
+    # rather than inheriting botocore's hidden defaults (60s connect/read + legacy
+    # retries). Inspect the real client's resolved ``meta.config`` so the assertion
+    # pins the EFFECTIVE values botocore will use — no network call is made (the
+    # context manager only builds the client). ``retry_max_attempts`` is the TOTAL
+    # attempt count: botocore normalizes the retries config to ``total_max_attempts``,
+    # and this must equal the field verbatim (N means N attempts, not N + 1). This is
+    # the assertion that catches the ``max_attempts`` vs ``total_max_attempts``
+    # off-by-one.
+    factory = make_s3_client_factory(
+        endpoint="http://localhost:8333",
+        bucket="bucket",
+        access_key="ak",
+        secret_key="sk",
+        connect_timeout=7.0,
+        read_timeout=42.0,
+        retry_max_attempts=3,
+    )
+    async with factory() as s3:
+        assert isinstance(s3, _Aioboto3S3Client)
+        config = s3._client.meta.config
+        assert config.connect_timeout == 7.0
+        assert config.read_timeout == 42.0
+        assert config.retries["mode"] == "standard"
+        assert config.retries["total_max_attempts"] == 3

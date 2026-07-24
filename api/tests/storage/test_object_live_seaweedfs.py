@@ -72,6 +72,9 @@ def _factory(bucket: str = _BUCKET) -> S3ClientFactory:
         bucket=bucket,
         access_key=_ACCESS_KEY,
         secret_key=_SECRET_KEY,
+        connect_timeout=10.0,
+        read_timeout=60.0,
+        retry_max_attempts=5,
     )
 
 

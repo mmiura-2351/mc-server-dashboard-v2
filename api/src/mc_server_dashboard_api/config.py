@@ -247,15 +247,31 @@ class StorageObjectSettings(_Section):
 
     The S3-compatible endpoint/bucket and the access-key/secret-key credentials
     behind the ``object`` adapter (STORAGE.md Section 7.3). Only read when
-    ``storage.backend = object``; all four are required in that case, enforced at
-    the edge. ``access_key`` / ``secret_key`` are secrets sourced from the
-    environment and masked in any dump (Section 5.2 marks them secret).
+    ``storage.backend = object``; endpoint/bucket/access_key/secret_key are
+    required in that case, enforced at the edge. ``access_key`` / ``secret_key``
+    are secrets sourced from the environment and masked in any dump (Section 5.2
+    marks them secret); the timeout/retry knobs are non-secret.
     """
 
     endpoint: str | None = None
     bucket: str | None = None
     access_key: str | None = None
     secret_key: str | None = None
+    # Explicit botocore transport budget so every object operation fails within a
+    # known ceiling instead of inheriting botocore's hidden 60s connect/read +
+    # legacy retries (issue #2249). Threaded into ``make_s3_client_factory``.
+    # ``connect_timeout`` gates only the TCP connect, which should complete
+    # quickly; a stalled connect need not burn a full read budget.
+    connect_timeout_seconds: float = Field(default=10.0, gt=0)
+    # ``read_timeout`` bounds a SINGLE socket read, not a whole transfer: a
+    # multi-GB hydrate/snapshot/backup streams in bounded chunks (``_PART``), each
+    # read carrying its own budget, so 60s is generous per chunk while still
+    # capping a genuinely stalled read rather than hanging indefinitely.
+    read_timeout_seconds: float = Field(default=60.0, gt=0)
+    # Total attempts (initial + retries) under the ``standard`` retry mode, which
+    # replaces botocore's legacy mode with capped exponential backoff and a
+    # broader retryable-error set. 5 matches the legacy de-facto attempt count.
+    retry_max_attempts: int = Field(default=5, ge=1)
 
 
 class StorageSettings(_Section):

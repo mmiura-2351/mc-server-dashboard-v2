@@ -856,6 +856,18 @@ operating cost/latency scale with **operation count** (files × snapshot
 frequency), not stored size or egress; keep the snapshot interval coarse enough
 that a publish completes well within it.
 
+**Explicit transport budget (issue #2249).** The S3 client is built with an
+explicit `botocore.config.Config` rather than inheriting botocore's hidden
+defaults (60s connect/read + legacy retries), so every object operation — hydrate,
+snapshot, upload, restore, and the at-rest backup archive — runs against a known,
+operator-sized ceiling and a stalled read fails fast instead of silently hanging.
+The three knobs (`storage.object.connect_timeout_seconds`,
+`read_timeout_seconds`, `retry_max_attempts`; CONFIGURATION.md Section 5.2) are
+threaded into `make_s3_client_factory`. `read_timeout_seconds` bounds a single
+socket read, not a whole transfer, so a multi-GB stream (chunked at 8 MiB) is
+unaffected while a genuinely stalled read is still capped; retries use botocore's
+`standard` mode (capped exponential backoff, broader retryable-error set).
+
 **At-rest integrity sweep limitation (issue #926).** The at-rest integrity sweep
 (`check_current_health`, Section 3.1; `check_backup_health`) returns a healthy
 `WorkingSetReport` unconditionally on the object backend — it does not inspect
