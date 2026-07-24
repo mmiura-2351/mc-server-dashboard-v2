@@ -513,6 +513,19 @@ class _CorruptBackupStore(FakeBackupArchiveStore):
         raise BackupCorruptError(str(server_id.value), corrupt_count=2)
 
 
+class _StorageUnavailableBackupStore(FakeBackupArchiveStore):
+    """Raises BackupStorageUnavailableError mid-archive (the storage-outage case)."""
+
+    async def create_from_current(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> None:
+        from mc_server_dashboard_api.servers.domain.errors import (
+            BackupStorageUnavailableError,
+        )
+
+        raise BackupStorageUnavailableError(str(server_id.value))
+
+
 async def test_backup_storage_timeout_records_distinguishable_detail() -> None:
     env = _env(backup_store=_StorageTimeoutBackupStore())
     server = _stopped_server()
@@ -567,6 +580,26 @@ async def test_corrupt_backup_records_backup_corrupt_detail() -> None:
 
     assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
     assert _run_details(env, schedule) == ["backup corrupt"]
+
+
+async def test_storage_unavailable_records_distinct_detail() -> None:
+    # A typed BackupStorageUnavailableError (#2270) is a distinct failure class,
+    # not the generic "action failed" fallback: the run row names the storage
+    # outage so the operator toast/audit surfaces *what* failed (#2248/#2274).
+    env = _env(backup_store=_StorageUnavailableBackupStore())
+    server = _stopped_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
+    assert _run_details(env, schedule) == ["storage unavailable"]
 
 
 async def test_advance_does_not_resurrect_a_concurrently_disabled_schedule() -> None:

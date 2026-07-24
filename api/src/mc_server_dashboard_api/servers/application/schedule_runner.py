@@ -91,6 +91,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import WorkerUnavailab
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
+    BackupStorageUnavailableError,
     BackupUnsettledError,
     CommandDispatchError,
     InvalidLifecycleTransitionError,
@@ -235,6 +236,8 @@ def _failure_detail(exc: ServerError) -> str:
         return "no eligible worker"
     if isinstance(exc, BackupCorruptError):
         return "backup corrupt"
+    if isinstance(exc, BackupStorageUnavailableError):
+        return "storage unavailable"
     return "action failed"
 
 
