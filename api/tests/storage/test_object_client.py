@@ -484,6 +484,90 @@ async def test_copy_object_translates_not_found(code: str) -> None:
         await client.copy_object("src/key", "dst/key")
 
 
+# --- Single-object write translation (issue #2273) -------------------------
+#
+# put_object / delete_object are single-object writes (no multipart abort to run),
+# so they are simpler than upload_multipart but carry the same Storage Port contract:
+# a botocore transport/backend failure must not cross the boundary as a raw type, so
+# it is translated to ObjectStoreUnavailableError with the original as the ``__cause__``
+# -- mirroring the upload_multipart translation (#2270). A botocore *usage* error is
+# deliberately NOT caught (it is excluded from ``_UPLOAD_FAILURE_ERRORS``).
+
+
+class _RaisingWriteClient:
+    """A client double whose put_object/delete_object raise a set error."""
+
+    def __init__(self, error: BaseException) -> None:
+        self._error = error
+
+    async def put_object(self, **_kwargs: object) -> None:
+        raise self._error
+
+    async def delete_object(self, **_kwargs: object) -> None:
+        raise self._error
+
+
+async def test_put_object_translates_client_error() -> None:
+    # A backend service failure on PutObject (e.g. a SeaweedFS HTTP 500) must not cross
+    # the Storage Port as a raw botocore type; it is translated (issue #2273).
+    error = ClientError({"Error": {"Code": "InternalError"}}, "PutObject")
+    client = _Aioboto3S3Client(_RaisingWriteClient(error), "bucket")
+
+    with pytest.raises(ObjectStoreUnavailableError) as excinfo:
+        await client.put_object("communities/k/x", b"data")
+
+    assert excinfo.value.__cause__ is error
+
+
+async def test_delete_object_translates_client_error() -> None:
+    # A backend service failure on DeleteObject is translated too (issue #2273).
+    error = ClientError({"Error": {"Code": "InternalError"}}, "DeleteObject")
+    client = _Aioboto3S3Client(_RaisingWriteClient(error), "bucket")
+
+    with pytest.raises(ObjectStoreUnavailableError) as excinfo:
+        await client.delete_object("communities/k/x")
+
+    assert excinfo.value.__cause__ is error
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        EndpointConnectionError(endpoint_url="http://store:8333"),
+        ConnectTimeoutError(endpoint_url="http://store:8333"),
+        ReadTimeoutError(endpoint_url="http://store:8333"),
+    ],
+)
+async def test_put_object_translates_transport_errors(error: BaseException) -> None:
+    # A connection/timeout transport failure on PutObject is a botocore type that must
+    # not cross the boundary (issue #2273); it is translated with the error as cause.
+    client = _Aioboto3S3Client(_RaisingWriteClient(error), "bucket")
+
+    with pytest.raises(ObjectStoreUnavailableError) as excinfo:
+        await client.put_object("communities/k/x", b"data")
+
+    assert excinfo.value.__cause__ is error
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        EndpointConnectionError(endpoint_url="http://store:8333"),
+        ConnectTimeoutError(endpoint_url="http://store:8333"),
+        ReadTimeoutError(endpoint_url="http://store:8333"),
+    ],
+)
+async def test_delete_object_translates_transport_errors(error: BaseException) -> None:
+    # A connection/timeout transport failure on DeleteObject is likewise translated
+    # (issue #2273), preserving the transport error as the cause.
+    client = _Aioboto3S3Client(_RaisingWriteClient(error), "bucket")
+
+    with pytest.raises(ObjectStoreUnavailableError) as excinfo:
+        await client.delete_object("communities/k/x")
+
+    assert excinfo.value.__cause__ is error
+
+
 # --- Explicit, settings-sourced timeouts + retries (issue #2249) -----------
 
 

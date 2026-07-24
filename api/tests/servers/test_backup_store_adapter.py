@@ -35,6 +35,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 )
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from mc_server_dashboard_api.storage.domain.errors import ObjectStoreUnavailableError
+from mc_server_dashboard_api.storage.domain.port import ByteStream
 from mc_server_dashboard_api.storage.domain.value_objects import (
     BackupKey,
 )
@@ -44,6 +45,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 from mc_server_dashboard_api.storage.domain.value_objects import (
     ServerId as StorageServerId,
 )
+from mc_server_dashboard_api.storage.integrity.region import WorkingSetReport
 from tests.storage.helpers import (
     drain,
     healthy_region_bytes,
@@ -201,6 +203,98 @@ async def test_create_storage_backend_failure_translates_to_backup_storage_unava
         await adapter.create_from_current(
             community_id=community, server_id=server, storage_ref=_ref()
         )
+
+
+class _RestoreUnavailableStorage(FsStorage):
+    """An ``FsStorage`` whose restore fails with a storage-backend error (#2273).
+
+    Models the object-client's translated ``ObjectStoreUnavailableError`` reaching the
+    restore path (which drives ``upload_multipart`` / single-object writes).
+    """
+
+    async def restore_backup(
+        self,
+        community_id: StorageCommunityId,
+        server_id: StorageServerId,
+        key: BackupKey,
+        *,
+        force: bool = False,
+    ) -> WorkingSetReport:
+        raise ObjectStoreUnavailableError("object store restore failed")
+
+
+async def test_restore_storage_backend_failure_translates_to_unavailable(
+    tmp_path: Path,
+) -> None:
+    """The seam (issue #2273): a storage ``ObjectStoreUnavailableError`` from restore is
+    translated to :class:`BackupStorageUnavailableError`, mirroring create."""
+
+    storage = _RestoreUnavailableStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+
+    with pytest.raises(BackupStorageUnavailableError):
+        await adapter.restore(
+            community_id=community, server_id=server, storage_ref=_ref()
+        )
+
+
+class _StoreUnavailableStorage(FsStorage):
+    """An ``FsStorage`` whose put_backup fails with a storage-backend error (#2273)."""
+
+    async def put_backup(
+        self,
+        community_id: StorageCommunityId,
+        server_id: StorageServerId,
+        stream: ByteStream,
+        key: BackupKey | None = None,
+    ) -> BackupKey:
+        raise ObjectStoreUnavailableError("object store put_backup failed")
+
+
+async def test_store_storage_backend_failure_translates_to_unavailable(
+    tmp_path: Path,
+) -> None:
+    """The seam (issue #2273): a storage ``ObjectStoreUnavailableError`` from store is
+    translated to :class:`BackupStorageUnavailableError`, mirroring create."""
+
+    storage = _StoreUnavailableStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+
+    async def _stream() -> AsyncIterator[bytes]:
+        yield b"data"
+
+    with pytest.raises(BackupStorageUnavailableError):
+        await adapter.store(
+            community_id=community,
+            server_id=server,
+            stream=_stream(),
+            storage_ref=_ref(),
+        )
+
+
+class _PruneUnavailableStorage(FsStorage):
+    """An ``FsStorage`` whose prune fails with a storage-backend error (#2273)."""
+
+    async def prune_to_final_snapshot(
+        self, community_id: StorageCommunityId, server_id: StorageServerId
+    ) -> None:
+        raise ObjectStoreUnavailableError("object store prune failed")
+
+
+async def test_prune_storage_backend_failure_translates_to_unavailable(
+    tmp_path: Path,
+) -> None:
+    """The seam (issue #2273): a storage ``ObjectStoreUnavailableError`` from prune is
+    translated to :class:`BackupStorageUnavailableError`, mirroring create."""
+
+    storage = _PruneUnavailableStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+
+    with pytest.raises(BackupStorageUnavailableError):
+        await adapter.prune_to_final_snapshot(community_id=community, server_id=server)
 
 
 async def _put_backup(

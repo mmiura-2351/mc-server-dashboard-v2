@@ -78,7 +78,15 @@ class _Aioboto3S3Client:
         return _iter_body(resp["Body"])
 
     async def put_object(self, key: str, body: bytes) -> None:
-        await self._client.put_object(Bucket=self._bucket, Key=key, Body=body)
+        # Single-object write (no multipart abort to run): translate a botocore
+        # transport/backend failure to a StorageError at this boundary (issue #2273),
+        # mirroring upload_multipart (#2270), so no raw botocore type crosses the Port.
+        try:
+            await self._client.put_object(Bucket=self._bucket, Key=key, Body=body)
+        except _UPLOAD_FAILURE_ERRORS as exc:
+            raise ObjectStoreUnavailableError(
+                f"object store put failed for {key}"
+            ) from exc
 
     async def upload_multipart(self, key: str, parts: AsyncIterator[bytes]) -> None:
         # Accumulate into >= _PART buffers so each uploaded part respects the S3
@@ -173,7 +181,16 @@ class _Aioboto3S3Client:
             raise
 
     async def delete_object(self, key: str) -> None:
-        await self._client.delete_object(Bucket=self._bucket, Key=key)
+        # Delete is idempotent at the store (a missing key is a success, not an error),
+        # so there is no NotFoundError to preserve: translate only a botocore
+        # transport/backend failure to a StorageError at this boundary (issue #2273),
+        # mirroring upload_multipart (#2270), so no raw botocore type crosses the Port.
+        try:
+            await self._client.delete_object(Bucket=self._bucket, Key=key)
+        except _UPLOAD_FAILURE_ERRORS as exc:
+            raise ObjectStoreUnavailableError(
+                f"object store delete failed for {key}"
+            ) from exc
 
     async def list_objects(self, prefix: str) -> list[S3Object]:
         # A bucketless store reads as empty (issue #946): SeaweedFS auto-creates the
