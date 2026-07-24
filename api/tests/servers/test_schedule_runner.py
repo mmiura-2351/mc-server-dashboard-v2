@@ -14,7 +14,7 @@ import asyncio
 import datetime as dt
 import logging
 import uuid
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 import pytest
 
@@ -391,6 +391,19 @@ class _DiskFullBackupStore(FakeBackupArchiveStore):
         self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
     ) -> None:
         raise OSError("disk full")
+
+
+@dataclass(frozen=True)
+class _SpyPrune(PruneScheduledBackups):
+    """Records invocations without pruning, so a test can assert (non-)calls."""
+
+    calls: list[tuple[CommunityId, ServerId]] = field(default_factory=list)
+
+    async def __call__(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> list[Backup]:
+        self.calls.append((community_id, server_id))
+        return []
 
 
 async def test_unexpected_exception_is_classified_as_failure() -> None:
@@ -1557,62 +1570,24 @@ async def test_skipped_backup_run_does_not_prune() -> None:
     assert {old.id, extra.id} <= set(env.uow.backups.by_id)
 
 
-async def test_failed_backup_run_still_prunes_per_retention_policy() -> None:
-    # The 2026-07-23 prod incident: every scheduled backup failed, so retention
-    # never ran and old scheduled backups accumulated indefinitely (#2253). A
-    # failed BACKUP run must still prune — freeing space keeps retention
-    # progressing and can help break the disk-full failure cycle.
+async def test_failed_backup_run_does_not_prune() -> None:
+    # Queue semantics (#2258, reverting #2254): a scheduled backup rolls off
+    # ONLY when a new backup succeeds. A failed BACKUP run must never invoke
+    # retention — deleting recovery points while backups are failing is exactly
+    # the data-loss the owner directive forbids.
     env = _env(backup_store=_DiskFullBackupStore())
-    server = _stopped_server()
-    server.backup_retention = {"keep_last": 1}
-    env.uow.servers.seed(server)
-    newer = _scheduled_backup(env, server, _NOW - dt.timedelta(days=1))
-    _scheduled_backup(env, server, _NOW - dt.timedelta(days=2))
-    schedule = _schedule(
-        server,
-        action=ScheduleAction.BACKUP,
-        next_run_at=_NOW - dt.timedelta(seconds=10),
-    )
-    env.uow.schedules.seed(schedule)
-
-    await env.runner.tick()
-
-    # The archive create raised (FAILURE), but retention still ran for the
-    # acted-on server: keep_last=1 kept the newest existing scheduled backup
-    # and pruned the older one.
-    assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
-    remaining = _scheduled_rows(env, server)
-    assert [b.id for b in remaining] == [newer.id]
-
-
-class _DiskFullFailingDeleteStore(FakeBackupArchiveStore):
-    """Fails the archive create (the run) and the archive delete (the prune)."""
-
-    async def create_from_current(
-        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
-    ) -> None:
-        raise OSError("disk full")
-
-    async def delete(
-        self,
-        *,
-        community_id: CommunityId,
-        server_id: ServerId,
-        storage_ref: str,
-    ) -> None:
-        raise RuntimeError("storage down")
-
-
-async def test_prune_failure_does_not_change_the_failed_backup_run() -> None:
-    # A prune raising during a FAILURE run is swallowed like it is on SUCCESS:
-    # the recorded outcome, audit, and notification stay exactly the failed
-    # backup's own — prune adds nothing (#2253).
-    env = _env(backup_store=_DiskFullFailingDeleteStore())
     server = _stopped_server()
     server.backup_retention = {"keep_last": 1}
     env.uow.servers.seed(server)
     old = _scheduled_backup(env, server, _NOW - dt.timedelta(days=1))
     extra = _scheduled_backup(env, server, _NOW - dt.timedelta(days=2))
+    spy = _SpyPrune(
+        uow=env.uow,
+        backup_store=FakeBackupArchiveStore(),
+        audit=env.audit,
+        clock=env.clock,
+    )
+    env.runner.prune_backups = spy
     schedule = _schedule(
         server,
         action=ScheduleAction.BACKUP,
@@ -1622,13 +1597,9 @@ async def test_prune_failure_does_not_change_the_failed_backup_run() -> None:
 
     await env.runner.tick()
 
+    # The run failed (disk full) and prune was never called: no backup deleted.
     assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
-    # Only the run's own failure audit/notification — the raising prune adds no
-    # audit event and emits nothing on the notification stream.
-    assert [e.outcome for e in env.audit.events] == [Outcome.ERROR]
-    assert len(env.notifier.notifications) == 1
-    assert env.notifier.notifications[0][1] == "schedule_failed"
-    # The archive delete raised before the row delete, so nothing was pruned.
+    assert spy.calls == []
     assert {old.id, extra.id} <= set(env.uow.backups.by_id)
 
 
