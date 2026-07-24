@@ -14,7 +14,7 @@ import asyncio
 import datetime as dt
 import logging
 import uuid
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 import pytest
 
@@ -391,6 +391,19 @@ class _DiskFullBackupStore(FakeBackupArchiveStore):
         self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
     ) -> None:
         raise OSError("disk full")
+
+
+@dataclass(frozen=True)
+class _SpyPrune(PruneScheduledBackups):
+    """Records invocations without pruning, so a test can assert (non-)calls."""
+
+    calls: list[tuple[CommunityId, ServerId]] = field(default_factory=list)
+
+    async def __call__(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> list[Backup]:
+        self.calls.append((community_id, server_id))
+        return []
 
 
 async def test_unexpected_exception_is_classified_as_failure() -> None:
@@ -1554,6 +1567,39 @@ async def test_skipped_backup_run_does_not_prune() -> None:
     await env.runner.tick()
 
     assert _runs(env, schedule) == [ScheduleRunOutcome.SKIPPED]
+    assert {old.id, extra.id} <= set(env.uow.backups.by_id)
+
+
+async def test_failed_backup_run_does_not_prune() -> None:
+    # Queue semantics (#2258, reverting #2254): a scheduled backup rolls off
+    # ONLY when a new backup succeeds. A failed BACKUP run must never invoke
+    # retention — deleting recovery points while backups are failing is exactly
+    # the data-loss the owner directive forbids.
+    env = _env(backup_store=_DiskFullBackupStore())
+    server = _stopped_server()
+    server.backup_retention = {"keep_last": 1}
+    env.uow.servers.seed(server)
+    old = _scheduled_backup(env, server, _NOW - dt.timedelta(days=1))
+    extra = _scheduled_backup(env, server, _NOW - dt.timedelta(days=2))
+    spy = _SpyPrune(
+        uow=env.uow,
+        backup_store=FakeBackupArchiveStore(),
+        audit=env.audit,
+        clock=env.clock,
+    )
+    env.runner.prune_backups = spy
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    # The run failed (disk full) and prune was never called: no backup deleted.
+    assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
+    assert spy.calls == []
     assert {old.id, extra.id} <= set(env.uow.backups.by_id)
 
 
