@@ -4,7 +4,7 @@ Runs the backend-agnostic ``storage.sweep`` on a fixed cadence as an asyncio
 task on the FastAPI event loop, mirroring the JAR-pool / plugin-cache GC loops.
 Until now the sweep ran only once, in the startup hook; on an interval it bounds
 the accumulation of orphan staging/snapshot prefixes and orphan in-progress
-multipart parts without a restart (STORAGE.md Section 8.5).
+multipart parts without a restart (STORAGE.md Section 9.5).
 
 The sweep is dispatched exactly like the startup hook: awaited directly when it
 is a coroutine function (the async object adapter) and run off the event loop

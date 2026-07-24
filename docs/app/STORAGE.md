@@ -1096,22 +1096,30 @@ lifecycle and are backend-specific (not all backends offer cheap clones).
 
 ### 9.5 Out of scope / deferred (carried as follow-ups, not implemented here)
 
-- **Orphan-sweep scheduling** (Section 4.3): the recovery sweep is specified;
-  *when* it runs (startup, periodic) is an operational detail for the
-  implementation epic (#8). The spool / multipart reclaim paths now apply a 1 h
-  age threshold (Section 4.3, #903), so making the sweep periodic or manual no
-  longer risks eating a live write's temp.
+- **Orphan-sweep scheduling** (Section 4.3): **now implemented** — the recovery
+  sweep runs at API startup and then on a periodic loop
+  (`storage_sweep.interval_seconds`, daily by default; issue #2252, PR #2255). The
+  spool / multipart reclaim paths apply a 1 h age threshold (Section 4.3, #903), so
+  the periodic pass does not eat a live write's temp spool. What remains a carried
+  follow-up is the multipart long-upload caveat below and its storage-layer
+  mitigation (#2251).
   **Multipart long-upload caveat** (#916): the threshold is *not* fully safe for a
   long-running multipart upload. Unlike an fs spool's mtime — which advances as the
   write progresses — the S3 `Initiated` timestamp is fixed at create time and never
-  refreshes, so a legitimate upload still streaming after 1 h *would* be aborted by
-  a periodic sweep. The failure is loud, not silent — the upload's next
-  `upload_part`/`complete` gets `NoSuchUpload`, which surfaces as the backup error and
-  **must be retried** (`upload_multipart`'s cleanup routes through the *translated*
-  idempotent abort, so a complete-vs-abort race makes that cleanup a no-op and the
-  original error is no longer masked — issue #935). While the sweep runs at startup
-  only this cannot fire (no live upload during recovery); it is a constraint to
-  respect before scheduling the sweep periodically.
+  refreshes, so a legitimate upload still streaming past the 1 h threshold *can now
+  be aborted mid-flight* by a periodic sweep pass. This is a real risk under the
+  periodic loop, where it was structurally impossible while the sweep ran at startup
+  only (no live upload during recovery). The failure is loud, not silent — the
+  upload's next `upload_part`/`complete` gets `NoSuchUpload`, which surfaces as the
+  backup error and **must be retried** (`upload_multipart`'s cleanup routes through
+  the *translated* idempotent abort, so a complete-vs-abort race makes that cleanup a
+  no-op and the original error is no longer masked — issue #935). Mitigations: the
+  daily loop cadence keeps the sweep cold, so overlap with a multipart upload still
+  running after an hour stays rare; and the storage-layer
+  `AbortIncompleteMultipartUpload` bucket lifecycle rule (umbrella #2251) is the
+  primary defense — it reclaims orphan parts natively with its own generous age, so
+  the sweep's in-process multipart abort is a backstop rather than the mechanism that
+  must catch every orphan within a tight window.
 - **Continuous delta sync** (FR-DATA-5) is explicitly deferred; the streaming
   Port shape leaves room for it.
 - **WebUI surfacing of `working_set_incomplete`** (tracked: #900). The 422 the

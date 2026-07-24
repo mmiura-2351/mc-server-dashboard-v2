@@ -540,8 +540,10 @@ class ObjectStorage(Storage):
         before deleting each candidate snapshot prefix and skips it if the pointer
         now names it. This narrows the window to the gap between that re-read and
         the delete; it does not eliminate it, so the sweep remains safest run when
-        no publisher is concurrent (today: API startup only — Section 8.5 leaves
-        scheduling open).
+        no publisher is concurrent. It runs at API startup and then on a periodic
+        loop (``storage_sweep.interval_seconds``, daily by default — issue #2252);
+        the daily cadence keeps the loop cold so overlap with a live publish stays
+        rare, which is the accepted concurrency posture (Section 9.5).
 
         In-flight staging (issue #160): a transfer staged but not yet committed has
         no live pointer to re-read against, so it is pinned instead by an in-process
