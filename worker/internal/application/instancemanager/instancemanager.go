@@ -613,6 +613,23 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// A reservation would only convert that refused-and-retried outcome into a
 		// BUSY-rejected one — same net effect, more coordination state — so it
 		// is intentionally not taken.
+		//
+		// The same no-reservation choice leaves a second, narrower cross-stream edge
+		// (issue #917 item 3): an old dropped stream's snapshot can SUCCEED and call
+		// sweepDisplaced(serverID) below while a NEW stream's re-placement hydrate for the
+		// same id has just renamed the live working set aside to .displaced-<id>
+		// (datatransfer.unpackAndSwap step (2)) — the sweep then deletes THAT hydrate's
+		// recovery copy. Same-stream overlap is excluded by the per-server FIFO lanes as
+		// above; cross-stream is a micro-window. It is acknowledged rather than closed:
+		// sweepDisplaced fires ONLY after a snapshot that SUCCEEDED, so the world it
+		// removes is provably in the store and recoverable by re-hydrating; and if the
+		// concurrent swap-in then fails, its restore rename can find the displaced tree
+		// gone (ENOENT), but destDir is likewise recoverable from the store. Closing the
+		// window would mean taking a per-id reservation on running-id snapshots —
+		// reversing this item-4 decision for no correctness gain. Note the prior-displaced
+		// deferral added for #917 item 2 does NOT cover this: it protects only the PRIOR
+		// displaced tree parked aside in unpackAndSwap step (1), while the NEW
+		// .displaced-<id> created by step (2) is exactly what sweepDisplaced removes.
 		var quiesced bool
 		var rawRestore func()
 		quiesced, rawRestore = m.quiesceRunning(ctx, cmd.ServerID, filepath.Join(m.scratchDir, cmd.ServerID))
@@ -1288,6 +1305,12 @@ func (m *Manager) removeScratch(serverID string) {
 // (".displaced-<id>"), so only this id's displaced tree is touched. Best-effort: a
 // removal failure is ignored (the leftover is wasted disk, never a correctness
 // problem). A missing tree is a no-op (os.RemoveAll returns nil).
+//
+// Cross-stream caveat (issue #917 item 3): a running-id snapshot holds no per-id
+// reservation (#829 item 4), so an old dropped stream's success can call this
+// concurrently with a NEW stream's re-placement hydrate and remove the .displaced-<id>
+// that hydrate just created. Acknowledged, not closed — the rationale is in
+// handleSnapshot's running branch.
 func (m *Manager) sweepDisplaced(serverID string) {
 	_ = os.RemoveAll(filepath.Join(m.scratchDir, ".displaced-"+serverID))
 }
