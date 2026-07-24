@@ -283,6 +283,10 @@ class ActionResult:
     outcome: ScheduleRunOutcome
     detail: str | None
     community_id: CommunityId | None
+    # Whether a FAILURE outcome is worth the one-shot backup retry (#2250). False
+    # only for a provably deterministic failure (a corrupt working set) whose
+    # re-archive can never succeed; True for infra/unexpected faults that may heal.
+    retryable: bool = True
 
 
 @dataclass(frozen=True)
@@ -330,7 +334,10 @@ class ExecuteScheduleAction:
                 exc,
             )
             return ActionResult(
-                ScheduleRunOutcome.FAILURE, _failure_detail(exc), community_id
+                ScheduleRunOutcome.FAILURE,
+                _failure_detail(exc),
+                community_id,
+                retryable=not isinstance(exc, BackupCorruptError),
             )
         except Exception as exc:  # noqa: BLE001 - every execution error is a run outcome
             # An unexpected error (a Storage/OS failure mid-archive, a DB error
@@ -516,7 +523,7 @@ class RunScheduleTick:
             await self._record(schedule, result, started_at, finished_at)
             await self._advance(schedule, last_run_at=started_at)
         if schedule.action is ScheduleAction.BACKUP:
-            self._reschedule_retry(schedule.id, result.outcome, finished_at)
+            self._reschedule_retry(schedule.id, result, finished_at)
         async with self._bookkeeping_lock:
             await self._prune_after_backup(schedule, result)
 
@@ -749,13 +756,15 @@ class RunScheduleTick:
         )
 
     def _reschedule_retry(
-        self, schedule_id: ScheduleId, outcome: ScheduleRunOutcome, now: dt.datetime
+        self, schedule_id: ScheduleId, result: ActionResult, now: dt.datetime
     ) -> None:
-        if outcome is ScheduleRunOutcome.FAILURE:
+        if result.outcome is ScheduleRunOutcome.FAILURE and result.retryable:
             self._backup_retry[schedule_id] = now + self.backup_retry_delay
-        elif outcome is ScheduleRunOutcome.SUCCESS:
+        elif result.outcome is ScheduleRunOutcome.SUCCESS:
             self._backup_retry.pop(schedule_id, None)
-        # SKIPPED: leave any pending retry untouched (a skip is not a fresh failure).
+        # SKIPPED, or a non-retryable (deterministic) FAILURE such as a corrupt
+        # working set (#2250): leave any pending retry untouched — a skip is not a
+        # fresh failure, and a deterministic failure's re-archive can never succeed.
 
     def _is_stale(
         self,

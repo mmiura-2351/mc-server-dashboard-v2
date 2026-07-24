@@ -1102,6 +1102,39 @@ async def test_successful_retry_clears_retry_and_is_not_notified() -> None:
     assert env.notifier.notifications[1][1] == "schedule_recovered"
 
 
+async def test_corrupt_backup_failure_is_not_retried() -> None:
+    # A BackupCorruptError is provably deterministic (issue #2250): re-archiving
+    # the identical corrupt working set can never succeed, so the one-shot retry
+    # must NOT be armed. A retryable failure would add a second run row + a second
+    # notification once the retry delay elapses; a corrupt failure must not.
+    env = _env(backup_store=_CorruptBackupStore())
+    server = _stopped_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()  # corrupt-triggered FAILURE; deterministic -> no retry
+    assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
+    assert len(env.notifier.notifications) == 1
+    # Push the next scheduled occurrence out of the way so only a retry could add a
+    # second run row (isolate from the interval grid, as the retry tests above do).
+    env.uow.schedules.by_id[schedule.id] = _replace_next_run(
+        env.uow.schedules.by_id[schedule.id], _NOW + dt.timedelta(days=1)
+    )
+
+    # Past the retry delay: a retryable failure would fire its one-shot retry here.
+    env.clock.set(_NOW + dt.timedelta(minutes=30))
+    await env.runner.tick()
+
+    # No second run row: the deterministic failure was never armed for retry.
+    assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
+    assert len(env.notifier.notifications) == 1
+
+
 # --- history cap + tick isolation -----------------------------------------
 
 
