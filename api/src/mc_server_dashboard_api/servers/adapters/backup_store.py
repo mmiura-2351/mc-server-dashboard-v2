@@ -113,6 +113,12 @@ class StorageBackupStoreAdapter(BackupArchiveStore):
             raise BackupCorruptError(
                 storage_ref, corrupt_count=len(exc.report.corrupt)
             ) from exc
+        except ObjectStoreUnavailableError as exc:
+            # The object store surfaced a transport/backend failure during the restore
+            # (issue #2273): already translated to a storage type at the object-client
+            # boundary. Translate again here so no storage type crosses the seam back
+            # into the servers layer, mirroring create_from_current.
+            raise BackupStorageUnavailableError(str(server_id.value)) from exc
         # A forced restore can publish a corrupt working set; return the corrupt
         # region count (0 when healthy) so the use case can quarantine + audit the
         # forced corrupt restore (#743).
@@ -159,7 +165,14 @@ class StorageBackupStoreAdapter(BackupArchiveStore):
         # a retained final tar.gz and drops the working-set tree, fail-closed on a
         # pack failure. No NotFoundError translation: an unpublished snapshot is a
         # no-op on Storage, not an error.
-        await self._storage.prune_to_final_snapshot(community, server)
+        try:
+            await self._storage.prune_to_final_snapshot(community, server)
+        except ObjectStoreUnavailableError as exc:
+            # The pack drives object-store writes (upload_multipart / delete_object): a
+            # transport/backend failure surfaces as a storage type (issue #2273).
+            # Translate at the seam so no storage type crosses back into the servers
+            # layer, mirroring create_from_current.
+            raise BackupStorageUnavailableError(str(server_id.value)) from exc
 
     def open(
         self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
@@ -192,9 +205,16 @@ class StorageBackupStoreAdapter(BackupArchiveStore):
         storage_ref: str,
     ) -> None:
         community, server = _scope(community_id, server_id)
-        await self._storage.put_backup(
-            community, server, stream, key=BackupKey(storage_ref)
-        )
+        try:
+            await self._storage.put_backup(
+                community, server, stream, key=BackupKey(storage_ref)
+            )
+        except ObjectStoreUnavailableError as exc:
+            # put_backup drives an object-store upload_multipart: a transport/backend
+            # failure surfaces as a storage type (issue #2273). Translate at the seam
+            # so no storage type crosses back into the servers layer, mirroring
+            # create_from_current.
+            raise BackupStorageUnavailableError(str(server_id.value)) from exc
 
     async def size(
         self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
