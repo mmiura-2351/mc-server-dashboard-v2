@@ -13,7 +13,6 @@ import datetime as dt
 from collections.abc import AsyncIterator
 
 import pytest
-from botocore.config import Config
 from botocore.exceptions import ClientError
 
 from mc_server_dashboard_api.storage.adapters.object_client import (
@@ -392,43 +391,18 @@ async def test_copy_object_translates_not_found(code: str) -> None:
 # --- Explicit, settings-sourced timeouts + retries (issue #2249) -----------
 
 
-class _ConfigCapturingClientCtx:
-    async def __aenter__(self) -> object:
-        return object()
-
-    async def __aexit__(self, *_exc: object) -> bool:
-        return False
-
-
-class _ConfigCapturingSession:
-    """An ``aioboto3.Session`` double recording the ``config`` passed to ``client``.
-
-    The factory builds the ``botocore.config.Config`` from settings; capturing it
-    here proves the built client carries explicit timeouts/retries rather than
-    inheriting botocore's hidden 60s + legacy-retry defaults (issue #2249).
-    """
-
-    captured: dict[str, Config] = {}
-
-    def __init__(self, **_kwargs: object) -> None:
-        pass
-
-    def client(
-        self, _service: str, *, endpoint_url: str, config: Config
-    ) -> _ConfigCapturingClientCtx:
-        type(self).captured["config"] = config
-        return _ConfigCapturingClientCtx()
-
-
-async def test_factory_passes_settings_sourced_timeouts_and_retries(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _ConfigCapturingSession.captured = {}
-    monkeypatch.setattr(
-        "mc_server_dashboard_api.storage.adapters.object_client.aioboto3.Session",
-        _ConfigCapturingSession,
-    )
-
+async def test_factory_builds_client_with_settings_sourced_timeouts_and_retries() -> (
+    None
+):
+    # The built client must carry the explicit, settings-sourced transport budget
+    # rather than inheriting botocore's hidden defaults (60s connect/read + legacy
+    # retries). Inspect the real client's resolved ``meta.config`` so the assertion
+    # pins the EFFECTIVE values botocore will use — no network call is made (the
+    # context manager only builds the client). ``retry_max_attempts`` is the TOTAL
+    # attempt count: botocore normalizes the retries config to ``total_max_attempts``,
+    # and this must equal the field verbatim (N means N attempts, not N + 1). This is
+    # the assertion that catches the ``max_attempts`` vs ``total_max_attempts``
+    # off-by-one.
     factory = make_s3_client_factory(
         endpoint="http://localhost:8333",
         bucket="bucket",
@@ -438,10 +412,10 @@ async def test_factory_passes_settings_sourced_timeouts_and_retries(
         read_timeout=42.0,
         retry_max_attempts=3,
     )
-    async with factory():
-        pass
-
-    config = _ConfigCapturingSession.captured["config"]
-    assert config.connect_timeout == 7.0
-    assert config.read_timeout == 42.0
-    assert config.retries == {"mode": "standard", "max_attempts": 3}
+    async with factory() as s3:
+        assert isinstance(s3, _Aioboto3S3Client)
+        config = s3._client.meta.config
+        assert config.connect_timeout == 7.0
+        assert config.read_timeout == 42.0
+        assert config.retries["mode"] == "standard"
+        assert config.retries["total_max_attempts"] == 3

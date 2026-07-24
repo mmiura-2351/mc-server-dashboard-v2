@@ -329,7 +329,12 @@ def make_s3_client_factory(
     config = botocore.config.Config(
         connect_timeout=connect_timeout,
         read_timeout=read_timeout,
-        retries={"mode": "standard", "max_attempts": retry_max_attempts},
+        # ``total_max_attempts`` (not ``max_attempts``) so the value is the TOTAL
+        # attempt count botocore makes: ``max_attempts`` means retries AFTER the
+        # initial request (botocore normalizes it to total + 1), which would make
+        # ``retry_max_attempts`` off by one and break the "1 disables retries"
+        # contract. ``total_max_attempts=N`` yields exactly N attempts.
+        retries={"mode": "standard", "total_max_attempts": retry_max_attempts},
     )
     session = aioboto3.Session(
         aws_access_key_id=access_key, aws_secret_access_key=secret_key
