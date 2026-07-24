@@ -384,6 +384,47 @@ async def test_dispatch_failure_records_failure_notifies_and_advances() -> None:
     assert stored.next_run_at is not None and stored.next_run_at > _NOW
 
 
+async def test_sustained_failures_notify_once_then_recover() -> None:
+    # State-transition suppression (#2269): a schedule stuck failing every
+    # occurrence emits exactly one failure toast for the whole incident, then one
+    # recovery toast when it clears. The run rows are still recorded every time.
+    refuse = FakeControlPlane(
+        outcomes={"command": CommandOutcome(status=CommandStatus.INTERNAL)}
+    )
+    env = _env(control_plane=refuse)
+    server = _running_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.COMMAND,
+        command="say hi",
+        cadence=Cadence.from_interval(60),
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()  # occurrence 1: fails
+    env.clock.set(_NOW + dt.timedelta(minutes=1))
+    await env.runner.tick()  # occurrence 2: fails again
+
+    # Both occurrences recorded, but only the first notifies (no dedup today: 2).
+    assert _runs(env, schedule) == [
+        ScheduleRunOutcome.FAILURE,
+        ScheduleRunOutcome.FAILURE,
+    ]
+    assert len(env.notifier.notifications) == 1
+
+    refuse._outcomes["command"] = CommandOutcome(status=CommandStatus.OK)
+    env.clock.set(_NOW + dt.timedelta(minutes=2))
+    await env.runner.tick()  # recovers
+
+    assert len(env.notifier.notifications) == 2
+    server_id, kind, title, _detail = env.notifier.notifications[1]
+    assert server_id == server.id
+    assert kind == "schedule_recovered"
+    assert "command" in title
+
+
 class _DiskFullBackupStore(FakeBackupArchiveStore):
     """Raises a non-ServerError mid-archive (the disk-full case)."""
 
@@ -1013,7 +1054,10 @@ async def test_failed_backup_retries_once_then_waits_for_next_occurrence() -> No
         ScheduleRunOutcome.FAILURE,
         ScheduleRunOutcome.FAILURE,
     ]
-    assert len(env.notifier.notifications) == 2
+    # State-transition suppression (#2269): the retry's FAILURE is on the same
+    # failing edge as the original occurrence, so it does not re-notify — one toast
+    # for the whole incident. The run row is still recorded (above).
+    assert len(env.notifier.notifications) == 1
     assert env.uow.schedules.by_id[schedule.id].next_run_at == next_run_after_failure
 
     # The retry is one-shot: a later tick fires no further retry.
@@ -1051,8 +1095,11 @@ async def test_successful_retry_clears_retry_and_is_not_notified() -> None:
         ScheduleRunOutcome.FAILURE,
         ScheduleRunOutcome.SUCCESS,
     ]
-    # Only the original failure was notified; the successful retry was not.
-    assert len(env.notifier.notifications) == 1
+    # The original failure notified once; the successful retry is not notified as a
+    # failure but, ending the failing run, fires one recovery notification (#2269).
+    assert len(env.notifier.notifications) == 2
+    assert env.notifier.notifications[0][1] == "schedule_failed"
+    assert env.notifier.notifications[1][1] == "schedule_recovered"
 
 
 # --- history cap + tick isolation -----------------------------------------
