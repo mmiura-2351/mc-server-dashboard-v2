@@ -370,6 +370,111 @@ run. It is an **incident-recovery lever, not a second scheduled mechanism** — 
 `-master.garbageThreshold=0.1` flag already handles the steady state; run
 `volume.vacuum` only to recover a store that has fallen behind.
 
+### Storage-capacity incident runbook (disk-full diagnosis and recovery)
+
+When the SeaweedFS store fills the host disk, publishes and backups start
+failing and the deployment can spiral — the 2026-07-23 incident reached 97% host
+disk. This is the diagnose-then-recover procedure for that class of incident; the
+steady-state mechanisms that keep it from recurring are cross-linked at the end.
+Host disk-usage **alerting** is a known gap — see the note below.
+
+#### Diagnosis
+
+**Confirm the signature.** A store with no room left surfaces as S3 write
+failures in the api container log; the 2026-07-23 signature was `InternalError`
+raised on the `UploadPart` operation (a multipart part that could not land):
+
+```sh
+docker compose logs api | grep InternalError
+```
+
+**Measure the garbage.** From the SeaweedFS shell, `volume.list` reports
+per-volume byte counts. Read each volume's `DeletedByteCount`
+(deleted-but-not-yet-reclaimed bytes — the vacuum backlog) against its total
+size: a large `DeletedByteCount` relative to the total means most of the space is
+reclaimable garbage rather than live data.
+
+```sh
+docker compose exec seaweedfs weed shell
+> volume.list
+```
+
+**Measure the live footprint.** `fs.du` reports the actual live size under the
+bucket, which separates a genuine capacity problem (live data is large) from a
+reclaimable-garbage problem (live data is small but the volumes are bloated):
+
+```sh
+docker compose exec seaweedfs weed shell
+> fs.du /buckets/mcsd
+```
+
+#### Recovery
+
+Work from the cheapest, most-reversible step to the most invasive, and re-check
+`df -h` after each one.
+
+1. **Free host build-cache first.** Docker's build cache can hold gigabytes
+   unrelated to SeaweedFS; reclaiming it buys the headroom that vacuum compaction
+   *needs* — compaction writes a fresh copy of a volume before swapping it in, so
+   it cannot complete on an already-full disk:
+
+   ```sh
+   docker builder prune
+   ```
+
+2. **Force an immediate vacuum.** With headroom restored, compact the volumes on
+   demand instead of waiting for the built-in periodic auto-vacuum:
+
+   ```sh
+   docker compose exec seaweedfs weed shell
+   > volume.vacuum -garbageThreshold=0.1
+   ```
+
+3. **Restart the `seaweedfs` service** to clear any wedged state and let it
+   re-open the compacted volumes:
+
+   ```sh
+   docker compose restart seaweedfs
+   ```
+
+4. **Clean incomplete uploads.** Remove incomplete multipart uploads that the
+   app-level abort did not catch — the SeaweedFS-native cleanup, complementary to
+   the API sweep (`Orphan multipart parts` above):
+
+   ```sh
+   docker compose exec seaweedfs weed shell
+   > s3.clean.uploads
+   ```
+
+#### Steady-state prevention
+
+Three landed mechanisms keep the store from filling in normal operation; this
+runbook is the fallback for when they have already fallen behind. Do not re-tune
+them here — each has its own subsection:
+
+- **Incomplete-upload lifecycle rule.** A bucket-level
+  `AbortIncompleteMultipartUpload` rule with `DaysAfterInitiation: 2` aborts
+  orphaned multipart uploads at the storage layer. See
+  [Bucket lifecycle rule (AbortIncompleteMultipartUpload)](#bucket-lifecycle-rule-abortincompletemultipartupload)
+  above.
+- **Auto-vacuum threshold.** `compose.yaml` sets `-master.garbageThreshold=0.1`,
+  so SeaweedFS's built-in periodic vacuum compacts a volume once its garbage
+  ratio crosses 10% — early enough that the headroom to compact is still
+  available. See [Vacuum tuning and manual recovery](#vacuum-tuning-and-manual-recovery)
+  above.
+- **App-side periodic sweep.** The API reclaims orphan staging/snapshot prefixes
+  and aborts orphan in-progress multipart uploads on a loop (daily by default,
+  `storage_sweep.interval_seconds`). See CONFIGURATION.md
+  [Section 5.15](../app/CONFIGURATION.md#515-crash-recovery-storage-sweep).
+
+#### Known gap: no disk-usage alerting
+
+There is currently **no automated early warning** before the disk fills — host
+disk-usage alerting was deferred by owner decision (umbrella issue #2251). Until
+it lands, check capacity by hand on a regular cadence: `df -h` on the host for
+overall free space, and `volume.list` from the SeaweedFS shell (as in Diagnosis
+above) for the per-volume garbage backlog.
+
 ## 6. First-run bootstrap (create the platform admin)
 
 There is no seeded admin and **no manual database step**. The first user
