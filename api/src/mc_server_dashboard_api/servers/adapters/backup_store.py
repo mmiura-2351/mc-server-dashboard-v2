@@ -6,8 +6,10 @@ bounded contexts (mirroring ``StorageFileStoreAdapter``); the servers *domain* a
 *application* never construct a storage adapter — the wiring does.
 
 The seam translates the storage value objects (``BackupKey`` wraps the opaque
-archive ref) and the storage ``NotFoundError`` -> :class:`BackupNotFoundError`, so
-no storage type crosses back into the servers layer.
+archive ref) and the storage errors so no storage type crosses back into the
+servers layer: ``NotFoundError`` -> :class:`BackupNotFoundError`,
+``IntegrityCheckError`` -> :class:`BackupCorruptError`, and
+``ObjectStoreUnavailableError`` -> :class:`BackupStorageUnavailableError` (#2270).
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ from mc_server_dashboard_api.servers.domain.backup_store import BackupArchiveSto
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
     BackupNotFoundError,
+    BackupStorageUnavailableError,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -26,6 +29,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 from mc_server_dashboard_api.storage.domain.errors import (
     IntegrityCheckError,
     NotFoundError,
+    ObjectStoreUnavailableError,
 )
 from mc_server_dashboard_api.storage.domain.port import Storage
 from mc_server_dashboard_api.storage.domain.value_objects import (
@@ -71,6 +75,13 @@ class StorageBackupStoreAdapter(BackupArchiveStore):
             raise BackupCorruptError(
                 str(server_id.value), corrupt_count=len(exc.report.corrupt)
             ) from exc
+        except ObjectStoreUnavailableError as exc:
+            # The object store surfaced a transport/backend failure during the archive
+            # upload (issue #2270): a botocore ClientError (e.g. the SeaweedFS 500
+            # InternalError on UploadPart) or a connection/timeout, already translated
+            # to a storage type at the object-client boundary. Translate again here so
+            # no storage type crosses the seam back into the servers layer.
+            raise BackupStorageUnavailableError(str(server_id.value)) from exc
 
     async def list_archive_refs(
         self, *, community_id: CommunityId, server_id: ServerId

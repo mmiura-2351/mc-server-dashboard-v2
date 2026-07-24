@@ -360,6 +360,20 @@ class BackupCorruptError(ServerError):
         self.corrupt_count = corrupt_count
 
 
+class BackupStorageUnavailableError(ServerError):
+    """A backup operation failed because the storage backend was unavailable (#2270).
+
+    The seam translation of the storage ``ObjectStoreUnavailableError``: the object
+    store surfaced a transport failure or a backend service error (e.g. a SeaweedFS
+    HTTP 500 ``InternalError`` on ``UploadPart``, the 2026-07-23 incident) that is not
+    one of the modelled outcomes. Translating it at the servers/storage seam keeps the
+    raw storage type from crossing back into the servers layer (the seam's documented
+    contract). The condition is a transient backend fault, distinct from a corrupt
+    working set (:class:`BackupCorruptError`); an unmapped ``ServerError`` surfaces as
+    a generic 500 at the edge, which a future dedicated handler may refine to a 503.
+    """
+
+
 class InvalidBackupArchiveError(ServerError):
     """An uploaded backup archive was not a valid, traversal-safe ``tar.gz`` (#281).
 

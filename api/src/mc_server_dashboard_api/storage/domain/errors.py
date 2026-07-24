@@ -39,6 +39,23 @@ class NotFoundError(StorageError):
     """
 
 
+class ObjectStoreUnavailableError(StorageError):
+    """The object-store backend failed or was unreachable during an operation (#2270).
+
+    Raised at the object-client adapter boundary when the S3 client surfaces a
+    transport failure or a backend service error that is not one of the modelled
+    storage outcomes (a missing key, a corrupt working set, an incomplete transfer):
+    a ``botocore`` ``ClientError`` such as SeaweedFS's HTTP 500 ``InternalError`` on
+    ``UploadPart`` (the 2026-07-23 incident), or a connection/timeout transport error
+    (``EndpointConnectionError``, ``ConnectTimeoutError``, ``ReadTimeoutError``, ...).
+
+    Translating it here keeps the raw third-party ``botocore`` type from crossing the
+    Storage Port boundary, so callers receive a typed, categorizable storage error
+    rather than an untranslated exception; the originating error is preserved as the
+    ``__cause__`` for the traceback logged at the edge.
+    """
+
+
 class ArchiveTooLargeError(StorageError):
     """A backup archive's members inflate past the restore decompressed-size cap.
 

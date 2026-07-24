@@ -22,6 +22,7 @@ from typing import Any
 
 import aioboto3
 import botocore.config
+import botocore.exceptions
 from botocore.exceptions import ClientError
 
 from mc_server_dashboard_api.storage.adapters.object_store import (
@@ -31,11 +32,30 @@ from mc_server_dashboard_api.storage.adapters.object_store import (
     S3MultipartUpload,
     S3Object,
 )
-from mc_server_dashboard_api.storage.domain.errors import NotFoundError
+from mc_server_dashboard_api.storage.domain.errors import (
+    NotFoundError,
+    ObjectStoreUnavailableError,
+)
 
 # Stream/multipart chunk size: 8 MiB respects the S3 5 MiB minimum for non-final
 # multipart parts while keeping per-call memory bounded.
 _PART = 8 * 1024 * 1024
+
+# Transport/backend failures the S3 client raises during an upload that mean the
+# object store could not complete the operation (issue #2270): a service
+# ``ClientError`` (e.g. SeaweedFS's HTTP 500 ``InternalError`` on ``UploadPart``, the
+# 2026-07-23 incident) or a connection/timeout transport error. ``ConnectionError``
+# is botocore's own base for ``EndpointConnectionError`` / ``ConnectTimeoutError``;
+# ``HTTPClientError`` for ``ReadTimeoutError`` / ``ConnectionClosedError``. Caught at
+# this adapter boundary and translated to :class:`ObjectStoreUnavailableError` so no
+# raw ``botocore`` type crosses the Storage Port. A ``botocore`` *usage* error
+# (bad params, missing credentials) is deliberately NOT included — that is a bug or
+# misconfiguration to surface loudly, not a backend-availability condition.
+_UPLOAD_FAILURE_ERRORS = (
+    ClientError,
+    botocore.exceptions.ConnectionError,
+    botocore.exceptions.HTTPClientError,
+)
 
 
 class _Aioboto3S3Client:
@@ -64,44 +84,59 @@ class _Aioboto3S3Client:
         # Accumulate into >= _PART buffers so each uploaded part respects the S3
         # minimum, without ever holding the whole object: at most one part plus one
         # incoming chunk in memory.
-        created = await self._client.create_multipart_upload(
-            Bucket=self._bucket, Key=key
-        )
-        upload_id = created["UploadId"]
-        completed: list[dict[str, object]] = []
-        buffer = bytearray()
-        part_number = 1
+        #
+        # Translate a botocore transport/backend failure to a StorageError at this
+        # boundary (issue #2270): create/upload_part/complete may raise a service
+        # ``ClientError`` (e.g. the SeaweedFS 500 ``InternalError`` on ``UploadPart``)
+        # or a connection/timeout error, and the Storage Port contract is that only
+        # storage-domain errors escape. The wrap is OUTSIDE the abort-cleanup block so
+        # the cleanup still runs first and the ORIGINAL failure is preserved as the
+        # ``__cause__``; a non-botocore error from the ``parts`` source stream falls
+        # through untranslated.
         try:
-            async for chunk in parts:
-                buffer.extend(chunk)
-                if len(buffer) >= _PART:
+            created = await self._client.create_multipart_upload(
+                Bucket=self._bucket, Key=key
+            )
+            upload_id = created["UploadId"]
+            completed: list[dict[str, object]] = []
+            buffer = bytearray()
+            part_number = 1
+            try:
+                async for chunk in parts:
+                    buffer.extend(chunk)
+                    if len(buffer) >= _PART:
+                        completed.append(
+                            await self._upload_part(key, upload_id, part_number, buffer)
+                        )
+                        part_number += 1
+                        buffer = bytearray()
+                if buffer or part_number == 1:
+                    # Always upload at least one (possibly empty) part so an empty
+                    # object completes rather than aborting on a zero-part upload.
                     completed.append(
                         await self._upload_part(key, upload_id, part_number, buffer)
                     )
-                    part_number += 1
-                    buffer = bytearray()
-            if buffer or part_number == 1:
-                # Always upload at least one (possibly empty) part so an empty
-                # object completes rather than aborting on a zero-part upload.
-                completed.append(
-                    await self._upload_part(key, upload_id, part_number, buffer)
+                await self._client.complete_multipart_upload(
+                    Bucket=self._bucket,
+                    Key=key,
+                    UploadId=upload_id,
+                    MultipartUpload={"Parts": completed},
                 )
-            await self._client.complete_multipart_upload(
-                Bucket=self._bucket,
-                Key=key,
-                UploadId=upload_id,
-                MultipartUpload={"Parts": completed},
-            )
-        except BaseException:
-            # Route cleanup through the translated, idempotent abort (issue #935):
-            # in a complete-vs-abort race the raw client would raise NoSuchUpload and
-            # that raise would mask the ORIGINAL upload error. The translated method
-            # turns NoSuchUpload into a no-op, so the original error surfaces. Suppress
-            # any OTHER cleanup-abort failure too — losing the orphan upload to a sweep
-            # is recoverable, but masking the original error is not.
-            with suppress(Exception):
-                await self.abort_multipart_upload(key, upload_id)
-            raise
+            except BaseException:
+                # Route cleanup through the translated, idempotent abort (issue #935):
+                # in a complete-vs-abort race the raw client would raise NoSuchUpload
+                # and that raise would mask the ORIGINAL upload error. The translated
+                # method turns NoSuchUpload into a no-op, so the original error
+                # surfaces. Suppress any OTHER cleanup-abort failure too — losing the
+                # orphan upload to a sweep is recoverable, but masking the original
+                # error is not.
+                with suppress(Exception):
+                    await self.abort_multipart_upload(key, upload_id)
+                raise
+        except _UPLOAD_FAILURE_ERRORS as exc:
+            raise ObjectStoreUnavailableError(
+                f"object store upload failed for {key}"
+            ) from exc
 
     async def _upload_part(
         self, key: str, upload_id: str, part_number: int, data: bytearray
