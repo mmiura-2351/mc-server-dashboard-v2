@@ -1105,8 +1105,12 @@ async def test_successful_retry_clears_retry_and_is_not_notified() -> None:
 async def test_corrupt_backup_failure_is_not_retried() -> None:
     # A BackupCorruptError is provably deterministic (issue #2250): re-archiving
     # the identical corrupt working set can never succeed, so the one-shot retry
-    # must NOT be armed. A retryable failure would add a second run row + a second
-    # notification once the retry delay elapses; a corrupt failure must not.
+    # must NOT be armed. The authoritative signal is the absence of a second run
+    # row after the retry delay elapses — a retryable failure would fire the retry
+    # and add one. The notification count is only a secondary check here: #2269's
+    # state-transition dedup suppresses the sustained-failure toast, so even the
+    # buggy (retry-armed) path would emit just one notification; the run-row count
+    # is what distinguishes armed from not-armed.
     env = _env(backup_store=_CorruptBackupStore())
     server = _stopped_server()
     schedule = _schedule(
@@ -1130,8 +1134,10 @@ async def test_corrupt_backup_failure_is_not_retried() -> None:
     env.clock.set(_NOW + dt.timedelta(minutes=30))
     await env.runner.tick()
 
-    # No second run row: the deterministic failure was never armed for retry.
+    # Primary proof: no second run row — the deterministic failure was never armed
+    # for retry.
     assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
+    # Secondary (weaker under #2269 dedup): still exactly one notification.
     assert len(env.notifier.notifications) == 1
 
 
