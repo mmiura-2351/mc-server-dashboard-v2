@@ -133,6 +133,38 @@ services:
       timeout: 5s
       retries: 20
 
+  seaweedfs-lifecycle:
+    # One-shot bucket provisioner (issue #2260), mirroring `migrate`: it applies
+    # the `AbortIncompleteMultipartUpload` lifecycle rule on the mcsd bucket — the
+    # storage-layer backstop the object sweep's own comments recommend for orphan
+    # multipart parts (STORAGE.md Section 7.3, DEPLOYMENT.md Section 5). Reuses the
+    # api image (its `aioboto3` ships a working SYNC boto3) with the script
+    # bind-mounted, so no new image or dependency. Gated behind the `object`
+    # profile like seaweedfs, and waits for the S3 gateway to be healthy before
+    # provisioning. The script self-verifies (GetBucketLifecycleConfiguration) and
+    # exits non-zero if the rule is not honored, so this service never no-ops.
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    image: mcsd-api:dev
+    restart: "no"
+    profiles: ["object"]
+    command: ["python", "/app/scripts/provision_object_lifecycle.py"]
+    volumes:
+      - ./scripts/provision_object_lifecycle.py:/app/scripts/provision_object_lifecycle.py:ro
+    environment:
+      MCD_API_STORAGE__OBJECT__ENDPOINT: http://seaweedfs:8333
+      MCD_API_STORAGE__OBJECT__BUCKET: ${MCD_API_STORAGE__OBJECT__BUCKET:-mcsd}
+      # `:-` (empty default), NOT `:?`: compose interpolates a service's env even
+      # when its profile is inactive, matching the seaweedfs/api posture. The
+      # blank-key fail-fast lives in the script (it exits non-zero on empty keys);
+      # it runs only under the `object` profile (#940, #702).
+      MCD_API_STORAGE__OBJECT__ACCESS_KEY: "${MCD_API_STORAGE__OBJECT__ACCESS_KEY:-}"
+      MCD_API_STORAGE__OBJECT__SECRET_KEY: "${MCD_API_STORAGE__OBJECT__SECRET_KEY:-}"
+    depends_on:
+      seaweedfs:
+        condition: service_healthy
+
   api:
     # Build context is the repo root so the webui stage can reach webui/
     # (issue #490); the Dockerfile copies the python app from api/.
@@ -232,6 +264,13 @@ services:
       # when seaweedfs is part of the active profile set, and ignored otherwise.
       seaweedfs:
         condition: service_healthy
+        required: false
+      # Block the api until the mcsd bucket's lifecycle rule is provisioned
+      # (issue #2260). `required: false` for the same reason as seaweedfs above:
+      # the one-shot is `object`-profile-gated, so in fs mode it is not in the
+      # active profile set and this dependency is ignored.
+      seaweedfs-lifecycle:
+        condition: service_completed_successfully
         required: false
 
   worker:

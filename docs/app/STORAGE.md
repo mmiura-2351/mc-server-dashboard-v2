@@ -834,10 +834,16 @@ designed for many small files). The deployment wiring, credentials, opt-out, and
 the live contract tests are in
 [DEPLOYMENT.md Section 5](../dev/DEPLOYMENT.md#5-storage-backend-object-on-seaweedfs-default).
 The app implements its own snapshot/version logic, so S3 versioning / object-lock
-are not required. Orphan multipart reclamation likewise does **not** depend on a
-bucket lifecycle rule: the startup sweep age-gates uploads via `ListParts` when
-SeaweedFS omits `Initiated` (Section 4.3), and `weed shell s3.clean.uploads` is
-the optional SeaweedFS-native backstop. **Bucket provisioning (issue #946).**
+are not required. Orphan multipart reclamation is **defense-in-depth (issue
+#2260)**: the startup sweep age-gates uploads via `ListParts` when SeaweedFS omits
+`Initiated` (Section 4.3), and behind it a bucket-level
+`AbortIncompleteMultipartUpload` lifecycle rule reclaims the residual gap the
+sweep cannot age-gate — an upload that crashes after `CreateMultipartUpload` but
+before its first part, which carries no timestamp. The rule is applied by a
+one-shot compose service (`seaweedfs-lifecycle`) on startup and self-verifies
+that SeaweedFS honored it (DEPLOYMENT.md Section 5); `weed shell
+s3.clean.uploads` remains an optional operator-side cleanup.
+**Bucket provisioning (issue #946).**
 SeaweedFS auto-creates the bucket on the first **write**, not on read, so a fresh
 deployment needs no manual bucket setup: every **read** against the not-yet-created
 bucket returns `NoSuchBucket`, which the adapter treats as empty/not-found, so the

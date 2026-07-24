@@ -258,6 +258,27 @@ If you want to reclaim those on a schedule too, `weed shell s3.clean.uploads` is
 the SeaweedFS-native operator-side cleanup (it removes incomplete uploads older
 than its default 24h); it is optional and complementary to the API sweep.
 
+### Bucket lifecycle rule (AbortIncompleteMultipartUpload)
+
+Behind the API sweep, a bucket-level `AbortIncompleteMultipartUpload` lifecycle
+rule on the `mcsd` bucket is the storage-layer backstop for the residual gap
+above — the partless orphan the sweep cannot age-gate (issue #2260). It is
+applied by a one-shot compose service, `seaweedfs-lifecycle`, that mirrors
+`migrate`: gated behind the `object` profile, it waits for the SeaweedFS S3
+gateway to be healthy and then runs `scripts/provision_object_lifecycle.py` (sync
+boto3 from the reused `mcsd-api:dev` image — no extra dependency). The api service
+blocks on it (`service_completed_successfully`) so the rule is in place before the
+app takes traffic; in `fs` mode the service is out of the active profile set and
+the dependency is ignored.
+
+The script creates the bucket if absent, applies the rule with
+`DaysAfterInitiation: 2` — safely above the sweep's 1h/24h age thresholds so the
+lifecycle rule never races the app-level abort — then **self-verifies** with
+`GetBucketLifecycleConfiguration` and exits non-zero if SeaweedFS did not honor
+the rule, so the one-shot fails loudly rather than silently no-op'ing. Self-verify
+proves the config was accepted and persisted; because `DaysAfterInitiation` is
+integer-days, actual abort execution is not observable at deploy time.
+
 ### Opting back to the fs backend
 
 To run the local-volume **`fs`** backend instead (the previous default; STORAGE.md
