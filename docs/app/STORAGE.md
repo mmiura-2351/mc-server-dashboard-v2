@@ -793,7 +793,10 @@ real generation of the world, so the server itself recovers by re-hydrating; the
 bounded to that delta. Practical consequence for operators: a `.displaced-<id>` tree can
 occasionally disappear without a snapshot of the *current* stream having succeeded, so
 recover from a displaced tree you care about promptly (the procedure above) rather than
-leaving it in place indefinitely.
+leaving it in place indefinitely. The sibling half of that same post-upload tail — the
+snapshot's working-set generation stamp — is **not** accepted this way: it is guarded, so
+a stale snapshot cannot stamp its generation onto the tree a concurrent hydrate swapped in
+(#2284, CONTROL_PLANE.md Section 4.1).
 
 ---
 

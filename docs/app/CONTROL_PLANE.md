@@ -153,7 +153,16 @@ hint, host resources) — the input to the API's greedy placement
 set the Worker already holds in its persistent local scratch (the non-empty
 per-server scratch dirs found at startup), tagged with the **generation** that
 set is at — the authoritative store generation it was last hydrated from or
-snapshotted to, persisted in the scratch. The API records this so it can skip the
+snapshotted to, persisted in the scratch. A snapshot advances that persisted
+generation **only while the working dir is still the directory the snapshot pinned
+when it began** (issue #2284): a running-id snapshot holds no per-server reservation
+(#829 item 4), so a new stream can re-place the server onto this Worker and hydrate it
+while an older, dropped stream's snapshot is still finishing — and stamping the freshly
+published generation onto that replacement tree would leave the marker *newer* than the
+world it names, which is precisely the case the skip gate below cannot recover from. The
+Worker skips the stamp instead (a `WARN` naming the reason; the publish itself still
+succeeds), so the set stays advertised at the hydrate's generation and the next start
+re-hydrates. The API records this so it can skip the
 destructive hydrate on a same-worker restart **only when the held generation is
 fresh enough** — hydrating a live, newer set would unpack the last authoritative
 snapshot over it and roll the world back, while a *stale* held set (e.g. an

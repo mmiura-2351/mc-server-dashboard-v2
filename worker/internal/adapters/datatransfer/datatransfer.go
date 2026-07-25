@@ -146,6 +146,12 @@ func (c *Client) Hydrate(ctx context.Context, url, token, destDir string) (uint6
 		// API gates this off with skip_hydrate (lifecycle.py), so a 204 here only ever
 		// hydrates onto an empty/absent destDir. Leaving the retained destDir is
 		// intentional — do not add a blind destDir wipe here.
+		//
+		// A wipe would also be invisible to instancemanager's generation-stamp guard
+		// (issue #2284), which detects a concurrent re-placement by the working dir's
+		// IDENTITY: the 200 path replaces destDir by rename, but a wipe-in-place would
+		// empty the very same directory object and the guard would see no change. Any
+		// future destDir mutation here must REPLACE the directory, not empty it.
 		return parseGeneration(resp.Header), nil
 	case http.StatusOK:
 	default:

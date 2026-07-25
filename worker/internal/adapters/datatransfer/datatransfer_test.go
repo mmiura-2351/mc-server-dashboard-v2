@@ -1317,6 +1317,48 @@ func TestHydrateDisplacesOldWorkingSetInsteadOfDeleting(t *testing.T) {
 	}
 }
 
+// A 200 hydrate must REPLACE destDir with a different directory object, not rewrite it
+// in place. The instancemanager's generation-stamp guard (issue #2284) detects a
+// concurrent re-placement by comparing the working dir's identity (os.SameFile against
+// a pinned descriptor) across the snapshot's window — it is correct ONLY because this
+// swap is a rename. Nothing else pins that, so an "optimisation" here that unpacked
+// straight into destDir would silently defeat the guard and let a stale snapshot stamp
+// its generation onto a tree it never packed.
+func TestHydrateSwapChangesDestDirIdentity(t *testing.T) {
+	body := tarOf(map[string]string{"server.properties": "new"})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	dest := filepath.Join(t.TempDir(), "server")
+	if err := os.MkdirAll(dest, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dest, "server.properties"), []byte("old"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c := New(srv.Client())
+	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest); err != nil {
+		t.Fatalf("Hydrate: %v", err)
+	}
+
+	after, err := os.Stat(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(before, after) {
+		t.Fatal("destDir is the SAME directory object after a 200 hydrate: the swap no longer " +
+			"replaces by rename, so instancemanager's #2284 identity guard can no longer detect " +
+			"a concurrent re-placement")
+	}
+}
+
 // A SECOND hydrate over the same id must KEEP the tree already at .displaced-<id> and
 // discard the working set it just displaced (oldest-wins, issue #2278). A surviving
 // .displaced-<id> proves no snapshot for this id has succeeded since it was created

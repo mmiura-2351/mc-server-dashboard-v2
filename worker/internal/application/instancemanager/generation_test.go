@@ -2,6 +2,7 @@ package instancemanager
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,6 +51,238 @@ func TestSnapshotRecordsNewGeneration(t *testing.T) {
 	}
 	if got := readGeneration(filepath.Join(m.scratchDir, "s1")); got != 12 {
 		t.Fatalf("recorded generation = %d, want 12", got)
+	}
+}
+
+// replaceWorkingDirLikeHydrate replaces dir the way a concurrent stream's hydrate
+// does, so a test's interleaving reproduces the real one. It MIRRORS
+// datatransfer.unpackAndSwap: build a fresh tree under a temp sibling, write the
+// marker into it before the swap (issue #917), rename the live dir aside to
+// .displaced-<id>, then rename the temp tree in — see the
+// os.Rename(destDir, asideAt) / swapRename(tmpDir, destDir) pair in
+// internal/adapters/datatransfer/datatransfer.go.
+//
+// The rename is the whole point: it gives the path a DIFFERENT directory object. A
+// hook that merely rewrote files inside dir would leave the identity unchanged and
+// prove nothing about the guard. Keep this in step with unpackAndSwap.
+func replaceWorkingDirLikeHydrate(t *testing.T, dir string, gen uint64) {
+	t.Helper()
+	parent, id := filepath.Dir(dir), filepath.Base(dir)
+	tmp := filepath.Join(parent, ".hydrate-"+id+"-tmp")
+	if err := os.MkdirAll(tmp, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "level.dat"), []byte("hydrated"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeGeneration(tmp, gen); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(dir, filepath.Join(parent, ".displaced-"+id)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp, dir); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRunningSnapshotSkipsGenerationStampWhenWorkingDirReplaced is the regression
+// test for issue #2284. A running-id snapshot takes no per-id reservation (issue
+// #829 item 4), so an old dropped stream's post-upload tail can still be running
+// after a NEW stream has re-placed the server here and hydrated it. Stamping the
+// newly published generation onto that replaced tree would make the marker describe
+// a world it does not hold — and because the marker would then be NEWER than the
+// tree, the #767 skip-hydrate gate (skip_hydrate = held >= store, lifecycle.py)
+// would skip the very hydrate that corrects it and boot the wrong generation,
+// silently. The stamp must be skipped instead, leaving the hydrate's own generation
+// in place so the API re-hydrates.
+func TestRunningSnapshotSkipsGenerationStampWhenWorkingDirReplaced(t *testing.T) {
+	tr := &fakeTransfer{gen: 12}
+	ctrl := &fakeControl{reply: "ok"}
+	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("start = %+v, want success", res)
+	}
+	dir := seedScratch(t, m, "s1")
+	if err := writeGeneration(dir, 5); err != nil {
+		t.Fatal(err)
+	}
+	tr.duringUpload = func(workingDir string) { replaceWorkingDirLikeHydrate(t, workingDir, 7) }
+
+	res := m.Handle(context.Background(), snapshotCmd())
+
+	// The publish itself succeeded and minted generation 12 server-side; a skipped
+	// marker stamp must not turn a valid publish into a reported failure.
+	if !res.Success {
+		t.Fatalf("SnapshotTrigger = %+v, want success (the publish succeeded; only the stamp is skipped)", res)
+	}
+	if got := readGeneration(dir); got != 7 {
+		t.Fatalf("generation = %d, want 7: the stale snapshot stamped its own generation onto the tree "+
+			"the concurrent hydrate swapped in, so the marker no longer describes the tree (issue #2284)", got)
+	}
+}
+
+// TestRunningSnapshotSkipsGenerationStampWhenWorkingDirRemoved covers the other way
+// the pinned directory stops being the tree that was packed: a new stream's final
+// snapshot (removeScratch) or the deleted-scratch reclaim deletes it outright. The
+// stamp must be skipped rather than let writeGeneration's MkdirAll RESURRECT the dir
+// as a marker-only directory.
+func TestRunningSnapshotSkipsGenerationStampWhenWorkingDirRemoved(t *testing.T) {
+	tr := &fakeTransfer{gen: 12}
+	ctrl := &fakeControl{reply: "ok"}
+	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("start = %+v, want success", res)
+	}
+	dir := seedScratch(t, m, "s1")
+	tr.duringUpload = func(workingDir string) {
+		if err := os.RemoveAll(workingDir); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	res := m.Handle(context.Background(), snapshotCmd())
+
+	if !res.Success {
+		t.Fatalf("SnapshotTrigger = %+v, want success", res)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("working dir resurrected by the skipped stamp (stat err = %v): a marker-only dir "+
+			"would advertise a generation for a world this Worker no longer holds", err)
+	}
+}
+
+// TestRunningSnapshotStampsWhenWorkingDirUnchanged pins the other direction: the
+// guard must not degenerate into "never stamp". It models the 204 hydrate path,
+// which returns WITHOUT touching destDir (datatransfer.Hydrate) — the directory the
+// snapshot packed is still the directory on disk, so the stamp is correct and must
+// happen. TestSnapshotRecordsNewGeneration covers the no-interleaving case.
+func TestRunningSnapshotStampsWhenWorkingDirUnchanged(t *testing.T) {
+	tr := &fakeTransfer{gen: 12}
+	ctrl := &fakeControl{reply: "ok"}
+	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("start = %+v, want success", res)
+	}
+	dir := seedScratch(t, m, "s1")
+	tr.duringUpload = func(workingDir string) {
+		// A concurrent 204 hydrate records its generation into the SAME directory.
+		if err := writeGeneration(workingDir, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	res := m.Handle(context.Background(), snapshotCmd())
+
+	if !res.Success {
+		t.Fatalf("SnapshotTrigger = %+v, want success", res)
+	}
+	if got := readGeneration(dir); got != 12 {
+		t.Fatalf("generation = %d, want 12: the working dir was never replaced, so the guard must "+
+			"still stamp the published generation", got)
+	}
+}
+
+// TestRunningSnapshotSkipsStampWhenIdentityUnavailable pins the failure DIRECTION of
+// the detector: when the identity cannot be captured at all (EMFILE, EACCES), the
+// stamp is skipped rather than written blind. A false skip costs one extra hydrate; a
+// false stamp is the silent wrong-generation boot, so every uncertainty must resolve
+// this way.
+func TestRunningSnapshotSkipsStampWhenIdentityUnavailable(t *testing.T) {
+	tr := &fakeTransfer{gen: 12}
+	ctrl := &fakeControl{reply: "ok"}
+	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("start = %+v, want success", res)
+	}
+	dir := seedScratch(t, m, "s1")
+	if err := writeGeneration(dir, 5); err != nil {
+		t.Fatal(err)
+	}
+	restore := openWorkingDirRef
+	openWorkingDirRef = func(string) (*os.File, error) { return nil, errors.New("test: cannot open working dir") }
+	t.Cleanup(func() { openWorkingDirRef = restore })
+
+	res := m.Handle(context.Background(), snapshotCmd())
+
+	if !res.Success {
+		t.Fatalf("SnapshotTrigger = %+v, want success", res)
+	}
+	if got := readGeneration(dir); got != 5 {
+		t.Fatalf("generation = %d, want 5: an unavailable identity must skip the stamp, not stamp blind", got)
+	}
+}
+
+// TestHydrateStampIsUnconditional proves the hydrate's own stamp was not gated along
+// with the snapshot's. handleHydrate holds a per-id reservation across the whole
+// transfer AND is the writer that produced the tree, so its marker is always correct.
+// Gating it would be a correctness regression: a permanently missing marker reads as
+// generation 0, and the API could then never skip a hydrate. The fake Hydrate never
+// creates the working dir, so only the stamp's own MkdirAll can produce it.
+func TestHydrateStampIsUnconditional(t *testing.T) {
+	tr := &fakeTransfer{gen: 11}
+	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
+	dir := filepath.Join(m.scratchDir, "s1")
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("working dir exists before the hydrate (stat err = %v), want absent", err)
+	}
+
+	if res := m.Handle(context.Background(), hydrateCmd()); !res.Success {
+		t.Fatalf("HydrateTrigger = %+v, want success", res)
+	}
+
+	if got := readGeneration(dir); got != 11 {
+		t.Fatalf("generation = %d, want 11: the hydrate stamp must stay unconditional", got)
+	}
+}
+
+// TestWorkingDirRefSurvivesUnlinkAndRejectsReplacement pins the two mechanics the
+// guard rests on, so a later "simplify" cannot quietly remove either.
+//
+//  1. os.SameFile against the captured identity REJECTS a different directory object
+//     at the same path — the shape a hydrate's swap produces.
+//  2. The *os.File is held OPEN for the whole window, which is what makes inode ABA
+//     impossible. With a bare Stat-at-capture / Stat-at-compare token, hydrate #1
+//     could free the inode and hydrate #2's os.MkdirTemp be handed it straight back;
+//     the token would then MATCH and the stale snapshot would stamp anyway — the
+//     detector failing in the UNSAFE direction on exactly the double-hydrate case
+//     handleSnapshot documents as reachable. Holding the fd defers the inode's
+//     reclamation until close, so it can never be recycled inside the window.
+func TestWorkingDirRefSurvivesUnlinkAndRejectsReplacement(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "s1")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	ref := pinWorkingDir(dir)
+	defer ref.close()
+	if ok, reason := ref.current(); !ok {
+		t.Fatalf("current() = (false, %q) on the pinned dir itself, want (true, \"\")", reason)
+	}
+
+	// The hydrate shape: the pinned dir is renamed aside and a different directory
+	// object takes its place.
+	aside := filepath.Join(root, ".displaced-s1")
+	if err := os.Rename(dir, aside); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if ok, reason := ref.current(); ok || reason != "working_dir_replaced" {
+		t.Fatalf("current() = (%v, %q), want (false, \"working_dir_replaced\")", ok, reason)
+	}
+
+	// The pinned inode outlives the unlink: fstat through the held descriptor still
+	// succeeds after the original directory is gone, so the inode cannot be handed to
+	// a new directory while this ref is alive. Two Stat calls would not have this.
+	if err := os.RemoveAll(aside); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ref.file.Stat(); err != nil {
+		t.Fatalf("fstat through the held descriptor = %v after the pinned dir was unlinked: the "+
+			"inode is only SAMPLED, not pinned, which reopens the ABA hole", err)
 	}
 }
 
