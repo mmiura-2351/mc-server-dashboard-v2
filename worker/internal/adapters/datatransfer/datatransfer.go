@@ -389,7 +389,7 @@ func unpackAndSwap(r io.Reader, destDir string, gen uint64) error {
 	// third before the renames; scratch capacity planning must now budget for it through
 	// swap completion.
 	displaced := displacedDir(destDir)
-	swapped := false
+	asideAt := ""    // non-empty once the live destDir has been parked aside
 	priorAside := "" // non-empty when a prior displaced tree was parked aside
 	if _, err := os.Lstat(destDir); err == nil {
 		// A live working set is present to displace.
@@ -424,16 +424,16 @@ func unpackAndSwap(r io.Reader, destDir string, gen uint64) error {
 			}
 			return err
 		}
-		swapped = true
+		asideAt = displaced
 	} else if !os.IsNotExist(err) {
 		return err
 	}
 	if err := swapRename(tmpDir, destDir); err != nil {
-		if swapped {
+		if asideAt != "" {
 			// Restore the old working set so the failure does not lose both copies. If
 			// this restore itself fails the old copy still survives under .displaced-<id>
 			// (a name no hydrate-time sweep deletes), so the only copy is never lost.
-			_ = os.Rename(displaced, destDir)
+			_ = os.Rename(asideAt, destDir)
 			// Reinstate the prior displaced from its aside name.
 			if priorAside != "" {
 				_ = os.Rename(priorAside, displaced)
