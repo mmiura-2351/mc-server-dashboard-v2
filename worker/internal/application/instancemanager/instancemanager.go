@@ -643,10 +643,13 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// destDir absent: recoverable by re-hydrating, at the same bound. Closing this
 		// window means taking a per-id reservation on running-id snapshots, reversing the
 		// item-4 decision above; for THIS edge that buys only the bounded delta just
-		// described. The prior-displaced deferral added for #917 item 2 does NOT cover it:
-		// that protects only the PRIOR displaced tree parked aside in unpackAndSwap step
-		// (1), while the NEW .displaced-<id> created by step (2) is exactly what
-		// sweepDisplaced removes.
+		// described. The superseded-set deferral in unpackAndSwap does NOT cover it: that
+		// protects only the live set parked aside across the swap, while the
+		// .displaced-<id> the hydrate writes is exactly what sweepDisplaced removes. The
+		// stated delta bound also assumes that hydrate CREATED the tree; under oldest-wins
+		// (issue #2278) a hydrate finding the slot occupied creates none, so a racing sweep
+		// then destroys the older retained tree instead, whose age this bound does not
+		// describe.
 		var quiesced bool
 		var rawRestore func()
 		quiesced, rawRestore = m.quiesceRunning(ctx, cmd.ServerID, filepath.Join(m.scratchDir, cmd.ServerID))
@@ -1328,7 +1331,10 @@ func (m *Manager) removeScratch(serverID string) {
 // concurrently with a NEW stream's re-placement hydrate and remove the .displaced-<id>
 // that hydrate just created. That tree holds the published state plus whatever the world
 // progressed since that snapshot's PACK, so the removal is not loss-free. Accepted, not
-// closed — the bound and the rationale are in handleSnapshot's running branch.
+// closed — the bound and the rationale are in handleSnapshot's running branch. Note the
+// bound assumes the racing hydrate CREATED the tree: under oldest-wins (issue #2278) a
+// hydrate that finds the slot occupied creates no new .displaced-<id>, so what a racing
+// sweep destroys is then the older retained tree, which that bound does not describe.
 func (m *Manager) sweepDisplaced(serverID string) {
 	_ = os.RemoveAll(filepath.Join(m.scratchDir, ".displaced-"+serverID))
 }

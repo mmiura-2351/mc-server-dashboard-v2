@@ -35,6 +35,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // generationMarkerFile is the Worker-private marker at the working-set root (inside
@@ -42,8 +43,9 @@ import (
 // ADAPTER writes it on the 200 hydrate path: unpackAndSwap puts it into the temp tree
 // before the swap-in rename so it is atomic with the new destDir (issue #917). That
 // write is a correctness dependency, not a corrective touch-up — a destDir with no
-// marker reads as generation 0, so the API re-dispatches hydrate and the retry's
-// displacement would destroy the recovery copy. writeGeneration still covers the
+// marker reads as generation 0, so the API re-dispatches hydrate and that spurious
+// retry discards this working set whenever a .displaced-<id> is retained (issue
+// #2278). writeGeneration still covers the
 // 204 and snapshot paths (and is idempotent on the 200 path). The marker is excluded
 // from a snapshot pack so this Worker-private state never lands in the authoritative
 // stored working set (and is never re-hydrated to another Worker or the live
@@ -151,7 +153,7 @@ func (c *Client) Hydrate(ctx context.Context, url, token, destDir string) (uint6
 	}
 
 	gen := parseGeneration(resp.Header)
-	if err := unpackAndSwap(resp.Body, destDir, gen); err != nil {
+	if err := unpackAndSwap(resp.Body, destDir, gen, c.logger); err != nil {
 		return 0, fmt.Errorf("datatransfer: unpack: %w", err)
 	}
 	// The store generation the API served, recorded by the caller alongside the
@@ -292,44 +294,56 @@ func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string, baseGe
 // Moving it aside keeps it recoverable by an operator after such an incident. The
 // displaced tree is dot-prefixed so it is never mistaken for a live scratch:
 // ScanHeldServers skips the .displaced-<id> prefix (scratchscan.go) so it is never
-// reported as a held server. At most one displaced tree exists
-// per server — a new hydrate removes the prior one first (it predates the store state
-// the newer tree was displaced by). It is GC'd on the next SUCCESSFUL snapshot for
-// this id, the moment the store provably supersedes it (instancemanager.sweepDisplaced,
-// mirroring the #845 GC-on-success pattern).
+// reported as a held server. At most one displaced tree exists per server, and it is
+// GC'd on the next SUCCESSFUL snapshot for this id, the moment the store provably
+// supersedes it (instancemanager.sweepDisplaced, mirroring the #845 GC-on-success
+// pattern).
 //
-// Crash safety (displace-first swap): the temp tree is built fully (including the
-// generation marker, issue #917) before any rename. When a live destDir is present,
-// the swap then does, in order, (1) rename any prior .displaced-<id> aside to a
-// .hydrate-<id>-prior-displaced-* temp name (issue #917: it is NOT deleted until the
-// swap succeeds, so a swap failure never leaves zero recovery copies), (2) rename the
-// live destDir DIRECTLY to .displaced-<id> as the "aside" step — there is no
-// intermediate trash name, so the recovery copy is never parked under a
-// .hydrate-<id>-* name the NEXT hydrate's sweepHydrateLeftovers would delete — and
-// (3) rename temp -> destDir. On a (3) failure the old copy is renamed back from
-// .displaced-<id> to destDir AND the prior displaced is reinstated from its aside name,
-// so the failure loses nothing. On success the stashed prior displaced is deleted
-// (best-effort). A crash between (2) and (3) leaves destDir absent but BOTH the old
-// copy (at .displaced-<id>) and the new copy (at the temp dir) on disk: no data is
-// lost, the next start re-hydrates (the missing destDir reports as "holding nothing"),
-// the temp leftover is swept, and the .displaced-<id> tree — which no hydrate-time
-// sweep touches — stays recoverable until the next SUCCESSFUL snapshot GCs it
-// (instancemanager.sweepDisplaced). Invariant: from the moment destDir is renamed
-// aside, the old world always exists under a name no sweep deletes before the store
-// provably supersedes it.
+// OLDEST-WINS when the slot is already occupied (issue #2278): a hydrate that finds a
+// .displaced-<id> already there KEEPS it and discards the working set it just displaced.
+// The rule rests on one provable fact — every successful snapshot for this id calls
+// sweepDisplaced, so a surviving .displaced-<id> means ZERO successful snapshots since it
+// was created. Both trees are therefore unpublished branches, and the discarded one can be
+// strictly NEWER; the swap emits a WARN naming both paths because of that. The rationale
+// and the rejected alternatives are in the swap block below and in issue #2278.
 //
-// Crucially, step (1)'s rename-aside of the prior .displaced-<id> runs ONLY when a
-// live destDir exists to take its place. If destDir is ABSENT (this very crash window
-// from a prior interrupted hydrate), the existing .displaced-<id> is the ONLY copy of
-// the world; this hydrate has nothing to displace and leaves it untouched, so
-// re-running the interrupted hydrate never destroys the recovery copy.
+// Crash safety (park-aside-first swap): the temp tree is built fully (including the
+// generation marker, issue #917) before any rename. When a live destDir is present, the
+// swap then does, in order, (1) park the live destDir aside — DIRECTLY at .displaced-<id>
+// when that slot is free, so the recovery copy is never left under a .hydrate-<id>-* name
+// the NEXT hydrate's sweepHydrateLeftovers would delete (issue #910); at a
+// .hydrate-<id>-superseded-* name when the slot is occupied, because oldest-wins retains
+// what is already there and this set is the one elected to be dropped — and (2) rename
+// temp -> destDir. On a (2) failure the parked set is renamed straight back, so the
+// failure loses nothing. On success the parked set is deleted only in the
+// slot-was-occupied case (best-effort).
+//
+// A crash between (1) and (2) leaves destDir absent but every copy on disk: the parked
+// set, any retained .displaced-<id>, and the new tree at the temp name. Nothing is lost —
+// the next start re-hydrates (the missing destDir reports as "holding nothing"), the temp
+// and superseded leftovers are swept, and the retained .displaced-<id> tree, which no
+// hydrate-time sweep touches, stays recoverable until the next SUCCESSFUL snapshot GCs it.
+// That converges on exactly the state a clean run produces.
+//
+// A retained .displaced-<id> is never renamed and never unlinked by this path, so its
+// survival needs NO fsync at all: no power loss anywhere in the swap can roll it into a
+// missing state. Only the parked-aside rename and the swap-in depend on the fsyncDir
+// below. Invariant: from the moment destDir is parked aside, the world it held always
+// exists under some name until the swap-in provably succeeds.
+//
+// Nothing at .displaced-<id> is touched unless a live destDir exists to displace. If
+// destDir is ABSENT (this very crash window from a prior interrupted hydrate), the
+// existing .displaced-<id> may be the ONLY copy of the world; this hydrate has nothing to
+// displace and leaves it untouched, so re-running the interrupted hydrate never destroys
+// the recovery copy (issue #910).
 //
 // Generation marker atomicity (issue #917): the generation marker is written into the
 // temp tree BEFORE the swap-in rename so it is atomic with the new destDir. A crash
 // after swap-in but before a post-swap marker write would leave a destDir with no
-// marker — the API reads gen 0, re-dispatches hydrate, and the retry's RemoveAll
-// destroys the recovery copy. Writing it pre-swap closes that window.
-func unpackAndSwap(r io.Reader, destDir string, gen uint64) error {
+// marker — the API reads gen 0 and re-dispatches hydrate, and that spurious retry
+// discards this working set whenever a .displaced-<id> is retained (issue #2278).
+// Writing it pre-swap closes that window.
+func unpackAndSwap(r io.Reader, destDir string, gen uint64, log *slog.Logger) error {
 	parent := filepath.Dir(destDir)
 	if err := os.MkdirAll(parent, 0o750); err != nil {
 		return err
@@ -370,80 +384,97 @@ func unpackAndSwap(r io.Reader, destDir string, gen uint64) error {
 		return err
 	}
 
-	// Displace-first swap (issue #906/#910/#917): move the old working set ASIDE to
-	// its recovery name BEFORE swapping the new tree in, so the old world is never
-	// parked under an intermediate trash name a later sweep would delete. The
-	// displaced tree is the only copy of the world whenever the final stop snapshot
-	// definitively failed and #845 retained the scratch for recovery; it is GC'd
-	// only on the next SUCCESSFUL snapshot (instancemanager.sweepDisplaced).
+	// Displace-first swap (issue #906/#910/#917): move the old working set ASIDE
+	// BEFORE swapping the new tree in. When the .displaced-<id> slot is free the aside
+	// name IS that recovery name, so the old world is never parked under an intermediate
+	// trash name a later sweep would delete. The displaced tree is the only copy of the
+	// world whenever the final stop snapshot definitively failed and #845 retained the
+	// scratch for recovery; it is GC'd only on the next SUCCESSFUL snapshot
+	// (instancemanager.sweepDisplaced).
 	//
-	// Prior-displaced deferral (issue #917 bug 2): a prior .displaced-<id> is NOT
-	// deleted before the swap-in succeeds. Instead it is renamed aside to a
-	// sweepable temp name; if the swap fails the prior displaced is reinstated. This
-	// prevents a swap failure from leaving no recovery copy at all.
+	// Superseded-set deferral (issue #917 bug 2, #2278): the live working set is parked
+	// ASIDE, never deleted, before the swap-in. Whichever name it is parked under, a
+	// swap-in failure renames it straight back, so no path deletes a world before the
+	// replacement is provably in place.
 	//
 	// Disk cost of that deferral: THREE world-sized copies of this one server — the
-	// unpacked temp tree, the displaced live set, and the prior displaced parked aside —
-	// are now live ACROSS the swap. The pre-deferral code also transiently reached three
-	// (it deleted the prior displaced only after the temp tree was built), but freed the
-	// third before the renames; scratch capacity planning must now budget for it through
-	// swap completion.
+	// unpacked temp tree, the retained .displaced-<id>, and the live set parked aside
+	// until the swap-in succeeds — are live ACROSS the swap. Scratch capacity planning
+	// must budget for it through swap completion (STORAGE.md Section 4.6).
 	displaced := displacedDir(destDir)
-	asideAt := ""    // non-empty once the live destDir has been parked aside
-	priorAside := "" // non-empty when a prior displaced tree was parked aside
+	asideAt := ""      // where the live destDir was parked; empty when there was nothing to displace
+	dropAside := false // true when asideAt is the sweepable name, i.e. an older displaced tree is being kept
 	if _, err := os.Lstat(destDir); err == nil {
 		// A live working set is present to displace.
 		//
-		// If a prior .displaced-<id> exists, rename it aside rather than deleting it
-		// (issue #917): the swap has not yet succeeded, so if it fails, both the
-		// current destDir and the prior displaced must survive. The aside name uses
-		// the hydrate temp prefix so sweepHydrateLeftovers reclaims it on the NEXT
-		// hydrate if this one crashes after stashing but before cleanup.
+		// OLDEST-WINS (issue #2278). When .displaced-<id> is already occupied, the
+		// existing tree is KEPT — never renamed, never removed by this path — and the
+		// set this hydrate displaces is parked under a sweepable name and dropped once
+		// the swap-in succeeds.
 		//
-		// The prior displaced tree is touched ONLY when a live destDir exists to take
-		// its place: if destDir is absent (a crash interrupted a prior hydrate between
-		// the displace-aside and the swap-in), the existing .displaced-<id> is the ONLY
-		// copy of the world and must NOT be removed — this hydrate has nothing to
-		// displace, so it leaves the recovery copy intact (issue #910).
-		if _, stErr := os.Lstat(displaced); stErr == nil {
-			aside, mkErr := os.MkdirTemp(parent, hydrateTmpPrefix(destDir)+"prior-displaced-*")
+		// What that choice rests on, precisely: every SUCCESSFUL snapshot for this id
+		// calls sweepDisplaced, so a .displaced-<id> still present at hydrate time proves
+		// ZERO successful snapshots for this id since it was created. This branch is
+		// therefore narrow — it needs a second displacement with no successful snapshot
+		// in between.
+		//
+		// What it does NOT rest on: it is NOT true that the set being displaced is
+		// "merely the store copy" and therefore cheap. It is the store copy PLUS
+		// everything Minecraft wrote since, and by the very argument above none of that
+		// progression was published either. BOTH trees are unpublished branches and the
+		// one dropped here can be strictly NEWER (e.g. an operator's restore_backup bumps
+		// the store generation, so the skip gate does not skip, and this hydrate discards
+		// days of unsnapshotted play while retaining the older tree). That is the accepted
+		// cost of the policy, chosen because the alternative loses the intact world in the
+		// torn-world case (#834: a torn destDir advertises generation 0, a hydrate is
+		// dispatched, and newest-wins would retain the torn tree over an intact older one).
+		// The WARN below names both paths so the cost is never silent.
+		//
+		// Deliberately NOT health-aware: no fsck, no mtime comparison to pick the "better"
+		// tree. That is option C in issue #2278 and was rejected — do not "improve" this
+		// into it.
+		if info, held := displacedSlotHoldsTree(displaced); held {
+			log.Warn("hydrate: an older displaced recovery tree already exists; keeping it and discarding the working set this hydrate replaces (oldest-wins, issue #2278; see STORAGE.md Section 4.6)",
+				"server_id", filepath.Base(destDir),
+				"retained", displaced,
+				"retained_mtime", info.ModTime().UTC().Format(time.RFC3339),
+				"discarded", destDir)
+			aside, mkErr := os.MkdirTemp(parent, hydrateTmpPrefix(destDir)+"superseded-*")
 			if mkErr != nil {
 				return mkErr
 			}
 			// MkdirTemp creates the dir; remove it so Rename can use the name.
 			_ = os.Remove(aside)
-			if rnErr := os.Rename(displaced, aside); rnErr != nil {
-				return rnErr
-			}
-			priorAside = aside
+			asideAt, dropAside = aside, true
+		} else {
+			// The slot is free (or held only junk, already cleared): take the ordinary
+			// displace path, which parks the live set DIRECTLY at .displaced-<id> — never
+			// under an intermediate name a later sweep would delete (issue #910).
+			asideAt = displaced
 		}
-		if err := os.Rename(destDir, displaced); err != nil {
-			// Reinstate the prior displaced if we moved it aside.
-			if priorAside != "" {
-				_ = os.Rename(priorAside, displaced)
-			}
+		if err := os.Rename(destDir, asideAt); err != nil {
 			return err
 		}
-		asideAt = displaced
 	} else if !os.IsNotExist(err) {
 		return err
 	}
 	if err := swapRename(tmpDir, destDir); err != nil {
 		if asideAt != "" {
-			// Restore the old working set so the failure does not lose both copies. If
-			// this restore itself fails the old copy still survives under .displaced-<id>
-			// (a name no hydrate-time sweep deletes), so the only copy is never lost.
+			// Restore the live working set so the failure does not lose it. If this
+			// restore itself fails the set still survives under asideAt, and any retained
+			// .displaced-<id> was never touched, so no state here has zero copies.
+			//
+			// Note this is why the WARN above is phrased as intent: on this path the
+			// discard does not actually happen.
 			_ = os.Rename(asideAt, destDir)
-			// Reinstate the prior displaced from its aside name.
-			if priorAside != "" {
-				_ = os.Rename(priorAside, displaced)
-			}
 		}
 		return err
 	}
-	// Swap succeeded: the prior displaced is now superseded. Best-effort cleanup.
-	if priorAside != "" {
-		_ = os.RemoveAll(priorAside)
+	// Swap succeeded. When an older displaced tree was retained instead, the set parked
+	// aside is the one the policy elected to drop. Best-effort: a failure here leaks a
+	// .hydrate-<id>-* tree that every sweeper reclaims later.
+	if dropAside {
+		_ = os.RemoveAll(asideAt)
 	}
 	// fsync the scratch root so BOTH swap renames (the displace-aside and the swap-in)
 	// are durable: a power loss must not roll the displace rename back, and the marker
@@ -455,10 +486,47 @@ func unpackAndSwap(r io.Reader, destDir string, gen uint64) error {
 	return nil
 }
 
+// displacedSlotHoldsTree reports whether the .displaced-<id> slot holds a retainable
+// recovery tree, returning its FileInfo for the discard WARN. Junk in the slot — a
+// regular file, a symlink, or an empty directory — is cleared (best-effort) and
+// reported as NOT holding a tree.
+//
+// The guard exists because oldest-wins (issue #2278) reads the slot as a decision, not
+// as an obstacle: under the previous newest-wins policy junk was simply overwritten,
+// whereas here a bare Lstat success would make the hydrate preserve garbage and discard
+// a real world. Realistic sources of junk: a partially-failed best-effort os.RemoveAll
+// inside instancemanager.sweepDisplaced, or an operator's half-finished manual cleanup
+// (STORAGE.md Section 4.6). Clearing it loses nothing (an empty dir and a non-dir hold
+// no world), and it is required anyway: renaming a directory onto an existing FILE fails
+// with ENOTDIR, so the ordinary displace path could not proceed otherwise.
+//
+// A directory that cannot be read is treated as holding a tree, NOT as junk: this
+// function must never delete something it has not proven to be empty.
+func displacedSlotHoldsTree(displaced string) (os.FileInfo, bool) {
+	info, err := os.Lstat(displaced)
+	if err != nil {
+		return nil, false
+	}
+	if info.IsDir() {
+		d, openErr := os.Open(displaced)
+		if openErr != nil {
+			return info, true
+		}
+		defer func() { _ = d.Close() }()
+		// One name is enough to decide; io.EOF means the directory is empty.
+		if _, readErr := d.Readdirnames(1); !errors.Is(readErr, io.EOF) {
+			return info, true
+		}
+	}
+	_ = os.RemoveAll(displaced)
+	return nil, false
+}
+
 // displacedDir is the per-server path the swap moves a displaced old working set to
 // (issue #906): a dot-prefixed sibling of destDir so it cannot collide with a
 // server-id scratch dir and is never matched to an assigned id by the API. One per
-// server (no random suffix), so a new hydrate's RemoveAll keeps exactly one.
+// server (no random suffix): the name is written only when the slot is free, so exactly
+// one displaced tree per server exists at any time (issue #2278).
 func displacedDir(destDir string) string {
 	return filepath.Join(filepath.Dir(destDir), displacedPrefix+filepath.Base(destDir))
 }
