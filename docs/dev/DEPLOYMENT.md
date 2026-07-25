@@ -896,9 +896,18 @@ servers), runs a post-deploy `/api/healthz` check, and stamps the new SHA. Use
 > Artifacts (dump, volume archive, restore log) land in a timestamped directory
 > next to the repo, or in `$MCSD_PG_UPGRADE_DIR` if you set one. **They are yours
 > to delete** — the script never removes them, because until you have verified
-> the new cluster they are the only copies of the PostgreSQL 17 data. A bad
-> restore is reverted by unpacking the archive and pointing a throwaway
-> `postgres:17` container at it.
+> the new cluster they are the only copies of the PostgreSQL 17 data. If a run
+> fails after the volume has been released, it prints the exact commands to put
+> the old data back from the archive; follow them and the deployment returns to
+> the revision and cluster it started on.
+>
+> While the old volume is gone and the new cluster is not yet restored, the
+> script keeps `.pg-upgrade-incomplete` in the repo root (gitignored, like
+> `.last-deploy-sha`). A re-run that finds it **refuses** rather than reporting
+> "nothing to do": a partially restored PostgreSQL 18 cluster and a finished one
+> are both just "the volume holds 18", and bringing the stack up on the first is
+> the one outcome this whole procedure exists to prevent. The recovery
+> instructions tell you when to delete it.
 >
 > Finish with `docker compose up -d --build`, then log in and check that servers,
 > backups, and snapshots resolve.
@@ -923,11 +932,20 @@ servers), runs a post-deploy `/api/healthz` check, and stamps the new SHA. Use
 > tar tzf ../db-data-pg17.tar.gz | grep -q PG_VERSION
 > docker volume rm mc-server-dashboard-v2_db-data
 >
-> # 3. Take the new revision and start the 18 db on a fresh volume. `--wait`
-> #    blocks until the healthcheck passes, so the restore below cannot race
-> #    initdb.
+> # 3. Take the new revision and start the 18 db on a fresh volume.
+> #    `--wait` is NOT enough on its own. It blocks on the compose healthcheck,
+> #    which is `pg_isready` over the container's unix socket -- and the image's
+> #    entrypoint runs a TEMPORARY server on that same socket to execute its init
+> #    scripts before shutting it down and starting the real one. `--wait` can
+> #    therefore return mid-bootstrap and the restore then dies with
+> #    "FATAL: the database system is shutting down". Measured on this image:
+> #    the socket answered from t=1.6s while TCP stayed closed until t=10.6s.
+> #    The temp server runs with `listen_addresses=''`, so waiting for TCP tells
+> #    the two apart structurally -- it can never answer.
 > git pull --ff-only origin main
 > docker compose up -d --wait db
+> until docker compose exec -T db pg_isready -q -h 127.0.0.1 -U mcsd -d postgres
+> do sleep 1; done
 >
 > # 4. Restore. `ON_ERROR_STOP=1` is what makes a failed statement visible:
 > #    without it psql exits 0 after an error and a half-restored database is

@@ -62,7 +62,10 @@ make_fixture() {
 	git -C "$dir" config user.email "test@example.com"
 	git -C "$dir" config user.name "Test"
 	write_compose "$dir" "$wt_image"
-	git -C "$dir" add compose.yaml
+	# Mirrors the real repo: the incomplete-upgrade sentinel is gitignored, so
+	# writing it must not make the tree dirty for the next run's precondition.
+	printf '.pg-upgrade-incomplete\n' > "$dir/.gitignore"
+	git -C "$dir" add compose.yaml .gitignore
 	git -C "$dir" commit -q -m "init"
 
 	git init -q --bare "$base/origin.git"
@@ -156,6 +159,21 @@ case "$1 $2" in
 		;;
 	"compose exec")
 		case "$*" in
+			*pg_isready*)
+				# The official image's entrypoint runs a temporary bootstrap
+				# server on the UNIX SOCKET (listen_addresses='') before the real
+				# one, so `up --wait`'s healthcheck can pass while TCP is still
+				# closed. MOCK_TCP_READY_AFTER models that window: the first N
+				# TCP probes are refused, as they are against the real image.
+				n=$(cat "${MCSD_PG_UPGRADE_DIR}/.tcp-probes" 2>/dev/null || echo 0)
+				n=$((n + 1))
+				echo "$n" > "${MCSD_PG_UPGRADE_DIR}/.tcp-probes"
+				if [ "$n" -le "${MOCK_TCP_READY_AFTER:-0}" ]; then
+					log "tcp-probe-refused $*"
+					exit 1
+				fi
+				log "tcp-ready $*"
+				;;
 			*"pg_dumpall --version"*)
 				log "version-probe $*"
 				printf 'pg_dumpall (PostgreSQL) %s.6\n' "${MOCK_RUNNING_MAJOR:-17}"
@@ -191,6 +209,8 @@ case "$1 $2" in
 						if [ "${MOCK_DUMP_MODE:-ok}" != "no_createdb" ]; then
 							printf "CREATE DATABASE mcsd WITH TEMPLATE = template0 ENCODING = 'UTF8' LOCALE = 'en_US.utf8';\n"
 						fi
+						[ "${MOCK_DUMP_MODE:-ok}" = "double_createdb" ] &&
+							printf "CREATE DATABASE mcsd WITH TEMPLATE = template0 ENCODING = 'UTF8' LOCALE = 'en_US.utf8';\n"
 						printf 'COPY public.servers (id, name) FROM stdin;\n1\\talpha\n\\.\n'
 						printf -- '--\n-- PostgreSQL database cluster dump complete\n--\n\n'
 						;;
@@ -587,6 +607,136 @@ done
 		fail_test "dirty working tree: expected refusal, got exit 0 -- $output"
 	fi
 	assert_nothing_destructive "dirty working tree" "$base"
+	rm -rf "$base"
+}
+
+# --- 10b. The restore waits for the REAL server, not the bootstrap one -------
+# `up --wait` blocks on a healthcheck that the image's temporary bootstrap
+# server answers over the unix socket; that server is then shut down. Anything
+# the script sends in between dies with "the database system is shutting down".
+# The TCP probe is the discriminator -- the bootstrap server has
+# listen_addresses='' and can never answer it.
+{
+	base="$(make_fixture)"
+	run_upgrade "$base" MOCK_PG_VERSION=17 MOCK_TCP_READY_AFTER=3
+	if [ "$exit_code" -eq 0 ]; then
+		ok "bootstrap window: completes once the real server is up"
+	else
+		fail_test "bootstrap window: expected exit 0, got $exit_code -- $output"
+	fi
+	refused="$(printf '%s\n' "$log" | grep -c '^tcp-probe-refused' || true)"
+	if [ "$refused" -eq 3 ]; then
+		ok "bootstrap window: kept probing while TCP was refused ($refused times)"
+	else
+		fail_test "bootstrap window: expected 3 refused probes, saw $refused -- $log"
+	fi
+	# The one that matters: nothing was sent to the database during the window.
+	order="$(printf '%s\n' "$log" | sed -n \
+		-e 's/^compose up.*/up/p' \
+		-e 's/^tcp-probe-refused.*/refused/p' \
+		-e 's/^tcp-ready.*/ready/p' \
+		-e 's/^dropdb .*/dropdb/p' \
+		-e 's/^restore .*/restore/p' | tr '\n' ' ')"
+	case "$order" in
+		"up refused refused refused ready dropdb restore "*)
+			ok "bootstrap window: no statement is sent before TCP is ready" ;;
+		*)
+			fail_test "bootstrap window: wrong order -- '$order'" ;;
+	esac
+	rm -rf "$base"
+}
+
+# --- 10c. An aborted run is not mistaken for a finished one on re-run --------
+# The dangerous chain: the restore aborts, the operator re-runs, and the volume
+# now holds the TARGET major -- indistinguishable from a completed upgrade
+# unless the script left something behind saying otherwise.
+{
+	base="$(make_fixture)"
+	run_upgrade "$base" MOCK_PG_VERSION=17 MOCK_RESTORE_FAILS=1
+	if [ "$exit_code" -ne 0 ]; then
+		ok "aborted run: first run exits non-zero"
+	else
+		fail_test "aborted run: first run unexpectedly succeeded -- $output"
+	fi
+	if [ -f "$base/repo/.pg-upgrade-incomplete" ]; then
+		ok "aborted run: leaves the incomplete-upgrade sentinel"
+	else
+		fail_test "aborted run: no sentinel left behind"
+	fi
+
+	# Re-run: the volume now holds 18, exactly as a completed upgrade would.
+	run_upgrade "$base" MOCK_PG_VERSION=18
+	if [ "$exit_code" -ne 0 ]; then
+		ok "aborted run: the re-run refuses instead of reporting success"
+	else
+		fail_test "aborted run: the re-run reported success -- $output"
+	fi
+	case "$output" in
+		*"PARTIALLY RESTORED"*) ok "aborted run: the re-run says the cluster is partial" ;;
+		*) fail_test "aborted run: the re-run does not warn -- $output" ;;
+	esac
+	case "$output" in
+		*"nothing to do"*) fail_test "aborted run: the re-run still says 'nothing to do' -- $output" ;;
+		*) ok "aborted run: the re-run does not say 'nothing to do'" ;;
+	esac
+	# It must name the unfinished run's artifacts, or the operator cannot recover.
+	case "$output" in
+		*.tar.gz*) ok "aborted run: the re-run names the archive to recover from" ;;
+		*) fail_test "aborted run: the re-run hides the archive -- $output" ;;
+	esac
+	rm -rf "$base"
+}
+
+# --- 10d. A completed run clears the sentinel -------------------------------
+{
+	base="$(make_fixture)"
+	run_upgrade "$base" MOCK_PG_VERSION=17
+	if [ ! -f "$base/repo/.pg-upgrade-incomplete" ]; then
+		ok "completed run: the sentinel is cleared"
+	else
+		fail_test "completed run: the sentinel was left behind"
+	fi
+	run_upgrade "$base" MOCK_PG_VERSION=18
+	if [ "$exit_code" -eq 0 ]; then
+		ok "completed run: the re-run is a no-op"
+	else
+		fail_test "completed run: the re-run failed -- $output"
+	fi
+	case "$output" in
+		*"nothing to do"*) ok "completed run: the re-run says nothing to do" ;;
+		*) fail_test "completed run: no 'nothing to do' -- $output" ;;
+	esac
+	rm -rf "$base"
+}
+
+# --- 10e. Failure after the volume is released prints the way back ----------
+# The recovery how-to used to appear only in the SUCCESS report, which an
+# operator whose run failed never reaches.
+{
+	base="$(make_fixture)"
+	run_upgrade "$base" MOCK_PG_VERSION=17 MOCK_RESTORE_FAILS=1
+	for needle in "docker volume create" "tar xzf" "git checkout" "docker compose up -d --wait db" ".pg-upgrade-incomplete"; do
+		case "$output" in
+			*"$needle"*) ok "failure path: recovery text includes '$needle'" ;;
+			*) fail_test "failure path: recovery text lacks '$needle' -- $output" ;;
+		esac
+	done
+	rm -rf "$base"
+}
+
+# --- 10f. An ambiguous CREATE DATABASE is refused, like the role check ------
+{
+	base="$(make_fixture)"
+	run_upgrade "$base" MOCK_PG_VERSION=17 MOCK_DUMP_MODE=double_createdb
+	if [ "$exit_code" -ne 0 ]; then
+		ok "two CREATE DATABASE statements: refused"
+	else
+		fail_test "two CREATE DATABASE statements: expected refusal, got 0 -- $output"
+	fi
+	case "$log" in
+		*"restore "*) fail_test "two CREATE DATABASE statements: restored anyway -- $log" ;;
+		*) ok "two CREATE DATABASE statements: no restore was attempted" ;;
+	esac
 	rm -rf "$base"
 }
 

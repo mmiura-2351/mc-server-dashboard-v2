@@ -52,6 +52,16 @@ die() {
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || die "not a git checkout (run from the repo root)."
 cd "$repo_root"
 
+# Written just before the old volume is released and removed once the restore
+# has succeeded, so its presence means "a previous run got into the destructive
+# phase and did not come out". Without it a re-run cannot tell a COMPLETED
+# upgrade from a new cluster left PARTIALLY RESTORED: both are simply "the
+# volume holds PostgreSQL <target>", and reporting "nothing to do" for the
+# second is how an operator ends up bringing the stack up on half a database.
+# Lives in the repo root and is gitignored, matching update.sh's .last-deploy-sha
+# -- a fixed path both runs compute identically, and one `git status` ignores.
+sentinel="$repo_root/.pg-upgrade-incomplete"
+
 # shellcheck source=scripts/pg_cluster_lib.sh
 . "$script_dir/pg_cluster_lib.sh"
 
@@ -92,8 +102,20 @@ if [ -z "$pg_cluster_major" ]; then
 	exit 0
 fi
 # The re-run case: after a successful upgrade the volume already matches, so a
-# second invocation stops here instead of starting over.
+# second invocation stops here instead of starting over -- UNLESS a previous run
+# left the sentinel behind, in which case this cluster is the wreckage of that
+# run rather than the result of a finished one, and "nothing to do" would be the
+# most dangerous thing this script could say.
 if [ "$pg_cluster_major" -eq "$pg_target_major" ]; then
+	if [ -f "$sentinel" ]; then
+		echo "pg upgrade: volume '${pg_volume_name}' holds PostgreSQL ${pg_cluster_major}, but a previous run of this script did not finish restoring into it." >&2
+		echo "  That cluster is PARTIALLY RESTORED. Do not bring the stack up on it." >&2
+		echo "  The unfinished run recorded:" >&2
+		sed 's/^/    /' "$sentinel" >&2
+		echo "  Recover from that run's archive (below), or re-restore its dump by hand; then delete" >&2
+		echo "  ${sentinel} once the cluster is good again." >&2
+		exit 1
+	fi
 	say "volume '${pg_volume_name}' already holds PostgreSQL ${pg_cluster_major}, which is what origin/main deploys (${pg_db_image}) -- nothing to do."
 	exit 0
 fi
@@ -148,7 +170,10 @@ say "dump verified: pg_dumpall exited 0 and the output ends with PostgreSQL's co
 
 # ── 5. Take the incoming revision ────────────────────────────────────────────
 # Before anything destructive, so a failed fast-forward costs nothing: the
-# volume is still there and the stack still starts.
+# volume is still there and the stack still starts. The pre-pull commit is kept
+# for the recovery instructions -- going back to the old data means going back
+# to the revision whose compose.yaml mounts it where PostgreSQL ${pg_cluster_major} expects.
+old_revision="$(git rev-parse HEAD)"
 say "fast-forwarding the checkout to origin/main..."
 git pull --ff-only origin main || die "git pull --ff-only origin main failed. Nothing destructive has happened -- volume '${pg_volume_name}' is intact and 'docker compose up -d' brings the stack back."
 
@@ -173,16 +198,81 @@ case "$archive_listing" in
 esac
 say "archive verified: ${archive} lists back as a PostgreSQL cluster."
 
+# Everything from here can leave the deployment without a working database, so
+# every failure below prints the way back rather than just naming the two files.
+# `docker volume rm` tolerates a missing volume with `|| true` so the block can
+# be followed verbatim whether the failure landed before or after step 7.
+print_recovery() {
+	echo "pg upgrade:" >&2
+	echo "pg upgrade: To put the PostgreSQL ${pg_cluster_major} data back exactly as it was, run these in ${repo_root}:" >&2
+	echo "pg upgrade:   sg docker -c 'docker compose down'" >&2
+	echo "pg upgrade:   sg docker -c 'docker volume rm ${pg_volume_name}' || true" >&2
+	echo "pg upgrade:   sg docker -c 'docker volume create ${pg_volume_name}'" >&2
+	echo "pg upgrade:   sg docker -c \"docker run --rm --entrypoint sh -v ${pg_volume_name}:/dst -v ${out_dir}:/src:ro ${pg_db_image} -c 'tar xzf /src/${archive_name} -C /dst'\"" >&2
+	echo "pg upgrade:   git checkout ${old_revision}   # the revision that deployed PostgreSQL ${pg_cluster_major}" >&2
+	echo "pg upgrade:   sg docker -c 'docker compose up -d --wait db'" >&2
+	echo "pg upgrade:   rm ${sentinel}" >&2
+	echo "pg upgrade: That restores the volume from the archive and starts the old major against it." >&2
+	echo "pg upgrade: Compose warns that the volume 'was not created by Docker Compose' -- expected, and harmless." >&2
+	echo "pg upgrade: It leaves the checkout on a detached HEAD; 'git checkout main' before re-running this script." >&2
+	echo "pg upgrade: The dump (${backup}) is the second, independent copy if the archive ever fails." >&2
+}
+die_recoverable() {
+	echo "pg upgrade: $*" >&2
+	print_recovery
+	exit 1
+}
+
 # ── 7. Release the old volume ────────────────────────────────────────────────
 # From here on the data lives in two places that are not this volume: the
-# verified dump and the verified archive.
+# verified dump and the verified archive. The sentinel goes down FIRST, so it is
+# present for every instant in which this deployment has no working database --
+# including a crash or a Ctrl-C, which no trap would have to catch.
+{
+	echo "started      $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+	echo "upgrading    PostgreSQL ${pg_cluster_major} -> ${pg_target_major}"
+	echo "volume       ${pg_volume_name}"
+	echo "dump         ${backup}"
+	echo "archive      ${archive}"
+	echo "old revision ${old_revision}"
+} > "$sentinel"
+
 say "removing volume '${pg_volume_name}' (the verified dump and archive are the surviving copies)..."
-pg_docker "docker volume rm ${pg_volume_name}" || die "could not remove volume '${pg_volume_name}'. The dump (${backup}) and archive (${archive}) are both good; remove the volume manually and re-run."
+pg_docker "docker volume rm ${pg_volume_name}" || die_recoverable "could not remove volume '${pg_volume_name}'. The dump (${backup}) and archive (${archive}) are both good."
 
 # ── 8. Restore into a healthy new cluster ────────────────────────────────────
-# `--wait` blocks on the healthcheck, so the restore cannot race initdb.
 say "starting PostgreSQL ${pg_target_major} on a fresh volume..."
-pg_docker "docker compose up -d --wait db" || die "the PostgreSQL ${pg_target_major} db did not become healthy. The dump (${backup}) and archive (${archive}) are intact; see 'docker compose logs db'."
+pg_docker "docker compose up -d --wait db" || die_recoverable "the PostgreSQL ${pg_target_major} db did not become healthy. The dump (${backup}) and archive (${archive}) are intact; see 'docker compose logs db'."
+
+# `--wait` is NOT sufficient on its own, and the comment that used to claim it
+# was is the reason this is here. It blocks on the compose healthcheck, which is
+# `pg_isready` over the container's UNIX SOCKET -- and the official image's
+# entrypoint starts a TEMPORARY server on that same socket to run its init
+# scripts before shutting it down and starting the real one. On the fresh volume
+# step 7 just created, `--wait` therefore returns while the cluster is still
+# bootstrapping, and the restore dies a few statements in with
+# "FATAL: the database system is shutting down". Measured on this image:
+# pg_isready answered over the socket from t=1.6s while TCP stayed closed until
+# t=10.6s -- a nine-second window in which --wait is satisfied and the server it
+# is satisfied by is about to be killed.
+#
+# That temp server is started with `listen_addresses=''` (docker-entrypoint.sh,
+# docker_temp_server_start), so it can never answer over TCP. Probing TCP is
+# therefore a STRUCTURAL distinction between the bootstrap server and the real
+# one rather than a guess about how long bootstrapping takes -- no consecutive
+# -success counting, no sleep long enough to "probably" be safe.
+say "waiting for the real server (the image's bootstrap server answers the healthcheck but not TCP)..."
+db_ready=0
+for _ in $(seq 1 120); do
+	if pg_docker "docker compose exec -T db pg_isready -q -h 127.0.0.1 -U ${pg_db_user} -d postgres" > /dev/null 2>&1; then
+		db_ready=1
+		break
+	fi
+	sleep 1
+done
+if [ "$db_ready" -ne 1 ]; then
+	die_recoverable "PostgreSQL ${pg_target_major} never began accepting TCP connections (waited 120s). The dump (${backup}) and archive (${archive}) are intact; see 'docker compose logs db'."
+fi
 
 # psql exits 0 after a statement that errored unless ON_ERROR_STOP is set, so
 # without it a failed COPY leaves a table that exists and is missing rows, and
@@ -212,12 +302,19 @@ pg_docker "docker compose up -d --wait db" || die "the PostgreSQL ${pg_target_ma
 role_stmt="CREATE ROLE ${pg_db_user};"
 role_lines="$(grep -c -x -F -- "$role_stmt" "$backup" || true)"
 if [ "$role_lines" != "1" ]; then
-	die "expected exactly one '${role_stmt}' line in ${backup}, found ${role_lines}. Refusing to restore a dump whose bootstrap role this script cannot identify. The dump and the archive (${archive}) are both intact."
+	die_recoverable "expected exactly one '${role_stmt}' line in ${backup}, found ${role_lines}. Refusing to restore a dump whose bootstrap role this script cannot identify."
 fi
-if awk -v db="$pg_db_name" '$1 == "CREATE" && $2 == "DATABASE" && $3 == db { found = 1 } END { exit !found }' "$backup"; then
+# Counted, not merely detected, so this refuses on an ambiguous dump exactly as
+# the role check above does. pg_dumpall emits at most one CREATE DATABASE per
+# database, so anything above 1 means this script is misreading the file.
+createdb_lines="$(awk -v db="$pg_db_name" '$1 == "CREATE" && $2 == "DATABASE" && $3 == db { n++ } END { print n + 0 }' "$backup")"
+if [ "$createdb_lines" -gt 1 ]; then
+	die_recoverable "found ${createdb_lines} 'CREATE DATABASE ${pg_db_name}' statements in ${backup}; expected 0 or 1. Refusing to guess which one the restore should make room for."
+fi
+if [ "$createdb_lines" -eq 1 ]; then
 	say "dropping the empty '${pg_db_name}' this image's initdb just created, so the dump recreates it as it was..."
 	pg_docker "docker compose exec -T db psql -v ON_ERROR_STOP=1 -U ${pg_db_user} -d postgres -c 'DROP DATABASE IF EXISTS ${pg_db_name}'" ||
-		die "could not drop the freshly created '${pg_db_name}'. The dump (${backup}) and the archive (${archive}) are both intact."
+		die_recoverable "could not drop the freshly created '${pg_db_name}'."
 fi
 
 restore_log="$out_dir/restore.log"
@@ -227,10 +324,14 @@ grep -v -x -F -- "$role_stmt" "$backup" |
 	pg_docker "docker compose exec -T db psql -v ON_ERROR_STOP=1 -U ${pg_db_user} -d postgres" 2>&1 |
 	tee "$restore_log" || restore_status=$?
 if [ "$restore_status" -ne 0 ]; then
-	die "the restore failed (exit ${restore_status}); see ${restore_log} for the statement that errored. The database is now PARTIALLY restored -- do not bring the stack up on it. The dump (${backup}) and the archive (${archive}) are both intact, so this is recoverable."
+	die_recoverable "the restore failed (exit ${restore_status}); see ${restore_log} for the statement that errored. The database is now PARTIALLY restored -- do not bring the stack up on it."
 fi
 
 table_count="$(pg_docker "docker compose exec -T db psql -U ${pg_db_user} -d ${pg_db_name} -tAc \"select count(*) from pg_tables where schemaname = 'public'\"" 2> /dev/null | tr -d '[:space:]')" || table_count=""
+
+# The restore is in; the deployment has a working database again. Clearing the
+# sentinel is what makes a later re-run say "nothing to do" instead of refusing.
+rm -f "$sentinel"
 
 # ── 9. Report ────────────────────────────────────────────────────────────────
 echo

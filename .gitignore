@@ -8,3 +8,9 @@ scripts/*.py[cod]
 
 # Deployed commit stamp written by scripts/update.sh.
 .last-deploy-sha
+
+# Written by scripts/pg_major_upgrade.sh while the db-data volume has been
+# released and the new cluster is not yet restored; removed once it is. Its
+# presence is how a re-run tells a partially-restored cluster from a finished
+# upgrade (both are just "the volume holds PostgreSQL <target>").
+.pg-upgrade-incomplete
