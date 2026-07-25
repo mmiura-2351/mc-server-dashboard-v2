@@ -34,7 +34,7 @@
 	bench bench-api bench-worker bench-webui \
 	openapi-gen openapi-check \
 	proto-lint proto-gen proto-check proto-breaking \
-	bootstrap hooks-install hooks-check hooks-test \
+	bootstrap hooks-install hooks-check hooks-test scripts-test \
 	update deploy \
 	up down restart status logs ps build clean help
 
@@ -88,7 +88,8 @@ all: check
 
 # Full verification gate. Matches the pre-push hook and CI.
 # Parallelized via scripts/check_parallel.sh: independent module chains
-# (api, webui, worker, relay, proto, hooks, docs) run concurrently in Phase 1,
+# (api, webui, worker, relay, proto, hooks, docs, scripts) run concurrently in
+# Phase 1,
 # then the drift checks (proto-check, openapi-check) that run generators
 # follow in Phase 2 after all readers have finished. See the script header
 # for the phasing rationale and bounded-parallelism notes.
@@ -99,7 +100,7 @@ lint: api-lint worker-lint relay-lint webui-lint proto-lint
 
 format: api-format worker-format relay-format webui-format
 
-test: api-test worker-test worker-e2e-compile relay-test relay-e2e-compile webui-test hooks-test
+test: api-test worker-test worker-e2e-compile relay-test relay-e2e-compile webui-test hooks-test scripts-test
 
 # docs/ convention gate (docs/README.md Conventions): relative links resolve,
 # no section-mark glyph, no 'v1' versioning term. Pure stdlib python3, no deps.
@@ -396,6 +397,11 @@ hooks-check:
 hooks-test:
 	bash .githooks/test-post-checkout.sh
 	bash .githooks/test-hooks-check.sh
+
+# Unit-test the deploy shell helpers. Same shape as hooks-test: pure bash, temp
+# dirs, and stubbed `sg`/`docker` -- never touches a real daemon or volume.
+scripts-test:
+	bash scripts/test_deploy_preflight.sh
 
 # ---------------------------------------------------------------------------
 # proto/ (buf) -- the shared control-plane contract.
