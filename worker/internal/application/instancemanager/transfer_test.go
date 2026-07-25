@@ -51,6 +51,13 @@ type fakeTransfer struct {
 	// error the blocked transfer observed so a test can assert it was the deadline.
 	blockUntilCtxDone bool
 	gotCtxErr         error
+	// duringUpload, when set, runs inside UploadSnapshot with the working dir the
+	// preceding PackSnapshot was given — after the pack, before the caller's
+	// post-upload tail (recordGenerationIfUnchanged -> sweepDisplaced). It models a
+	// NEW stream's re-placement hydrate replacing the working dir while this (old,
+	// dropped) stream's snapshot is still finishing that tail, the cross-stream
+	// window issue #2284 closes for the marker stamp.
+	duringUpload func(workingDir string)
 }
 
 func (f *fakeTransfer) Hydrate(ctx context.Context, _, _, workingDir string) (uint64, error) {
@@ -92,21 +99,33 @@ func (f *fakeTransfer) UploadSnapshot(ctx context.Context, _, _, _ string, baseG
 		f.mu.Unlock()
 		return 0, ctx.Err()
 	}
-	defer f.mu.Unlock()
 	f.uploads = append(f.uploads, "upload")
 	f.snapshotBaseGenerations = append(f.snapshotBaseGenerations, baseGeneration)
 	f.snapshotWorkerIDs = append(f.snapshotWorkerIDs, workerID)
 	if f.seq != nil {
 		*f.seq = append(*f.seq, "upload")
 	}
-	if f.cancelDuringSnapshot != nil {
-		f.cancelDuringSnapshot()
+	packedDir := ""
+	if len(f.packs) > 0 {
+		packedDir = f.packs[len(f.packs)-1]
+	}
+	cancel, uploadErr, duringUpload := f.cancelDuringSnapshot, f.uploadErr, f.duringUpload
+	gen, err := f.gen, f.err
+	// Unlocked explicitly rather than deferred so duringUpload runs OUTSIDE f.mu: the
+	// hook does filesystem work and CI runs -race.
+	f.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
 		return 0, context.Canceled
 	}
-	if f.uploadErr != nil {
-		return 0, f.uploadErr
+	if uploadErr != nil {
+		return 0, uploadErr
 	}
-	return f.gen, f.err
+	if duringUpload != nil {
+		duringUpload(packedDir)
+	}
+	return gen, err
 }
 
 func (f *fakeTransfer) Snapshot(ctx context.Context, _, _, workingDir string, baseGeneration uint64, workerID string) (uint64, error) {

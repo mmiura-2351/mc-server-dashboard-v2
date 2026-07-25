@@ -158,7 +158,19 @@ destructive hydrate on a same-worker restart **only when the held generation is
 fresh enough** — hydrating a live, newer set would unpack the last authoritative
 snapshot over it and roll the world back, while a *stale* held set (e.g. an
 A→B→A leftover scratch B has advanced past) must still hydrate (issue #763,
-generalizing #696, see Section 5). Before advertising a held set's generation the
+generalizing #696, see Section 5).
+
+A snapshot advances that persisted generation **only while the working dir is still the
+directory the snapshot pinned when it began** (issue #2284). A running-id snapshot holds
+no per-server reservation (#829 item 4), so a new stream can re-place the server onto
+this Worker and hydrate it while an older, dropped stream's snapshot is still finishing
+— and stamping the freshly published generation onto that replacement tree would leave
+the marker *newer* than the world it names, which is precisely the case the skip gate
+above cannot recover from: it would skip the hydrate that corrects the tree. The Worker
+skips the stamp instead (a `WARN` naming the reason; the publish itself still succeeds),
+so the set stays advertised at the hydrate's generation and the next start re-hydrates.
+
+Before advertising a held set's generation the
 Worker structurally fsck's its region files (issue #834): a periodic running-id
 snapshot makes the generation marker durable while the live world files are never
 fsynced by the Worker, so a power loss can leave a durable gen-N marker next to a

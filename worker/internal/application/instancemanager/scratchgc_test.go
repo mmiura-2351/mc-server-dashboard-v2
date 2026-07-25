@@ -329,6 +329,34 @@ func TestRunningSnapshotGCsDisplacedTree(t *testing.T) {
 	}
 }
 
+// The identity pin that guards the marker stamp (issue #2284) deliberately does NOT
+// guard the sibling sweep in the same post-upload tail. This documents that choice in
+// code: with the working dir replaced mid-upload by a concurrent stream's hydrate, the
+// stamp is skipped but sweepDisplaced still removes the .displaced-<id> recovery tree
+// that hydrate just created — issue #917 item 3, knowingly left open. Only the silent,
+// non-self-healing consumer of the window was fixed here; the sweep's loss is bounded
+// and recoverable by re-hydrating. Change this test only together with that decision.
+func TestRunningSnapshotStillSweepsDisplacedWhenWorkingDirReplaced(t *testing.T) {
+	tr := &fakeTransfer{gen: 12}
+	ctrl := &fakeControl{reply: "ok"}
+	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
+	_ = m.Handle(context.Background(), startCmd())
+	dir := seedScratch(t, m, "s1")
+	tr.duringUpload = func(workingDir string) { replaceWorkingDirLikeHydrate(t, workingDir, 7) }
+
+	if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
+		t.Fatalf("running-id snapshot = %+v, want success", res)
+	}
+
+	if got := readGeneration(dir); got != 7 {
+		t.Fatalf("generation = %d, want 7 (the stamp is guarded, issue #2284)", got)
+	}
+	if _, err := os.Stat(filepath.Join(m.scratchDir, ".displaced-s1")); !os.IsNotExist(err) {
+		t.Fatalf("displaced tree survived (stat err = %v): the sweep is intentionally NOT gated on "+
+			"the identity pin — issue #917 item 3 stays open", err)
+	}
+}
+
 // A FAILED snapshot must RETAIN the displaced recovery tree: the store did not
 // capture the world, so the .displaced-<id> copy is still the only one — GC-ing it
 // would defeat the recovery insurance entirely (issue #906).

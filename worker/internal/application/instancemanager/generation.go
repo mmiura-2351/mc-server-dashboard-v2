@@ -1,6 +1,7 @@
 package instancemanager
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -21,8 +22,17 @@ const generationFile = ".mcsd_generation"
 // best-effort from the caller's view: a write failure is returned for logging but
 // must not fail the hydrate/snapshot it follows. On the 200 hydrate path the marker
 // was already written atomically into the temp tree before the swap-in rename
-// (issue #917), so this call is idempotent; on the 204 path and the snapshot path a
-// missing/stale marker only costs an extra hydrate, never correctness. The file is
+// (issue #917), so this call is idempotent; on the 204 path and the snapshot path it
+// is the only write.
+//
+// "Best-effort" is bounded by DIRECTION, and the two are not symmetric (issue #2284).
+// A marker OLDER than the tree it sits in — the outcome of a missing or failed write —
+// costs one extra hydrate and nothing else, because the API's skip-hydrate gate
+// (skip_hydrate = held >= store, issue #767) then does not skip. A marker NEWER than
+// its tree is a correctness failure: the gate skips the hydrate that would correct the
+// tree and the Worker boots a working set that is not the generation it claims to be.
+// So a caller that cannot prove the marker still describes the directory it is writing
+// into must not write it at all — see writeGenerationGuarded. The file is
 // written atomically (temp
 // sibling + rename) so a crash mid-write never leaves a torn generation, and the
 // temp contents are fsynced before the rename so a crash cannot surface an EMPTY
@@ -35,6 +45,44 @@ const generationFile = ".mcsd_generation"
 // earlier crashed writes stranded in workingDir (sweepGenerationTemps, issue #2283),
 // so the cleanup is self-healing rather than a separate mechanism.
 func writeGeneration(workingDir string, gen uint64) error {
+	return writeGenerationGuarded(workingDir, gen, nil)
+}
+
+// writeGenerationGuarded is writeGeneration with an optional last-moment guard, run
+// immediately before the rename that publishes the marker. It exists for the running-id
+// snapshot's stamp (issue #2284), whose caller must not publish a marker once the
+// working dir has stopped being the directory it packed; every other caller passes nil
+// and gets writeGeneration's behaviour byte for byte.
+//
+// The guard runs THERE rather than only in the caller because the caller's check is
+// check-then-act, and exactly ONE sub-window of that gap can publish a marker into the
+// wrong tree. Take T to be the instant a concurrent hydrate's swap completes:
+//
+//   - T before CreateTemp below (i.e. across the caller's check and MkdirAll): the temp
+//     is created inside the REPLACEMENT directory, every later path resolves there
+//     consistently, and the rename succeeds — the marker lands on a tree this caller
+//     never packed. This is the wrong-stamp window, and this guard is what closes it.
+//   - T after CreateTemp: the temp lives inside the pinned inode, which the swap has
+//     moved to .displaced-<id>. tmpName resolves through the path, so its lookup now
+//     enters the replacement directory, where that name does not exist: the rename
+//     fails ENOENT on its SOURCE and no marker can be published. Path semantics close
+//     this window on their own — including the whole fsync above, which is the slowest
+//     part of the gap. The guard's contribution here is not safety but classification:
+//     the caller reports a clean skip instead of an ENOENT marker-write error.
+//
+// So the residual is not "the fsync" and not "one rename": for any T that lands wholly
+// before or wholly after the rename below, a wrong stamp is impossible. What these path
+// semantics do not decide is a swap interleaved WITHIN that one rename's own resolution
+// of its two path arguments. That is the honest bound, and it is why the renameat-against-
+// the-pinned-descriptor rewrite is not worth its cost (see recordGenerationIfUnchanged).
+//
+// A refused write removes its temp — unlike the rename-failure path below, which strands
+// a complete marker on purpose, this temp is one nothing will ever publish. That cleanup
+// is effective in the first case above (the temp is in the replacement dir, at a path
+// that still resolves); in the second the temp has ridden the pinned inode into
+// .displaced-<id> and the Remove is a harmless ENOENT, leaving an inert temp that the
+// displaced tree's own reclaim covers.
+func writeGenerationGuarded(workingDir string, gen uint64, guard func() bool) error {
 	// Ensure the working dir exists: a hydrate that served a 204 (no published
 	// snapshot) does not create it, but the generation (0) still needs recording so
 	// a same-Worker restart re-reports the empty-set generation rather than nothing.
@@ -68,6 +116,10 @@ func writeGeneration(workingDir string, gen uint64) error {
 		_ = os.Remove(tmpName)
 		return err
 	}
+	if guard != nil && !guard() {
+		_ = os.Remove(tmpName)
+		return errWorkingDirReplaced
+	}
 	// A failed rename deliberately leaves the temp in place instead of unlinking it
 	// inline as the three paths above do. Those unlink because their temp holds torn or
 	// unflushed bytes; this one holds a complete, fsynced generation under the temp
@@ -100,13 +152,17 @@ func writeGeneration(workingDir string, gen uint64) error {
 //
 // The sweep CAN unlink a CONCURRENT writer's in-flight temp, and does so in practice
 // (8 goroutines x 50 writes on one dir: 0 rename errors without the sweep, ~300
-// ENOENT renames with it). Two writeGeneration calls do overlap on one workingDir:
+// ENOENT renames with it; that measurement drove writeGeneration directly). Two marker
+// writes still overlap on one workingDir, though the shape is narrower than it was:
 // the per-server FIFO lanes are per-STREAM (the dispatcher is recreated per serve,
 // domain/session/session.go), and a running-id snapshot deliberately takes no id
 // reservation (issue #829 item 4, handleSnapshot) though a hydrate and a stopped-id
-// snapshot do, so a dropped stream's post-upload snapshot tail (recordGeneration) can
-// still run while a NEW stream's hydrate records its own marker — the same window
-// documented as issue #917 item 3.
+// snapshot do, so a dropped stream's post-upload snapshot tail can still run while a
+// NEW stream's hydrate records its own marker. What survives of that overlap after the
+// snapshot tail's identity guard (issue #2284) is (i) a concurrent hydrate that did NOT
+// replace the working dir — the 204 path leaves destDir untouched — and (ii) the
+// guard's own residual, the rename-sized window between its last check and the marker
+// rename.
 //
 // That is accepted rather than prevented, because what the loser loses is bounded: the
 // marker can never be absent or torn (the winner's rename precedes this sweep and its
@@ -127,6 +183,113 @@ func sweepGenerationTemps(workingDir string) {
 		}
 		_ = os.Remove(filepath.Join(workingDir, entry.Name()))
 	}
+}
+
+// errWorkingDirReplaced reports that a guarded marker write was refused because the
+// working dir stopped being the directory the caller pinned. It is a skipped write, not
+// a failed one: the caller logs it as such rather than as a marker-write error.
+var errWorkingDirReplaced = errors.New("instancemanager: working dir replaced since it was pinned")
+
+// openWorkingDirRef is os.Open, indirected through a package var so a test can force
+// the identity capture to fail and pin the fail-toward-skip direction (mirrors
+// datatransfer's `var swapRename`). Production always uses os.Open.
+var openWorkingDirRef = os.Open
+
+// statWorkingDirRef is the compare-side os.Stat, indirected for the same reason. It is
+// what lets a test drive the ONE interleaving the pre-rename guard uniquely closes — a
+// replacement landing after the caller's check but before the marker temp is created —
+// which is otherwise a microseconds-wide race no test could hit deterministically.
+// Production always uses os.Stat.
+var statWorkingDirRef = os.Stat
+
+// workingDirRef pins the IDENTITY of a working directory across a window in which a
+// concurrent stream may replace it (issue #2284). It answers one question: is the
+// directory at this path still the same directory object it was when the window opened?
+//
+// TWO mechanics make that answer trustworthy, and NEITHER is an optimisation:
+//
+//   - os.SameFile compares (device, inode) and is portable, so no syscall/build-tag
+//     work — a hand-rolled inode comparison would buy nothing.
+//   - The descriptor is held OPEN for the whole window. A bare Stat-at-capture /
+//     Stat-at-compare token is defeated by inode ABA: a first hydrate renames the dir
+//     aside, a sweep frees the inode, and a second hydrate's os.MkdirTemp can be handed
+//     that same inode back and rename it into place — the token then MATCHES and the
+//     caller acts on a directory it never pinned. Holding the descriptor defers the
+//     inode's reclamation until close, so the number can never be recycled inside the
+//     window. Do not "simplify" this to two Stat calls; the double-hydrate case that
+//     breaks it is one handleSnapshot explicitly documents as reachable, and
+//     TestWorkingDirRefSurvivesUnlinkAndRejectsReplacement fails if the descriptor goes.
+//
+// The cost is one file descriptor per in-flight running snapshot, so a ref MUST be
+// closed on every path out of the window.
+type workingDirRef struct {
+	dir  string
+	file *os.File    // held open for the whole window — see the ABA note above
+	info os.FileInfo // the pinned identity, for os.SameFile
+	err  error       // non-nil when the identity could not be captured
+}
+
+// pinWorkingDir captures dir's identity. It never returns nil: a capture failure is
+// carried in the ref and surfaces from current() as a mismatch, so a caller that cannot
+// establish the identity behaves exactly like one that finds it changed.
+func pinWorkingDir(dir string) *workingDirRef {
+	ref := &workingDirRef{dir: dir}
+	f, err := openWorkingDirRef(dir)
+	if err != nil {
+		ref.err = err
+		return ref
+	}
+	// fstat through the descriptor, not a second path lookup: the identity recorded is
+	// then provably the object being held open.
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		ref.err = err
+		return ref
+	}
+	ref.file, ref.info = f, info
+	return ref
+}
+
+// close releases the pinned descriptor. Nil-safe and idempotent-friendly.
+func (r *workingDirRef) close() {
+	if r == nil || r.file == nil {
+		return
+	}
+	_ = r.file.Close()
+}
+
+// current reports whether the path still resolves to the pinned directory, and when it
+// does not, a structured reason for the caller's log. Every uncertainty resolves to
+// "not current": a false mismatch costs one extra hydrate, while a false match is the
+// silent wrong-generation boot this guard exists to prevent.
+func (r *workingDirRef) current() (bool, string) {
+	if r == nil {
+		return false, "identity_unavailable"
+	}
+	if r.err != nil {
+		// A capture that failed because the dir was not there is reported as absent, not
+		// as unavailable: the two reasons send an operator looking in different places
+		// (a deleted scratch vs. an fd/permission problem), so they must stay disjoint.
+		return false, absentOr(r.err, "identity_unavailable")
+	}
+	now, err := statWorkingDirRef(r.dir)
+	if err != nil {
+		return false, absentOr(err, "identity_unavailable")
+	}
+	if !os.SameFile(r.info, now) {
+		return false, "working_dir_replaced"
+	}
+	return true, ""
+}
+
+// absentOr classifies a filesystem error as the working dir being gone, falling back to
+// otherwise for anything else.
+func absentOr(err error, otherwise string) string {
+	if os.IsNotExist(err) {
+		return "working_dir_absent"
+	}
+	return otherwise
 }
 
 // fsyncDir fsyncs a directory so a rename/create within it is durable. The dir is
