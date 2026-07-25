@@ -41,7 +41,12 @@ func writeGeneration(workingDir string, gen uint64) error {
 	if err := os.MkdirAll(workingDir, 0o750); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(workingDir, ".mcsd_generation-*")
+	// The pattern is DERIVED from generationFile, not spelled out: hasWorkingSet
+	// (issue #2279), the snapshot pack (issue #834) and sweepGenerationTemps
+	// (issue #2283) all recognise a temp by that same prefix, so a literal here
+	// would let a rename of the constant leave the creation site behind and strand
+	// temps no consumer matches (issue #2287).
+	tmp, err := os.CreateTemp(workingDir, generationFile+"-*")
 	if err != nil {
 		return err
 	}
@@ -63,6 +68,13 @@ func writeGeneration(workingDir string, gen uint64) error {
 		_ = os.Remove(tmpName)
 		return err
 	}
+	// A failed rename deliberately leaves the temp in place instead of unlinking it
+	// inline as the three paths above do. Those unlink because their temp holds torn or
+	// unflushed bytes; this one holds a complete, fsynced generation under the temp
+	// form, which every consumer already treats as non-content (issues #2279, #834), so
+	// it is inert until reclaimed — by the next successful marker write's sweep
+	// (sweepGenerationTemps, issue #2283) or by the scratch GC's RemoveAll, the same two
+	// reclaims that cover a crash-stranded temp.
 	if err := os.Rename(tmpName, filepath.Join(workingDir, generationFile)); err != nil {
 		return err
 	}
