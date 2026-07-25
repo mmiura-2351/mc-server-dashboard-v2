@@ -200,6 +200,11 @@ func TestWriteGenerationKeepsTempFormDirectory(t *testing.T) {
 // temp write and the rename leaves behind.
 func TestStrandedGenerationTempMatchesTheMarkerTempPredicates(t *testing.T) {
 	dir := t.TempDir()
+	// The directory makes the rename fail with EISDIR, and writeGeneration's
+	// rename-error path returns WITHOUT unlinking its temp (unlike its write, sync and
+	// close paths, which do) — that omission is what leaves the temp here to inspect.
+	// Adding an inline unlink there would empty this dir and fail the test at
+	// strandedGenerationTemp, far from anything to do with drift.
 	if err := os.MkdirAll(filepath.Join(dir, generationFile), 0o750); err != nil {
 		t.Fatal(err)
 	}
