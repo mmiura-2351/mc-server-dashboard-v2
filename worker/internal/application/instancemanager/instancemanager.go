@@ -481,12 +481,12 @@ func (m *Manager) handleHydrate(ctx context.Context, cmd session.Command) sessio
 
 // recordGeneration writes the working-set generation marker, logging (not failing) on
 // error: a marker this call fails to write is one OLDER than the tree, which costs an
-// extra hydrate and nothing else. It is unconditional, and only its two callers make
-// that sound — handleHydrate holds a per-id reservation across the whole transfer AND
-// is the writer that produced the tree, so the marker it writes always describes what
-// is on disk. The running-id snapshot's tail holds no such reservation and goes through
-// recordGenerationIfUnchanged instead. Do not gate this one: a marker that is never
-// written reads as generation 0, so the API could never skip a hydrate again.
+// extra hydrate and nothing else. It is unconditional, and its single caller is what
+// makes that sound — handleHydrate holds a per-id reservation across the whole transfer
+// AND is the writer that produced the tree, so the marker it writes always describes
+// what is on disk. The running-id snapshot's tail holds no such reservation and goes
+// through recordGenerationIfUnchanged instead. Do not gate this one: a marker that is
+// never written reads as generation 0, so the API could never skip a hydrate again.
 func (m *Manager) recordGeneration(workingDir, serverID string, gen uint64) {
 	if err := writeGeneration(workingDir, gen); err != nil {
 		m.logger.Warn("could not record working-set generation",
@@ -509,12 +509,17 @@ func (m *Manager) recordGeneration(workingDir, serverID string, gen uint64) {
 // boot the wrong generation silently. Nothing is reported to the API (a CommandResult
 // carries no warning channel); the WARN is the only signal.
 //
-// The check is repeated as writeGenerationGuarded's pre-rename guard, because the fsync
-// between them is not a negligible window. What remains after that is a single rename
-// syscall: closing it entirely would mean doing the marker rename as renameat against
-// the pinned descriptor, which is deliberately NOT done here — it would rewrite the
-// shared, fsync-ordered writeGeneration that the hydrate path also uses, and would write
-// a marker into the displaced tree that STORAGE.md Section 4.6's manual recovery reads.
+// The check is repeated as writeGenerationGuarded's pre-rename guard, and that second
+// check is what closes the one interleaving this one cannot: a replacement landing after
+// the check here but before the marker temp is created gets a temp inside the REPLACEMENT
+// tree, which then publishes cleanly. Once the temp exists the marker can no longer land
+// in a replacement tree at all — the temp rides the pinned inode to .displaced-<id> and
+// the rename fails ENOENT on its source — so between them no wrong stamp survives except
+// a swap interleaved inside the marker rename's own path resolution. That is why the
+// renameat-against-the-pinned-descriptor rewrite is NOT done here: it would buy only that
+// last sliver, while rewriting the shared, fsync-ordered writeGeneration the hydrate path
+// also uses and writing a marker into the displaced tree that STORAGE.md Section 4.6's
+// manual recovery reads. See writeGenerationGuarded for the case analysis.
 func (m *Manager) recordGenerationIfUnchanged(ref *workingDirRef, workingDir, serverID string, gen uint64) {
 	reason := ""
 	guard := func() bool {

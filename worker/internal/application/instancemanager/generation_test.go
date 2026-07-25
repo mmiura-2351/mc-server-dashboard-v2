@@ -3,6 +3,7 @@ package instancemanager
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -122,6 +123,52 @@ func TestRunningSnapshotSkipsGenerationStampWhenWorkingDirReplaced(t *testing.T)
 	}
 }
 
+// TestWriteGenerationGuardedRefusesAndRemovesItsTemp pins the pre-rename guard itself
+// (issue #2284): a guard that reports the working dir is no longer the pinned one must
+// stop the marker from being published, report the distinct errWorkingDirReplaced so the
+// caller can log a skip rather than a marker-write failure, and leave no temp behind.
+// Without this the guard block can be deleted outright with the rest of the suite green,
+// because every interleaving test trips the CALLER's earlier check and returns before
+// writeGenerationGuarded is ever reached with a failing guard.
+func TestWriteGenerationGuardedRefusesAndRemovesItsTemp(t *testing.T) {
+	dir := t.TempDir()
+
+	err := writeGenerationGuarded(dir, 9, func() bool { return false })
+
+	if !errors.Is(err, errWorkingDirReplaced) {
+		t.Fatalf("writeGenerationGuarded = %v, want errWorkingDirReplaced", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, generationFile)); !os.IsNotExist(statErr) {
+		t.Fatalf("marker published despite a refusing guard: stat err = %v", statErr)
+	}
+	entries, readErr := os.ReadDir(dir)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 0 {
+		var names []string
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		t.Fatalf("refused write left %v behind, want its temp removed", names)
+	}
+}
+
+// TestWriteGenerationGuardedWritesWhenTheGuardHolds is the companion direction: a guard
+// that reports the dir unchanged must not disturb the write at all. Together with the
+// refusal test above it pins the guard as a decision point rather than a blanket veto.
+func TestWriteGenerationGuardedWritesWhenTheGuardHolds(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := writeGenerationGuarded(dir, 9, func() bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := readGeneration(dir); got != 9 {
+		t.Fatalf("generation = %d, want 9", got)
+	}
+}
+
 // TestRunningSnapshotSkipsGenerationStampWhenWorkingDirRemoved covers the other way
 // the pinned directory stops being the tree that was packed: a new stream's final
 // snapshot (removeScratch) or the deleted-scratch reclaim deletes it outright. The
@@ -149,6 +196,120 @@ func TestRunningSnapshotSkipsGenerationStampWhenWorkingDirRemoved(t *testing.T) 
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("working dir resurrected by the skipped stamp (stat err = %v): a marker-only dir "+
 			"would advertise a generation for a world this Worker no longer holds", err)
+	}
+}
+
+// TestRunningSnapshotSkipsStampWhenWorkingDirReplacedAfterTheCheck drives the ONE
+// interleaving that the caller's pre-check cannot catch and the pre-rename guard must
+// (issue #2284): the replacement lands AFTER recordGenerationIfUnchanged has checked and
+// passed, but BEFORE writeGenerationGuarded creates the marker temp. The temp is then
+// created inside the REPLACEMENT directory, so every later path resolves there
+// consistently and the rename would publish generation 12 onto a tree this snapshot
+// never packed. (Once the temp exists the window is closed by path semantics instead:
+// the temp rides the pinned inode into .displaced-<id> and the rename fails ENOENT on
+// its source. That is why this test has to strike before CreateTemp to be meaningful.)
+//
+// The interleaving is microseconds wide in production — it spans MkdirAll — so it is
+// driven through statWorkingDirRef rather than raced for: the fake performs the swap
+// after the pre-check has read the OLD identity but before it returns, then delegates.
+//
+// It also pins the classification: this must be logged as a SKIP with the structured
+// reason, not as recordGeneration's marker-write error.
+func TestRunningSnapshotSkipsStampWhenWorkingDirReplacedAfterTheCheck(t *testing.T) {
+	tr := &fakeTransfer{gen: 12}
+	ctrl := &fakeControl{reply: "ok"}
+	h := &capturingSlogHandler{}
+	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr).WithLogger(slog.New(h))
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("start = %+v, want success", res)
+	}
+	dir := seedScratch(t, m, "s1")
+	if err := writeGeneration(dir, 5); err != nil {
+		t.Fatal(err)
+	}
+
+	calls := 0
+	restore := statWorkingDirRef
+	statWorkingDirRef = func(name string) (os.FileInfo, error) {
+		calls++
+		info, err := restore(name)
+		if calls == 1 {
+			// The pre-check has already sampled the pinned identity; swap the tree in
+			// underneath it and hand back the pre-swap answer, so the check passes and
+			// the write proceeds into a directory that is no longer the pinned one.
+			replaceWorkingDirLikeHydrate(t, dir, 7)
+		}
+		return info, err
+	}
+	t.Cleanup(func() { statWorkingDirRef = restore })
+
+	res := m.Handle(context.Background(), snapshotCmd())
+
+	if !res.Success {
+		t.Fatalf("SnapshotTrigger = %+v, want success", res)
+	}
+	if calls < 2 {
+		t.Fatalf("identity was compared %d time(s), want the pre-check AND the pre-rename guard: "+
+			"the guarded write was never reached, so this test proves nothing", calls)
+	}
+	if got := readGeneration(dir); got != 7 {
+		t.Fatalf("generation = %d, want 7: the marker temp was created inside the tree the "+
+			"concurrent hydrate swapped in, and the pre-rename guard did not stop it from being "+
+			"published there (issue #2284)", got)
+	}
+	// The refused write must not strand its temp — here the temp IS reachable (it was
+	// created in the replacement dir), so the cleanup is observable.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), generationFile+"-") {
+			t.Fatalf("refused write stranded its temp %q in the working dir", entry.Name())
+		}
+	}
+	assertSkippedStampWarn(t, h, "working_dir_replaced")
+}
+
+// assertSkippedStampWarn fails unless the records hold a skipped-stamp WARN carrying
+// reason, and no marker-write ERROR: a refused stamp must be classified as a skip
+// (errWorkingDirReplaced) rather than surfacing as writeGeneration's failure log.
+func assertSkippedStampWarn(t *testing.T, h *capturingSlogHandler, reason string) {
+	t.Helper()
+	found := false
+	for _, rec := range h.records {
+		if strings.HasPrefix(rec.Message, "could not record working-set generation") {
+			t.Fatalf("refused stamp logged as a marker-write error: %q", rec.Message)
+		}
+		if !strings.HasPrefix(rec.Message, "skipped recording working-set generation") {
+			continue
+		}
+		if rec.Level != slog.LevelWarn {
+			t.Fatalf("skipped-stamp log level = %v, want Warn", rec.Level)
+		}
+		rec.Attrs(func(a slog.Attr) bool {
+			if a.Key == "reason" && a.Value.String() == reason {
+				found = true
+			}
+			return true
+		})
+	}
+	if !found {
+		t.Fatalf("no skipped-stamp WARN with reason=%q; records = %v", reason, h.records)
+	}
+}
+
+// TestPinWorkingDirReportsAnAbsentDirAsAbsent pins the capture-time classification: a
+// pin taken on a directory that is not there must say so, not blame an fd/permission
+// problem. The direction is the same either way (skip the stamp), but the reason is what
+// an operator acts on — a deleted scratch and an exhausted fd table are different
+// problems, so the three reasons have to stay disjoint.
+func TestPinWorkingDirReportsAnAbsentDirAsAbsent(t *testing.T) {
+	ref := pinWorkingDir(filepath.Join(t.TempDir(), "never-created"))
+	defer ref.close()
+
+	if ok, reason := ref.current(); ok || reason != "working_dir_absent" {
+		t.Fatalf("current() = (%v, %q), want (false, \"working_dir_absent\")", ok, reason)
 	}
 }
 

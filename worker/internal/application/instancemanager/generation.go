@@ -55,15 +55,33 @@ func writeGeneration(workingDir string, gen uint64) error {
 // and gets writeGeneration's behaviour byte for byte.
 //
 // The guard runs THERE rather than only in the caller because the caller's check is
-// check-then-act: between it and the rename this function does MkdirAll, CreateTemp,
-// WriteString and an fsync, and that fsync is milliseconds to tens of milliseconds
-// under load — a wide window, not a negligible one. Re-checking against the rename
-// narrows the residual to a single rename syscall. It does NOT close it: the only
-// fully atomic form is renameat against the pinned descriptor, which is deliberately
-// not done here (see recordGenerationIfUnchanged).
+// check-then-act, and exactly ONE sub-window of that gap can publish a marker into the
+// wrong tree. Take T to be the instant a concurrent hydrate's swap completes:
 //
-// A refused write removes its temp — unlike the rename-failure path below, which
-// strands a complete marker on purpose, this temp is one nothing will ever publish.
+//   - T before CreateTemp below (i.e. across the caller's check and MkdirAll): the temp
+//     is created inside the REPLACEMENT directory, every later path resolves there
+//     consistently, and the rename succeeds — the marker lands on a tree this caller
+//     never packed. This is the wrong-stamp window, and this guard is what closes it.
+//   - T after CreateTemp: the temp lives inside the pinned inode, which the swap has
+//     moved to .displaced-<id>. tmpName resolves through the path, so its lookup now
+//     enters the replacement directory, where that name does not exist: the rename
+//     fails ENOENT on its SOURCE and no marker can be published. Path semantics close
+//     this window on their own — including the whole fsync above, which is the slowest
+//     part of the gap. The guard's contribution here is not safety but classification:
+//     the caller reports a clean skip instead of an ENOENT marker-write error.
+//
+// So the residual is not "the fsync" and not "one rename": for any T that lands wholly
+// before or wholly after the rename below, a wrong stamp is impossible. What these path
+// semantics do not decide is a swap interleaved WITHIN that one rename's own resolution
+// of its two path arguments. That is the honest bound, and it is why the renameat-against-
+// the-pinned-descriptor rewrite is not worth its cost (see recordGenerationIfUnchanged).
+//
+// A refused write removes its temp — unlike the rename-failure path below, which strands
+// a complete marker on purpose, this temp is one nothing will ever publish. That cleanup
+// is effective in the first case above (the temp is in the replacement dir, at a path
+// that still resolves); in the second the temp has ridden the pinned inode into
+// .displaced-<id> and the Remove is a harmless ENOENT, leaving an inert temp that the
+// displaced tree's own reclaim covers.
 func writeGenerationGuarded(workingDir string, gen uint64, guard func() bool) error {
 	// Ensure the working dir exists: a hydrate that served a 204 (no published
 	// snapshot) does not create it, but the generation (0) still needs recording so
@@ -177,6 +195,13 @@ var errWorkingDirReplaced = errors.New("instancemanager: working dir replaced si
 // datatransfer's `var swapRename`). Production always uses os.Open.
 var openWorkingDirRef = os.Open
 
+// statWorkingDirRef is the compare-side os.Stat, indirected for the same reason. It is
+// what lets a test drive the ONE interleaving the pre-rename guard uniquely closes — a
+// replacement landing after the caller's check but before the marker temp is created —
+// which is otherwise a microseconds-wide race no test could hit deterministically.
+// Production always uses os.Stat.
+var statWorkingDirRef = os.Stat
+
 // workingDirRef pins the IDENTITY of a working directory across a window in which a
 // concurrent stream may replace it (issue #2284). It answers one question: is the
 // directory at this path still the same directory object it was when the window opened?
@@ -239,20 +264,32 @@ func (r *workingDirRef) close() {
 // "not current": a false mismatch costs one extra hydrate, while a false match is the
 // silent wrong-generation boot this guard exists to prevent.
 func (r *workingDirRef) current() (bool, string) {
-	if r == nil || r.err != nil {
+	if r == nil {
 		return false, "identity_unavailable"
 	}
-	now, err := os.Stat(r.dir)
+	if r.err != nil {
+		// A capture that failed because the dir was not there is reported as absent, not
+		// as unavailable: the two reasons send an operator looking in different places
+		// (a deleted scratch vs. an fd/permission problem), so they must stay disjoint.
+		return false, absentOr(r.err, "identity_unavailable")
+	}
+	now, err := statWorkingDirRef(r.dir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return false, "working_dir_absent"
-		}
-		return false, "identity_unavailable"
+		return false, absentOr(err, "identity_unavailable")
 	}
 	if !os.SameFile(r.info, now) {
 		return false, "working_dir_replaced"
 	}
 	return true, ""
+}
+
+// absentOr classifies a filesystem error as the working dir being gone, falling back to
+// otherwise for anything else.
+func absentOr(err error, otherwise string) string {
+	if os.IsNotExist(err) {
+		return "working_dir_absent"
+	}
+	return otherwise
 }
 
 // fsyncDir fsyncs a directory so a rename/create within it is durable. The dir is
