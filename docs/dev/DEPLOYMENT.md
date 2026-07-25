@@ -854,6 +854,46 @@ servers), runs a post-deploy `/api/healthz` check, and stamps the new SHA. Use
 > API_HTTP_BIND_IP=0.0.0.0
 > ```
 
+> **Breaking change — PostgreSQL 17 to 18, and `db-data` now mounts at
+> `/var/lib/postgresql` (issue #2133).** `compose.yaml` runs `postgres:18`, which
+> moved `PGDATA` to `/var/lib/postgresql/<major>/docker` and declares its volume
+> at that parent directory; the mount moved with it. An existing deployment's
+> `db-data` volume holds PostgreSQL 17-format data that `postgres:18` cannot
+> read: the container aborts during entrypoint init — loudly, and without
+> touching your data — and because `migrate` and `api` both gate on `db` being
+> healthy, the whole stack stays down until the data is migrated.
+> `scripts/deploy_preflight.sh` now detects this and refuses the deploy, so
+> `make update` stops before it takes the stack down.
+>
+> **Take the dump while the stack is still running `postgres:17` — before
+> `git pull` swaps the image.** The `postgres:18` image ships no PostgreSQL 17
+> binary, so once the new image is in place there is no supported way to read the
+> old volume.
+>
+> ```sh
+> # 1. On the OLD revision, with the 17 stack still up:
+> docker compose exec db pg_dumpall -U mcsd > backup-pg17.sql
+> docker compose down
+> docker volume rm mc-server-dashboard-v2_db-data
+>
+> # 2. Take the new revision and start the 18 db on a fresh volume:
+> git pull --ff-only origin main
+> docker compose up -d db
+>
+> # 3. Restore, then bring the rest of the stack up:
+> docker compose exec -T db psql -U mcsd -d postgres < backup-pg17.sql
+> docker compose up -d --build
+> ```
+>
+> (The volume name is `<project>_db-data`; `docker volume ls` shows the exact
+> names for your project directory. The restore replays `CREATE ROLE mcsd` and
+> `CREATE DATABASE mcsd`, which the fresh container already provisioned from
+> `.env` — those two "already exists" errors are expected and harmless.)
+>
+> For a large cluster, `pg_upgrade --link` converts in place much faster, but it
+> needs both majors' binaries in one image and is not covered here. Performing
+> this migration on the canonical host is tracked as issue #2293.
+
 Stacks that were first deployed before the `api` image pre-created the storage
 mount point have an `api-storage` volume owned by root, so the non-root app
 (uid 10001) cannot write to it. Fix the ownership once, then bring the stack up:
