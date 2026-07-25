@@ -1868,6 +1868,30 @@ func TestJunkDisplacedSlotDoesNotShadowLiveSet(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
+		// The routine world-less shape, not an exotic one: a 204 hydrate returns without
+		// creating destDir, and the caller's writeGeneration then makes <scratch>/<id>
+		// holding ONLY the marker. hasWorkingSet reports that as not-held, so the next 200
+		// hydrate parks it at .displaced-<id> by the ordinary path — and it must not then
+		// shadow a real world.
+		{"marker only", func(t *testing.T, path string) {
+			if err := os.MkdirAll(path, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(path, generationMarkerFile), []byte("7"), 0o640); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		// Same, via a marker TEMP sibling: writeGeneration writes the marker atomically
+		// through a ".mcsd_generation-XXXX" temp + rename, so a crash before the rename
+		// leaves one behind. The match must be by prefix, as hasWorkingSet does (#2279).
+		{"marker temp sibling only", func(t *testing.T, path string) {
+			if err := os.MkdirAll(path, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(path, generationMarkerFile+"-abc123"), []byte("7"), 0o640); err != nil {
+				t.Fatal(err)
+			}
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

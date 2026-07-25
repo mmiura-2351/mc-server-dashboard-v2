@@ -648,8 +648,13 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// .displaced-<id> the hydrate writes is exactly what sweepDisplaced removes. The
 		// stated delta bound also assumes that hydrate CREATED the tree; under oldest-wins
 		// (issue #2278) a hydrate finding the slot occupied creates none, so a racing sweep
-		// then destroys the older retained tree instead, whose age this bound does not
-		// describe.
+		// then destroys the older RETAINED tree instead, whose age this bound does not
+		// describe. In that variant BOTH local branches can go: a sweep landing between the
+		// hydrate's slot check and its post-swap drop removes the retained tree while the
+		// hydrate drops the superseded set, leaving only the store's pack generation. Not a
+		// regression (newest-wins reached the same place by a different route), and the
+		// no-zero-copy reasoning in unpackAndSwap is a CRASH statement, which this
+		// concurrent sweep is not.
 		var quiesced bool
 		var rawRestore func()
 		quiesced, rawRestore = m.quiesceRunning(ctx, cmd.ServerID, filepath.Join(m.scratchDir, cmd.ServerID))
@@ -1334,7 +1339,9 @@ func (m *Manager) removeScratch(serverID string) {
 // closed — the bound and the rationale are in handleSnapshot's running branch. Note the
 // bound assumes the racing hydrate CREATED the tree: under oldest-wins (issue #2278) a
 // hydrate that finds the slot occupied creates no new .displaced-<id>, so what a racing
-// sweep destroys is then the older retained tree, which that bound does not describe.
+// sweep destroys is then the older retained tree, which that bound does not describe —
+// and since that hydrate also drops the set it superseded, the race can leave no local
+// branch at all, only the store's pack generation.
 func (m *Manager) sweepDisplaced(serverID string) {
 	_ = os.RemoveAll(filepath.Join(m.scratchDir, ".displaced-"+serverID))
 }

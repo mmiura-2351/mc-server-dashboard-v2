@@ -367,8 +367,9 @@ func unpackAndSwap(r io.Reader, destDir string, gen uint64, log *slog.Logger) er
 	// Write the generation marker into the temp tree BEFORE the swap-in rename
 	// (issue #917): the marker must be atomic with the new destDir so a crash after
 	// swap-in never leaves a destDir with no marker. Without this, the API reads
-	// gen 0, re-dispatches hydrate, and the retry's RemoveAll destroys the recovery
-	// copy. writeFile fsyncs the contents; fsyncTree below makes the dir entry durable.
+	// gen 0 and re-dispatches hydrate, and that spurious retry discards this working
+	// set whenever a .displaced-<id> is retained (issue #2278). writeFile fsyncs the
+	// contents; fsyncTree below makes the dir entry durable.
 	if err := writeFile(filepath.Join(tmpDir, generationMarkerFile),
 		strings.NewReader(strconv.FormatUint(gen, 10)), 0o640); err != nil {
 		return err
@@ -412,11 +413,14 @@ func unpackAndSwap(r io.Reader, destDir string, gen uint64, log *slog.Logger) er
 		// set this hydrate displaces is parked under a sweepable name and dropped once
 		// the swap-in succeeds.
 		//
-		// What that choice rests on, precisely: every SUCCESSFUL snapshot for this id
-		// calls sweepDisplaced, so a .displaced-<id> still present at hydrate time proves
-		// ZERO successful snapshots for this id since it was created. This branch is
-		// therefore narrow — it needs a second displacement with no successful snapshot
-		// in between.
+		// What that choice rests on, precisely: every snapshot that succeeds ON THIS
+		// WORKER for this id calls sweepDisplaced, so a .displaced-<id> still present at
+		// hydrate time proves the retained tree was never published from here. The scope
+		// matters — sweepDisplaced only ever walks this Worker's scratch, so a snapshot
+		// that succeeded for this id on ANOTHER Worker (an A->B->A re-placement) leaves
+		// this tree in place. The tree can therefore be arbitrarily old even while the id
+		// snapshotted successfully elsewhere; what stays true is that a success on B
+		// publishes B's set, never this tree.
 		//
 		// What it does NOT rest on: it is NOT true that the set being displaced is
 		// "merely the store copy" and therefore cheap. It is the store copy PLUS
@@ -433,7 +437,11 @@ func unpackAndSwap(r io.Reader, destDir string, gen uint64, log *slog.Logger) er
 		// Deliberately NOT health-aware: no fsck, no mtime comparison to pick the "better"
 		// tree. That is option C in issue #2278 and was rejected — do not "improve" this
 		// into it.
-		if info, held := displacedSlotHoldsTree(displaced); held {
+		info, held, slotErr := displacedSlotHoldsWorkingSet(displaced)
+		if slotErr != nil {
+			return slotErr
+		}
+		if held {
 			log.Warn("hydrate: an older displaced recovery tree already exists; keeping it and discarding the working set this hydrate replaces (oldest-wins, issue #2278; see STORAGE.md Section 4.6)",
 				"server_id", filepath.Base(destDir),
 				"retained", displaced,
@@ -486,40 +494,59 @@ func unpackAndSwap(r io.Reader, destDir string, gen uint64, log *slog.Logger) er
 	return nil
 }
 
-// displacedSlotHoldsTree reports whether the .displaced-<id> slot holds a retainable
-// recovery tree, returning its FileInfo for the discard WARN. Junk in the slot — a
-// regular file, a symlink, or an empty directory — is cleared (best-effort) and
-// reported as NOT holding a tree.
+// displacedSlotHoldsWorkingSet reports whether the .displaced-<id> slot holds a
+// retainable recovery tree, returning its FileInfo for the discard WARN. Junk in the
+// slot — a regular file, a symlink, an empty directory, or a directory holding only
+// Worker-private generation-marker state — is cleared (best-effort) and reported as NOT
+// holding a working set.
 //
-// The guard exists because oldest-wins (issue #2278) reads the slot as a decision, not
+// The guard exists because oldest-wins (issue #2278) reads the slot as a DECISION, not
 // as an obstacle: under the previous newest-wins policy junk was simply overwritten,
-// whereas here a bare Lstat success would make the hydrate preserve garbage and discard
-// a real world. Realistic sources of junk: a partially-failed best-effort os.RemoveAll
-// inside instancemanager.sweepDisplaced, or an operator's half-finished manual cleanup
-// (STORAGE.md Section 4.6). Clearing it loses nothing (an empty dir and a non-dir hold
-// no world), and it is required anyway: renaming a directory onto an existing FILE fails
-// with ENOTDIR, so the ordinary displace path could not proceed otherwise.
+// whereas here a slot that merely looks occupied would make the hydrate preserve garbage
+// and destroy a real world.
 //
-// A directory that cannot be read is treated as holding a tree, NOT as junk: this
-// function must never delete something it has not proven to be empty.
-func displacedSlotHoldsTree(displaced string) (os.FileInfo, bool) {
+// "Holds a working set" is deliberately the predicate the rest of the codebase already
+// uses — instancemanager.hasWorkingSet: at least one child that is NOT the generation
+// marker, matched by PREFIX so writeGeneration's ".mcsd_generation-XXXX" temp siblings
+// count as marker state too (issues #2279/#2283/#834). Reusing it matters because a
+// marker-only directory is ROUTINE, not exotic: a 204 hydrate returns without creating
+// destDir and the caller's writeGeneration then creates <scratch>/<id> holding only the
+// marker, which hasWorkingSet reports as not-held — so the next 200 hydrate parks that
+// world-less directory at .displaced-<id> by the ordinary path. Retaining it over a real
+// world would be exactly the loss this guard exists to prevent.
+//
+// This is NOT a health check on the retained world (option C in #2278, rejected): it
+// applies the existing "holds a working set" test, and inspects nothing inside the world.
+//
+// Clearing junk loses nothing and is required anyway: renaming a directory onto an
+// existing FILE fails with ENOTDIR, so the ordinary displace path could not proceed
+// otherwise. Unlike hasWorkingSet — which answers false when it cannot read, the safe
+// direction for advertising held servers — an unexpected error here is RETURNED and
+// fails the hydrate. Nothing is deleted and nothing is discarded on that path, and a
+// failed hydrate is simply retried (STORAGE.md Section 4.6); silently reclassifying a
+// transient EACCES/EMFILE into "discard the live working set" is not an acceptable
+// trade for a durability decision.
+func displacedSlotHoldsWorkingSet(displaced string) (os.FileInfo, bool, error) {
 	info, err := os.Lstat(displaced)
+	if os.IsNotExist(err) {
+		return nil, false, nil
+	}
 	if err != nil {
-		return nil, false
+		return nil, false, err
 	}
 	if info.IsDir() {
-		d, openErr := os.Open(displaced)
-		if openErr != nil {
-			return info, true
+		entries, readErr := os.ReadDir(displaced)
+		if readErr != nil {
+			return nil, false, readErr
 		}
-		defer func() { _ = d.Close() }()
-		// One name is enough to decide; io.EOF means the directory is empty.
-		if _, readErr := d.Readdirnames(1); !errors.Is(readErr, io.EOF) {
-			return info, true
+		for _, e := range entries {
+			if !strings.HasPrefix(e.Name(), generationMarkerFile) {
+				return info, true, nil
+			}
 		}
 	}
 	_ = os.RemoveAll(displaced)
-	return nil, false
+	return nil, false, nil
 }
 
 // displacedDir is the per-server path the swap moves a displaced old working set to

@@ -616,9 +616,15 @@ below).
 **Which copy wins: oldest-wins (#2278).** A hydrate that displaces a live working set
 while a `.displaced-<id>` is already present must choose between two trees, and
 **neither is guaranteed to be in the store**: a surviving `.displaced-<id>` proves that
-*no* snapshot for this id has succeeded since it was created (any success calls
+tree was never published *from this Worker* (any snapshot succeeding here calls
 `sweepDisplaced`), and the live set may itself be torn or simply un-snapshotted. The
 Worker retains the **first-displaced** tree and drops the newer one.
+
+Note the scope: `sweepDisplaced` only walks *this* Worker's scratch dir, so a snapshot
+that succeeded for the same server on **another** Worker (an A→B→A re-placement) does not
+reclaim this tree. A retained tree can therefore be arbitrarily old even while the server
+snapshotted successfully elsewhere — what remains true is that a success on B publishes
+B's working set, never this tree.
 
 The case this gets right is the torn-world path (#834): a torn `<scratch>/<id>` fails the
 boot region fsck and advertises generation 0, so the API's skip gate dispatches a hydrate
@@ -636,7 +642,10 @@ WARN  hydrate: an older displaced recovery tree already exists; keeping it and d
 ```
 
 Treat that line as an operator signal: the retained tree is the one to recover from, and
-the discarded one is gone once the hydrate's swap-in succeeds. The policy is deliberately
+the discarded one is gone once the hydrate's swap-in succeeds. "Occupied" means the slot
+holds an actual working set: a leftover file, an empty directory, or a directory holding
+only the Worker-private generation marker is cleared and the ordinary displace path runs,
+so world-less junk in the slot can never shadow a real world. The policy is deliberately
 **not** health-aware — the Worker does not fsck both trees to pick the better one (option
 C in #2278), because that puts a region scan on the hydrate path and makes the rule
 unpredictable under partial failures.
@@ -656,11 +665,11 @@ and `.hydrate-<id>-*` leftovers.
 **Scratch capacity.** One hydrate that displaces a live working set peaks at **three
 world-sized copies of that server**: the unpacked temp tree, the retained
 `.displaced-<id>` (left untouched), and the live set parked aside until the swap-in
-succeeds (#917/#2278). The retained displaced tree is one of the three, not a fourth
-term. Hydrates for distinct servers can
-be at that peak simultaneously — the Worker runs up to `maxConcurrentLanes` (4) command
-lanes concurrently — so budget `worker.scratch_dir` as **3× the largest world × the
-number of overlapping hydrates** (4 in the worst case), plus one world-sized copy per
+succeeds (#917/#2278). The retained displaced tree is one of the three, not a fourth term.
+Hydrates for distinct servers can be at that peak simultaneously — the Worker runs up to
+`maxConcurrentLanes` (4) command lanes concurrently — so budget `worker.scratch_dir` as
+**3× the largest world × the number of overlapping hydrates** (4 in the worst case), plus
+one world-sized copy per
 retained `.displaced-<id>` belonging to a server that is *not* currently hydrating, plus
 the ordinary scratch dirs of the servers this Worker holds. Running out of space is not
 data loss: the unpack, the generation-marker write and the fsync all complete before the
