@@ -8,7 +8,7 @@
 # would silently ship a stray branch or detached HEAD. Run this before any
 # `docker compose up -d --build`; it refuses (exit 1) when the checkout is not on
 # `main`, when the working tree is dirty, or when the db-data volume holds a
-# PostgreSQL cluster older than the major compose.yaml deploys (#2133).
+# PostgreSQL cluster older than the major the incoming revision deploys (#2133).
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || {
@@ -66,9 +66,30 @@ check_postgres_major() {
 		return 0
 	fi
 
-	compose_json="$(sg docker -c "docker compose config --format json" 2>/dev/null || true)"
+	# Every deploy path is preflight -> git pull -> docker compose up
+	# (scripts/update.sh, scripts/deploy.sh, DEPLOYMENT.md Section 9), so when
+	# this runs the working tree still holds the OLD revision. Reading its
+	# compose.yaml compares the volume against the major already deployed, which
+	# always passes -- right up to the `up` after the pull, which then takes the
+	# stack down (#2303). The target has to come from the INCOMING revision.
+	#
+	# The fetch is this guard's only network dependency, so it is a skip like any
+	# other undeterminable input, never a refusal. It updates
+	# refs/remotes/origin/main only: HEAD, the index and the working tree are left
+	# exactly as the two checks above found them.
+	if ! git fetch --quiet origin main > /dev/null 2>&1; then
+		pg_skip "could not fetch origin/main (the revision the deploy will build)."
+		return 0
+	fi
+
+	# `-f -` hands compose the incoming compose.yaml on stdin while the project
+	# directory stays the repo root, so interpolation still reads the host's .env
+	# and the volume name still resolves under the real project name. Target image
+	# and volume name therefore both come from the incoming revision; resolving
+	# one from each side would be worse than resolving both from either.
+	compose_json="$(git show origin/main:compose.yaml 2>/dev/null | sg docker -c "docker compose -f - config --format json" 2>/dev/null || true)"
 	if [ -z "$compose_json" ]; then
-		pg_skip "could not read the compose config."
+		pg_skip "could not read the compose config of origin/main."
 		return 0
 	fi
 
@@ -131,7 +152,7 @@ print(cfg["volumes"]["db-data"]["name"])
 	esac
 
 	if [ "$found_major" -lt "$target_major" ]; then
-		echo "deploy preflight: volume '${volume_name}' holds PostgreSQL ${found_major} data, but compose.yaml deploys ${db_image}." >&2
+		echo "deploy preflight: volume '${volume_name}' holds PostgreSQL ${found_major} data, but origin/main's compose.yaml deploys ${db_image}." >&2
 		echo "  PostgreSQL ${target_major} cannot read a PostgreSQL ${found_major} cluster: the db container aborts during" >&2
 		echo "  entrypoint init (your data is left untouched) and migrate/api stay down behind its healthcheck." >&2
 		echo "  Migrate the data BEFORE deploying -- the dump must be taken while PostgreSQL ${found_major} is still" >&2
