@@ -28,13 +28,29 @@ fail=0
 ok()        { echo "  PASS: $1"; pass=$((pass + 1)); }
 fail_test() { echo "  FAIL: $1"; fail=$((fail + 1)); }
 
+write_compose() {
+	printf 'services:\n  db:\n    image: %s\n    volumes:\n      - db-data:/var/lib/postgresql\nvolumes:\n  db-data:\n' \
+		"$2" > "$1/compose.yaml"
+}
+
 # ---------------------------------------------------------------------------
 # Fixture: a clean temp repo on 'main' (so the two pre-existing checks pass)
-# plus stub `sg` and `docker` in a sibling bin/ -- outside the repo, or the
-# stubs themselves would make the working tree dirty. Prints the base dir.
+# with an 'origin' it can fetch from, plus stub `sg` and `docker` in a sibling
+# bin/ -- outside the repo, or the stubs themselves would make the working tree
+# dirty. Prints the base dir.
+#
+#   make_fixture [working-tree image] [origin/main image]
+#
+# The two images are set independently because the guard must read its target
+# from the revision that is about to be deployed. When they differ the repo is
+# left one commit BEHIND origin/main -- the state every deploy path runs the
+# preflight in, since all of them are preflight -> git pull -> docker compose up
+# (#2303). The remote-tracking ref is dropped afterwards, so origin/main only
+# resolves if the guard really fetches.
 # ---------------------------------------------------------------------------
 make_fixture() {
-	local base dir bin
+	local wt_image="${1:-postgres:18}" origin_image="${2:-}" base dir bin
+	origin_image="${origin_image:-$wt_image}"
 	base="$(mktemp -d)"
 	dir="$base/repo"
 	bin="$base/bin"
@@ -42,9 +58,20 @@ make_fixture() {
 	git -C "$dir" init -b main -q
 	git -C "$dir" config user.email "test@example.com"
 	git -C "$dir" config user.name "Test"
-	touch "$dir/file.txt"
-	git -C "$dir" add file.txt
+	write_compose "$dir" "$wt_image"
+	git -C "$dir" add compose.yaml
 	git -C "$dir" commit -q -m "init"
+
+	git init -q --bare "$base/origin.git"
+	git -C "$dir" remote add origin "$base/origin.git"
+	git -C "$dir" push -q origin main
+	if [ "$origin_image" != "$wt_image" ]; then
+		write_compose "$dir" "$origin_image"
+		git -C "$dir" commit -q -am "bump the db image"
+		git -C "$dir" push -q origin main
+		git -C "$dir" reset -q --hard HEAD~1
+	fi
+	git -C "$dir" update-ref -d refs/remotes/origin/main
 
 	# `sg <group> -c <command>` -- run the command string, ignoring the group.
 	cat > "$bin/sg" << 'SGEOF'
@@ -52,15 +79,25 @@ make_fixture() {
 exec sh -c "$3"
 SGEOF
 
-	# Answers only the three sub-commands the guard issues; MOCK_DB_IMAGE,
-	# MOCK_VOLUME_EXISTS and MOCK_PG_VERSION drive each case. MOCK_RUN_LOG, when
-	# set, records the probe invocation so a test can assert which image it used.
+	# Answers only the three sub-commands the guard issues; the compose.yaml the
+	# guard hands it plus MOCK_VOLUME_EXISTS and MOCK_PG_VERSION drive each case.
+	# MOCK_RUN_LOG, when set, records the probe invocation so a test can assert
+	# which image it used.
 	cat > "$bin/docker" << 'DOCKEREOF'
 #!/bin/sh
 case "$1 $2" in
-	"compose config")
+	"compose config" | "compose -f")
+		# Real `docker compose config` reads compose.yaml from the project
+		# directory unless `-f -` feeds it one on stdin. The stub models both, so
+		# a test can tell WHICH revision the guard resolved its target from.
+		if [ "$2" = "-f" ]; then
+			yaml="$(cat)"
+		else
+			yaml="$(cat compose.yaml)"
+		fi
+		image="$(printf '%s\n' "$yaml" | sed -n 's/^[[:space:]]*image:[[:space:]]*//p' | head -1)"
 		printf '{"services": {"db": {"image": "%s"}}, "volumes": {"db-data": {"name": "testproj_db-data"}}}\n' \
-			"${MOCK_DB_IMAGE:-postgres:18}"
+			"$image"
 		;;
 	"volume inspect")
 		[ "${MOCK_VOLUME_EXISTS:-1}" = "1" ] || exit 1
@@ -152,8 +189,8 @@ echo "=== deploy_preflight Postgres version guard tests ==="
 
 # --- 2. PG17 data under a postgres:18 target -- refuse ---
 {
-	base="$(make_fixture)"
-	run_preflight "$base" MOCK_DB_IMAGE=postgres:18 MOCK_PG_VERSION=17
+	base="$(make_fixture postgres:18)"
+	run_preflight "$base" MOCK_PG_VERSION=17
 	if [ "$exit_code" -ne 0 ]; then
 		ok "PG17 data + postgres:18 target: deploy refused"
 	else
@@ -174,8 +211,8 @@ echo "=== deploy_preflight Postgres version guard tests ==="
 
 # --- 3. Matching major -- pass ---
 {
-	base="$(make_fixture)"
-	run_preflight "$base" MOCK_DB_IMAGE=postgres:18 MOCK_PG_VERSION=18
+	base="$(make_fixture postgres:18)"
+	run_preflight "$base" MOCK_PG_VERSION=18
 	if [ "$exit_code" -eq 0 ]; then
 		ok "PG18 data + postgres:18 target: deploy allowed"
 	else
@@ -186,8 +223,8 @@ echo "=== deploy_preflight Postgres version guard tests ==="
 
 # --- 4. Volume exists but holds no cluster -- pass (must not be a hard error) ---
 {
-	base="$(make_fixture)"
-	run_preflight "$base" MOCK_DB_IMAGE=postgres:18 MOCK_PG_VERSION=
+	base="$(make_fixture postgres:18)"
+	run_preflight "$base" MOCK_PG_VERSION=
 	if [ "$exit_code" -eq 0 ]; then
 		ok "empty PG_VERSION: deploy allowed"
 	else
@@ -214,8 +251,8 @@ echo "=== deploy_preflight Postgres version guard tests ==="
 
 # --- 6. Registry host with a port -- the port is not a major version ---
 {
-	base="$(make_fixture)"
-	run_preflight "$base" MOCK_DB_IMAGE=registry.example.com:5000/postgres:18 MOCK_PG_VERSION=18
+	base="$(make_fixture registry.example.com:5000/postgres:18)"
+	run_preflight "$base" MOCK_PG_VERSION=18
 	if [ "$exit_code" -eq 0 ]; then
 		ok "registry port in the image ref: deploy allowed"
 	else
@@ -226,10 +263,8 @@ echo "=== deploy_preflight Postgres version guard tests ==="
 
 # --- 7. Digest-pinned image -- no readable major, skip rather than guess ---
 {
-	base="$(make_fixture)"
-	run_preflight "$base" \
-		MOCK_DB_IMAGE=postgres@sha256:18f0e6c9c8b1a2d3e4f5061728394a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5c \
-		MOCK_PG_VERSION=17
+	base="$(make_fixture postgres@sha256:18f0e6c9c8b1a2d3e4f5061728394a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5c)"
+	run_preflight "$base" MOCK_PG_VERSION=17
 	if [ "$exit_code" -eq 0 ]; then
 		ok "digest-pinned image: deploy allowed"
 	else
@@ -241,8 +276,8 @@ echo "=== deploy_preflight Postgres version guard tests ==="
 
 # --- 8. Non-numeric tag -- no readable major, skip rather than guess ---
 {
-	base="$(make_fixture)"
-	run_preflight "$base" MOCK_DB_IMAGE=postgres:latest MOCK_PG_VERSION=17
+	base="$(make_fixture postgres:latest)"
+	run_preflight "$base" MOCK_PG_VERSION=17
 	if [ "$exit_code" -eq 0 ]; then
 		ok "'latest' tag: deploy allowed"
 	else
@@ -254,8 +289,8 @@ echo "=== deploy_preflight Postgres version guard tests ==="
 
 # --- 9. Tag with a leading integer -- the major is read from it ---
 {
-	base="$(make_fixture)"
-	run_preflight "$base" MOCK_DB_IMAGE=postgres:18.4-bookworm MOCK_PG_VERSION=17
+	base="$(make_fixture postgres:18.4-bookworm)"
+	run_preflight "$base" MOCK_PG_VERSION=17
 	if [ "$exit_code" -ne 0 ]; then
 		ok "'18.4-bookworm' tag: PG17 data refused"
 	else
@@ -283,9 +318,8 @@ echo "=== deploy_preflight Postgres version guard tests ==="
 
 # --- 11. The probe reuses the db image, not a separate helper image ---
 {
-	base="$(make_fixture)"
-	run_preflight "$base" MOCK_DB_IMAGE=postgres:18 MOCK_PG_VERSION=18 \
-		MOCK_RUN_LOG="$base/run.log"
+	base="$(make_fixture postgres:18)"
+	run_preflight "$base" MOCK_PG_VERSION=18 MOCK_RUN_LOG="$base/run.log"
 	probe="$(cat "$base/run.log" 2>/dev/null || true)"
 	case "$probe" in
 		*postgres:18*) ok "probe runs the db image" ;;
@@ -294,6 +328,48 @@ echo "=== deploy_preflight Postgres version guard tests ==="
 	case "$probe" in
 		*alpine*) fail_test "probe still pulls a separate helper image -- $probe" ;;
 		*) ok "probe pulls no separate helper image" ;;
+	esac
+	rm -rf "$base"
+}
+
+# --- 12. Pre-pull checkout: the target comes from origin/main, not the tree ---
+# Every deploy path is preflight -> git pull -> docker compose up, so the tree
+# still pins the OLD image when the guard runs. Reading it compares 17 against
+# 17, passes, and the stack goes down on the `up` right after the pull (#2303).
+{
+	base="$(make_fixture postgres:17 postgres:18)"
+	run_preflight "$base" MOCK_PG_VERSION=17
+	if [ "$exit_code" -ne 0 ]; then
+		ok "PG17 data + incoming postgres:18: deploy refused before the pull"
+	else
+		fail_test "PG17 data + incoming postgres:18: expected refusal, got exit 0 -- $output"
+	fi
+	case "$output" in
+		*"PostgreSQL 17"*"postgres:18"*)
+			ok "pre-pull checkout: message names both majors" ;;
+		*)
+			fail_test "pre-pull checkout: message lacks the majors -- $output" ;;
+	esac
+	rm -rf "$base"
+}
+
+# --- 13. origin/main unreachable -- skip the check, never refuse ---
+# The fetch is the one part of this guard that needs the network. An offline or
+# flaky host must fall back to the same loud skip as every other "could not
+# determine" case, not block a deploy.
+{
+	base="$(make_fixture postgres:17 postgres:18)"
+	git -C "$base/repo" remote set-url origin "$base/no-such-remote.git"
+	run_preflight "$base" MOCK_PG_VERSION=17
+	if [ "$exit_code" -eq 0 ]; then
+		ok "origin/main unreachable: deploy allowed"
+	else
+		fail_test "origin/main unreachable: expected exit 0, got $exit_code -- $output"
+	fi
+	assert_skipped "origin/main unreachable"
+	case "$output" in
+		*origin/main*) ok "origin/main unreachable: the message names origin/main" ;;
+		*) fail_test "origin/main unreachable: the message does not name origin/main -- $output" ;;
 	esac
 	rm -rf "$base"
 }
