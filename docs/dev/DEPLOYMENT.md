@@ -871,14 +871,19 @@ servers), runs a post-deploy `/api/healthz` check, and stamps the new SHA. Use
 > old volume.
 >
 > ```sh
-> # 1. On the OLD revision, with the 17 stack still up:
-> docker compose exec db pg_dumpall -U mcsd > backup-pg17.sql
+> # 1. On the OLD revision, with the 17 stack still up. Stop the writers FIRST:
+> #    `api` is the only DB client (`worker` and `relay` reach it over gRPC), so
+> #    anything written after the dump would be lost on restore.
+> docker compose stop api worker relay cloudflared
+> docker compose exec -T db pg_dumpall -U mcsd > backup-pg17.sql
 > docker compose down
 > docker volume rm mc-server-dashboard-v2_db-data
 >
-> # 2. Take the new revision and start the 18 db on a fresh volume:
+> # 2. Take the new revision and start the 18 db on a fresh volume. `--wait`
+> #    blocks until the healthcheck passes, so the restore below cannot race
+> #    initdb.
 > git pull --ff-only origin main
-> docker compose up -d db
+> docker compose up -d --wait db
 >
 > # 3. Restore, then bring the rest of the stack up:
 > docker compose exec -T db psql -U mcsd -d postgres < backup-pg17.sql
@@ -886,9 +891,12 @@ servers), runs a post-deploy `/api/healthz` check, and stamps the new SHA. Use
 > ```
 >
 > (The volume name is `<project>_db-data`; `docker volume ls` shows the exact
-> names for your project directory. The restore replays `CREATE ROLE mcsd` and
-> `CREATE DATABASE mcsd`, which the fresh container already provisioned from
-> `.env` — those two "already exists" errors are expected and harmless.)
+> names for your project directory. Naming `relay`/`cloudflared` is harmless when
+> those profiles are inactive. `-T` on the dump matters: without it Compose
+> allocates a TTY and the redirected SQL is line-ending mangled. The restore
+> replays `CREATE ROLE mcsd` and `CREATE DATABASE mcsd`, which the fresh
+> container already provisioned from `.env` — those two "already exists" errors
+> are expected and harmless.)
 >
 > For a large cluster, `pg_upgrade --link` converts in place much faster, but it
 > needs both majors' binaries in one image and is not covered here. Performing

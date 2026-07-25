@@ -41,48 +41,111 @@ fi
 # stays down until an operator migrates it (#2133). Refuse the deploy instead.
 #
 # Docker goes through `sg docker` to match scripts/update.sh -- a session without
-# active docker-group membership would otherwise fail here and block a valid
-# deploy. Every step below degrades to "skip" rather than "refuse" for the same
-# reason: this guard must never be the thing that stops a legitimate deploy.
-compose_json="$(sg docker -c "docker compose config --format json" 2>/dev/null || true)"
-if [ -z "$compose_json" ]; then
-	echo "deploy preflight: cannot read the compose config -- skipping the Postgres version check." >&2
-else
-	target_major="$(printf '%s' "$compose_json" | python3 -c 'import json, re, sys; m = re.search(r":(\d+)", json.load(sys.stdin)["services"]["db"]["image"]); print(m.group(1) if m else "")' 2>/dev/null || true)"
-	volume_name="$(printf '%s' "$compose_json" | python3 -c 'import json, sys; print(json.load(sys.stdin)["volumes"]["db-data"]["name"])' 2>/dev/null || true)"
+# active docker-group membership would otherwise fail here. Anything this check
+# cannot determine is a SKIP, never a refusal: a false positive here blocks a
+# legitimate deploy of the live host. Every skip says so out loud and marks the
+# final line, because a guard that quietly disappears is worse than no guard --
+# the operator has to be able to tell "checked, ok" from "could not check".
+#
+# Returns 1 to refuse the deploy, 0 otherwise.
+pg_skipped=""
 
-	found_major=""
-	# No volume yet = fresh deployment, nothing to be incompatible with.
-	if [ -n "$target_major" ] && [ -n "$volume_name" ] && sg docker -c "docker volume inspect $volume_name" >/dev/null 2>&1; then
-		# Postgres <= 17 keeps PG_VERSION at the volume root, >= 18 keeps it at
-		# <major>/docker/PG_VERSION; probe both and take the oldest cluster found.
-		# Read-only, so this is safe against a running db -- it is a second bind
-		# mount of the same directory and Postgres holds no lock against a read.
-		probe_cmd="docker run --rm -v ${volume_name}:/probedata:ro alpine sh -c 'cat /probedata/PG_VERSION /probedata/*/docker/PG_VERSION 2>/dev/null | sort -n | head -1'"
-		found_major="$(sg docker -c "$probe_cmd" 2>/dev/null || true)"
+pg_skip() {
+	pg_skipped=1
+	echo "deploy preflight: SKIPPED the Postgres version check -- $1" >&2
+}
+
+check_postgres_major() {
+	local compose_json pg_facts target_major db_image volume_name probe_cmd found_major
+
+	# The compose config is JSON; python3 is the only parser this repo already
+	# depends on (scripts/check_docs.py et al.), but the deploy host does not
+	# otherwise need it, so its absence is a real possibility and must be loud.
+	if ! command -v python3 > /dev/null 2>&1; then
+		pg_skip "python3 is not installed (needed to read the compose config)."
+		return 0
+	fi
+
+	compose_json="$(sg docker -c "docker compose config --format json" 2>/dev/null || true)"
+	if [ -z "$compose_json" ]; then
+		pg_skip "could not read the compose config."
+		return 0
+	fi
+
+	# The tag is what follows the LAST colon of the final path segment, with any
+	# @sha256 digest removed first: a registry host carries a :port that a
+	# leftmost search would mistake for a major, and 5000 < 18 would refuse every
+	# deploy. A leading integer in the tag is the major (18, 18.4, 17.6-alpine);
+	# `latest` and a bare digest pin have none and must skip, not guess.
+	pg_facts="$(printf '%s' "$compose_json" | python3 -c '
+import json, re, sys
+cfg = json.load(sys.stdin)
+image = cfg["services"]["db"]["image"]
+ref = image.rsplit("/", 1)[-1].split("@", 1)[0]
+tag = ref.rsplit(":", 1)[1] if ":" in ref else ""
+major = re.match(r"\d+", tag)
+print(major.group(0) if major else "")
+print(image)
+print(cfg["volumes"]["db-data"]["name"])
+' 2>/dev/null || true)"
+	# One field per line, so an empty major (first field) is not swallowed.
+	{ read -r target_major; read -r db_image; read -r volume_name; } <<< "$pg_facts" || true
+
+	if [ -z "$db_image" ] || [ -z "$volume_name" ]; then
+		pg_skip "could not resolve the db image and the db-data volume name from the compose config."
+		return 0
+	fi
+	if [ -z "$target_major" ]; then
+		pg_skip "no major version to read from the db image '${db_image}'."
+		return 0
+	fi
+
+	# No volume yet = fresh deployment, nothing to be incompatible with. That is
+	# a completed check, not a skip, so it stays silent.
+	if ! sg docker -c "docker volume inspect $volume_name" > /dev/null 2>&1; then
+		return 0
+	fi
+
+	# Postgres <= 17 keeps PG_VERSION at the volume root, >= 18 keeps it at
+	# <major>/docker/PG_VERSION; probe both and take the oldest cluster found.
+	# Read-only, so this is safe against a running db -- it is a second bind
+	# mount of the same directory and Postgres holds no lock against a read.
+	# Runs the db image itself with the entrypoint replaced rather than pulling a
+	# helper image: no second image to version-pin and vet (DEPENDENCIES.md), and
+	# `sh` replaces the very docker-entrypoint.sh whose abort this check is about.
+	probe_cmd="docker run --rm --entrypoint sh -v ${volume_name}:/probedata:ro ${db_image} -c 'cat /probedata/PG_VERSION /probedata/*/docker/PG_VERSION 2>/dev/null | sort -n | head -1'"
+	if ! found_major="$(sg docker -c "$probe_cmd" 2>/dev/null)"; then
+		pg_skip "could not read PG_VERSION from volume '${volume_name}'."
+		return 0
 	fi
 
 	case "$found_major" in
-		# Empty or non-numeric: an uninitialized volume, or a probe that could not
-		# read it. Must skip -- an integer comparison against a non-number is fatal
-		# under `set -e` and would wrongly block the deploy.
-		'' | *[!0-9]*) ;;
-		*)
-			if [ "$found_major" -lt "$target_major" ]; then
-				echo "deploy preflight: volume '${volume_name}' holds PostgreSQL ${found_major} data, but compose.yaml deploys postgres:${target_major}." >&2
-				echo "  postgres:${target_major} cannot read a PostgreSQL ${found_major} cluster: the db container aborts during" >&2
-				echo "  entrypoint init (your data is left untouched) and migrate/api stay down behind its healthcheck." >&2
-				echo "  Migrate the data BEFORE deploying -- the dump must be taken while postgres:${found_major} is still" >&2
-				echo "  running. See docs/dev/DEPLOYMENT.md Section 9 (Upgrade)." >&2
-				fail=1
-			fi
+		# The volume exists but holds no cluster -- nothing to compare against.
+		'') return 0 ;;
+		# Unreadable PG_VERSION. Must not be compared: an integer test against a
+		# non-number is fatal under `set -e` and would wrongly block the deploy.
+		*[!0-9]*)
+			pg_skip "unreadable PG_VERSION in volume '${volume_name}'."
+			return 0
 			;;
 	esac
-fi
+
+	if [ "$found_major" -lt "$target_major" ]; then
+		echo "deploy preflight: volume '${volume_name}' holds PostgreSQL ${found_major} data, but compose.yaml deploys ${db_image}." >&2
+		echo "  PostgreSQL ${target_major} cannot read a PostgreSQL ${found_major} cluster: the db container aborts during" >&2
+		echo "  entrypoint init (your data is left untouched) and migrate/api stay down behind its healthcheck." >&2
+		echo "  Migrate the data BEFORE deploying -- the dump must be taken while PostgreSQL ${found_major} is still" >&2
+		echo "  running. See docs/dev/DEPLOYMENT.md Section 9 (Upgrade)." >&2
+		return 1
+	fi
+	return 0
+}
+
+check_postgres_major || fail=1
 
 if [ "$fail" -ne 0 ]; then
 	echo "deploy preflight: refusing to deploy." >&2
 	exit 1
 fi
 
-echo "deploy preflight: on clean 'main' -- ok to build."
+echo "deploy preflight: on clean 'main' -- ok to build.${pg_skipped:+ (Postgres version check skipped -- see above.)}"

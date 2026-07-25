@@ -53,7 +53,8 @@ exec sh -c "$3"
 SGEOF
 
 	# Answers only the three sub-commands the guard issues; MOCK_DB_IMAGE,
-	# MOCK_VOLUME_EXISTS and MOCK_PG_VERSION drive each case.
+	# MOCK_VOLUME_EXISTS and MOCK_PG_VERSION drive each case. MOCK_RUN_LOG, when
+	# set, records the probe invocation so a test can assert which image it used.
 	cat > "$bin/docker" << 'DOCKEREOF'
 #!/bin/sh
 case "$1 $2" in
@@ -66,6 +67,9 @@ case "$1 $2" in
 		echo "[]"
 		;;
 	"run --rm")
+		if [ -n "${MOCK_RUN_LOG:-}" ]; then
+			echo "$*" >> "$MOCK_RUN_LOG"
+		fi
 		printf '%s\n' "${MOCK_PG_VERSION:-}"
 		;;
 	*)
@@ -91,6 +95,36 @@ run_preflight() {
 	)" || exit_code=$?
 }
 
+# Same, but with PATH restricted to the stub dir so the script finds no python3.
+# `git` is symlinked in because the two pre-existing checks need it.
+run_preflight_without_python3() {
+	local base="$1" bash_bin
+	bash_bin="$(command -v bash)"
+	ln -sf "$(command -v git)" "$base/bin/git"
+	exit_code=0
+	output="$(
+		cd "$base/repo" || exit 99
+		env PATH="$base/bin" "$bash_bin" "$SCRIPT" 2>&1
+	)" || exit_code=$?
+}
+
+# A skip must be loud AND must not read as a completed check: the stderr line
+# says SKIPPED, and the success line is marked so "ok to build" on its own can
+# never be mistaken for "the db-data volume was checked and is compatible".
+assert_skipped() {
+	local label="$1"
+	case "$output" in
+		*"SKIPPED the Postgres version check"*) ok "$label: skip is reported" ;;
+		*) fail_test "$label: skip is not reported -- $output" ;;
+	esac
+	case "$output" in
+		*"ok to build. (Postgres version check skipped"*)
+			ok "$label: success line is marked as unchecked" ;;
+		*)
+			fail_test "$label: success line reads as a full pass -- $output" ;;
+	esac
+}
+
 # ---------------------------------------------------------------------------
 echo "=== deploy_preflight Postgres version guard tests ==="
 
@@ -106,6 +140,12 @@ echo "=== deploy_preflight Postgres version guard tests ==="
 	case "$output" in
 		*PostgreSQL*) fail_test "missing db-data volume: unexpected Postgres output -- $output" ;;
 		*) ok "missing db-data volume: no Postgres complaint" ;;
+	esac
+	# A fresh deployment is a completed check ("nothing to be incompatible
+	# with"), not a skip -- it must not claim the check was skipped.
+	case "$output" in
+		*SKIPPED*) fail_test "missing db-data volume: reported as a skip -- $output" ;;
+		*) ok "missing db-data volume: reported as checked, not skipped" ;;
 	esac
 	rm -rf "$base"
 }
@@ -168,9 +208,92 @@ echo "=== deploy_preflight Postgres version guard tests ==="
 	else
 		fail_test "docker unavailable: expected exit 0, got $exit_code -- $output"
 	fi
+	assert_skipped "docker unavailable"
+	rm -rf "$base"
+}
+
+# --- 6. Registry host with a port -- the port is not a major version ---
+{
+	base="$(make_fixture)"
+	run_preflight "$base" MOCK_DB_IMAGE=registry.example.com:5000/postgres:18 MOCK_PG_VERSION=18
+	if [ "$exit_code" -eq 0 ]; then
+		ok "registry port in the image ref: deploy allowed"
+	else
+		fail_test "registry port in the image ref: expected exit 0, got $exit_code -- $output"
+	fi
+	rm -rf "$base"
+}
+
+# --- 7. Digest-pinned image -- no readable major, skip rather than guess ---
+{
+	base="$(make_fixture)"
+	run_preflight "$base" \
+		MOCK_DB_IMAGE=postgres@sha256:18f0e6c9c8b1a2d3e4f5061728394a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5c \
+		MOCK_PG_VERSION=17
+	if [ "$exit_code" -eq 0 ]; then
+		ok "digest-pinned image: deploy allowed"
+	else
+		fail_test "digest-pinned image: expected exit 0, got $exit_code -- $output"
+	fi
+	assert_skipped "digest-pinned image"
+	rm -rf "$base"
+}
+
+# --- 8. Non-numeric tag -- no readable major, skip rather than guess ---
+{
+	base="$(make_fixture)"
+	run_preflight "$base" MOCK_DB_IMAGE=postgres:latest MOCK_PG_VERSION=17
+	if [ "$exit_code" -eq 0 ]; then
+		ok "'latest' tag: deploy allowed"
+	else
+		fail_test "'latest' tag: expected exit 0, got $exit_code -- $output"
+	fi
+	assert_skipped "'latest' tag"
+	rm -rf "$base"
+}
+
+# --- 9. Tag with a leading integer -- the major is read from it ---
+{
+	base="$(make_fixture)"
+	run_preflight "$base" MOCK_DB_IMAGE=postgres:18.4-bookworm MOCK_PG_VERSION=17
+	if [ "$exit_code" -ne 0 ]; then
+		ok "'18.4-bookworm' tag: PG17 data refused"
+	else
+		fail_test "'18.4-bookworm' tag: expected refusal, got exit 0 -- $output"
+	fi
+	rm -rf "$base"
+}
+
+# --- 10. python3 missing -- skip loudly, never silently no-op ---
+{
+	base="$(make_fixture)"
+	run_preflight_without_python3 "$base"
+	if [ "$exit_code" -eq 0 ]; then
+		ok "python3 missing: deploy allowed"
+	else
+		fail_test "python3 missing: expected exit 0, got $exit_code -- $output"
+	fi
+	assert_skipped "python3 missing"
 	case "$output" in
-		*skipping*) ok "docker unavailable: skip is reported" ;;
-		*) fail_test "docker unavailable: skip is silent -- $output" ;;
+		*python3*) ok "python3 missing: the message names python3" ;;
+		*) fail_test "python3 missing: the message does not name python3 -- $output" ;;
+	esac
+	rm -rf "$base"
+}
+
+# --- 11. The probe reuses the db image, not a separate helper image ---
+{
+	base="$(make_fixture)"
+	run_preflight "$base" MOCK_DB_IMAGE=postgres:18 MOCK_PG_VERSION=18 \
+		MOCK_RUN_LOG="$base/run.log"
+	probe="$(cat "$base/run.log" 2>/dev/null || true)"
+	case "$probe" in
+		*postgres:18*) ok "probe runs the db image" ;;
+		*) fail_test "probe does not run the db image -- $probe" ;;
+	esac
+	case "$probe" in
+		*alpine*) fail_test "probe still pulls a separate helper image -- $probe" ;;
+		*) ok "probe pulls no separate helper image" ;;
 	esac
 	rm -rf "$base"
 }
