@@ -18,6 +18,7 @@
 #   E: proto-lint                       (proto/)
 #   F: hooks-check → hooks-test         (.githooks/)
 #   G: docs-check                       (docs/)
+#   H: scripts-test                     (scripts/)
 #
 # Phase 2 — drift checks (serial; generators write files read by Phase 1):
 #   proto-check  (proto-gen + git diff; writes api/worker/relay stubs)
@@ -25,8 +26,8 @@
 #   Skipped entirely if Phase 1 already failed (no point running generators
 #   on a known-broken tree).
 #
-# Bounded parallelism: 7 background jobs on a 4-core host. The heavy chains
-# (A, B) are CPU-bound; the lighter ones (C-G) finish quickly and free cores.
+# Bounded parallelism: 8 background jobs on a 4-core host. The heavy chains
+# (A, B) are CPU-bound; the lighter ones (C-H) finish quickly and free cores.
 # golangci-lint is capped at --concurrency=2 by the Makefile, and pytest-xdist
 # uses -n auto (4 workers). Oversubscription is transient and tolerable.
 
@@ -114,6 +115,9 @@ pids[5]=$!; names[5]=hooks
 
 run_chain docs     docs-check &
 pids[6]=$!; names[6]=docs
+
+run_chain scripts  scripts-test &
+pids[7]=$!; names[7]=scripts
 
 # Wait for all Phase 1 chains; collect failures.
 for i in "${!pids[@]}"; do
