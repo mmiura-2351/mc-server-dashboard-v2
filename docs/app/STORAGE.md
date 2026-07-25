@@ -593,7 +593,7 @@ generation, so the Worker always sees `held < store` on the next start and
 re-hydrates rather than reusing a stale scratch; see Section 3.3 `restore_backup`
 row). Subsequent snapshots then publish cleanly against the reconciled world.
 
-### 4.6 Worker `.displaced-<id>` trees: lifecycle, operator recovery, and cleanup (#906/#910/#911)
+### 4.6 Worker `.displaced-<id>` trees: lifecycle, operator recovery, and cleanup (#906/#910/#911/#2278)
 
 #### What creates a `.displaced-<id>` tree
 
@@ -609,7 +609,49 @@ of the world as it stood before the failed final snapshot.
 
 **Location on the Worker.** `<worker.scratch_dir>/.displaced-<server-id>` — a
 dot-prefixed sibling of the server's normal scratch dir. Only one displaced tree
-exists per server at any time (a new hydrate replaces the prior one).
+exists per server at any time; a hydrate that finds the slot already occupied **keeps
+the existing tree** and discards the working set it just displaced (oldest-wins, #2278,
+below).
+
+**Which copy wins: oldest-wins (#2278).** A hydrate that displaces a live working set
+while a `.displaced-<id>` is already present must choose between two trees, and
+**neither is guaranteed to be in the store**: a surviving `.displaced-<id>` proves that
+tree was never published *from this Worker* (any snapshot succeeding here calls
+`sweepDisplaced`), and the live set may itself be torn or simply un-snapshotted. The
+Worker retains the **first-displaced** tree and drops the newer one.
+
+Note the scope: `sweepDisplaced` only walks *this* Worker's scratch dir, so a snapshot
+that succeeded for the same server on **another** Worker (an A→B→A re-placement) does not
+reclaim this tree. A retained tree can therefore be arbitrarily old even while the server
+snapshotted successfully elsewhere — what remains true is that a success on B publishes
+B's working set, never this tree.
+
+The case this gets right is the torn-world path (#834): a torn `<scratch>/<id>` fails the
+boot region fsck and advertises generation 0, so the API's skip gate dispatches a hydrate
+— and retaining the older *intact* tree is better than retaining the torn one. The cost is
+real and goes the other way when the newer tree is fine: the discarded set is the store
+copy **plus everything Minecraft wrote since**, none of which was published either, so it
+can be strictly newer than the tree retained. (Concretely: a server whose snapshots keep
+being refused by the integrity gate runs for days, an operator's `restore_backup` bumps
+the store generation so the skip gate no longer skips, and the resulting hydrate discards
+those days.) Because that loss is otherwise invisible, the Worker emits a `WARN` naming
+**both** paths at the moment it decides:
+
+```
+WARN  hydrate: an older displaced recovery tree already exists; keeping it and discarding the working set this hydrate replaces (oldest-wins, issue #2278; see STORAGE.md Section 4.6)  server_id=<id>  retained=<scratch>/.displaced-<id>  retained_mtime=<ts>  discarded=<scratch>/<id>
+```
+
+Treat that line as an operator signal: the retained tree is the one to recover from, and
+the discarded one is gone once the hydrate's swap-in succeeds. "Occupied" means the slot
+holds an actual working set — at least one entry that is not Worker-private generation
+state. A regular file, a symlink, an empty directory, or a directory holding only
+`.mcsd_generation` (or a crashed write's `.mcsd_generation-XXXX` temp sibling) is cleared
+and the ordinary displace path runs, so world-less junk in the slot can never shadow a
+real world. That is the same "holds a working set" test the held-server scan applies.
+
+The policy is deliberately **not** health-aware — the Worker does not fsck both trees to
+pick the better one (option C in #2278), because that puts a region scan on the hydrate
+path and makes the rule unpredictable under partial failures.
 
 **Lifecycle.** The displaced tree is **never GC'd automatically on server delete**
 — it is the last surviving copy of the world exactly when it is most needed. It is
@@ -624,21 +666,38 @@ intentionally does **not** reclaim `.displaced-<id>` trees — only the scratch 
 and `.hydrate-<id>-*` leftovers.
 
 **Scratch capacity.** One hydrate that displaces a live working set peaks at **three
-world-sized copies of that server**: the unpacked temp tree, the displaced live set, and
-a prior `.displaced-<id>` parked aside until the swap-in succeeds (#917). The prior
-displaced tree is one of the three, not a fourth term. Hydrates for distinct servers can
-be at that peak simultaneously — the Worker runs up to `maxConcurrentLanes` (4) command
-lanes concurrently — so budget `worker.scratch_dir` as **3× the largest world × the
-number of overlapping hydrates** (4 in the worst case), plus one world-sized copy per
-retained `.displaced-<id>` belonging to a server that is *not* currently hydrating, plus
-the ordinary scratch dirs of the servers this Worker holds. Running out of space is not
-data loss: the unpack, the generation-marker write and the fsync all complete before the
-first rename, so an `ENOSPC` fails the hydrate with the live working set (and any
-existing displaced tree) untouched and the transfer is simply retried.
+world-sized copies of that server**: the unpacked temp tree, the retained
+`.displaced-<id>` (left untouched), and the live set parked aside until the swap-in
+succeeds (#917/#2278). The retained displaced tree is one of the three, not a fourth term.
+Hydrates for distinct servers can be at that peak simultaneously — the Worker runs up to
+`maxConcurrentLanes` (4) command lanes concurrently — so budget `worker.scratch_dir` as
+**3× the largest world × the number of overlapping hydrates** (4 in the worst case), plus
+one world-sized copy per retained `.displaced-<id>` belonging to a server that is *not*
+currently hydrating, plus the ordinary scratch dirs of the servers this Worker holds.
+Running out of space is not data loss: the unpack, the generation-marker write and the
+fsync all complete before the first rename, so an `ENOSPC` fails the hydrate with the live
+working set (and any existing displaced tree) untouched and the transfer is simply
+retried.
+
+**An unreadable slot blocks hydrates for that server until it is cleared.** Because the
+slot decides which world survives, a hydrate that cannot *read* `.displaced-<id>` (a
+permission problem on the directory, a descriptor exhaustion, an I/O error) fails rather
+than guessing: guessing "occupied" would discard the live working set, and guessing "junk"
+would delete a recovery tree. The failed hydrate deletes and discards nothing — the live
+set stays at `<scratch>/<id>` and the slot is left byte-identical — and it surfaces the
+same way an `ENOSPC` hydrate does (`transfer_failed`). Unlike `ENOSPC`, though, it does
+**not** clear on retry: every subsequent hydrate for that server hits the same slot and
+fails the same way, so the server cannot start until an operator intervenes. If a server
+persistently fails to hydrate with a permission/IO error, inspect
+`<worker.scratch_dir>/.displaced-<id>`: recover it if it holds a world (procedure below),
+then fix its permissions or remove it.
 
 **Boot detection.** At Worker boot, after the held-server scan,
 `WarnOrphanDisplacedTrees` logs a `WARN` for each `.displaced-<id>` tree whose
-server id is **not** in the held-server set. A tree is "assigned" (not logged) if
+server id is **not** in the held-server set. Since #2278 the tree it names is the
+**first-retained** branch, which can be frozen at a displacement much older than the last
+world this Worker held — read its mtime, not its existence, when judging how current it
+is. A tree is "assigned" (not logged) if
 the same id also has a live scratch in the held set; it will be GC'd on the next
 successful snapshot. Note: a held-but-idle server that never snapshots again retains
 its displaced tree silently and indefinitely — this is INTENDED (the tree is the
@@ -659,7 +718,11 @@ WARN  displaced recovery tree for unknown/unassigned server found at boot; manua
    same layout the Worker normally holds in `<scratch>/<id>`). `level.dat` and
    region dirs live under `world/` inside the displaced tree (e.g.
    `.displaced-<id>/world/level.dat`, `.displaced-<id>/world/region/`). Inspect
-   those paths to confirm the world data looks intact.
+   those paths to confirm the world data looks intact. **Check its age.** Under
+   oldest-wins (#2278) this is the EARLIEST retained local branch, not the latest: later
+   hydrates may have displaced and discarded newer working sets while this tree sat in the
+   slot. Each such discard logged the `WARN` above, so grep the Worker log for
+   `discarding the working set` on this server id to see whether newer branches existed.
 3. **Recover the world.** Two options:
 
    - **Repack as a new backup (recommended).** Tar the displaced tree, upload it
@@ -722,7 +785,10 @@ hydrate has just created. The exposed window is small (the dropped stream's uplo
 cancelled with its stream, so only the brief post-upload tail can still sweep), but
 when it happens the removed tree is not redundant: it holds the published state **plus**
 whatever the world progressed since that snapshot's *pack* — auto-save resumes before
-the upload, and the racing stop's shutdown save lands after it. The store still holds a
+the upload, and the racing stop's shutdown save lands after it. That bound assumes the
+racing hydrate *created* the tree; under oldest-wins (#2278) a hydrate that finds the slot
+occupied creates none, so what the sweep removes is then the older retained tree, which
+the bound does not describe. The store still holds a
 real generation of the world, so the server itself recovers by re-hydrating; the loss is
 bounded to that delta. Practical consequence for operators: a `.displaced-<id>` tree can
 occasionally disappear without a snapshot of the *current* stream having succeeded, so

@@ -1248,7 +1248,7 @@ func TestHydrateRestoresOldCopyWhenSwapRenameFails(t *testing.T) {
 	}
 
 	body := tarOf(map[string]string{"level.dat": "new-world"})
-	err := unpackAndSwap(bytes.NewReader(body), dest, 0)
+	err := unpackAndSwap(bytes.NewReader(body), dest, 0, slog.Default())
 	if err == nil {
 		t.Fatal("expected unpackAndSwap to fail when the swap rename fails")
 	}
@@ -1317,11 +1317,13 @@ func TestHydrateDisplacesOldWorkingSetInsteadOfDeleting(t *testing.T) {
 	}
 }
 
-// A SECOND hydrate over the same id must REPLACE the prior displaced tree, keeping at
-// most one per server (issue #906): the older displaced tree predates the store state
-// the newer one was displaced by, so replacing it is correct and bounds disk to one
-// extra working set per server.
-func TestHydrateReplacesPriorDisplacedTree(t *testing.T) {
+// A SECOND hydrate over the same id must KEEP the tree already at .displaced-<id> and
+// discard the working set it just displaced (oldest-wins, issue #2278). A surviving
+// .displaced-<id> proves no snapshot for this id has succeeded since it was created
+// (any success calls sweepDisplaced), so both trees are unpublished branches; the policy
+// retains the FIRST one. At most one displaced tree per server still holds (#906), and
+// the superseded set must leave no .hydrate-* leftover behind.
+func TestHydrateKeepsOldestDisplacedTree(t *testing.T) {
 	body := tarOf(map[string]string{"server.properties": "x"})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write(body)
@@ -1351,15 +1353,16 @@ func TestHydrateReplacesPriorDisplacedTree(t *testing.T) {
 		t.Fatalf("second Hydrate: %v", err)
 	}
 
-	// Exactly one displaced tree, holding the most recent (v2) displaced content.
+	// Exactly one displaced tree, holding the FIRST-retained (v1) displaced content.
 	got, err := os.ReadFile(filepath.Join(scratch, ".displaced-server", "gen"))
 	if err != nil {
 		t.Fatalf("displaced tree missing after second hydrate: %v", err)
 	}
-	if string(got) != "v2" {
-		t.Fatalf("displaced content = %q, want %q (newer displacement replaces the prior one)", got, "v2")
+	if string(got) != "v1" {
+		t.Fatalf("displaced content = %q, want %q (oldest-wins: the retained tree is never replaced, issue #2278)", got, "v1")
 	}
-	// No second .displaced-* sibling accumulated.
+	// No second .displaced-* sibling accumulated, and the superseded v2 set left no
+	// .hydrate-* leftover pinning disk.
 	entries, err := os.ReadDir(scratch)
 	if err != nil {
 		t.Fatal(err)
@@ -1368,6 +1371,9 @@ func TestHydrateReplacesPriorDisplacedTree(t *testing.T) {
 	for _, e := range entries {
 		if strings.HasPrefix(e.Name(), ".displaced-") {
 			displacedCount++
+		}
+		if strings.HasPrefix(e.Name(), ".hydrate-") {
+			t.Fatalf("superseded set left a .hydrate-* leftover: %q", e.Name())
 		}
 	}
 	if displacedCount != 1 {
@@ -1384,6 +1390,12 @@ func TestHydrateReplacesPriorDisplacedTree(t *testing.T) {
 // one hydrate later. This pins the on-disk state at the instant of swap-in: the old
 // copy must already sit at .displaced-<id> and nothing must be parked under a
 // .hydrate-* name a sweep would delete.
+//
+// SCOPE (issue #2278): this rule applies when the .displaced-<id> slot is EMPTY, as in
+// this fixture. When it is already occupied, oldest-wins keeps the tree that is there
+// and deliberately parks the superseded live set under a sweepable .hydrate-<id>-* name
+// — see TestSwapParksSupersededSetUnderSweepableName. That is not a regression of #910:
+// a recovery copy still sits at .displaced-<id> throughout.
 func TestSwapAsidesOldCopyToDisplacedNotTrash(t *testing.T) {
 	scratch := t.TempDir()
 	dest := filepath.Join(scratch, "server")
@@ -1430,7 +1442,7 @@ func TestSwapAsidesOldCopyToDisplacedNotTrash(t *testing.T) {
 	defer func() { swapRename = orig }()
 
 	body := tarOf(map[string]string{"server.properties": "fresh"})
-	if err := unpackAndSwap(bytes.NewReader(body), dest, 0); err == nil {
+	if err := unpackAndSwap(bytes.NewReader(body), dest, 0, slog.Default()); err == nil {
 		t.Fatal("expected unpackAndSwap to fail when the swap rename fails")
 	}
 
@@ -1445,8 +1457,8 @@ func TestSwapAsidesOldCopyToDisplacedNotTrash(t *testing.T) {
 // Re-running an interrupted hydrate must NOT destroy the recovery copy (issue #910):
 // a crash between the displace-aside and the swap-in leaves destDir absent and the
 // only copy of the world under .displaced-<id>. The next hydrate has nothing to
-// displace, so it must leave that .displaced-<id> tree intact — the prior-displaced
-// RemoveAll runs only when a live destDir exists to take its place.
+// displace, so it must leave that .displaced-<id> tree intact — nothing in the slot is
+// touched unless a live destDir exists to displace.
 func TestReHydrateDoesNotDeleteDisplacedWhenDestAbsent(t *testing.T) {
 	body := tarOf(map[string]string{"server.properties": "fresh"})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -1505,7 +1517,7 @@ func TestHydrateNeverDeletesOnlyCopyOnSwapFailure(t *testing.T) {
 	}
 
 	body := tarOf(map[string]string{"level.dat": "new-world"})
-	if err := unpackAndSwap(bytes.NewReader(body), dest, 0); err == nil {
+	if err := unpackAndSwap(bytes.NewReader(body), dest, 0, slog.Default()); err == nil {
 		t.Fatal("expected unpackAndSwap to fail when the swap rename fails")
 	}
 
@@ -1524,8 +1536,9 @@ func TestHydrateNeverDeletesOnlyCopyOnSwapFailure(t *testing.T) {
 
 // The generation marker must be present in the temp tree BEFORE the swap-in rename
 // (issue #917 bug 1): if it is written after the swap, a crash between swap-in and
-// marker write leaves a destDir with no marker — the API reads gen 0, re-dispatches
-// hydrate, and the retry's RemoveAll destroys the recovery copy.
+// marker write leaves a destDir with no marker — the API reads gen 0 and re-dispatches
+// hydrate, and that spurious retry discards this working set whenever a .displaced-<id>
+// is retained (issue #2278).
 func TestGenerationMarkerPresentAtSwapTime(t *testing.T) {
 	const servedGen uint64 = 42
 	body := tarOf(map[string]string{"server.properties": "new"})
@@ -1570,7 +1583,9 @@ func TestGenerationMarkerPresentAtSwapTime(t *testing.T) {
 // Prior displaced tree must survive a swap failure when both destDir and
 // .displaced-<id> exist (issue #917 bug 2): the prior displaced must not be deleted
 // before the swap-in succeeds, so a swap failure leaves both the old destDir and the
-// prior displaced recoverable.
+// prior displaced recoverable. Under oldest-wins (issue #2278) this also covers the
+// restore path: the retained tree is never touched at all, and the superseded set is
+// renamed back from its aside name instead of being dropped.
 func TestPriorDisplacedSurvivesSwapFailure(t *testing.T) {
 	orig := swapRename
 	swapRename = func(_, _ string) error { return errors.New("forced swap failure") }
@@ -1594,7 +1609,7 @@ func TestPriorDisplacedSurvivesSwapFailure(t *testing.T) {
 	}
 
 	body := tarOf(map[string]string{"server.properties": "new"})
-	if err := unpackAndSwap(bytes.NewReader(body), dest, 99); err == nil {
+	if err := unpackAndSwap(bytes.NewReader(body), dest, 99, slog.Default()); err == nil {
 		t.Fatal("expected unpackAndSwap to fail when the swap rename fails")
 	}
 
@@ -1616,13 +1631,19 @@ func TestPriorDisplacedSurvivesSwapFailure(t *testing.T) {
 	}
 }
 
-// At swap-in time, the prior displaced content ("prior") must still exist under
-// some name (issue #917 bug 2): it must not be deleted before the swap-in rename,
-// so a crash at that instant does not lose the recovery copy. Note that
-// .displaced-<id> itself always holds the just-displaced destDir ("current") at
-// swap time, so the test must search ALL entries for the "prior" content — checking
-// only .displaced-<id> is vacuous and would pass even with eager deletion.
-func TestPriorDisplacedNotDeletedAtSwapTime(t *testing.T) {
+// Pins the exact on-disk layout AT THE INSTANT of the swap-in rename when the
+// .displaced-<id> slot is already occupied (oldest-wins, issue #2278):
+//
+//	.displaced-server        → still holds "prior"   (retained, never renamed)
+//	.hydrate-server-superseded-* → holds "current"   (the set this hydrate supersedes)
+//	server                   → absent                (parked aside, not yet swapped in)
+//
+// This is the test that catches a regression to newest-wins: under that policy
+// .displaced-server would hold "current" at this instant instead. The superseded set
+// must sit under a .hydrate-<id>-* name so a crash in this window is reclaimable by
+// every existing sweeper, and the live set must NOT have been deleted — a swap failure
+// here still has to be able to put it back.
+func TestSwapParksSupersededSetUnderSweepableName(t *testing.T) {
 	scratch := t.TempDir()
 	dest := filepath.Join(scratch, "server")
 	if err := os.MkdirAll(dest, 0o750); err != nil {
@@ -1640,18 +1661,23 @@ func TestPriorDisplacedNotDeletedAtSwapTime(t *testing.T) {
 	}
 
 	orig := swapRename
-	var priorContentFoundAtSwap bool
+	var retainedAtSwap, supersededAtSwap string
+	var destPresentAtSwap bool
 	swapRename = func(src, dst string) error {
-		// At swap-in time the filesystem state is:
-		//   .displaced-server                   → holds "current" (just-displaced destDir)
-		//   .hydrate-server-prior-displaced-*   → holds "prior"  (renamed aside)
-		// Search ALL entries under scratch for a "gen" file containing "prior".
+		if _, err := os.Stat(dest); err == nil {
+			destPresentAtSwap = true
+		}
 		entries, _ := os.ReadDir(scratch)
 		for _, e := range entries {
-			p := filepath.Join(scratch, e.Name(), "gen")
-			if d, rerr := os.ReadFile(p); rerr == nil && string(d) == "prior" {
-				priorContentFoundAtSwap = true
-				break
+			d, rerr := os.ReadFile(filepath.Join(scratch, e.Name(), "gen"))
+			if rerr != nil {
+				continue
+			}
+			switch string(d) {
+			case "prior":
+				retainedAtSwap = e.Name()
+			case "current":
+				supersededAtSwap = e.Name()
 			}
 		}
 		return os.Rename(src, dst)
@@ -1659,11 +1685,360 @@ func TestPriorDisplacedNotDeletedAtSwapTime(t *testing.T) {
 	defer func() { swapRename = orig }()
 
 	body := tarOf(map[string]string{"server.properties": "new"})
-	if err := unpackAndSwap(bytes.NewReader(body), dest, 99); err != nil {
+	if err := unpackAndSwap(bytes.NewReader(body), dest, 99, slog.Default()); err != nil {
 		t.Fatalf("unpackAndSwap: %v", err)
 	}
 
-	if !priorContentFoundAtSwap {
-		t.Fatal("prior displaced content was deleted before swap-in (issue #917: must defer deletion)")
+	if destPresentAtSwap {
+		t.Fatal("destDir still present at swap-in time; the live set was not parked aside first")
+	}
+	if retainedAtSwap != ".displaced-server" {
+		t.Fatalf("retained tree at swap-in = %q, want %q (oldest-wins keeps the existing tree in place, issue #2278)",
+			retainedAtSwap, ".displaced-server")
+	}
+	if !strings.HasPrefix(supersededAtSwap, ".hydrate-server-superseded-") {
+		t.Fatalf("superseded set at swap-in = %q, want a .hydrate-server-superseded-* name (sweepable, issue #2278)",
+			supersededAtSwap)
+	}
+}
+
+// After a SUCCESSFUL swap with a prior displaced tree present, the retained tree keeps
+// its content, the superseded set is dropped (no .hydrate-* leftover pinning disk), and
+// destDir holds the new set plus its generation marker (issue #2278).
+func TestSupersededSetDroppedOnSuccessfulSwap(t *testing.T) {
+	scratch := t.TempDir()
+	dest := filepath.Join(scratch, "server")
+	if err := os.MkdirAll(dest, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dest, "gen"), []byte("current"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	displaced := filepath.Join(scratch, ".displaced-server")
+	if err := os.MkdirAll(displaced, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(displaced, "gen"), []byte("prior"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	body := tarOf(map[string]string{"server.properties": "new"})
+	if err := unpackAndSwap(bytes.NewReader(body), dest, 99, slog.Default()); err != nil {
+		t.Fatalf("unpackAndSwap: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(displaced, "gen"))
+	if err != nil || string(got) != "prior" {
+		t.Fatalf("retained displaced content = %q, %v (want %q)", got, err, "prior")
+	}
+	if got, err = os.ReadFile(filepath.Join(dest, "server.properties")); err != nil || string(got) != "new" {
+		t.Fatalf("destDir server.properties = %q, %v (want %q)", got, err, "new")
+	}
+	if got, err = os.ReadFile(filepath.Join(dest, generationMarkerFile)); err != nil || string(got) != "99" {
+		t.Fatalf("destDir generation marker = %q, %v (want %q)", got, err, "99")
+	}
+	entries, err := os.ReadDir(scratch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".hydrate-") {
+			t.Fatalf("superseded set left a .hydrate-* leftover after a successful swap: %q", e.Name())
+		}
+	}
+}
+
+// A failed swap-in must put the superseded set back at destDir and leave the retained
+// tree untouched (issue #2278): oldest-wins drops the superseded set only AFTER the
+// swap-in succeeds, so a failure loses nothing and leaves no scratch leftovers.
+func TestSupersededSetRestoredWhenSwapFails(t *testing.T) {
+	orig := swapRename
+	swapRename = func(_, _ string) error { return errors.New("forced swap failure") }
+	defer func() { swapRename = orig }()
+
+	scratch := t.TempDir()
+	dest := filepath.Join(scratch, "server")
+	if err := os.MkdirAll(dest, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dest, "gen"), []byte("current"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	displaced := filepath.Join(scratch, ".displaced-server")
+	if err := os.MkdirAll(displaced, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(displaced, "gen"), []byte("prior"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	body := tarOf(map[string]string{"server.properties": "new"})
+	if err := unpackAndSwap(bytes.NewReader(body), dest, 99, slog.Default()); err == nil {
+		t.Fatal("expected unpackAndSwap to fail when the swap rename fails")
+	}
+
+	got, err := os.ReadFile(filepath.Join(dest, "gen"))
+	if err != nil || string(got) != "current" {
+		t.Fatalf("superseded set not restored to destDir = %q, %v (want %q)", got, err, "current")
+	}
+	if got, err = os.ReadFile(filepath.Join(displaced, "gen")); err != nil || string(got) != "prior" {
+		t.Fatalf("retained displaced content = %q, %v (want %q)", got, err, "prior")
+	}
+	entries, err := os.ReadDir(scratch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() != "server" && e.Name() != ".displaced-server" {
+			t.Fatalf("leftover entry in scratch root after a failed swap: %q", e.Name())
+		}
+	}
+}
+
+// A crash between the aside-rename and the swap-in must CONVERGE on the next hydrate,
+// not accumulate (issue #2278, the S2 crash row). The post-crash fixture is destDir
+// absent, the retained tree at .displaced-<id>, the superseded set and the unpacked temp
+// tree both under .hydrate-<id>-* names. A fresh hydrate sweeps both leftovers, finds
+// nothing to displace, and swaps in — ending at the same state a clean run produces,
+// with the oldest tree still retained.
+func TestCrashBetweenAsideAndSwapConvergesToOldest(t *testing.T) {
+	body := tarOf(map[string]string{"server.properties": "fresh"})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	scratch := t.TempDir()
+	dest := filepath.Join(scratch, "server")
+	mkTree := func(dir, content string) {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "gen"), []byte(content), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	displaced := filepath.Join(scratch, ".displaced-server")
+	mkTree(displaced, "prior")
+	mkTree(filepath.Join(scratch, ".hydrate-server-superseded-123"), "current")
+	mkTree(filepath.Join(scratch, ".hydrate-server-456"), "half-unpacked")
+
+	c := New(srv.Client())
+	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest); err != nil {
+		t.Fatalf("Hydrate: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(dest, "server.properties"))
+	if err != nil || string(got) != "fresh" {
+		t.Fatalf("destDir server.properties = %q, %v (want %q)", got, err, "fresh")
+	}
+	if got, err = os.ReadFile(filepath.Join(displaced, "gen")); err != nil || string(got) != "prior" {
+		t.Fatalf("retained displaced content = %q, %v (want %q — the crash window must converge, not lose it)", got, err, "prior")
+	}
+	entries, err := os.ReadDir(scratch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".hydrate-") {
+			t.Fatalf("crash leftover not reclaimed by the next hydrate: %q", e.Name())
+		}
+	}
+}
+
+// Junk in the .displaced-<id> slot must NOT shadow a real world (issue #2278). Under
+// newest-wins junk was simply overwritten; under oldest-wins an occupied-looking slot
+// makes the hydrate discard the live set, so "occupied" must mean "a directory holding
+// something", not merely "a name exists". Realistic sources are a partially-failed
+// best-effort RemoveAll in sweepDisplaced and an operator's half-finished manual
+// cleanup (STORAGE.md Section 4.6). In both sub-cases the hydrate must take the
+// ordinary path: the live set lands at .displaced-<id> and is recoverable.
+func TestJunkDisplacedSlotDoesNotShadowLiveSet(t *testing.T) {
+	cases := []struct {
+		name string
+		junk func(t *testing.T, path string)
+	}{
+		{"empty dir", func(t *testing.T, path string) {
+			if err := os.MkdirAll(path, 0o750); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"regular file", func(t *testing.T, path string) {
+			if err := os.WriteFile(path, []byte("leftover"), 0o640); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		// The routine world-less shape, not an exotic one: a 204 hydrate returns without
+		// creating destDir, and the caller's writeGeneration then makes <scratch>/<id>
+		// holding ONLY the marker. hasWorkingSet reports that as not-held, so the next 200
+		// hydrate parks it at .displaced-<id> by the ordinary path — and it must not then
+		// shadow a real world.
+		{"marker only", func(t *testing.T, path string) {
+			if err := os.MkdirAll(path, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(path, generationMarkerFile), []byte("7"), 0o640); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		// Same, via a marker TEMP sibling: writeGeneration writes the marker atomically
+		// through a ".mcsd_generation-XXXX" temp + rename, so a crash before the rename
+		// leaves one behind. The match must be by prefix, as hasWorkingSet does (#2279).
+		{"marker temp sibling only", func(t *testing.T, path string) {
+			if err := os.MkdirAll(path, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(path, generationMarkerFile+"-abc123"), []byte("7"), 0o640); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			scratch := t.TempDir()
+			dest := filepath.Join(scratch, "server")
+			if err := os.MkdirAll(dest, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dest, "gen"), []byte("live"), 0o640); err != nil {
+				t.Fatal(err)
+			}
+			displaced := filepath.Join(scratch, ".displaced-server")
+			tc.junk(t, displaced)
+
+			body := tarOf(map[string]string{"server.properties": "new"})
+			if err := unpackAndSwap(bytes.NewReader(body), dest, 99, slog.Default()); err != nil {
+				t.Fatalf("unpackAndSwap: %v", err)
+			}
+
+			got, err := os.ReadFile(filepath.Join(displaced, "gen"))
+			if err != nil {
+				t.Fatalf("live working set not displaced to .displaced-server; junk in the slot shadowed a real world (issue #2278): %v", err)
+			}
+			if string(got) != "live" {
+				t.Fatalf("displaced content = %q, want %q", got, "live")
+			}
+			if got, err = os.ReadFile(filepath.Join(dest, "server.properties")); err != nil || string(got) != "new" {
+				t.Fatalf("destDir server.properties = %q, %v (want %q)", got, err, "new")
+			}
+		})
+	}
+}
+
+// An unexpected error reading the .displaced-<id> slot must FAIL the hydrate, never be
+// reclassified as a decision (issue #2278). The slot check answers "which world do we
+// keep", so a transient EACCES/EMFILE must not silently become "the slot is occupied,
+// discard the live working set" — nor "the slot is junk, delete it". Failing loses
+// nothing: the caller maps a hydrate error to CommandErrorTransferFailed exactly as it
+// does for ENOSPC, and the transfer is retried (STORAGE.md Section 4.6).
+//
+// The failure is injected through the readDir seam rather than a chmod fixture: a
+// mode-000 directory is readable by root, so a chmod-based test silently stops asserting
+// anything whenever the suite runs as root.
+func TestUnreadableDisplacedSlotFailsHydrateWithoutDiscarding(t *testing.T) {
+	scratch := t.TempDir()
+	dest := filepath.Join(scratch, "server")
+	if err := os.MkdirAll(filepath.Join(dest, "world"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dest, "world", "r.0.0.mca"), []byte("live-world"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	displaced := filepath.Join(scratch, ".displaced-server")
+	if err := os.MkdirAll(filepath.Join(displaced, "world"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(displaced, "world", "r.0.0.mca"), []byte("retained-world"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := readDir
+	readDir = func(dir string) ([]os.DirEntry, error) {
+		if dir == displaced {
+			return nil, os.ErrPermission
+		}
+		return os.ReadDir(dir)
+	}
+	defer func() { readDir = orig }()
+
+	body := tarOf(map[string]string{"server.properties": "new"})
+	err := unpackAndSwap(bytes.NewReader(body), dest, 99, slog.Default())
+	if err == nil {
+		t.Fatal("expected unpackAndSwap to fail when the displaced slot cannot be read")
+	}
+	if !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("error = %v, want a permission error propagated to the caller", err)
+	}
+
+	// The live working set is untouched — not displaced, not discarded.
+	got, readErr := os.ReadFile(filepath.Join(dest, "world", "r.0.0.mca"))
+	if readErr != nil || string(got) != "live-world" {
+		t.Fatalf("live working set = %q, %v (want %q untouched at destDir)", got, readErr, "live-world")
+	}
+	// The slot is byte-identical: neither cleared as junk nor overwritten.
+	if got, readErr = os.ReadFile(filepath.Join(displaced, "world", "r.0.0.mca")); readErr != nil || string(got) != "retained-world" {
+		t.Fatalf("displaced slot = %q, %v (want %q untouched)", got, readErr, "retained-world")
+	}
+	// No leftovers pinning disk.
+	entries, readErr := os.ReadDir(scratch)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	for _, e := range entries {
+		if e.Name() != "server" && e.Name() != ".displaced-server" {
+			t.Fatalf("leftover entry in scratch root after a failed slot read: %q", e.Name())
+		}
+	}
+}
+
+// Discarding a working set must be visible to an operator (issue #2278): oldest-wins
+// gives up the newer unpublished branch, and the WARN naming BOTH paths is the whole
+// mitigation for that. Without it the loss is silent.
+func TestDiscardWarnsWithBothPaths(t *testing.T) {
+	scratch := t.TempDir()
+	dest := filepath.Join(scratch, "server")
+	if err := os.MkdirAll(dest, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dest, "gen"), []byte("current"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	displaced := filepath.Join(scratch, ".displaced-server")
+	if err := os.MkdirAll(displaced, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(displaced, "gen"), []byte("prior"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	h := &capturingHandler{}
+	body := tarOf(map[string]string{"server.properties": "new"})
+	if err := unpackAndSwap(bytes.NewReader(body), dest, 99, slog.New(h)); err != nil {
+		t.Fatalf("unpackAndSwap: %v", err)
+	}
+
+	var rec *slog.Record
+	for i := range h.records {
+		if h.records[i].Level == slog.LevelWarn && strings.Contains(h.records[i].Message, "discarding") {
+			rec = &h.records[i]
+			break
+		}
+	}
+	if rec == nil {
+		t.Fatalf("no discard WARN emitted; the oldest-wins data loss would be silent (issue #2278). records: %v", h.records)
+	}
+	attrs := map[string]string{}
+	rec.Attrs(func(a slog.Attr) bool {
+		attrs[a.Key] = a.Value.String()
+		return true
+	})
+	if attrs["server_id"] != "server" {
+		t.Fatalf("WARN server_id = %q, want %q", attrs["server_id"], "server")
+	}
+	if attrs["retained"] != displaced {
+		t.Fatalf("WARN retained = %q, want %q", attrs["retained"], displaced)
+	}
+	if attrs["discarded"] != dest {
+		t.Fatalf("WARN discarded = %q, want %q", attrs["discarded"], dest)
 	}
 }
