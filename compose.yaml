@@ -33,7 +33,7 @@
 
 services:
   db:
-    image: postgres:17
+    image: postgres:18
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
@@ -43,7 +43,14 @@ services:
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env, e.g. openssl rand -base64 32}"
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
-      - db-data:/var/lib/postgresql/data
+      # Mounted at the PARENT directory, not .../data: postgres:18 moved PGDATA
+      # to /var/lib/postgresql/<major>/docker and declares VOLUME
+      # /var/lib/postgresql (docker-library/postgres#1259). With the legacy
+      # .../data mount the entrypoint sees that path as a mountpoint and aborts
+      # before postgres ever starts, so the healthcheck has nothing to probe
+      # (#2133). Upgrading an existing deployment needs a dump/restore first --
+      # see docs/dev/DEPLOYMENT.md Section 9.
+      - db-data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
