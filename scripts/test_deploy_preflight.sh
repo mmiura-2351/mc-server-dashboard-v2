@@ -206,6 +206,14 @@ echo "=== deploy_preflight Postgres version guard tests ==="
 		*DEPLOYMENT.md*) ok "PG17 data + postgres:18 target: message points at the runbook" ;;
 		*) fail_test "PG17 data + postgres:18 target: message lacks the runbook pointer -- $output" ;;
 	esac
+	# The refusal has to name the way out, not just the problem: the operator is
+	# mid-deploy and the fix is one deliberately-invoked script (#2304).
+	case "$output" in
+		*"scripts/pg_major_upgrade.sh"*)
+			ok "PG17 data + postgres:18 target: message names the upgrade script" ;;
+		*)
+			fail_test "PG17 data + postgres:18 target: message does not name the upgrade script -- $output" ;;
+	esac
 	rm -rf "$base"
 }
 

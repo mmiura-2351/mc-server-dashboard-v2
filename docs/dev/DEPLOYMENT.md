@@ -862,33 +862,82 @@ servers), runs a post-deploy `/api/healthz` check, and stamps the new SHA. Use
 > read: the container aborts during entrypoint init — loudly, and without
 > touching your data — and because `migrate` and `api` both gate on `db` being
 > healthy, the whole stack stays down until the data is migrated.
-> `scripts/deploy_preflight.sh` now detects this and refuses the deploy, so
-> `make update` stops before it takes the stack down.
+> `scripts/deploy_preflight.sh` detects this and refuses the deploy, so
+> `make update` stops before it takes the stack down, and names the script below.
 >
 > **Take the dump while the stack is still running `postgres:17` — before
 > `git pull` swaps the image.** The `postgres:18` image ships no PostgreSQL 17
 > binary, so once the new image is in place there is no supported way to read the
 > old volume.
 >
+> **Primary path — `scripts/pg_major_upgrade.sh`.** Run it from the repo root on
+> a clean `main`, with the old stack still up:
+>
+> ```sh
+> ./scripts/pg_major_upgrade.sh
+> ```
+>
+> It refuses unless an upgrade is actually pending (so re-running after a
+> successful one is a no-op), refuses unless the running `db` container is still
+> the major that wrote the volume, stops the writers, and takes the dump — then
+> **verifies it**, on `pg_dumpall`'s own exit status *and* PostgreSQL's
+> end-of-dump marker, before anything destructive happens. It then fast-forwards
+> the checkout to `origin/main`, archives the old volume to a host-side tarball
+> and lists that tarball back, and only then removes the volume; the PostgreSQL
+> 18 `db` comes up with `--wait` and the dump is restored into it. Any failure
+> exits non-zero with the old volume still there.
+>
+> Nothing invokes this script for you, by design: `make update` and
+> `scripts/deploy.sh` never trigger it. The API is down for the duration and the
+> volume swap is irreversible, so it runs when *you* have chosen to.
+>
+> Artifacts (dump, volume archive, restore log) land in a timestamped directory
+> next to the repo, or in `$MCSD_PG_UPGRADE_DIR` if you set one. **They are yours
+> to delete** — the script never removes them, because until you have verified
+> the new cluster they are the only copies of the PostgreSQL 17 data. A bad
+> restore is reverted by unpacking the archive and pointing a throwaway
+> `postgres:17` container at it.
+>
+> Finish with `docker compose up -d --build`, then log in and check that servers,
+> backups, and snapshots resolve.
+>
+> **Manual fallback.** The same sequence by hand, including the two checks the
+> script exists to enforce:
+>
 > ```sh
 > # 1. On the OLD revision, with the 17 stack still up. Stop the writers FIRST:
 > #    `api` is the only DB client (`worker` and `relay` reach it over gRPC), so
 > #    anything written after the dump would be lost on restore.
 > docker compose stop api worker relay cloudflared
-> docker compose exec -T db pg_dumpall -U mcsd > backup-pg17.sql
+> docker compose exec -T db pg_dumpall -U mcsd > backup-pg17.sql   # check $?
+> tail -n 5 backup-pg17.sql | grep 'PostgreSQL database cluster dump complete'
+>
+> # 2. Archive the volume BEFORE releasing it, and list the archive back. Without
+> #    this the dump is the only copy of the data the moment the volume goes.
 > docker compose down
+> docker run --rm --entrypoint sh \
+>   -v mc-server-dashboard-v2_db-data:/src:ro -v "$(pwd)/..":/out postgres:17 \
+>   -c 'tar czf /out/db-data-pg17.tar.gz -C /src .'
+> tar tzf ../db-data-pg17.tar.gz | grep -q PG_VERSION
 > docker volume rm mc-server-dashboard-v2_db-data
 >
-> # 2. Take the new revision and start the 18 db on a fresh volume. `--wait`
+> # 3. Take the new revision and start the 18 db on a fresh volume. `--wait`
 > #    blocks until the healthcheck passes, so the restore below cannot race
 > #    initdb.
 > git pull --ff-only origin main
 > docker compose up -d --wait db
 >
-> # 3. Restore, then bring the rest of the stack up:
+> # 4. Restore, then bring the rest of the stack up:
 > docker compose exec -T db psql -U mcsd -d postgres < backup-pg17.sql
 > docker compose up -d --build
 > ```
+>
+> Both checks are load-bearing. `pg_dumpall` failing partway — full disk, broken
+> pipe, a non-zero exit — still leaves a non-empty, plausible-looking
+> `backup-pg17.sql`, because the shell created the file before the command ran;
+> the completion marker is the only evidence the dump finished. And an archive
+> that will not list back is not a copy you can restore from, so checking it is
+> what makes the `docker volume rm` on the next line safe.
 >
 > (The volume name is `<project>_db-data`; `docker volume ls` shows the exact
 > names for your project directory. Naming `relay`/`cloudflared` is harmless when

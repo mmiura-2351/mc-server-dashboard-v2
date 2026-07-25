@@ -95,7 +95,8 @@ check_postgres_major() {
 		echo "  PostgreSQL ${pg_target_major} cannot read a PostgreSQL ${pg_cluster_major} cluster: the db container aborts during" >&2
 		echo "  entrypoint init (your data is left untouched) and migrate/api stay down behind its healthcheck." >&2
 		echo "  Migrate the data BEFORE deploying -- the dump must be taken while PostgreSQL ${pg_cluster_major} is still" >&2
-		echo "  running. See docs/dev/DEPLOYMENT.md Section 9 (Upgrade)." >&2
+		echo "  running. Run scripts/pg_major_upgrade.sh -- it dumps, verifies the dump, archives the old" >&2
+		echo "  volume, and restores into PostgreSQL ${pg_target_major}. See docs/dev/DEPLOYMENT.md Section 9 (Upgrade)." >&2
 		return 1
 	fi
 	return 0
