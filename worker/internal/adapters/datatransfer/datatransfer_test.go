@@ -1925,6 +1925,72 @@ func TestJunkDisplacedSlotDoesNotShadowLiveSet(t *testing.T) {
 	}
 }
 
+// An unexpected error reading the .displaced-<id> slot must FAIL the hydrate, never be
+// reclassified as a decision (issue #2278). The slot check answers "which world do we
+// keep", so a transient EACCES/EMFILE must not silently become "the slot is occupied,
+// discard the live working set" — nor "the slot is junk, delete it". Failing loses
+// nothing: the caller maps a hydrate error to CommandErrorTransferFailed exactly as it
+// does for ENOSPC, and the transfer is retried (STORAGE.md Section 4.6).
+//
+// The failure is injected through the readDir seam rather than a chmod fixture: a
+// mode-000 directory is readable by root, so a chmod-based test silently stops asserting
+// anything whenever the suite runs as root.
+func TestUnreadableDisplacedSlotFailsHydrateWithoutDiscarding(t *testing.T) {
+	scratch := t.TempDir()
+	dest := filepath.Join(scratch, "server")
+	if err := os.MkdirAll(filepath.Join(dest, "world"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dest, "world", "r.0.0.mca"), []byte("live-world"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	displaced := filepath.Join(scratch, ".displaced-server")
+	if err := os.MkdirAll(filepath.Join(displaced, "world"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(displaced, "world", "r.0.0.mca"), []byte("retained-world"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := readDir
+	readDir = func(dir string) ([]os.DirEntry, error) {
+		if dir == displaced {
+			return nil, os.ErrPermission
+		}
+		return os.ReadDir(dir)
+	}
+	defer func() { readDir = orig }()
+
+	body := tarOf(map[string]string{"server.properties": "new"})
+	err := unpackAndSwap(bytes.NewReader(body), dest, 99, slog.Default())
+	if err == nil {
+		t.Fatal("expected unpackAndSwap to fail when the displaced slot cannot be read")
+	}
+	if !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("error = %v, want a permission error propagated to the caller", err)
+	}
+
+	// The live working set is untouched — not displaced, not discarded.
+	got, readErr := os.ReadFile(filepath.Join(dest, "world", "r.0.0.mca"))
+	if readErr != nil || string(got) != "live-world" {
+		t.Fatalf("live working set = %q, %v (want %q untouched at destDir)", got, readErr, "live-world")
+	}
+	// The slot is byte-identical: neither cleared as junk nor overwritten.
+	if got, readErr = os.ReadFile(filepath.Join(displaced, "world", "r.0.0.mca")); readErr != nil || string(got) != "retained-world" {
+		t.Fatalf("displaced slot = %q, %v (want %q untouched)", got, readErr, "retained-world")
+	}
+	// No leftovers pinning disk.
+	entries, readErr := os.ReadDir(scratch)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	for _, e := range entries {
+		if e.Name() != "server" && e.Name() != ".displaced-server" {
+			t.Fatalf("leftover entry in scratch root after a failed slot read: %q", e.Name())
+		}
+	}
+}
+
 // Discarding a working set must be visible to an operator (issue #2278): oldest-wins
 // gives up the newer unpublished branch, and the WARN naming BOTH paths is the whole
 // mitigation for that. Without it the loss is silent.

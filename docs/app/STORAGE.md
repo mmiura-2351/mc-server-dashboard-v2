@@ -643,12 +643,15 @@ WARN  hydrate: an older displaced recovery tree already exists; keeping it and d
 
 Treat that line as an operator signal: the retained tree is the one to recover from, and
 the discarded one is gone once the hydrate's swap-in succeeds. "Occupied" means the slot
-holds an actual working set: a leftover file, an empty directory, or a directory holding
-only the Worker-private generation marker is cleared and the ordinary displace path runs,
-so world-less junk in the slot can never shadow a real world. The policy is deliberately
-**not** health-aware — the Worker does not fsck both trees to pick the better one (option
-C in #2278), because that puts a region scan on the hydrate path and makes the rule
-unpredictable under partial failures.
+holds an actual working set — at least one entry that is not Worker-private generation
+state. A regular file, a symlink, an empty directory, or a directory holding only
+`.mcsd_generation` (or a crashed write's `.mcsd_generation-XXXX` temp sibling) is cleared
+and the ordinary displace path runs, so world-less junk in the slot can never shadow a
+real world. That is the same "holds a working set" test the held-server scan applies.
+
+The policy is deliberately **not** health-aware — the Worker does not fsck both trees to
+pick the better one (option C in #2278), because that puts a region scan on the hydrate
+path and makes the rule unpredictable under partial failures.
 
 **Lifecycle.** The displaced tree is **never GC'd automatically on server delete**
 — it is the last surviving copy of the world exactly when it is most needed. It is
@@ -669,12 +672,25 @@ succeeds (#917/#2278). The retained displaced tree is one of the three, not a fo
 Hydrates for distinct servers can be at that peak simultaneously — the Worker runs up to
 `maxConcurrentLanes` (4) command lanes concurrently — so budget `worker.scratch_dir` as
 **3× the largest world × the number of overlapping hydrates** (4 in the worst case), plus
-one world-sized copy per
-retained `.displaced-<id>` belonging to a server that is *not* currently hydrating, plus
-the ordinary scratch dirs of the servers this Worker holds. Running out of space is not
-data loss: the unpack, the generation-marker write and the fsync all complete before the
-first rename, so an `ENOSPC` fails the hydrate with the live working set (and any
-existing displaced tree) untouched and the transfer is simply retried.
+one world-sized copy per retained `.displaced-<id>` belonging to a server that is *not*
+currently hydrating, plus the ordinary scratch dirs of the servers this Worker holds.
+Running out of space is not data loss: the unpack, the generation-marker write and the
+fsync all complete before the first rename, so an `ENOSPC` fails the hydrate with the live
+working set (and any existing displaced tree) untouched and the transfer is simply
+retried.
+
+**An unreadable slot blocks hydrates for that server until it is cleared.** Because the
+slot decides which world survives, a hydrate that cannot *read* `.displaced-<id>` (a
+permission problem on the directory, a descriptor exhaustion, an I/O error) fails rather
+than guessing: guessing "occupied" would discard the live working set, and guessing "junk"
+would delete a recovery tree. The failed hydrate deletes and discards nothing — the live
+set stays at `<scratch>/<id>` and the slot is left byte-identical — and it surfaces the
+same way an `ENOSPC` hydrate does (`transfer_failed`). Unlike `ENOSPC`, though, it does
+**not** clear on retry: every subsequent hydrate for that server hits the same slot and
+fails the same way, so the server cannot start until an operator intervenes. If a server
+persistently fails to hydrate with a permission/IO error, inspect
+`<worker.scratch_dir>/.displaced-<id>`: recover it if it holds a world (procedure below),
+then fix its permissions or remove it.
 
 **Boot detection.** At Worker boot, after the held-server scan,
 `WarnOrphanDisplacedTrees` logs a `WARN` for each `.displaced-<id>` tree whose

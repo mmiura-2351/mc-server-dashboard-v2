@@ -535,7 +535,7 @@ func displacedSlotHoldsWorkingSet(displaced string) (os.FileInfo, bool, error) {
 		return nil, false, err
 	}
 	if info.IsDir() {
-		entries, readErr := os.ReadDir(displaced)
+		entries, readErr := readDir(displaced)
 		if readErr != nil {
 			return nil, false, readErr
 		}
@@ -579,6 +579,9 @@ var openFile = os.Open
 // through a package var for the same reason as openFile: a test can inject ENOENT
 // for a specific directory (simulating a rotated log dir / plugin temp dir
 // deleted between the parent's walk and this read) without racing real timings.
+// displacedSlotHoldsWorkingSet reads through it too, so a test can inject a
+// permission failure on the .displaced-<id> slot without a chmod fixture that would
+// silently stop testing anything when the suite runs as root (issue #2278).
 // Production always uses os.ReadDir.
 var readDir = os.ReadDir
 

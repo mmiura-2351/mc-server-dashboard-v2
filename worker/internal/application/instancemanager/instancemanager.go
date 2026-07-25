@@ -649,12 +649,14 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// stated delta bound also assumes that hydrate CREATED the tree; under oldest-wins
 		// (issue #2278) a hydrate finding the slot occupied creates none, so a racing sweep
 		// then destroys the older RETAINED tree instead, whose age this bound does not
-		// describe. In that variant BOTH local branches can go: a sweep landing between the
-		// hydrate's slot check and its post-swap drop removes the retained tree while the
-		// hydrate drops the superseded set, leaving only the store's pack generation. Not a
-		// regression (newest-wins reached the same place by a different route), and the
-		// no-zero-copy reasoning in unpackAndSwap is a CRASH statement, which this
-		// concurrent sweep is not.
+		// describe. In that variant BOTH local branches can go: the hydrate drops the set it
+		// superseded, so any sweep from the slot check onward — during the swap OR after it
+		// has completed — removes the retained tree and leaves only the store's pack
+		// generation. The drop does not bound the window; it only decides whether the
+		// superseded set is already gone when the sweep lands. Not a regression
+		// (newest-wins reached the same place by a different route), and the no-zero-copy
+		// reasoning in unpackAndSwap is a CRASH statement, which this concurrent sweep
+		// is not.
 		var quiesced bool
 		var rawRestore func()
 		quiesced, rawRestore = m.quiesceRunning(ctx, cmd.ServerID, filepath.Join(m.scratchDir, cmd.ServerID))
