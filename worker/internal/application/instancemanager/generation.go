@@ -81,10 +81,29 @@ func writeGeneration(workingDir string, gen uint64) error {
 //
 // It runs AFTER the rename, so the marker itself already carries its final name and
 // is never matched: the predicate requires the temp form (the marker name plus "-"),
-// not merely the marker prefix that hasWorkingSet and the snapshot pack treat as
-// non-content — an over-broad match here would delete real files those scans only
-// ignore. Directories are skipped for the same reason. The sweep is best-effort: a
-// removal failure is ignored so it can never fail the marker write.
+// not merely the marker prefix that hasWorkingSet (issue #2279) and the snapshot pack
+// (issue #834) treat as non-content — those two only IGNORE what they match, while
+// this unlinks it, so an over-broad match here would delete real files. Directories
+// are skipped for the same reason.
+//
+// The sweep CAN unlink a CONCURRENT writer's in-flight temp, and does so in practice
+// (8 goroutines x 50 writes on one dir: 0 rename errors without the sweep, ~300
+// ENOENT renames with it). Two writeGeneration calls do overlap on one workingDir:
+// the per-server FIFO lanes are per-STREAM (the dispatcher is recreated per serve,
+// domain/session/session.go), and a running-id snapshot deliberately takes no id
+// reservation (issue #829 item 4, handleSnapshot) though a hydrate and a stopped-id
+// snapshot do, so a dropped stream's post-upload snapshot tail (recordGeneration) can
+// still run while a NEW stream's hydrate records its own marker — the same window
+// documented as issue #917 item 3.
+//
+// That is accepted rather than prevented, because what the loser loses is bounded: the
+// marker can never be absent or torn (the winner's rename precedes this sweep and its
+// final name is never matched), so the loser forfeits only a best-effort marker UPDATE
+// — which writeGeneration's contract already permits and recordGeneration logs without
+// propagating — and a lost update costs at most one extra hydrate. Which of two
+// concurrent writes wins was already last-rename-wins before this sweep existed. The
+// sweep is otherwise best-effort too: a ReadDir or Remove failure is ignored so it can
+// never fail the marker write.
 func sweepGenerationTemps(workingDir string) {
 	entries, err := os.ReadDir(workingDir)
 	if err != nil {
