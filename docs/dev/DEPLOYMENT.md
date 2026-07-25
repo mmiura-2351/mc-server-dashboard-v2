@@ -884,8 +884,10 @@ servers), runs a post-deploy `/api/healthz` check, and stamps the new SHA. Use
 > end-of-dump marker, before anything destructive happens. It then fast-forwards
 > the checkout to `origin/main`, archives the old volume to a host-side tarball
 > and lists that tarball back, and only then removes the volume; the PostgreSQL
-> 18 `db` comes up with `--wait` and the dump is restored into it. Any failure
-> exits non-zero with the old volume still there.
+> 18 `db` comes up with `--wait` and the dump is restored into it under
+> `ON_ERROR_STOP=1`, so a statement that errors halfway aborts the run rather
+> than reporting a half-restored database as a success. Any failure exits
+> non-zero with the old volume still there.
 >
 > Nothing invokes this script for you, by design: `make update` and
 > `scripts/deploy.sh` never trigger it. The API is down for the duration and the
@@ -927,25 +929,45 @@ servers), runs a post-deploy `/api/healthz` check, and stamps the new SHA. Use
 > git pull --ff-only origin main
 > docker compose up -d --wait db
 >
-> # 4. Restore, then bring the rest of the stack up:
-> docker compose exec -T db psql -U mcsd -d postgres < backup-pg17.sql
+> # 4. Restore. `ON_ERROR_STOP=1` is what makes a failed statement visible:
+> #    without it psql exits 0 after an error and a half-restored database is
+> #    indistinguishable from a good one. That means the two statements the new
+> #    container's initdb already ran from .env have to be REMOVED rather than
+> #    tolerated -- drop the empty database it created (the dump recreates it
+> #    with the original encoding and locale), and filter the single CREATE ROLE
+> #    line for the role you connect as, which cannot be dropped. Its following
+> #    `ALTER ROLE` carries the attributes and password, so nothing is lost.
+> grep -c -x -F 'CREATE ROLE mcsd;' backup-pg17.sql       # must print exactly 1
+> docker compose exec -T db psql -v ON_ERROR_STOP=1 -U mcsd -d postgres \
+>   -c 'DROP DATABASE IF EXISTS mcsd'
+> grep -v -x -F 'CREATE ROLE mcsd;' backup-pg17.sql \
+>   | docker compose exec -T db psql -v ON_ERROR_STOP=1 -U mcsd -d postgres
+>
+> # 5. Only once that exited 0, bring the rest of the stack up:
 > docker compose up -d --build
 > ```
 >
-> Both checks are load-bearing. `pg_dumpall` failing partway — full disk, broken
-> pipe, a non-zero exit — still leaves a non-empty, plausible-looking
+> All three checks are load-bearing. `pg_dumpall` failing partway — full disk,
+> broken pipe, a non-zero exit — still leaves a non-empty, plausible-looking
 > `backup-pg17.sql`, because the shell created the file before the command ran;
-> the completion marker is the only evidence the dump finished. And an archive
-> that will not list back is not a copy you can restore from, so checking it is
-> what makes the `docker volume rm` on the next line safe.
+> the completion marker is the only evidence the dump finished. An archive that
+> will not list back is not a copy you can restore from, so checking it is what
+> makes the `docker volume rm` on the next line safe. And `ON_ERROR_STOP=1` is
+> the difference between a failed `COPY` stopping the restore and a table that
+> exists with rows missing from it.
+>
+> Do **not** substitute "read the restore log and ignore the errors you
+> recognise" for that flag. The two expected errors sit in the same list as a
+> real one and look no different — a run with a genuinely broken statement in it
+> prints three `ERROR:` lines where a good run prints two, and nothing marks
+> which is which.
 >
 > (The volume name is `<project>_db-data`; `docker volume ls` shows the exact
 > names for your project directory. Naming `relay`/`cloudflared` is harmless when
 > those profiles are inactive. `-T` on the dump matters: without it Compose
-> allocates a TTY and the redirected SQL is line-ending mangled. The restore
-> replays `CREATE ROLE mcsd` and `CREATE DATABASE mcsd`, which the fresh
-> container already provisioned from `.env` — those two "already exists" errors
-> are expected and harmless.)
+> allocates a TTY and the redirected SQL is line-ending mangled. `mcsd` above is
+> `POSTGRES_USER` / `POSTGRES_DB` from your `.env` — substitute yours in all
+> four places.)
 >
 > For a large cluster, `pg_upgrade --link` converts in place much faster, but it
 > needs both majors' binaries in one image and is not covered here. Performing

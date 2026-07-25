@@ -24,6 +24,10 @@
 #     every instant. The old volume is archived to a host path and the archive is
 #     listed back BEFORE `docker volume rm` runs, so the moment the volume goes
 #     there are two independently verified copies, not one.
+#   * The restore runs under ON_ERROR_STOP=1, so a statement that errors halfway
+#     through exits non-zero instead of reporting a success the operator would
+#     then bring the stack up on. See the comment above the restore for the two
+#     collisions that are removed rather than tolerated.
 #
 # Usage:
 #   scripts/pg_major_upgrade.sh
@@ -180,12 +184,50 @@ pg_docker "docker volume rm ${pg_volume_name}" || die "could not remove volume '
 say "starting PostgreSQL ${pg_target_major} on a fresh volume..."
 pg_docker "docker compose up -d --wait db" || die "the PostgreSQL ${pg_target_major} db did not become healthy. The dump (${backup}) and archive (${archive}) are intact; see 'docker compose logs db'."
 
+# psql exits 0 after a statement that errored unless ON_ERROR_STOP is set, so
+# without it a failed COPY leaves a table that exists and is missing rows, and
+# this script reports success. Exactly two statements in a pg_dumpall output
+# collide with what the new container's initdb has already done from .env:
+#
+#     CREATE ROLE <POSTGRES_USER>;
+#     CREATE DATABASE <POSTGRES_DB> WITH TEMPLATE = ...;
+#
+# Both are removed as errors rather than tolerated as ones, so ON_ERROR_STOP=1
+# can stay on for everything else:
+#
+#   * the database is dropped below, which also makes the restore more faithful
+#     -- the dump's own CREATE DATABASE then rebuilds it with the OLD cluster's
+#     encoding, locale and collation provider instead of this image's initdb
+#     defaults;
+#   * the role cannot be dropped (it is the role we connect as), so its one
+#     CREATE line is filtered out of the stream. pg_dumpall emits
+#     `CREATE ROLE x;` followed by `ALTER ROLE x WITH ...` precisely so the
+#     CREATE is free to fail -- the ALTER carries the attributes and the
+#     password, and it still runs.
+#
+# Nothing here matches psql's error text: those strings are locale-dependent and
+# have changed between majors, so an allowlist of them would widen silently. The
+# two statements are identified by name, and the count is asserted -- a dump this
+# script cannot read exactly is a dump it must not guess at.
+role_stmt="CREATE ROLE ${pg_db_user};"
+role_lines="$(grep -c -x -F -- "$role_stmt" "$backup" || true)"
+if [ "$role_lines" != "1" ]; then
+	die "expected exactly one '${role_stmt}' line in ${backup}, found ${role_lines}. Refusing to restore a dump whose bootstrap role this script cannot identify. The dump and the archive (${archive}) are both intact."
+fi
+if awk -v db="$pg_db_name" '$1 == "CREATE" && $2 == "DATABASE" && $3 == db { found = 1 } END { exit !found }' "$backup"; then
+	say "dropping the empty '${pg_db_name}' this image's initdb just created, so the dump recreates it as it was..."
+	pg_docker "docker compose exec -T db psql -v ON_ERROR_STOP=1 -U ${pg_db_user} -d postgres -c 'DROP DATABASE IF EXISTS ${pg_db_name}'" ||
+		die "could not drop the freshly created '${pg_db_name}'. The dump (${backup}) and the archive (${archive}) are both intact."
+fi
+
 restore_log="$out_dir/restore.log"
-say "restoring the dump into the new cluster..."
+say "restoring the dump into the new cluster (ON_ERROR_STOP=1 -- any unexpected error aborts)..."
 restore_status=0
-pg_docker "docker compose exec -T db psql -U ${pg_db_user} -d postgres" < "$backup" 2>&1 | tee "$restore_log" || restore_status=$?
+grep -v -x -F -- "$role_stmt" "$backup" |
+	pg_docker "docker compose exec -T db psql -v ON_ERROR_STOP=1 -U ${pg_db_user} -d postgres" 2>&1 |
+	tee "$restore_log" || restore_status=$?
 if [ "$restore_status" -ne 0 ]; then
-	die "psql exited ${restore_status} during the restore; see ${restore_log}. The dump (${backup}) and the archive (${archive}) are both intact, so this is recoverable -- do not delete them."
+	die "the restore failed (exit ${restore_status}); see ${restore_log} for the statement that errored. The database is now PARTIALLY restored -- do not bring the stack up on it. The dump (${backup}) and the archive (${archive}) are both intact, so this is recoverable."
 fi
 
 table_count="$(pg_docker "docker compose exec -T db psql -U ${pg_db_user} -d ${pg_db_name} -tAc \"select count(*) from pg_tables where schemaname = 'public'\"" 2> /dev/null | tr -d '[:space:]')" || table_count=""
@@ -201,8 +243,6 @@ echo
 say "NOT done by this script -- verify these before calling the upgrade finished:"
 say "  1. Bring the rest of the stack up:  docker compose up -d --build"
 say "  2. Exercise the app: log in, list servers, open a backup and a snapshot."
-say "  3. Two 'already exists' errors for role/database '${pg_db_name}' in the restore log are"
-say "     expected -- the fresh container provisioned both from .env before the restore ran."
-say "  4. Remove ${out_dir} yourself once satisfied. Nothing else will: until then it holds"
+say "  3. Remove ${out_dir} yourself once satisfied. Nothing else will: until then it holds"
 say "     the only copies of the PostgreSQL ${pg_cluster_major} data, and a bad restore can still be reverted by"
 say "     unpacking the archive and pointing a throwaway postgres:${pg_cluster_major} container at it."

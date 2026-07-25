@@ -178,7 +178,20 @@ case "$1 $2" in
 						printf -- '--\n-- PostgreSQL database cluster dump\n--\nCREATE ROLE mcsd;\nCOPY public.servers (id) FROM std\n'
 						;;
 					*)
-						printf -- '--\n-- PostgreSQL database cluster dump\n--\nCREATE ROLE mcsd;\n'
+						# Shaped like a real pg_dumpall (verified against
+						# postgres:17): the bootstrap role's CREATE is a bare
+						# line of its own followed by the ALTER that carries its
+						# attributes, and the app database is recreated with the
+						# old cluster's encoding and locale.
+						printf -- '--\n-- PostgreSQL database cluster dump\n--\n'
+						printf 'CREATE ROLE mcsd;\n'
+						[ "${MOCK_DUMP_MODE:-ok}" = "double_role" ] && printf 'CREATE ROLE mcsd;\n'
+						printf "ALTER ROLE mcsd WITH SUPERUSER LOGIN PASSWORD 'SCRAM-SHA-256\$4096:x';\n"
+						printf 'CREATE ROLE reporter;\n'
+						if [ "${MOCK_DUMP_MODE:-ok}" != "no_createdb" ]; then
+							printf "CREATE DATABASE mcsd WITH TEMPLATE = template0 ENCODING = 'UTF8' LOCALE = 'en_US.utf8';\n"
+						fi
+						printf 'COPY public.servers (id, name) FROM stdin;\n1\\talpha\n\\.\n'
 						printf -- '--\n-- PostgreSQL database cluster dump complete\n--\n\n'
 						;;
 				esac
@@ -187,9 +200,14 @@ case "$1 $2" in
 				log "table-count $*"
 				printf '%s\n' "${MOCK_TABLE_COUNT:-42}"
 				;;
+			*"DROP DATABASE"*)
+				log "dropdb $*"
+				[ "${MOCK_DROPDB_FAILS:-0}" = "1" ] && exit 1
+				;;
 			*psql*)
-				# Drain the restore's stdin so the writer never sees SIGPIPE.
-				cat > /dev/null
+				# Keep the restore's stdin so a test can assert what the script
+				# actually fed psql (and so the writer never sees SIGPIPE).
+				cat > "${MCSD_PG_UPGRADE_DIR}/restore-stdin.sql"
 				log "restore $*"
 				[ "${MOCK_RESTORE_FAILS:-0}" = "1" ] && exit 1
 				;;
@@ -386,16 +404,18 @@ done
 			fail_test "happy path: no archive when the volume was released -- $log" ;;
 	esac
 
-	# Order: dump -> down -> archive -> volume rm -> up --wait db -> restore.
+	# Order: dump -> down -> archive -> volume rm -> up --wait db -> drop the
+	# freshly initdb'd database -> restore.
 	order="$(printf '%s\n' "$log" | sed -n \
 		-e 's/^dump .*/dump/p' \
 		-e 's/^compose down.*/down/p' \
 		-e 's/^archive .*/archive/p' \
 		-e 's/^volume rm .*/rm/p' \
 		-e 's/^compose up.*/up/p' \
+		-e 's/^dropdb .*/dropdb/p' \
 		-e 's/^restore .*/restore/p' | tr '\n' ' ')"
 	case "$order" in
-		"dump down archive rm up restore "*)
+		"dump down archive rm up dropdb restore "*)
 			ok "happy path: dump, archive, release, restore -- in that order" ;;
 		*)
 			fail_test "happy path: wrong order -- '$order' from $log" ;;
@@ -440,6 +460,118 @@ done
 	case "$output" in
 		*"$base/out"*) ok "happy path: the report names the artifact directory" ;;
 		*) fail_test "happy path: the report hides the artifacts -- $output" ;;
+	esac
+
+	# psql exits 0 after a statement that errored unless this is set, so without
+	# it a failed COPY leaves a half-restored database reported as a success.
+	case "$log" in
+		*"restore compose exec -T db psql -v ON_ERROR_STOP=1"*)
+			ok "happy path: the restore runs with ON_ERROR_STOP=1" ;;
+		*)
+			fail_test "happy path: the restore tolerates statement errors -- $log" ;;
+	esac
+
+	# The two collisions with what the new container's initdb already did are
+	# removed rather than tolerated -- that is what lets ON_ERROR_STOP stay on.
+	fed="$(cat "$base/out/restore-stdin.sql" 2>/dev/null || true)"
+	if printf '%s\n' "$fed" | grep -qxF 'CREATE ROLE mcsd;'; then
+		fail_test "happy path: the bootstrap role's CREATE was fed to psql -- it errors"
+	else
+		ok "happy path: the bootstrap role's CREATE is filtered out"
+	fi
+	# ...and only that one line: the ALTER carries the attributes and password.
+	if printf '%s\n' "$fed" | grep -q '^ALTER ROLE mcsd WITH'; then
+		ok "happy path: the bootstrap role's ALTER still runs"
+	else
+		fail_test "happy path: the role's attributes were filtered away too -- $fed"
+	fi
+	if printf '%s\n' "$fed" | grep -q '^CREATE ROLE reporter;'; then
+		ok "happy path: other roles are untouched"
+	else
+		fail_test "happy path: a non-bootstrap role was filtered out -- $fed"
+	fi
+	if printf '%s\n' "$fed" | grep -q '^CREATE DATABASE mcsd WITH'; then
+		ok "happy path: the dump's own CREATE DATABASE runs (original encoding/locale)"
+	else
+		fail_test "happy path: CREATE DATABASE was filtered out -- $fed"
+	fi
+	rm -rf "$base"
+}
+
+# --- 9b. The restore itself fails -- non-zero exit, and say it is partial ---
+# psql erroring out mid-restore is the case ON_ERROR_STOP=1 exists to produce;
+# reporting success here is the worst outcome this script can have.
+{
+	base="$(make_fixture)"
+	run_upgrade "$base" MOCK_PG_VERSION=17 MOCK_RESTORE_FAILS=1
+	if [ "$exit_code" -ne 0 ]; then
+		ok "restore fails: exits non-zero"
+	else
+		fail_test "restore fails: expected a non-zero exit, got 0 -- $output"
+	fi
+	case "$output" in
+		*PARTIALLY*) ok "restore fails: warns the database is partially restored" ;;
+		*) fail_test "restore fails: no partial-restore warning -- $output" ;;
+	esac
+	# The two copies of the data must still be named as recoverable.
+	case "$output" in
+		*.tar.gz*) ok "restore fails: points at the surviving archive" ;;
+		*) fail_test "restore fails: does not point at the archive -- $output" ;;
+	esac
+	rm -rf "$base"
+}
+
+# --- 9c. Dropping the freshly initdb'd database fails -- abort ---
+{
+	base="$(make_fixture)"
+	run_upgrade "$base" MOCK_PG_VERSION=17 MOCK_DROPDB_FAILS=1
+	if [ "$exit_code" -ne 0 ]; then
+		ok "drop of the fresh database fails: exits non-zero"
+	else
+		fail_test "drop of the fresh database fails: expected a non-zero exit, got 0 -- $output"
+	fi
+	case "$log" in
+		*"restore "*) fail_test "drop failed but the restore ran anyway -- $log" ;;
+		*) ok "drop of the fresh database fails: no restore was attempted" ;;
+	esac
+	rm -rf "$base"
+}
+
+# --- 9d. A dump whose bootstrap role this script cannot pin down -- refuse ---
+# The filter is exact and counted. A dump that does not have exactly one
+# `CREATE ROLE <user>;` line is one this script has misread, and guessing would
+# either feed psql a statement that errors under ON_ERROR_STOP or silently drop
+# more than intended.
+for dump_mode in double_role; do
+	base="$(make_fixture)"
+	run_upgrade "$base" MOCK_PG_VERSION=17 "MOCK_DUMP_MODE=$dump_mode"
+	if [ "$exit_code" -ne 0 ]; then
+		ok "dump with an unreadable bootstrap role ($dump_mode): refused"
+	else
+		fail_test "dump with an unreadable bootstrap role ($dump_mode): expected refusal, got 0 -- $output"
+	fi
+	case "$log" in
+		*"restore "*) fail_test "$dump_mode: restored anyway -- $log" ;;
+		*) ok "$dump_mode: no restore was attempted" ;;
+	esac
+	rm -rf "$base"
+done
+
+# --- 9e. A dump with no CREATE DATABASE for POSTGRES_DB -- do not drop it ---
+# The drop exists solely to make room for the dump's own CREATE DATABASE. With
+# no such statement there is nothing to make room for, and dropping would throw
+# away the only database there is.
+{
+	base="$(make_fixture)"
+	run_upgrade "$base" MOCK_PG_VERSION=17 MOCK_DUMP_MODE=no_createdb
+	if [ "$exit_code" -eq 0 ]; then
+		ok "dump without CREATE DATABASE: still completes"
+	else
+		fail_test "dump without CREATE DATABASE: expected exit 0, got $exit_code -- $output"
+	fi
+	case "$log" in
+		*dropdb*) fail_test "dump without CREATE DATABASE: dropped it anyway -- $log" ;;
+		*) ok "dump without CREATE DATABASE: the database is left alone" ;;
 	esac
 	rm -rf "$base"
 }
