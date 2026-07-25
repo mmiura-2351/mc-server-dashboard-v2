@@ -41,7 +41,12 @@ func writeGeneration(workingDir string, gen uint64) error {
 	if err := os.MkdirAll(workingDir, 0o750); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(workingDir, ".mcsd_generation-*")
+	// The pattern is DERIVED from generationFile, not spelled out: hasWorkingSet
+	// (issue #2279), the snapshot pack (issue #834) and sweepGenerationTemps
+	// (issue #2283) all recognise a temp by that same prefix, so a literal here
+	// would let a rename of the constant leave the creation site behind and strand
+	// temps no consumer matches (issue #2287).
+	tmp, err := os.CreateTemp(workingDir, generationFile+"-*")
 	if err != nil {
 		return err
 	}

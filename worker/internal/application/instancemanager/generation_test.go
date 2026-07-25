@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
@@ -177,6 +178,72 @@ func TestWriteGenerationKeepsTempFormDirectory(t *testing.T) {
 	if info, err := os.Stat(sub); err != nil || !info.IsDir() {
 		t.Fatalf("temp-form directory removed by the sweep: stat err = %v", err)
 	}
+}
+
+// TestStrandedGenerationTempMatchesTheMarkerTempPredicates proves the temp name
+// writeGeneration actually creates is the one every consumer's marker-temp predicate
+// matches (issue #2287). The creation site and the three predicates are coupled only
+// by the string they share, so a rename of generationFile that misses the creation
+// site would strand temps no consumer recognises: hasWorkingSet (issue #2279) and the
+// snapshot pack (issue #834) would read a leftover as working-set content — the Worker
+// then advertises holding a world it does not hold — and sweepGenerationTemps (issue
+// #2283) would stop reclaiming them.
+//
+// So the expectations here are DERIVED from generationFile rather than hardcoded: a
+// rename that carries the creation site with it keeps this test green, while one that
+// leaves the creation site behind turns it red. That is the opposite of the literal
+// pin in generation_marker_name_test.go, which guards the marker's cross-package NAME;
+// this guards the temp PATTERN against the constant it is built from.
+//
+// The temp is stranded through the real creation site: a directory sitting at the
+// marker path makes the rename fail, leaving behind exactly what a crash between the
+// temp write and the rename leaves behind.
+func TestStrandedGenerationTempMatchesTheMarkerTempPredicates(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, generationFile), 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeGeneration(dir, 5); err == nil {
+		t.Fatal("writeGeneration = nil, want the rename onto a directory to fail so its temp is stranded")
+	}
+
+	stranded := strandedGenerationTemp(t, dir)
+	if !strings.HasPrefix(stranded, generationFile+"-") {
+		t.Fatalf("stranded temp %q does not carry the %q prefix: the creation site no longer "+
+			"derives its pattern from generationFile, so sweepGenerationTemps (issue #2283) "+
+			"cannot reclaim it", stranded, generationFile+"-")
+	}
+	if hasWorkingSet(dir) {
+		t.Fatalf("a dir holding only the stranded temp %q reads as a working set: the Worker "+
+			"would advertise holding a world it does not hold (issue #2279)", stranded)
+	}
+
+	sweepGenerationTemps(dir)
+
+	if _, err := os.Stat(filepath.Join(dir, stranded)); !os.IsNotExist(err) {
+		t.Fatalf("stranded temp %q survived the sweep: stat err = %v", stranded, err)
+	}
+}
+
+// strandedGenerationTemp returns the name of the single entry in dir that is not the
+// marker path itself, failing the test when there is not exactly one.
+func strandedGenerationTemp(t *testing.T, dir string) string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, entry := range entries {
+		if entry.Name() != generationFile {
+			names = append(names, entry.Name())
+		}
+	}
+	if len(names) != 1 {
+		t.Fatalf("entries besides the marker path = %v, want exactly the stranded temp", names)
+	}
+	return names[0]
 }
 
 // TestGenerationMarkerRetainedOnRestart proves a transient restart retains the
