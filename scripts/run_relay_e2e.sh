@@ -135,7 +135,15 @@ for _ in $(seq 1 90); do
   sleep 2
 done
 if [ -z "$ready" ]; then
-  echo "API did not become ready; recent logs:" >&2
+  # db is a dependency of every other service here, so a stack that fails to come
+  # up usually names its cause in the DB's logs; the api's only show that it never
+  # got a healthy database (issue #2294). Print both, plus the service status so
+  # the failing container is obvious.
+  echo "API did not become ready; service status:" >&2
+  "${COMPOSE[@]}" --env-file "$ENV_FILE" ps >&2 || true
+  echo "recent db logs:" >&2
+  "${COMPOSE[@]}" --env-file "$ENV_FILE" logs --tail=80 db >&2 || true
+  echo "recent api logs:" >&2
   "${COMPOSE[@]}" --env-file "$ENV_FILE" logs --tail=80 api >&2 || true
   exit 1
 fi
