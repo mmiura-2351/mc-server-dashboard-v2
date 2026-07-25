@@ -31,7 +31,9 @@ const generationFile = ".mcsd_generation"
 // (issue #787). The directory is fsynced after the rename so the rename itself is
 // durable: the caller (handleHydrate) reaches this only after Hydrate has already
 // fsynced the working tree the marker describes, so the marker can never become
-// durable before that tree.
+// durable before that tree. A successful write also sweeps the temp siblings that
+// earlier crashed writes stranded in workingDir (sweepGenerationTemps, issue #2283),
+// so the cleanup is self-healing rather than a separate mechanism.
 func writeGeneration(workingDir string, gen uint64) error {
 	// Ensure the working dir exists: a hydrate that served a 204 (no published
 	// snapshot) does not create it, but the generation (0) still needs recording so
@@ -64,10 +66,55 @@ func writeGeneration(workingDir string, gen uint64) error {
 	if err := os.Rename(tmpName, filepath.Join(workingDir, generationFile)); err != nil {
 		return err
 	}
+	sweepGenerationTemps(workingDir)
 	// fsync the dir so the rename (the marker's appearance) is itself durable, not
 	// just the file contents: the ordering guarantee (issue #787) requires the
 	// marker to become durable only AFTER the tree it describes.
 	return fsyncDir(workingDir)
+}
+
+// sweepGenerationTemps removes the ".mcsd_generation-XXXX" temp siblings a crashed
+// earlier marker write left behind in workingDir (issue #2283). A crash between the
+// temp write and the rename strands one such file per crash, and nothing else
+// reclaims them until the whole scratch dir is GC'd, so the next successful marker
+// write cleans up after its predecessors.
+//
+// It runs AFTER the rename, so the marker itself already carries its final name and
+// is never matched: the predicate requires the temp form (the marker name plus "-"),
+// not merely the marker prefix that hasWorkingSet (issue #2279) and the snapshot pack
+// (issue #834) treat as non-content — those two only IGNORE what they match, while
+// this unlinks it, so an over-broad match here would delete real files. Directories
+// are skipped for the same reason.
+//
+// The sweep CAN unlink a CONCURRENT writer's in-flight temp, and does so in practice
+// (8 goroutines x 50 writes on one dir: 0 rename errors without the sweep, ~300
+// ENOENT renames with it). Two writeGeneration calls do overlap on one workingDir:
+// the per-server FIFO lanes are per-STREAM (the dispatcher is recreated per serve,
+// domain/session/session.go), and a running-id snapshot deliberately takes no id
+// reservation (issue #829 item 4, handleSnapshot) though a hydrate and a stopped-id
+// snapshot do, so a dropped stream's post-upload snapshot tail (recordGeneration) can
+// still run while a NEW stream's hydrate records its own marker — the same window
+// documented as issue #917 item 3.
+//
+// That is accepted rather than prevented, because what the loser loses is bounded: the
+// marker can never be absent or torn (the winner's rename precedes this sweep and its
+// final name is never matched), so the loser forfeits only a best-effort marker UPDATE
+// — which writeGeneration's contract already permits and recordGeneration logs without
+// propagating — and a lost update costs at most one extra hydrate. Which of two
+// concurrent writes wins was already last-rename-wins before this sweep existed. The
+// sweep is otherwise best-effort too: a ReadDir or Remove failure is ignored so it can
+// never fail the marker write.
+func sweepGenerationTemps(workingDir string) {
+	entries, err := os.ReadDir(workingDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), generationFile+"-") {
+			continue
+		}
+		_ = os.Remove(filepath.Join(workingDir, entry.Name()))
+	}
 }
 
 // fsyncDir fsyncs a directory so a rename/create within it is durable. The dir is

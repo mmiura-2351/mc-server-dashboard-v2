@@ -129,6 +129,56 @@ func TestGenerationMarkerRemovedAfterFinalSnapshot(t *testing.T) {
 	}
 }
 
+// TestWriteGenerationSweepsStaleTempSiblings proves a successful marker write
+// reclaims the ".mcsd_generation-XXXX" temp siblings a crashed earlier write left
+// behind (issue #2283): the leftovers are removed, the marker itself holds the new
+// generation, and real working-set content is untouched.
+func TestWriteGenerationSweepsStaleTempSiblings(t *testing.T) {
+	dir := t.TempDir()
+	leftover := filepath.Join(dir, ".mcsd_generation-123456")
+	if err := os.WriteFile(leftover, []byte("3"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	content := filepath.Join(dir, "server.properties")
+	if err := os.WriteFile(content, []byte("level-name=world"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeGeneration(dir, 9); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
+		t.Fatalf("stale temp sibling survived the marker write: stat err = %v", err)
+	}
+	if got := readGeneration(dir); got != 9 {
+		t.Fatalf("generation = %d, want 9 (the sweep must not remove the marker itself)", got)
+	}
+	if data, err := os.ReadFile(content); err != nil || string(data) != "level-name=world" {
+		t.Fatalf("working-set content = %q (err %v), want it untouched", data, err)
+	}
+}
+
+// TestWriteGenerationKeepsTempFormDirectory proves the sweep only reclaims FILES in
+// the temp form (issue #2283): a directory whose name happens to carry the temp
+// prefix is working-set content the scan already ignores, and deleting it would
+// silently destroy data.
+func TestWriteGenerationKeepsTempFormDirectory(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, ".mcsd_generation-dir")
+	if err := os.MkdirAll(sub, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeGeneration(dir, 4); err != nil {
+		t.Fatal(err)
+	}
+
+	if info, err := os.Stat(sub); err != nil || !info.IsDir() {
+		t.Fatalf("temp-form directory removed by the sweep: stat err = %v", err)
+	}
+}
+
 // TestGenerationMarkerRetainedOnRestart proves a transient restart retains the
 // generation marker (the same Worker keeps its live working set), so the held
 // generation is re-reported on the next registration (issue #763).
