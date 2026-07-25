@@ -60,6 +60,24 @@ TLS_DIR="$(mktemp -d)"
 chmod 755 "$TLS_DIR"   # mktemp -d creates 0700; the relay container is non-root (uid 10001)
 
 cleanup() {
+  local status=$?   # must stay the first statement: every command below clobbers $?
+
+  # Any non-zero exit gets the stack's state dumped BEFORE the teardown destroys
+  # it (issue #2294). This lives in the trap rather than at the individual wait
+  # loops because the most common startup failure never reaches them: `migrate`
+  # depends on `db: condition: service_healthy` (compose.yaml), so a db that never
+  # becomes healthy makes `up` itself fail with "dependency failed to start:
+  # container ... is unhealthy" and `set -e` ends the script right there.
+  # Dumped regardless of MCD_RELAY_E2E_KEEP: the diagnostics belong in the run's
+  # own output (that is what a CI reader has), and every call is non-fatal so the
+  # original exit status still propagates.
+  if [ "$status" -ne 0 ]; then
+    echo "harness failed (exit $status); service status:" >&2
+    "${COMPOSE[@]}" --env-file "$ENV_FILE" ps -a >&2 || true
+    echo "recent logs (all services):" >&2
+    "${COMPOSE[@]}" --env-file "$ENV_FILE" logs --tail=80 >&2 || true
+  fi
+
   # MCD_RELAY_E2E_KEEP=1 leaves the stack up for debugging (tear it down manually
   # with `docker compose -p mcsd-relay-e2e down -v`).
   if [ "${MCD_RELAY_E2E_KEEP:-}" != "1" ]; then
@@ -135,8 +153,8 @@ for _ in $(seq 1 90); do
   sleep 2
 done
 if [ -z "$ready" ]; then
-  echo "API did not become ready; recent logs:" >&2
-  "${COMPOSE[@]}" --env-file "$ENV_FILE" logs --tail=80 api >&2 || true
+  # Names WHICH wait failed; the cleanup trap dumps the status and the logs.
+  echo "API did not become ready" >&2
   exit 1
 fi
 
@@ -155,8 +173,7 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 if [ -z "$relay_ready" ]; then
-  echo "relay did not register; recent logs:" >&2
-  "${COMPOSE[@]}" --env-file "$ENV_FILE" logs --tail=60 relay >&2 || true
+  echo "relay did not register" >&2
   exit 1
 fi
 
