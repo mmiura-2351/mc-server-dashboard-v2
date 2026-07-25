@@ -44,8 +44,8 @@ jobs:
     # pinned per docs/dev/DEPENDENCIES.md, reusing the api.yml-vetted digest.
     services:
       postgres:
-        # postgres:17.6-alpine (pushed 2025-10-24, outside the cooldown).
-        image: postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
+        # postgres:18.4-alpine (pushed 2026-07-08, outside the cooldown).
+        image: postgres@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
         env:
           POSTGRES_USER: mcsd
           POSTGRES_PASSWORD: mcsd
