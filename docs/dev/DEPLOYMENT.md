@@ -906,8 +906,10 @@ servers), runs a post-deploy `/api/healthz` check, and stamps the new SHA. Use
 > `.last-deploy-sha`). A re-run that finds it **refuses** rather than reporting
 > "nothing to do": a partially restored PostgreSQL 18 cluster and a finished one
 > are both just "the volume holds 18", and bringing the stack up on the first is
-> the one outcome this whole procedure exists to prevent. The recovery
-> instructions tell you when to delete it.
+> the one outcome this whole procedure exists to prevent. That refusal prints the
+> same recovery commands, reconstructed from what the unfinished run recorded in
+> the file — you do not need the original run's output still on screen. The
+> recovery instructions tell you when to delete it.
 >
 > Finish with `docker compose up -d --build`, then log in and check that servers,
 > backups, and snapshots resolve.

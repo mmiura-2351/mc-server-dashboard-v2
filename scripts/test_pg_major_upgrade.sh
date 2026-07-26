@@ -275,6 +275,56 @@ run_upgrade() {
 	log="$(cat "$base/docker.log" 2>/dev/null || true)"
 }
 
+# The section-2b refusals (a previous run did not finish) must print the SAME
+# executable recovery sequence die_recoverable prints, reconstructed from the
+# sentinel. That operator is the one coming back after a crash or a reboot, quite
+# possibly without the original run's output still on screen -- naming the paths
+# and leaving them to reconstruct the commands is the deprivation the failure
+# path was already fixed for.
+assert_recovery_commands() {
+	local label="$1" base="$2" needle recorded_rev after
+	for needle in \
+		"docker compose down" \
+		"docker volume create testproj_db-data" \
+		"tar xzf /src/pg17-testproj_db-data.tar.gz" \
+		"MCSD_ALLOW_PRIMARY_BRANCH=1 git checkout" \
+		"docker compose up -d --wait db" \
+		"rm $base/repo/.pg-upgrade-incomplete"; do
+		case "$output" in
+			*"$needle"*) ok "$label: recovery commands include '$needle'" ;;
+			*) fail_test "$label: recovery commands lack '$needle' -- $output" ;;
+		esac
+	done
+
+	# Reconstructed from the UNFINISHED run's record, never from this run's
+	# state: the volume now holds the target major, or nothing, or something this
+	# run could not read. A recovery that named this run's numbers would put back
+	# the wrong thing, or nothing at all.
+	case "$output" in
+		*"PostgreSQL 17 data back"*)
+			ok "$label: recovery targets the unfinished run's old major" ;;
+		*)
+			fail_test "$label: recovery does not name PostgreSQL 17 as the data to put back -- $output" ;;
+	esac
+	recorded_rev="$(sed -n 's/^old_revision	//p' "$base/repo/.pg-upgrade-incomplete")"
+	case "$output" in
+		*"git checkout ${recorded_rev}"*)
+			ok "$label: recovery checks out the revision the sentinel recorded" ;;
+		*)
+			fail_test "$label: recovery does not check out the recorded revision '${recorded_rev}' -- $output" ;;
+	esac
+
+	# "Recover from that run's archive (below)" has to point AT something: the
+	# archive path itself was printed above, in the sentinel dump.
+	after="${output#*Recover from that run}"
+	case "$after" in
+		*"docker volume create"*)
+			ok "$label: the '(below)' pointer is followed by the commands" ;;
+		*)
+			fail_test "$label: nothing follows the '(below)' pointer -- $output" ;;
+	esac
+}
+
 # Nothing irreversible has happened: the stack was not taken down, the volume
 # was not removed, and no archive was written.
 assert_nothing_destructive() {
@@ -713,6 +763,7 @@ done
 		*.tar.gz*) ok "aborted run: the re-run names the archive to recover from" ;;
 		*) fail_test "aborted run: the re-run hides the archive -- $output" ;;
 	esac
+	assert_recovery_commands "aborted run" "$base"
 	rm -rf "$base"
 }
 
@@ -872,6 +923,7 @@ done
 		*"PARTIALLY RESTORED"*) fail_test "crash before the replacement: calls a missing volume partially restored -- $output" ;;
 		*) ok "crash before the replacement: does not claim a partial restore" ;;
 	esac
+	assert_recovery_commands "crash before the replacement" "$base"
 	rm -rf "$base"
 }
 
@@ -908,6 +960,7 @@ done
 		*"PARTIALLY RESTORED"*) fail_test "crash before initdb: calls an empty volume partially restored -- $output" ;;
 		*) ok "crash before initdb: does not claim a partial restore" ;;
 	esac
+	assert_recovery_commands "crash before initdb" "$base"
 	rm -rf "$base"
 }
 
@@ -920,14 +973,8 @@ done
 # one stale file refuses every future upgrade with no way out but `rm`.
 {
 	base="$(make_fixture)"
-	cat > "$base/repo/.pg-upgrade-incomplete" << 'STALEEOF'
-started      2019-01-01T00:00:00Z
-upgrading    PostgreSQL 9 -> 10
-volume       some_other_deployments_volume
-dump         /nonexistent/old-dumpall.sql
-archive      /nonexistent/old-volume.tar.gz
-old revision 0000000000000000000000000000000000000000
-STALEEOF
+	printf 'started\t2019-01-01T00:00:00Z\ncluster_major\t9\ntarget_major\t10\nvolume\tsome_other_deployments_volume\ndump\t/nonexistent/old-dumpall.sql\narchive\t/nonexistent/old-volume.tar.gz\nold_revision\t0000000000000000000000000000000000000000\n' \
+		> "$base/repo/.pg-upgrade-incomplete"
 	run_upgrade "$base" MOCK_PG_VERSION=17
 	if [ "$exit_code" -eq 0 ]; then
 		ok "stale marker: a genuine pending upgrade still proceeds"
@@ -982,6 +1029,7 @@ STALEEOF
 		*.pg-upgrade-incomplete*) ok "unreadable volume: names the sentinel to delete once recovered" ;;
 		*) fail_test "unreadable volume: no recovery instructions -- $output" ;;
 	esac
+	assert_recovery_commands "unreadable volume" "$base"
 	rm -rf "$base"
 }
 
