@@ -827,6 +827,121 @@ done
 	fi
 }
 
+# --- 10g. Killed between the volume removal and its replacement -------------
+# The destructive phase releases the old volume and then asks compose to
+# recreate it. A crash in between -- `kill -9`, a reboot, nothing a trap could
+# ever catch -- leaves the sentinel on disk and NO volume at all. That is the
+# exact state the script's FIRST "nothing to do" exit is written for, and there
+# it is the most dangerous thing it could say: the data this deployment was
+# running on is at that moment only in the dump and archive the sentinel names.
+# Reproduced against a real daemon with setsid + `kill -9 -<pgid>` before this
+# test was written.
+{
+	base="$(make_fixture)"
+	# An aborted run is how the fixture gets a genuine, correctly populated
+	# sentinel; the volume state below is then set to what the crash leaves.
+	run_upgrade "$base" MOCK_PG_VERSION=17 MOCK_RESTORE_FAILS=1
+	if [ -f "$base/repo/.pg-upgrade-incomplete" ]; then
+		ok "crash before the replacement: the sentinel is on disk"
+	else
+		fail_test "crash before the replacement: no sentinel to test with -- $output"
+	fi
+
+	run_upgrade "$base" MOCK_VOLUME_EXISTS=0
+	if [ "$exit_code" -ne 0 ]; then
+		ok "crash before the replacement: the re-run refuses"
+	else
+		fail_test "crash before the replacement: expected a refusal, got exit 0 -- $output"
+	fi
+	case "$output" in
+		*"nothing to do"*) fail_test "crash before the replacement: the re-run says 'nothing to do' -- $output" ;;
+		*) ok "crash before the replacement: the re-run does not say 'nothing to do'" ;;
+	esac
+	case "$output" in
+		*.tar.gz*) ok "crash before the replacement: the re-run names the archive to recover from" ;;
+		*) fail_test "crash before the replacement: the re-run hides the archive -- $output" ;;
+	esac
+	# Nothing was restored into anything here -- there is no volume. Borrowing
+	# the partially-restored wording would send the operator looking for a
+	# half-written cluster that does not exist.
+	case "$output" in
+		*"PARTIALLY RESTORED"*) fail_test "crash before the replacement: calls a missing volume partially restored -- $output" ;;
+		*) ok "crash before the replacement: does not claim a partial restore" ;;
+	esac
+	rm -rf "$base"
+}
+
+# --- 10h. Killed after the replacement, before initdb wrote PG_VERSION ------
+# The other half of the same window. Compose has recreated the volume but the
+# new cluster's initdb has not written PG_VERSION yet, so the probe reports a
+# volume that exists and holds nothing -- the script's SECOND "nothing to do"
+# exit. Reproduced against a real daemon the same way: the container had only
+# reached Created and `cat /probedata/PG_VERSION` was No such file or directory.
+{
+	base="$(make_fixture)"
+	run_upgrade "$base" MOCK_PG_VERSION=17 MOCK_RESTORE_FAILS=1
+	if [ -f "$base/repo/.pg-upgrade-incomplete" ]; then
+		ok "crash before initdb: the sentinel is on disk"
+	else
+		fail_test "crash before initdb: no sentinel to test with -- $output"
+	fi
+
+	run_upgrade "$base" MOCK_PG_VERSION=
+	if [ "$exit_code" -ne 0 ]; then
+		ok "crash before initdb: the re-run refuses"
+	else
+		fail_test "crash before initdb: expected a refusal, got exit 0 -- $output"
+	fi
+	case "$output" in
+		*"nothing to do"*) fail_test "crash before initdb: the re-run says 'nothing to do' -- $output" ;;
+		*) ok "crash before initdb: the re-run does not say 'nothing to do'" ;;
+	esac
+	case "$output" in
+		*.tar.gz*) ok "crash before initdb: the re-run names the archive to recover from" ;;
+		*) fail_test "crash before initdb: the re-run hides the archive -- $output" ;;
+	esac
+	case "$output" in
+		*"PARTIALLY RESTORED"*) fail_test "crash before initdb: calls an empty volume partially restored -- $output" ;;
+		*) ok "crash before initdb: does not claim a partial restore" ;;
+	esac
+	rm -rf "$base"
+}
+
+# --- 10i. A stale marker does not block a legitimate upgrade ----------------
+# The sentinel check above widened from "the volume already holds the target"
+# to "anything that is not an unambiguous pending upgrade". This is the line it
+# must not cross: a volume still holding the OLD major cannot be the wreckage
+# of a run that got past `docker volume rm`, so that upgrade proceeds whatever
+# the marker says -- and completing it is what clears the marker. Without this,
+# one stale file refuses every future upgrade with no way out but `rm`.
+{
+	base="$(make_fixture)"
+	cat > "$base/repo/.pg-upgrade-incomplete" << 'STALEEOF'
+started      2019-01-01T00:00:00Z
+upgrading    PostgreSQL 9 -> 10
+volume       some_other_deployments_volume
+dump         /nonexistent/old-dumpall.sql
+archive      /nonexistent/old-volume.tar.gz
+old revision 0000000000000000000000000000000000000000
+STALEEOF
+	run_upgrade "$base" MOCK_PG_VERSION=17
+	if [ "$exit_code" -eq 0 ]; then
+		ok "stale marker: a genuine pending upgrade still proceeds"
+	else
+		fail_test "stale marker: the upgrade was blocked -- $output"
+	fi
+	case "$log" in
+		*"restore "*) ok "stale marker: the upgrade really ran (the dump was restored)" ;;
+		*) fail_test "stale marker: no restore happened -- $log" ;;
+	esac
+	if [ ! -f "$base/repo/.pg-upgrade-incomplete" ]; then
+		ok "stale marker: the completed run clears it"
+	else
+		fail_test "stale marker: left behind after a successful run"
+	fi
+	rm -rf "$base"
+}
+
 # ---------------------------------------------------------------------------
 echo
 echo "Results: $pass passed, $fail failed"

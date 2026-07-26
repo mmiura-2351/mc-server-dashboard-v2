@@ -90,32 +90,75 @@ pg_resolve_compose_facts || die "$pg_reason"
 
 probe_status=0
 pg_probe_cluster_major "$pg_volume_name" "$pg_db_image" || probe_status=$?
-case "$probe_status" in
-	2)
-		say "volume '${pg_volume_name}' does not exist -- nothing to do (the next deploy creates it at PostgreSQL ${pg_target_major})."
-		exit 0
-		;;
-	1) die "$pg_reason" ;;
-esac
+if [ "$probe_status" -eq 1 ]; then
+	die "$pg_reason"
+fi
+
+# ── 2b. Did a previous run leave this volume mid-migration? ──────────────────
+# The sentinel records that a PREVIOUS run entered the destructive phase and did
+# not come out. That is a fact about that run, not about what the volume holds
+# now, so it is read BEFORE this run branches on the volume's contents. The
+# destructive phase releases the volume and then waits on compose to recreate it
+# and initdb to populate it; a crash in either gap (kill -9, a reboot -- nothing
+# a trap could catch) leaves the volume missing, or present and empty. Both of
+# those reach a "nothing to do" exit below, which is the most dangerous thing
+# this script can say to an operator whose running data is at that instant only
+# in the dump and archive the sentinel names.
+#
+# A genuine major mismatch is the one state that is NOT ambiguous: the volume
+# still holds the old cluster, so no previous run can have got past the removal,
+# and the upgrade this script exists for is still pending. That case proceeds
+# whatever the marker says -- which is also what keeps a stale marker from
+# refusing every future upgrade, since a successful run clears it.
+refuse_unfinished_run() {
+	local headline="$1" line
+	shift
+	echo "pg upgrade: ${headline}" >&2
+	for line in "$@"; do
+		echo "  ${line}" >&2
+	done
+	echo "  The unfinished run recorded:" >&2
+	sed 's/^/    /' "$sentinel" >&2
+	echo "  Recover from that run's archive (below), or re-restore its dump by hand; then delete" >&2
+	echo "  ${sentinel} once the cluster is good again." >&2
+	exit 1
+}
+if [ -f "$sentinel" ]; then
+	# Nothing was restored in either of the first two: saying "PARTIALLY
+	# RESTORED" there would send the operator hunting for a half-written cluster
+	# that does not exist. What is true is simpler and worse.
+	if [ "$probe_status" -eq 2 ]; then
+		refuse_unfinished_run \
+			"volume '${pg_volume_name}' does not exist, but a previous run of this script did not finish." \
+			"That run released the volume and never got a replacement into place. NOTHING has been" \
+			"restored: this deployment has no database, and the only copies of its data are the dump" \
+			"and archive recorded below. Do not deploy -- that would start the stack on an EMPTY volume."
+	elif [ -z "$pg_cluster_major" ]; then
+		refuse_unfinished_run \
+			"volume '${pg_volume_name}' holds no PostgreSQL cluster, but a previous run of this script did not finish." \
+			"That run released the old volume and its replacement never finished initializing. NOTHING" \
+			"has been restored: the only copies of this deployment's data are the dump and archive" \
+			"recorded below. Do not deploy -- that would start the stack on an EMPTY volume."
+	elif [ "$pg_cluster_major" -eq "$pg_target_major" ]; then
+		refuse_unfinished_run \
+			"volume '${pg_volume_name}' holds PostgreSQL ${pg_cluster_major}, but a previous run of this script did not finish restoring into it." \
+			"That cluster is PARTIALLY RESTORED. Do not bring the stack up on it."
+	fi
+fi
+
+if [ "$probe_status" -eq 2 ]; then
+	say "volume '${pg_volume_name}' does not exist -- nothing to do (the next deploy creates it at PostgreSQL ${pg_target_major})."
+	exit 0
+fi
 if [ -z "$pg_cluster_major" ]; then
 	say "volume '${pg_volume_name}' holds no PostgreSQL cluster -- nothing to do."
 	exit 0
 fi
 # The re-run case: after a successful upgrade the volume already matches, so a
-# second invocation stops here instead of starting over -- UNLESS a previous run
-# left the sentinel behind, in which case this cluster is the wreckage of that
-# run rather than the result of a finished one, and "nothing to do" would be the
-# most dangerous thing this script could say.
+# second invocation stops here instead of starting over. What makes that safe is
+# the sentinel check above -- without it this exit cannot tell a COMPLETED
+# upgrade from the wreckage of one that died halfway.
 if [ "$pg_cluster_major" -eq "$pg_target_major" ]; then
-	if [ -f "$sentinel" ]; then
-		echo "pg upgrade: volume '${pg_volume_name}' holds PostgreSQL ${pg_cluster_major}, but a previous run of this script did not finish restoring into it." >&2
-		echo "  That cluster is PARTIALLY RESTORED. Do not bring the stack up on it." >&2
-		echo "  The unfinished run recorded:" >&2
-		sed 's/^/    /' "$sentinel" >&2
-		echo "  Recover from that run's archive (below), or re-restore its dump by hand; then delete" >&2
-		echo "  ${sentinel} once the cluster is good again." >&2
-		exit 1
-	fi
 	say "volume '${pg_volume_name}' already holds PostgreSQL ${pg_cluster_major}, which is what origin/main deploys (${pg_db_image}) -- nothing to do."
 	exit 0
 fi
