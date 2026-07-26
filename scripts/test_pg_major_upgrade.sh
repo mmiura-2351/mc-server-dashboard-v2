@@ -42,18 +42,21 @@ write_compose() {
 }
 
 # ---------------------------------------------------------------------------
-# Fixture: a clean temp repo on 'main' with an 'origin' to pull from, plus stub
-# `sg` and `docker` in a sibling bin/ (outside the repo, or the stubs would make
-# the working tree dirty). Prints the base dir.
+# Fixture: a clean temp repo on 'main' with an 'origin', plus stub `sg` and
+# `docker` in a sibling bin/ (outside the repo, or the stubs would make the
+# working tree dirty). Prints the base dir.
 #
-#   make_fixture [working-tree image] [origin/main image]
+#   make_fixture [old image] [new image]
 #
-# The default models the state the operator is actually in when the preflight
-# refuses: the tree still pins the OLD image, origin/main pins the new one, and
-# nothing has been pulled yet.
+# Two commits: the first pins the OLD image (the revision the running stack was
+# built from), the second pins the NEW one, and the checkout is left on the
+# second. That is the state the operator is in when they run this script -- they
+# have already pulled, because pulling is how they obtained it at all (#2309).
+# Passing the same image twice leaves a single commit, which is what a checkout
+# that has NOT pulled looks like: the new revision is not in its history yet.
 # ---------------------------------------------------------------------------
 make_fixture() {
-	local wt_image="${1:-postgres:17}" origin_image="${2:-postgres:18}" base dir bin
+	local old_image="${1:-postgres:17}" new_image="${2:-postgres:18}" base dir bin
 	base="$(mktemp -d)"
 	dir="$base/repo"
 	bin="$base/bin"
@@ -61,23 +64,20 @@ make_fixture() {
 	git -C "$dir" init -b main -q
 	git -C "$dir" config user.email "test@example.com"
 	git -C "$dir" config user.name "Test"
-	write_compose "$dir" "$wt_image"
+	write_compose "$dir" "$old_image"
 	# Mirrors the real repo: the incomplete-upgrade sentinel is gitignored, so
 	# writing it must not make the tree dirty for the next run's precondition.
 	printf '.pg-upgrade-incomplete\n' > "$dir/.gitignore"
 	git -C "$dir" add compose.yaml .gitignore
 	git -C "$dir" commit -q -m "init"
+	if [ "$new_image" != "$old_image" ]; then
+		write_compose "$dir" "$new_image"
+		git -C "$dir" commit -q -am "bump the db image"
+	fi
 
 	git init -q --bare "$base/origin.git"
 	git -C "$dir" remote add origin "$base/origin.git"
 	git -C "$dir" push -q origin main
-	if [ "$origin_image" != "$wt_image" ]; then
-		write_compose "$dir" "$origin_image"
-		git -C "$dir" commit -q -am "bump the db image"
-		git -C "$dir" push -q origin main
-		git -C "$dir" reset -q --hard HEAD~1
-	fi
-	git -C "$dir" update-ref -d refs/remotes/origin/main
 
 	# `sg <group> -c <command>` -- run the command string, ignoring the group.
 	# `exec` so stdin, stdout and the exit status all pass straight through: the
@@ -367,6 +367,30 @@ echo "=== pg_major_upgrade tests ==="
 	rm -rf "$base"
 }
 
+# --- 1b. Run BEFORE pulling -- nothing to do, and say why ------------------
+# The one wrong turn the new order makes possible (#2309). A checkout that has
+# not pulled still pins the old image, so it matches the volume and this exits
+# "nothing to do" -- which is true of THIS checkout and the exact opposite of
+# what the operator wanted to hear. It has to name the pull, or they read it as
+# "no upgrade is pending" and deploy into the entrypoint abort.
+{
+	base="$(make_fixture postgres:17 postgres:17)"
+	run_upgrade "$base" MOCK_PG_VERSION=17
+	if [ "$exit_code" -eq 0 ]; then
+		ok "not pulled yet: exits 0"
+	else
+		fail_test "not pulled yet: expected exit 0, got $exit_code -- $output"
+	fi
+	case "$output" in
+		*"git pull --ff-only origin main"*)
+			ok "not pulled yet: points at the pull that would make an upgrade pending" ;;
+		*)
+			fail_test "not pulled yet: 'nothing to do' with no mention of pulling -- $output" ;;
+	esac
+	assert_nothing_destructive "not pulled yet" "$base"
+	rm -rf "$base"
+}
+
 # --- 2. No db-data volume at all -- nothing to migrate ---
 {
 	base="$(make_fixture)"
@@ -476,6 +500,7 @@ done
 # --- 9. The happy path, end to end ---
 {
 	base="$(make_fixture)"
+	head_before="$(git -C "$base/repo" rev-parse HEAD)"
 	run_upgrade "$base" MOCK_PG_VERSION=17
 	if [ "$exit_code" -eq 0 ]; then
 		ok "happy path: exits 0"
@@ -537,12 +562,20 @@ done
 		*) fail_test "happy path: did not wait for the new db -- $log" ;;
 	esac
 
-	# The restore has to run against the NEW major, which means the checkout
-	# must be on the incoming revision by then.
+	# The restore runs against the NEW major because the operator pulled before
+	# invoking this -- the script does not move the checkout itself, and must not:
+	# a run that pulled would be validating one revision and deploying another,
+	# and the revision it came from would be gone from HEAD by the time the
+	# recovery block needs it (#2309).
 	if grep -q 'postgres:18' "$base/repo/compose.yaml"; then
-		ok "happy path: the checkout is on the incoming revision"
+		ok "happy path: the restore ran against the checkout's own revision"
 	else
-		fail_test "happy path: the checkout was never advanced to origin/main"
+		fail_test "happy path: the checkout no longer pins the image the run validated"
+	fi
+	if [ "$(git -C "$base/repo" rev-parse HEAD)" = "$head_before" ]; then
+		ok "happy path: the checkout is left exactly where the operator put it"
+	else
+		fail_test "happy path: the run moved HEAD from $head_before to $(git -C "$base/repo" rev-parse HEAD)"
 	fi
 
 	# Both artifacts survive the run, and the operator is told where they are
@@ -676,7 +709,7 @@ done
 	rm -rf "$base"
 }
 
-# --- 10. A dirty working tree -- refuse (the run pulls origin/main) ---
+# --- 10. A dirty working tree -- refuse (HEAD is not what it would deploy) ---
 {
 	base="$(make_fixture)"
 	echo "stray" > "$base/repo/stray.txt"
@@ -823,7 +856,10 @@ done
 	recovery_checkout="$(printf '%s\n' "$output" | grep 'git checkout ' | grep -v 'git checkout main' | head -n 1)"
 	recovery_checkout="${recovery_checkout#pg upgrade:}"
 	recovery_checkout="${recovery_checkout%%#*}"
-	recovery_sha="${recovery_checkout##* }"
+	# Trailing spaces before the comment marker, so a suffix strip on the last
+	# space yields "" -- and `git checkout ""` fails, leaving HEAD on main and
+	# the negative control below passing for the wrong reason.
+	recovery_sha="$(printf '%s\n' "$recovery_checkout" | sed -n 's/.*git checkout \([0-9a-f]\{7,\}\).*/\1/p')"
 
 	# Negative control, so the assertions below cannot pass vacuously: if the hook
 	# is not firing in this fixture at all, every checkout survives and the real
@@ -1091,21 +1127,21 @@ done
 	rm -rf "$base"
 }
 
-# --- 13. origin/main advancing mid-run does not move this run's target ------
-# The facts are resolved once, at step 2, from origin/main. Step 5 then advances
-# the checkout. If those are two independent resolutions, a push that lands in
-# between makes the run validate one revision and restore into another -- and
-# `db` would come up on whatever image THAT revision pins, which is the entire
-# thing the version check exists to prevent. This repo's main advances often,
-# including from automated merges, so "nobody pushes during the window" is not
-# an assumption available here.
+# --- 13. A push to origin during the run cannot move this run's target ------
+# The old design resolved origin/main and then fast-forwarded onto it, so a merge
+# landing in between could make the run validate one revision and restore into
+# another. Running post-pull removes that window structurally rather than
+# carefully: the run reads HEAD, never the remote, and never moves the checkout.
+# This repo's main advances often, including from automated merges, so "nobody
+# pushes during the window" was never an assumption available here.
 {
 	base="$(make_fixture postgres:17 postgres:18)"
-	validated_rev="$(git -C "$base/origin.git" rev-parse main)"
+	pulled_rev="$(git -C "$base/repo" rev-parse HEAD)"
 
-	# Lands while the writers are being stopped: facts resolved, checkout not yet
-	# advanced. A clone, so the run's own working tree is untouched -- a dirty
-	# tree would be refused by a precondition and the test would pass vacuously.
+	# Lands while the writers are being stopped -- the same instant the old
+	# fast-forward window opened. A clone, so the run's own working tree is
+	# untouched: a dirty tree would be refused by a precondition and the test
+	# would pass vacuously.
 	cat > "$base/advance-origin.sh" << ADVANCEEOF
 set -e
 tmp="\$(mktemp -d)"
@@ -1122,7 +1158,7 @@ ADVANCEEOF
 
 	# Negative control first: without a real advance every assertion below passes
 	# for the wrong reason.
-	if [ "$(git -C "$base/origin.git" rev-parse main)" != "$validated_rev" ]; then
+	if [ "$(git -C "$base/origin.git" rev-parse main)" != "$pulled_rev" ]; then
 		ok "mid-run push: origin/main really did advance during the run"
 	else
 		fail_test "mid-run push: origin/main never moved -- the assertions below prove nothing"
@@ -1133,10 +1169,10 @@ ADVANCEEOF
 	else
 		fail_test "mid-run push: expected exit 0, got $exit_code -- $output"
 	fi
-	if [ "$(git -C "$base/repo" rev-parse HEAD)" = "$validated_rev" ]; then
-		ok "mid-run push: the checkout lands on the revision the run validated"
+	if [ "$(git -C "$base/repo" rev-parse HEAD)" = "$pulled_rev" ]; then
+		ok "mid-run push: the checkout stays on the revision the operator pulled"
 	else
-		fail_test "mid-run push: the checkout followed origin/main instead of the validated revision -- $(git -C "$base/repo" rev-parse HEAD) != $validated_rev"
+		fail_test "mid-run push: the checkout followed origin/main -- $(git -C "$base/repo" rev-parse HEAD) != $pulled_rev"
 	fi
 	# The one that bites: the restore ran against whatever image the checkout
 	# holds by then.
@@ -1147,77 +1183,108 @@ ADVANCEEOF
 	rm -rf "$base"
 }
 
-# --- 13b. ...and the sentinel records the revision that was actually used ----
-# A sentinel naming a target the run never deployed into is the misleading
-# artifact it exists to prevent. `old_revision` says where the checkout came
-# from; the target it was taken to has to be recorded too, or the operator
-# cannot tell which of two revisions their half-migrated cluster belongs to.
+# --- 13b. The sentinel records both ends of the migration -------------------
+# A half-migrated cluster belongs to one specific pair of revisions: the one
+# whose major wrote the data, and the one it was being taken to. `HEAD` names
+# neither of them a week later, so both are written down.
 {
 	base="$(make_fixture postgres:17 postgres:18)"
-	validated_rev="$(git -C "$base/origin.git" rev-parse main)"
-	cat > "$base/advance-origin.sh" << ADVANCEEOF
-set -e
-tmp="\$(mktemp -d)"
-git clone -q --branch main "$base/origin.git" "\$tmp/c"
-git -C "\$tmp/c" config user.email "test@example.com"
-git -C "\$tmp/c" config user.name "Test"
-printf 'services:\n  db:\n    image: postgres:19\n    volumes:\n      - db-data:/var/lib/postgresql\nvolumes:\n  db-data:\n' > "\$tmp/c/compose.yaml"
-git -C "\$tmp/c" commit -q -am "someone else's merge lands mid-run"
-git -C "\$tmp/c" push -q origin main
-rm -rf "\$tmp"
-ADVANCEEOF
+	pulled_rev="$(git -C "$base/repo" rev-parse HEAD)"
+	old_rev="$(git -C "$base/repo" rev-parse HEAD~1)"
 
 	# The restore fails, so the sentinel survives to be read.
-	run_upgrade "$base" MOCK_PG_VERSION=17 MOCK_RESTORE_FAILS=1 MOCK_ON_STOP="$base/advance-origin.sh"
-	if [ "$(git -C "$base/origin.git" rev-parse main)" != "$validated_rev" ]; then
-		ok "mid-run push: origin/main advanced for the sentinel case too"
-	else
-		fail_test "mid-run push: origin/main never moved -- the sentinel assertions prove nothing"
-	fi
+	run_upgrade "$base" MOCK_PG_VERSION=17 MOCK_RESTORE_FAILS=1
 
-	recorded_target_major="$(sed -n 's/^target_major	//p' "$base/repo/.pg-upgrade-incomplete")"
+	recorded_target_major="$(sed -n 's/^target_major\t//p' "$base/repo/.pg-upgrade-incomplete")"
 	if [ "$recorded_target_major" = "18" ]; then
-		ok "mid-run push: the sentinel's target major is the one that was deployed"
+		ok "sentinel: the target major is the one that was deployed"
 	else
-		fail_test "mid-run push: the sentinel records target major '$recorded_target_major', not 18"
+		fail_test "sentinel: records target major '$recorded_target_major', not 18"
 	fi
-	recorded_target_rev="$(sed -n 's/^target_revision	//p' "$base/repo/.pg-upgrade-incomplete")"
-	if [ "$recorded_target_rev" = "$validated_rev" ]; then
-		ok "mid-run push: the sentinel names the revision the run was taking the checkout to"
+	recorded_target_rev="$(sed -n 's/^target_revision\t//p' "$base/repo/.pg-upgrade-incomplete")"
+	if [ "$recorded_target_rev" = "$pulled_rev" ]; then
+		ok "sentinel: names the revision the run restored into"
 	else
-		fail_test "mid-run push: the sentinel records target revision '$recorded_target_rev', not $validated_rev"
+		fail_test "sentinel: records target revision '$recorded_target_rev', not $pulled_rev"
+	fi
+	recorded_old_rev="$(sed -n 's/^old_revision\t//p' "$base/repo/.pg-upgrade-incomplete")"
+	if [ "$recorded_old_rev" = "$old_rev" ]; then
+		ok "sentinel: names the revision that deploys the major the data came from"
+	else
+		fail_test "sentinel: records old revision '$recorded_old_rev', not $old_rev"
 	fi
 	rm -rf "$base"
 }
 
-# --- 13c. A checkout that cannot be fast-forwarded still aborts, non-destructively
-# The advance changed from `git pull --ff-only origin main` to a merge onto the
-# pinned SHA. The refusal it exists to produce -- a checkout carrying a local
-# commit that is not on main -- has to survive that change: same abort, before
-# anything destructive, with a message that names what could not be done.
+# --- 13c. The recovery revision is not the one that was just pulled ---------
+# THE regression this file exists for (#2309). Invoked post-pull, `git rev-parse
+# HEAD` names the revision that deploys the NEW major, so a recovery block built
+# from it tells the operator to restore the old data and then start PostgreSQL 18
+# on it -- the entrypoint abort this whole script exists to avoid, reached by
+# following the recovery instructions verbatim. Every earlier fixture had the
+# script already in its tree, which made HEAD the OLD revision and hid this
+# behind a passing assertion. So the claim tested here is not "a revision is
+# printed" but "the revision printed is not HEAD, and its compose.yaml really
+# does deploy the old major".
 {
 	base="$(make_fixture postgres:17 postgres:18)"
-	# Committed, not just written, or the dirty-tree precondition would refuse
-	# first and this would never reach the fast-forward.
-	echo "local work" > "$base/repo/local.txt"
-	git -C "$base/repo" add local.txt
-	git -C "$base/repo" commit -q -m "a commit that is not on origin/main"
+	pulled_rev="$(git -C "$base/repo" rev-parse HEAD)"
+	run_upgrade "$base" MOCK_PG_VERSION=17 MOCK_RESTORE_FAILS=1
 
-	run_upgrade "$base" MOCK_PG_VERSION=17
-	if [ "$exit_code" -ne 0 ]; then
-		ok "diverged checkout: refused"
+	recovery_rev="$(printf '%s\n' "$output" |
+		sed -n 's/.*git checkout \([0-9a-f]\{7,\}\).*/\1/p' | head -n 1)"
+	if [ -n "$recovery_rev" ] && git -C "$base/repo" rev-parse --verify --quiet "${recovery_rev}^{commit}" > /dev/null; then
+		ok "recovery revision: the block names a commit that exists"
 	else
-		fail_test "diverged checkout: expected a refusal, got exit 0 -- $output"
+		fail_test "recovery revision: '$recovery_rev' is not a commit in this repo -- $output"
 	fi
+	if [ "$recovery_rev" != "$pulled_rev" ]; then
+		ok "recovery revision: it is not the revision that was just pulled"
+	else
+		fail_test "recovery revision: names HEAD ($pulled_rev), which deploys the NEW major"
+	fi
+	case "$(git -C "$base/repo" show "${recovery_rev}:compose.yaml" 2>/dev/null)" in
+		*postgres:17*) ok "recovery revision: its compose.yaml deploys the old major" ;;
+		*) fail_test "recovery revision: ${recovery_rev} does not pin postgres:17 -- $(git -C "$base/repo" show "${recovery_rev}:compose.yaml" 2>&1)" ;;
+	esac
+	rm -rf "$base"
+}
+
+# --- 13d. No revision in history deploys the old major -- say so ------------
+# The honest end of the same question. A shallow clone, or a volume older than
+# anything in this history, leaves nothing to name -- and a plausible-looking SHA
+# would be worse than a gap, because the next line of the recovery block starts a
+# database from whatever it names. The operator hears about it BEFORE the
+# destructive phase, while "stop and go find it" is still free.
+{
+	base="$(make_fixture postgres:18 postgres:18)"
+	run_upgrade "$base" MOCK_PG_VERSION=17 MOCK_RUNNING_MAJOR=17 MOCK_RESTORE_FAILS=1
+
 	case "$output" in
-		*"fast-forward"*) ok "diverged checkout: the message says what could not be done" ;;
-		*) fail_test "diverged checkout: the message does not mention the fast-forward -- $output" ;;
+		*"NOT FOUND"*) ok "no old revision: says it could not find one" ;;
+		*) fail_test "no old revision: never says it could not find one -- $output" ;;
+	esac
+	# Ordering is the point: after the dump starts, the operator is committed.
+	before_dump="${output%%dumping the PostgreSQL*}"
+	case "$before_dump" in
+		*"NOT FOUND"*) ok "no old revision: said before the dump, not in the wreckage" ;;
+		*) fail_test "no old revision: only mentioned after the run was underway -- $output" ;;
 	esac
 	case "$output" in
-		*"is intact"*) ok "diverged checkout: the message says the volume is intact" ;;
-		*) fail_test "diverged checkout: the message does not say the volume survived -- $output" ;;
+		*"NO REVISION FOUND"*) ok "no old revision: the recovery block flags the gap" ;;
+		*) fail_test "no old revision: the recovery block does not flag the gap -- $output" ;;
 	esac
-	assert_nothing_destructive "diverged checkout" "$base"
+	case "$output" in
+		*"git show <rev>:compose.yaml"*) ok "no old revision: tells the operator what to look for" ;;
+		*) fail_test "no old revision: no way to find the revision themselves -- $output" ;;
+	esac
+	# The failure mode being avoided: a real SHA on that line, which the operator
+	# would paste, ending up on a checkout that deploys the NEW major.
+	recovery_line="$(printf '%s\n' "$output" | grep 'MCSD_ALLOW_PRIMARY_BRANCH=1 git checkout' | head -n 1)"
+	case "$recovery_line" in
+		*"<that revision>"*) ok "no old revision: no SHA is offered in its place" ;;
+		*) fail_test "no old revision: the block still names a revision -- $recovery_line" ;;
+	esac
 	rm -rf "$base"
 }
 
