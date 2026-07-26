@@ -197,6 +197,11 @@ async def _aiter(data: bytes) -> object:
     yield data
 
 
+async def _aiter_chunks(chunks: list[bytes]) -> object:
+    for chunk in chunks:
+        yield chunk
+
+
 def _stats() -> BackupStatistics:
     return BackupStatistics(
         count=2,
@@ -462,7 +467,7 @@ def test_member_without_permission_gets_403_on_download() -> None:
 
 
 def test_download_streams_archive_with_disposition() -> None:
-    use_case = _FakeUseCase(result=_aiter(b"archive-bytes"))
+    use_case = _FakeUseCase(result=(_aiter(b"archive-bytes"), len(b"archive-bytes")))
     app = _app(member=True, allow=True, download=use_case)
     client = next(_client(app))
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download"))
@@ -471,6 +476,26 @@ def test_download_streams_archive_with_disposition() -> None:
     assert resp.headers["content-type"] == "application/gzip"
     assert "attachment" in resp.headers["content-disposition"]
     assert ".tar.gz" in resp.headers["content-disposition"]
+
+
+def test_download_declares_content_length_matching_streamed_bytes() -> None:
+    # The load-bearing invariant (issue #2312): a declared length that disagrees
+    # with the streamed byte count corrupts or hangs the response over HTTP/2.
+    chunks = [b"first-chunk", b"second-chunk", b"third"]
+    use_case = _FakeUseCase(
+        result=(_aiter_chunks(chunks), sum(len(chunk) for chunk in chunks))
+    )
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, download=use_case, recorder=recorder)
+    client = next(_client(app))
+    resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download"))
+    assert resp.status_code == 200
+    assert resp.content == b"".join(chunks)
+    assert int(resp.headers["content-length"]) == len(resp.content)
+    assert resp.headers["cache-control"] == "no-store"
+    # The download is still audited exactly once.
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_DOWNLOAD]
+    assert recorder.events[0].outcome is Outcome.SUCCESS
 
 
 def test_download_unknown_backup_is_404() -> None:

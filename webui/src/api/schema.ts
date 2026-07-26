@@ -773,6 +773,9 @@ export interface paths {
          *
          *     No recompression: the exact stored bytes stream out with a ``.tar.gz``
          *     attachment. An unknown / cross-community backup is 404 (no existence signal).
+         *
+         *     The response declares the archive's exact size as ``Content-Length``, so a
+         *     client can show download progress and refuse an over-cap archive up front.
          */
         get: operations["download_backup_api_communities__community_id__servers__server_id__backups__backup_id__download_get"];
         put?: never;
