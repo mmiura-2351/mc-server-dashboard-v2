@@ -43,8 +43,17 @@ vi.mock("../api/client.ts", async () => {
   };
 });
 
+// Only `downloadFile` is stubbed (the other detail-page tabs use it); the real
+// `saveUrlAs` runs so the backups download can be asserted on the anchor it
+// synthesises.
 const mockDownload = vi.hoisted(() => ({ downloadFile: vi.fn() }));
-vi.mock("../api/download.ts", () => mockDownload);
+vi.mock("../api/download.ts", async () => {
+  const actual =
+    await vi.importActual<typeof import("../api/download.ts")>(
+      "../api/download.ts",
+    );
+  return { ...actual, ...mockDownload };
+});
 
 let mockCan: Can = () => true;
 vi.mock("../permissions/ActiveCommunityProvider.tsx", () => ({
@@ -332,20 +341,83 @@ describe("ServerBackupsTab create / upload / download / delete", () => {
     expect((form as FormData).get("file")).toBe(file);
   });
 
-  it("downloads a row through the authenticated helper", async () => {
-    routeGet();
-    mockDownload.downloadFile.mockResolvedValue(undefined);
-    await openBackups();
+  describe("download (minted grant, #2314)", () => {
+    const GRANT_URL = `/api/communities/${CID}/servers/${SID}/backups/${BID}/download?grant=jwt-1`;
+    const clicks: HTMLAnchorElement[] = [];
 
-    fireEvent.click(
-      await screen.findByRole("button", { name: t("backups.download") }),
-    );
-    await waitFor(() =>
-      expect(mockDownload.downloadFile).toHaveBeenCalledWith(
-        `/api/communities/${CID}/servers/${SID}/backups/${BID}/download`,
-        `${BID}.tar.gz`,
-      ),
-    );
+    beforeEach(() => {
+      clicks.length = 0;
+      // Capture the synthesised anchor click instead of navigating.
+      vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(
+        function (this: HTMLAnchorElement) {
+          clicks.push(this);
+        },
+      );
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("mints a grant and saves it under the backup filename", async () => {
+      routeGet();
+      mockApi.post.mockResolvedValue({
+        download_url: GRANT_URL,
+        expires_at: "2026-06-06T04:00:30Z",
+      });
+      await openBackups();
+
+      fireEvent.click(
+        await screen.findByRole("button", { name: t("backups.download") }),
+      );
+
+      await waitFor(() =>
+        expect(mockApi.post).toHaveBeenCalledWith(
+          `/api/communities/${CID}/servers/${SID}/backups/${BID}/download-grant`,
+        ),
+      );
+      await waitFor(() => expect(clicks).toHaveLength(1));
+      expect(clicks[0].getAttribute("href")).toBe(GRANT_URL);
+      expect(clicks[0].download).toBe(`${BID}.tar.gz`);
+      // The archive body is never read by the tab: no capped fetch+Blob path.
+      expect(mockDownload.downloadFile).not.toHaveBeenCalled();
+    });
+
+    it("routes a mint 403 through the permission glue", async () => {
+      routeGet();
+      mockApi.post.mockRejectedValue(
+        new ApiError(403, { reason: "forbidden", permission: "backup:read" }),
+      );
+      await openBackups();
+
+      fireEvent.click(
+        await screen.findByRole("button", { name: t("backups.download") }),
+      );
+
+      expect(
+        await screen.findByText(
+          t("permissions.deniedNamed", { permission: "backup:read" }),
+        ),
+      ).toBeInTheDocument();
+      expect(clicks).toHaveLength(0);
+    });
+
+    it("shows the generic backups error when the mint 404s", async () => {
+      routeGet();
+      mockApi.post.mockRejectedValue(
+        new ApiError(404, { reason: "not_found" }),
+      );
+      await openBackups();
+
+      fireEvent.click(
+        await screen.findByRole("button", { name: t("backups.download") }),
+      );
+
+      expect(
+        await screen.findByText(t("backups.error.generic")),
+      ).toBeInTheDocument();
+      expect(clicks).toHaveLength(0);
+    });
   });
 
   it("deletes after typed confirm with a DELETE to the backup", async () => {

@@ -649,6 +649,12 @@ class TokenSettings(_Section):
     # stores the cookie.
     refresh_cookie_name: str = Field(default="mcd_refresh", min_length=1)
     refresh_cookie_secure: bool = True
+    # Lifetime of a backup download grant — the self-authenticating URL a browser
+    # streams a multi-GB archive from (issue #2313). Grants are TTL-only, not
+    # single-use, so this window is the whole exposure of one leaking into an
+    # access log; it only has to cover the round trip from mint to the browser
+    # starting the download.
+    download_grant_ttl_seconds: int = Field(default=30, gt=0)
 
     @model_validator(mode="after")
     def _enforce_hs256_key_length(self) -> TokenSettings:

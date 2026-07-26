@@ -34,6 +34,7 @@ from mc_server_dashboard_api.identity.domain.repositories import (
 )
 from mc_server_dashboard_api.identity.domain.sleeper import Sleeper
 from mc_server_dashboard_api.identity.domain.token_service import (
+    IssuedDownloadGrant,
     IssuedRefreshToken,
     TokenService,
 )
@@ -272,8 +273,17 @@ class StubHasher(PasswordHasher):
         return password_hash == f"hashed::{plaintext}"
 
 
+# Fixed expiry for the fake's download grants — the deadline is the JWT adapter's
+# concern, so the fake only has to report something stable.
+_GRANT_EXPIRY = dt.datetime(2026, 6, 4, 12, 0, 30, tzinfo=dt.timezone.utc)
+
+
 class FakeTokenService(TokenService):
-    """Deterministic token service: access token == ``access::<uuid>``."""
+    """Deterministic token service: access token == ``access::<uuid>``.
+
+    Download grants are ``grant::<resource>::<uuid>``, so a grant minted for one
+    resource cannot verify against another.
+    """
 
     def __init__(self) -> None:
         self._counter = 0
@@ -305,6 +315,29 @@ class FakeTokenService(TokenService):
 
     def hash_refresh_token(self, secret: str) -> str:
         return f"hash::{secret}"
+
+    def issue_download_grant(
+        self, user_id: UserId, resource: str
+    ) -> IssuedDownloadGrant:
+        return IssuedDownloadGrant(
+            token=f"grant::{resource}::{user_id.value}",
+            expires_at=_GRANT_EXPIRY,
+        )
+
+    def verify_download_grant(self, token: str, resource: str) -> UserId:
+        import uuid
+
+        from mc_server_dashboard_api.identity.domain.errors import (
+            InvalidDownloadGrantError,
+        )
+
+        prefix = f"grant::{resource}::"
+        if not token.startswith(prefix):
+            raise InvalidDownloadGrantError
+        try:
+            return UserId(uuid.UUID(token[len(prefix) :]))
+        except ValueError as exc:
+            raise InvalidDownloadGrantError from exc
 
 
 class RecordingFailureDelay(LoginFailureDelay):

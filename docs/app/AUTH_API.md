@@ -196,6 +196,50 @@ router — the security posture, not knobs.
   a stale cookie). Login is the exception: it always sets the cookie, because it
   is the entry point that grants it.
 
+### Download grants — the third credential kind
+
+A browser cannot put an `Authorization` header on a plain navigation, so a
+multi-GB backup archive would have to be buffered into memory before it could be
+saved — exactly the tab OOM the Web UI's download cap exists to prevent. The API
+therefore mints a **download grant** (issue #2313): a short-lived JWT that the
+URL itself carries, so the browser can stream the response straight to disk.
+
+```
+POST /api/communities/{cid}/servers/{sid}/backups/{bid}/download-grant
+-> 200 Cache-Control: no-store
+   {"download_url": "/api/communities/{cid}/servers/{sid}/backups/{bid}/download?grant=<token>",
+    "expires_at": "<RFC 3339>"}
+```
+
+A grant is:
+
+- **Scoped to one resource.** It is bound to the whole community/server/backup
+  triple, so it opens neither another backup nor the same backup id addressed
+  under a different server or community.
+- **Very short-lived.** `auth.token.download_grant_ttl_seconds`, 30 s by default
+  ([`CONFIGURATION.md`](CONFIGURATION.md) Section 5.3) — long enough to hand the
+  URL to the browser, no longer.
+- **TTL-only, not single-use.** Nothing is persisted, so nothing has to be pruned
+  and nothing breaks with more than one API replica. Replay within the TTL is
+  accepted: the grant is bound to one user, one backup and one purpose, and every
+  redemption is re-authorized.
+- **Identity, never authority.** The download re-runs the full `backup:read` gate
+  on redemption with the grant's subject, so a permission revocation, a membership
+  removal, or a deactivated account takes effect immediately even on a URL already
+  minted (403 / 404 / 401 respectively).
+- **Not interchangeable with an access token, in either direction.** A grant
+  presented as `Authorization: Bearer …` is 401 on every endpoint, and an ordinary
+  access token presented as `?grant=` is rejected. Without that separation a grant
+  leaking into a reverse-proxy access log would be a full session credential.
+
+The mint endpoint is gated by the same `backup:read` permission the download is,
+and resolves the backup through the same lookup, so an unknown or cross-server id
+is 404 with no existence signal. Issuance is not audited: bytes leave the system
+at redemption, which records `backup:download` with the grant's subject as actor.
+
+The `download_url` is same-origin relative by design
+([`WEBUI_SPEC.md`](../ui/WEBUI_SPEC.md) Section 7.7).
+
 ## 4. Refresh rotation and the reuse grace window
 
 Each successful refresh **rotates**: the presented token is revoked and a fresh

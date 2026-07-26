@@ -773,10 +773,51 @@ export interface paths {
          *
          *     No recompression: the exact stored bytes stream out with a ``.tar.gz``
          *     attachment. An unknown / cross-community backup is 404 (no existence signal).
+         *
+         *     The response declares the archive's exact size as ``Content-Length``, so a
+         *     client can show download progress and refuse an over-cap archive up front.
+         *
+         *     The caller authenticates with the usual Bearer access token, or — for a
+         *     browser that cannot set a header on a plain navigation — with a short-lived
+         *     ``?grant=`` minted by ``POST .../download-grant`` (issue #2313). Either way
+         *     the same ``backup:read`` gate decides, and the response is identical.
          */
         get: operations["download_backup_api_communities__community_id__servers__server_id__backups__backup_id__download_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/backups/{backup_id}/download-grant": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Issue Backup Download Grant
+         * @description Mint a self-authenticating download URL for one backup (backup:read, #2313).
+         *
+         *     A multi-GB archive cannot be buffered into a Blob just to attach a Bearer
+         *     header, so the browser needs a URL that authenticates itself. The grant is
+         *     bound to this exact community/server/backup triple and to the caller, expires
+         *     in ``auth.token.download_grant_ttl_seconds``, and proves identity only — the
+         *     download re-runs the full ``backup:read`` gate on redemption.
+         *
+         *     The URL is relative because the Web UI is same-origin by design
+         *     (WEBUI_SPEC.md Section 7.7). An unknown / cross-server backup is 404, through
+         *     the same lookup the download uses (no existence signal).
+         *
+         *     Nothing is audited here: bytes leave the system at redemption, which records
+         *     ``backup:download`` with this same subject as actor.
+         */
+        post: operations["issue_backup_download_grant_api_communities__community_id__servers__server_id__backups__backup_id__download_grant_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2464,6 +2505,23 @@ export interface components {
         AvailablePortsResponse: {
             /** Ports */
             ports: number[];
+        };
+        /**
+         * BackupDownloadGrantResponse
+         * @description A short-lived, self-authenticating backup download URL (issue #2313).
+         *
+         *     ``download_url`` is same-origin relative (WEBUI_SPEC.md Section 7.7) and
+         *     already carries the grant, so a client hands it straight to ``<a download>``.
+         *     ``expires_at`` is when the grant stops verifying; after that the URL is 401.
+         */
+        BackupDownloadGrantResponse: {
+            /** Download Url */
+            download_url: string;
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            expires_at: string;
         };
         /** BackupListResponse */
         BackupListResponse: {
@@ -5617,7 +5675,9 @@ export interface operations {
     };
     download_backup_api_communities__community_id__servers__server_id__backups__backup_id__download_get: {
         parameters: {
-            query?: never;
+            query?: {
+                grant?: string | null;
+            };
             header?: never;
             path: {
                 community_id: string;
@@ -5635,6 +5695,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    issue_backup_download_grant_api_communities__community_id__servers__server_id__backups__backup_id__download_grant_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+                backup_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackupDownloadGrantResponse"];
                 };
             };
             /** @description Validation Error */

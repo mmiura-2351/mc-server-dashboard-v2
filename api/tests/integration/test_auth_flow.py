@@ -81,6 +81,7 @@ def _tokens() -> JwtTokenService:
         signing_key="integration-key",
         algorithm="HS256",
         access_ttl=dt.timedelta(minutes=15),
+        download_grant_ttl=dt.timedelta(seconds=30),
         clock=SystemClock(),
     )
 
