@@ -2692,30 +2692,58 @@ def require_permission(
         visibility: Annotated[MembershipVisibility, Depends(get_membership_visibility)],
         checker: Annotated[PermissionChecker, Depends(get_permission_checker)],
     ) -> AuthUser:
-        auth_user = _to_auth_user(user)
-        community = CommunityId(_community_id_from_path(request))
-
-        if allow_platform_admin and auth_user.is_platform_admin:
-            return auth_user
-
-        if not await visibility.is_member(
-            user_id=auth_user.user_id, community_id=community
-        ):
-            raise _not_found()
-
-        resource_id = _resource_id_from_path(request, resource_id_param)
-        resource = ResourceRef(
-            community_id=community,
+        return await authorize_two_layer(
+            request=request,
+            user=user,
+            visibility=visibility,
+            checker=checker,
+            operation=operation,
             resource_type=resource_type,
-            resource_id=resource_id,
+            resource_id_param=resource_id_param,
+            allow_platform_admin=allow_platform_admin,
         )
-        if not await checker.can(
-            user=auth_user, operation=operation, resource=resource
-        ):
-            raise _forbidden(operation)
-        return auth_user
 
     return _dependency
+
+
+async def authorize_two_layer(
+    *,
+    request: Request,
+    user: User,
+    visibility: MembershipVisibility,
+    checker: PermissionChecker,
+    operation: Permission,
+    resource_type: str | None = None,
+    resource_id_param: str | None = None,
+    allow_platform_admin: bool = False,
+) -> AuthUser:
+    """Run the two-layer check for ``operation`` against an already-resolved user.
+
+    The body of :func:`require_permission`'s dependency, lifted to module level so
+    a dependency that resolves its subject some other way than the ``Authorization``
+    header can reuse the identical decision instead of restating it.
+    """
+
+    auth_user = _to_auth_user(user)
+    community = CommunityId(_community_id_from_path(request))
+
+    if allow_platform_admin and auth_user.is_platform_admin:
+        return auth_user
+
+    if not await visibility.is_member(
+        user_id=auth_user.user_id, community_id=community
+    ):
+        raise _not_found()
+
+    resource_id = _resource_id_from_path(request, resource_id_param)
+    resource = ResourceRef(
+        community_id=community,
+        resource_type=resource_type,
+        resource_id=resource_id,
+    )
+    if not await checker.can(user=auth_user, operation=operation, resource=resource):
+        raise _forbidden(operation)
+    return auth_user
 
 
 class DeferredAuthz(NamedTuple):
