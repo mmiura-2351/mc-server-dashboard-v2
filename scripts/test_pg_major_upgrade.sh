@@ -125,6 +125,10 @@ case "$1 $2" in
 	"run --rm")
 		case "$*" in
 			*probedata*)
+				# The probe command itself failing (a daemon hiccup, an
+				# unreadable PG_VERSION) -- distinct from it succeeding and
+				# finding nothing, which is MOCK_PG_VERSION=.
+				[ "${MOCK_PROBE_FAILS:-0}" = "1" ] && exit 1
 				printf '%s\n' "${MOCK_PG_VERSION-17}"
 				;;
 			*/out/*)
@@ -939,6 +943,64 @@ STALEEOF
 	else
 		fail_test "stale marker: left behind after a successful run"
 	fi
+	rm -rf "$base"
+}
+
+# --- 10j. The probe fails outright while a run is unfinished ----------------
+# The third state reachable during the destructive phase, and the one where the
+# script knows least: the probe command itself failed, so this run cannot say
+# what the volume holds -- or whether the previous run ever got a cluster back
+# into it. A non-zero exit is not enough on its own. What the operator needs at
+# that moment is where their data went, so the probe's own reason and the
+# recovery pointer both have to be printed, not one or the other.
+{
+	base="$(make_fixture)"
+	run_upgrade "$base" MOCK_PG_VERSION=17 MOCK_RESTORE_FAILS=1
+	if [ -f "$base/repo/.pg-upgrade-incomplete" ]; then
+		ok "unreadable volume: the sentinel is on disk"
+	else
+		fail_test "unreadable volume: no sentinel to test with -- $output"
+	fi
+
+	run_upgrade "$base" MOCK_PROBE_FAILS=1
+	if [ "$exit_code" -ne 0 ]; then
+		ok "unreadable volume: the re-run refuses"
+	else
+		fail_test "unreadable volume: expected a refusal, got exit 0 -- $output"
+	fi
+	# Why the probe failed may well be the thing the operator has to fix, so the
+	# recovery text is added to it rather than substituted for it.
+	case "$output" in
+		*"could not read PG_VERSION"*) ok "unreadable volume: still reports why the probe failed" ;;
+		*) fail_test "unreadable volume: the probe's own reason was dropped -- $output" ;;
+	esac
+	case "$output" in
+		*.tar.gz*) ok "unreadable volume: names the archive to recover from" ;;
+		*) fail_test "unreadable volume: hides the archive -- $output" ;;
+	esac
+	case "$output" in
+		*.pg-upgrade-incomplete*) ok "unreadable volume: names the sentinel to delete once recovered" ;;
+		*) fail_test "unreadable volume: no recovery instructions -- $output" ;;
+	esac
+	rm -rf "$base"
+}
+
+# --- 10k. ...and with no unfinished run, it stays a plain probe failure ------
+# The widening must not turn every unreadable volume into a recovery lecture
+# about a run that never happened.
+{
+	base="$(make_fixture)"
+	run_upgrade "$base" MOCK_PROBE_FAILS=1
+	if [ "$exit_code" -ne 0 ]; then
+		ok "unreadable volume, no sentinel: refused"
+	else
+		fail_test "unreadable volume, no sentinel: expected a refusal, got exit 0 -- $output"
+	fi
+	case "$output" in
+		*"did not finish"*) fail_test "unreadable volume, no sentinel: invented an unfinished run -- $output" ;;
+		*) ok "unreadable volume, no sentinel: no unfinished-run claim" ;;
+	esac
+	assert_nothing_destructive "unreadable volume, no sentinel" "$base"
 	rm -rf "$base"
 }
 

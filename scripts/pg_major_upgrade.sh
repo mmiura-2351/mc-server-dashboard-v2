@@ -90,9 +90,6 @@ pg_resolve_compose_facts || die "$pg_reason"
 
 probe_status=0
 pg_probe_cluster_major "$pg_volume_name" "$pg_db_image" || probe_status=$?
-if [ "$probe_status" -eq 1 ]; then
-	die "$pg_reason"
-fi
 
 # ── 2b. Did a previous run leave this volume mid-migration? ──────────────────
 # The sentinel records that a PREVIOUS run entered the destructive phase and did
@@ -127,7 +124,18 @@ if [ -f "$sentinel" ]; then
 	# Nothing was restored in either of the first two: saying "PARTIALLY
 	# RESTORED" there would send the operator hunting for a half-written cluster
 	# that does not exist. What is true is simpler and worse.
-	if [ "$probe_status" -eq 2 ]; then
+	if [ "$probe_status" -eq 1 ]; then
+		# A failed probe leaves pg_cluster_major empty, so this has to come
+		# first or the empty-volume branch would claim to know something this
+		# run could not determine. The probe's own reason is kept rather than
+		# replaced: it may be the very thing the operator has to fix.
+		refuse_unfinished_run \
+			"${pg_reason} A previous run of this script also did not finish." \
+			"This run cannot tell what that volume holds, so it cannot tell how far the previous one" \
+			"got. Fix the reason above before trusting anything about the volume; until then treat the" \
+			"dump and archive recorded below as the only copies of this deployment's data, and do not" \
+			"deploy."
+	elif [ "$probe_status" -eq 2 ]; then
 		refuse_unfinished_run \
 			"volume '${pg_volume_name}' does not exist, but a previous run of this script did not finish." \
 			"That run released the volume and never got a replacement into place. NOTHING has been" \
@@ -146,6 +154,9 @@ if [ -f "$sentinel" ]; then
 	fi
 fi
 
+if [ "$probe_status" -eq 1 ]; then
+	die "$pg_reason"
+fi
 if [ "$probe_status" -eq 2 ]; then
 	say "volume '${pg_volume_name}' does not exist -- nothing to do (the next deploy creates it at PostgreSQL ${pg_target_major})."
 	exit 0
