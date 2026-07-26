@@ -237,10 +237,16 @@ async def download_resource_pack(
     use_case: Annotated[DownloadResourcePack, Depends(get_download_resource_pack)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> StreamingResponse:
-    """Download a resource pack (authenticated, issue #1176)."""
+    """Download a resource pack (authenticated, issue #1176).
+
+    The pack's size is declared as ``Content-Length`` (issue #2317) — Starlette
+    populates no length for a streaming body, so without it the response is chunked
+    and a client can neither show progress nor refuse an over-cap pack up front.
+    The value comes from the pack store, so it equals the streamed byte count.
+    """
 
     try:
-        stream, pack = await use_case(
+        stream, pack, size_bytes = await use_case(
             resource_pack_id=ResourcePackId(resource_pack_id),
         )
     except ResourcePackNotFoundError as exc:
@@ -258,7 +264,10 @@ async def download_resource_pack(
     return StreamingResponse(
         stream,
         media_type=_PACK_MEDIA_TYPE,
-        headers={"Content-Disposition": _content_disposition(pack.filename)},
+        headers={
+            "Content-Disposition": _content_disposition(pack.filename),
+            "Content-Length": str(size_bytes),
+        },
     )
 
 
@@ -270,11 +279,13 @@ async def public_download_resource_pack(
 ) -> StreamingResponse:
     """Public download endpoint for Minecraft clients (no auth, issue #1176).
 
-    Validates that ``filename`` matches the stored filename (404 otherwise).
+    Validates that ``filename`` matches the stored filename (404 otherwise). The
+    size is declared as ``Content-Length`` (issue #2317) — the game client shows
+    the pack's download progress from it.
     """
 
     try:
-        stream, pack = await use_case(
+        stream, pack, size_bytes = await use_case(
             resource_pack_id=ResourcePackId(resource_pack_id),
         )
     except ResourcePackNotFoundError as exc:
@@ -286,7 +297,10 @@ async def public_download_resource_pack(
     return StreamingResponse(
         stream,
         media_type=_PACK_MEDIA_TYPE,
-        headers={"Content-Disposition": _content_disposition(pack.filename)},
+        headers={
+            "Content-Disposition": _content_disposition(pack.filename),
+            "Content-Length": str(size_bytes),
+        },
     )
 
 

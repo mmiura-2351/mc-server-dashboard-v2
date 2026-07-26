@@ -180,7 +180,13 @@ class DeleteResourcePack:
 
 @dataclass(frozen=True)
 class DownloadResourcePack:
-    """Open a byte stream for a resource pack."""
+    """Open a byte stream for a resource pack.
+
+    Returns ``(stream, pack, size_bytes)`` so the edge can declare a
+    ``Content-Length`` (issue #2317). The size is read from the blob store, never
+    from ``ResourcePack.size_bytes`` — the declared length must equal the streamed
+    byte count exactly, and only the store knows what it is about to stream.
+    """
 
     uow: UnitOfWork
     store: ResourcePackStore
@@ -189,13 +195,17 @@ class DownloadResourcePack:
         self,
         *,
         resource_pack_id: ResourcePackId,
-    ) -> tuple[ByteStream, ResourcePack]:
+    ) -> tuple[ByteStream, ResourcePack, int]:
         async with self.uow:
             pack = await self.uow.resource_packs.get_by_id(resource_pack_id)
         if pack is None:
             raise ResourcePackNotFoundError(str(resource_pack_id.value))
+        # Size first: ``open`` is an async-generator factory that touches storage
+        # only on first iteration, so opening first would leave the stream
+        # unconsumed should ``size`` raise.
+        size_bytes = await self.store.size(resource_pack_id, pack.filename)
         stream = self.store.open(resource_pack_id, pack.filename)
-        return stream, pack
+        return stream, pack, size_bytes
 
 
 # ---------------------------------------------------------------------------
