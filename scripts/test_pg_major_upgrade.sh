@@ -108,13 +108,19 @@ case "$1 $2" in
 		echo "[]"
 		;;
 	"volume rm")
-		# The whole point of the archive: record whether one existed at the
-		# instant the original volume was released.
-		if ls "${MCSD_PG_UPGRADE_DIR:-/nonexistent}"/*.tar.gz > /dev/null 2>&1; then
-			log "volume rm $3 archive_present=yes"
-		else
-			log "volume rm $3 archive_present=no"
-		fi
+		# Both guarantees this script makes are about what exists at the instant
+		# the original volume is released, so both are sampled here rather than
+		# after the fact: a surviving copy of the data (the archive), and a record
+		# that this deployment currently has no working database (the sentinel).
+		# Ordering IS the mechanism for each -- written afterwards, either one
+		# leaves a window in which it is not true.
+		archive_present=no
+		ls "${MCSD_PG_UPGRADE_DIR:-/nonexistent}"/*.tar.gz > /dev/null 2>&1 && archive_present=yes
+		# cwd is the repo root (the script cd's there and never leaves), the same
+		# assumption the `compose config` branch above makes.
+		sentinel_present=no
+		[ -f .pg-upgrade-incomplete ] && sentinel_present=yes
+		log "volume rm $3 archive_present=$archive_present sentinel_present=$sentinel_present"
 		;;
 	"run --rm")
 		case "$*" in
@@ -424,6 +430,17 @@ done
 			fail_test "happy path: no archive when the volume was released -- $log" ;;
 	esac
 
+	# The sentinel has to be down BEFORE the volume goes, not after: written
+	# afterwards there is a window in which the deployment has no working
+	# database and nothing records it -- exactly the state it exists to make
+	# detectable, and a window a crash or Ctrl-C would land in.
+	case "$log" in
+		*"volume rm testproj_db-data archive_present=yes sentinel_present=yes"*)
+			ok "happy path: the sentinel is written before the volume is released" ;;
+		*)
+			fail_test "happy path: no sentinel when the volume was released -- $log" ;;
+	esac
+
 	# Order: dump -> down -> archive -> volume rm -> up --wait db -> drop the
 	# freshly initdb'd database -> restore.
 	order="$(printf '%s\n' "$log" | sed -n \
@@ -663,6 +680,14 @@ done
 	else
 		fail_test "aborted run: no sentinel left behind"
 	fi
+	# Not just "left behind afterwards" -- already there when the volume went,
+	# which is the only ordering that leaves no unrecorded window.
+	case "$log" in
+		*"volume rm testproj_db-data"*"sentinel_present=yes"*)
+			ok "aborted run: the sentinel predates the volume removal" ;;
+		*)
+			fail_test "aborted run: the sentinel was written after the volume went -- $log" ;;
+	esac
 
 	# Re-run: the volume now holds 18, exactly as a completed upgrade would.
 	run_upgrade "$base" MOCK_PG_VERSION=18
