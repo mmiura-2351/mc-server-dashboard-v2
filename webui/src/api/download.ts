@@ -1,19 +1,25 @@
 /**
  * Authenticated file download via fetch + blob (WEBUI_SPEC.md 7.1).
  *
- * The API authenticates with a Bearer access token only (no cookie auth, no
- * query-token path) and the token lives in memory, never in storage. So a plain
- * `<a href>` / `window.location` to a streamed-download endpoint (e.g. the
- * server export ZIP) cannot carry the credential — the request would arrive
- * unauthenticated. The honest path is to fetch the URL with the Authorization
- * header set, read the response as a Blob, and click a synthesised anchor at an
- * object URL so the browser saves the file.
+ * These endpoints authenticate with a Bearer access token that lives in memory,
+ * never in storage, so a plain `<a href>` / `window.location` to a
+ * streamed-download endpoint (e.g. the server export ZIP) cannot carry the
+ * credential — the request would arrive unauthenticated. The honest path is to
+ * fetch the URL with the Authorization header set, read the response as a Blob,
+ * and click a synthesised anchor at an object URL so the browser saves the file.
  *
  * This is intentionally separate from the JSON {@link api} client: that client
  * parses every body as JSON, which a binary ZIP is not. The trade-off is that
  * the whole archive buffers in memory before the save prompt; for the working
  * sets these endpoints serve that is acceptable, and it is the only way to
  * attach the in-memory token (issue #438).
+ *
+ * Backup archives are the exception, and no longer take this path: they run to
+ * multiple GB, so buffering them hit {@link MAX_DOWNLOAD_BYTES} and failed
+ * (#2314). That surface mints a short-lived self-authenticating URL
+ * (`POST …/backups/{id}/download-grant`, #2313) and hands it to
+ * {@link saveUrlAs}, so the browser streams the bytes to disk without the tab
+ * reading them.
  */
 
 import { getAccessToken } from "../auth/tokenStore.ts";
@@ -146,6 +152,22 @@ async function readCappedBlob(response: Response): Promise<Blob> {
   });
 }
 
+/**
+ * Save `url` as a file named `filename` by clicking a synthesised anchor.
+ *
+ * The `download` attribute only applies same-origin, which every URL handed
+ * here is (WEBUI_SPEC.md 7.7). The anchor is detached again immediately; the
+ * click leaves no history entry.
+ */
+export function saveUrlAs(url: string, filename: string): void {
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+}
+
 export async function downloadFile(
   path: string,
   filename: string,
@@ -153,12 +175,7 @@ export async function downloadFile(
 ): Promise<void> {
   const blob = await fetchFileBlob(path, signal);
   const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
+  saveUrlAs(url, filename);
   // Defer the revoke so the click-initiated download has the object URL when it
   // actually fetches; revoking synchronously can race the save in some browsers.
   setTimeout(() => URL.revokeObjectURL(url), 0);

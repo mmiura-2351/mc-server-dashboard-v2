@@ -24,7 +24,7 @@ import {
   isUploadAbortError,
   postFormWithProgress,
 } from "../api/client.ts";
-import { downloadFile } from "../api/download.ts";
+import { saveUrlAs } from "../api/download.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
@@ -204,19 +204,25 @@ export function ServerBackupsTab({
     },
   });
 
+  // A backup archive can be multi-GB, so it must never be buffered into a Blob
+  // just to attach the Bearer header (#2314): mint a short-lived self-
+  // authenticating URL and hand it to the browser, which streams it to disk.
+  // The grant lives ~30 s, so minting and clicking are one step — never minted
+  // ahead of time or cached.
   const download = useMutation({
-    mutationFn: (backup: BackupResponse) =>
-      downloadFile(
+    mutationFn: async (backup: BackupResponse) => {
+      const grant = await api.post(
         apiPath(
-          "/api/communities/{community_id}/servers/{server_id}/backups/{backup_id}/download",
+          "/api/communities/{community_id}/servers/{server_id}/backups/{backup_id}/download-grant",
           {
             community_id: communityId,
             server_id: serverId,
             backup_id: backup.id,
           },
         ),
-        `${backup.id}.tar.gz`,
-      ),
+      );
+      saveUrlAs(grant.download_url, `${backup.id}.tar.gz`);
+    },
     onError,
   });
 
