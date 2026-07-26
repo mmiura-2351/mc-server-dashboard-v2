@@ -600,12 +600,14 @@ async def download_backup(
     No recompression: the exact stored bytes stream out with a ``.tar.gz``
     attachment. An unknown / cross-community backup is 404 (no existence signal).
 
-    The archive's size is declared as ``Content-Length`` (issue #2312) — Starlette
-    populates no length for a streaming body, so without it the response is chunked
-    and a client can neither show progress nor refuse an over-cap archive up front.
-    The value comes from the archive store, so it equals the streamed byte count.
+    The response declares the archive's exact size as ``Content-Length``, so a
+    client can show download progress and refuse an over-cap archive up front.
     """
 
+    # Starlette populates no Content-Length for a streaming body, so without an
+    # explicit header the response is chunked (issue #2312). The declared value
+    # comes from the archive store, so it equals the streamed byte count — a
+    # length that disagrees corrupts or hangs the response over HTTP/2.
     try:
         stream, size_bytes = await use_case(
             community_id=CommunityId(community_id),

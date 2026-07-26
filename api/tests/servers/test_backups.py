@@ -885,10 +885,9 @@ async def test_download_size_comes_from_the_archive_store_not_the_row() -> None:
     repo.seed(server)
     backups = FakeBackupRepository()
     archive = FakeBackupArchiveStore()
-    backup = _seed_backup(
-        backups, archive, server.id, storage_ref="ref", size_bytes=None
+    backup = _seed_null_size_row(
+        backups, archive, server.id, storage_ref="ref", archive_bytes=b"x" * 7
     )
-    archive.bytes_by_ref["ref"] = b"x" * 7
     uow = FakeUnitOfWork(servers=repo, backups=backups)
 
     stream, size_bytes = await DownloadBackup(uow=uow, backup_store=archive)(
