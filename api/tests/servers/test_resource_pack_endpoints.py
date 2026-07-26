@@ -91,29 +91,31 @@ class _FakeUseCase:
 
 
 class _FakeDownloadUseCase:
-    """Fake that returns a (stream, pack) tuple like DownloadResourcePack."""
+    """Fake that returns a (stream, pack, size) tuple like DownloadResourcePack."""
 
     def __init__(
         self,
         *,
         pack: ResourcePack | None = None,
         data: bytes = b"zipdata",
+        chunks: list[bytes] | None = None,
         error: Exception | None = None,
     ):
         self._pack = pack or _pack()
-        self._data = data
+        self._chunks = [data] if chunks is None else chunks
         self._error = error
 
     async def __call__(
         self, **kwargs: object
-    ) -> tuple[AsyncIterator[bytes], ResourcePack]:
+    ) -> tuple[AsyncIterator[bytes], ResourcePack, int]:
         if self._error is not None:
             raise self._error
 
         async def _stream() -> AsyncIterator[bytes]:
-            yield self._data
+            for chunk in self._chunks:
+                yield chunk
 
-        return _stream(), self._pack
+        return _stream(), self._pack, sum(len(chunk) for chunk in self._chunks)
 
 
 _shared_app: FastAPI
@@ -308,6 +310,20 @@ class TestDownloadEndpoint:
         assert len(recorder.events) == 1
         assert recorder.events[0].operation == ops.RESOURCE_PACK_DOWNLOAD
 
+    def test_download_declares_content_length_matching_streamed_bytes(self) -> None:
+        # The load-bearing invariant (issue #2317): a declared length that
+        # disagrees with the streamed byte count corrupts or hangs the response
+        # over HTTP/2.
+        p = _pack()
+        chunks = [b"first-chunk", b"second-chunk", b"third"]
+        uc = _FakeDownloadUseCase(pack=p, chunks=chunks)
+        app = _app(download=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.get(f"/api/resource-packs/{p.id.value}/download")
+        assert resp.status_code == 200
+        assert resp.content == b"".join(chunks)
+        assert int(resp.headers["content-length"]) == len(resp.content)
+
     def test_download_not_found_404(self) -> None:
         uc = _FakeDownloadUseCase(error=ResourcePackNotFoundError("nope"))
         app = _app(download=uc)
@@ -326,6 +342,19 @@ class TestPublicDownloadEndpoint:
         assert resp.status_code == 200
         assert resp.content == b"publiczip"
         assert resp.headers["content-type"] == "application/zip"
+
+    def test_public_download_declares_content_length(self) -> None:
+        # The Minecraft client fetches the pack from this route, so it needs the
+        # declared size too (issue #2317).
+        p = _pack(filename="my-pack.zip")
+        chunks = [b"pack-head", b"pack-tail"]
+        uc = _FakeDownloadUseCase(pack=p, chunks=chunks)
+        app = _app(download=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.get(f"/api/public/resource-packs/{p.id.value}/my-pack.zip")
+        assert resp.status_code == 200
+        assert resp.content == b"".join(chunks)
+        assert int(resp.headers["content-length"]) == len(resp.content)
 
     def test_public_download_wrong_filename_404(self) -> None:
         p = _pack(filename="my-pack.zip")

@@ -413,11 +413,34 @@ class TestDownloadResourcePack:
         )
 
         download_uc = DownloadResourcePack(uow=uow, store=store)
-        stream, returned_pack = await download_uc(resource_pack_id=pack.id)
+        stream, returned_pack, _ = await download_uc(resource_pack_id=pack.id)
 
         chunks = [chunk async for chunk in stream]
         assert b"".join(chunks) == _ZIP_CONTENT
         assert returned_pack.filename == "dl.zip"
+
+    async def test_download_size_comes_from_the_store_not_the_row(self) -> None:
+        # The edge declares the size as Content-Length (issue #2317), so it has
+        # to equal the streamed byte count — read it from the blob store rather
+        # than from the ``size_bytes`` column recorded at upload time.
+        uow = FakeUnitOfWork()
+        store = FakeResourcePackStore()
+        upload_uc = _make_upload(uow=uow, store=store)
+
+        pack = await upload_uc(
+            filename="dl.zip",
+            display_name="Download Me",
+            content=_ZIP_CONTENT,
+            uploaded_by=uuid.uuid4(),
+        )
+        store.blobs[pack.id] = b"x" * (pack.size_bytes + 3)
+
+        download_uc = DownloadResourcePack(uow=uow, store=store)
+        stream, _, size_bytes = await download_uc(resource_pack_id=pack.id)
+
+        body = b"".join([chunk async for chunk in stream])
+        assert size_bytes == len(body)
+        assert size_bytes != pack.size_bytes
 
     async def test_download_not_found(self) -> None:
         uow = FakeUnitOfWork()
