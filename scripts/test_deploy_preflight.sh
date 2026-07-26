@@ -152,6 +152,23 @@ run_preflight_without_python3() {
 	)" || exit_code=$?
 }
 
+# Same again, on a host with no `timeout`: PATH is restricted to the stub dir
+# with everything the guard and the stubs need symlinked in EXCEPT timeout, so
+# the fallback is exercised for real rather than simulated.
+run_preflight_without_timeout() {
+	local base="$1" bash_bin tool
+	shift
+	bash_bin="$(command -v bash)"
+	for tool in sh git python3 cat sed head grep; do
+		ln -sf "$(command -v "$tool")" "$base/bin/$tool"
+	done
+	exit_code=0
+	output="$(
+		cd "$base/repo" || exit 99
+		env PATH="$base/bin" "$@" "$bash_bin" "$SCRIPT" 2>&1
+	)" || exit_code=$?
+}
+
 # A skip must be loud AND must not read as a completed check: the stderr line
 # says SKIPPED, and the success line is marked so "ok to build" on its own can
 # never be mistaken for "the db-data volume was checked and is compatible".
@@ -427,6 +444,64 @@ echo "=== deploy_preflight Postgres version guard tests ==="
 	case "$output" in
 		*SKIPPED*) fail_test "near-miss volume name: reported as a skip -- $output" ;;
 		*) ok "near-miss volume name: still a silent, completed check" ;;
+	esac
+	rm -rf "$base"
+}
+
+# --- 16. A HANGING fetch is bounded -- skip rather than stall forever ---
+# A hard-down network fails fast and reaches the skip in test 13. A black-holed
+# route or a stalled proxy does not: the fetch blocks and the preflight blocks
+# with it, indefinitely, with no output explaining why (#2306). The remote is an
+# ssh:// URL and `ssh` is stubbed to sleep, which is a real hang rather than a
+# simulated one; `timeout` is stubbed to keep its semantics on a shorter
+# deadline, so the test does not have to wait out the production bound.
+{
+	base="$(make_fixture postgres:17 postgres:18)"
+	printf '#!/bin/sh\nsleep 30\n' > "$base/bin/ssh"
+	printf '#!/bin/sh\nshift\nexec %s 2 "$@"\n' "$(command -v timeout)" > "$base/bin/timeout"
+	chmod +x "$base/bin/ssh" "$base/bin/timeout"
+	git -C "$base/repo" remote set-url origin "ssh://example.invalid/repo.git"
+
+	started="$(date +%s)"
+	run_preflight "$base" MOCK_PG_VERSION=17
+	elapsed=$(($(date +%s) - started))
+
+	if [ "$elapsed" -lt 15 ]; then
+		ok "hanging fetch: the preflight returns instead of blocking (${elapsed}s)"
+	else
+		fail_test "hanging fetch: the preflight waited ${elapsed}s on a hung fetch -- $output"
+	fi
+	if [ "$exit_code" -eq 0 ]; then
+		ok "hanging fetch: deploy allowed"
+	else
+		fail_test "hanging fetch: expected exit 0, got $exit_code -- $output"
+	fi
+	assert_skipped "hanging fetch"
+	case "$output" in
+		*"did not finish within"*)
+			ok "hanging fetch: the skip says the fetch ran out of time" ;;
+		*)
+			fail_test "hanging fetch: the skip does not name the deadline -- $output" ;;
+	esac
+	rm -rf "$base"
+}
+
+# --- 17. No `timeout` on the host -- run the fetch unbounded, never fail ---
+# The bound is an improvement on a hang, not a new prerequisite. A host without
+# coreutils' `timeout` must get the guard it had before, not a skip on every
+# deploy -- which would make the guard useless in exactly the way #2295 spent
+# three rounds avoiding.
+{
+	base="$(make_fixture postgres:17 postgres:18)"
+	run_preflight_without_timeout "$base" MOCK_PG_VERSION=17
+	if [ "$exit_code" -ne 0 ]; then
+		ok "no timeout binary: the guard still refuses PG17 data under postgres:18"
+	else
+		fail_test "no timeout binary: expected a refusal, got exit 0 -- $output"
+	fi
+	case "$output" in
+		*SKIPPED*) fail_test "no timeout binary: degraded to a skip -- $output" ;;
+		*) ok "no timeout binary: the check still ran" ;;
 	esac
 	rm -rf "$base"
 }

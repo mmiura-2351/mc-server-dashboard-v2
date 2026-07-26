@@ -67,7 +67,34 @@ pg_resolve_compose_facts() {
 	# failure like any other undeterminable input. It updates
 	# refs/remotes/origin/main only: HEAD, the index and the working tree are
 	# left exactly as they were.
-	if ! git fetch --quiet origin main > /dev/null 2>&1; then
+	#
+	# It also has no deadline of its own. A hard-down network fails fast and
+	# reaches the failure below; a black-holed route or a stalled proxy does not,
+	# and the caller blocks with it indefinitely (#2306). 120s is far longer than
+	# an incremental fetch of this repo takes on the deploy host, so a slow but
+	# working link is never cut short -- a skip on every deploy would make the
+	# guard useless.
+	#
+	# `timeout` is coreutils and present on the deploy host, but its ABSENCE must
+	# degrade to the unbounded fetch this has always done. Failing here instead
+	# would refuse an upgrade and blind the preflight on every run, which is the
+	# one thing neither caller may do over a missing convenience.
+	local fetch_status=0 fetch_deadline=120 timed_out=""
+	if command -v timeout > /dev/null 2>&1; then
+		timeout "$fetch_deadline" git fetch --quiet origin main > /dev/null 2>&1 || fetch_status=$?
+		# Only meaningful when `timeout` actually ran it: 124 is its "the command
+		# was still going" status, not one git assigns.
+		if [ "$fetch_status" -eq 124 ]; then
+			timed_out=1
+		fi
+	else
+		git fetch --quiet origin main > /dev/null 2>&1 || fetch_status=$?
+	fi
+	if [ -n "$timed_out" ]; then
+		pg_reason="fetching origin/main (the revision the deploy will build) did not finish within ${fetch_deadline}s."
+		return 1
+	fi
+	if [ "$fetch_status" -ne 0 ]; then
 		pg_reason="could not fetch origin/main (the revision the deploy will build)."
 		return 1
 	fi
