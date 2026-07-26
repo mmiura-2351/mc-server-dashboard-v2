@@ -869,11 +869,34 @@ async def test_download_streams_archive_for_known_backup() -> None:
     backup = _seed_backup(backups, archive, server.id, storage_ref="ref", size_bytes=5)
     uow = FakeUnitOfWork(servers=repo, backups=backups)
 
-    stream = await DownloadBackup(uow=uow, backup_store=archive)(
+    stream, size_bytes = await DownloadBackup(uow=uow, backup_store=archive)(
         community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id
     )
     blob = b"".join([chunk async for chunk in stream])
     assert blob == b"x" * 5
+    assert size_bytes == 5
+
+
+async def test_download_size_comes_from_the_archive_store_not_the_row() -> None:
+    # ``Backup.size_bytes`` is nullable (legacy rows, #661), so the declared
+    # Content-Length must come from the store instead (issue #2312).
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    backups = FakeBackupRepository()
+    archive = FakeBackupArchiveStore()
+    backup = _seed_backup(
+        backups, archive, server.id, storage_ref="ref", size_bytes=None
+    )
+    archive.bytes_by_ref["ref"] = b"x" * 7
+    uow = FakeUnitOfWork(servers=repo, backups=backups)
+
+    stream, size_bytes = await DownloadBackup(uow=uow, backup_store=archive)(
+        community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id
+    )
+    assert backup.size_bytes is None
+    assert size_bytes == 7
+    assert b"".join([chunk async for chunk in stream]) == b"x" * 7
 
 
 async def test_download_unknown_backup_is_not_found() -> None:

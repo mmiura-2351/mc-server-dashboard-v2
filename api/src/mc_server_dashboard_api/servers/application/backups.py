@@ -853,6 +853,11 @@ class DownloadBackup:
     stored archive bytes through the :class:`BackupArchiveStore` seam — no
     recompression, the exact stored ``tar.gz`` bytes. An unknown / cross-server
     backup is :class:`BackupNotFoundError` (the edge 404s, no existence signal).
+
+    Returns ``(stream, size_bytes)`` so the edge can declare a ``Content-Length``
+    (issue #2312). The size is read from the store, never from ``Backup.size_bytes``
+    — that column is nullable on legacy rows (#661), while the declared length must
+    equal the streamed byte count exactly.
     """
 
     uow: UnitOfWork
@@ -864,13 +869,19 @@ class DownloadBackup:
         community_id: CommunityId,
         server_id: ServerId,
         backup_id: BackupId,
-    ) -> AsyncIterator[bytes]:
+    ) -> tuple[AsyncIterator[bytes], int]:
         backup = await _load_backup(self.uow, community_id, server_id, backup_id)
-        return self.backup_store.open(
+        size_bytes = await self.backup_store.size(
             community_id=community_id,
             server_id=server_id,
             storage_ref=backup.storage_ref,
         )
+        stream = self.backup_store.open(
+            community_id=community_id,
+            server_id=server_id,
+            storage_ref=backup.storage_ref,
+        )
+        return stream, size_bytes
 
 
 @dataclass(frozen=True)

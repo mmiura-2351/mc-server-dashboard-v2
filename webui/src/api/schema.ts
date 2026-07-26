@@ -773,6 +773,11 @@ export interface paths {
          *
          *     No recompression: the exact stored bytes stream out with a ``.tar.gz``
          *     attachment. An unknown / cross-community backup is 404 (no existence signal).
+         *
+         *     The archive's size is declared as ``Content-Length`` (issue #2312) — Starlette
+         *     populates no length for a streaming body, so without it the response is chunked
+         *     and a client can neither show progress nor refuse an over-cap archive up front.
+         *     The value comes from the archive store, so it equals the streamed byte count.
          */
         get: operations["download_backup_api_communities__community_id__servers__server_id__backups__backup_id__download_get"];
         put?: never;
