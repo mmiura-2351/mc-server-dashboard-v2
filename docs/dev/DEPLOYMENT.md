@@ -865,28 +865,72 @@ servers), runs a post-deploy `/api/healthz` check, and stamps the new SHA. Use
 > `scripts/deploy_preflight.sh` detects this and refuses the deploy, so
 > `make update` stops before it takes the stack down, and names the script below.
 >
-> **Take the dump while the stack is still running `postgres:17` — before
-> `git pull` swaps the image.** The `postgres:18` image ships no PostgreSQL 17
-> binary, so once the new image is in place there is no supported way to read the
-> old volume.
+> **The guard cannot protect this particular upgrade, only the next one (issue
+> #2309).** It ships in the same revision as the bump it guards against, so a
+> deployment that has not pulled yet is running the *older* preflight — the one
+> with no Postgres check at all. It prints `on clean 'main' -- ok to build.` and
+> `make update` proceeds to pull, rebuild, and take the stack down. Do not rely
+> on it for this upgrade; follow the procedure below instead. (Verified on the
+> canonical host at `964f4fc6`.)
 >
-> **Primary path — `scripts/pg_major_upgrade.sh`.** Run it from the repo root on
-> a clean `main`, with the old stack still up:
+> **Take the dump while the stack is still running `postgres:17` — before
+> `docker compose up` swaps the image.** The `postgres:18` image ships no
+> PostgreSQL 17 binary, so once the new container is in place there is no
+> supported way to read the old volume. **`git pull` is not that moment**: it
+> rewrites files on disk and nothing else, and the running `db` container keeps
+> serving the image it was started from until a `docker compose up` recreates it.
+> That is what makes the order below safe.
+>
+> **Primary path — `scripts/pg_major_upgrade.sh`.** Three commands, from the repo
+> root, on a clean `main`, with the old stack still up:
 >
 > ```sh
-> ./scripts/pg_major_upgrade.sh
+> git pull --ff-only origin main   # 1. how you obtain the script and the new image
+> ./scripts/pg_major_upgrade.sh    # 2. exits 0 doing nothing unless an upgrade is pending
+> docker compose up -d --build     # 3. only once step 2 exited 0
 > ```
+>
+> The pull comes first because it has to: the script ships **in** the revision
+> that bumps Postgres, so on the deployment that needs it, there is no copy to
+> run until you have pulled. It is safe in either order for the *data* — see the
+> paragraph above — but running it before the pull leaves it validating the
+> revision you are replacing, so it reports `nothing to do` and tells you to
+> pull. That sequence is the same on every future upgrade, major or not: step 2
+> is a no-op when nothing is pending.
+>
+> **Already pulled, or already read this after a `make update`?** Nothing is
+> lost either way. A pull on its own leaves the running stack exactly as it was —
+> pick the sequence up at step 2. If `make update` got past the older preflight
+> and took the stack down, the `db` container is now `postgres:18` aborting on a
+> PostgreSQL 17 volume and **your data is untouched** — that abort happens before
+> postgres starts. Run step 2 anyway: it refuses, because the running `db` is no
+> longer the major that wrote the volume, and the refusal names the revision to
+> put back. Then:
+>
+> ```sh
+> MCSD_ALLOW_PRIMARY_BRANCH=1 git checkout <the revision it named>
+> docker compose up -d --wait db   # PostgreSQL 17, on the volume it never touched
+> git checkout main                # no override needed going back
+> ./scripts/pg_major_upgrade.sh    # now it has a 17 to dump
+> docker compose up -d --build
+> ```
+>
+> `MCSD_ALLOW_PRIMARY_BRANCH=1` is not optional on the first line: this repo's
+> post-checkout hook silently restores the primary checkout to `main`
+> ([`AGENTS.md`](AGENTS.md) Section 1), which would put `postgres:18` straight
+> back and start it on the 17 data.
 >
 > It refuses unless an upgrade is actually pending (so re-running after a
 > successful one is a no-op), refuses unless the running `db` container is still
-> the major that wrote the volume, stops the writers, and takes the dump — then
-> **verifies it**, on `pg_dumpall`'s own exit status *and* PostgreSQL's
-> end-of-dump marker, before anything destructive happens. It then fast-forwards
-> the checkout to the exact commit it resolved `origin/main` to at the start (one
-> run, one revision — a merge landing on `main` mid-run cannot make it restore
-> into an image it never checked), archives the old volume to a host-side tarball
-> and lists that tarball back, and only then removes the volume; the PostgreSQL
-> 18 `db` comes up with `--wait` and the dump is restored into it under
+> the major that wrote the volume — which is also the check that catches a stack
+> already restarted onto `postgres:18` — stops the writers, and takes the dump,
+> then **verifies it**, on `pg_dumpall`'s own exit status *and* PostgreSQL's
+> end-of-dump marker, before anything destructive happens. Everything it
+> validates comes from `HEAD`, the revision you just pulled and the one step 3
+> deploys, so no push landing on `main` mid-run can make it restore into an image
+> it never checked. It archives the old volume to a host-side tarball and lists
+> that tarball back, and only then removes the volume; the PostgreSQL 18 `db`
+> comes up with `--wait` and the dump is restored into it under
 > `ON_ERROR_STOP=1`, so a statement that errors halfway aborts the run rather
 > than reporting a half-restored database as a success. Any failure exits
 > non-zero with the old volume still there.
@@ -901,7 +945,20 @@ servers), runs a post-deploy `/api/healthz` check, and stamps the new SHA. Use
 > the new cluster they are the only copies of the PostgreSQL 17 data. If a run
 > fails after the volume has been released, it prints the exact commands to put
 > the old data back from the archive; follow them and the deployment returns to
-> the revision and cluster it started on.
+> the cluster it started on, on a checkout that runs it.
+>
+> One line of that recovery block is worth knowing about in advance: it checks
+> out **a different revision than the one you just pulled**, because bringing the
+> old data back means bringing back a `compose.yaml` that pins the old major.
+> Your checkout is on the new revision by then, and nothing on the host reliably
+> records which revision the running stack was built from (`.last-deploy-sha` is
+> written only by `make update`, and only on its success path — on the canonical
+> host it was 24 commits stale). So the script derives it from this repo's own
+> history: the newest revision whose `compose.yaml` deploys the major the volume
+> holds, **verified** by reading that revision's image the same way it read
+> `HEAD`'s. If history contains no such revision, it says so up front, before
+> anything destructive, and the recovery block tells you what to look for rather
+> than naming a revision that would start the wrong major.
 >
 > While the old volume is gone and the new cluster is not yet restored, the
 > script keeps `.pg-upgrade-incomplete` in the repo root (gitignored, like
@@ -920,7 +977,15 @@ servers), runs a post-deploy `/api/healthz` check, and stamps the new SHA. Use
 > script exists to enforce:
 >
 > ```sh
-> # 1. On the OLD revision, with the 17 stack still up. Stop the writers FIRST:
+> # 0. Take the new revision. This swaps no containers -- the running `db` keeps
+> #    serving postgres:17 until step 3 recreates it -- and it is what puts the
+> #    new compose.yaml on disk. Note the revision you are leaving; step 5 of the
+> #    recovery in the script's output is the only thing that needs it, but if
+> #    you are doing this by hand, `git rev-parse HEAD` BEFORE this line is the
+> #    cheapest way to have it.
+> git pull --ff-only origin main
+>
+> # 1. With the 17 stack still up. Stop the writers FIRST:
 > #    `api` is the only DB client (`worker` and `relay` reach it over gRPC), so
 > #    anything written after the dump would be lost on restore.
 > docker compose stop api worker relay cloudflared
@@ -936,7 +1001,8 @@ servers), runs a post-deploy `/api/healthz` check, and stamps the new SHA. Use
 > tar tzf ../db-data-pg17.tar.gz | grep -q PG_VERSION
 > docker volume rm mc-server-dashboard-v2_db-data
 >
-> # 3. Take the new revision and start the 18 db on a fresh volume.
+> # 3. Start the 18 db on a fresh volume (step 0 already put its compose.yaml
+> #    in place).
 > #    `--wait` is NOT enough on its own. It blocks on the compose healthcheck,
 > #    which is `pg_isready` over the container's unix socket -- and the image's
 > #    entrypoint runs a TEMPORARY server on that same socket to execute its init
@@ -946,7 +1012,6 @@ servers), runs a post-deploy `/api/healthz` check, and stamps the new SHA. Use
 > #    the socket answered from t=1.6s while TCP stayed closed until t=10.6s.
 > #    The temp server runs with `listen_addresses=''`, so waiting for TCP tells
 > #    the two apart structurally -- it can never answer.
-> git pull --ff-only origin main
 > docker compose up -d --wait db
 > until docker compose exec -T db pg_isready -q -h 127.0.0.1 -U mcsd -d postgres
 > do sleep 1; done

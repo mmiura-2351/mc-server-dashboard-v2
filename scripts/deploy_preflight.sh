@@ -68,7 +68,16 @@ pg_skip() {
 check_postgres_major() {
 	local probe_status
 
-	if ! pg_resolve_compose_facts; then
+	# origin/main, not HEAD: this runs BEFORE the pull it is guarding, so the
+	# tree still holds the revision already deployed and comparing the volume
+	# against it would never refuse anything (#2303). The upgrade script this
+	# points at resolves HEAD instead, because it runs AFTER the pull -- see the
+	# header of scripts/pg_cluster_lib.sh.
+	if ! pg_resolve_incoming_revision; then
+		pg_skip "$pg_reason"
+		return 0
+	fi
+	if ! pg_resolve_compose_facts "$pg_target_revision"; then
 		pg_skip "$pg_reason"
 		return 0
 	fi
@@ -95,8 +104,10 @@ check_postgres_major() {
 		echo "  PostgreSQL ${pg_target_major} cannot read a PostgreSQL ${pg_cluster_major} cluster: the db container aborts during" >&2
 		echo "  entrypoint init (your data is left untouched) and migrate/api stay down behind its healthcheck." >&2
 		echo "  Migrate the data BEFORE deploying -- the dump must be taken while PostgreSQL ${pg_cluster_major} is still" >&2
-		echo "  running. Run scripts/pg_major_upgrade.sh -- it dumps, verifies the dump, archives the old" >&2
-		echo "  volume, and restores into PostgreSQL ${pg_target_major}. See docs/dev/DEPLOYMENT.md Section 9 (Upgrade)." >&2
+		echo "  running, which it is until a 'docker compose up' recreates the container:" >&2
+		echo "    git pull --ff-only origin main   # swaps no containers; the running db keeps serving ${pg_cluster_major}" >&2
+		echo "    scripts/pg_major_upgrade.sh      # dumps, verifies, archives the old volume, restores into ${pg_target_major}" >&2
+		echo "  Then deploy. See docs/dev/DEPLOYMENT.md Section 9 (Upgrade)." >&2
 		return 1
 	fi
 	return 0

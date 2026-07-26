@@ -11,11 +11,22 @@
 #                                the major the incoming revision runs (#2133).
 #   scripts/pg_major_upgrade.sh  performs the dump/restore that clears it.
 #
-# The facts all come from the INCOMING revision (origin/main), never the working
-# tree: every deploy path is preflight -> git pull -> docker compose up
-# (scripts/update.sh, scripts/deploy.sh, DEPLOYMENT.md Section 9), so when
-# either script runs the tree still holds the OLD revision and reading it would
-# compare the volume against the major already deployed (#2303).
+# Which revision those facts come from is the CALLER's, because the two callers
+# stand at opposite sides of the pull and neither can use the other's answer
+# (#2309):
+#
+#   the preflight runs PRE-pull -- it guards `git pull && docker compose up`
+#     (scripts/update.sh, scripts/deploy.sh), so the tree still holds the OLD
+#     revision and reading it would compare the volume against the major already
+#     deployed (#2303). It resolves origin/main.
+#   the upgrade script runs POST-pull -- `git pull` is how the operator obtains
+#     it at all, so by the time it runs, the tree IS the incoming revision. It
+#     resolves HEAD, which is both what the next `docker compose up` will deploy
+#     and what the restore lands in, with no second network round trip and no
+#     window for a mid-run push to move the target.
+#
+# That asymmetry is deliberate; `pg_resolve_compose_facts` therefore takes the
+# revision rather than choosing one.
 #
 # Failure policy is the CALLER's, never this file's: every function reports a
 # failure as a non-zero return plus a human-readable sentence in `pg_reason`,
@@ -31,45 +42,18 @@ pg_docker() {
 	sg docker -c "$1"
 }
 
-# Resolve the db facts from origin/main's compose.yaml.
+# Resolve the revision a deploy from THIS checkout would build: origin/main,
+# fetched first. Sets `pg_target_revision` (a SHA) on success; returns 1 with
+# `pg_reason` set otherwise.
 #
-# On success (return 0) sets, from the incoming revision interpolated against
-# the host's own .env:
-#   pg_target_revision  the commit origin/main resolved to, as a SHA
-#   pg_target_major  the Postgres major the incoming revision deploys
-#   pg_db_image      the db service's image ref
-#   pg_volume_name   the project-qualified name of the db-data volume
-#   pg_db_user       POSTGRES_USER  (empty if .env does not set it)
-#   pg_db_name       POSTGRES_DB    (empty if .env does not set it)
-#
-# `pg_target_revision` is what makes "the incoming revision" a single thing for
-# the whole run rather than a name re-resolved at each use. main advances here
-# often, including from automated merges, so a caller that acts on these facts
-# and THEN moves the checkout to `origin/main` by name could act on one revision
-# and deploy another (see the fast-forward in scripts/pg_major_upgrade.sh).
-#
-# Returns 1 with `pg_reason` set when any of the first three cannot be resolved.
-# The two credentials are best-effort: only the upgrade script needs them, and
-# an unset POSTGRES_USER must not cost the preflight its version check.
-pg_resolve_compose_facts() {
-	local compose_json facts
-	# Explicit, because callers run under `set -u` and a short read below (an
-	# empty or truncated parse) would otherwise leave the later fields unset.
+# Only the pre-pull caller (scripts/deploy_preflight.sh) needs this. Pinning to a
+# SHA here, once, is what makes "the incoming revision" a single thing for the
+# whole run rather than a name re-resolved at each use: main advances here often,
+# including from automated merges, so a caller that resolves it twice can
+# validate one revision and deploy another.
+pg_resolve_incoming_revision() {
 	pg_reason=""
 	pg_target_revision=""
-	pg_target_major=""
-	pg_db_image=""
-	pg_volume_name=""
-	pg_db_user=""
-	pg_db_name=""
-
-	# The compose config is JSON; python3 is the only parser this repo already
-	# depends on (scripts/check_docs.py et al.), but the deploy host does not
-	# otherwise need it, so its absence is a real possibility and must be loud.
-	if ! command -v python3 > /dev/null 2>&1; then
-		pg_reason="python3 is not installed (needed to read the compose config)."
-		return 1
-	fi
 
 	# The fetch is the only network dependency here, so it is a reportable
 	# failure like any other undeterminable input. It updates
@@ -107,31 +91,35 @@ pg_resolve_compose_facts() {
 		return 1
 	fi
 
-	# Pinned to a SHA here, once, and everything downstream reads the SHA rather
-	# than the name: `origin/main` is a moving target, and a caller that resolves
-	# it twice can validate one revision and deploy another.
 	if ! pg_target_revision="$(git rev-parse --verify --quiet "origin/main^{commit}" 2>/dev/null)"; then
 		pg_reason="could not resolve origin/main to a commit after fetching it."
 		return 1
 	fi
+	return 0
+}
 
-	# `-f -` hands compose the incoming compose.yaml on stdin while the project
-	# directory stays the repo root, so interpolation still reads the host's .env
-	# and the volume name still resolves under the real project name. Target
-	# image and volume name therefore both come from the incoming revision;
-	# resolving one from each side would be worse than resolving both from either.
-	compose_json="$(git show "${pg_target_revision}:compose.yaml" 2>/dev/null | pg_docker "docker compose -f - config --format json" 2>/dev/null || true)"
-	if [ -z "$compose_json" ]; then
-		pg_reason="could not read the compose config of origin/main."
-		return 1
-	fi
+# Print the db facts of <revision>'s compose.yaml, one per line: major, image,
+# volume name, POSTGRES_USER, POSTGRES_DB. Returns 1, silently, when that
+# revision has no readable compose config -- callers phrase their own message,
+# and the history walk in scripts/pg_major_upgrade.sh treats it as "not this
+# candidate" rather than as an error.
+#
+# `-f -` hands compose the revision's compose.yaml on stdin while the project
+# directory stays the repo root, so interpolation still reads the host's .env and
+# the volume name still resolves under the real project name. Image and volume
+# name therefore both come from the same revision; resolving one from each side
+# would be worse than resolving both from either.
+pg_compose_db_facts() {
+	local revision="$1" compose_json
+	compose_json="$(git show "${revision}:compose.yaml" 2>/dev/null | pg_docker "docker compose -f - config --format json" 2>/dev/null || true)"
+	[ -n "$compose_json" ] || return 1
 
 	# The tag is what follows the LAST colon of the final path segment, with any
 	# @sha256 digest removed first: a registry host carries a :port that a
 	# leftmost search would mistake for a major, and 5000 < 18 would refuse every
 	# deploy. A leading integer in the tag is the major (18, 18.4, 17.6-alpine);
 	# `latest` and a bare digest pin have none and must be reported, not guessed.
-	facts="$(printf '%s' "$compose_json" | python3 -c '
+	printf '%s' "$compose_json" | python3 -c '
 import json, re, sys
 cfg = json.load(sys.stdin)
 db = cfg["services"]["db"]
@@ -145,7 +133,44 @@ print(image)
 print(cfg["volumes"]["db-data"]["name"])
 print(env.get("POSTGRES_USER") or "")
 print(env.get("POSTGRES_DB") or "")
-' 2>/dev/null || true)"
+' 2>/dev/null || true
+}
+
+# Resolve the db facts of <revision>'s compose.yaml.
+#
+# On success (return 0) sets, interpolated against the host's own .env:
+#   pg_target_major  the Postgres major that revision deploys
+#   pg_db_image      the db service's image ref
+#   pg_volume_name   the project-qualified name of the db-data volume
+#   pg_db_user       POSTGRES_USER  (empty if .env does not set it)
+#   pg_db_name       POSTGRES_DB    (empty if .env does not set it)
+#
+# Returns 1 with `pg_reason` set when any of the first three cannot be resolved.
+# The two credentials are best-effort: only the upgrade script needs them, and
+# an unset POSTGRES_USER must not cost the preflight its version check.
+pg_resolve_compose_facts() {
+	local revision="$1" facts
+	# Explicit, because callers run under `set -u` and a short read below (an
+	# empty or truncated parse) would otherwise leave the later fields unset.
+	pg_reason=""
+	pg_target_major=""
+	pg_db_image=""
+	pg_volume_name=""
+	pg_db_user=""
+	pg_db_name=""
+
+	# The compose config is JSON; python3 is the only parser this repo already
+	# depends on (scripts/check_docs.py et al.), but the deploy host does not
+	# otherwise need it, so its absence is a real possibility and must be loud.
+	if ! command -v python3 > /dev/null 2>&1; then
+		pg_reason="python3 is not installed (needed to read the compose config)."
+		return 1
+	fi
+
+	if ! facts="$(pg_compose_db_facts "$revision")"; then
+		pg_reason="could not read the compose config of ${revision}."
+		return 1
+	fi
 	# One field per line, so an empty major (first field) is not swallowed.
 	{
 		read -r pg_target_major

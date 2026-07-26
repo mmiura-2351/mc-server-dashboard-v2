@@ -1,8 +1,16 @@
 #!/usr/bin/env bash
 #
-# pg_major_upgrade.sh: migrate the db-data volume to the PostgreSQL major the
-# incoming revision deploys -- dump, verify, archive, fresh volume, restore
-# (issue #2304).
+# pg_major_upgrade.sh: migrate the db-data volume to the PostgreSQL major this
+# checkout deploys -- dump, verify, archive, fresh volume, restore (issue #2304).
+#
+# RUN IT AFTER `git pull`, not before (issue #2309). This file ships in the same
+# revision as the Postgres bump it migrates for, so on the deployment that needs
+# it the pull is the only way to obtain it -- a script that assumed a pre-pull
+# checkout could only ever be invoked from a state its operator could not reach.
+# Pulling first costs nothing and changes nothing about the running stack: the
+# db container keeps running the image it was STARTED from until a
+# `docker compose up` recreates it, which is the event this script exists to
+# stand in front of. Everything below therefore validates against HEAD.
 #
 # DELIBERATELY INVOKED. Nothing in this repo calls it: not scripts/update.sh,
 # not `make update`, not scripts/deploy.sh. The API is unavailable for the whole
@@ -16,7 +24,8 @@
 #   * The dump is taken while the OLD major is still what `db` runs. A
 #     postgres:18 image ships no PostgreSQL 17 binary, so a dump taken after the
 #     image swap is not a dump of this cluster at all. The run refuses unless the
-#     running container's pg_dumpall is the major that wrote the volume.
+#     running container's pg_dumpall is the major that wrote the volume -- which
+#     is also what makes the pull above safe to have happened already.
 #   * The dump is verified before anything destructive happens: pg_dumpall's own
 #     exit status (not that a file appeared), plus PostgreSQL's end-of-dump
 #     marker. Either check failing aborts with the volume untouched.
@@ -30,7 +39,9 @@
 #     collisions that are removed rather than tolerated.
 #
 # Usage:
-#   scripts/pg_major_upgrade.sh
+#   git pull --ff-only origin main     # how you get this script and the new image
+#   scripts/pg_major_upgrade.sh        # no-op unless an upgrade is pending
+#   docker compose up -d --build       # only once the above exited 0
 #
 # Artifacts (dump, volume archive, restore log) land in $MCSD_PG_UPGRADE_DIR,
 # defaulting to a timestamped directory NEXT TO the repo -- never inside it, as
@@ -97,7 +108,19 @@ print_recovery() {
 	echo "pg upgrade:   sg docker -c 'docker volume rm ${volume}' || true" >&2
 	echo "pg upgrade:   sg docker -c 'docker volume create ${volume}'" >&2
 	echo "pg upgrade:   sg docker -c \"docker run --rm --entrypoint sh -v ${volume}:/dst -v ${archive_dir}:/src:ro ${image} -c 'tar xzf /src/${archive_file} -C /dst'\"" >&2
-	echo "pg upgrade:   MCSD_ALLOW_PRIMARY_BRANCH=1 git checkout ${old_rev}   # the revision that deployed PostgreSQL ${cluster_major}" >&2
+	if [ -n "$old_rev" ]; then
+		echo "pg upgrade:   MCSD_ALLOW_PRIMARY_BRANCH=1 git checkout ${old_rev}   # verified: its compose.yaml deploys PostgreSQL ${cluster_major}" >&2
+	else
+		# Section 3 could not find one, and said so before anything destructive
+		# happened. Printing a plausible SHA anyway is the one thing that would
+		# be worse: the next line would start the NEW major on the data just put
+		# back, which is the abort this whole script exists to avoid.
+		echo "pg upgrade:   # NO REVISION FOUND that deploys PostgreSQL ${cluster_major}. Find one BEFORE the next line --" >&2
+		echo "pg upgrade:   # this checkout deploys PostgreSQL ${pg_target_major} and would start it on the restored data:" >&2
+		echo "pg upgrade:   #   git log --format='%H %s' -- compose.yaml    # candidates, newest first" >&2
+		echo "pg upgrade:   #   git show <rev>:compose.yaml | grep 'image: postgres'   # until it prints postgres:${cluster_major}" >&2
+		echo "pg upgrade:   MCSD_ALLOW_PRIMARY_BRANCH=1 git checkout <that revision>" >&2
+	fi
 	echo "pg upgrade:   sg docker -c 'docker compose up -d --wait db'" >&2
 	echo "pg upgrade:   rm ${sentinel}" >&2
 	echo "pg upgrade: That restores the volume from the archive and starts the old major against it." >&2
@@ -126,25 +149,29 @@ sentinel_field() {
 }
 
 # ── 1. Preconditions ─────────────────────────────────────────────────────────
-# This run advances the checkout to origin/main (step 5) -- it has to, because
-# the restore must land in a container started from the NEW image. So the same
-# two conditions the deploy preflight enforces apply here: a pull onto a stray
-# branch would merge, and a dirty tree would block the fast-forward halfway
-# through a migration.
+# Everything below reads HEAD as the revision that will be deployed, and the
+# recovery block hands the operator a checkout to leave and come back to. Both
+# of those are only true of the deploy source itself: on a stray branch HEAD is
+# not what the next `docker compose up` builds, and with a dirty tree HEAD is not
+# even what this checkout would deploy.
 branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || echo "")"
 if [ "$branch" != "main" ]; then
-	die "checkout is on '${branch:-a detached HEAD}', not 'main'. This run fast-forwards to origin/main; restore it first: git checkout main"
+	die "checkout is on '${branch:-a detached HEAD}', not 'main'. This run migrates the volume to what the deploy source deploys; restore it first: git checkout main"
 fi
 if [ -n "$(git status --porcelain)" ]; then
 	git status --short >&2
-	die "working tree is dirty. This run fast-forwards to origin/main; commit, stash, or discard the changes above first."
+	die "working tree is dirty, so HEAD is not what this checkout would deploy. Commit, stash, or discard the changes above first."
 fi
 
 # ── 2. Is an upgrade actually pending? ───────────────────────────────────────
-# Same facts, same source, as the guard that sends operators here: the target
-# comes from origin/main, because that is the revision whose `db` image the
-# restore has to land in (scripts/pg_cluster_lib.sh explains why not the tree).
-pg_resolve_compose_facts || die "$pg_reason"
+# HEAD, because the pull has already happened (see the header): it is both the
+# revision whose `db` image the restore has to land in and the one the next
+# deploy builds, resolved once, locally, with no window for a push to origin to
+# move it mid-run. The preflight that sends operators here resolves origin/main
+# instead -- it runs on the other side of the pull, and that asymmetry is
+# explained in scripts/pg_cluster_lib.sh.
+pg_target_revision="$(git rev-parse HEAD)"
+pg_resolve_compose_facts "$pg_target_revision" || die "$pg_reason"
 [ -n "$pg_db_user" ] || die "POSTGRES_USER is not set for the db service -- the dump and restore need it (see .env)."
 [ -n "$pg_db_name" ] || die "POSTGRES_DB is not set for the db service -- the restore needs it (see .env)."
 
@@ -241,25 +268,84 @@ fi
 # second invocation stops here instead of starting over. What makes that safe is
 # the sentinel check above -- without it this exit cannot tell a COMPLETED
 # upgrade from the wreckage of one that died halfway.
+#
+# It is also where an operator who ran this BEFORE pulling lands, and they must
+# not read "nothing to do" as "nothing is pending": their checkout still pins the
+# old image, so of course it matches the volume. Naming the revision and telling
+# them to pull is the whole difference between the two readings.
 if [ "$pg_cluster_major" -eq "$pg_target_major" ]; then
-	say "volume '${pg_volume_name}' already holds PostgreSQL ${pg_cluster_major}, which is what origin/main deploys (${pg_db_image}) -- nothing to do."
+	say "volume '${pg_volume_name}' already holds PostgreSQL ${pg_cluster_major}, which is what this checkout deploys (${pg_db_image}) -- nothing to do."
+	say "  (If you have not taken the new revision yet, do that first -- 'git pull --ff-only origin main' -- and re-run."
+	say "   This checkout is at ${pg_target_revision}.)"
 	exit 0
 fi
 if [ "$pg_cluster_major" -gt "$pg_target_major" ]; then
-	die "volume '${pg_volume_name}' holds PostgreSQL ${pg_cluster_major}, NEWER than the ${pg_target_major} that origin/main deploys (${pg_db_image}). Downgrading a cluster is not something this script handles; check what origin/main pins before going further."
+	die "volume '${pg_volume_name}' holds PostgreSQL ${pg_cluster_major}, NEWER than the ${pg_target_major} this checkout deploys (${pg_db_image}). Downgrading a cluster is not something this script handles; check what HEAD (${pg_target_revision}) pins before going further."
 fi
 
-say "PostgreSQL ${pg_cluster_major} -> ${pg_target_major} upgrade of volume '${pg_volume_name}' (origin/main deploys ${pg_db_image})."
+say "PostgreSQL ${pg_cluster_major} -> ${pg_target_major} upgrade of volume '${pg_volume_name}' (this checkout deploys ${pg_db_image})."
 
-# ── 3. The running db must still BE the old major ────────────────────────────
+# ── 3. The way back: which revision deploys the OLD major ────────────────────
+# The recovery block has to name a checkout that starts PostgreSQL ${pg_cluster_major} against the
+# restored volume. This script runs after the pull, so that is no longer HEAD --
+# and nothing on this host records it reliably. `.last-deploy-sha` was the
+# obvious candidate and is not good enough: scripts/update.sh writes it only on
+# its own success path, so a deployment ever brought up with
+# `docker compose up -d --build` (DEPLOYMENT.md Section 4) has none or has a
+# stale one, and neither is distinguishable from a current one by looking at it.
+# Measured on the canonical host while writing this, it was 24 commits behind the
+# checkout. A recovery instruction cannot rest on that.
+#
+# What the recovery actually needs of that revision is one property -- its
+# compose.yaml deploys PostgreSQL ${pg_cluster_major}, so `up -d --wait db` from it starts the major
+# that wrote the data. That property is CHECKABLE, here, from this repo's own
+# history: only a commit that touched compose.yaml can change the db image, so
+# the newest such commit still on the old major is the answer, and it is read
+# exactly the way HEAD's own major was rather than assumed.
+#
+# The bound keeps this cheap. In the case it exists for the answer is the second
+# candidate -- the bump commit, then the one before it -- and without a bound a
+# repo whose db image was never the old major would run a compose config for
+# every commit that ever touched the file.
+find_old_major_revision() {
+	local rev major checked=0
+	while read -r rev; do
+		checked=$((checked + 1))
+		[ "$checked" -le 25 ] || break
+		major="$(pg_compose_db_facts "$rev" | head -n 1)"
+		if [ "$major" = "$pg_cluster_major" ]; then
+			printf '%s' "$rev"
+			return 0
+		fi
+	done < <(git log --first-parent --format=%H HEAD -- compose.yaml)
+	return 1
+}
+
+say "looking for the revision to go back to if this run fails..."
+old_revision="$(find_old_major_revision || true)"
+if [ -n "$old_revision" ]; then
+	say "  ${old_revision} -- the newest revision in this checkout's history whose compose.yaml deploys PostgreSQL ${pg_cluster_major}."
+else
+	# Said HERE, before anything destructive, because it is the one thing the
+	# operator may want to act on before starting: the run is still safe, but its
+	# recovery block will hand them a search rather than a command.
+	say "  NOT FOUND -- no revision in this checkout's history deploys PostgreSQL ${pg_cluster_major}."
+	say "  The upgrade can still run and every check below still holds. But if it fails after the volume"
+	say "  is released, the recovery block cannot name a checkout to go back to and will tell you what to"
+	say "  look for instead. Find that revision now if you want the way back to be a copy-paste."
+fi
+
+# ── 4. The running db must still BE the old major ────────────────────────────
 # The one constraint the whole script hangs on. Ask the binary that will take
-# the dump, not the compose file that was supposed to have started it.
+# the dump, not the compose file that was supposed to have started it. Post-pull
+# the compose file would say ${pg_target_major} while the container it started is still
+# ${pg_cluster_major}, which is exactly the state this must not be confused by.
 running_version="$(pg_docker "docker compose exec -T db pg_dumpall --version" 2> /dev/null)" ||
-	die "the 'db' service is not running, so there is nothing to dump. Start it from the revision that deployed PostgreSQL ${pg_cluster_major} (docker compose up -d --wait db) and re-run."
+	die "the 'db' service is not running, so there is nothing to dump. Start it from the revision that deploys PostgreSQL ${pg_cluster_major}${old_revision:+ (${old_revision})} -- 'MCSD_ALLOW_PRIMARY_BRANCH=1 git checkout <that revision> && docker compose up -d --wait db' -- then 'git checkout main' and re-run."
 running_major="$(printf '%s' "$running_version" | sed -n 's/.*(PostgreSQL) \([0-9][0-9]*\).*/\1/p')"
 [ -n "$running_major" ] || die "could not read a PostgreSQL major from the running db container's pg_dumpall: '${running_version}'."
 if [ "$running_major" -ne "$pg_cluster_major" ]; then
-	die "the running 'db' container is PostgreSQL ${running_major}, but volume '${pg_volume_name}' holds a PostgreSQL ${pg_cluster_major} cluster. The dump must be taken by the major that wrote the cluster -- PostgreSQL ${running_major} ships no ${pg_cluster_major} binary. Bring the db up from the revision that deployed ${pg_cluster_major} and re-run."
+	die "the running 'db' container is PostgreSQL ${running_major}, but volume '${pg_volume_name}' holds a PostgreSQL ${pg_cluster_major} cluster. The dump must be taken by the major that wrote the cluster -- PostgreSQL ${running_major} ships no ${pg_cluster_major} binary. Bring the db up from the revision that deploys ${pg_cluster_major}${old_revision:+ (${old_revision})} and re-run."
 fi
 
 out_dir="${MCSD_PG_UPGRADE_DIR:-${repo_root%/*}/mcsd-pg-upgrade-$(date -u +%Y%m%dT%H%M%SZ)}"
@@ -271,7 +357,7 @@ case "$out_dir" in
 esac
 say "artifacts will be written to ${out_dir}"
 
-# ── 4. Stop the writers, then dump, then verify the dump ─────────────────────
+# ── 5. Stop the writers, then dump, then verify the dump ─────────────────────
 # `api` is the only DB client (`worker` and `relay` reach it over gRPC), so
 # stopping it is what makes the dump a consistent end state; the others go too
 # because they only error against a stopped API. `db` stays up -- it is what
@@ -293,23 +379,6 @@ if ! tail -n 5 "$backup" | grep -q 'PostgreSQL database cluster dump complete'; 
 	die "the dump at ${backup} does not end with PostgreSQL's completion marker, so it is truncated. NOTHING has been changed -- volume '${pg_volume_name}' still holds the PostgreSQL ${pg_cluster_major} cluster and 'docker compose up -d' brings the stack back."
 fi
 say "dump verified: pg_dumpall exited 0 and the output ends with PostgreSQL's completion marker."
-
-# ── 5. Take the incoming revision ────────────────────────────────────────────
-# Before anything destructive, so a failed fast-forward costs nothing: the
-# volume is still there and the stack still starts. The pre-pull commit is kept
-# for the recovery instructions -- going back to the old data means going back
-# to the revision whose compose.yaml mounts it where PostgreSQL ${pg_cluster_major} expects.
-#
-# The fast-forward targets the SHA step 2 resolved, NOT `origin/main` by name.
-# `git pull --ff-only origin main` would fetch again and take whatever the branch
-# points at by now; main here advances often, including from automated merges, so
-# a push landing during the dump would leave this run restoring into an image it
-# never checked -- the exact incompatibility the version check exists to catch,
-# reintroduced by the fix for it. One run, one revision.
-old_revision="$(git rev-parse HEAD)"
-say "fast-forwarding the checkout to ${pg_target_revision} (the revision this run validated)..."
-git merge --ff-only "$pg_target_revision" ||
-	die "could not fast-forward the checkout to ${pg_target_revision} (git merge --ff-only). Nothing destructive has happened -- volume '${pg_volume_name}' is intact and 'docker compose up -d' brings the stack back."
 
 # ── 6. Archive the old volume, and verify the archive ────────────────────────
 # `down` first, so the archive is a quiesced cluster rather than a torn copy of
@@ -354,10 +423,13 @@ die_recoverable() {
 	printf 'volume\t%s\n' "$pg_volume_name"
 	printf 'dump\t%s\n' "$backup"
 	printf 'archive\t%s\n' "$archive"
+	# Empty when section 3 could not find one; print_recovery then prints the
+	# search instead of a checkout, for the live run and for a later one alike.
 	printf 'old_revision\t%s\n' "$old_revision"
-	# Where this run was taking the checkout, as distinct from old_revision's
-	# where it came from. A half-migrated cluster belongs to one specific
-	# revision, and after main has moved on, its name no longer identifies it.
+	# The revision this run validated and restored INTO, as distinct from
+	# old_revision's where the data came from. A half-migrated cluster belongs to
+	# one specific revision, and after main has moved on, `HEAD` no longer
+	# identifies it.
 	printf 'target_revision\t%s\n' "$pg_target_revision"
 } > "$sentinel"
 
