@@ -146,6 +146,22 @@ async function readCappedBlob(response: Response): Promise<Blob> {
   });
 }
 
+/**
+ * Save `url` as a file named `filename` by clicking a synthesised anchor.
+ *
+ * The `download` attribute only applies same-origin, which every URL handed
+ * here is (WEBUI_SPEC.md 7.7). The anchor is detached again immediately; the
+ * click leaves no history entry.
+ */
+export function saveUrlAs(url: string, filename: string): void {
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+}
+
 export async function downloadFile(
   path: string,
   filename: string,
@@ -153,12 +169,7 @@ export async function downloadFile(
 ): Promise<void> {
   const blob = await fetchFileBlob(path, signal);
   const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
+  saveUrlAs(url, filename);
   // Defer the revoke so the click-initiated download has the object URL when it
   // actually fetches; revoking synchronously can race the save in some browsers.
   setTimeout(() => URL.revokeObjectURL(url), 0);
