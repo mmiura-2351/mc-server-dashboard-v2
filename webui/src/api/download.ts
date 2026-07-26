@@ -1,19 +1,25 @@
 /**
  * Authenticated file download via fetch + blob (WEBUI_SPEC.md 7.1).
  *
- * The API authenticates with a Bearer access token only (no cookie auth, no
- * query-token path) and the token lives in memory, never in storage. So a plain
- * `<a href>` / `window.location` to a streamed-download endpoint (e.g. the
- * server export ZIP) cannot carry the credential — the request would arrive
- * unauthenticated. The honest path is to fetch the URL with the Authorization
- * header set, read the response as a Blob, and click a synthesised anchor at an
- * object URL so the browser saves the file.
+ * These endpoints authenticate with a Bearer access token that lives in memory,
+ * never in storage, so a plain `<a href>` / `window.location` to a
+ * streamed-download endpoint (e.g. the server export ZIP) cannot carry the
+ * credential — the request would arrive unauthenticated. The honest path is to
+ * fetch the URL with the Authorization header set, read the response as a Blob,
+ * and click a synthesised anchor at an object URL so the browser saves the file.
  *
  * This is intentionally separate from the JSON {@link api} client: that client
  * parses every body as JSON, which a binary ZIP is not. The trade-off is that
  * the whole archive buffers in memory before the save prompt; for the working
  * sets these endpoints serve that is acceptable, and it is the only way to
  * attach the in-memory token (issue #438).
+ *
+ * Backup archives are the exception, and no longer take this path: they run to
+ * multiple GB, so buffering them hit {@link MAX_DOWNLOAD_BYTES} and failed
+ * (#2314). That surface mints a short-lived self-authenticating URL
+ * (`POST …/backups/{id}/download-grant`, #2313) and hands it to
+ * {@link saveUrlAs}, so the browser streams the bytes to disk without the tab
+ * reading them.
  */
 
 import { getAccessToken } from "../auth/tokenStore.ts";
