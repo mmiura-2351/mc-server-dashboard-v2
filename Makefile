@@ -402,6 +402,7 @@ hooks-test:
 # dirs, and stubbed `sg`/`docker` -- never touches a real daemon or volume.
 scripts-test:
 	bash scripts/test_deploy_preflight.sh
+	bash scripts/test_pg_major_upgrade.sh
 
 # ---------------------------------------------------------------------------
 # proto/ (buf) -- the shared control-plane contract.

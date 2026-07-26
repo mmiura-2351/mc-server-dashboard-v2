@@ -99,9 +99,16 @@ case "$1 $2" in
 		printf '{"services": {"db": {"image": "%s"}}, "volumes": {"db-data": {"name": "testproj_db-data"}}}\n' \
 			"$image"
 		;;
-	"volume inspect")
-		[ "${MOCK_VOLUME_EXISTS:-1}" = "1" ] || exit 1
-		echo "[]"
+	"volume ls")
+		# The guard LISTS volumes rather than inspecting one, so that a daemon
+		# which cannot answer is distinguishable from a volume that is genuinely
+		# not there -- `volume inspect` fails identically for both (#2301).
+		[ "${MOCK_VOLUME_LS_FAILS:-0}" = "1" ] && exit 1
+		# A host's other volumes come back too, including one whose name has the
+		# target as a prefix: the match has to be exact, not a substring.
+		echo "testproj_db-data-old"
+		[ "${MOCK_VOLUME_EXISTS:-1}" = "1" ] && echo "testproj_db-data"
+		exit 0
 		;;
 	"run --rm")
 		if [ -n "${MOCK_RUN_LOG:-}" ]; then
@@ -142,6 +149,23 @@ run_preflight_without_python3() {
 	output="$(
 		cd "$base/repo" || exit 99
 		env PATH="$base/bin" "$bash_bin" "$SCRIPT" 2>&1
+	)" || exit_code=$?
+}
+
+# Same again, on a host with no `timeout`: PATH is restricted to the stub dir
+# with everything the guard and the stubs need symlinked in EXCEPT timeout, so
+# the fallback is exercised for real rather than simulated.
+run_preflight_without_timeout() {
+	local base="$1" bash_bin tool
+	shift
+	bash_bin="$(command -v bash)"
+	for tool in sh git python3 cat sed head grep; do
+		ln -sf "$(command -v "$tool")" "$base/bin/$tool"
+	done
+	exit_code=0
+	output="$(
+		cd "$base/repo" || exit 99
+		env PATH="$base/bin" "$@" "$bash_bin" "$SCRIPT" 2>&1
 	)" || exit_code=$?
 }
 
@@ -205,6 +229,14 @@ echo "=== deploy_preflight Postgres version guard tests ==="
 	case "$output" in
 		*DEPLOYMENT.md*) ok "PG17 data + postgres:18 target: message points at the runbook" ;;
 		*) fail_test "PG17 data + postgres:18 target: message lacks the runbook pointer -- $output" ;;
+	esac
+	# The refusal has to name the way out, not just the problem: the operator is
+	# mid-deploy and the fix is one deliberately-invoked script (#2304).
+	case "$output" in
+		*"scripts/pg_major_upgrade.sh"*)
+			ok "PG17 data + postgres:18 target: message names the upgrade script" ;;
+		*)
+			fail_test "PG17 data + postgres:18 target: message does not name the upgrade script -- $output" ;;
 	esac
 	rm -rf "$base"
 }
@@ -370,6 +402,106 @@ echo "=== deploy_preflight Postgres version guard tests ==="
 	case "$output" in
 		*origin/main*) ok "origin/main unreachable: the message names origin/main" ;;
 		*) fail_test "origin/main unreachable: the message does not name origin/main -- $output" ;;
+	esac
+	rm -rf "$base"
+}
+
+# --- 14. The daemon cannot answer whether the volume exists -- skip, loudly ---
+# "Volume absent" and "could not ask" used to share an outcome, because
+# `docker volume inspect` exits non-zero for both. Absence is a real answer a
+# fresh host gives and stays silent (test 1); an unanswerable question is a
+# "could not determine" case like every other, and the one thing the guard must
+# never do is disappear without saying so (#2301).
+{
+	base="$(make_fixture postgres:18)"
+	run_preflight "$base" MOCK_VOLUME_LS_FAILS=1 MOCK_PG_VERSION=17
+	if [ "$exit_code" -eq 0 ]; then
+		ok "docker cannot answer about the volume: deploy allowed"
+	else
+		fail_test "docker cannot answer about the volume: expected exit 0, got $exit_code -- $output"
+	fi
+	assert_skipped "docker cannot answer about the volume"
+	case "$output" in
+		*testproj_db-data*)
+			ok "docker cannot answer about the volume: the message names the volume" ;;
+		*)
+			fail_test "docker cannot answer about the volume: the message does not name the volume -- $output" ;;
+	esac
+	rm -rf "$base"
+}
+
+# --- 15. A volume whose name merely CONTAINS the target's is not the target ---
+# The absent/unanswerable split reads the daemon's list of volumes; matching that
+# list loosely would invent a cluster to compare against on a fresh host.
+{
+	base="$(make_fixture postgres:18)"
+	run_preflight "$base" MOCK_VOLUME_EXISTS=0 MOCK_PG_VERSION=17
+	if [ "$exit_code" -eq 0 ]; then
+		ok "near-miss volume name: deploy allowed"
+	else
+		fail_test "near-miss volume name: expected exit 0, got $exit_code -- $output"
+	fi
+	case "$output" in
+		*SKIPPED*) fail_test "near-miss volume name: reported as a skip -- $output" ;;
+		*) ok "near-miss volume name: still a silent, completed check" ;;
+	esac
+	rm -rf "$base"
+}
+
+# --- 16. A HANGING fetch is bounded -- skip rather than stall forever ---
+# A hard-down network fails fast and reaches the skip in test 13. A black-holed
+# route or a stalled proxy does not: the fetch blocks and the preflight blocks
+# with it, indefinitely, with no output explaining why (#2306). The remote is an
+# ssh:// URL and `ssh` is stubbed to sleep, which is a real hang rather than a
+# simulated one; `timeout` is stubbed to keep its semantics on a shorter
+# deadline, so the test does not have to wait out the production bound.
+{
+	base="$(make_fixture postgres:17 postgres:18)"
+	printf '#!/bin/sh\nsleep 30\n' > "$base/bin/ssh"
+	printf '#!/bin/sh\nshift\nexec %s 2 "$@"\n' "$(command -v timeout)" > "$base/bin/timeout"
+	chmod +x "$base/bin/ssh" "$base/bin/timeout"
+	git -C "$base/repo" remote set-url origin "ssh://example.invalid/repo.git"
+
+	started="$(date +%s)"
+	run_preflight "$base" MOCK_PG_VERSION=17
+	elapsed=$(($(date +%s) - started))
+
+	if [ "$elapsed" -lt 15 ]; then
+		ok "hanging fetch: the preflight returns instead of blocking (${elapsed}s)"
+	else
+		fail_test "hanging fetch: the preflight waited ${elapsed}s on a hung fetch -- $output"
+	fi
+	if [ "$exit_code" -eq 0 ]; then
+		ok "hanging fetch: deploy allowed"
+	else
+		fail_test "hanging fetch: expected exit 0, got $exit_code -- $output"
+	fi
+	assert_skipped "hanging fetch"
+	case "$output" in
+		*"did not finish within"*)
+			ok "hanging fetch: the skip says the fetch ran out of time" ;;
+		*)
+			fail_test "hanging fetch: the skip does not name the deadline -- $output" ;;
+	esac
+	rm -rf "$base"
+}
+
+# --- 17. No `timeout` on the host -- run the fetch unbounded, never fail ---
+# The bound is an improvement on a hang, not a new prerequisite. A host without
+# coreutils' `timeout` must get the guard it had before, not a skip on every
+# deploy -- which would make the guard useless in exactly the way #2295 spent
+# three rounds avoiding.
+{
+	base="$(make_fixture postgres:17 postgres:18)"
+	run_preflight_without_timeout "$base" MOCK_PG_VERSION=17
+	if [ "$exit_code" -ne 0 ]; then
+		ok "no timeout binary: the guard still refuses PG17 data under postgres:18"
+	else
+		fail_test "no timeout binary: expected a refusal, got exit 0 -- $output"
+	fi
+	case "$output" in
+		*SKIPPED*) fail_test "no timeout binary: degraded to a skip -- $output" ;;
+		*) ok "no timeout binary: the check still ran" ;;
 	esac
 	rm -rf "$base"
 }

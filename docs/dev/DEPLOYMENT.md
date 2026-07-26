@@ -862,41 +862,134 @@ servers), runs a post-deploy `/api/healthz` check, and stamps the new SHA. Use
 > read: the container aborts during entrypoint init — loudly, and without
 > touching your data — and because `migrate` and `api` both gate on `db` being
 > healthy, the whole stack stays down until the data is migrated.
-> `scripts/deploy_preflight.sh` now detects this and refuses the deploy, so
-> `make update` stops before it takes the stack down.
+> `scripts/deploy_preflight.sh` detects this and refuses the deploy, so
+> `make update` stops before it takes the stack down, and names the script below.
 >
 > **Take the dump while the stack is still running `postgres:17` — before
 > `git pull` swaps the image.** The `postgres:18` image ships no PostgreSQL 17
 > binary, so once the new image is in place there is no supported way to read the
 > old volume.
 >
+> **Primary path — `scripts/pg_major_upgrade.sh`.** Run it from the repo root on
+> a clean `main`, with the old stack still up:
+>
+> ```sh
+> ./scripts/pg_major_upgrade.sh
+> ```
+>
+> It refuses unless an upgrade is actually pending (so re-running after a
+> successful one is a no-op), refuses unless the running `db` container is still
+> the major that wrote the volume, stops the writers, and takes the dump — then
+> **verifies it**, on `pg_dumpall`'s own exit status *and* PostgreSQL's
+> end-of-dump marker, before anything destructive happens. It then fast-forwards
+> the checkout to the exact commit it resolved `origin/main` to at the start (one
+> run, one revision — a merge landing on `main` mid-run cannot make it restore
+> into an image it never checked), archives the old volume to a host-side tarball
+> and lists that tarball back, and only then removes the volume; the PostgreSQL
+> 18 `db` comes up with `--wait` and the dump is restored into it under
+> `ON_ERROR_STOP=1`, so a statement that errors halfway aborts the run rather
+> than reporting a half-restored database as a success. Any failure exits
+> non-zero with the old volume still there.
+>
+> Nothing invokes this script for you, by design: `make update` and
+> `scripts/deploy.sh` never trigger it. The API is down for the duration and the
+> volume swap is irreversible, so it runs when *you* have chosen to.
+>
+> Artifacts (dump, volume archive, restore log) land in a timestamped directory
+> next to the repo, or in `$MCSD_PG_UPGRADE_DIR` if you set one. **They are yours
+> to delete** — the script never removes them, because until you have verified
+> the new cluster they are the only copies of the PostgreSQL 17 data. If a run
+> fails after the volume has been released, it prints the exact commands to put
+> the old data back from the archive; follow them and the deployment returns to
+> the revision and cluster it started on.
+>
+> While the old volume is gone and the new cluster is not yet restored, the
+> script keeps `.pg-upgrade-incomplete` in the repo root (gitignored, like
+> `.last-deploy-sha`). A re-run that finds it **refuses** rather than reporting
+> "nothing to do": a partially restored PostgreSQL 18 cluster and a finished one
+> are both just "the volume holds 18", and bringing the stack up on the first is
+> the one outcome this whole procedure exists to prevent. That refusal prints the
+> same recovery commands, reconstructed from what the unfinished run recorded in
+> the file — you do not need the original run's output still on screen. The
+> recovery instructions tell you when to delete it.
+>
+> Finish with `docker compose up -d --build`, then log in and check that servers,
+> backups, and snapshots resolve.
+>
+> **Manual fallback.** The same sequence by hand, including the two checks the
+> script exists to enforce:
+>
 > ```sh
 > # 1. On the OLD revision, with the 17 stack still up. Stop the writers FIRST:
 > #    `api` is the only DB client (`worker` and `relay` reach it over gRPC), so
 > #    anything written after the dump would be lost on restore.
 > docker compose stop api worker relay cloudflared
-> docker compose exec -T db pg_dumpall -U mcsd > backup-pg17.sql
+> docker compose exec -T db pg_dumpall -U mcsd > backup-pg17.sql   # check $?
+> tail -n 5 backup-pg17.sql | grep 'PostgreSQL database cluster dump complete'
+>
+> # 2. Archive the volume BEFORE releasing it, and list the archive back. Without
+> #    this the dump is the only copy of the data the moment the volume goes.
 > docker compose down
+> docker run --rm --entrypoint sh \
+>   -v mc-server-dashboard-v2_db-data:/src:ro -v "$(pwd)/..":/out postgres:17 \
+>   -c 'tar czf /out/db-data-pg17.tar.gz -C /src .'
+> tar tzf ../db-data-pg17.tar.gz | grep -q PG_VERSION
 > docker volume rm mc-server-dashboard-v2_db-data
 >
-> # 2. Take the new revision and start the 18 db on a fresh volume. `--wait`
-> #    blocks until the healthcheck passes, so the restore below cannot race
-> #    initdb.
+> # 3. Take the new revision and start the 18 db on a fresh volume.
+> #    `--wait` is NOT enough on its own. It blocks on the compose healthcheck,
+> #    which is `pg_isready` over the container's unix socket -- and the image's
+> #    entrypoint runs a TEMPORARY server on that same socket to execute its init
+> #    scripts before shutting it down and starting the real one. `--wait` can
+> #    therefore return mid-bootstrap and the restore then dies with
+> #    "FATAL: the database system is shutting down". Measured on this image:
+> #    the socket answered from t=1.6s while TCP stayed closed until t=10.6s.
+> #    The temp server runs with `listen_addresses=''`, so waiting for TCP tells
+> #    the two apart structurally -- it can never answer.
 > git pull --ff-only origin main
 > docker compose up -d --wait db
+> until docker compose exec -T db pg_isready -q -h 127.0.0.1 -U mcsd -d postgres
+> do sleep 1; done
 >
-> # 3. Restore, then bring the rest of the stack up:
-> docker compose exec -T db psql -U mcsd -d postgres < backup-pg17.sql
+> # 4. Restore. `ON_ERROR_STOP=1` is what makes a failed statement visible:
+> #    without it psql exits 0 after an error and a half-restored database is
+> #    indistinguishable from a good one. That means the two statements the new
+> #    container's initdb already ran from .env have to be REMOVED rather than
+> #    tolerated -- drop the empty database it created (the dump recreates it
+> #    with the original encoding and locale), and filter the single CREATE ROLE
+> #    line for the role you connect as, which cannot be dropped. Its following
+> #    `ALTER ROLE` carries the attributes and password, so nothing is lost.
+> grep -c -x -F 'CREATE ROLE mcsd;' backup-pg17.sql       # must print exactly 1
+> docker compose exec -T db psql -v ON_ERROR_STOP=1 -U mcsd -d postgres \
+>   -c 'DROP DATABASE IF EXISTS mcsd'
+> grep -v -x -F 'CREATE ROLE mcsd;' backup-pg17.sql \
+>   | docker compose exec -T db psql -v ON_ERROR_STOP=1 -U mcsd -d postgres
+>
+> # 5. Only once that exited 0, bring the rest of the stack up:
 > docker compose up -d --build
 > ```
+>
+> All three checks are load-bearing. `pg_dumpall` failing partway — full disk,
+> broken pipe, a non-zero exit — still leaves a non-empty, plausible-looking
+> `backup-pg17.sql`, because the shell created the file before the command ran;
+> the completion marker is the only evidence the dump finished. An archive that
+> will not list back is not a copy you can restore from, so checking it is what
+> makes the `docker volume rm` on the next line safe. And `ON_ERROR_STOP=1` is
+> the difference between a failed `COPY` stopping the restore and a table that
+> exists with rows missing from it.
+>
+> Do **not** substitute "read the restore log and ignore the errors you
+> recognise" for that flag. The two expected errors sit in the same list as a
+> real one and look no different — a run with a genuinely broken statement in it
+> prints three `ERROR:` lines where a good run prints two, and nothing marks
+> which is which.
 >
 > (The volume name is `<project>_db-data`; `docker volume ls` shows the exact
 > names for your project directory. Naming `relay`/`cloudflared` is harmless when
 > those profiles are inactive. `-T` on the dump matters: without it Compose
-> allocates a TTY and the redirected SQL is line-ending mangled. The restore
-> replays `CREATE ROLE mcsd` and `CREATE DATABASE mcsd`, which the fresh
-> container already provisioned from `.env` — those two "already exists" errors
-> are expected and harmless.)
+> allocates a TTY and the redirected SQL is line-ending mangled. `mcsd` above is
+> `POSTGRES_USER` / `POSTGRES_DB` from your `.env` — substitute yours in all
+> four places.)
 >
 > For a large cluster, `pg_upgrade --link` converts in place much faster, but it
 > needs both majors' binaries in one image and is not covered here. Performing
