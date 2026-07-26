@@ -149,6 +149,9 @@ from mc_server_dashboard_api.identity.application.admin_create_user import (
 from mc_server_dashboard_api.identity.application.admin_delete_user import (
     AdminDeleteUser,
 )
+from mc_server_dashboard_api.identity.application.authenticate_download_grant import (
+    AuthenticateDownloadGrant,
+)
 from mc_server_dashboard_api.identity.application.authenticate_request import (
     AuthenticateRequest,
 )
@@ -172,7 +175,10 @@ from mc_server_dashboard_api.identity.application.set_user_active import SetUser
 from mc_server_dashboard_api.identity.application.update_profile import UpdateProfile
 from mc_server_dashboard_api.identity.domain.brute_force import BruteForceConfig
 from mc_server_dashboard_api.identity.domain.entities import User
-from mc_server_dashboard_api.identity.domain.errors import InvalidAccessTokenError
+from mc_server_dashboard_api.identity.domain.errors import (
+    InvalidAccessTokenError,
+    InvalidDownloadGrantError,
+)
 from mc_server_dashboard_api.identity.domain.password_hasher import PasswordHasher
 from mc_server_dashboard_api.identity.domain.password_policy import (
     PRESETS,
@@ -222,10 +228,12 @@ from mc_server_dashboard_api.servers.application.backups import (
     GlobalBackupStatistics,
     ListBackups,
     PruneScheduledBackups,
+    ResolveBackup,
     RestoreBackup,
     ServerBackupStatistics,
     SetBackupRetention,
     UploadBackup,
+    download_grant_resource,
 )
 from mc_server_dashboard_api.servers.application.catalog import (
     CheckPluginUpdate,
@@ -922,6 +930,7 @@ def _build_token_service(token: TokenSettings, clock: SystemClock) -> TokenServi
         signing_key=token.signing_key,
         algorithm=token.algorithm,
         access_ttl=dt.timedelta(seconds=token.access_ttl_seconds),
+        download_grant_ttl=dt.timedelta(seconds=token.download_grant_ttl_seconds),
         clock=clock,
     )
 
@@ -1063,6 +1072,23 @@ def get_authenticate_request(request: Request) -> AuthenticateRequest:
     settings = get_settings(request)
     session_factory = create_session_factory(get_engine(request))
     return AuthenticateRequest(
+        uow=SqlAlchemyUnitOfWork(session_factory),
+        tokens=_build_token_service(settings.auth.token, SystemClock()),
+    )
+
+
+def get_token_service(request: Request) -> TokenService:
+    """The :class:`TokenService` Port, for routes that mint a download grant."""
+
+    return _build_token_service(get_settings(request).auth.token, SystemClock())
+
+
+def get_authenticate_download_grant(request: Request) -> AuthenticateDownloadGrant:
+    """Assemble the :class:`AuthenticateDownloadGrant` use case (issue #2313)."""
+
+    settings = get_settings(request)
+    session_factory = create_session_factory(get_engine(request))
+    return AuthenticateDownloadGrant(
         uow=SqlAlchemyUnitOfWork(session_factory),
         tokens=_build_token_service(settings.auth.token, SystemClock()),
     )
@@ -2206,6 +2232,13 @@ def get_download_backup(
     )
 
 
+def get_resolve_backup(request: Request) -> ResolveBackup:
+    """Assemble the :class:`ResolveBackup` use case (grant mint, issue #2313)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ResolveBackup(uow=ServersUnitOfWork(session_factory))
+
+
 def get_upload_backup(
     request: Request,
     backup_store: Annotated[BackupArchiveStore, Depends(get_servers_backup_store)],
@@ -2744,6 +2777,68 @@ async def authorize_two_layer(
     if not await checker.can(user=auth_user, operation=operation, resource=resource):
         raise _forbidden(operation)
     return auth_user
+
+
+async def require_backup_download_access(
+    request: Request,
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    backup_id: uuid.UUID,
+    credentials: Annotated[
+        HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)
+    ],
+    authenticate: Annotated[AuthenticateRequest, Depends(get_authenticate_request)],
+    authenticate_grant: Annotated[
+        AuthenticateDownloadGrant, Depends(get_authenticate_download_grant)
+    ],
+    visibility: Annotated[MembershipVisibility, Depends(get_membership_visibility)],
+    checker: Annotated[PermissionChecker, Depends(get_permission_checker)],
+    grant: str | None = None,
+) -> AuthUser:
+    """Gate the backup download on ``backup:read``, by Bearer token *or* grant.
+
+    A browser cannot put an ``Authorization`` header on a plain navigation, so a
+    multi-GB archive is fetched from a URL carrying a short-lived ``?grant=``
+    instead (issue #2313). The grant is bound to this exact community/server/backup
+    triple, so it opens nothing else.
+
+    Whichever way the subject is resolved, the same two-layer check runs — a grant
+    proves identity, never authority, so it survives neither a permission
+    revocation nor a membership removal within its TTL. The ``Authorization``
+    header wins when both are present: the grant is the fallback transport, not an
+    escalation path.
+
+    This is a standalone dependency rather than a :func:`require_permission`
+    variant because PEP 563 (``from __future__ import annotations``, top of this
+    module) makes FastAPI resolve ``Annotated[...]`` strings against the module
+    globals — a closure-built dependency cannot inject a per-call user resolver.
+    """
+
+    if credentials is not None:
+        try:
+            user = await authenticate(access_token=credentials.credentials)
+        except InvalidAccessTokenError as exc:
+            raise _unauthenticated() from exc
+    elif grant is not None:
+        try:
+            user = await authenticate_grant(
+                grant=grant,
+                resource=download_grant_resource(community_id, server_id, backup_id),
+            )
+        except InvalidDownloadGrantError as exc:
+            raise _unauthenticated() from exc
+    else:
+        raise _unauthenticated()
+
+    return await authorize_two_layer(
+        request=request,
+        user=user,
+        visibility=visibility,
+        checker=checker,
+        operation=Permission("backup:read"),
+        resource_type="server",
+        resource_id_param="server_id",
+    )
 
 
 class DeferredAuthz(NamedTuple):

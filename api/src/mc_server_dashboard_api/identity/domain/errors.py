@@ -113,6 +113,16 @@ class InvalidAccessTokenError(IdentityError):
     """An access token failed verification (bad signature, malformed, expired)."""
 
 
+class InvalidDownloadGrantError(IdentityError):
+    """A download grant failed verification (issue #2313).
+
+    Bad signature, malformed, expired, not a download grant at all, or bound to a
+    different resource than the one being fetched. Deliberately distinct from
+    :class:`InvalidAccessTokenError`: the two credential kinds are not
+    interchangeable, so neither verifier may accept the other's token.
+    """
+
+
 class InvalidRefreshTokenError(IdentityError):
     """A presented refresh token is unknown, revoked, or expired (FR-AUTH-2)."""
 

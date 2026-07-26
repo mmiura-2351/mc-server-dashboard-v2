@@ -21,7 +21,7 @@ import uuid
 from typing import Annotated
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, UploadFile, status
+from fastapi import APIRouter, Depends, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -37,15 +37,22 @@ from mc_server_dashboard_api.dependencies import (
     get_download_backup,
     get_global_backup_statistics,
     get_list_backups,
+    get_resolve_backup,
     get_restore_backup,
     get_server_backup_statistics,
     get_set_backup_retention,
+    get_token_service,
     get_upload_backup,
+    require_backup_download_access,
     require_permission,
     require_platform_admin,
 )
 from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_problem import ProblemException, problem
+from mc_server_dashboard_api.identity.domain.token_service import TokenService
+from mc_server_dashboard_api.identity.domain.value_objects import (
+    UserId as IdentityUserId,
+)
 from mc_server_dashboard_api.servers.application.backups import (
     ClearBackupRetention,
     CreateBackup,
@@ -54,10 +61,12 @@ from mc_server_dashboard_api.servers.application.backups import (
     GlobalBackupStatistics,
     ListBackups,
     ListedBackup,
+    ResolveBackup,
     RestoreBackup,
     ServerBackupStatistics,
     SetBackupRetention,
     UploadBackup,
+    download_grant_resource,
 )
 from mc_server_dashboard_api.servers.application.files import MAX_UPLOAD_BYTES
 from mc_server_dashboard_api.servers.domain.backup import (
@@ -146,6 +155,18 @@ class BackupResponse(BaseModel):
 
 class BackupListResponse(BaseModel):
     backups: list[BackupResponse]
+
+
+class BackupDownloadGrantResponse(BaseModel):
+    """A short-lived, self-authenticating backup download URL (issue #2313).
+
+    ``download_url`` is same-origin relative (WEBUI_SPEC.md Section 7.7) and
+    already carries the grant, so a client hands it straight to ``<a download>``.
+    ``expires_at`` is when the grant stops verifying; after that the URL is 401.
+    """
+
+    download_url: str
+    expires_at: UtcDatetime
 
 
 class BackupStatisticsResponse(BaseModel):
@@ -582,16 +603,7 @@ async def download_backup(
     community_id: uuid.UUID,
     server_id: uuid.UUID,
     backup_id: uuid.UUID,
-    authorized: Annotated[
-        AuthUser,
-        Depends(
-            require_permission(
-                Permission("backup:read"),
-                resource_type=_SERVER_RESOURCE_TYPE,
-                resource_id_param="server_id",
-            )
-        ),
-    ],
+    authorized: Annotated[AuthUser, Depends(require_backup_download_access)],
     use_case: Annotated[DownloadBackup, Depends(get_download_backup)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> StreamingResponse:
@@ -602,6 +614,11 @@ async def download_backup(
 
     The response declares the archive's exact size as ``Content-Length``, so a
     client can show download progress and refuse an over-cap archive up front.
+
+    The caller authenticates with the usual Bearer access token, or — for a
+    browser that cannot set a header on a plain navigation — with a short-lived
+    ``?grant=`` minted by ``POST .../download-grant`` (issue #2313). Either way
+    the same ``backup:read`` gate decides, and the response is identical.
     """
 
     # Starlette populates no Content-Length for a streaming body, so without an
@@ -627,6 +644,71 @@ async def download_backup(
             "Content-Length": str(size_bytes),
             "Cache-Control": "no-store",
         },
+    )
+
+
+@router.post(
+    "/communities/{community_id}/servers/{server_id}/backups/{backup_id}/download-grant",
+)
+async def issue_backup_download_grant(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    backup_id: uuid.UUID,
+    response: Response,
+    authorized: Annotated[
+        AuthUser,
+        Depends(
+            require_permission(
+                Permission("backup:read"),
+                resource_type=_SERVER_RESOURCE_TYPE,
+                resource_id_param="server_id",
+            )
+        ),
+    ],
+    use_case: Annotated[ResolveBackup, Depends(get_resolve_backup)],
+    tokens: Annotated[TokenService, Depends(get_token_service)],
+) -> BackupDownloadGrantResponse:
+    """Mint a self-authenticating download URL for one backup (backup:read, #2313).
+
+    A multi-GB archive cannot be buffered into a Blob just to attach a Bearer
+    header, so the browser needs a URL that authenticates itself. The grant is
+    bound to this exact community/server/backup triple and to the caller, expires
+    in ``auth.token.download_grant_ttl_seconds``, and proves identity only — the
+    download re-runs the full ``backup:read`` gate on redemption.
+
+    The URL is relative because the Web UI is same-origin by design
+    (WEBUI_SPEC.md Section 7.7). An unknown / cross-server backup is 404, through
+    the same lookup the download uses (no existence signal).
+
+    Nothing is audited here: bytes leave the system at redemption, which records
+    ``backup:download`` with this same subject as actor.
+    """
+
+    try:
+        await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+            backup_id=BackupId(backup_id),
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    except BackupNotFoundError as exc:
+        raise _not_found() from exc
+
+    grant = tokens.issue_download_grant(
+        IdentityUserId(authorized.user_id.value),
+        download_grant_resource(community_id, server_id, backup_id),
+    )
+    # The middleware's no-store set is matched by exact path (middleware.py), which
+    # a templated route cannot join; set it here so a credential-bearing URL is
+    # never cached.
+    response.headers["Cache-Control"] = "no-store"
+    return BackupDownloadGrantResponse(
+        download_url=(
+            f"/api/communities/{community_id}/servers/{server_id}"
+            f"/backups/{backup_id}/download?grant={quote(grant.token, safe='')}"
+        ),
+        expires_at=grant.expires_at,
     )
 
 

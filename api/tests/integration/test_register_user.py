@@ -149,6 +149,7 @@ def _login(engine: AsyncEngine) -> Login:
             signing_key="test-signing-key",
             algorithm="HS256",
             access_ttl=dt.timedelta(minutes=15),
+            download_grant_ttl=dt.timedelta(seconds=30),
             clock=clock,
         ),
         clock=clock,
