@@ -202,6 +202,13 @@ say "archive verified: ${archive} lists back as a PostgreSQL cluster."
 # every failure below prints the way back rather than just naming the two files.
 # `docker volume rm` tolerates a missing volume with `|| true` so the block can
 # be followed verbatim whether the failure landed before or after step 7.
+#
+# The MCSD_ALLOW_PRIMARY_BRANCH=1 prefix on the checkout is load-bearing, not
+# decoration. On the canonical host the post-checkout hook auto-restores this
+# checkout to main (.githooks/post-checkout, docs/dev/AGENTS.md Section 1), so a
+# plain `git checkout <old revision>` is silently undone and the very next line
+# brings the NEW major up on the OLD data -- the entrypoint abort this whole
+# script exists to avoid, in the middle of the incident this block is for.
 print_recovery() {
 	echo "pg upgrade:" >&2
 	echo "pg upgrade: To put the PostgreSQL ${pg_cluster_major} data back exactly as it was, run these in ${repo_root}:" >&2
@@ -209,12 +216,17 @@ print_recovery() {
 	echo "pg upgrade:   sg docker -c 'docker volume rm ${pg_volume_name}' || true" >&2
 	echo "pg upgrade:   sg docker -c 'docker volume create ${pg_volume_name}'" >&2
 	echo "pg upgrade:   sg docker -c \"docker run --rm --entrypoint sh -v ${pg_volume_name}:/dst -v ${out_dir}:/src:ro ${pg_db_image} -c 'tar xzf /src/${archive_name} -C /dst'\"" >&2
-	echo "pg upgrade:   git checkout ${old_revision}   # the revision that deployed PostgreSQL ${pg_cluster_major}" >&2
+	echo "pg upgrade:   MCSD_ALLOW_PRIMARY_BRANCH=1 git checkout ${old_revision}   # the revision that deployed PostgreSQL ${pg_cluster_major}" >&2
 	echo "pg upgrade:   sg docker -c 'docker compose up -d --wait db'" >&2
 	echo "pg upgrade:   rm ${sentinel}" >&2
 	echo "pg upgrade: That restores the volume from the archive and starts the old major against it." >&2
 	echo "pg upgrade: Compose warns that the volume 'was not created by Docker Compose' -- expected, and harmless." >&2
-	echo "pg upgrade: It leaves the checkout on a detached HEAD; 'git checkout main' before re-running this script." >&2
+	echo "pg upgrade: MCSD_ALLOW_PRIMARY_BRANCH=1 is not optional on that checkout: without it this repo's" >&2
+	echo "pg upgrade: post-checkout hook restores the checkout to main (docs/dev/AGENTS.md Section 1), and the" >&2
+	echo "pg upgrade: 'up -d --wait db' above would then start PostgreSQL ${pg_target_major} on the PostgreSQL ${pg_cluster_major} data it just" >&2
+	echo "pg upgrade: put back. With the override the hook only prints a loud NOTICE -- expected. As a command" >&2
+	echo "pg upgrade: prefix it applies to that one checkout, which is left on a detached HEAD; 'git checkout main'" >&2
+	echo "pg upgrade: (no override needed) before re-running this script." >&2
 	echo "pg upgrade: The dump (${backup}) is the second, independent copy if the archive ever fails." >&2
 }
 die_recoverable() {

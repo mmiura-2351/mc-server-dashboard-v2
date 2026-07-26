@@ -740,12 +740,55 @@ done
 {
 	base="$(make_fixture)"
 	run_upgrade "$base" MOCK_PG_VERSION=17 MOCK_RESTORE_FAILS=1
-	for needle in "docker volume create" "tar xzf" "git checkout" "docker compose up -d --wait db" ".pg-upgrade-incomplete"; do
+	for needle in "docker volume create" "tar xzf" "MCSD_ALLOW_PRIMARY_BRANCH=1 git checkout" "docker compose up -d --wait db" ".pg-upgrade-incomplete"; do
 		case "$output" in
 			*"$needle"*) ok "failure path: recovery text includes '$needle'" ;;
 			*) fail_test "failure path: recovery text lacks '$needle' -- $output" ;;
 		esac
 	done
+
+	# The needles above pin the TEXT. What the operator actually hits is the repo's
+	# post-checkout hook, which auto-restores the primary checkout to main
+	# (docs/dev/AGENTS.md Section 1) -- so a plain `git checkout <sha>` there is
+	# silently undone and the `up -d --wait db` on the next line would start the
+	# NEW major on the OLD data, which is the abort this whole script exists to
+	# avoid. The fixtures carry no core.hooksPath, which is exactly why every
+	# earlier review of this text missed that: point the fixture at the real hook
+	# and run the printed command through it.
+	git -C "$base/repo" config core.hooksPath "$SCRIPTS_DIR/../.githooks"
+	recovery_checkout="$(printf '%s\n' "$output" | grep 'git checkout ' | grep -v 'git checkout main' | head -n 1)"
+	recovery_checkout="${recovery_checkout#pg upgrade:}"
+	recovery_checkout="${recovery_checkout%%#*}"
+	recovery_sha="${recovery_checkout##* }"
+
+	# Negative control, so the assertions below cannot pass vacuously: if the hook
+	# is not firing in this fixture at all, every checkout survives and the real
+	# defect goes unnoticed a second time.
+	(cd "$base/repo" && git checkout "$recovery_sha") > /dev/null 2>&1
+	if git -C "$base/repo" symbolic-ref --quiet HEAD > /dev/null; then
+		ok "failure path: the hook is live in this fixture (a plain checkout is auto-restored)"
+	else
+		fail_test "failure path: the post-checkout hook did not fire -- the hook assertions would pass vacuously"
+	fi
+
+	# Same shell runs the command and reports the variable, so a leaked override
+	# (`export`, or a form the hook needs kept set) is visible rather than hidden
+	# by a subshell that was going to discard it anyway.
+	leaked="$(cd "$base/repo" && eval "$recovery_checkout" > /dev/null 2>&1; printf '%s' "${MCSD_ALLOW_PRIMARY_BRANCH-unset}")"
+	if git -C "$base/repo" symbolic-ref --quiet HEAD > /dev/null; then
+		fail_test "failure path: the hook undid the printed recovery checkout -- back on $(git -C "$base/repo" symbolic-ref --short HEAD)"
+	else
+		ok "failure path: the printed recovery checkout survives the post-checkout hook"
+	fi
+	case "$(cat "$base/repo/compose.yaml")" in
+		*postgres:17*) ok "failure path: the recovered checkout holds the old major's compose.yaml" ;;
+		*) fail_test "failure path: the recovered checkout does not pin postgres:17 -- $(cat "$base/repo/compose.yaml")" ;;
+	esac
+	if [ "$leaked" = "unset" ]; then
+		ok "failure path: the override does not persist in the operator's shell"
+	else
+		fail_test "failure path: MCSD_ALLOW_PRIMARY_BRANCH is left set to '$leaked' after the recovery checkout"
+	fi
 	rm -rf "$base"
 }
 
