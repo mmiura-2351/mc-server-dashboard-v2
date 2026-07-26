@@ -170,6 +170,11 @@ case "$1 $2" in
 		;;
 	"compose stop" | "compose down" | "compose up")
 		log "$*"
+		# A seam for the one thing a stub cannot express as a return value: the
+		# world changing underneath the run. MOCK_ON_STOP fires at the writers
+		# stop -- after the facts have been resolved, before the checkout is
+		# advanced -- which is the window a push to origin/main lands in.
+		[ "$2" = "stop" ] && [ -n "${MOCK_ON_STOP:-}" ] && sh "$MOCK_ON_STOP"
 		;;
 	"compose exec")
 		case "$*" in
@@ -1083,6 +1088,136 @@ done
 			fail_test "docker cannot answer about the volume: the message does not name the volume -- $output" ;;
 	esac
 	assert_nothing_destructive "docker cannot answer about the volume" "$base"
+	rm -rf "$base"
+}
+
+# --- 13. origin/main advancing mid-run does not move this run's target ------
+# The facts are resolved once, at step 2, from origin/main. Step 5 then advances
+# the checkout. If those are two independent resolutions, a push that lands in
+# between makes the run validate one revision and restore into another -- and
+# `db` would come up on whatever image THAT revision pins, which is the entire
+# thing the version check exists to prevent. This repo's main advances often,
+# including from automated merges, so "nobody pushes during the window" is not
+# an assumption available here.
+{
+	base="$(make_fixture postgres:17 postgres:18)"
+	validated_rev="$(git -C "$base/origin.git" rev-parse main)"
+
+	# Lands while the writers are being stopped: facts resolved, checkout not yet
+	# advanced. A clone, so the run's own working tree is untouched -- a dirty
+	# tree would be refused by a precondition and the test would pass vacuously.
+	cat > "$base/advance-origin.sh" << ADVANCEEOF
+set -e
+tmp="\$(mktemp -d)"
+git clone -q --branch main "$base/origin.git" "\$tmp/c"
+git -C "\$tmp/c" config user.email "test@example.com"
+git -C "\$tmp/c" config user.name "Test"
+printf 'services:\n  db:\n    image: postgres:19\n    volumes:\n      - db-data:/var/lib/postgresql\nvolumes:\n  db-data:\n' > "\$tmp/c/compose.yaml"
+git -C "\$tmp/c" commit -q -am "someone else's merge lands mid-run"
+git -C "\$tmp/c" push -q origin main
+rm -rf "\$tmp"
+ADVANCEEOF
+
+	run_upgrade "$base" MOCK_PG_VERSION=17 MOCK_ON_STOP="$base/advance-origin.sh"
+
+	# Negative control first: without a real advance every assertion below passes
+	# for the wrong reason.
+	if [ "$(git -C "$base/origin.git" rev-parse main)" != "$validated_rev" ]; then
+		ok "mid-run push: origin/main really did advance during the run"
+	else
+		fail_test "mid-run push: origin/main never moved -- the assertions below prove nothing"
+	fi
+
+	if [ "$exit_code" -eq 0 ]; then
+		ok "mid-run push: the run still completes"
+	else
+		fail_test "mid-run push: expected exit 0, got $exit_code -- $output"
+	fi
+	if [ "$(git -C "$base/repo" rev-parse HEAD)" = "$validated_rev" ]; then
+		ok "mid-run push: the checkout lands on the revision the run validated"
+	else
+		fail_test "mid-run push: the checkout followed origin/main instead of the validated revision -- $(git -C "$base/repo" rev-parse HEAD) != $validated_rev"
+	fi
+	# The one that bites: the restore ran against whatever image the checkout
+	# holds by then.
+	case "$(cat "$base/repo/compose.yaml")" in
+		*postgres:18*) ok "mid-run push: the restore ran against the validated db image" ;;
+		*) fail_test "mid-run push: the checkout pins an image this run never validated -- $(cat "$base/repo/compose.yaml")" ;;
+	esac
+	rm -rf "$base"
+}
+
+# --- 13b. ...and the sentinel records the revision that was actually used ----
+# A sentinel naming a target the run never deployed into is the misleading
+# artifact it exists to prevent. `old_revision` says where the checkout came
+# from; the target it was taken to has to be recorded too, or the operator
+# cannot tell which of two revisions their half-migrated cluster belongs to.
+{
+	base="$(make_fixture postgres:17 postgres:18)"
+	validated_rev="$(git -C "$base/origin.git" rev-parse main)"
+	cat > "$base/advance-origin.sh" << ADVANCEEOF
+set -e
+tmp="\$(mktemp -d)"
+git clone -q --branch main "$base/origin.git" "\$tmp/c"
+git -C "\$tmp/c" config user.email "test@example.com"
+git -C "\$tmp/c" config user.name "Test"
+printf 'services:\n  db:\n    image: postgres:19\n    volumes:\n      - db-data:/var/lib/postgresql\nvolumes:\n  db-data:\n' > "\$tmp/c/compose.yaml"
+git -C "\$tmp/c" commit -q -am "someone else's merge lands mid-run"
+git -C "\$tmp/c" push -q origin main
+rm -rf "\$tmp"
+ADVANCEEOF
+
+	# The restore fails, so the sentinel survives to be read.
+	run_upgrade "$base" MOCK_PG_VERSION=17 MOCK_RESTORE_FAILS=1 MOCK_ON_STOP="$base/advance-origin.sh"
+	if [ "$(git -C "$base/origin.git" rev-parse main)" != "$validated_rev" ]; then
+		ok "mid-run push: origin/main advanced for the sentinel case too"
+	else
+		fail_test "mid-run push: origin/main never moved -- the sentinel assertions prove nothing"
+	fi
+
+	recorded_target_major="$(sed -n 's/^target_major	//p' "$base/repo/.pg-upgrade-incomplete")"
+	if [ "$recorded_target_major" = "18" ]; then
+		ok "mid-run push: the sentinel's target major is the one that was deployed"
+	else
+		fail_test "mid-run push: the sentinel records target major '$recorded_target_major', not 18"
+	fi
+	recorded_target_rev="$(sed -n 's/^target_revision	//p' "$base/repo/.pg-upgrade-incomplete")"
+	if [ "$recorded_target_rev" = "$validated_rev" ]; then
+		ok "mid-run push: the sentinel names the revision the run was taking the checkout to"
+	else
+		fail_test "mid-run push: the sentinel records target revision '$recorded_target_rev', not $validated_rev"
+	fi
+	rm -rf "$base"
+}
+
+# --- 13c. A checkout that cannot be fast-forwarded still aborts, non-destructively
+# The advance changed from `git pull --ff-only origin main` to a merge onto the
+# pinned SHA. The refusal it exists to produce -- a checkout carrying a local
+# commit that is not on main -- has to survive that change: same abort, before
+# anything destructive, with a message that names what could not be done.
+{
+	base="$(make_fixture postgres:17 postgres:18)"
+	# Committed, not just written, or the dirty-tree precondition would refuse
+	# first and this would never reach the fast-forward.
+	echo "local work" > "$base/repo/local.txt"
+	git -C "$base/repo" add local.txt
+	git -C "$base/repo" commit -q -m "a commit that is not on origin/main"
+
+	run_upgrade "$base" MOCK_PG_VERSION=17
+	if [ "$exit_code" -ne 0 ]; then
+		ok "diverged checkout: refused"
+	else
+		fail_test "diverged checkout: expected a refusal, got exit 0 -- $output"
+	fi
+	case "$output" in
+		*"fast-forward"*) ok "diverged checkout: the message says what could not be done" ;;
+		*) fail_test "diverged checkout: the message does not mention the fast-forward -- $output" ;;
+	esac
+	case "$output" in
+		*"is intact"*) ok "diverged checkout: the message says the volume is intact" ;;
+		*) fail_test "diverged checkout: the message does not say the volume survived -- $output" ;;
+	esac
+	assert_nothing_destructive "diverged checkout" "$base"
 	rm -rf "$base"
 }
 

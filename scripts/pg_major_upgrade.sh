@@ -299,9 +299,17 @@ say "dump verified: pg_dumpall exited 0 and the output ends with PostgreSQL's co
 # volume is still there and the stack still starts. The pre-pull commit is kept
 # for the recovery instructions -- going back to the old data means going back
 # to the revision whose compose.yaml mounts it where PostgreSQL ${pg_cluster_major} expects.
+#
+# The fast-forward targets the SHA step 2 resolved, NOT `origin/main` by name.
+# `git pull --ff-only origin main` would fetch again and take whatever the branch
+# points at by now; main here advances often, including from automated merges, so
+# a push landing during the dump would leave this run restoring into an image it
+# never checked -- the exact incompatibility the version check exists to catch,
+# reintroduced by the fix for it. One run, one revision.
 old_revision="$(git rev-parse HEAD)"
-say "fast-forwarding the checkout to origin/main..."
-git pull --ff-only origin main || die "git pull --ff-only origin main failed. Nothing destructive has happened -- volume '${pg_volume_name}' is intact and 'docker compose up -d' brings the stack back."
+say "fast-forwarding the checkout to ${pg_target_revision} (the revision this run validated)..."
+git merge --ff-only "$pg_target_revision" ||
+	die "could not fast-forward the checkout to ${pg_target_revision} (git merge --ff-only). Nothing destructive has happened -- volume '${pg_volume_name}' is intact and 'docker compose up -d' brings the stack back."
 
 # ── 6. Archive the old volume, and verify the archive ────────────────────────
 # `down` first, so the archive is a quiesced cluster rather than a torn copy of
@@ -347,6 +355,10 @@ die_recoverable() {
 	printf 'dump\t%s\n' "$backup"
 	printf 'archive\t%s\n' "$archive"
 	printf 'old_revision\t%s\n' "$old_revision"
+	# Where this run was taking the checkout, as distinct from old_revision's
+	# where it came from. A half-migrated cluster belongs to one specific
+	# revision, and after main has moved on, its name no longer identifies it.
+	printf 'target_revision\t%s\n' "$pg_target_revision"
 } > "$sentinel"
 
 say "removing volume '${pg_volume_name}' (the verified dump and archive are the surviving copies)..."

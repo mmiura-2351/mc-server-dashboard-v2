@@ -35,11 +35,18 @@ pg_docker() {
 #
 # On success (return 0) sets, from the incoming revision interpolated against
 # the host's own .env:
+#   pg_target_revision  the commit origin/main resolved to, as a SHA
 #   pg_target_major  the Postgres major the incoming revision deploys
 #   pg_db_image      the db service's image ref
 #   pg_volume_name   the project-qualified name of the db-data volume
 #   pg_db_user       POSTGRES_USER  (empty if .env does not set it)
 #   pg_db_name       POSTGRES_DB    (empty if .env does not set it)
+#
+# `pg_target_revision` is what makes "the incoming revision" a single thing for
+# the whole run rather than a name re-resolved at each use. main advances here
+# often, including from automated merges, so a caller that acts on these facts
+# and THEN moves the checkout to `origin/main` by name could act on one revision
+# and deploy another (see the fast-forward in scripts/pg_major_upgrade.sh).
 #
 # Returns 1 with `pg_reason` set when any of the first three cannot be resolved.
 # The two credentials are best-effort: only the upgrade script needs them, and
@@ -49,6 +56,7 @@ pg_resolve_compose_facts() {
 	# Explicit, because callers run under `set -u` and a short read below (an
 	# empty or truncated parse) would otherwise leave the later fields unset.
 	pg_reason=""
+	pg_target_revision=""
 	pg_target_major=""
 	pg_db_image=""
 	pg_volume_name=""
@@ -99,12 +107,20 @@ pg_resolve_compose_facts() {
 		return 1
 	fi
 
+	# Pinned to a SHA here, once, and everything downstream reads the SHA rather
+	# than the name: `origin/main` is a moving target, and a caller that resolves
+	# it twice can validate one revision and deploy another.
+	if ! pg_target_revision="$(git rev-parse --verify --quiet "origin/main^{commit}" 2>/dev/null)"; then
+		pg_reason="could not resolve origin/main to a commit after fetching it."
+		return 1
+	fi
+
 	# `-f -` hands compose the incoming compose.yaml on stdin while the project
 	# directory stays the repo root, so interpolation still reads the host's .env
 	# and the volume name still resolves under the real project name. Target
 	# image and volume name therefore both come from the incoming revision;
 	# resolving one from each side would be worse than resolving both from either.
-	compose_json="$(git show origin/main:compose.yaml 2>/dev/null | pg_docker "docker compose -f - config --format json" 2>/dev/null || true)"
+	compose_json="$(git show "${pg_target_revision}:compose.yaml" 2>/dev/null | pg_docker "docker compose -f - config --format json" 2>/dev/null || true)"
 	if [ -z "$compose_json" ]; then
 		pg_reason="could not read the compose config of origin/main."
 		return 1

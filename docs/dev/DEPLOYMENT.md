@@ -882,7 +882,9 @@ servers), runs a post-deploy `/api/healthz` check, and stamps the new SHA. Use
 > the major that wrote the volume, stops the writers, and takes the dump — then
 > **verifies it**, on `pg_dumpall`'s own exit status *and* PostgreSQL's
 > end-of-dump marker, before anything destructive happens. It then fast-forwards
-> the checkout to `origin/main`, archives the old volume to a host-side tarball
+> the checkout to the exact commit it resolved `origin/main` to at the start (one
+> run, one revision — a merge landing on `main` mid-run cannot make it restore
+> into an image it never checked), archives the old volume to a host-side tarball
 > and lists that tarball back, and only then removes the volume; the PostgreSQL
 > 18 `db` comes up with `--wait` and the dump is restored into it under
 > `ON_ERROR_STOP=1`, so a statement that errors halfway aborts the run rather
