@@ -845,6 +845,42 @@ async def _load_backup(
         return backup
 
 
+def download_grant_resource(
+    community_id: uuid.UUID, server_id: uuid.UUID, backup_id: uuid.UUID
+) -> str:
+    """The opaque resource string a backup download grant is bound to (#2313).
+
+    Binds the whole triple, so a grant minted for one backup opens neither
+    another backup nor the same backup id addressed under a different server or
+    community. The identity Port treats this as an opaque string. Takes the raw
+    path ids because both the minting route and the redeeming dependency see the
+    triple as URL segments.
+    """
+
+    return f"backup-download:{community_id}:{server_id}:{backup_id}"
+
+
+@dataclass(frozen=True)
+class ResolveBackup:
+    """Load one community-scoped backup's metadata (issue #2313).
+
+    Exists so the download-grant mint endpoint can 404 an unknown or cross-server
+    backup id through the exact same lookup the download itself uses — a grant is
+    never minted for a backup the caller could not have downloaded.
+    """
+
+    uow: UnitOfWork
+
+    async def __call__(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        backup_id: BackupId,
+    ) -> Backup:
+        return await _load_backup(self.uow, community_id, server_id, backup_id)
+
+
 @dataclass(frozen=True)
 class DownloadBackup:
     """Stream a backup archive in its native format (backup:read, issue #281).

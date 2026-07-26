@@ -17,6 +17,7 @@ import datetime as dt
 import uuid
 from collections.abc import Iterator
 
+import httpx2
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -36,6 +37,8 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 )
 from mc_server_dashboard_api.dependencies import (
     get_audit_recorder,
+    get_authenticate_download_grant,
+    get_authenticate_request,
     get_clear_backup_retention,
     get_create_backup,
     get_current_user,
@@ -45,14 +48,25 @@ from mc_server_dashboard_api.dependencies import (
     get_list_backups,
     get_membership_visibility,
     get_permission_checker,
+    get_resolve_backup,
     get_restore_backup,
     get_server_backup_statistics,
     get_set_backup_retention,
+    get_token_service,
     get_upload_backup,
 )
+from mc_server_dashboard_api.identity.adapters.token_service import JwtTokenService
+from mc_server_dashboard_api.identity.application.authenticate_download_grant import (
+    AuthenticateDownloadGrant,
+)
+from mc_server_dashboard_api.identity.application.authenticate_request import (
+    AuthenticateRequest,
+)
+from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.servers.application.backups import (
     ListedBackup,
     RestoreResult,
+    download_grant_resource,
 )
 from mc_server_dashboard_api.servers.domain.backup import (
     Backup,
@@ -77,9 +91,13 @@ from mc_server_dashboard_api.servers.domain.errors import (
 )
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 from tests.audit.fakes import RecordingAuditRecorder
-from tests.identity.fakes import make_user
+from tests.identity.fakes import FakeClock, FakeUnitOfWork, make_user
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
+
+# A 32-byte HS256 key; the value is irrelevant, only that mint and verify share it.
+_SIGNING_KEY = "0123456789abcdef0123456789abcdef"
+_GRANT_TTL_SECONDS = 30
 
 
 class _FakeVisibility(MembershipVisibility):
@@ -140,15 +158,24 @@ def _bind_shared_app(shared_app: FastAPI) -> None:
     _shared_app = shared_app
 
 
+# Set by _app so the download tests can mint real access tokens and grants against
+# the same signing key and clock the app under test verifies with.
+_clock: FakeClock
+_tokens: JwtTokenService
+_user: User
+
+
 def _app(
     *,
     member: bool,
     allow: bool,
+    subject: User | None = None,
+    resolve: _FakeUseCase | None = None,
     create: _FakeUseCase | None = None,
     list_: _FakeUseCase | None = None,
     restore: _FakeUseCase | None = None,
     delete: _FakeUseCase | None = None,
-    download: _FakeUseCase | None = None,
+    download: _FakeUseCase | _FakeDownload | None = None,
     upload: _FakeUseCase | None = None,
     statistics: _FakeUseCase | None = None,
     global_statistics: _FakeUseCase | None = None,
@@ -157,15 +184,36 @@ def _app(
     recorder: RecordingAuditRecorder | None = None,
     is_admin: bool = False,
 ) -> object:
+    global _clock, _tokens, _user
     app = _shared_app
     app.dependency_overrides.clear()
-    app.dependency_overrides[get_current_user] = lambda: make_user(
-        is_platform_admin=is_admin
+    _user = subject if subject is not None else make_user(is_platform_admin=is_admin)
+    _clock = FakeClock(_NOW)
+    _tokens = JwtTokenService(
+        signing_key=_SIGNING_KEY,
+        algorithm="HS256",
+        access_ttl=dt.timedelta(minutes=15),
+        download_grant_ttl=dt.timedelta(seconds=_GRANT_TTL_SECONDS),
+        clock=_clock,
     )
+    identity_uow = FakeUnitOfWork()
+    identity_uow.users.seed(_user)
+    app.dependency_overrides[get_current_user] = lambda: _user
+    # The download route resolves its subject itself (Bearer *or* grant), so it
+    # goes through these two use cases rather than get_current_user.
+    app.dependency_overrides[get_authenticate_request] = lambda: AuthenticateRequest(
+        uow=identity_uow, tokens=_tokens
+    )
+    app.dependency_overrides[get_authenticate_download_grant] = lambda: (
+        AuthenticateDownloadGrant(uow=identity_uow, tokens=_tokens)
+    )
+    app.dependency_overrides[get_token_service] = lambda: _tokens
     app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(
         member=member
     )
     app.dependency_overrides[get_permission_checker] = lambda: _FakeChecker(allow=allow)
+    if resolve is not None:
+        app.dependency_overrides[get_resolve_backup] = lambda: resolve
     if create is not None:
         app.dependency_overrides[get_create_backup] = lambda: create
     if list_ is not None:
@@ -459,18 +507,35 @@ def test_delete_unknown_backup_is_404() -> None:
 # --- download (issue #281) -------------------------------------------------
 
 
+def _bearer() -> dict[str, str]:
+    return {"Authorization": f"Bearer {_tokens.issue_access_token(_user.id)}"}
+
+
 def test_member_without_permission_gets_403_on_download() -> None:
     app = _app(member=True, allow=False, download=_FakeUseCase())
     client = next(_client(app))
-    resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download"))
+    resp = client.get(
+        _url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download"),
+        headers=_bearer(),
+    )
     assert resp.status_code == 403
+
+
+def test_download_without_credentials_is_401() -> None:
+    app = _app(member=True, allow=True, download=_FakeUseCase())
+    client = next(_client(app))
+    resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download"))
+    assert resp.status_code == 401
 
 
 def test_download_streams_archive_with_disposition() -> None:
     use_case = _FakeUseCase(result=(_aiter(b"archive-bytes"), len(b"archive-bytes")))
     app = _app(member=True, allow=True, download=use_case)
     client = next(_client(app))
-    resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download"))
+    resp = client.get(
+        _url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download"),
+        headers=_bearer(),
+    )
     assert resp.status_code == 200
     assert resp.content == b"archive-bytes"
     assert resp.headers["content-type"] == "application/gzip"
@@ -488,7 +553,10 @@ def test_download_declares_content_length_matching_streamed_bytes() -> None:
     recorder = RecordingAuditRecorder()
     app = _app(member=True, allow=True, download=use_case, recorder=recorder)
     client = next(_client(app))
-    resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download"))
+    resp = client.get(
+        _url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download"),
+        headers=_bearer(),
+    )
     assert resp.status_code == 200
     assert resp.content == b"".join(chunks)
     assert int(resp.headers["content-length"]) == len(resp.content)
@@ -502,8 +570,255 @@ def test_download_unknown_backup_is_404() -> None:
     use_case = _FakeUseCase(error=BackupNotFoundError("x"))
     app = _app(member=True, allow=True, download=use_case)
     client = next(_client(app))
-    resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download"))
+    resp = client.get(
+        _url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download"),
+        headers=_bearer(),
+    )
     assert resp.status_code == 404
+
+
+# --- download grants (issue #2313) -----------------------------------------
+
+_ARCHIVE = b"archive-bytes"
+
+
+class _FakeDownload:
+    """A download use case that yields a fresh stream on every call.
+
+    Needed where one test fetches the same archive twice: an async generator is
+    exhausted by its first consumer.
+    """
+
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    async def __call__(self, **kwargs: object) -> object:
+        return _aiter(self._data), len(self._data)
+
+
+def _grant_url(
+    community: uuid.UUID, server: uuid.UUID, backup: uuid.UUID, *, subject: User
+) -> str:
+    """The download URL a grant minted for this triple would produce."""
+
+    issued = _tokens.issue_download_grant(
+        subject.id, download_grant_resource(community, server, backup)
+    )
+    return _url(community, server, f"/{backup}/download?grant={issued.token}")
+
+
+def _mint(
+    client: TestClient, community: uuid.UUID, server: uuid.UUID, backup: uuid.UUID
+) -> httpx2.Response:
+    return client.post(
+        _url(community, server, f"/{backup}/download-grant"), headers=_bearer()
+    )
+
+
+def test_non_member_gets_404_on_download_grant() -> None:
+    app = _app(member=False, allow=True, resolve=_FakeUseCase())
+    client = next(_client(app))
+    resp = _mint(client, uuid.uuid4(), uuid.uuid4(), uuid.uuid4())
+    assert resp.status_code == 404
+
+
+def test_member_without_permission_gets_403_on_download_grant() -> None:
+    app = _app(member=True, allow=False, resolve=_FakeUseCase())
+    client = next(_client(app))
+    resp = _mint(client, uuid.uuid4(), uuid.uuid4(), uuid.uuid4())
+    assert resp.status_code == 403
+
+
+def test_download_grant_for_unknown_backup_is_404() -> None:
+    app = _app(
+        member=True, allow=True, resolve=_FakeUseCase(error=BackupNotFoundError("x"))
+    )
+    client = next(_client(app))
+    resp = _mint(client, uuid.uuid4(), uuid.uuid4(), uuid.uuid4())
+    assert resp.status_code == 404
+
+
+def test_download_grant_response_is_not_cached_and_reports_expiry() -> None:
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, resolve=_FakeUseCase())
+    client = next(_client(app))
+    resp = _mint(client, community, server, backup)
+    assert resp.status_code == 200
+    # A URL that carries a credential must never sit in a shared cache.
+    assert resp.headers["cache-control"] == "no-store"
+    body = resp.json()
+    assert body["download_url"].startswith(
+        f"/api/communities/{community}/servers/{server}/backups/{backup}/download?grant="
+    )
+    assert body["expires_at"] == (
+        _NOW + dt.timedelta(seconds=_GRANT_TTL_SECONDS)
+    ).isoformat().replace("+00:00", "Z")
+
+
+def test_minting_a_grant_records_no_audit_event() -> None:
+    # Bytes leave the system at redemption, not at issuance (issue #2313).
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, resolve=_FakeUseCase(), recorder=recorder)
+    client = next(_client(app))
+    assert _mint(client, uuid.uuid4(), uuid.uuid4(), uuid.uuid4()).status_code == 200
+    assert recorder.events == []
+
+
+def test_minted_url_downloads_without_an_authorization_header() -> None:
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    download = _FakeUseCase(result=(_aiter(_ARCHIVE), len(_ARCHIVE)))
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        resolve=_FakeUseCase(),
+        download=download,
+        recorder=recorder,
+    )
+    client = next(_client(app))
+    url = _mint(client, community, server, backup).json()["download_url"]
+
+    resp = client.get(url)
+
+    assert resp.status_code == 200
+    assert resp.content == _ARCHIVE
+    assert resp.headers["content-type"] == "application/gzip"
+    assert int(resp.headers["content-length"]) == len(_ARCHIVE)
+    assert resp.headers["cache-control"] == "no-store"
+    assert ".tar.gz" in resp.headers["content-disposition"]
+    # Exactly one audit row, at redemption, with the grant's subject as actor.
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_DOWNLOAD]
+    assert recorder.events[0].actor_id == _user.id.value
+
+
+def test_grant_redeemed_download_matches_the_bearer_response() -> None:
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    app = _app(
+        member=True,
+        allow=True,
+        resolve=_FakeUseCase(),
+        download=_FakeDownload(_ARCHIVE),
+    )
+    client = next(_client(app))
+    path = _url(community, server, f"/{backup}/download")
+
+    with_bearer = client.get(path, headers=_bearer())
+    with_grant = client.get(_grant_url(community, server, backup, subject=_user))
+
+    assert with_grant.status_code == with_bearer.status_code == 200
+    assert with_grant.content == with_bearer.content
+    for header in ("content-type", "content-length", "content-disposition"):
+        assert with_grant.headers[header] == with_bearer.headers[header]
+    assert with_grant.headers["cache-control"] == with_bearer.headers["cache-control"]
+
+
+def test_grant_is_rejected_after_its_ttl() -> None:
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeUseCase())
+    client = next(_client(app))
+    url = _grant_url(community, server, backup, subject=_user)
+
+    _clock.set(_NOW + dt.timedelta(seconds=_GRANT_TTL_SECONDS))
+
+    assert client.get(url).status_code == 401
+
+
+def test_grant_is_rejected_on_another_backup() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeUseCase())
+    client = next(_client(app))
+    issued = _tokens.issue_download_grant(
+        _user.id, download_grant_resource(community, server, uuid.uuid4())
+    )
+    other = uuid.uuid4()
+
+    resp = client.get(
+        _url(community, server, f"/{other}/download?grant={issued.token}")
+    )
+
+    assert resp.status_code == 401
+
+
+def test_grant_is_rejected_under_another_server_or_community() -> None:
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeUseCase())
+    client = next(_client(app))
+    issued = _tokens.issue_download_grant(
+        _user.id, download_grant_resource(community, server, backup)
+    )
+
+    other_server = client.get(
+        _url(community, uuid.uuid4(), f"/{backup}/download?grant={issued.token}")
+    )
+    other_community = client.get(
+        _url(uuid.uuid4(), server, f"/{backup}/download?grant={issued.token}")
+    )
+
+    assert other_server.status_code == 401
+    assert other_community.status_code == 401
+
+
+def test_grant_is_not_accepted_as_a_bearer_token() -> None:
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeUseCase())
+    client = next(_client(app))
+    issued = _tokens.issue_download_grant(
+        _user.id, download_grant_resource(community, server, backup)
+    )
+
+    resp = client.get(
+        _url(community, server, f"/{backup}/download"),
+        headers={"Authorization": f"Bearer {issued.token}"},
+    )
+
+    assert resp.status_code == 401
+
+
+def test_access_token_is_not_accepted_as_a_grant() -> None:
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeUseCase())
+    client = next(_client(app))
+    access = _tokens.issue_access_token(_user.id)
+
+    resp = client.get(_url(community, server, f"/{backup}/download?grant={access}"))
+
+    assert resp.status_code == 401
+
+
+def test_grant_loses_to_a_permission_revoked_after_issuance() -> None:
+    # The grant proves identity, never authority: authorization is decided afresh.
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=False, download=_FakeUseCase())
+    client = next(_client(app))
+
+    resp = client.get(_grant_url(community, server, backup, subject=_user))
+
+    assert resp.status_code == 403
+
+
+def test_grant_loses_to_a_membership_removed_after_issuance() -> None:
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    app = _app(member=False, allow=True, download=_FakeUseCase())
+    client = next(_client(app))
+
+    resp = client.get(_grant_url(community, server, backup, subject=_user))
+
+    assert resp.status_code == 404
+
+
+def test_grant_for_a_deactivated_subject_is_rejected() -> None:
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    app = _app(
+        member=True,
+        allow=True,
+        subject=make_user(active=False),
+        download=_FakeUseCase(),
+    )
+    client = next(_client(app))
+
+    resp = client.get(_grant_url(community, server, backup, subject=_user))
+
+    assert resp.status_code == 401
 
 
 # --- upload (issue #281) ---------------------------------------------------

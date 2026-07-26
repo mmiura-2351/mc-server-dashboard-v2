@@ -120,7 +120,8 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 | GET / POST | `…/{sid}/backups` | List / create on-demand backup. |
 | GET | `…/{sid}/backups/statistics` | count / total bytes / newest / oldest. |
 | POST | `…/{sid}/backups/upload` | Upload an off-host backup archive. |
-| GET | `…/{sid}/backups/{bid}/download` | Download archive. |
+| GET | `…/{sid}/backups/{bid}/download` | Download archive. Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB archive straight to disk (#2313). |
+| POST | `…/{sid}/backups/{bid}/download-grant` | Mint that grant: `{download_url, expires_at}`, `Cache-Control: no-store`. Same `backup:read` gate as the download; 30 s TTL (AUTH_API.md Section 3). |
 | POST | `…/{sid}/backups/{bid}/restore[?force=true]` | **Server must be stopped.** `?force=true` overrides the quarantine gate (#703). |
 | DELETE | `…/{sid}/backups/{bid}` | Delete. |
 | PUT / DELETE | `…/{sid}/backups/retention` | Set / clear the scheduled-backup retention policy (issue #1841): `{keep_last}` (≥ 1) XOR `{daily, weekly, monthly}` (each ≥ 0, one > 0); an invalid shape is 422 `invalid_retention_policy`. Gated by `backup:schedule`. Applies only to `source=scheduled` backups — manual/uploaded rows are never auto-deleted. Setting prunes immediately; thereafter each successful scheduled backup run prunes (each deletion audited as `backup:delete`, no actor). Policy readable as `backup_retention` on the server read; null while unconfigured. |

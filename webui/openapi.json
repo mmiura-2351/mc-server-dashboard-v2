@@ -424,6 +424,26 @@
         "title": "AvailablePortsResponse",
         "type": "object"
       },
+      "BackupDownloadGrantResponse": {
+        "description": "A short-lived, self-authenticating backup download URL (issue #2313).\n\n``download_url`` is same-origin relative (WEBUI_SPEC.md Section 7.7) and\nalready carries the grant, so a client hands it straight to ``<a download>``.\n``expires_at`` is when the grant stops verifying; after that the URL is 401.",
+        "properties": {
+          "download_url": {
+            "title": "Download Url",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "download_url",
+          "expires_at"
+        ],
+        "title": "BackupDownloadGrantResponse",
+        "type": "object"
+      },
       "BackupListResponse": {
         "properties": {
           "backups": {
@@ -7078,8 +7098,88 @@
     },
     "/api/communities/{community_id}/servers/{server_id}/backups/{backup_id}/download": {
       "get": {
-        "description": "Stream a backup archive in its native ``tar.gz`` format (backup:read, #281).\n\nNo recompression: the exact stored bytes stream out with a ``.tar.gz``\nattachment. An unknown / cross-community backup is 404 (no existence signal).\n\nThe response declares the archive's exact size as ``Content-Length``, so a\nclient can show download progress and refuse an over-cap archive up front.",
+        "description": "Stream a backup archive in its native ``tar.gz`` format (backup:read, #281).\n\nNo recompression: the exact stored bytes stream out with a ``.tar.gz``\nattachment. An unknown / cross-community backup is 404 (no existence signal).\n\nThe response declares the archive's exact size as ``Content-Length``, so a\nclient can show download progress and refuse an over-cap archive up front.\n\nThe caller authenticates with the usual Bearer access token, or \u2014 for a\nbrowser that cannot set a header on a plain navigation \u2014 with a short-lived\n``?grant=`` minted by ``POST .../download-grant`` (issue #2313). Either way\nthe same ``backup:read`` gate decides, and the response is identical.",
         "operationId": "download_backup_api_communities__community_id__servers__server_id__backups__backup_id__download_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "backup_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Backup Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "grant",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Grant"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Download Backup"
+      }
+    },
+    "/api/communities/{community_id}/servers/{server_id}/backups/{backup_id}/download-grant": {
+      "post": {
+        "description": "Mint a self-authenticating download URL for one backup (backup:read, #2313).\n\nA multi-GB archive cannot be buffered into a Blob just to attach a Bearer\nheader, so the browser needs a URL that authenticates itself. The grant is\nbound to this exact community/server/backup triple and to the caller, expires\nin ``auth.token.download_grant_ttl_seconds``, and proves identity only \u2014 the\ndownload re-runs the full ``backup:read`` gate on redemption.\n\nThe URL is relative because the Web UI is same-origin by design\n(WEBUI_SPEC.md Section 7.7). An unknown / cross-server backup is 404, through\nthe same lookup the download uses (no existence signal).\n\nNothing is audited here: bytes leave the system at redemption, which records\n``backup:download`` with this same subject as actor.",
+        "operationId": "issue_backup_download_grant_api_communities__community_id__servers__server_id__backups__backup_id__download_grant_post",
         "parameters": [
           {
             "in": "path",
@@ -7116,7 +7216,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/BackupDownloadGrantResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -7137,7 +7239,7 @@
             "HTTPBearer": []
           }
         ],
-        "summary": "Download Backup"
+        "summary": "Issue Backup Download Grant"
       }
     },
     "/api/communities/{community_id}/servers/{server_id}/backups/{backup_id}/restore": {
