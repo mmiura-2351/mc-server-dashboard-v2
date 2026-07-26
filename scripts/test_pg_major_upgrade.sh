@@ -103,9 +103,13 @@ case "$1 $2" in
 		printf '{"services": {"db": {"image": "%s", "environment": {"POSTGRES_USER": "%s", "POSTGRES_DB": "%s"}}}, "volumes": {"db-data": {"name": "testproj_db-data"}}}\n' \
 			"$image" "${MOCK_PG_USER-mcsd}" "${MOCK_PG_DB-mcsd}"
 		;;
-	"volume inspect")
-		[ "${MOCK_VOLUME_EXISTS:-1}" = "1" ] || exit 1
-		echo "[]"
+	"volume ls")
+		# Listing rather than inspecting is what makes "no such volume"
+		# distinguishable from "the daemon did not answer" (#2301).
+		[ "${MOCK_VOLUME_LS_FAILS:-0}" = "1" ] && exit 1
+		echo "testproj_db-data-old"
+		[ "${MOCK_VOLUME_EXISTS:-1}" = "1" ] && echo "testproj_db-data"
+		exit 0
 		;;
 	"volume rm")
 		# Both guarantees this script makes are about what exists at the instant
@@ -1049,6 +1053,36 @@ done
 		*) ok "unreadable volume, no sentinel: no unfinished-run claim" ;;
 	esac
 	assert_nothing_destructive "unreadable volume, no sentinel" "$base"
+	rm -rf "$base"
+}
+
+# --- 12. The daemon cannot say whether the volume exists -- refuse -----------
+# The other side of #2301. On the preflight this is a loud skip, because that
+# guard must never block a legitimate deploy; here the policy is the opposite and
+# has to be, because the alternative reading of the same unanswered question is
+# "no volume -- nothing to do", which is the sentence that sends an operator away
+# from a deployment whose data may be sitting only in a previous run's artifacts.
+{
+	base="$(make_fixture)"
+	run_upgrade "$base" MOCK_VOLUME_LS_FAILS=1
+	if [ "$exit_code" -ne 0 ]; then
+		ok "docker cannot answer about the volume: refused"
+	else
+		fail_test "docker cannot answer about the volume: expected a refusal, got exit 0 -- $output"
+	fi
+	case "$output" in
+		*"nothing to do"*)
+			fail_test "docker cannot answer about the volume: read it as an absent volume -- $output" ;;
+		*)
+			ok "docker cannot answer about the volume: does not say 'nothing to do'" ;;
+	esac
+	case "$output" in
+		*testproj_db-data*)
+			ok "docker cannot answer about the volume: the message names the volume" ;;
+		*)
+			fail_test "docker cannot answer about the volume: the message does not name the volume -- $output" ;;
+	esac
+	assert_nothing_destructive "docker cannot answer about the volume" "$base"
 	rm -rf "$base"
 }
 

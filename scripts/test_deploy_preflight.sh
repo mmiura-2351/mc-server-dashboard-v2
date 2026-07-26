@@ -99,9 +99,16 @@ case "$1 $2" in
 		printf '{"services": {"db": {"image": "%s"}}, "volumes": {"db-data": {"name": "testproj_db-data"}}}\n' \
 			"$image"
 		;;
-	"volume inspect")
-		[ "${MOCK_VOLUME_EXISTS:-1}" = "1" ] || exit 1
-		echo "[]"
+	"volume ls")
+		# The guard LISTS volumes rather than inspecting one, so that a daemon
+		# which cannot answer is distinguishable from a volume that is genuinely
+		# not there -- `volume inspect` fails identically for both (#2301).
+		[ "${MOCK_VOLUME_LS_FAILS:-0}" = "1" ] && exit 1
+		# A host's other volumes come back too, including one whose name has the
+		# target as a prefix: the match has to be exact, not a substring.
+		echo "testproj_db-data-old"
+		[ "${MOCK_VOLUME_EXISTS:-1}" = "1" ] && echo "testproj_db-data"
+		exit 0
 		;;
 	"run --rm")
 		if [ -n "${MOCK_RUN_LOG:-}" ]; then
@@ -378,6 +385,48 @@ echo "=== deploy_preflight Postgres version guard tests ==="
 	case "$output" in
 		*origin/main*) ok "origin/main unreachable: the message names origin/main" ;;
 		*) fail_test "origin/main unreachable: the message does not name origin/main -- $output" ;;
+	esac
+	rm -rf "$base"
+}
+
+# --- 14. The daemon cannot answer whether the volume exists -- skip, loudly ---
+# "Volume absent" and "could not ask" used to share an outcome, because
+# `docker volume inspect` exits non-zero for both. Absence is a real answer a
+# fresh host gives and stays silent (test 1); an unanswerable question is a
+# "could not determine" case like every other, and the one thing the guard must
+# never do is disappear without saying so (#2301).
+{
+	base="$(make_fixture postgres:18)"
+	run_preflight "$base" MOCK_VOLUME_LS_FAILS=1 MOCK_PG_VERSION=17
+	if [ "$exit_code" -eq 0 ]; then
+		ok "docker cannot answer about the volume: deploy allowed"
+	else
+		fail_test "docker cannot answer about the volume: expected exit 0, got $exit_code -- $output"
+	fi
+	assert_skipped "docker cannot answer about the volume"
+	case "$output" in
+		*testproj_db-data*)
+			ok "docker cannot answer about the volume: the message names the volume" ;;
+		*)
+			fail_test "docker cannot answer about the volume: the message does not name the volume -- $output" ;;
+	esac
+	rm -rf "$base"
+}
+
+# --- 15. A volume whose name merely CONTAINS the target's is not the target ---
+# The absent/unanswerable split reads the daemon's list of volumes; matching that
+# list loosely would invent a cluster to compare against on a fresh host.
+{
+	base="$(make_fixture postgres:18)"
+	run_preflight "$base" MOCK_VOLUME_EXISTS=0 MOCK_PG_VERSION=17
+	if [ "$exit_code" -eq 0 ]; then
+		ok "near-miss volume name: deploy allowed"
+	else
+		fail_test "near-miss volume name: expected exit 0, got $exit_code -- $output"
+	fi
+	case "$output" in
+		*SKIPPED*) fail_test "near-miss volume name: reported as a skip -- $output" ;;
+		*) ok "near-miss volume name: still a silent, completed check" ;;
 	esac
 	rm -rf "$base"
 }

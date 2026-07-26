@@ -128,16 +128,30 @@ print(env.get("POSTGRES_DB") or "")
 #   pg_probe_cluster_major <volume-name> <probe-image>
 #
 # Returns 2 when the volume does not exist (a fresh deployment -- a completed
-# answer, not a failure), 1 with `pg_reason` set when the cluster's version
-# cannot be determined, and 0 otherwise with the major in `pg_cluster_major`.
+# answer, not a failure), 1 with `pg_reason` set when the volume's existence or
+# the cluster's version cannot be determined, and 0 otherwise with the major in
+# `pg_cluster_major`.
 # An EMPTY `pg_cluster_major` on return 0 means the volume exists but holds no
 # cluster.
 pg_probe_cluster_major() {
-	local volume="$1" image="$2" probe_cmd found_major
+	local volume="$1" image="$2" probe_cmd found_major volumes
 	pg_reason=""
 	pg_cluster_major=""
 
-	if ! pg_docker "docker volume inspect $volume" > /dev/null 2>&1; then
+	# `docker volume inspect` exits non-zero for "no such volume" AND for "the
+	# daemon did not answer", and the two must not share an outcome (#2301): a
+	# fresh host's absent volume is a completed answer, while an unanswerable
+	# question is a failure the caller has to hear about -- a guard that quietly
+	# disappears is worse than no guard. Listing instead splits them on the call's
+	# own exit status, so the split does not depend on an error string that varies
+	# by daemon version: success means the daemon answered, and membership in that
+	# answer is then the fact. The match is exact, or a `<volume>-old` left on the
+	# host would invent a cluster to compare against.
+	if ! volumes="$(pg_docker "docker volume ls --quiet" 2>/dev/null)"; then
+		pg_reason="could not ask Docker whether volume '${volume}' exists."
+		return 1
+	fi
+	if ! printf '%s\n' "$volumes" | grep -qxF -- "$volume"; then
 		return 2
 	fi
 
