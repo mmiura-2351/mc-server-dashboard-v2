@@ -111,7 +111,7 @@ print_recovery() {
 	if [ -n "$old_rev" ]; then
 		echo "pg upgrade:   MCSD_ALLOW_PRIMARY_BRANCH=1 git checkout ${old_rev}   # verified: its compose.yaml deploys PostgreSQL ${cluster_major}" >&2
 	else
-		# Section 4 could not find one, and said so before anything destructive
+		# Section 3 could not find one, and said so before anything destructive
 		# happened. Printing a plausible SHA anyway is the one thing that would
 		# be worse: the next line would start the NEW major on the data just put
 		# back, which is the abort this whole script exists to avoid.

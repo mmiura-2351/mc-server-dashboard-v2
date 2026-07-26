@@ -898,6 +898,28 @@ servers), runs a post-deploy `/api/healthz` check, and stamps the new SHA. Use
 > pull. That sequence is the same on every future upgrade, major or not: step 2
 > is a no-op when nothing is pending.
 >
+> **Already pulled, or already read this after a `make update`?** Nothing is
+> lost either way. A pull on its own leaves the running stack exactly as it was —
+> pick the sequence up at step 2. If `make update` got past the older preflight
+> and took the stack down, the `db` container is now `postgres:18` aborting on a
+> PostgreSQL 17 volume and **your data is untouched** — that abort happens before
+> postgres starts. Run step 2 anyway: it refuses, because the running `db` is no
+> longer the major that wrote the volume, and the refusal names the revision to
+> put back. Then:
+>
+> ```sh
+> MCSD_ALLOW_PRIMARY_BRANCH=1 git checkout <the revision it named>
+> docker compose up -d --wait db   # PostgreSQL 17, on the volume it never touched
+> git checkout main                # no override needed going back
+> ./scripts/pg_major_upgrade.sh    # now it has a 17 to dump
+> docker compose up -d --build
+> ```
+>
+> `MCSD_ALLOW_PRIMARY_BRANCH=1` is not optional on the first line: this repo's
+> post-checkout hook silently restores the primary checkout to `main`
+> ([`AGENTS.md`](AGENTS.md) Section 1), which would put `postgres:18` straight
+> back and start it on the 17 data.
+>
 > It refuses unless an upgrade is actually pending (so re-running after a
 > successful one is a no-op), refuses unless the running `db` container is still
 > the major that wrote the volume — which is also the check that catches a stack
