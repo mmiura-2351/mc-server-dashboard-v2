@@ -550,21 +550,27 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   subprotocol header (`["access_token", "<jwt>"]`, issue #1596); on token
   rotation, sockets are reconnected (reconnect-on-rotate chosen).
 - **Authenticated downloads.** An in-memory access token cannot ride a plain
-  `<a href>`, so file / resource-pack / plugin downloads fetch the URL with the
-  Authorization header and buffer the response as a Blob, capped at 512 MiB to
-  bound memory (issues #438, #1593, #2027). **Backup archives and server
-  exports are the exception**: they run to multiple GB, so the tab mints a
-  short-lived self-authenticating URL (`POST …/backups/{bid}/download-grant`,
-  #2313; `POST …/{sid}/export/download-grant`, #2352 — both 30 s TTL) and
-  clicks an `<a download>` at it — same-origin (7.7), so the browser saves the
+  `<a href>`, so single-file / resource-pack / plugin downloads fetch the URL
+  with the Authorization header and buffer the response as a Blob, capped at
+  512 MiB to bound memory (issues #438, #1593, #2027). **Backup archives,
+  server exports and directory ZIPs are the exception**: they run to multiple
+  GB, so the tab mints a short-lived self-authenticating URL
+  (`POST …/backups/{bid}/download-grant`, #2313;
+  `POST …/{sid}/export/download-grant` and
+  `POST …/{sid}/files/download-grant?path=…`, #2352 — all 30 s TTL) and clicks
+  an `<a download>` at it — same-origin (7.7), so the browser saves the
   response natively with no size ceiling and no bytes read by the application
-  (#2314, #2353). The grant is minted on click, never on render, and the
-  `download` attribute names the file: neither response carries a
-  `Content-Disposition` the browser could use. Mint-time failures (403 / 404,
-  and 409 `server_unsettled` for an export off its at-rest precondition)
-  surface as toasts; once the click is handed off, the browser's download
-  manager owns progress and errors — for an incrementally built zip that means
-  bytes-so-far with no total, since there is no `Content-Length`.
+  (#2314, #2353, #2354). The grant is minted on click, never on render or on
+  selection, and the `download` attribute names the file — load-bearing for
+  backups and exports, whose responses carry no `Content-Disposition`. A
+  **single file deliberately stays on the capped fetch** even though it shares
+  the download route with a directory: the API declares its `Content-Length`,
+  so an oversize one is rejected up front with the too-large toast, whereas the
+  anchor path would save the error document under the intended filename.
+  Mint-time failures (403 / 404, and 409 `server_unsettled` off the at-rest
+  precondition) surface as toasts; once the click is handed off, the browser's
+  download manager owns progress and errors — for an incrementally built zip
+  that means bytes-so-far with no total, since there is no `Content-Length`.
 
 ### 7.2 Real-time strategy
 - One WS per open server-detail page + one community WS for the dashboard.
