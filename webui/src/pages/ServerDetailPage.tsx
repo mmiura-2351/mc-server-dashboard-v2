@@ -11,7 +11,7 @@ import {
 } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { ApiError, api } from "../api/client.ts";
-import { downloadFile } from "../api/download.ts";
+import { saveUrlAs } from "../api/download.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
 import { copyToClipboard } from "../clipboard.ts";
@@ -91,6 +91,29 @@ function pluginTabLabelKey(serverType: string): TranslationKey {
   return MOD_LOADER_TYPES.has(serverType)
     ? "serverDetail.tab.mods"
     : "serverDetail.tab.plugins";
+}
+
+/**
+ * The mutation body behind both Export buttons (the actions bar and the
+ * settings danger zone).
+ *
+ * An export zip carries the whole working set, so it must never be buffered
+ * into a Blob just to attach the Bearer header (#2353): mint a short-lived
+ * self-authenticating URL and hand it to the browser, which streams it to disk.
+ * The grant lives ~30 s, so minting and clicking are one step — never minted on
+ * render or cached. The export response carries no `Content-Disposition`
+ * (#2357), so the anchor's `download` attribute is what names the saved file.
+ */
+function exportViaGrant(communityId: string, server: ServerResponse) {
+  return async () => {
+    const grant = await api.post(
+      apiPath(
+        "/api/communities/{community_id}/servers/{server_id}/export/download-grant",
+        { community_id: communityId, server_id: server.id },
+      ),
+    );
+    saveUrlAs(grant.download_url, `${server.name}.zip`);
+  };
 }
 
 /**
@@ -539,14 +562,7 @@ function Controls({
   });
 
   const exportMutation = useMutation({
-    mutationFn: () =>
-      downloadFile(
-        apiPath("/api/communities/{community_id}/servers/{server_id}/export", {
-          community_id: communityId,
-          server_id: server.id,
-        }),
-        `${server.name}.zip`,
-      ),
+    mutationFn: exportViaGrant(communityId, server),
     onSuccess: () => showToast(t("serverDetail.exportStarted"), "success"),
     onError,
   });
@@ -1597,14 +1613,7 @@ function Settings({
   });
 
   const exportMutation = useMutation({
-    mutationFn: () =>
-      downloadFile(
-        apiPath("/api/communities/{community_id}/servers/{server_id}/export", {
-          community_id: communityId,
-          server_id: server.id,
-        }),
-        `${server.name}.zip`,
-      ),
+    mutationFn: exportViaGrant(communityId, server),
     onSuccess: () => showToast(t("serverDetail.exportStarted"), "success"),
     onError,
   });
