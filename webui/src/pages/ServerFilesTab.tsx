@@ -167,9 +167,9 @@ function downloadName(name: string, isDir: boolean): string {
  * minted on render, on selection, or cached.
  *
  * Single files deliberately stay on {@link downloadFile}: the API declares their
- * `Content-Length`, so an oversize one is rejected before a byte is read and
- * toasts the size. The anchor path has no such pre-flight — it would save the
- * error document under the intended filename.
+ * `Content-Length` whenever the size resolves, so an oversize one is rejected
+ * before a byte is read and toasts the size. The anchor path has no such
+ * pre-flight — it would save the error document under the intended filename.
  */
 async function saveDirViaGrant(
   communityId: string,

@@ -21,8 +21,10 @@
  * (`POST …/backups/{id}/download-grant`, #2313; `POST …/export/download-grant`
  * and `POST …/files/download-grant?path=…`, #2352) and hand it to
  * {@link saveUrlAs}, so the browser streams the bytes to disk without the tab
- * reading them. A single file stays here: the API declares its `Content-Length`,
- * so an oversize one is rejected before a byte is read.
+ * reading them. A single file stays here: the API declares its `Content-Length`
+ * whenever the size resolves, so an oversize one is normally rejected before a
+ * byte is read — and when it does not resolve the response is chunked and
+ * {@link readCappedBlob}'s byte counter caps it instead.
  */
 
 import { getAccessToken } from "../auth/tokenStore.ts";
