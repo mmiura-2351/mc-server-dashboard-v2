@@ -44,6 +44,7 @@ import datetime as dt
 import io
 import json
 import logging
+import uuid
 import zipfile
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -122,6 +123,41 @@ async def _load(
     if server is None or server.community_id != community_id:
         raise ServerNotFoundError(str(server_id.value))
     return server
+
+
+def export_download_grant_resource(
+    community_id: uuid.UUID, server_id: uuid.UUID
+) -> str:
+    """The opaque resource string a server-export download grant is bound to (#2352).
+
+    Binds the community/server pair, so a grant minted for one server's export
+    opens neither another server's nor the same server id addressed under another
+    community. The prefix separates it from the other download grants: an export
+    grant is not redeemable at the files download, nor a backup grant here. The
+    identity Port treats this as an opaque string.
+    """
+
+    return f"server-export:{community_id}:{server_id}"
+
+
+@dataclass(frozen=True)
+class ResolveServerExport:
+    """Pre-flight the export a download grant is about to be minted for (#2352).
+
+    Runs the checks :class:`ExportServer` runs before it streams anything, so the
+    mint returns the same 404 (unknown / cross-community server) and the same 409
+    ``server_unsettled`` the download would. A running server is the *common*
+    export failure, not a race: without this the browser would save the mint's
+    problem+json under the export's filename instead of showing the error.
+    """
+
+    uow: UnitOfWork
+
+    async def __call__(self, *, community_id: CommunityId, server_id: ServerId) -> None:
+        async with self.uow:
+            server = await _load(self.uow, community_id, server_id)
+        if not server.is_at_rest():
+            raise ServerFilesUnsettledError(str(server_id.value))
 
 
 @dataclass(frozen=True)

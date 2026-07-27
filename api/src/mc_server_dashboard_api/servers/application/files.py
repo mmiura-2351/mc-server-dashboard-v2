@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import io
 import tarfile
+import uuid
 import zipfile
 from collections.abc import AsyncGenerator, AsyncIterator, Iterator
 from dataclasses import dataclass
@@ -763,6 +764,29 @@ class UploadFile:
                 rel_path=_join(dir_path, filename),
                 content=content,
             )
+
+
+def file_download_grant_resource(
+    community_id: uuid.UUID, server_id: uuid.UUID, path: str
+) -> str:
+    """The opaque resource string a file download grant is bound to (#2352).
+
+    ``path`` is the *decoded* ``?path=`` query value, bound verbatim and compared
+    by exact string equality — no normalisation. The binding is containment, not
+    a privilege boundary: ``file:read`` is server-scoped, so substituting one path
+    for another grants nothing the holder could not mint directly. A grant for
+    ``world`` therefore cannot redeem ``world/../other`` (the strings differ, so
+    it fails closed), and a non-canonical spelling of the same path fails to
+    redeem too — which is fine, because the Web UI only ever redeems the URL the
+    mint returned. Traversal is rejected on redemption by ``RelPath`` regardless.
+
+    Normalising before binding would have to widen the :class:`FileStore` Port
+    (``validate_rel_path`` returns ``None`` today) to hand back a canonical form —
+    a domain plus adapter change — to buy only tolerance of spellings no client
+    produces. The identity Port treats this as an opaque string.
+    """
+
+    return f"file-download:{community_id}:{server_id}:{path}"
 
 
 @dataclass(frozen=True)

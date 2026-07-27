@@ -6,6 +6,8 @@ cases and authorization Ports faked (NFR-TEST-1, no database). Verifies:
 - the two-layer gate (non-member -> 404, member-without-permission -> 403);
 - export is gated by ``file:read`` and streams ``application/zip``; a running
   server is 409 ``server_unsettled`` and audited DENIED;
+- the export download grant (issue #2352): the mint's gate and pre-flight,
+  redemption without an ``Authorization`` header, and the grant's binding;
 - import is gated by ``server:create`` (multipart) and maps the domain errors:
   invalid metadata -> 422, name conflict -> 409, oversized -> 413,
   seed failure -> 503;
@@ -20,6 +22,7 @@ import uuid
 import zipfile
 from collections.abc import AsyncIterator, Iterator
 
+import httpx2
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -39,11 +42,26 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 )
 from mc_server_dashboard_api.dependencies import (
     get_audit_recorder,
+    get_authenticate_download_grant,
+    get_authenticate_request,
     get_current_user,
     get_export_server,
     get_import_server,
     get_membership_visibility,
     get_permission_checker,
+    get_resolve_server_export,
+    get_token_service,
+)
+from mc_server_dashboard_api.identity.adapters.token_service import JwtTokenService
+from mc_server_dashboard_api.identity.application.authenticate_download_grant import (
+    AuthenticateDownloadGrant,
+)
+from mc_server_dashboard_api.identity.application.authenticate_request import (
+    AuthenticateRequest,
+)
+from mc_server_dashboard_api.identity.domain.entities import User
+from mc_server_dashboard_api.servers.application.export_import import (
+    export_download_grant_resource,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
@@ -51,6 +69,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidExportMetadataError,
     ServerFilesUnsettledError,
     ServerNameAlreadyExistsError,
+    ServerNotFoundError,
     WorkingSetSeedFailedError,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
@@ -64,9 +83,13 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerType,
 )
 from tests.audit.fakes import RecordingAuditRecorder
-from tests.identity.fakes import make_user
+from tests.identity.fakes import FakeClock, FakeUnitOfWork, make_user
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
+
+# A 32-byte HS256 key; the value is irrelevant, only that mint and verify share it.
+_SIGNING_KEY = "0123456789abcdef0123456789abcdef"
+_GRANT_TTL_SECONDS = 30
 
 
 class _FakeVisibility(MembershipVisibility):
@@ -103,6 +126,17 @@ class _FakeExport:
                 yield chunk
 
         return _gen()
+
+
+class _FakeResolveExport:
+    """Fake :class:`ResolveServerExport` — the grant mint's export pre-flight."""
+
+    def __init__(self, *, error: Exception | None = None) -> None:
+        self._error = error
+
+    async def __call__(self, **kwargs: object) -> None:
+        if self._error is not None:
+            raise self._error
 
 
 class _FakeImport:
@@ -154,28 +188,64 @@ def _bind_shared_app(shared_app: FastAPI) -> None:
     _shared_app = shared_app
 
 
+# Set by _app so the export-download tests can mint real access tokens and grants
+# against the same signing key and clock the app under test verifies with.
+_clock: FakeClock
+_tokens: JwtTokenService
+_user: User
+
+
 def _app(
     *,
     member: bool,
     allow: bool,
+    subject: User | None = None,
     export: _FakeExport | None = None,
+    resolve_export: _FakeResolveExport | None = None,
     import_: _FakeImport | None = None,
     recorder: RecordingAuditRecorder | None = None,
 ) -> object:
+    global _clock, _tokens, _user
     app = _shared_app
     app.dependency_overrides.clear()
-    app.dependency_overrides[get_current_user] = lambda: make_user()
+    _user = subject if subject is not None else make_user()
+    _clock = FakeClock(_NOW)
+    _tokens = JwtTokenService(
+        signing_key=_SIGNING_KEY,
+        algorithm="HS256",
+        access_ttl=dt.timedelta(minutes=15),
+        download_grant_ttl=dt.timedelta(seconds=_GRANT_TTL_SECONDS),
+        clock=_clock,
+    )
+    identity_uow = FakeUnitOfWork()
+    identity_uow.users.seed(_user)
+    app.dependency_overrides[get_current_user] = lambda: _user
+    # The export download resolves its subject itself (Bearer *or* grant), so it
+    # goes through these two use cases rather than get_current_user.
+    app.dependency_overrides[get_authenticate_request] = lambda: AuthenticateRequest(
+        uow=identity_uow, tokens=_tokens
+    )
+    app.dependency_overrides[get_authenticate_download_grant] = lambda: (
+        AuthenticateDownloadGrant(uow=identity_uow, tokens=_tokens)
+    )
+    app.dependency_overrides[get_token_service] = lambda: _tokens
     app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(
         member=member
     )
     app.dependency_overrides[get_permission_checker] = lambda: _FakeChecker(allow=allow)
     if export is not None:
         app.dependency_overrides[get_export_server] = lambda: export
+    if resolve_export is not None:
+        app.dependency_overrides[get_resolve_server_export] = lambda: resolve_export
     if import_ is not None:
         app.dependency_overrides[get_import_server] = lambda: import_
     if recorder is not None:
         app.dependency_overrides[get_audit_recorder] = lambda: recorder
     return app
+
+
+def _bearer() -> dict[str, str]:
+    return {"Authorization": f"Bearer {_tokens.issue_access_token(_user.id)}"}
 
 
 def _zip_upload() -> tuple[dict[str, tuple[str, bytes, str]], dict[str, str]]:
@@ -192,17 +262,21 @@ def _zip_upload() -> tuple[dict[str, tuple[str, bytes, str]], dict[str, str]]:
 # --- export ----------------------------------------------------------------
 
 
+def _export_url(community: uuid.UUID, server: uuid.UUID) -> str:
+    return f"/api/communities/{community}/servers/{server}/export"
+
+
 def test_non_member_gets_404_on_export() -> None:
     app = _app(member=False, allow=True, export=_FakeExport())
     client = next(_client(app))
-    resp = client.get(f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}/export")
+    resp = client.get(_export_url(uuid.uuid4(), uuid.uuid4()), headers=_bearer())
     assert resp.status_code == 404
 
 
 def test_member_without_permission_gets_403_on_export() -> None:
     app = _app(member=True, allow=False, export=_FakeExport())
     client = next(_client(app))
-    resp = client.get(f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}/export")
+    resp = client.get(_export_url(uuid.uuid4(), uuid.uuid4()), headers=_bearer())
     assert resp.status_code == 403
 
 
@@ -215,7 +289,7 @@ def test_export_streams_zip_and_audits() -> None:
         recorder=recorder,
     )
     client = next(_client(app))
-    resp = client.get(f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}/export")
+    resp = client.get(_export_url(uuid.uuid4(), uuid.uuid4()), headers=_bearer())
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "application/zip"
     assert resp.content == b"zip-bytes"
@@ -233,11 +307,230 @@ def test_export_running_is_409_and_audits_denied() -> None:
         recorder=recorder,
     )
     client = next(_client(app))
-    resp = client.get(f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}/export")
+    resp = client.get(_export_url(uuid.uuid4(), uuid.uuid4()), headers=_bearer())
     assert resp.status_code == 409
     assert resp.json()["reason"] == "server_unsettled"
     assert [e.operation for e in recorder.events] == [ops.SERVER_EXPORT]
     assert recorder.events[0].outcome is Outcome.DENIED
+
+
+def test_export_without_any_credential_is_401() -> None:
+    app = _app(member=True, allow=True, export=_FakeExport())
+    client = next(_client(app))
+    resp = client.get(_export_url(uuid.uuid4(), uuid.uuid4()))
+    assert resp.status_code == 401
+
+
+# --- export download grants (issue #2352) ----------------------------------
+
+
+def _mint(
+    client: TestClient, community: uuid.UUID, server: uuid.UUID
+) -> httpx2.Response:
+    return client.post(
+        f"{_export_url(community, server)}/download-grant", headers=_bearer()
+    )
+
+
+def test_non_member_gets_404_on_export_download_grant() -> None:
+    app = _app(member=False, allow=True, resolve_export=_FakeResolveExport())
+    client = next(_client(app))
+    assert _mint(client, uuid.uuid4(), uuid.uuid4()).status_code == 404
+
+
+def test_member_without_permission_gets_403_on_export_download_grant() -> None:
+    app = _app(member=True, allow=False, resolve_export=_FakeResolveExport())
+    client = next(_client(app))
+    assert _mint(client, uuid.uuid4(), uuid.uuid4()).status_code == 403
+
+
+def test_export_download_grant_for_unknown_server_is_404() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        resolve_export=_FakeResolveExport(error=ServerNotFoundError("x")),
+    )
+    client = next(_client(app))
+    assert _mint(client, uuid.uuid4(), uuid.uuid4()).status_code == 404
+
+
+def test_export_download_grant_for_a_running_server_is_409_and_audits_denied() -> None:
+    # The common export failure, not a race: without this pre-flight the WebUI
+    # would save the problem+json under MyServer.zip (issue #2352).
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        resolve_export=_FakeResolveExport(error=ServerFilesUnsettledError("x")),
+        recorder=recorder,
+    )
+    client = next(_client(app))
+    resp = _mint(client, uuid.uuid4(), uuid.uuid4())
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "server_unsettled"
+    # The denied row the download would have recorded: minting first must not
+    # delete denied-export visibility from the audit log.
+    assert [e.operation for e in recorder.events] == [ops.SERVER_EXPORT]
+    assert recorder.events[0].outcome is Outcome.DENIED
+
+
+def test_export_download_grant_response_is_not_cached_and_reports_expiry() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, resolve_export=_FakeResolveExport())
+    client = next(_client(app))
+    resp = _mint(client, community, server)
+    assert resp.status_code == 200
+    # A URL that carries a credential must never sit in a shared cache.
+    assert resp.headers["cache-control"] == "no-store"
+    body = resp.json()
+    assert body["download_url"].startswith(f"{_export_url(community, server)}?grant=")
+    assert body["expires_at"] == (
+        _NOW + dt.timedelta(seconds=_GRANT_TTL_SECONDS)
+    ).isoformat().replace("+00:00", "Z")
+
+
+def test_minting_an_export_grant_records_no_audit_event() -> None:
+    # Bytes leave the system at redemption, not at issuance (issue #2352).
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True, allow=True, resolve_export=_FakeResolveExport(), recorder=recorder
+    )
+    client = next(_client(app))
+    assert _mint(client, uuid.uuid4(), uuid.uuid4()).status_code == 200
+    assert recorder.events == []
+
+
+def test_minted_export_url_downloads_without_an_authorization_header() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        export=_FakeExport(chunks=[b"zip-bytes"]),
+        resolve_export=_FakeResolveExport(),
+        recorder=recorder,
+    )
+    client = next(_client(app))
+    url = _mint(client, community, server).json()["download_url"]
+
+    resp = client.get(url)
+
+    assert resp.status_code == 200
+    assert resp.content == b"zip-bytes"
+    assert resp.headers["content-type"] == "application/zip"
+    # Exactly one audit row, at redemption, with the grant's subject as actor.
+    assert [e.operation for e in recorder.events] == [ops.SERVER_EXPORT]
+    assert recorder.events[0].actor_id == _user.id.value
+
+
+def _export_grant_url(community: uuid.UUID, server: uuid.UUID, *, subject: User) -> str:
+    issued = _tokens.issue_download_grant(
+        subject.id, export_download_grant_resource(community, server)
+    )
+    return f"{_export_url(community, server)}?grant={issued.token}"
+
+
+def test_export_grant_redeemed_download_matches_the_bearer_response() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, export=_FakeExport(chunks=[b"zip-bytes"]))
+    client = next(_client(app))
+
+    with_bearer = client.get(_export_url(community, server), headers=_bearer())
+    with_grant = client.get(_export_grant_url(community, server, subject=_user))
+
+    assert with_grant.status_code == with_bearer.status_code == 200
+    assert with_grant.content == with_bearer.content
+    assert with_grant.headers["content-type"] == with_bearer.headers["content-type"]
+
+
+def test_export_grant_is_rejected_after_its_ttl() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, export=_FakeExport())
+    client = next(_client(app))
+    url = _export_grant_url(community, server, subject=_user)
+
+    _clock.set(_NOW + dt.timedelta(seconds=_GRANT_TTL_SECONDS))
+
+    assert client.get(url).status_code == 401
+
+
+def test_export_grant_is_rejected_under_another_server_or_community() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, export=_FakeExport())
+    client = next(_client(app))
+    issued = _tokens.issue_download_grant(
+        _user.id, export_download_grant_resource(community, server)
+    )
+
+    other_server = client.get(
+        f"{_export_url(community, uuid.uuid4())}?grant={issued.token}"
+    )
+    other_community = client.get(
+        f"{_export_url(uuid.uuid4(), server)}?grant={issued.token}"
+    )
+
+    assert other_server.status_code == 401
+    assert other_community.status_code == 401
+
+
+def test_export_grant_is_not_accepted_as_a_bearer_token() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, export=_FakeExport())
+    client = next(_client(app))
+    issued = _tokens.issue_download_grant(
+        _user.id, export_download_grant_resource(community, server)
+    )
+
+    resp = client.get(
+        _export_url(community, server),
+        headers={"Authorization": f"Bearer {issued.token}"},
+    )
+
+    assert resp.status_code == 401
+
+
+def test_access_token_is_not_accepted_as_an_export_grant() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, export=_FakeExport())
+    client = next(_client(app))
+    access = _tokens.issue_access_token(_user.id)
+
+    resp = client.get(f"{_export_url(community, server)}?grant={access}")
+
+    assert resp.status_code == 401
+
+
+def test_export_grant_loses_to_a_permission_revoked_after_issuance() -> None:
+    # The grant proves identity, never authority: authorization is decided afresh.
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=False, export=_FakeExport())
+    client = next(_client(app))
+
+    resp = client.get(_export_grant_url(community, server, subject=_user))
+
+    assert resp.status_code == 403
+
+
+def test_export_grant_loses_to_a_membership_removed_after_issuance() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=False, allow=True, export=_FakeExport())
+    client = next(_client(app))
+
+    resp = client.get(_export_grant_url(community, server, subject=_user))
+
+    assert resp.status_code == 404
+
+
+def test_export_grant_for_a_deactivated_subject_is_rejected() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(
+        member=True, allow=True, subject=make_user(active=False), export=_FakeExport()
+    )
+    client = next(_client(app))
+
+    resp = client.get(_export_grant_url(community, server, subject=_user))
+
+    assert resp.status_code == 401
 
 
 # --- import ----------------------------------------------------------------

@@ -54,6 +54,7 @@ from fastapi import (
     APIRouter,
     Depends,
     Query,
+    Request,
     Response,
     UploadFile,
     status,
@@ -77,11 +78,19 @@ from mc_server_dashboard_api.dependencies import (
     get_rename_file,
     get_rollback_file,
     get_search_files,
+    get_token_service,
     get_upload_file,
     get_write_file,
+    path_uuid,
+    require_download_access,
     require_permission,
 )
+from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_problem import ProblemException, problem
+from mc_server_dashboard_api.identity.domain.token_service import TokenService
+from mc_server_dashboard_api.identity.domain.value_objects import (
+    UserId as IdentityUserId,
+)
 from mc_server_dashboard_api.servers.application.files import (
     MAX_UPLOAD_BYTES,
     DeleteFile,
@@ -95,6 +104,7 @@ from mc_server_dashboard_api.servers.application.files import (
     RollbackFile,
     SearchFiles,
     WriteFile,
+    file_download_grant_resource,
 )
 from mc_server_dashboard_api.servers.application.files import (
     UploadFile as UploadFileUseCase,
@@ -125,6 +135,25 @@ _SERVER_RESOURCE_TYPE = "server"
 # How much of the multipart body to pull per chunk while counting it against the
 # upload cap (the bounded-read loop in ``_read_capped_upload``).
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
+
+# The ``?path=`` default shared by the download and its grant mint. The two must
+# read the same value for an absent parameter, or a grant minted without a path
+# would not redeem the URL it names.
+_DEFAULT_DOWNLOAD_PATH = "."
+
+
+def _download_grant_resource(request: Request) -> str:
+    """Bind a file download grant to the request's server and ``?path=``.
+
+    The *same* callable runs at issuance and at redemption, so the two cannot
+    build different strings for the same URL.
+    """
+
+    return file_download_grant_resource(
+        path_uuid(request, "community_id"),
+        path_uuid(request, "server_id"),
+        request.query_params.get("path", _DEFAULT_DOWNLOAD_PATH),
+    )
 
 
 class FileContentResponse(BaseModel):
@@ -555,22 +584,25 @@ async def download_file(
     authorized: Annotated[
         AuthUser,
         Depends(
-            require_permission(
-                Permission("file:read"),
-                resource_type=_SERVER_RESOURCE_TYPE,
-                resource_id_param="server_id",
-            )
+            require_download_access(Permission("file:read"), _download_grant_resource)
         ),
     ],
     use_case: Annotated[DownloadFile, Depends(get_download_file)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
-    path: Annotated[str, Query()] = ".",
+    path: Annotated[str, Query()] = _DEFAULT_DOWNLOAD_PATH,
 ) -> Response:
     """Download a file (bytes) or a directory (streamed zip) at rest (file:read).
 
     At rest only (Section 6.9): a running server is 409 ``server_unsettled``. A
     directory streams as a zip built incrementally over the Storage read stream
     (bounded memory); a file streams its bytes with an attachment disposition.
+
+    The directory zip is built incrementally, so it carries no ``Content-Length``
+    and a browser cannot cap it up front; a multi-GB ``world`` is therefore fetched
+    as a plain navigation to a URL carrying a short-lived ``?grant=`` minted by
+    ``POST .../files/download-grant`` instead of being buffered into a Blob to
+    attach a Bearer header (issue #2352). Either credential runs the same
+    ``file:read`` gate, and the response is identical.
     """
 
     try:
@@ -629,6 +661,100 @@ async def download_file(
         raise _conflict("server_unsettled") from exc
     await _record_file(recorder, ops.FILE_DOWNLOAD, authorized, community_id, server_id)
     return response
+
+
+class FileDownloadGrantResponse(BaseModel):
+    """A short-lived, self-authenticating file download URL (issue #2352).
+
+    ``download_url`` is same-origin relative (WEBUI_SPEC.md Section 7.7) and
+    already carries the path and the grant, so a client hands it straight to
+    ``<a download>``. ``expires_at`` is when the grant stops verifying; after that
+    the URL is 401.
+    """
+
+    download_url: str
+    expires_at: UtcDatetime
+
+
+@router.post("/communities/{community_id}/servers/{server_id}/files/download-grant")
+async def issue_file_download_grant(
+    request: Request,
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    response: Response,
+    authorized: Annotated[
+        AuthUser,
+        Depends(
+            require_permission(
+                Permission("file:read"),
+                resource_type=_SERVER_RESOURCE_TYPE,
+                resource_id_param="server_id",
+            )
+        ),
+    ],
+    use_case: Annotated[DownloadFile, Depends(get_download_file)],
+    tokens: Annotated[TokenService, Depends(get_token_service)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+    path: Annotated[str, Query()] = _DEFAULT_DOWNLOAD_PATH,
+) -> FileDownloadGrantResponse:
+    """Mint a self-authenticating download URL for one path (file:read, #2352).
+
+    A multi-GB directory zip cannot be buffered into a Blob just to attach a
+    Bearer header, so the browser needs a URL that authenticates itself. The grant
+    is bound to this exact community/server/path triple and to the caller, expires
+    in ``auth.token.download_grant_ttl_seconds``, and proves identity only — the
+    download re-runs the full ``file:read`` gate on redemption.
+
+    ``path`` is a **query** parameter on this POST rather than a JSON body so the
+    same ``_download_grant_resource`` callable builds the bound resource string
+    here and at the download: divergence between the two is structurally
+    impossible. The binding compares the decoded value by exact string equality;
+    see :func:`file_download_grant_resource` for why containment — not a privilege
+    boundary — is the right bar here.
+
+    The pre-flight reuses ``DownloadFile.is_dir``, so a missing path is 404, a
+    traversal-unsafe one 422 ``invalid_path``, and a running server 409
+    ``server_unsettled`` — exactly what the download returns. The 409 records the
+    DENIED ``file:download`` row the download would have recorded; once the Web UI
+    mints first the download is never reached, and the denial would otherwise
+    vanish from the audit log.
+
+    Nothing is audited on success: bytes leave the system at redemption, which
+    records ``file:download`` with this same subject as actor.
+    """
+
+    try:
+        await use_case.is_dir(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+            rel_path=path,
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    except ServerFileNotFoundError as exc:
+        raise _not_found() from exc
+    except InvalidFilePathError as exc:
+        raise _unprocessable("invalid_path") from exc
+    except ServerFilesUnsettledError as exc:
+        await _record_file_failure(
+            recorder, ops.FILE_DOWNLOAD, authorized, community_id, server_id
+        )
+        raise _conflict("server_unsettled") from exc
+
+    grant = tokens.issue_download_grant(
+        IdentityUserId(authorized.user_id.value), _download_grant_resource(request)
+    )
+    # The middleware's no-store set is matched by exact path (middleware.py), which
+    # a templated route cannot join; set it here so a credential-bearing URL is
+    # never cached.
+    response.headers["Cache-Control"] = "no-store"
+    return FileDownloadGrantResponse(
+        download_url=(
+            f"/api/communities/{community_id}/servers/{server_id}/files/download"
+            f"?path={quote(path, safe='')}&grant={quote(grant.token, safe='')}"
+        ),
+        expires_at=grant.expires_at,
+    )
 
 
 @router.post(

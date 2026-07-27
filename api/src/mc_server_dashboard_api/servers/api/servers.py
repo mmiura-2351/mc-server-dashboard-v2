@@ -18,12 +18,15 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from typing import Annotated, Any
+from urllib.parse import quote
 
 from fastapi import (
     APIRouter,
     Depends,
     Form,
     Query,
+    Request,
+    Response,
     UploadFile,
     status,
 )
@@ -49,20 +52,30 @@ from mc_server_dashboard_api.dependencies import (
     get_list_game_sessions,
     get_list_servers,
     get_read_server,
+    get_resolve_server_export,
     get_restart_server,
     get_send_server_command,
     get_settings,
     get_start_server,
     get_stop_server,
+    get_token_service,
     get_update_server,
+    path_uuid,
     require_deferred_authz,
+    require_download_access,
     require_permission,
 )
 from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_problem import ProblemException, problem
+from mc_server_dashboard_api.identity.domain.token_service import TokenService
+from mc_server_dashboard_api.identity.domain.value_objects import (
+    UserId as IdentityUserId,
+)
 from mc_server_dashboard_api.servers.application.export_import import (
     ExportServer,
     ImportServer,
+    ResolveServerExport,
+    export_download_grant_resource,
 )
 from mc_server_dashboard_api.servers.application.files import MAX_UPLOAD_BYTES
 from mc_server_dashboard_api.servers.application.game_sessions import ListGameSessions
@@ -145,6 +158,14 @@ _SERVER_RESOURCE_TYPE = "server"
 # How much of the multipart import body to pull per chunk while counting it
 # against the upload cap (the bounded-read loop in ``_read_capped_upload``).
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
+
+
+def _export_grant_resource(request: Request) -> str:
+    """Bind an export download grant to the request's community/server pair."""
+
+    return export_download_grant_resource(
+        path_uuid(request, "community_id"), path_uuid(request, "server_id")
+    )
 
 
 class CreateServerRequest(BaseModel):
@@ -681,11 +702,7 @@ async def export_server(
     authorized: Annotated[
         AuthUser,
         Depends(
-            require_permission(
-                Permission("file:read"),
-                resource_type=_SERVER_RESOURCE_TYPE,
-                resource_id_param="server_id",
-            )
+            require_download_access(Permission("file:read"), _export_grant_resource)
         ),
     ],
     use_case: Annotated[ExportServer, Depends(get_export_server)],
@@ -699,6 +716,13 @@ async def export_server(
     (Section 6.9): a running server is 409 ``server_unsettled`` (the authoritative
     copy is only well-defined at rest). The zip carries the working set plus an
     ``export_metadata.json`` descriptor. Recorded under ``server:export``.
+
+    The zip is built incrementally, so it carries no ``Content-Length`` and a
+    browser cannot cap it up front; a multi-GB export is therefore fetched as a
+    plain navigation to a URL carrying a short-lived ``?grant=`` minted by
+    ``POST .../export/download-grant`` instead of being buffered into a Blob to
+    attach a Bearer header (issue #2352). Either credential runs the same
+    ``file:read`` gate, and the response is identical.
     """
 
     try:
@@ -715,6 +739,87 @@ async def export_server(
         raise _conflict("server_unsettled") from exc
     await _record(recorder, ops.SERVER_EXPORT, authorized, community_id, server_id)
     return StreamingResponse(stream, media_type="application/zip")
+
+
+class ServerExportDownloadGrantResponse(BaseModel):
+    """A short-lived, self-authenticating server-export download URL (issue #2352).
+
+    ``download_url`` is same-origin relative (WEBUI_SPEC.md Section 7.7) and
+    already carries the grant, so a client hands it straight to ``<a download>``.
+    ``expires_at`` is when the grant stops verifying; after that the URL is 401.
+    """
+
+    download_url: str
+    expires_at: UtcDatetime
+
+
+@router.post("/communities/{community_id}/servers/{server_id}/export/download-grant")
+async def issue_export_download_grant(
+    request: Request,
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    response: Response,
+    authorized: Annotated[
+        AuthUser,
+        Depends(
+            require_permission(
+                Permission("file:read"),
+                resource_type=_SERVER_RESOURCE_TYPE,
+                resource_id_param="server_id",
+            )
+        ),
+    ],
+    use_case: Annotated[ResolveServerExport, Depends(get_resolve_server_export)],
+    tokens: Annotated[TokenService, Depends(get_token_service)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+) -> ServerExportDownloadGrantResponse:
+    """Mint a self-authenticating download URL for a server export (file:read, #2352).
+
+    A multi-GB export cannot be buffered into a Blob just to attach a Bearer
+    header, so the browser needs a URL that authenticates itself. The grant is
+    bound to this exact community/server pair and to the caller, expires in
+    ``auth.token.download_grant_ttl_seconds``, and proves identity only — the
+    export re-runs the full ``file:read`` gate on redemption.
+
+    The pre-flight is not optional: an export at rest is the *precondition*, and a
+    running server is the common failure. Minting regardless would have the
+    browser save the download's ``problem+json`` under the export filename, so the
+    same 404 / 409 the download returns is returned here instead, and the 409
+    records the DENIED ``server:export`` row the download would have recorded —
+    once the Web UI mints first the download is never reached, and the denial
+    would otherwise vanish from the audit log.
+
+    Nothing is audited on success: bytes leave the system at redemption, which
+    records ``server:export`` with this same subject as actor.
+    """
+
+    try:
+        await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    except ServerFilesUnsettledError as exc:
+        await _record_denied(
+            recorder, ops.SERVER_EXPORT, authorized, community_id, server_id
+        )
+        raise _conflict("server_unsettled") from exc
+
+    grant = tokens.issue_download_grant(
+        IdentityUserId(authorized.user_id.value), _export_grant_resource(request)
+    )
+    # The middleware's no-store set is matched by exact path (middleware.py), which
+    # a templated route cannot join; set it here so a credential-bearing URL is
+    # never cached.
+    response.headers["Cache-Control"] = "no-store"
+    return ServerExportDownloadGrantResponse(
+        download_url=(
+            f"/api/communities/{community_id}/servers/{server_id}"
+            f"/export?grant={quote(grant.token, safe='')}"
+        ),
+        expires_at=grant.expires_at,
+    )
 
 
 @router.patch("/communities/{community_id}/servers/{server_id}")

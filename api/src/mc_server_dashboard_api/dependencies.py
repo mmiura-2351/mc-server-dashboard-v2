@@ -250,6 +250,7 @@ from mc_server_dashboard_api.servers.application.client_modpack import (
 from mc_server_dashboard_api.servers.application.export_import import (
     ExportServer,
     ImportServer,
+    ResolveServerExport,
 )
 from mc_server_dashboard_api.servers.application.files import (
     DeleteFile,
@@ -1958,6 +1959,13 @@ def get_export_server(
         clock=ServersSystemClock(),
         file_store=file_store,
     )
+
+
+def get_resolve_server_export(request: Request) -> ResolveServerExport:
+    """Assemble the :class:`ResolveServerExport` use case (grant mint, issue #2352)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ResolveServerExport(uow=ServersUnitOfWork(session_factory))
 
 
 def get_import_server(
