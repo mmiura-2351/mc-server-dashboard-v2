@@ -49,6 +49,7 @@ from mc_server_dashboard_api.dependencies import (
 )
 from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_problem import ProblemException, problem
+from mc_server_dashboard_api.http_streaming import counted
 from mc_server_dashboard_api.identity.domain.token_service import TokenService
 from mc_server_dashboard_api.identity.domain.value_objects import (
     UserId as IdentityUserId,
@@ -636,8 +637,12 @@ async def download_backup(
     except BackupNotFoundError as exc:
         raise _not_found() from exc
     await _record(recorder, ops.BACKUP_DOWNLOAD, authorized, community_id, backup_id)
+    # A concurrent DeleteBackup (or the retention prune) can remove the archive
+    # underneath the open stream (issue #2318). Counting the streamed bytes turns
+    # the resulting short body into an aborted connection, so the client sees a
+    # failed transfer instead of an incomplete archive reported as a success.
     return StreamingResponse(
-        stream,
+        counted(stream, size_bytes),
         media_type=_BACKUP_MEDIA_TYPE,
         headers={
             "Content-Disposition": _content_disposition(f"{backup_id}.tar.gz"),
