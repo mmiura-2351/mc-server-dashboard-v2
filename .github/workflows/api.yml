@@ -110,3 +110,97 @@ jobs:
         # stay fast and uncluttered; CI surfaces the number and the missing
         # lines per source path. No floor enforced.
         run: uv run pytest -n auto --dist worksteal --cov=src --cov-report=term-missing
+
+  # The MCD_TEST_S3_ENDPOINT-gated modules, run against a real SeaweedFS
+  # (issue #2331). They pin the one dimension the in-memory stub cannot: a
+  # backend whose `head` ContentLength disagrees with its `get` body
+  # (tests/storage/fake_s3.py returns len(objects[key]) by construction, so the
+  # two agree definitionally there). Both resource-pack download routes declare
+  # Content-Length from store.size() while streaming the body from store.open()
+  # (#2317), and backup downloads have the same shape (#2312); a disagreement
+  # hangs the client over HTTP/2.
+  #
+  # A separate job, not part of `check`: only these two modules need the
+  # container, so the rest of the api suite neither waits on it nor fails when
+  # the registry is unreachable. Deliberately not a required status check yet —
+  # see the PR that added it.
+  live-s3:
+    runs-on: ubuntu-latest
+    steps:
+      # Action versions are pinned to a commit SHA per
+      # docs/dev/DEPENDENCIES.md (pinning + 7-day cooldown).
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up uv (caches the uv-managed toolchain)
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: true
+          cache-dependency-glob: api/uv.lock
+
+      - name: Sync (pinned Python + dev toolchain from uv.lock)
+        run: uv sync --locked
+
+      # Not a `services:` container: that block has no field for the container
+      # command (only image/env/ports/volumes/options), and SeaweedFS needs
+      # `weed server -s3 -s3.config=...` — `--entrypoint` in `options` can
+      # replace the binary but cannot supply its arguments. So the container is
+      # started by hand, mirroring compose.yaml's seaweedfs service: same image
+      # version the deployment runs, same `weed server` invocation, same
+      # identities file shape. The `mcsd` bucket is auto-created on first PUT.
+      - name: Start SeaweedFS (S3 gateway)
+        run: |
+          mkdir -p "$RUNNER_TEMP/seaweedfs"
+          printf '{"identities":[{"name":"ci","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Admin","Read","Write","List","Tagging"]}]}' \
+            mcsdaccess mcsdsecret > "$RUNNER_TEMP/seaweedfs/s3.json"
+
+          # chrislusf/seaweedfs:4.39 — the version compose.yaml deploys, so CI
+          # exercises the backend the deployment actually runs. Digest-pinned
+          # per docs/dev/DEPENDENCIES.md (pinning + 7-day cooldown).
+          docker run -d --name seaweedfs -p 8333:8333 \
+            -v "$RUNNER_TEMP/seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro" \
+            --entrypoint weed \
+            chrislusf/seaweedfs@sha256:c7d6c721b30ae711db766bbbfd40192776e263d4e51e22f57baef7bef93c12c6 \
+            server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json
+
+          # /status returns 200 once the S3 gateway is serving (no auth needed) —
+          # the same readiness signal compose.yaml's healthcheck uses.
+          ready=
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8333/status >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [ -z "$ready" ]; then
+            echo "SeaweedFS did not become ready; container log:" >&2
+            docker logs seaweedfs >&2 || true
+            exit 1
+          fi
+
+      - name: Test (live S3 contract modules)
+        # The bucket/credential defaults these modules fall back to are spelled
+        # out anyway, so the job is readable without cross-referencing them.
+        env:
+          MCD_TEST_S3_ENDPOINT: http://127.0.0.1:8333
+          MCD_TEST_S3_BUCKET: mcsd
+          MCD_TEST_S3_ACCESS_KEY: mcsdaccess
+          MCD_TEST_S3_SECRET_KEY: mcsdsecret
+        # A job that silently skips everything is worse than no job: it looks
+        # like coverage. Both modules skip on `MCD_TEST_S3_ENDPOINT is None`, so
+        # any skip here means the endpoint did not reach pytest — fail on it
+        # rather than report green. `-rs` prints the reason for each one.
+        run: |
+          set -o pipefail
+          uv run pytest -rs \
+            tests/storage/test_object_live_seaweedfs.py \
+            tests/servers/test_resource_pack_store_adapter.py | tee "$RUNNER_TEMP/pytest.log"
+          if grep -qE '[0-9]+ skipped' "$RUNNER_TEMP/pytest.log"; then
+            echo "::error::live-s3 tests were skipped; MCD_TEST_S3_ENDPOINT did not reach pytest" >&2
+            exit 1
+          fi
+
+      - name: SeaweedFS log on failure
+        if: failure()
+        run: docker logs seaweedfs || true

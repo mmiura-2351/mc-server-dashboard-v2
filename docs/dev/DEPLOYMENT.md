@@ -327,8 +327,11 @@ server-side CopyObject, multipart + prefix list, and the startup sweep) against 
 real endpoint. `api/tests/servers/test_resource_pack_store_adapter.py` runs its
 `live-s3` parametrization against the same endpoint (the resource pack store's
 `size()` == `open()` byte-count invariant, #2320). Both are skipped unless
-`MCD_TEST_S3_ENDPOINT` is set, so `make check` and CI stay green without an S3
-instance. To run them against a throwaway SeaweedFS:
+`MCD_TEST_S3_ENDPOINT` is set, so `make check` and the main `check` CI job stay
+green without an S3 instance. CI runs them in the api workflow's separate
+`live-s3` job, which starts a SeaweedFS container and supplies the endpoint
+(#2331); that job fails if either module skips. To run them locally against a
+throwaway SeaweedFS:
 
 ```sh
 docker run -d --name swfs-test -p 8333:8333 \
