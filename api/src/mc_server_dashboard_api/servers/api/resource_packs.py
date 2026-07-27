@@ -239,12 +239,14 @@ async def download_resource_pack(
 ) -> StreamingResponse:
     """Download a resource pack (authenticated, issue #1176).
 
-    The pack's size is declared as ``Content-Length`` (issue #2317) — Starlette
-    populates no length for a streaming body, so without it the response is chunked
-    and a client can neither show progress nor refuse an over-cap pack up front.
-    The value comes from the pack store, so it equals the streamed byte count.
+    The response declares the pack's exact size as ``Content-Length``, so a client
+    can show download progress and refuse an over-cap pack up front.
     """
 
+    # Starlette populates no Content-Length for a streaming body, so without an
+    # explicit header the response is chunked (issue #2317). The declared value
+    # comes from the pack store, so it equals the streamed byte count — a length
+    # that disagrees corrupts or hangs the response over HTTP/2.
     try:
         stream, pack, size_bytes = await use_case(
             resource_pack_id=ResourcePackId(resource_pack_id),
@@ -280,10 +282,13 @@ async def public_download_resource_pack(
     """Public download endpoint for Minecraft clients (no auth, issue #1176).
 
     Validates that ``filename`` matches the stored filename (404 otherwise). The
-    size is declared as ``Content-Length`` (issue #2317) — the game client shows
-    the pack's download progress from it.
+    response declares the pack's exact size as ``Content-Length``, which the game
+    client shows as download progress.
     """
 
+    # Starlette populates no Content-Length for a streaming body, so the header is
+    # explicit (issue #2317). The declared value comes from the pack store, so it
+    # equals the streamed byte count.
     try:
         stream, pack, size_bytes = await use_case(
             resource_pack_id=ResourcePackId(resource_pack_id),
