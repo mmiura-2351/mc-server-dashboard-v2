@@ -12,7 +12,15 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useNavigate } from "react-router";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  type MockInstance,
+  vi,
+} from "vitest";
 import { ApiError } from "../api/client.ts";
 import { setAccessToken } from "../auth/tokenStore.ts";
 import { ToastProvider } from "../components/Toast.tsx";
@@ -39,8 +47,17 @@ vi.mock("../api/client.ts", async () => {
   return { ...actual, api: mockApi };
 });
 
+// Only `downloadFile` is stubbed (the other detail-page tabs use it); the real
+// `saveUrlAs` runs so the export download can be asserted on the anchor it
+// synthesises.
 const mockDownload = vi.hoisted(() => ({ downloadFile: vi.fn() }));
-vi.mock("../api/download.ts", () => mockDownload);
+vi.mock("../api/download.ts", async () => {
+  const actual =
+    await vi.importActual<typeof import("../api/download.ts")>(
+      "../api/download.ts",
+    );
+  return { ...actual, ...mockDownload };
+});
 
 let mockCan: Can = () => true;
 vi.mock("../permissions/ActiveCommunityProvider.tsx", () => ({
@@ -962,12 +979,44 @@ describe("ServerDetailPage lifecycle controls", () => {
   });
 });
 
-describe("ServerDetailPage export", () => {
-  it("downloads the export ZIP through the authenticated helper", async () => {
+describe("ServerDetailPage export (minted grant, #2353)", () => {
+  const GRANT_PATH = `/api/communities/${CID}/servers/${SID}/export/download-grant`;
+  const GRANT_URL = `/api/communities/${CID}/servers/${SID}/export?grant=jwt-1`;
+  const clicks: HTMLAnchorElement[] = [];
+  let fetchSpy: MockInstance<typeof fetch>;
+
+  /** URLs the page requested itself, rather than handing to the browser. */
+  const fetchedUrls = () => fetchSpy.mock.calls.map(([input]) => String(input));
+
+  beforeEach(() => {
+    clicks.length = 0;
+    // Capture the synthesised anchor click instead of navigating.
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      clicks.push(this);
+    });
+    fetchSpy = vi.spyOn(globalThis, "fetch");
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function openSettings() {
+    fireEvent.click(
+      screen.getByRole("tab", { name: t("serverDetail.tab.settings") }),
+    );
+  }
+
+  it("mints a grant and saves it under the server filename", async () => {
     mockApi.get.mockResolvedValue(
       server({ observed_state: "stopped", desired_state: "stopped" }),
     );
-    mockDownload.downloadFile.mockResolvedValue(undefined);
+    mockApi.post.mockResolvedValue({
+      download_url: GRANT_URL,
+      expires_at: "2026-07-27T04:00:30Z",
+    });
     renderPage();
 
     await screen.findByText("survival");
@@ -975,12 +1024,150 @@ describe("ServerDetailPage export", () => {
       screen.getByRole("button", { name: t("serverDetail.export") }),
     );
 
-    await waitFor(() =>
-      expect(mockDownload.downloadFile).toHaveBeenCalledWith(
-        `/api/communities/${CID}/servers/${SID}/export`,
-        "survival.zip",
-      ),
+    await waitFor(() => expect(mockApi.post).toHaveBeenCalledWith(GRANT_PATH));
+    await waitFor(() => expect(clicks).toHaveLength(1));
+    expect(clicks[0].getAttribute("href")).toBe(GRANT_URL);
+    // The export response carries no Content-Disposition (#2357), so the
+    // `download` attribute is what names the saved file.
+    expect(clicks[0].download).toBe("survival.zip");
+    expect(
+      await screen.findByText(t("serverDetail.exportStarted")),
+    ).toBeInTheDocument();
+    // The ZIP body is never read by the tab: no capped fetch+Blob path, and no
+    // request to the grant URL at all — only the browser fetches it.
+    expect(mockDownload.downloadFile).not.toHaveBeenCalled();
+    expect(fetchedUrls()).not.toContain(GRANT_URL);
+    expect(fetchedUrls().filter((url) => url.includes("?grant="))).toEqual([]);
+  });
+
+  it("disables the export button while the mint is in flight", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ observed_state: "stopped", desired_state: "stopped" }),
     );
+    let settleMint: (grant: { download_url: string }) => void = () => {};
+    mockApi.post.mockReturnValue(
+      new Promise<{ download_url: string }>((resolve) => {
+        settleMint = resolve;
+      }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    const button = screen.getByRole("button", {
+      name: t("serverDetail.export"),
+    });
+    fireEvent.click(button);
+
+    // A second click must not mint a second grant (and save twice).
+    await waitFor(() => expect(button).toBeDisabled());
+    fireEvent.click(button);
+    expect(mockApi.post).toHaveBeenCalledTimes(1);
+
+    settleMint({ download_url: GRANT_URL });
+    await waitFor(() => expect(button).toBeEnabled());
+    expect(clicks).toHaveLength(1);
+  });
+
+  it("shows the state-changed toast when the mint 409s, and saves nothing", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ observed_state: "stopped", desired_state: "stopped" }),
+    );
+    mockApi.post.mockRejectedValue(
+      new ApiError(409, { reason: "server_unsettled" }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.export") }),
+    );
+
+    expect(
+      await screen.findByText(t("dashboard.stateChanged")),
+    ).toBeInTheDocument();
+    expect(clicks).toHaveLength(0);
+  });
+
+  it("routes a mint 403 through the permission glue, and saves nothing", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ observed_state: "stopped", desired_state: "stopped" }),
+    );
+    mockApi.post.mockRejectedValue(
+      new ApiError(403, { reason: "forbidden", permission: "file:read" }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.export") }),
+    );
+
+    expect(
+      await screen.findByText(
+        t("permissions.deniedNamed", { permission: "file:read" }),
+      ),
+    ).toBeInTheDocument();
+    expect(clicks).toHaveLength(0);
+  });
+
+  it("mints a grant from the danger-zone export button too", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ observed_state: "stopped", desired_state: "stopped" }),
+    );
+    mockApi.post.mockResolvedValue({
+      download_url: GRANT_URL,
+      expires_at: "2026-07-27T04:00:30Z",
+    });
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: t("serverDetail.danger.exportButton"),
+      }),
+    );
+
+    await waitFor(() => expect(mockApi.post).toHaveBeenCalledWith(GRANT_PATH));
+    await waitFor(() => expect(clicks).toHaveLength(1));
+    expect(clicks[0].getAttribute("href")).toBe(GRANT_URL);
+    expect(clicks[0].download).toBe("survival.zip");
+    expect(mockDownload.downloadFile).not.toHaveBeenCalled();
+  });
+
+  it("shows the unsettled toast when the danger-zone mint 409s", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ observed_state: "stopped", desired_state: "stopped" }),
+    );
+    mockApi.post.mockRejectedValue(
+      new ApiError(409, { reason: "server_unsettled" }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: t("serverDetail.danger.exportButton"),
+      }),
+    );
+
+    expect(
+      await screen.findByText(t("serverDetail.error.unsettled")),
+    ).toBeInTheDocument();
+    expect(clicks).toHaveLength(0);
+  });
+
+  it("mints no grant on render — only on click", async () => {
+    mockApi.get.mockResolvedValue(
+      server({ observed_state: "stopped", desired_state: "stopped" }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    expect(mockApi.post).not.toHaveBeenCalled();
+    expect(clicks).toHaveLength(0);
   });
 
   it("disables export while the server is running", async () => {
