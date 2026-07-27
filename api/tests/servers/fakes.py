@@ -127,6 +127,7 @@ from mc_server_dashboard_api.servers.domain.version_validator import (
     UnsupportedServerTypeError,
     VersionValidator,
 )
+from mc_server_dashboard_api.storage.domain.errors import NotFoundError
 
 
 class FakeJarProvisioner(JarProvisioner):
@@ -1551,10 +1552,9 @@ class FakeResourcePackStore(ResourcePackStore):
         self.blobs[pack_id] = data
 
     def open(self, pack_id: ResourcePackId, filename: str) -> AsyncIterator[bytes]:
-        data = self.blobs[pack_id]
-
         async def _gen() -> AsyncIterator[bytes]:
-            yield data
+            # Like the adapter, the miss surfaces while streaming, not on open().
+            yield self._blob(pack_id)
 
         return _gen()
 
@@ -1562,7 +1562,13 @@ class FakeResourcePackStore(ResourcePackStore):
         self.blobs.pop(pack_id, None)
 
     async def size(self, pack_id: ResourcePackId, filename: str) -> int:
-        return len(self.blobs[pack_id])
+        return len(self._blob(pack_id))
+
+    def _blob(self, pack_id: ResourcePackId) -> bytes:
+        data = self.blobs.get(pack_id)
+        if data is None:
+            raise NotFoundError(f"resource pack not found: {pack_id.value}")
+        return data
 
 
 class FakePluginCacheStore(PluginCacheStore):
