@@ -141,13 +141,15 @@ jobs:
       - name: Sync (pinned Python + dev toolchain from uv.lock)
         run: uv sync --locked
 
-      # Not a `services:` container: that block has no field for the container
-      # command (only image/env/ports/volumes/options), and SeaweedFS needs
-      # `weed server -s3 -s3.config=...` — `--entrypoint` in `options` can
-      # replace the binary but cannot supply its arguments. So the container is
-      # started by hand, mirroring compose.yaml's seaweedfs service: same image
-      # version the deployment runs, same `weed server` invocation, same
-      # identities file shape. The `mcsd` bucket is auto-created on first PUT.
+      # Started by hand rather than as a `services:` container so it runs the
+      # mode the deployment runs: compose.yaml's seaweedfs service execs
+      # `weed server -dir=/data -s3 -s3.config=...`, whereas the image's default
+      # command is `mini` — a different mode, and the only one a `services:`
+      # block can start, since that block has no field for the container command
+      # (only image/env/ports/volumes/options). Testing against the deployed
+      # mode is the point of this job, so: same image version, same `weed
+      # server` invocation, same identities-file shape as compose.yaml. The
+      # `mcsd` bucket is auto-created on first PUT.
       - name: Start SeaweedFS (S3 gateway)
         run: |
           mkdir -p "$RUNNER_TEMP/seaweedfs"
@@ -157,7 +159,7 @@ jobs:
           # chrislusf/seaweedfs:4.39 — the version compose.yaml deploys, so CI
           # exercises the backend the deployment actually runs. Digest-pinned
           # per docs/dev/DEPENDENCIES.md (pinning + 7-day cooldown).
-          docker run -d --name seaweedfs -p 8333:8333 \
+          docker run -d --name seaweedfs -p 127.0.0.1:8333:8333 \
             -v "$RUNNER_TEMP/seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro" \
             --entrypoint weed \
             chrislusf/seaweedfs@sha256:c7d6c721b30ae711db766bbbfd40192776e263d4e51e22f57baef7bef93c12c6 \
@@ -173,9 +175,9 @@ jobs:
             fi
             sleep 1
           done
+          # The container log is dumped by the `if: failure()` step below.
           if [ -z "$ready" ]; then
-            echo "SeaweedFS did not become ready; container log:" >&2
-            docker logs seaweedfs >&2 || true
+            echo "SeaweedFS did not become ready" >&2
             exit 1
           fi
 
@@ -190,14 +192,18 @@ jobs:
         # A job that silently skips everything is worse than no job: it looks
         # like coverage. Both modules skip on `MCD_TEST_S3_ENDPOINT is None`, so
         # any skip here means the endpoint did not reach pytest — fail on it
-        # rather than report green. `-rs` prints the reason for each one.
+        # rather than report green. The count is read from the JUnit report, not
+        # grepped out of the summary line: a summary-line match that stops
+        # matching fails open (the guard silently becomes a no-op), while a
+        # missing `skipped` attribute raises and fails the job. `-rs` prints the
+        # reason for each skip.
         run: |
-          set -o pipefail
-          uv run pytest -rs \
+          uv run pytest -rs --junitxml="$RUNNER_TEMP/junit.xml" \
             tests/storage/test_object_live_seaweedfs.py \
-            tests/servers/test_resource_pack_store_adapter.py | tee "$RUNNER_TEMP/pytest.log"
-          if grep -qE '[0-9]+ skipped' "$RUNNER_TEMP/pytest.log"; then
-            echo "::error::live-s3 tests were skipped; MCD_TEST_S3_ENDPOINT did not reach pytest" >&2
+            tests/servers/test_resource_pack_store_adapter.py
+          skipped="$(python3 -c 'import sys, xml.etree.ElementTree as ET; print(sum(int(s.attrib["skipped"]) for s in ET.parse(sys.argv[1]).iter("testsuite")))' "$RUNNER_TEMP/junit.xml")"
+          if [ "$skipped" != 0 ]; then
+            echo "::error::$skipped live-s3 test(s) skipped; MCD_TEST_S3_ENDPOINT did not reach pytest" >&2
             exit 1
           fi
 
