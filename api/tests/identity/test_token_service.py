@@ -128,6 +128,20 @@ def test_download_grant_reports_its_expiry() -> None:
     assert issued.expires_at == now + dt.timedelta(seconds=30)
 
 
+def test_download_grant_expiry_matches_the_enforced_exp_claim() -> None:
+    """Sub-second issue time must not push the advertised deadline past ``exp``.
+
+    ``exp`` is a whole-second claim, so a grant minted mid-second stops verifying
+    before an advertised deadline carrying the fraction (issue #2324).
+    """
+    now = dt.datetime(2026, 6, 4, 0, 0, 0, 750_000, tzinfo=dt.timezone.utc)
+    clock = _FakeClock(now)
+    svc = _service(clock, grant_seconds=30)
+    issued = svc.issue_download_grant(_USER, _RESOURCE)
+    clock.set(issued.expires_at - dt.timedelta(milliseconds=1))
+    assert svc.verify_download_grant(issued.token, _RESOURCE) == _USER
+
+
 def test_download_grant_rejected_after_expiry() -> None:
     clock = _FakeClock(dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc))
     svc = _service(clock, grant_seconds=30)

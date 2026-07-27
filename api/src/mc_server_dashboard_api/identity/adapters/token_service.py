@@ -113,16 +113,22 @@ class JwtTokenService(TokenService):
         self, user_id: UserId, resource: str
     ) -> IssuedDownloadGrant:
         now = self._clock.now()
-        expires_at = now + self._download_grant_ttl
+        # ``exp`` is whole seconds, so the advertised deadline is derived from the
+        # truncated claim rather than from ``now + ttl``: otherwise a grant minted
+        # mid-second stops verifying up to a second before the instant the caller
+        # was told (issue #2324).
+        exp = int((now + self._download_grant_ttl).timestamp())
         claims = {
             "sub": str(user_id.value),
             "iat": int(now.timestamp()),
-            "exp": int(expires_at.timestamp()),
+            "exp": exp,
             "purpose": _DOWNLOAD_PURPOSE,
             "res": resource,
         }
         token = jwt.encode(claims, self._signing_key, algorithm=self._algorithm)
-        return IssuedDownloadGrant(token=token, expires_at=expires_at)
+        return IssuedDownloadGrant(
+            token=token, expires_at=dt.datetime.fromtimestamp(exp, tz=dt.timezone.utc)
+        )
 
     def verify_download_grant(self, token: str, resource: str) -> UserId:
         try:
