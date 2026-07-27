@@ -113,6 +113,9 @@ class _FakeDownloadUseCase:
     ) -> tuple[AsyncIterator[bytes], ResourcePack, int]:
         if self._error is not None:
             raise self._error
+        expected_filename = kwargs.get("expected_filename")
+        if expected_filename is not None and expected_filename != self._pack.filename:
+            raise ResourcePackNotFoundError(str(self._pack.id.value))
 
         async def _stream() -> AsyncIterator[bytes]:
             for chunk in self._chunks:
@@ -390,6 +393,26 @@ class TestPublicDownloadEndpoint:
         with TestClient(app) as client:  # type: ignore[arg-type]
             resp = client.get(f"/api/public/resource-packs/{p.id.value}/wrong-name.zip")
         assert resp.status_code == 404
+
+    def test_public_download_wrong_filename_touches_no_store(self) -> None:
+        # This route is unauthenticated, so an unknown caller can hammer it with
+        # wrong filenames; each one must cost zero storage requests (issue #2322).
+        # It also stays indistinguishable from an unknown pack id — same 404 body,
+        # so the endpoint leaks no existence signal.
+        p = _pack(filename="my-pack.zip")
+        store = FakeResourcePackStore()
+        store.blobs[p.id] = b"publiczip"
+        uow = FakeUnitOfWork()
+        uow.resource_packs.packs[p.id] = p
+        app = _app(download=DownloadResourcePack(uow=uow, store=store))
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.get(f"/api/public/resource-packs/{p.id.value}/wrong-name.zip")
+            unknown = client.get(
+                f"/api/public/resource-packs/{uuid.uuid4()}/wrong-name.zip"
+            )
+        assert resp.status_code == 404
+        assert store.calls == []
+        assert resp.json() == unknown.json()
 
     def test_public_download_not_found_404(self) -> None:
         uc = _FakeDownloadUseCase(error=ResourcePackNotFoundError("nope"))

@@ -471,6 +471,51 @@ class TestDownloadResourcePack:
         with pytest.raises(ResourcePackNotFoundError):
             await download_uc(resource_pack_id=pack.id)
 
+    async def test_download_with_the_expected_filename_streams_the_pack(self) -> None:
+        uow = FakeUnitOfWork()
+        store = FakeResourcePackStore()
+        upload_uc = _make_upload(uow=uow, store=store)
+
+        pack = await upload_uc(
+            filename="dl.zip",
+            display_name="Download Me",
+            content=_ZIP_CONTENT,
+            uploaded_by=uuid.uuid4(),
+        )
+
+        download_uc = DownloadResourcePack(uow=uow, store=store)
+        stream, _, _ = await download_uc(
+            resource_pack_id=pack.id, expected_filename="dl.zip"
+        )
+
+        assert b"".join([chunk async for chunk in stream]) == _ZIP_CONTENT
+
+    async def test_download_with_a_wrong_expected_filename_touches_no_store(
+        self,
+    ) -> None:
+        # The public route passes the URL's filename segment, so a wrong one is
+        # what an unauthenticated caller can hammer: it must be rejected off the
+        # already-loaded row, before any store round trip (issue #2322).
+        uow = FakeUnitOfWork()
+        store = FakeResourcePackStore()
+        upload_uc = _make_upload(uow=uow, store=store)
+
+        pack = await upload_uc(
+            filename="dl.zip",
+            display_name="Download Me",
+            content=_ZIP_CONTENT,
+            uploaded_by=uuid.uuid4(),
+        )
+        store.calls.clear()
+
+        download_uc = DownloadResourcePack(uow=uow, store=store)
+
+        with pytest.raises(ResourcePackNotFoundError):
+            await download_uc(
+                resource_pack_id=pack.id, expected_filename="wrong-name.zip"
+            )
+        assert store.calls == []
+
 
 # ---------------------------------------------------------------------------
 # Assignment use cases (issue #1177)

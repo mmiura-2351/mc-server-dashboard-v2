@@ -186,6 +186,10 @@ class DownloadResourcePack:
     ``Content-Length`` (issue #2317). The size is read from the blob store, never
     from ``ResourcePack.size_bytes`` — the declared length must equal the streamed
     byte count exactly, and only the store knows what it is about to stream.
+
+    ``expected_filename`` is the filename a caller addressed the pack by (the
+    public route's path segment); a mismatch is reported as a missing pack, and
+    the caller that omits it accepts whatever filename the row carries.
     """
 
     uow: UnitOfWork
@@ -195,10 +199,16 @@ class DownloadResourcePack:
         self,
         *,
         resource_pack_id: ResourcePackId,
+        expected_filename: str | None = None,
     ) -> tuple[ByteStream, ResourcePack, int]:
         async with self.uow:
             pack = await self.uow.resource_packs.get_by_id(resource_pack_id)
         if pack is None:
+            raise ResourcePackNotFoundError(str(resource_pack_id.value))
+        # Match the filename off the row already read, before any store round
+        # trip: the public route is unauthenticated, so a wrong filename must not
+        # cost a storage request (issue #2322).
+        if expected_filename is not None and expected_filename != pack.filename:
             raise ResourcePackNotFoundError(str(resource_pack_id.value))
         # Size first: ``open`` is an async-generator factory that touches storage
         # only on first iteration, so opening first would leave the stream

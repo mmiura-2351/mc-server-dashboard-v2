@@ -1537,10 +1537,16 @@ class FakeCatalogProvider(CatalogProvider):
 
 
 class FakeResourcePackStore(ResourcePackStore):
-    """In-memory resource pack blob store for use-case tests (issue #1176)."""
+    """In-memory resource pack blob store for use-case tests (issue #1176).
+
+    ``calls`` records the name of every store operation invoked, so a test can
+    assert that a rejected request costs no store round trip at all — each of
+    these is an object-storage request on the real adapter (issue #2322).
+    """
 
     def __init__(self) -> None:
         self.blobs: dict[ResourcePackId, bytes] = {}
+        self.calls: list[str] = []
 
     async def put(
         self,
@@ -1548,10 +1554,13 @@ class FakeResourcePackStore(ResourcePackStore):
         filename: str,
         stream: AsyncIterator[bytes],
     ) -> None:
+        self.calls.append("put")
         data = b"".join([chunk async for chunk in stream])
         self.blobs[pack_id] = data
 
     def open(self, pack_id: ResourcePackId, filename: str) -> AsyncIterator[bytes]:
+        self.calls.append("open")
+
         async def _gen() -> AsyncIterator[bytes]:
             # Like the adapter, the miss surfaces while streaming, not on open().
             yield self._blob(pack_id)
@@ -1559,9 +1568,11 @@ class FakeResourcePackStore(ResourcePackStore):
         return _gen()
 
     async def delete(self, pack_id: ResourcePackId) -> None:
+        self.calls.append("delete")
         self.blobs.pop(pack_id, None)
 
     async def size(self, pack_id: ResourcePackId, filename: str) -> int:
+        self.calls.append("size")
         return len(self._blob(pack_id))
 
     def _blob(self, pack_id: ResourcePackId) -> bytes:
