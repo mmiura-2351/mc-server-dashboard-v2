@@ -35,6 +35,7 @@ from mc_server_dashboard_api.dependencies import (
     get_upload_resource_pack,
     require_server_update_in_any_community,
 )
+from mc_server_dashboard_api.http_streaming import ShortResponseBodyError
 from mc_server_dashboard_api.servers.application.resource_packs import (
     DownloadResourcePack,
 )
@@ -103,10 +104,14 @@ class _FakeDownloadUseCase:
         data: bytes = b"zipdata",
         chunks: list[bytes] | None = None,
         error: Exception | None = None,
+        declared: int | None = None,
+        stream_error: Exception | None = None,
     ):
         self._pack = pack or _pack()
         self._chunks = [data] if chunks is None else chunks
         self._error = error
+        self._declared = declared
+        self._stream_error = stream_error
 
     async def __call__(
         self, **kwargs: object
@@ -117,8 +122,12 @@ class _FakeDownloadUseCase:
         async def _stream() -> AsyncIterator[bytes]:
             for chunk in self._chunks:
                 yield chunk
+            if self._stream_error is not None:
+                raise self._stream_error
 
-        return _stream(), self._pack, sum(len(chunk) for chunk in self._chunks)
+        streamed = sum(len(chunk) for chunk in self._chunks)
+        declared = streamed if self._declared is None else self._declared
+        return _stream(), self._pack, declared
 
 
 def _orphaned_row_download(pack: ResourcePack) -> DownloadResourcePack:
@@ -339,6 +348,37 @@ class TestDownloadEndpoint:
         assert resp.content == b"".join(chunks)
         assert int(resp.headers["content-length"]) == len(resp.content)
 
+    def test_download_aborts_when_stream_ends_short_of_declared_length(self) -> None:
+        # A delete or a prune racing an in-flight download can remove the blob
+        # between size() and the first chunk (issue #2337), leaving the body short
+        # of the declared Content-Length. A real server (uvicorn + h11) already
+        # rejects that at the wire; counting the bytes names the mismatch here
+        # instead, so the invariant holds without depending on the ASGI server.
+        p = _pack()
+        uc = _FakeDownloadUseCase(pack=p, chunks=[b"first-chunk"], declared=1024)
+        app = _app(download=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            with pytest.raises(ShortResponseBodyError):
+                client.get(f"/api/resource-packs/{p.id.value}/download")
+
+    def test_download_aborts_when_the_blob_disappears_mid_stream(self) -> None:
+        # The other half of the same race (issue #2337): the read fails once the
+        # stream is open and the store seam translates it to
+        # ResourcePackNotFoundError (issue #2321). The headers are already on the
+        # wire, so there is no 404 to send — the response must abort rather than
+        # end quietly short.
+        p = _pack()
+        uc = _FakeDownloadUseCase(
+            pack=p,
+            chunks=[b"first-chunk"],
+            declared=1024,
+            stream_error=ResourcePackNotFoundError("gone"),
+        )
+        app = _app(download=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            with pytest.raises(ResourcePackNotFoundError):
+                client.get(f"/api/resource-packs/{p.id.value}/download")
+
     def test_download_not_found_404(self) -> None:
         uc = _FakeDownloadUseCase(error=ResourcePackNotFoundError("nope"))
         app = _app(download=uc)
@@ -382,6 +422,19 @@ class TestPublicDownloadEndpoint:
         assert resp.status_code == 200
         assert resp.content == b"".join(chunks)
         assert int(resp.headers["content-length"]) == len(resp.content)
+
+    def test_public_download_aborts_when_stream_ends_short_of_declared_length(
+        self,
+    ) -> None:
+        # The same race on the route every joining Minecraft client hits (issue
+        # #2337): a body short of its declared Content-Length must fail rather
+        # than pass for a complete pack.
+        p = _pack(filename="my-pack.zip")
+        uc = _FakeDownloadUseCase(pack=p, chunks=[b"pack-head"], declared=1024)
+        app = _app(download=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            with pytest.raises(ShortResponseBodyError):
+                client.get(f"/api/public/resource-packs/{p.id.value}/my-pack.zip")
 
     def test_public_download_wrong_filename_touches_no_store(self) -> None:
         # This route is unauthenticated, so an unknown caller can hammer it with
