@@ -166,7 +166,7 @@ class TestUploadResourcePack:
         # The stored hash must NOT match the original wrapped bytes.
         assert pack.sha1_hash != hashlib.sha1(wrapped).hexdigest()
         # The stored hash must match the normalized zip bytes.
-        stored_blob = store.blobs[pack.id, pack.filename]
+        stored_blob = store.blobs[(pack.id, pack.filename)]
         assert pack.sha1_hash == hashlib.sha1(stored_blob).hexdigest()
         assert pack.sha256_hash == hashlib.sha256(stored_blob).hexdigest()
         assert pack.size_bytes == len(stored_blob)
@@ -230,7 +230,10 @@ class TestDeleteResourcePack:
         )
 
         assert pack.id not in uow.resource_packs.packs
-        assert (pack.id, pack.filename) not in store.blobs
+        # Asserted as emptiness rather than the absence of one key: delete sweeps
+        # every filename under the pack id, and a key-absence check silently goes
+        # vacuous the next time the key shape changes (issue #2335).
+        assert store.blobs == {}
 
     async def test_delete_by_admin(self) -> None:
         uow = FakeUnitOfWork()
@@ -433,7 +436,7 @@ class TestDownloadResourcePack:
             content=_ZIP_CONTENT,
             uploaded_by=uuid.uuid4(),
         )
-        store.blobs[pack.id, pack.filename] = b"x" * (pack.size_bytes + 3)
+        store.blobs[(pack.id, pack.filename)] = b"x" * (pack.size_bytes + 3)
 
         download_uc = DownloadResourcePack(uow=uow, store=store)
         stream, _, size_bytes = await download_uc(resource_pack_id=pack.id)

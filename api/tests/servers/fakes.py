@@ -1561,7 +1561,7 @@ class FakeResourcePackStore(ResourcePackStore):
     ) -> None:
         self.calls.append("put")
         data = b"".join([chunk async for chunk in stream])
-        self.blobs[pack_id, filename] = data
+        self.blobs[(pack_id, filename)] = data
 
     def open(self, pack_id: ResourcePackId, filename: str) -> AsyncIterator[bytes]:
         self.calls.append("open")
@@ -1587,8 +1587,9 @@ class FakeResourcePackStore(ResourcePackStore):
         if data is None:
             # Like the adapter, the storage error is translated at the seam so no
             # storage type reaches the servers layer (issue #2321).
+            # The adapter reports the full object key it missed; match it.
             raise ResourcePackNotFoundError(
-                f"resource pack not found: {pack_id.value}/{filename}"
+                f"resource-packs/{pack_id.value}/{filename}"
             )
         return data
 
