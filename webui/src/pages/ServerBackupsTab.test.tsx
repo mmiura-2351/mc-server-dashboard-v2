@@ -8,7 +8,15 @@ import {
   within,
 } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  type MockInstance,
+  vi,
+} from "vitest";
 import { ApiError } from "../api/client.ts";
 import { setAccessToken } from "../auth/tokenStore.ts";
 import { ToastProvider } from "../components/Toast.tsx";
@@ -344,6 +352,11 @@ describe("ServerBackupsTab create / upload / download / delete", () => {
   describe("download (minted grant, #2314)", () => {
     const GRANT_URL = `/api/communities/${CID}/servers/${SID}/backups/${BID}/download?grant=jwt-1`;
     const clicks: HTMLAnchorElement[] = [];
+    let fetchSpy: MockInstance<typeof fetch>;
+
+    /** URLs the page requested itself, rather than handing to the browser. */
+    const fetchedUrls = () =>
+      fetchSpy.mock.calls.map(([input]) => String(input));
 
     beforeEach(() => {
       clicks.length = 0;
@@ -353,6 +366,7 @@ describe("ServerBackupsTab create / upload / download / delete", () => {
           clicks.push(this);
         },
       );
+      fetchSpy = vi.spyOn(globalThis, "fetch");
     });
 
     afterEach(() => {
@@ -379,8 +393,38 @@ describe("ServerBackupsTab create / upload / download / delete", () => {
       await waitFor(() => expect(clicks).toHaveLength(1));
       expect(clicks[0].getAttribute("href")).toBe(GRANT_URL);
       expect(clicks[0].download).toBe(`${BID}.tar.gz`);
-      // The archive body is never read by the tab: no capped fetch+Blob path.
+      // The archive body is never read by the tab: no capped fetch+Blob path,
+      // and no request to the grant URL at all — only the browser fetches it.
       expect(mockDownload.downloadFile).not.toHaveBeenCalled();
+      expect(fetchedUrls()).not.toContain(GRANT_URL);
+      expect(
+        fetchedUrls().filter((url) => url.includes("download?grant=")),
+      ).toEqual([]);
+    });
+
+    it("disables the download button while the mint is in flight", async () => {
+      routeGet();
+      let settleMint: (grant: { download_url: string }) => void = () => {};
+      mockApi.post.mockReturnValue(
+        new Promise<{ download_url: string }>((resolve) => {
+          settleMint = resolve;
+        }),
+      );
+      await openBackups();
+
+      const button = await screen.findByRole("button", {
+        name: t("backups.download"),
+      });
+      fireEvent.click(button);
+
+      // A second click must not mint a second grant (and save twice).
+      await waitFor(() => expect(button).toBeDisabled());
+      fireEvent.click(button);
+      expect(mockApi.post).toHaveBeenCalledTimes(1);
+
+      settleMint({ download_url: GRANT_URL });
+      await waitFor(() => expect(button).toBeEnabled());
+      expect(clicks).toHaveLength(1);
     });
 
     it("routes a mint 403 through the permission glue", async () => {
