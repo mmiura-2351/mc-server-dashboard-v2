@@ -1984,8 +1984,8 @@ export interface paths {
          * @description Public download endpoint for Minecraft clients (no auth, issue #1176).
          *
          *     Validates that ``filename`` matches the stored filename (404 otherwise). The
-         *     size is declared as ``Content-Length`` (issue #2317) — the game client shows
-         *     the pack's download progress from it.
+         *     response declares the pack's exact size as ``Content-Length``, which the game
+         *     client shows as download progress.
          */
         get: operations["public_download_resource_pack_api_public_resource_packs__resource_pack_id___filename__get"];
         put?: never;
@@ -2068,10 +2068,8 @@ export interface paths {
          * Download Resource Pack
          * @description Download a resource pack (authenticated, issue #1176).
          *
-         *     The pack's size is declared as ``Content-Length`` (issue #2317) — Starlette
-         *     populates no length for a streaming body, so without it the response is chunked
-         *     and a client can neither show progress nor refuse an over-cap pack up front.
-         *     The value comes from the pack store, so it equals the streamed byte count.
+         *     The response declares the pack's exact size as ``Content-Length``, so a client
+         *     can show download progress and refuse an over-cap pack up front.
          */
         get: operations["download_resource_pack_api_resource_packs__resource_pack_id__download_get"];
         put?: never;

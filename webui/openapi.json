@@ -10664,7 +10664,7 @@
     },
     "/api/public/resource-packs/{resource_pack_id}/{filename}": {
       "get": {
-        "description": "Public download endpoint for Minecraft clients (no auth, issue #1176).\n\nValidates that ``filename`` matches the stored filename (404 otherwise). The\nsize is declared as ``Content-Length`` (issue #2317) \u2014 the game client shows\nthe pack's download progress from it.",
+        "description": "Public download endpoint for Minecraft clients (no auth, issue #1176).\n\nValidates that ``filename`` matches the stored filename (404 otherwise). The\nresponse declares the pack's exact size as ``Content-Length``, which the game\nclient shows as download progress.",
         "operationId": "public_download_resource_pack_api_public_resource_packs__resource_pack_id___filename__get",
         "parameters": [
           {
@@ -10835,7 +10835,7 @@
     },
     "/api/resource-packs/{resource_pack_id}/download": {
       "get": {
-        "description": "Download a resource pack (authenticated, issue #1176).\n\nThe pack's size is declared as ``Content-Length`` (issue #2317) \u2014 Starlette\npopulates no length for a streaming body, so without it the response is chunked\nand a client can neither show progress nor refuse an over-cap pack up front.\nThe value comes from the pack store, so it equals the streamed byte count.",
+        "description": "Download a resource pack (authenticated, issue #1176).\n\nThe response declares the pack's exact size as ``Content-Length``, so a client\ncan show download progress and refuse an over-cap pack up front.",
         "operationId": "download_resource_pack_api_resource_packs__resource_pack_id__download_get",
         "parameters": [
           {
