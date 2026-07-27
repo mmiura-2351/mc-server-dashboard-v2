@@ -49,9 +49,17 @@ vi.mock("../api/client.ts", async () => {
   };
 });
 
+// Only `downloadFile` is stubbed; the rest of the module stays real so the
+// error classes it exports (`DownloadTooLargeError`) survive the mock (#2359).
 const mockDownload = vi.hoisted(() => ({ downloadFile: vi.fn() }));
 
-vi.mock("../api/download.ts", () => mockDownload);
+vi.mock("../api/download.ts", async () => {
+  const actual =
+    await vi.importActual<typeof import("../api/download.ts")>(
+      "../api/download.ts",
+    );
+  return { ...actual, ...mockDownload };
+});
 
 vi.mock("../permissions/ActiveCommunityProvider.tsx", () => ({
   useActiveCommunity: () => ({
