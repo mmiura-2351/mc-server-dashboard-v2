@@ -55,6 +55,7 @@ from mc_server_dashboard_api.dependencies import (
     get_token_service,
     get_upload_backup,
 )
+from mc_server_dashboard_api.http_streaming import ShortResponseBodyError
 from mc_server_dashboard_api.identity.adapters.token_service import JwtTokenService
 from mc_server_dashboard_api.identity.application.authenticate_download_grant import (
     AuthenticateDownloadGrant,
@@ -248,6 +249,12 @@ async def _aiter(data: bytes) -> object:
 async def _aiter_chunks(chunks: list[bytes]) -> object:
     for chunk in chunks:
         yield chunk
+
+
+async def _aiter_then_raise(chunks: list[bytes], error: Exception) -> object:
+    for chunk in chunks:
+        yield chunk
+    raise error
 
 
 def _stats() -> BackupStatistics:
@@ -564,6 +571,40 @@ def test_download_declares_content_length_matching_streamed_bytes() -> None:
     # The download is still audited exactly once.
     assert [e.operation for e in recorder.events] == [ops.BACKUP_DOWNLOAD]
     assert recorder.events[0].outcome is Outcome.SUCCESS
+
+
+def test_download_aborts_when_stream_ends_short_of_declared_length() -> None:
+    # A concurrent DeleteBackup (or the retention prune) can remove the archive
+    # under an open stream (issue #2318), leaving the body short of the declared
+    # Content-Length. A real server (uvicorn + h11) already rejects that at the
+    # wire; counting the bytes names the mismatch here instead, so the invariant
+    # holds without depending on the ASGI server to notice.
+    chunks = [b"first-chunk", b"second-chunk"]
+    use_case = _FakeUseCase(result=(_aiter_chunks(chunks), 1024))
+    app = _app(member=True, allow=True, download=use_case)
+    client = next(_client(app))
+    with pytest.raises(ShortResponseBodyError):
+        client.get(
+            _url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download"),
+            headers=_bearer(),
+        )
+
+
+def test_download_aborts_when_archive_disappears_mid_stream() -> None:
+    # The other half of the same race (issue #2318): the archive is removed while
+    # the stream is open and the next read raises, which the store seam translates
+    # to BackupNotFoundError. Headers are already on the wire, so there is no 404
+    # to send — the response must abort rather than end quietly short.
+    use_case = _FakeUseCase(
+        result=(_aiter_then_raise([b"first-chunk"], BackupNotFoundError("x")), 1024)
+    )
+    app = _app(member=True, allow=True, download=use_case)
+    client = next(_client(app))
+    with pytest.raises(BackupNotFoundError):
+        client.get(
+            _url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download"),
+            headers=_bearer(),
+        )
 
 
 def test_download_unknown_backup_is_404() -> None:
