@@ -28,11 +28,11 @@ import pytest
 from mc_server_dashboard_api.servers.adapters.resource_pack_store import (
     ObjectResourcePackStore,
 )
+from mc_server_dashboard_api.servers.domain.errors import ResourcePackNotFoundError
 from mc_server_dashboard_api.servers.domain.resource_pack import ResourcePackId
 from mc_server_dashboard_api.storage.adapters.object_client import (
     make_s3_client_factory,
 )
-from mc_server_dashboard_api.storage.domain.errors import NotFoundError
 from tests.storage.fake_s3 import (
     FakeS3Store,
     close_tracking_factory,
@@ -115,10 +115,11 @@ async def test_size_of_unknown_pack_is_not_found_like_open(
     store: ObjectResourcePackStore, pack: ResourcePackId
 ) -> None:
     # Nothing was put: size() must fail the same way open() does, so the route
-    # cannot declare a length for a body that will never stream.
-    with pytest.raises(NotFoundError):
+    # cannot declare a length for a body that will never stream. The seam reports
+    # the servers-layer error, which the routes map to 404 (issue #2321).
+    with pytest.raises(ResourcePackNotFoundError):
         await _read(store, pack)
-    with pytest.raises(NotFoundError):
+    with pytest.raises(ResourcePackNotFoundError):
         await store.size(pack, _FILENAME)
 
 
@@ -126,9 +127,9 @@ async def test_size_of_unknown_filename_is_not_found_like_open(
     store: ObjectResourcePackStore, pack: ResourcePackId
 ) -> None:
     await _put(store, pack)
-    with pytest.raises(NotFoundError):
+    with pytest.raises(ResourcePackNotFoundError):
         assert [chunk async for chunk in store.open(pack, "other.zip")]
-    with pytest.raises(NotFoundError):
+    with pytest.raises(ResourcePackNotFoundError):
         await store.size(pack, "other.zip")
 
 
@@ -137,5 +138,5 @@ async def test_delete_removes_the_stored_blob(
 ) -> None:
     await _put(store, pack)
     await store.delete(pack)
-    with pytest.raises(NotFoundError):
+    with pytest.raises(ResourcePackNotFoundError):
         await store.size(pack, _FILENAME)

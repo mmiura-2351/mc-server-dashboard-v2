@@ -35,6 +35,9 @@ from mc_server_dashboard_api.dependencies import (
     get_upload_resource_pack,
     require_server_update_in_any_community,
 )
+from mc_server_dashboard_api.servers.application.resource_packs import (
+    DownloadResourcePack,
+)
 from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     PermissionDeniedError,
@@ -51,7 +54,7 @@ from mc_server_dashboard_api.servers.domain.resource_pack import (
 )
 from tests.audit.fakes import RecordingAuditRecorder
 from tests.identity.fakes import make_user
-from tests.servers.fakes import FakeResourcePackStore
+from tests.servers.fakes import FakeResourcePackStore, FakeUnitOfWork
 
 _NOW = dt.datetime(2026, 6, 16, 12, 0, 0, tzinfo=dt.timezone.utc)
 _PACK_ID = ResourcePackId(uuid.UUID("11111111-1111-1111-1111-111111111111"))
@@ -118,6 +121,18 @@ class _FakeDownloadUseCase:
         return _stream(), self._pack, sum(len(chunk) for chunk in self._chunks)
 
 
+def _orphaned_row_download(pack: ResourcePack) -> DownloadResourcePack:
+    """The real use case over a pack row whose blob is absent from the store.
+
+    Unlike :class:`_FakeDownloadUseCase`, this drives the store seam, which is
+    where the missing blob is detected (issue #2321).
+    """
+
+    uow = FakeUnitOfWork()
+    uow.resource_packs.packs[pack.id] = pack
+    return DownloadResourcePack(uow=uow, store=FakeResourcePackStore())
+
+
 _shared_app: FastAPI
 
 
@@ -132,7 +147,7 @@ def _app(
     upload: _FakeUseCase | None = None,
     list_: _FakeUseCase | None = None,
     delete: _FakeUseCase | None = None,
-    download: _FakeDownloadUseCase | None = None,
+    download: _FakeDownloadUseCase | DownloadResourcePack | None = None,
     recorder: RecordingAuditRecorder | None = None,
     is_admin: bool = False,
     require_upload_perm: bool = True,
@@ -331,6 +346,18 @@ class TestDownloadEndpoint:
             resp = client.get(f"/api/resource-packs/{uuid.uuid4()}/download")
         assert resp.status_code == 404
 
+    def test_download_of_a_row_whose_blob_is_missing_404(self) -> None:
+        # An orphaned row is not retrievable, so it reports 404 rather than the
+        # 500 a storage error crossing the store seam would produce (issue #2321),
+        # and no download is audited as a success.
+        p = _pack()
+        recorder = RecordingAuditRecorder()
+        app = _app(download=_orphaned_row_download(p), recorder=recorder)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.get(f"/api/resource-packs/{p.id.value}/download")
+        assert resp.status_code == 404
+        assert recorder.events == []
+
 
 class TestPublicDownloadEndpoint:
     def test_public_download_200(self) -> None:
@@ -369,6 +396,15 @@ class TestPublicDownloadEndpoint:
         app = _app(download=uc)
         with TestClient(app) as client:  # type: ignore[arg-type]
             resp = client.get(f"/api/public/resource-packs/{uuid.uuid4()}/any.zip")
+        assert resp.status_code == 404
+
+    def test_public_download_of_a_row_whose_blob_is_missing_404(self) -> None:
+        # The route every joining Minecraft client hits: an orphaned row reports
+        # 404, not 500 (issue #2321).
+        p = _pack(filename="my-pack.zip")
+        app = _app(download=_orphaned_row_download(p))
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.get(f"/api/public/resource-packs/{p.id.value}/my-pack.zip")
         assert resp.status_code == 404
 
 

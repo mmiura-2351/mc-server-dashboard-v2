@@ -48,6 +48,7 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
     BackupNotFoundError,
+    ResourcePackNotFoundError,
     ServerFileNotFoundError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileEntry, FileStore
@@ -127,7 +128,6 @@ from mc_server_dashboard_api.servers.domain.version_validator import (
     UnsupportedServerTypeError,
     VersionValidator,
 )
-from mc_server_dashboard_api.storage.domain.errors import NotFoundError
 
 
 class FakeJarProvisioner(JarProvisioner):
@@ -1567,7 +1567,9 @@ class FakeResourcePackStore(ResourcePackStore):
     def _blob(self, pack_id: ResourcePackId) -> bytes:
         data = self.blobs.get(pack_id)
         if data is None:
-            raise NotFoundError(f"resource pack not found: {pack_id.value}")
+            # Like the adapter, the storage error is translated at the seam so no
+            # storage type reaches the servers layer (issue #2321).
+            raise ResourcePackNotFoundError(f"resource pack not found: {pack_id.value}")
         return data
 
 

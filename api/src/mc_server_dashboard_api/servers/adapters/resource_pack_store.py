@@ -4,12 +4,18 @@ Stores resource pack blobs under the ``resource-packs/<pack-id>/<filename>``
 key namespace (top-level, outside ``communities/``). Uses the same
 :class:`~...storage.adapters.object_store.S3ClientFactory` as the main
 ``ObjectStorage`` adapter.
+
+The seam translates the storage error so no storage type crosses back into the
+servers layer (mirroring ``backup_store.py``): a missing blob surfaces as
+:class:`ResourcePackNotFoundError`, which the download routes map to 404 —
+an orphaned row is not retrievable, not a degraded backend (issue #2321).
 """
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
+from mc_server_dashboard_api.servers.domain.errors import ResourcePackNotFoundError
 from mc_server_dashboard_api.servers.domain.resource_pack import ResourcePackId
 from mc_server_dashboard_api.servers.domain.resource_pack_store import (
     ResourcePackStore,
@@ -42,9 +48,16 @@ class ObjectResourcePackStore(ResourcePackStore):
         self, pack_id: ResourcePackId, filename: str
     ) -> AsyncIterator[bytes]:
         key = _key(pack_id, filename)
-        async with self._client_factory() as client:
-            async for chunk in await client.get_object(key):
-                yield chunk
+        try:
+            async with self._client_factory() as client:
+                async for chunk in await client.get_object(key):
+                    yield chunk
+        except NotFoundError as exc:
+            # ``open`` does no I/O itself, so this fires on the first iteration —
+            # after the response head is committed on the download routes. The
+            # transfer aborts either way; translating keeps the storage type from
+            # crossing the seam.
+            raise ResourcePackNotFoundError(key) from exc
 
     async def delete(self, pack_id: ResourcePackId) -> None:
         prefix = f"resource-packs/{pack_id.value}/"
@@ -58,5 +71,5 @@ class ObjectResourcePackStore(ResourcePackStore):
         async with self._client_factory() as client:
             result = await client.head_object(key)
             if result is None:
-                raise NotFoundError(f"resource pack not found: {key}")
+                raise ResourcePackNotFoundError(key)
             return result
