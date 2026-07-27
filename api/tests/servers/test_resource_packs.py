@@ -450,6 +450,27 @@ class TestDownloadResourcePack:
         with pytest.raises(ResourcePackNotFoundError):
             await download_uc(resource_pack_id=ResourcePackId.new())
 
+    async def test_download_of_a_row_whose_blob_is_missing_is_not_found(self) -> None:
+        # An orphaned row — the pack row survives but its blob is gone from the
+        # store — must fail as the servers error the edge maps to 404, not as a
+        # storage error crossing the seam (which the edge cannot map, issue #2321).
+        uow = FakeUnitOfWork()
+        store = FakeResourcePackStore()
+        upload_uc = _make_upload(uow=uow, store=store)
+
+        pack = await upload_uc(
+            filename="orphan.zip",
+            display_name="Orphan",
+            content=_ZIP_CONTENT,
+            uploaded_by=uuid.uuid4(),
+        )
+        store.blobs.pop(pack.id)
+
+        download_uc = DownloadResourcePack(uow=uow, store=store)
+
+        with pytest.raises(ResourcePackNotFoundError):
+            await download_uc(resource_pack_id=pack.id)
+
 
 # ---------------------------------------------------------------------------
 # Assignment use cases (issue #1177)

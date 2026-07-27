@@ -26,7 +26,11 @@ class ResourcePackStore(abc.ABC):
 
     @abc.abstractmethod
     def open(self, pack_id: ResourcePackId, filename: str) -> ByteStream:
-        """Open a read stream over a stored resource pack."""
+        """Open a read stream over a stored resource pack.
+
+        Performs no I/O itself: a missing blob raises ``ResourcePackNotFoundError``
+        on the first iteration, not from this call.
+        """
 
     @abc.abstractmethod
     async def delete(self, pack_id: ResourcePackId) -> None:
@@ -34,4 +38,7 @@ class ResourcePackStore(abc.ABC):
 
     @abc.abstractmethod
     async def size(self, pack_id: ResourcePackId, filename: str) -> int:
-        """Return the size in bytes of a stored resource pack."""
+        """Return the size in bytes of a stored resource pack.
+
+        Raises ``ResourcePackNotFoundError`` when no blob is stored (issue #2321).
+        """
