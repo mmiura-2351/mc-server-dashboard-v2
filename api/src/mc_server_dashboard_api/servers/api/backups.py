@@ -670,6 +670,7 @@ async def download_backup(
     "/communities/{community_id}/servers/{server_id}/backups/{backup_id}/download-grant",
 )
 async def issue_backup_download_grant(
+    request: Request,
     community_id: uuid.UUID,
     server_id: uuid.UUID,
     backup_id: uuid.UUID,
@@ -715,8 +716,7 @@ async def issue_backup_download_grant(
         raise _not_found() from exc
 
     grant = tokens.issue_download_grant(
-        IdentityUserId(authorized.user_id.value),
-        download_grant_resource(community_id, server_id, backup_id),
+        IdentityUserId(authorized.user_id.value), _grant_resource(request)
     )
     # The middleware's no-store set is matched by exact path (middleware.py), which
     # a templated route cannot join; set it here so a credential-bearing URL is
