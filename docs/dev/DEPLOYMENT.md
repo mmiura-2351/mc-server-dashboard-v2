@@ -324,8 +324,11 @@ data as a deliberate cutover, and back up both volumes first.
 `api/tests/storage/test_object_live_seaweedfs.py` exercises the load-bearing
 object-store assumptions (read-after-write on the pointer overwrite PUT,
 server-side CopyObject, multipart + prefix list, and the startup sweep) against a
-real endpoint. It is skipped unless `MCD_TEST_S3_ENDPOINT` is set, so `make check`
-and CI stay green without an S3 instance. To run it against a throwaway SeaweedFS:
+real endpoint. `api/tests/servers/test_resource_pack_store_adapter.py` runs its
+`live-s3` parametrization against the same endpoint (the resource pack store's
+`size()` == `open()` byte-count invariant, #2320). Both are skipped unless
+`MCD_TEST_S3_ENDPOINT` is set, so `make check` and CI stay green without an S3
+instance. To run them against a throwaway SeaweedFS:
 
 ```sh
 docker run -d --name swfs-test -p 8333:8333 \
@@ -334,7 +337,8 @@ docker run -d --name swfs-test -p 8333:8333 \
 
 cd api && MCD_TEST_S3_ENDPOINT=http://localhost:8333 \
   MCD_TEST_S3_ACCESS_KEY=testak MCD_TEST_S3_SECRET_KEY=testsk \
-  uv run pytest tests/storage/test_object_live_seaweedfs.py
+  uv run pytest tests/storage/test_object_live_seaweedfs.py \
+    tests/servers/test_resource_pack_store_adapter.py
 
 docker rm -f swfs-test
 ```
