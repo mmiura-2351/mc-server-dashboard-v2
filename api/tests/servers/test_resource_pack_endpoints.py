@@ -443,7 +443,7 @@ class TestPublicDownloadEndpoint:
         # so the endpoint leaks no existence signal.
         p = _pack(filename="my-pack.zip")
         store = FakeResourcePackStore()
-        store.blobs[p.id] = b"publiczip"
+        store.blobs[(p.id, p.filename)] = b"publiczip"
         uow = FakeUnitOfWork()
         uow.resource_packs.packs[p.id] = p
         app = _app(download=DownloadResourcePack(uow=uow, store=store))
@@ -452,9 +452,16 @@ class TestPublicDownloadEndpoint:
             unknown = client.get(
                 f"/api/public/resource-packs/{uuid.uuid4()}/wrong-name.zip"
             )
+            wrong_filename_calls = list(store.calls)
+            # The seed is genuinely reachable under its own filename, so the 404s
+            # above are the wrong filename's doing and not an unstored pack — the
+            # premise this test rests on, checked rather than assumed.
+            stored = client.get(f"/api/public/resource-packs/{p.id.value}/my-pack.zip")
         assert resp.status_code == 404
-        assert store.calls == []
+        assert wrong_filename_calls == []
         assert resp.json() == unknown.json()
+        assert stored.status_code == 200
+        assert stored.content == b"publiczip"
 
     def test_public_download_not_found_404(self) -> None:
         uc = _FakeDownloadUseCase(error=ResourcePackNotFoundError("nope"))

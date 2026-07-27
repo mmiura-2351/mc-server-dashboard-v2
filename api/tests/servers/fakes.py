@@ -1542,10 +1542,15 @@ class FakeResourcePackStore(ResourcePackStore):
     ``calls`` records the name of every store operation invoked, so a test can
     assert that a rejected request costs no store round trip at all — each of
     these is an object-storage request on the real adapter (issue #2322).
+
+    ``blobs`` is keyed by ``(pack_id, filename)`` because the adapter keys on
+    ``resource-packs/<pack-id>/<filename>``: reading a stored pack under a
+    different filename must miss here exactly as it does in production
+    (issue #2335).
     """
 
     def __init__(self) -> None:
-        self.blobs: dict[ResourcePackId, bytes] = {}
+        self.blobs: dict[tuple[ResourcePackId, str], bytes] = {}
         self.calls: list[str] = []
 
     async def put(
@@ -1556,31 +1561,36 @@ class FakeResourcePackStore(ResourcePackStore):
     ) -> None:
         self.calls.append("put")
         data = b"".join([chunk async for chunk in stream])
-        self.blobs[pack_id] = data
+        self.blobs[(pack_id, filename)] = data
 
     def open(self, pack_id: ResourcePackId, filename: str) -> AsyncIterator[bytes]:
         self.calls.append("open")
 
         async def _gen() -> AsyncIterator[bytes]:
             # Like the adapter, the miss surfaces while streaming, not on open().
-            yield self._blob(pack_id)
+            yield self._blob(pack_id, filename)
 
         return _gen()
 
     async def delete(self, pack_id: ResourcePackId) -> None:
         self.calls.append("delete")
-        self.blobs.pop(pack_id, None)
+        # Like the adapter, delete sweeps the whole ``<pack-id>/`` prefix.
+        for key in [key for key in self.blobs if key[0] == pack_id]:
+            del self.blobs[key]
 
     async def size(self, pack_id: ResourcePackId, filename: str) -> int:
         self.calls.append("size")
-        return len(self._blob(pack_id))
+        return len(self._blob(pack_id, filename))
 
-    def _blob(self, pack_id: ResourcePackId) -> bytes:
-        data = self.blobs.get(pack_id)
+    def _blob(self, pack_id: ResourcePackId, filename: str) -> bytes:
+        data = self.blobs.get((pack_id, filename))
         if data is None:
             # Like the adapter, the storage error is translated at the seam so no
             # storage type reaches the servers layer (issue #2321).
-            raise ResourcePackNotFoundError(f"resource pack not found: {pack_id.value}")
+            # The adapter reports the full object key it missed; match it.
+            raise ResourcePackNotFoundError(
+                f"resource-packs/{pack_id.value}/{filename}"
+            )
         return data
 
 
