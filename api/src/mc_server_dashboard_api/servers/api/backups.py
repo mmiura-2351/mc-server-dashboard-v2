@@ -638,9 +638,9 @@ async def download_backup(
         raise _not_found() from exc
     await _record(recorder, ops.BACKUP_DOWNLOAD, authorized, community_id, backup_id)
     # A concurrent DeleteBackup (or the retention prune) can remove the archive
-    # underneath the open stream (issue #2318). Counting the streamed bytes turns
-    # the resulting short body into an aborted connection, so the client sees a
-    # failed transfer instead of an incomplete archive reported as a success.
+    # underneath the open stream (issue #2318). The resulting short body already
+    # fails at the wire; counting the streamed bytes fails it here instead, with
+    # both numbers named, and without depending on the HTTP layer to catch it.
     return StreamingResponse(
         counted(stream, size_bytes),
         media_type=_BACKUP_MEDIA_TYPE,

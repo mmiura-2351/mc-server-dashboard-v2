@@ -575,10 +575,10 @@ def test_download_declares_content_length_matching_streamed_bytes() -> None:
 
 def test_download_aborts_when_stream_ends_short_of_declared_length() -> None:
     # A concurrent DeleteBackup (or the retention prune) can remove the archive
-    # under an open stream (issue #2318). If the stream then simply ends, the
-    # response would otherwise complete as a 200 whose body is shorter than the
-    # declared Content-Length — an incomplete archive presented as a success.
-    # The stream is counted, so exhaustion below the declared length aborts.
+    # under an open stream (issue #2318), leaving the body short of the declared
+    # Content-Length. A real server (uvicorn + h11) already rejects that at the
+    # wire; counting the bytes names the mismatch here instead, so the invariant
+    # holds without depending on the ASGI server to notice.
     chunks = [b"first-chunk", b"second-chunk"]
     use_case = _FakeUseCase(result=(_aiter_chunks(chunks), 1024))
     app = _app(member=True, allow=True, download=use_case)

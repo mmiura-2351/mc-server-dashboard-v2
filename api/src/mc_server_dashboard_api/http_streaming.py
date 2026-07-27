@@ -8,15 +8,22 @@ archive is immutable per storage ref.
 
 The one way the two can disagree is a delete underneath an open stream (issue
 #2318): ``DeleteBackup`` or the retention prune removes the object while the body
-is on the wire. If the read then raises, the exception propagates out of the ASGI
-app and the connection is torn down — the client sees a failed transfer, which is
-the honest outcome. If instead the stream just ends, the response would complete
-as a 200 whose body is shorter than the header promised: an incomplete archive
-presented as a success.
+is on the wire. Either the read raises, or the stream simply ends early; both
+deliver fewer bytes than the header promised.
 
-:func:`counted` closes that gap by tallying the bytes that pass through and
-failing at exhaustion when the total does not equal the declared length, so the
-short body aborts the connection instead of completing.
+The client-observable outcome is already correct in both cases, and this module
+does not change it: an exception propagates out of the ASGI app and tears the
+connection down, and a body that ends below its declared ``Content-Length`` is
+rejected by the HTTP layer itself (measured on uvicorn + h11: ``curl`` reports
+``transfer closed with N bytes remaining``, exit 18, with and without this
+guard).
+
+What :func:`counted` adds is an *attributable* server-side failure in place of a
+generic protocol error raised by whichever HTTP implementation happens to be
+underneath: it tallies the bytes that pass through and fails at exhaustion when
+the total falls below the declared length, naming both numbers. That also makes
+the invariant hold on its own terms rather than depending on the ASGI server and
+protocol version to notice.
 """
 
 from __future__ import annotations
@@ -31,8 +38,9 @@ class ShortResponseBodyError(Exception):
 async def counted(source: AsyncIterator[bytes], declared: int) -> AsyncIterator[bytes]:
     """Yield ``source`` unchanged, failing if it ends below ``declared`` bytes.
 
-    Raising after the last chunk aborts the response mid-body rather than letting
-    it complete short, because the headers are long since on the wire by then.
+    The failure can only be raised after the last chunk, since the headers are
+    long since on the wire by then; it fails the response rather than reporting
+    anything to the client.
 
     Only the short direction is guarded: a body that runs *past* its declared
     length is already a protocol error the ASGI server rejects, and nothing here
