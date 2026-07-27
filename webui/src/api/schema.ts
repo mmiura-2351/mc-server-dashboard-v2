@@ -985,10 +985,54 @@ export interface paths {
          *     (Section 6.9): a running server is 409 ``server_unsettled`` (the authoritative
          *     copy is only well-defined at rest). The zip carries the working set plus an
          *     ``export_metadata.json`` descriptor. Recorded under ``server:export``.
+         *
+         *     The zip is built incrementally, so it carries no ``Content-Length`` and a
+         *     browser cannot cap it up front; a multi-GB export is therefore fetched as a
+         *     plain navigation to a URL carrying a short-lived ``?grant=`` minted by
+         *     ``POST .../export/download-grant`` instead of being buffered into a Blob to
+         *     attach a Bearer header (issue #2352). Either credential runs the same
+         *     ``file:read`` gate, and the response is identical.
          */
         get: operations["export_server_api_communities__community_id__servers__server_id__export_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/export/download-grant": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Issue Export Download Grant
+         * @description Mint a self-authenticating download URL for a server export (file:read, #2352).
+         *
+         *     A multi-GB export cannot be buffered into a Blob just to attach a Bearer
+         *     header, so the browser needs a URL that authenticates itself. The grant is
+         *     bound to this exact community/server pair and to the caller, expires in
+         *     ``auth.token.download_grant_ttl_seconds``, and proves identity only — the
+         *     export re-runs the full ``file:read`` gate on redemption.
+         *
+         *     The pre-flight is not optional: an export at rest is the *precondition*, and a
+         *     running server is the common failure. Minting regardless would have the
+         *     browser save the download's ``problem+json`` under the export filename, so the
+         *     same 404 / 409 the download returns is returned here instead, and the 409
+         *     records the DENIED ``server:export`` row the download would have recorded —
+         *     once the Web UI mints first the download is never reached, and the denial
+         *     would otherwise vanish from the audit log.
+         *
+         *     Nothing is audited on success: bytes leave the system at redemption, which
+         *     records ``server:export`` with this same subject as actor.
+         */
+        post: operations["issue_export_download_grant_api_communities__community_id__servers__server_id__export_download_grant_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1076,10 +1120,60 @@ export interface paths {
          *     At rest only (Section 6.9): a running server is 409 ``server_unsettled``. A
          *     directory streams as a zip built incrementally over the Storage read stream
          *     (bounded memory); a file streams its bytes with an attachment disposition.
+         *
+         *     The directory zip is built incrementally, so it carries no ``Content-Length``
+         *     and a browser cannot cap it up front; a multi-GB ``world`` is therefore fetched
+         *     as a plain navigation to a URL carrying a short-lived ``?grant=`` minted by
+         *     ``POST .../files/download-grant`` instead of being buffered into a Blob to
+         *     attach a Bearer header (issue #2352). Either credential runs the same
+         *     ``file:read`` gate, and the response is identical.
          */
         get: operations["download_file_api_communities__community_id__servers__server_id__files_download_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/files/download-grant": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Issue File Download Grant
+         * @description Mint a self-authenticating download URL for one path (file:read, #2352).
+         *
+         *     A multi-GB directory zip cannot be buffered into a Blob just to attach a
+         *     Bearer header, so the browser needs a URL that authenticates itself. The grant
+         *     is bound to this exact community/server/path triple and to the caller, expires
+         *     in ``auth.token.download_grant_ttl_seconds``, and proves identity only — the
+         *     download re-runs the full ``file:read`` gate on redemption.
+         *
+         *     ``path`` is a **query** parameter on this POST rather than a JSON body so the
+         *     same ``_download_grant_resource`` callable builds the bound resource string
+         *     here and at the download: divergence between the two is structurally
+         *     impossible. The binding compares the decoded value by exact string equality;
+         *     see :func:`file_download_grant_resource` for why containment — not a privilege
+         *     boundary — is the right bar here.
+         *
+         *     The pre-flight reuses ``DownloadFile.is_dir``, so a missing path is 404, a
+         *     traversal-unsafe one 422 ``invalid_path``, and a running server 409
+         *     ``server_unsettled`` — exactly what the download returns. The 409 records the
+         *     DENIED ``file:download`` row the download would have recorded; once the Web UI
+         *     mints first the download is never reached, and the denial would otherwise
+         *     vanish from the audit log.
+         *
+         *     Nothing is audited on success: bytes leave the system at redemption, which
+         *     records ``file:download`` with this same subject as actor.
+         */
+        post: operations["issue_file_download_grant_api_communities__community_id__servers__server_id__files_download_grant_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2926,6 +3020,24 @@ export interface components {
             /** Path */
             path: string;
         };
+        /**
+         * FileDownloadGrantResponse
+         * @description A short-lived, self-authenticating file download URL (issue #2352).
+         *
+         *     ``download_url`` is same-origin relative (WEBUI_SPEC.md Section 7.7) and
+         *     already carries the path and the grant, so a client hands it straight to
+         *     ``<a download>``. ``expires_at`` is when the grant stops verifying; after that
+         *     the URL is 401.
+         */
+        FileDownloadGrantResponse: {
+            /** Download Url */
+            download_url: string;
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            expires_at: string;
+        };
         /** FileVersionsResponse */
         FileVersionsResponse: {
             /** Path */
@@ -3598,6 +3710,23 @@ export interface components {
         ServerCommandResponse: {
             /** Output */
             output: string;
+        };
+        /**
+         * ServerExportDownloadGrantResponse
+         * @description A short-lived, self-authenticating server-export download URL (issue #2352).
+         *
+         *     ``download_url`` is same-origin relative (WEBUI_SPEC.md Section 7.7) and
+         *     already carries the grant, so a client hands it straight to ``<a download>``.
+         *     ``expires_at`` is when the grant stops verifying; after that the URL is 401.
+         */
+        ServerExportDownloadGrantResponse: {
+            /** Download Url */
+            download_url: string;
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            expires_at: string;
         };
         /**
          * ServerResponse
@@ -5979,7 +6108,9 @@ export interface operations {
     };
     export_server_api_communities__community_id__servers__server_id__export_get: {
         parameters: {
-            query?: never;
+            query?: {
+                grant?: string | null;
+            };
             header?: never;
             path: {
                 community_id: string;
@@ -5996,6 +6127,38 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    issue_export_download_grant_api_communities__community_id__servers__server_id__export_download_grant_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ServerExportDownloadGrantResponse"];
                 };
             };
             /** @description Validation Error */
@@ -6148,6 +6311,7 @@ export interface operations {
         parameters: {
             query?: {
                 path?: string;
+                grant?: string | null;
             };
             header?: never;
             path: {
@@ -6165,6 +6329,40 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    issue_file_download_grant_api_communities__community_id__servers__server_id__files_download_grant_post: {
+        parameters: {
+            query?: {
+                path?: string;
+            };
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FileDownloadGrantResponse"];
                 };
             };
             /** @description Validation Error */

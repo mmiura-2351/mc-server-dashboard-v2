@@ -9,7 +9,10 @@ cases and authorization Ports faked (NFR-TEST-1, no database). Verifies:
   oversized 413, transitional 409, disconnected worker 503);
 - base64 bytes-faithful read/write;
 - per-resource gating with the real role+grant checker: a per-resource
-  ``file:read`` grant on server X opens exactly X's files.
+  ``file:read`` grant on server X opens exactly X's files;
+- the file download grant (issue #2352): the mint's gate and pre-flight,
+  redemption without an ``Authorization`` header, and the grant's binding to one
+  ``?path=``.
 """
 
 from __future__ import annotations
@@ -18,7 +21,9 @@ import base64
 import datetime as dt
 import uuid
 from collections.abc import Iterator
+from urllib.parse import quote
 
+import httpx2
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -42,6 +47,8 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 )
 from mc_server_dashboard_api.dependencies import (
     get_audit_recorder,
+    get_authenticate_download_grant,
+    get_authenticate_request,
     get_current_user,
     get_delete_file,
     get_download_file,
@@ -55,14 +62,27 @@ from mc_server_dashboard_api.dependencies import (
     get_rename_file,
     get_rollback_file,
     get_search_files,
+    get_token_service,
     get_upload_file,
     get_write_file,
 )
+from mc_server_dashboard_api.identity.adapters.token_service import JwtTokenService
+from mc_server_dashboard_api.identity.application.authenticate_download_grant import (
+    AuthenticateDownloadGrant,
+)
+from mc_server_dashboard_api.identity.application.authenticate_request import (
+    AuthenticateRequest,
+)
+from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.servers.adapters.file_store import StorageFileStoreAdapter
+from mc_server_dashboard_api.servers.application.export_import import (
+    export_download_grant_resource,
+)
 from mc_server_dashboard_api.servers.application.files import (
     DirListing,
     SearchResult,
     WriteFile,
+    file_download_grant_resource,
 )
 from mc_server_dashboard_api.servers.domain.control_plane import WorkerUnavailableError
 from mc_server_dashboard_api.servers.domain.entities import Server
@@ -93,10 +113,15 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from tests.audit.fakes import RecordingAuditRecorder
 from tests.community.fakes import FakeAuthzUnitOfWork
-from tests.identity.fakes import make_user
+from tests.identity.fakes import FakeClock, make_user
+from tests.identity.fakes import FakeUnitOfWork as IdentityFakeUnitOfWork
 from tests.servers.fakes import FakeUnitOfWork
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
+
+# A 32-byte HS256 key; the value is irrelevant, only that mint and verify share it.
+_SIGNING_KEY = "0123456789abcdef0123456789abcdef"
+_GRANT_TTL_SECONDS = 30
 
 
 class _FakeVisibility(MembershipVisibility):
@@ -220,11 +245,19 @@ def _bind_shared_app(shared_app: FastAPI) -> None:
     _shared_app = shared_app
 
 
+# Set by _app so the download tests can mint real access tokens and grants against
+# the same signing key and clock the app under test verifies with.
+_clock: FakeClock
+_tokens: JwtTokenService
+_user: User
+
+
 def _app(
     *,
     member: bool,
     allow: bool,
     permissions: set[str] | None = None,
+    subject: User | None = None,
     read: _FakeUseCase | None = None,
     list_: _FakeUseCase | None = None,
     write: _FakeUseCase | None = None,
@@ -239,9 +272,30 @@ def _app(
     search: _FakeUseCase | None = None,
     recorder: RecordingAuditRecorder | None = None,
 ) -> object:
+    global _clock, _tokens, _user
     app = _shared_app
     app.dependency_overrides.clear()
-    app.dependency_overrides[get_current_user] = lambda: make_user()
+    _user = subject if subject is not None else make_user()
+    _clock = FakeClock(_NOW)
+    _tokens = JwtTokenService(
+        signing_key=_SIGNING_KEY,
+        algorithm="HS256",
+        access_ttl=dt.timedelta(minutes=15),
+        download_grant_ttl=dt.timedelta(seconds=_GRANT_TTL_SECONDS),
+        clock=_clock,
+    )
+    identity_uow = IdentityFakeUnitOfWork()
+    identity_uow.users.seed(_user)
+    app.dependency_overrides[get_current_user] = lambda: _user
+    # The file download resolves its subject itself (Bearer *or* grant), so it goes
+    # through these two use cases rather than get_current_user.
+    app.dependency_overrides[get_authenticate_request] = lambda: AuthenticateRequest(
+        uow=identity_uow, tokens=_tokens
+    )
+    app.dependency_overrides[get_authenticate_download_grant] = lambda: (
+        AuthenticateDownloadGrant(uow=identity_uow, tokens=_tokens)
+    )
+    app.dependency_overrides[get_token_service] = lambda: _tokens
     app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(
         member=member
     )
@@ -284,6 +338,10 @@ def _app(
 
 def _url(community: uuid.UUID, server: uuid.UUID, suffix: str = "") -> str:
     return f"/api/communities/{community}/servers/{server}/files{suffix}"
+
+
+def _bearer() -> dict[str, str]:
+    return {"Authorization": f"Bearer {_tokens.issue_access_token(_user.id)}"}
 
 
 # --- two-layer gate --------------------------------------------------------
@@ -819,6 +877,7 @@ def test_download_file_returns_bytes() -> None:
     resp = client.get(
         _url(uuid.uuid4(), uuid.uuid4(), "/download"),
         params={"path": "level.dat"},
+        headers=_bearer(),
     )
     assert resp.status_code == 200
     assert resp.content == raw
@@ -841,6 +900,7 @@ def test_download_dir_returns_zip_stream() -> None:
     resp = client.get(
         _url(uuid.uuid4(), uuid.uuid4(), "/download"),
         params={"path": "world"},
+        headers=_bearer(),
     )
     assert resp.status_code == 200
     assert resp.content == b"PKzip-tail"
@@ -854,7 +914,9 @@ def test_download_requires_file_read_permission() -> None:
     app = _app(member=True, allow=False, download=_FakeDownload())
     client = next(_client(app))
     resp = client.get(
-        _url(uuid.uuid4(), uuid.uuid4(), "/download"), params={"path": "f"}
+        _url(uuid.uuid4(), uuid.uuid4(), "/download"),
+        params={"path": "f"},
+        headers=_bearer(),
     )
     assert resp.status_code == 403
 
@@ -867,7 +929,9 @@ def test_download_missing_is_404() -> None:
     )
     client = next(_client(app))
     resp = client.get(
-        _url(uuid.uuid4(), uuid.uuid4(), "/download"), params={"path": "f"}
+        _url(uuid.uuid4(), uuid.uuid4(), "/download"),
+        params={"path": "f"},
+        headers=_bearer(),
     )
     assert resp.status_code == 404
 
@@ -880,7 +944,9 @@ def test_download_running_is_409() -> None:
     )
     client = next(_client(app))
     resp = client.get(
-        _url(uuid.uuid4(), uuid.uuid4(), "/download"), params={"path": "f"}
+        _url(uuid.uuid4(), uuid.uuid4(), "/download"),
+        params={"path": "f"},
+        headers=_bearer(),
     )
     assert resp.status_code == 409
     assert resp.json()["reason"] == "server_unsettled"
@@ -896,7 +962,9 @@ def test_download_filename_with_quote_is_sanitized() -> None:
     app = _app(member=True, allow=True, download=_FakeDownload(is_dir=False))
     client = next(_client(app))
     resp = client.get(
-        _url(uuid.uuid4(), uuid.uuid4(), "/download"), params={"path": 'evil".zip'}
+        _url(uuid.uuid4(), uuid.uuid4(), "/download"),
+        params={"path": 'evil".zip'},
+        headers=_bearer(),
     )
     assert resp.status_code == 200
     cd = resp.headers["content-disposition"]
@@ -913,6 +981,7 @@ def test_download_unicode_filename_does_not_500() -> None:
     resp = client.get(
         _url(uuid.uuid4(), uuid.uuid4(), "/download"),
         params={"path": "ワールド.zip"},
+        headers=_bearer(),
     )
     assert resp.status_code == 200
     cd = resp.headers["content-disposition"]
@@ -1078,7 +1147,9 @@ def test_download_success_records_file_download_audit() -> None:
     )
     client = next(_client(app))
     resp = client.get(
-        _url(uuid.uuid4(), uuid.uuid4(), "/download"), params={"path": "f"}
+        _url(uuid.uuid4(), uuid.uuid4(), "/download"),
+        params={"path": "f"},
+        headers=_bearer(),
     )
     assert resp.status_code == 200
     assert [e.operation for e in recorder.events] == [ops.FILE_DOWNLOAD]
@@ -1095,7 +1166,9 @@ def test_download_unsettled_records_denied_audit() -> None:
     )
     client = next(_client(app))
     resp = client.get(
-        _url(uuid.uuid4(), uuid.uuid4(), "/download"), params={"path": "f"}
+        _url(uuid.uuid4(), uuid.uuid4(), "/download"),
+        params={"path": "f"},
+        headers=_bearer(),
     )
     assert resp.status_code == 409
     assert [e.operation for e in recorder.events] == [ops.FILE_DOWNLOAD]
@@ -1114,7 +1187,9 @@ def test_download_validation_failure_is_not_audited() -> None:
     )
     client = next(_client(app))
     resp = client.get(
-        _url(uuid.uuid4(), uuid.uuid4(), "/download"), params={"path": "../escape"}
+        _url(uuid.uuid4(), uuid.uuid4(), "/download"),
+        params={"path": "../escape"},
+        headers=_bearer(),
     )
     assert resp.status_code == 422
     assert recorder.events == []
@@ -1514,3 +1589,337 @@ def test_write_unicode_path_is_accepted(tmp_path: object) -> None:
         json={"content_base64": ""},
     )
     assert resp.status_code == 204
+
+
+# --- file download grants (issue #2352) ------------------------------------
+
+
+def _mint(
+    client: TestClient, community: uuid.UUID, server: uuid.UUID, path: str
+) -> httpx2.Response:
+    return client.post(
+        _url(community, server, "/download-grant"),
+        params={"path": path},
+        headers=_bearer(),
+    )
+
+
+def _file_grant_url(
+    community: uuid.UUID, server: uuid.UUID, path: str, *, subject: User
+) -> str:
+    """The download URL a grant minted for this (server, path) would produce."""
+
+    issued = _tokens.issue_download_grant(
+        subject.id, file_download_grant_resource(community, server, path)
+    )
+    return (
+        f"{_url(community, server, '/download')}"
+        f"?path={quote(path, safe='')}&grant={issued.token}"
+    )
+
+
+def test_non_member_gets_404_on_file_download_grant() -> None:
+    app = _app(member=False, allow=True, download=_FakeDownload())
+    client = next(_client(app))
+    assert _mint(client, uuid.uuid4(), uuid.uuid4(), "world").status_code == 404
+
+
+def test_member_without_permission_gets_403_on_file_download_grant() -> None:
+    app = _app(member=True, allow=False, download=_FakeDownload())
+    client = next(_client(app))
+    assert _mint(client, uuid.uuid4(), uuid.uuid4(), "world").status_code == 403
+
+
+def test_file_download_grant_for_a_missing_path_is_404() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        download=_FakeDownload(error=ServerFileNotFoundError("x")),
+    )
+    client = next(_client(app))
+    assert _mint(client, uuid.uuid4(), uuid.uuid4(), "gone").status_code == 404
+
+
+def test_file_download_grant_for_a_traversal_path_is_422() -> None:
+    app = _app(
+        member=True, allow=True, download=_FakeDownload(error=InvalidFilePathError("x"))
+    )
+    client = next(_client(app))
+    resp = _mint(client, uuid.uuid4(), uuid.uuid4(), "../escape")
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_path"
+
+
+def test_file_download_grant_for_a_running_server_is_409_and_audits_denied() -> None:
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        download=_FakeDownload(error=ServerFilesUnsettledError("x")),
+        recorder=recorder,
+    )
+    client = next(_client(app))
+    resp = _mint(client, uuid.uuid4(), uuid.uuid4(), "world")
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "server_unsettled"
+    # The denied row the download would have recorded: minting first must not
+    # delete denied-download visibility from the audit log.
+    assert [e.operation for e in recorder.events] == [ops.FILE_DOWNLOAD]
+    assert recorder.events[0].outcome is Outcome.DENIED
+
+
+def test_file_download_grant_response_is_not_cached_and_reports_expiry() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeDownload(is_dir=True))
+    client = next(_client(app))
+    resp = _mint(client, community, server, "world/nether")
+    assert resp.status_code == 200
+    # A URL that carries a credential must never sit in a shared cache.
+    assert resp.headers["cache-control"] == "no-store"
+    body = resp.json()
+    assert body["download_url"].startswith(
+        f"{_url(community, server, '/download')}?path=world%2Fnether&grant="
+    )
+    assert body["expires_at"] == (
+        _NOW + dt.timedelta(seconds=_GRANT_TTL_SECONDS)
+    ).isoformat().replace("+00:00", "Z")
+
+
+def test_minting_a_file_grant_records_no_audit_event() -> None:
+    # Bytes leave the system at redemption, not at issuance (issue #2352).
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True, allow=True, download=_FakeDownload(is_dir=True), recorder=recorder
+    )
+    client = next(_client(app))
+    assert _mint(client, uuid.uuid4(), uuid.uuid4(), "world").status_code == 200
+    assert recorder.events == []
+
+
+def test_minted_file_url_downloads_a_directory_zip_without_a_header() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        download=_FakeDownload(is_dir=True, zip_chunks=[b"PK", b"zip-tail"]),
+        recorder=recorder,
+    )
+    client = next(_client(app))
+    url = _mint(client, community, server, "world").json()["download_url"]
+
+    resp = client.get(url)
+
+    assert resp.status_code == 200
+    assert resp.content == b"PKzip-tail"
+    assert resp.headers["content-type"] == "application/zip"
+    assert 'filename="world.zip"' in resp.headers["content-disposition"]
+    # Exactly one audit row, at redemption, with the grant's subject as actor.
+    assert [e.operation for e in recorder.events] == [ops.FILE_DOWNLOAD]
+    assert recorder.events[0].actor_id == _user.id.value
+
+
+def test_minted_file_url_downloads_a_single_file_without_a_header() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        download=_FakeDownload(is_dir=False, file_content=b"level-bytes"),
+        recorder=recorder,
+    )
+    client = next(_client(app))
+    url = _mint(client, community, server, "level.dat").json()["download_url"]
+
+    resp = client.get(url)
+
+    assert resp.status_code == 200
+    assert resp.content == b"level-bytes"
+    assert 'filename="level.dat"' in resp.headers["content-disposition"]
+    assert [e.operation for e in recorder.events] == [ops.FILE_DOWNLOAD]
+    assert recorder.events[0].actor_id == _user.id.value
+
+
+def test_file_grant_redeemed_download_matches_the_bearer_response() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(
+        member=True, allow=True, download=_FakeDownload(is_dir=True, zip_chunks=[b"PK"])
+    )
+    client = next(_client(app))
+
+    with_bearer = client.get(
+        _url(community, server, "/download"),
+        params={"path": "world"},
+        headers=_bearer(),
+    )
+    with_grant = client.get(_file_grant_url(community, server, "world", subject=_user))
+
+    assert with_grant.status_code == with_bearer.status_code == 200
+    assert with_grant.content == with_bearer.content
+    for header in ("content-type", "content-disposition"):
+        assert with_grant.headers[header] == with_bearer.headers[header]
+
+
+def test_file_grant_is_rejected_on_another_path() -> None:
+    # The binding is exact string equality (fail-closed): a grant for `world`
+    # redeems `world` and nothing else, not even another spelling of it.
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeDownload(is_dir=True))
+    client = next(_client(app))
+    issued = _tokens.issue_download_grant(
+        _user.id, file_download_grant_resource(community, server, "world")
+    )
+
+    other_path = client.get(
+        _url(community, server, "/download"),
+        params={"path": "secrets", "grant": issued.token},
+    )
+    traversal = client.get(
+        _url(community, server, "/download"),
+        params={"path": "world/../secrets", "grant": issued.token},
+    )
+
+    assert other_path.status_code == 401
+    assert traversal.status_code == 401
+
+
+def test_file_grant_is_rejected_under_another_server_or_community() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeDownload(is_dir=True))
+    client = next(_client(app))
+    issued = _tokens.issue_download_grant(
+        _user.id, file_download_grant_resource(community, server, "world")
+    )
+
+    other_server = client.get(
+        _url(community, uuid.uuid4(), "/download"),
+        params={"path": "world", "grant": issued.token},
+    )
+    other_community = client.get(
+        _url(uuid.uuid4(), server, "/download"),
+        params={"path": "world", "grant": issued.token},
+    )
+
+    assert other_server.status_code == 401
+    assert other_community.status_code == 401
+
+
+def test_export_grant_is_rejected_at_the_file_download() -> None:
+    # The resource prefixes separate the two surfaces (issue #2352).
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeDownload(is_dir=True))
+    client = next(_client(app))
+    issued = _tokens.issue_download_grant(
+        _user.id, export_download_grant_resource(community, server)
+    )
+
+    resp = client.get(
+        _url(community, server, "/download"),
+        params={"path": "world", "grant": issued.token},
+    )
+
+    assert resp.status_code == 401
+
+
+def test_file_grant_is_rejected_at_the_export_download() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeDownload(is_dir=True))
+    client = next(_client(app))
+    issued = _tokens.issue_download_grant(
+        _user.id, file_download_grant_resource(community, server, "world")
+    )
+
+    resp = client.get(
+        f"/api/communities/{community}/servers/{server}/export",
+        params={"grant": issued.token},
+    )
+
+    assert resp.status_code == 401
+
+
+def test_file_grant_is_rejected_after_its_ttl() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeDownload(is_dir=True))
+    client = next(_client(app))
+    url = _file_grant_url(community, server, "world", subject=_user)
+
+    _clock.set(_NOW + dt.timedelta(seconds=_GRANT_TTL_SECONDS))
+
+    assert client.get(url).status_code == 401
+
+
+def test_file_grant_is_not_accepted_as_a_bearer_token() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeDownload(is_dir=True))
+    client = next(_client(app))
+    issued = _tokens.issue_download_grant(
+        _user.id, file_download_grant_resource(community, server, "world")
+    )
+
+    resp = client.get(
+        _url(community, server, "/download"),
+        params={"path": "world"},
+        headers={"Authorization": f"Bearer {issued.token}"},
+    )
+
+    assert resp.status_code == 401
+
+
+def test_access_token_is_not_accepted_as_a_file_grant() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeDownload(is_dir=True))
+    client = next(_client(app))
+    access = _tokens.issue_access_token(_user.id)
+
+    resp = client.get(
+        _url(community, server, "/download"),
+        params={"path": "world", "grant": access},
+    )
+
+    assert resp.status_code == 401
+
+
+def test_file_grant_loses_to_a_permission_revoked_after_issuance() -> None:
+    # The grant proves identity, never authority: authorization is decided afresh.
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=False, download=_FakeDownload(is_dir=True))
+    client = next(_client(app))
+
+    resp = client.get(_file_grant_url(community, server, "world", subject=_user))
+
+    assert resp.status_code == 403
+
+
+def test_file_grant_loses_to_a_membership_removed_after_issuance() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=False, allow=True, download=_FakeDownload(is_dir=True))
+    client = next(_client(app))
+
+    resp = client.get(_file_grant_url(community, server, "world", subject=_user))
+
+    assert resp.status_code == 404
+
+
+def test_file_grant_for_a_deactivated_subject_is_rejected() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(
+        member=True,
+        allow=True,
+        subject=make_user(active=False),
+        download=_FakeDownload(is_dir=True),
+    )
+    client = next(_client(app))
+
+    resp = client.get(_file_grant_url(community, server, "world", subject=_user))
+
+    assert resp.status_code == 401
+
+
+def test_file_download_without_any_credential_is_401() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeDownload(is_dir=True))
+    client = next(_client(app))
+
+    resp = client.get(_url(community, server, "/download"), params={"path": "world"})
+
+    assert resp.status_code == 401

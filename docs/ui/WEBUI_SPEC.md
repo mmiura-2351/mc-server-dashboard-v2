@@ -104,14 +104,16 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 |---|---|---|
 | GET / POST | `/communities/{cid}/servers` | List / create (`name`, `mc_edition`, `mc_version`, `server_type`, `config`, `accept_eula`, optional `game_port`). |
 | POST | `/communities/{cid}/servers/import` | ZIP import (multipart). |
-| GET | `…/{sid}/export` | ZIP export (download). |
+| GET | `…/{sid}/export` | ZIP export (download). Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB export straight to disk (#2352). |
+| POST | `…/{sid}/export/download-grant` | Mint that grant: `{download_url, expires_at}`, `Cache-Control: no-store`. Same `file:read` gate as the export, and the same pre-flight — a running server is 409 `server_unsettled` and no grant is issued; 30 s TTL (AUTH_API.md Section 3). |
 | GET / PATCH / DELETE | `…/{sid}` | Read / update (name, config, game_port) / delete. Every PATCH edit needs `server:update`. The retired `backup_interval_hours` key is a `422` (`retired_config_key`, #1840) — backup cadence is a `backup` schedule now. |
 | POST | `…/{sid}/start` · `/stop?force=` · `/restart` | Lifecycle. Stop supports force. |
 | POST | `…/{sid}/command` | RCON line → `{output}`. |
 | GET | `…/{sid}/files?path=&list=` | Read file (base64) or list directory (entries + `truncated`). |
 | PUT / DELETE | `…/{sid}/files?path=` | Write (base64, versioned) / delete. |
 | POST | `…/{sid}/files/directories?path=` | mkdir. |
-| GET | `…/{sid}/files/download?path=` | Raw download. |
+| GET | `…/{sid}/files/download?path=` | Raw download (file bytes, or a streamed ZIP for a directory). Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB directory straight to disk (#2352). |
+| POST | `…/{sid}/files/download-grant?path=` | Mint that grant: `{download_url, expires_at}`, `Cache-Control: no-store`. Same `file:read` gate as the download, and the same pre-flight — missing path 404, traversal 422 `invalid_path`, running server 409 `server_unsettled`. `path` is a **query** parameter so mint and redemption bind the identical string; 30 s TTL (AUTH_API.md Section 3). |
 | POST | `…/{sid}/files/upload?path=&extract=` | Multipart upload, optional ZIP extract. |
 | POST | `…/{sid}/files/rename` | `{from, to}`. |
 | POST | `…/{sid}/files/search` | `{query, by, max_results}` → matching paths. |

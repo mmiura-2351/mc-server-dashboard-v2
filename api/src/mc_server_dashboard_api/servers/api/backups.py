@@ -21,7 +21,7 @@ import uuid
 from typing import Annotated
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, Response, UploadFile, status
+from fastapi import APIRouter, Depends, Request, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -43,7 +43,8 @@ from mc_server_dashboard_api.dependencies import (
     get_set_backup_retention,
     get_token_service,
     get_upload_backup,
-    require_backup_download_access,
+    path_uuid,
+    require_download_access,
     require_permission,
     require_platform_admin,
 )
@@ -108,6 +109,16 @@ _UPLOAD_CHUNK_BYTES = 1024 * 1024
 # Backups are self-contained gzip tar archives (STORAGE.md Section 2); download
 # streams the native bytes with this content type and a ``.tar.gz`` attachment.
 _BACKUP_MEDIA_TYPE = "application/gzip"
+
+
+def _grant_resource(request: Request) -> str:
+    """Bind a backup download grant to the request's community/server/backup triple."""
+
+    return download_grant_resource(
+        path_uuid(request, "community_id"),
+        path_uuid(request, "server_id"),
+        path_uuid(request, "backup_id"),
+    )
 
 
 class BackupResponse(BaseModel):
@@ -604,7 +615,10 @@ async def download_backup(
     community_id: uuid.UUID,
     server_id: uuid.UUID,
     backup_id: uuid.UUID,
-    authorized: Annotated[AuthUser, Depends(require_backup_download_access)],
+    authorized: Annotated[
+        AuthUser,
+        Depends(require_download_access(Permission("backup:read"), _grant_resource)),
+    ],
     use_case: Annotated[DownloadBackup, Depends(get_download_backup)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
 ) -> StreamingResponse:
@@ -656,6 +670,7 @@ async def download_backup(
     "/communities/{community_id}/servers/{server_id}/backups/{backup_id}/download-grant",
 )
 async def issue_backup_download_grant(
+    request: Request,
     community_id: uuid.UUID,
     server_id: uuid.UUID,
     backup_id: uuid.UUID,
@@ -701,8 +716,7 @@ async def issue_backup_download_grant(
         raise _not_found() from exc
 
     grant = tokens.issue_download_grant(
-        IdentityUserId(authorized.user_id.value),
-        download_grant_resource(community_id, server_id, backup_id),
+        IdentityUserId(authorized.user_id.value), _grant_resource(request)
     )
     # The middleware's no-store set is matched by exact path (middleware.py), which
     # a templated route cannot join; set it here so a credential-bearing URL is

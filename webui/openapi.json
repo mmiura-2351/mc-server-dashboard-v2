@@ -1583,6 +1583,26 @@
         "title": "FileContentResponse",
         "type": "object"
       },
+      "FileDownloadGrantResponse": {
+        "description": "A short-lived, self-authenticating file download URL (issue #2352).\n\n``download_url`` is same-origin relative (WEBUI_SPEC.md Section 7.7) and\nalready carries the path and the grant, so a client hands it straight to\n``<a download>``. ``expires_at`` is when the grant stops verifying; after that\nthe URL is 401.",
+        "properties": {
+          "download_url": {
+            "title": "Download Url",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "download_url",
+          "expires_at"
+        ],
+        "title": "FileDownloadGrantResponse",
+        "type": "object"
+      },
       "FileVersionsResponse": {
         "properties": {
           "path": {
@@ -3342,6 +3362,26 @@
           "output"
         ],
         "title": "ServerCommandResponse",
+        "type": "object"
+      },
+      "ServerExportDownloadGrantResponse": {
+        "description": "A short-lived, self-authenticating server-export download URL (issue #2352).\n\n``download_url`` is same-origin relative (WEBUI_SPEC.md Section 7.7) and\nalready carries the grant, so a client hands it straight to ``<a download>``.\n``expires_at`` is when the grant stops verifying; after that the URL is 401.",
+        "properties": {
+          "download_url": {
+            "title": "Download Url",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "download_url",
+          "expires_at"
+        ],
+        "title": "ServerExportDownloadGrantResponse",
         "type": "object"
       },
       "ServerResponse": {
@@ -7708,7 +7748,7 @@
     },
     "/api/communities/{community_id}/servers/{server_id}/export": {
       "get": {
-        "description": "Export a whole server as a streamed ZIP at rest (issue #274).\n\nGated by ``file:read``: an export is a bulk read of the whole working set, so\nit reuses the file-read permission (and the per-resource grant) rather than a\ndedicated code -- the same permission the directory download uses. At rest only\n(Section 6.9): a running server is 409 ``server_unsettled`` (the authoritative\ncopy is only well-defined at rest). The zip carries the working set plus an\n``export_metadata.json`` descriptor. Recorded under ``server:export``.",
+        "description": "Export a whole server as a streamed ZIP at rest (issue #274).\n\nGated by ``file:read``: an export is a bulk read of the whole working set, so\nit reuses the file-read permission (and the per-resource grant) rather than a\ndedicated code -- the same permission the directory download uses. At rest only\n(Section 6.9): a running server is 409 ``server_unsettled`` (the authoritative\ncopy is only well-defined at rest). The zip carries the working set plus an\n``export_metadata.json`` descriptor. Recorded under ``server:export``.\n\nThe zip is built incrementally, so it carries no ``Content-Length`` and a\nbrowser cannot cap it up front; a multi-GB export is therefore fetched as a\nplain navigation to a URL carrying a short-lived ``?grant=`` minted by\n``POST .../export/download-grant`` instead of being buffered into a Blob to\nattach a Bearer header (issue #2352). Either credential runs the same\n``file:read`` gate, and the response is identical.",
         "operationId": "export_server_api_communities__community_id__servers__server_id__export_get",
         "parameters": [
           {
@@ -7729,6 +7769,22 @@
               "format": "uuid",
               "title": "Server Id",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "grant",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Grant"
             }
           }
         ],
@@ -7758,6 +7814,62 @@
           }
         ],
         "summary": "Export Server"
+      }
+    },
+    "/api/communities/{community_id}/servers/{server_id}/export/download-grant": {
+      "post": {
+        "description": "Mint a self-authenticating download URL for a server export (file:read, #2352).\n\nA multi-GB export cannot be buffered into a Blob just to attach a Bearer\nheader, so the browser needs a URL that authenticates itself. The grant is\nbound to this exact community/server pair and to the caller, expires in\n``auth.token.download_grant_ttl_seconds``, and proves identity only \u2014 the\nexport re-runs the full ``file:read`` gate on redemption.\n\nThe pre-flight is not optional: an export at rest is the *precondition*, and a\nrunning server is the common failure. Minting regardless would have the\nbrowser save the download's ``problem+json`` under the export filename, so the\nsame 404 / 409 the download returns is returned here instead, and the 409\nrecords the DENIED ``server:export`` row the download would have recorded \u2014\nonce the Web UI mints first the download is never reached, and the denial\nwould otherwise vanish from the audit log.\n\nNothing is audited on success: bytes leave the system at redemption, which\nrecords ``server:export`` with this same subject as actor.",
+        "operationId": "issue_export_download_grant_api_communities__community_id__servers__server_id__export_download_grant_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServerExportDownloadGrantResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Issue Export Download Grant"
       }
     },
     "/api/communities/{community_id}/servers/{server_id}/files": {
@@ -8027,8 +8139,88 @@
     },
     "/api/communities/{community_id}/servers/{server_id}/files/download": {
       "get": {
-        "description": "Download a file (bytes) or a directory (streamed zip) at rest (file:read).\n\nAt rest only (Section 6.9): a running server is 409 ``server_unsettled``. A\ndirectory streams as a zip built incrementally over the Storage read stream\n(bounded memory); a file streams its bytes with an attachment disposition.",
+        "description": "Download a file (bytes) or a directory (streamed zip) at rest (file:read).\n\nAt rest only (Section 6.9): a running server is 409 ``server_unsettled``. A\ndirectory streams as a zip built incrementally over the Storage read stream\n(bounded memory); a file streams its bytes with an attachment disposition.\n\nThe directory zip is built incrementally, so it carries no ``Content-Length``\nand a browser cannot cap it up front; a multi-GB ``world`` is therefore fetched\nas a plain navigation to a URL carrying a short-lived ``?grant=`` minted by\n``POST .../files/download-grant`` instead of being buffered into a Blob to\nattach a Bearer header (issue #2352). Either credential runs the same\n``file:read`` gate, and the response is identical.",
         "operationId": "download_file_api_communities__community_id__servers__server_id__files_download_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "path",
+            "required": false,
+            "schema": {
+              "default": ".",
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "grant",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Grant"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Download File"
+      }
+    },
+    "/api/communities/{community_id}/servers/{server_id}/files/download-grant": {
+      "post": {
+        "description": "Mint a self-authenticating download URL for one path (file:read, #2352).\n\nA multi-GB directory zip cannot be buffered into a Blob just to attach a\nBearer header, so the browser needs a URL that authenticates itself. The grant\nis bound to this exact community/server/path triple and to the caller, expires\nin ``auth.token.download_grant_ttl_seconds``, and proves identity only \u2014 the\ndownload re-runs the full ``file:read`` gate on redemption.\n\n``path`` is a **query** parameter on this POST rather than a JSON body so the\nsame ``_download_grant_resource`` callable builds the bound resource string\nhere and at the download: divergence between the two is structurally\nimpossible. The binding compares the decoded value by exact string equality;\nsee :func:`file_download_grant_resource` for why containment \u2014 not a privilege\nboundary \u2014 is the right bar here.\n\nThe pre-flight reuses ``DownloadFile.is_dir``, so a missing path is 404, a\ntraversal-unsafe one 422 ``invalid_path``, and a running server 409\n``server_unsettled`` \u2014 exactly what the download returns. The 409 records the\nDENIED ``file:download`` row the download would have recorded; once the Web UI\nmints first the download is never reached, and the denial would otherwise\nvanish from the audit log.\n\nNothing is audited on success: bytes leave the system at redemption, which\nrecords ``file:download`` with this same subject as actor.",
+        "operationId": "issue_file_download_grant_api_communities__community_id__servers__server_id__files_download_grant_post",
         "parameters": [
           {
             "in": "path",
@@ -8065,7 +8257,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/FileDownloadGrantResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -8086,7 +8280,7 @@
             "HTTPBearer": []
           }
         ],
-        "summary": "Download File"
+        "summary": "Issue File Download Grant"
       }
     },
     "/api/communities/{community_id}/servers/{server_id}/files/history": {

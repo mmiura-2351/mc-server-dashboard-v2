@@ -233,7 +233,6 @@ from mc_server_dashboard_api.servers.application.backups import (
     ServerBackupStatistics,
     SetBackupRetention,
     UploadBackup,
-    download_grant_resource,
 )
 from mc_server_dashboard_api.servers.application.catalog import (
     CheckPluginUpdate,
@@ -251,6 +250,7 @@ from mc_server_dashboard_api.servers.application.client_modpack import (
 from mc_server_dashboard_api.servers.application.export_import import (
     ExportServer,
     ImportServer,
+    ResolveServerExport,
 )
 from mc_server_dashboard_api.servers.application.files import (
     DeleteFile,
@@ -1961,6 +1961,13 @@ def get_export_server(
     )
 
 
+def get_resolve_server_export(request: Request) -> ResolveServerExport:
+    """Assemble the :class:`ResolveServerExport` use case (grant mint, issue #2352)."""
+
+    session_factory = create_session_factory(get_engine(request))
+    return ResolveServerExport(uow=ServersUnitOfWork(session_factory))
+
+
 def get_import_server(
     request: Request,
     create_server: Annotated[CreateServer, Depends(get_create_server)],
@@ -2779,28 +2786,17 @@ async def authorize_two_layer(
     return auth_user
 
 
-async def require_backup_download_access(
-    request: Request,
-    community_id: uuid.UUID,
-    server_id: uuid.UUID,
-    backup_id: uuid.UUID,
-    credentials: Annotated[
-        HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)
-    ],
-    authenticate: Annotated[AuthenticateRequest, Depends(get_authenticate_request)],
-    authenticate_grant: Annotated[
-        AuthenticateDownloadGrant, Depends(get_authenticate_download_grant)
-    ],
-    visibility: Annotated[MembershipVisibility, Depends(get_membership_visibility)],
-    checker: Annotated[PermissionChecker, Depends(get_permission_checker)],
-    grant: str | None = None,
-) -> AuthUser:
-    """Gate the backup download on ``backup:read``, by Bearer token *or* grant.
+def require_download_access(
+    operation: Permission,
+    resource_from_request: Callable[[Request], str],
+) -> Callable[..., Awaitable[AuthUser]]:
+    """Build a download gate on ``operation``, by Bearer token *or* grant (#2313).
 
     A browser cannot put an ``Authorization`` header on a plain navigation, so a
-    multi-GB archive is fetched from a URL carrying a short-lived ``?grant=``
-    instead (issue #2313). The grant is bound to this exact community/server/backup
-    triple, so it opens nothing else.
+    multi-GB body is fetched from a URL carrying a short-lived ``?grant=``
+    instead. ``resource_from_request`` builds the opaque resource string the grant
+    must be bound to, straight off the request, so the *same* callable can build
+    it at issuance and at redemption — a binding that cannot drift.
 
     Whichever way the subject is resolved, the same two-layer check runs — a grant
     proves identity, never authority, so it survives neither a permission
@@ -2808,37 +2804,69 @@ async def require_backup_download_access(
     header wins when both are present: the grant is the fallback transport, not an
     escalation path.
 
-    This is a standalone dependency rather than a :func:`require_permission`
-    variant because PEP 563 (``from __future__ import annotations``, top of this
-    module) makes FastAPI resolve ``Annotated[...]`` strings against the module
-    globals — a closure-built dependency cannot inject a per-call user resolver.
+    Every download this gates is server-scoped, so the Layer-2 lookup is fixed to
+    ``resource_type='server'`` / ``resource_id_param='server_id'`` (FR-AUTHZ-2);
+    only the permission and the resource string vary per download.
+
+    Closing over the two values is safe under PEP 563 (``from __future__ import
+    annotations``, top of this module): they are plain runtime values used in the
+    body, never annotations — FastAPI resolves the ``Annotated[...]`` strings
+    below against the module globals, where every name they use is defined.
     """
 
-    if credentials is not None:
-        try:
-            user = await authenticate(access_token=credentials.credentials)
-        except InvalidAccessTokenError as exc:
-            raise _unauthenticated() from exc
-    elif grant is not None:
-        try:
-            user = await authenticate_grant(
-                grant=grant,
-                resource=download_grant_resource(community_id, server_id, backup_id),
-            )
-        except InvalidDownloadGrantError as exc:
-            raise _unauthenticated() from exc
-    else:
-        raise _unauthenticated()
+    async def _dependency(
+        request: Request,
+        credentials: Annotated[
+            HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)
+        ],
+        authenticate: Annotated[AuthenticateRequest, Depends(get_authenticate_request)],
+        authenticate_grant: Annotated[
+            AuthenticateDownloadGrant, Depends(get_authenticate_download_grant)
+        ],
+        visibility: Annotated[MembershipVisibility, Depends(get_membership_visibility)],
+        checker: Annotated[PermissionChecker, Depends(get_permission_checker)],
+        grant: str | None = None,
+    ) -> AuthUser:
+        if credentials is not None:
+            try:
+                user = await authenticate(access_token=credentials.credentials)
+            except InvalidAccessTokenError as exc:
+                raise _unauthenticated() from exc
+        elif grant is not None:
+            try:
+                user = await authenticate_grant(
+                    grant=grant, resource=resource_from_request(request)
+                )
+            except InvalidDownloadGrantError as exc:
+                raise _unauthenticated() from exc
+        else:
+            raise _unauthenticated()
 
-    return await authorize_two_layer(
-        request=request,
-        user=user,
-        visibility=visibility,
-        checker=checker,
-        operation=Permission("backup:read"),
-        resource_type="server",
-        resource_id_param="server_id",
-    )
+        return await authorize_two_layer(
+            request=request,
+            user=user,
+            visibility=visibility,
+            checker=checker,
+            operation=operation,
+            resource_type="server",
+            resource_id_param="server_id",
+        )
+
+    return _dependency
+
+
+def path_uuid(request: Request, param: str) -> uuid.UUID:
+    """The named path segment, parsed the way FastAPI would coerce a UUID param.
+
+    Lets a ``resource_from_request`` callable bind a grant to canonical id text
+    without re-declaring the segments as typed parameters — a second typed
+    declaration makes FastAPI validate and report a malformed id twice (#631).
+    A malformed id still raises the framework's own path 422 (#630).
+    """
+
+    value = _resource_id_from_path(request, param)
+    assert value is not None
+    return value
 
 
 class DeferredAuthz(NamedTuple):

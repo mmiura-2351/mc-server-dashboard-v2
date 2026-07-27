@@ -199,43 +199,61 @@ router — the security posture, not knobs.
 ### Download grants — the third credential kind
 
 A browser cannot put an `Authorization` header on a plain navigation, so a
-multi-GB backup archive would have to be buffered into memory before it could be
+multi-GB download would have to be buffered into memory before it could be
 saved — exactly the tab OOM the Web UI's download cap exists to prevent. The API
 therefore mints a **download grant** (issue #2313): a short-lived JWT that the
 URL itself carries, so the browser can stream the response straight to disk.
 
+Three downloads mint one, each with its own endpoint (issues #2313, #2352):
+
 ```
-POST /api/communities/{cid}/servers/{sid}/backups/{bid}/download-grant
+POST …/servers/{sid}/backups/{bid}/download-grant   -> …/backups/{bid}/download?grant=…
+POST …/servers/{sid}/export/download-grant          -> …/export?grant=…
+POST …/servers/{sid}/files/download-grant?path=…    -> …/files/download?path=…&grant=…
+```
+
+```
 -> 200 Cache-Control: no-store
-   {"download_url": "/api/communities/{cid}/servers/{sid}/backups/{bid}/download?grant=<token>",
-    "expires_at": "<RFC 3339>"}
+   {"download_url": "<relative URL, grant included>", "expires_at": "<RFC 3339>"}
 ```
 
 A grant is:
 
-- **Scoped to one resource.** It is bound to the whole community/server/backup
-  triple, so it opens neither another backup nor the same backup id addressed
-  under a different server or community.
+- **Scoped to one resource.** It is bound to exactly one of: a
+  community/server/backup triple, a community/server export, or a
+  community/server/`path` triple. It opens no other resource, no other server or
+  community, and no other one of the three surfaces. The files grant binds the
+  *decoded* `?path=` value by exact string equality — no normalisation, so a
+  spelling other than the one the mint returned fails closed. That binding is
+  containment, not a privilege boundary: `file:read` is server-scoped, so its
+  holder could mint a grant for the other path directly.
 - **Very short-lived.** `auth.token.download_grant_ttl_seconds`, 30 s by default
   ([`CONFIGURATION.md`](CONFIGURATION.md) Section 5.3) — long enough to hand the
   URL to the browser, no longer.
 - **TTL-only, not single-use.** Nothing is persisted, so nothing has to be pruned
   and nothing breaks with more than one API replica. Replay within the TTL is
-  accepted: the grant is bound to one user, one backup and one purpose, and every
-  redemption is re-authorized.
-- **Identity, never authority.** The download re-runs the full `backup:read` gate
-  on redemption with the grant's subject, so a permission revocation, a membership
-  removal, or a deactivated account takes effect immediately even on a URL already
-  minted (403 / 404 / 401 respectively).
+  accepted: the grant is bound to one user, one resource and one purpose, and
+  every redemption is re-authorized.
+- **Identity, never authority.** The download re-runs its full permission gate
+  (`backup:read` for a backup, `file:read` for an export or a file) on redemption
+  with the grant's subject, so a permission revocation, a membership removal, or a
+  deactivated account takes effect immediately even on a URL already minted
+  (403 / 404 / 401 respectively).
 - **Not interchangeable with an access token, in either direction.** A grant
   presented as `Authorization: Bearer …` is 401 on every endpoint, and an ordinary
   access token presented as `?grant=` is rejected. Without that separation a grant
   leaking into a reverse-proxy access log would be a full session credential.
 
-The mint endpoint is gated by the same `backup:read` permission the download is,
-and resolves the backup through the same lookup, so an unknown or cross-server id
-is 404 with no existence signal. Issuance is not audited: bytes leave the system
-at redemption, which records `backup:download` with the grant's subject as actor.
+Each mint endpoint is gated by the same permission its download is, and runs the
+same pre-flight, so it returns the download's own errors: an unknown or
+cross-server backup is 404 with no existence signal; a `?path=` that does not
+exist is 404 and a traversal-unsafe one 422 `invalid_path`; an export or file
+download of a running server is 409 `server_unsettled` (issue #2352). Issuance is
+not audited on success: bytes leave the system at redemption, which records the
+download's own operation with the grant's subject as actor. A mint that *fails*
+its pre-flight does record the DENIED row the download would have recorded —
+once a client mints first, the download is never reached, so the denial would
+otherwise never appear in the audit log.
 
 The `download_url` is same-origin relative by design
 ([`WEBUI_SPEC.md`](../ui/WEBUI_SPEC.md) Section 7.7).
