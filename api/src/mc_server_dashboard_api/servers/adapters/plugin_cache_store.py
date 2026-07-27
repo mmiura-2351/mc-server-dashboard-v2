@@ -7,17 +7,23 @@ main ``ObjectStorage`` and ``ObjectResourcePackStore`` adapters.
 
 Dedup-on-ingest: :meth:`put` ``head_object``-checks the content key first and
 skips the upload when the blob already exists, so identical bytes land once.
+
+The seam translates the storage error so no storage type crosses back into the
+servers layer (mirroring ``backup_store.py`` and ``resource_pack_store.py``): a
+missing blob surfaces as :class:`PluginCacheBlobNotFoundError` (issue #2338).
 """
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
+from mc_server_dashboard_api.servers.domain.errors import PluginCacheBlobNotFoundError
 from mc_server_dashboard_api.servers.domain.plugin_cache_store import (
     CacheEntry,
     PluginCacheStore,
 )
 from mc_server_dashboard_api.storage.adapters.object_store import S3ClientFactory
+from mc_server_dashboard_api.storage.domain.errors import NotFoundError
 
 
 def _key(sha256: str) -> str:
@@ -47,11 +53,19 @@ class ObjectPluginCacheStore(PluginCacheStore):
 
     async def _open_gen(self, sha256: str) -> AsyncIterator[bytes]:
         key = _key(sha256)
-        async with self._client_factory() as client:
-            # get_object already raises NotFoundError on a missing key, so no
-            # redundant head_object first — mirrors ObjectResourcePackStore.open.
-            async for chunk in await client.get_object(key):
-                yield chunk
+        try:
+            async with self._client_factory() as client:
+                # get_object already raises NotFoundError on a missing key, so no
+                # redundant head_object first.
+                async for chunk in await client.get_object(key):
+                    yield chunk
+        except NotFoundError as exc:
+            # ``open`` does no I/O itself, so this fires on the first iteration.
+            # Every caller either gates on ``has`` first or opens a blob a plugin
+            # row still references, so a miss is a storage-consistency fault, not
+            # a control-flow branch; translating keeps the storage type from
+            # crossing the seam.
+            raise PluginCacheBlobNotFoundError(key) from exc
 
     async def list_entries(self) -> list[CacheEntry]:
         prefix = "plugin-cache/"

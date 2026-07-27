@@ -48,7 +48,11 @@ class PluginCacheStore(abc.ABC):
 
     @abc.abstractmethod
     def open(self, sha256: str) -> ByteStream:
-        """Open a read stream over a cached jar. Raises if absent."""
+        """Open a read stream over a cached jar.
+
+        Performs no I/O itself: a missing blob raises
+        ``PluginCacheBlobNotFoundError`` on the first iteration (issue #2338).
+        """
 
     @abc.abstractmethod
     async def list_entries(self) -> list[CacheEntry]:
