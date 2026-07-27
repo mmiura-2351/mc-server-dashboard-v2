@@ -289,15 +289,17 @@ async def public_download_resource_pack(
     # Starlette populates no Content-Length for a streaming body, so the header is
     # explicit (issue #2317). The declared value comes from the pack store, so it
     # equals the streamed byte count.
+    #
+    # The filename goes into the use case rather than being compared afterwards:
+    # the mismatch is then decided off the pack row alone, so a wrong filename on
+    # this unauthenticated route costs no storage request (issue #2322).
     try:
         stream, pack, size_bytes = await use_case(
             resource_pack_id=ResourcePackId(resource_pack_id),
+            expected_filename=filename,
         )
     except ResourcePackNotFoundError as exc:
         raise _not_found() from exc
-
-    if pack.filename != filename:
-        raise _not_found()
 
     return StreamingResponse(
         stream,
