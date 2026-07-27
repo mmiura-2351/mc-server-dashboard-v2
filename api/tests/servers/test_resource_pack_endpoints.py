@@ -443,7 +443,7 @@ class TestPublicDownloadEndpoint:
         # so the endpoint leaks no existence signal.
         p = _pack(filename="my-pack.zip")
         store = FakeResourcePackStore()
-        store.blobs[p.id] = b"publiczip"
+        store.blobs[p.id, p.filename] = b"publiczip"
         uow = FakeUnitOfWork()
         uow.resource_packs.packs[p.id] = p
         app = _app(download=DownloadResourcePack(uow=uow, store=store))
