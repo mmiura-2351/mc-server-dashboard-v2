@@ -48,6 +48,7 @@ from mc_server_dashboard_api.dependencies import (
 )
 from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_problem import ProblemException, problem
+from mc_server_dashboard_api.http_streaming import counted
 from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.servers.application.resource_packs import (
     MAX_RESOURCE_PACK_BYTES,
@@ -263,8 +264,12 @@ async def download_resource_pack(
             target_id=resource_pack_id,
         )
     )
+    # A delete or a prune racing the download can remove the blob underneath the
+    # open stream (issue #2337). The resulting short body already fails at the
+    # wire; counting the streamed bytes fails it here instead, with both numbers
+    # named, and without depending on the HTTP layer to catch it.
     return StreamingResponse(
-        stream,
+        counted(stream, size_bytes),
         media_type=_PACK_MEDIA_TYPE,
         headers={
             "Content-Disposition": _content_disposition(pack.filename),
@@ -301,8 +306,11 @@ async def public_download_resource_pack(
     except ResourcePackNotFoundError as exc:
         raise _not_found() from exc
 
+    # Same race as on the authenticated route (issue #2337), on the route every
+    # joining Minecraft client hits: a short body fails here rather than passing
+    # for a complete pack.
     return StreamingResponse(
-        stream,
+        counted(stream, size_bytes),
         media_type=_PACK_MEDIA_TYPE,
         headers={
             "Content-Disposition": _content_disposition(pack.filename),

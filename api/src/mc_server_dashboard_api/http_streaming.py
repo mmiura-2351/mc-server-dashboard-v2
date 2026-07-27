@@ -6,10 +6,11 @@ store up front, so a client can show progress and refuse an over-cap transfer
 the storage port contract pins ``size(ref) == len(open(ref))``, and a stored
 archive is immutable per storage ref.
 
-The one way the two can disagree is a delete underneath an open stream (issue
-#2318): ``DeleteBackup`` or the retention prune removes the object while the body
-is on the wire. Either the read raises, or the stream simply ends early; both
-deliver fewer bytes than the header promised.
+The one way the two can disagree is a delete underneath an open stream: a
+``DeleteBackup`` or the retention prune removes the archive (issue #2318), or a
+delete removes a resource pack blob (issue #2337), while the body is on the wire.
+Either the read raises, or the stream simply ends early; both deliver fewer bytes
+than the header promised.
 
 The client-observable outcome is already correct in both cases, and this module
 does not change it: an exception propagates out of the ASGI app and tears the
