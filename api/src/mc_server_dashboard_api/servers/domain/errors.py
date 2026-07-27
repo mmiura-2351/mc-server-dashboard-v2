@@ -508,6 +508,18 @@ class InvalidPluginSideError(ServerError):
     """
 
 
+class PluginCacheBlobNotFoundError(ServerError):
+    """A cached jar blob is absent from the content-addressed cache (issue #2338).
+
+    Raised at the ``PluginCacheStore`` seam when ``open`` hits a missing content
+    key, so the storage ``NotFoundError`` never crosses into the servers layer
+    (mirroring ``backup_store.py`` and ``resource_pack_store.py``). Every caller
+    either gates on ``has`` first or opens a blob a plugin row still references,
+    so this is a storage-consistency fault (a GC race or an external deletion),
+    not a client error: no route maps it, and the edge reports it as a 500.
+    """
+
+
 class CatalogUnavailableError(ServerError):
     """External catalog API unreachable or errored.
 

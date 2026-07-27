@@ -48,6 +48,7 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
     BackupNotFoundError,
+    PluginCacheBlobNotFoundError,
     ResourcePackNotFoundError,
     ServerFileNotFoundError,
 )
@@ -1617,9 +1618,14 @@ class FakePluginCacheStore(PluginCacheStore):
         self.blobs.setdefault(sha256, data)
 
     def open(self, sha256: str) -> AsyncIterator[bytes]:
-        data = self.blobs[sha256]
-
         async def _gen() -> AsyncIterator[bytes]:
+            data = self.blobs.get(sha256)
+            if data is None:
+                # Like the adapter, the miss surfaces while streaming, not on
+                # open(), and as the servers-layer error so no storage type
+                # reaches the servers layer (issue #2338). The adapter reports
+                # the full object key it missed; match it.
+                raise PluginCacheBlobNotFoundError(f"plugin-cache/{sha256}")
             yield data
 
         return _gen()

@@ -16,7 +16,7 @@ import pytest
 from mc_server_dashboard_api.servers.adapters.plugin_cache_store import (
     ObjectPluginCacheStore,
 )
-from mc_server_dashboard_api.storage.domain.errors import NotFoundError
+from mc_server_dashboard_api.servers.domain.errors import PluginCacheBlobNotFoundError
 from tests.storage.fake_s3 import FakeS3Store, fake_s3_factory
 
 
@@ -65,10 +65,11 @@ async def test_open_round_trips_bytes() -> None:
     assert out == content
 
 
-async def test_open_missing_raises_not_found() -> None:
+async def test_open_missing_raises_servers_layer_error() -> None:
+    """The seam translates the storage miss, so no storage type crosses (#2338)."""
     store = FakeS3Store()
     cache = ObjectPluginCacheStore(fake_s3_factory(store))
-    with pytest.raises(NotFoundError):
+    with pytest.raises(PluginCacheBlobNotFoundError):
         _ = [chunk async for chunk in cache.open("0" * 64)]
 
 
