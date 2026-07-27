@@ -1627,6 +1627,8 @@ export const en = {
   "plugins.error.notFound": "{Noun} not found. It may have been removed.",
   "plugins.error.workerUnavailable":
     "The server agent is disconnected. Please try again later.",
+  "plugins.error.downloadTooLarge":
+    "The client modpack is too large to download in the browser ({size}). The limit is 512 MiB.",
   "plugins.error.generic": "Something went wrong. Please try again.",
   // Dependency / compatibility validation checklist (issue #1307).
   "plugins.validation.heading": "Dependencies & compatibility",

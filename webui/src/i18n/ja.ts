@@ -1616,6 +1616,8 @@ export const ja: Record<TranslationKey, string> = {
     "{Noun}が見つかりません。削除された可能性があります。",
   "plugins.error.workerUnavailable":
     "サーバーエージェントが切断されています。しばらくしてから再度お試しください。",
+  "plugins.error.downloadTooLarge":
+    "クライアント用Modのサイズ ({size}) がブラウザでのダウンロード上限 (512 MiB) を超えています。",
   "plugins.error.generic": "エラーが発生しました。もう一度お試しください。",
   // Dependency / compatibility validation checklist (issue #1307).
   "plugins.validation.heading": "依存関係と互換性",

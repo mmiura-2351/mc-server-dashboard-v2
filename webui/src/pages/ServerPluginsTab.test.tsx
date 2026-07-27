@@ -17,8 +17,11 @@ import {
 import { MemoryRouter } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client.ts";
+import { DownloadTooLargeError } from "../api/download.ts";
 import type { components } from "../api/schema";
 import { ToastProvider } from "../components/Toast.tsx";
+import { humanizeBytes } from "../format.ts";
+import { t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { ServerPluginsTab } from "./ServerPluginsTab.tsx";
 
@@ -509,6 +512,29 @@ describe("ServerPluginsTab side + client modpack (issue #1308)", () => {
         "mods.zip",
       );
     });
+  });
+
+  it("names the size when the client modpack exceeds the download cap", async () => {
+    const size = 600 * 1024 * 1024;
+    mockDownload.downloadFile.mockRejectedValue(
+      new DownloadTooLargeError(size),
+    );
+    mockGets({
+      plugins: [plugin({ side: "client" })],
+      validation: EMPTY_VALIDATION,
+    });
+    renderTab();
+    const button = await screen.findByText("Download client modpack");
+    fireEvent.click(button);
+
+    expect(
+      await screen.findByText(
+        t("plugins.error.downloadTooLarge", { size: humanizeBytes(size) }),
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("plugins.error.generic")),
+    ).not.toBeInTheDocument();
   });
 
   it("hides the download button when no client mods exist", async () => {
