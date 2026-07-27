@@ -401,9 +401,14 @@ export function ServerBackupsTab({
                         : t("backups.unknownCreator"))}
                   </td>
                   <td className="row-actions">
+                    {/* Disabled while any mint is in flight, so a double-click
+                        cannot mint two grants and save twice (#2326). The mint
+                        settles in ~100 ms, so briefly disabling the other rows
+                        too is unnoticeable. */}
                     <button
                       type="button"
                       className="btn sm"
+                      disabled={download.isPending}
                       onClick={() => download.mutate(backup)}
                     >
                       {t("backups.download")}

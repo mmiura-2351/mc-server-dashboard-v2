@@ -548,9 +548,9 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   subprotocol header (`["access_token", "<jwt>"]`, issue #1596); on token
   rotation, sockets are reconnected (reconnect-on-rotate chosen).
 - **Authenticated downloads.** An in-memory access token cannot ride a plain
-  `<a href>`, so file / export / resource-pack downloads fetch the URL with the
-  Authorization header and buffer the response as a Blob, capped at 512 MiB to
-  bound memory (issues #438, #1593, #2027). **Backup archives are the
+  `<a href>`, so file / export / resource-pack / plugin downloads fetch the URL
+  with the Authorization header and buffer the response as a Blob, capped at
+  512 MiB to bound memory (issues #438, #1593, #2027). **Backup archives are the
   exception**: they run to multiple GB, so the tab mints a short-lived
   self-authenticating URL (`POST …/backups/{bid}/download-grant`, 30 s TTL,
   #2313) and clicks an `<a download>` at it — same-origin (7.7), so the browser
