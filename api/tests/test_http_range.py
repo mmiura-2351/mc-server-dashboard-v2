@@ -84,6 +84,16 @@ def test_any_range_over_an_empty_representation_is_unsatisfiable() -> None:
         "bytes=",  # empty range set
         "0-99",  # no unit
         "bytes=0-99,200-299",  # multi-range: served as if Range were absent
+        # Characters Python calls digits but the grammar does not. A latin-1
+        # superscript survives header parsing (it is valid obs-text, and header
+        # values decode latin-1), and the fullwidth forms are digits to
+        # ``str.isdigit`` — neither is a DIGIT, so all of them are ignored
+        # rather than parsed or, worse, raising out of the parser.
+        "bytes=²-5",  # SUPERSCRIPT TWO as the first position
+        "bytes=0-²",  # ... as the last position
+        "bytes=-²",  # ... as a suffix length
+        "bytes=５-９",  # FULLWIDTH DIGIT FIVE / NINE
+        "bytes=-５",  # ... as a suffix length
     ],
 )
 def test_unusable_range_is_ignored(header: str) -> None:

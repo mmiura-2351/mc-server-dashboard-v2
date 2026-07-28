@@ -753,18 +753,16 @@ def test_range_boundaries(header: str, expected: bytes, content_range: str) -> N
 
 def test_unsatisfiable_range_is_416_naming_the_size() -> None:
     recorder = RecordingAuditRecorder()
-    app = _app(
-        member=True,
-        allow=True,
-        download=_FakeDownload(_RANGED),
-        recorder=recorder,
-    )
+    download = _FakeDownload(_RANGED)
+    app = _app(member=True, allow=True, download=download, recorder=recorder)
     client = next(_client(app))
     resp = _download(client, {**_bearer(), "Range": "bytes=26-"})
     assert resp.status_code == 416
     assert resp.headers["content-range"] == "bytes */26"
     assert resp.json()["reason"] == "range_not_satisfiable"
-    # Nothing was downloaded, so nothing is recorded — as for a 404.
+    # No stream is opened for a range that cannot be served...
+    assert download.ranges == []
+    # ... so nothing is recorded either — as for a 404.
     assert recorder.events == []
 
 
@@ -829,6 +827,40 @@ def test_if_range_not_matching_serves_the_whole_archive() -> None:
     )
     assert resp.status_code == 200
     assert resp.content == _RANGED
+
+
+def test_if_range_carrying_the_weak_form_of_our_etag_serves_the_whole_archive() -> None:
+    # If-Range is compared with the STRONG function (RFC 9110 Section 13.1.5), so
+    # ``W/`` in front of our own tag is deliberately not a match.
+    app = _app(member=True, allow=True, download=_FakeDownload(_RANGED))
+    client = next(_client(app))
+    path = _url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download")
+    etag = client.get(path, headers=_bearer()).headers["etag"]
+
+    resp = client.get(
+        path, headers={**_bearer(), "Range": "bytes=20-", "If-Range": f"W/{etag}"}
+    )
+    assert resp.status_code == 200
+    assert resp.content == _RANGED
+
+
+def test_if_range_without_a_range_is_a_plain_full_download() -> None:
+    # If-Range only ever gates a Range; on its own it decides nothing, whether or
+    # not it matches.
+    download = _FakeDownload(_RANGED)
+    app = _app(member=True, allow=True, download=download)
+    client = next(_client(app))
+    path = _url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download")
+    etag = client.get(path, headers=_bearer()).headers["etag"]
+
+    matching = client.get(path, headers={**_bearer(), "If-Range": etag})
+    stale = client.get(path, headers={**_bearer(), "If-Range": '"stale"'})
+
+    assert matching.status_code == 200
+    assert matching.content == _RANGED
+    assert stale.status_code == 200
+    assert stale.content == _RANGED
+    assert download.ranges == [None, None, None]
 
 
 # --- download grants (issue #2313) -----------------------------------------

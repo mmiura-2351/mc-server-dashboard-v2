@@ -68,9 +68,7 @@ def parse_byte_range(header: str | None, *, size: int) -> ByteRange | None:
     first, last = first.strip(), last.strip()
     if not first:
         return _suffix_range(last, size)
-    if not first.isdigit() or (last and not last.isdigit()):
-        # ``isdigit`` (not ``int``) so the grammar's bare DIGITs are what is
-        # accepted: ``int`` would also take ``+5`` and unicode digits.
+    if not _is_digits(first) or (last and not _is_digits(last)):
         return None
     start = int(first)
     if last and int(last) < start:
@@ -85,10 +83,27 @@ def parse_byte_range(header: str | None, *, size: int) -> ByteRange | None:
     return ByteRange(start, end)
 
 
+def _is_digits(value: str) -> bool:
+    """Is ``value`` one or more of the grammar's bare ``DIGIT``s (``0``-``9``)?
+
+    Neither ``int()`` nor ``str.isdigit()`` alone says this, and each is wrong in
+    a different direction. ``int()`` also accepts ``+5``, surrounding whitespace,
+    and non-ASCII digits. ``str.isdigit()`` accepts characters ``int()`` then
+    refuses (``'²'.isdigit()`` is true; ``int('²')`` raises) — and ``²`` is a
+    latin-1 byte, so it is valid ``obs-text`` in a field value and arrives here
+    intact through header parsing. Testing with ``isdigit`` alone would therefore
+    let ``bytes=²-5`` raise ``ValueError`` out of this module (a 500 at the edge,
+    which catches only :class:`RangeNotSatisfiableError`) and would serve
+    ``bytes=５-９`` a ``206`` off fullwidth digits. Both must simply be ignored.
+    """
+
+    return value.isascii() and value.isdigit()
+
+
 def _suffix_range(last: str, size: int) -> ByteRange | None:
     """Resolve ``bytes=-N`` — the final ``N`` bytes of the representation."""
 
-    if not last.isdigit():
+    if not _is_digits(last):
         return None
     suffix = int(last)
     if suffix == 0 or size == 0:
