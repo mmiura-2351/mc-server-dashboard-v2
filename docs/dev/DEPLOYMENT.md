@@ -1093,7 +1093,7 @@ Back up the database with a logical dump and archive the storage volume. For the
 default object backend:
 
 ```sh
-docker compose exec db pg_dump -U mcsd -d mcsd > backup-db.sql
+docker compose exec -T db pg_dump -U mcsd -d mcsd > backup-db.sql
 docker run --rm -v mc-server-dashboard-v2_seaweedfs-data:/data \
   -v "$PWD":/backup debian:bookworm-slim \
   tar czf /backup/backup-storage.tar.gz -C /data .
