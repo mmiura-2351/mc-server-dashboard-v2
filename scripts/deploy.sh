@@ -9,6 +9,11 @@
 # If .env already exists, skips setup and does a full rebuild + deploy
 # (equivalent to `make update FORCE=1`).
 #
+# It writes the same two records as scripts/update.sh, with the same meaning --
+# .last-deploy-sha is what the stack was built and started from, and
+# .last-deploy-health is whether that revision passed the healthcheck. update.sh
+# reads them, so the two writers must agree on what they mean (#2311).
+#
 # Usage:
 #   make deploy
 set -euo pipefail
@@ -20,6 +25,7 @@ repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || {
 cd "$repo_root"
 
 STAMP_FILE=".last-deploy-sha"
+HEALTH_FILE=".last-deploy-health"
 
 # ── 1. Interactive .env setup ────────────────────────────────────────────────
 if [ ! -f .env ]; then
@@ -224,9 +230,24 @@ sg docker -c "DOCKER_BUILDKIT=1 docker build --network=host --build-arg VERSION=
 
 # ── 4. Deploy ─────────────────────────────────────────────────────────────────
 echo "deploy: starting services..."
-sg docker -c "docker compose up -d"
+head_sha="$(git rev-parse HEAD)"
+if ! sg docker -c "docker compose up -d"; then
+	# Part-way through a recreate, no single revision describes the stack; see
+	# the same guard in scripts/update.sh.
+	rm -f "$STAMP_FILE" "$HEALTH_FILE"
+	echo "deploy: ERROR -- 'docker compose up -d' failed; the running stack may now be a mix" >&2
+	echo "  of revisions. Cleared ${STAMP_FILE}, so the next 'make update' rebuilds every" >&2
+	echo "  component rather than trusting a base that no longer describes what is running." >&2
+	exit 1
+fi
 
-# ── 5. Healthcheck ────────────────────────────────────────────────────────────
+# ── 5. Stamp the started revision ────────────────────────────────────────────
+# Before the healthcheck: the containers are running $head_sha either way, and
+# that is the fact update.sh's change detection needs (#2311).
+echo "$head_sha" > "$STAMP_FILE"
+rm -f "$HEALTH_FILE"
+
+# ── 6. Healthcheck ────────────────────────────────────────────────────────────
 api_port="${API_HTTP_PORT:-8000}"
 if [ -f .env ]; then
 	api_port="$(grep -E '^API_HTTP_PORT=' .env | cut -d= -f2 | tr -d '[:space:]')"
@@ -244,12 +265,13 @@ for i in $(seq 1 30); do
 done
 
 if [ "$ok" -ne 1 ]; then
+	echo "failed" > "$HEALTH_FILE"
 	echo "deploy: ERROR -- API healthcheck failed after 60s." >&2
+	echo "  The stack is running ${head_sha:0:7}; that is stamped in ${STAMP_FILE} and the" >&2
+	echo "  failure in ${HEALTH_FILE}. Investigate (docker compose logs api), then re-run" >&2
+	echo "  'make update' -- it will re-start and re-check without rebuilding anything." >&2
 	exit 1
 fi
+echo "ok" > "$HEALTH_FILE"
 echo "deploy: API healthcheck passed."
-
-# ── 6. Stamp deployed commit ─────────────────────────────────────────────────
-head_sha="$(git rev-parse HEAD)"
-echo "$head_sha" > "$STAMP_FILE"
 echo "deploy: deployed ${head_sha:0:7} successfully."
