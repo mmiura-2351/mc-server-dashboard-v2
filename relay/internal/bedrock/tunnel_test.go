@@ -465,8 +465,10 @@ func TestReaderDoesNotStallWhenSendQueueFull(t *testing.T) {
 	// Resend from every source until all flows are registered or we time out.
 	// Resends from an already-registered source only refresh its flow (a Lookup
 	// hit), so the count converges on the number of distinct sources; loopback
-	// UDP loss (rare) is absorbed by the retry.
-	deadline := time.Now().Add(3 * time.Second)
+	// UDP loss (rare) is absorbed by the retry. The bound is generous for the
+	// same reason as starvationBudget: convergence takes milliseconds unless the
+	// process is CPU-starved, and a fixed short budget only flakes (issue #2050).
+	deadline := time.Now().Add(starvationBudget)
 	for {
 		for _, src := range sources {
 			// First byte 0x84 (connected gameplay), not 0x01, so the per-flow
