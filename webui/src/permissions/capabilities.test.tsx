@@ -201,10 +201,17 @@ describe("per-community cache isolation", () => {
 
 describe("selection reconciliation when the active community vanishes", () => {
   function Switcher() {
-    const { communityId, setCommunityId } = useActiveCommunity();
+    const { communityId, setCommunityId, communities } = useActiveCommunity();
     return (
       <div>
         <span data-testid="cid">{communityId ?? "none"}</span>
+        {/* The loaded list, so a test can wait for a specific refetch to land
+            before asserting what the selection did. */}
+        <span data-testid="list">
+          {communities === undefined
+            ? "loading"
+            : communities.map((c) => c.id).join(",") || "empty"}
+        </span>
         <button type="button" onClick={() => setCommunityId("c2")}>
           to-c2
         </button>
@@ -288,6 +295,184 @@ describe("selection reconciliation when the active community vanishes", () => {
 
     await waitFor(() =>
       expect(screen.getByTestId("cid")).toHaveTextContent("none"),
+    );
+  });
+
+  it("keeps the fallback when the vanished community reappears in a later list", async () => {
+    let communitiesResponse = [
+      { id: "c1", name: "First" },
+      { id: "c2", name: "Second" },
+    ];
+    fetchMock.mockImplementation((url: string) => {
+      if (url === "/api/communities") {
+        return Promise.resolve(jsonResponse(communitiesResponse));
+      }
+      return Promise.resolve(jsonResponse({ permissions: [], grants: [] }));
+    });
+
+    const client = newClient();
+    render(wrap(<Switcher />, client));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("cid")).toHaveTextContent("c1"),
+    );
+
+    act(() => {
+      screen.getByRole("button", { name: "to-c2" }).click();
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("cid")).toHaveTextContent("c2"),
+    );
+
+    // c2 vanishes from a loaded list: the provider falls back to c1.
+    communitiesResponse = [{ id: "c1", name: "First" }];
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ["communities"] });
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("cid")).toHaveTextContent("c1"),
+    );
+
+    // c2 comes back (re-invited, or a transiently inconsistent list). The stale
+    // selection must not resurrect: the user stays on c1 until they switch.
+    communitiesResponse = [
+      { id: "c1", name: "First" },
+      { id: "c2", name: "Second" },
+    ];
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ["communities"] });
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("list")).toHaveTextContent("c1,c2"),
+    );
+
+    expect(screen.getByTestId("cid")).toHaveTextContent("c1");
+  });
+
+  it("keeps the selection when a refetch fails instead of treating it as absent", async () => {
+    let communitiesResponse: { id: string; name: string }[] = [
+      { id: "c1", name: "First" },
+      { id: "c2", name: "Second" },
+    ];
+    let failCommunities = false;
+    fetchMock.mockImplementation((url: string) => {
+      if (url === "/api/communities") {
+        return failCommunities
+          ? Promise.reject(new Error("network down"))
+          : Promise.resolve(jsonResponse(communitiesResponse));
+      }
+      return Promise.resolve(jsonResponse({ permissions: [], grants: [] }));
+    });
+
+    const client = newClient();
+    render(wrap(<Switcher />, client));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("cid")).toHaveTextContent("c1"),
+    );
+    act(() => {
+      screen.getByRole("button", { name: "to-c2" }).click();
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("cid")).toHaveTextContent("c2"),
+    );
+
+    // A failed fetch says nothing about the selection's fate.
+    failCommunities = true;
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ["communities"] });
+    });
+
+    failCommunities = false;
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ["communities"] });
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("list")).toHaveTextContent("c1,c2"),
+    );
+
+    expect(screen.getByTestId("cid")).toHaveTextContent("c2");
+  });
+
+  it("keeps the selection when the list is momentarily empty", async () => {
+    let communitiesResponse: { id: string; name: string }[] = [
+      { id: "c1", name: "First" },
+      { id: "c2", name: "Second" },
+    ];
+    fetchMock.mockImplementation((url: string) => {
+      if (url === "/api/communities") {
+        return Promise.resolve(jsonResponse(communitiesResponse));
+      }
+      return Promise.resolve(jsonResponse({ permissions: [], grants: [] }));
+    });
+
+    const client = newClient();
+    render(wrap(<Switcher />, client));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("cid")).toHaveTextContent("c1"),
+    );
+    act(() => {
+      screen.getByRole("button", { name: "to-c2" }).click();
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("cid")).toHaveTextContent("c2"),
+    );
+
+    // An empty list is not evidence that c2 specifically is gone.
+    communitiesResponse = [];
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ["communities"] });
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("cid")).toHaveTextContent("none"),
+    );
+
+    communitiesResponse = [
+      { id: "c1", name: "First" },
+      { id: "c2", name: "Second" },
+    ];
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ["communities"] });
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("list")).toHaveTextContent("c1,c2"),
+    );
+
+    expect(screen.getByTestId("cid")).toHaveTextContent("c2");
+  });
+
+  it("keeps a selection made while the list is still loading", async () => {
+    let releaseCommunities = (): void => {};
+    const communitiesLoaded = new Promise<void>((resolve) => {
+      releaseCommunities = resolve;
+    });
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url === "/api/communities") {
+        await communitiesLoaded;
+        return jsonResponse([
+          { id: "c1", name: "First" },
+          { id: "c2", name: "Second" },
+        ]);
+      }
+      return jsonResponse({ permissions: [], grants: [] });
+    });
+
+    render(wrap(<Switcher />, newClient()));
+
+    // Selection made before any list has loaded: nothing can confirm it absent.
+    act(() => {
+      screen.getByRole("button", { name: "to-c2" }).click();
+    });
+    expect(screen.getByTestId("cid")).toHaveTextContent("none");
+
+    await act(async () => {
+      releaseCommunities();
+      await communitiesLoaded;
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("cid")).toHaveTextContent("c2"),
     );
   });
 
