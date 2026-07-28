@@ -17,6 +17,12 @@ store *before* a response body starts, so one outage yields one status at the ed
 (503 ``storage_unavailable``, issue #2378). The lone exception is :meth:`open`: the
 stream's failure surfaces after the headers are on the wire, where no status is left
 to choose, so it stays a truncated body guarded by the route's byte count (#2318).
+
+That claim holds only because the layer below produces the typed error in the first
+place: the object client translates a backend 5xx / transport failure on the read
+operations too, not just the writes (issues #2376, #2378). Translating here without
+that would be decorative — the ``FsStorage`` backend never raises the type at all,
+so a seam test alone cannot show the path works.
 """
 
 from __future__ import annotations
