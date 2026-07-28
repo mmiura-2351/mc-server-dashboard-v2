@@ -640,6 +640,23 @@ async def test_open_missing_jar_is_not_found(harness: StorageHarness) -> None:
         await drain(harness.storage.open_jar(JarKey("b" * 64)))
 
 
+async def test_jar_deleted_after_open_is_not_found(harness: StorageHarness) -> None:
+    """A delete landing after ``open_jar`` surfaces as NotFoundError (#2341).
+
+    The JAR egress sibling of ``open_backup``: the stream is opened while the
+    JAR is pooled and read after the GC reclaimed it, and the miss must be the
+    Port's own error rather than the backend's native one.
+    """
+
+    key = await harness.storage.put_jar(stream_of(b"jar-bytes"))
+
+    stream = harness.storage.open_jar(key)
+    await harness.storage.delete_jar(key)
+
+    with pytest.raises(NotFoundError):
+        await drain(stream)
+
+
 async def test_jar_pool_stats_empty(harness: StorageHarness) -> None:
     stats = await harness.storage.jar_pool_stats()
     assert stats.count == 0
@@ -1058,6 +1075,28 @@ async def test_open_unknown_backup_is_not_found(harness: StorageHarness) -> None
     community, server = new_scope()
     with pytest.raises(NotFoundError):
         await drain(harness.storage.open_backup(community, server, BackupKey("nope")))
+
+
+async def test_backup_deleted_after_open_is_not_found(
+    harness: StorageHarness,
+) -> None:
+    """A delete landing after ``open_backup`` surfaces as NotFoundError (#2341).
+
+    The stream is opened while the archive exists and read after it is gone —
+    the window an unlucky concurrent delete lands in. The Port's own miss error
+    is what the adapter seam translates, so a backend-native miss
+    (``FileNotFoundError``, a store 404) must never escape as itself.
+    """
+
+    community, server = new_scope()
+    await harness.publish(community, server, {"f": b"x"})
+    key = await harness.storage.create_backup_from_current(community, server)
+
+    stream = harness.storage.open_backup(community, server, key)
+    await harness.storage.delete_backup(community, server, key)
+
+    with pytest.raises(NotFoundError):
+        await drain(stream)
 
 
 async def test_ranged_open_backup_matches_a_slice_of_the_full_stream(

@@ -396,7 +396,12 @@ class JarStore(abc.ABC):
 
     @abc.abstractmethod
     def open_jar(self, key: JarKey) -> ByteStream:
-        """Read a stored JAR. Raises :class:`~.errors.NotFoundError` if absent."""
+        """Read a stored JAR. Raises :class:`~.errors.NotFoundError` if absent.
+
+        The miss surfaces on the stream's FIRST iteration: locating the JAR is
+        part of opening it, so a delete racing the open is the same miss as an
+        unknown key and never a backend-native error (issue #2341).
+        """
 
     @abc.abstractmethod
     async def jar_pool_stats(self) -> JarPoolStats:
@@ -528,7 +533,9 @@ class BackupStore(abc.ABC):
         Streams the archive bytes verbatim (the adapter-internal ``tar.gz`` codec,
         Section 2) with **no** recompression so a download is the exact stored
         bytes; the edge sets the content-type/disposition (issue #281). Raises
-        :class:`~.errors.NotFoundError` for an unknown key.
+        :class:`~.errors.NotFoundError` for an unknown key, on the stream's FIRST
+        iteration: locating the archive is part of opening it, so a delete racing
+        the open is the same miss and never a backend-native error (issue #2341).
 
         ``byte_range`` is an INCLUSIVE ``(first, last)`` byte-position pair,
         already resolved against :meth:`backup_size` by the caller: the stream

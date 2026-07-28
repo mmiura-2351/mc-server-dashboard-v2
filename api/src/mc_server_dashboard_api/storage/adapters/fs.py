@@ -772,10 +772,9 @@ class FsStorage(Storage):
         return await asyncio.to_thread(self._jar_path(key).is_file)
 
     def open_jar(self, key: JarKey) -> ByteStream:
-        path = self._jar_path(key)
-        if not path.is_file():
-            raise NotFoundError(f"jar not found: {key.sha256}")
-        return _file_stream(path)
+        return _file_stream(
+            self._jar_path(key), not_found=f"jar not found: {key.sha256}"
+        )
 
     async def jar_pool_stats(self) -> JarPoolStats:
         return await asyncio.to_thread(self._jar_pool_stats)
@@ -1148,11 +1147,14 @@ class FsStorage(Storage):
     ) -> ByteStream:
         # Stream the stored archive bytes verbatim (no recompression): the file is
         # already a self-contained tar.gz (issue #281). A byte_range seeks to its
-        # first position rather than discarding a prefix (issue #2372).
+        # first position rather than discarding a prefix (issue #2372). The stream
+        # opens the archive on its first iteration and reports the miss itself, so
+        # an unknown key and a delete racing the open take the same NotFoundError
+        # path (issue #2341).
         archive = self._backup_path(community_id, server_id, key)
-        if not archive.is_file():
-            raise NotFoundError(f"backup not found: {key.value}")
-        return _file_stream(archive, byte_range)
+        return _file_stream(
+            archive, byte_range, not_found=f"backup not found: {key.value}"
+        )
 
     async def put_backup(
         self,
@@ -1932,9 +1934,18 @@ def _tar_into_fd(
 
 
 def _file_stream(
-    path: Path, byte_range: tuple[int, int] | None = None
+    path: Path, byte_range: tuple[int, int] | None = None, *, not_found: str
 ) -> AsyncIterator[bytes]:
-    """Yield a stored file's bytes in chunks (JAR egress).
+    """Yield a stored file's bytes in chunks (JAR / backup egress).
+
+    The open IS the existence check (issue #2341): a caller-side ``is_file()``
+    pre-check plus this lazy open left a window in which a concurrent delete made
+    the stream raise a bare ``FileNotFoundError``, which the servers-side adapter
+    seams do not translate (they translate :class:`NotFoundError` only). Opening
+    once and reporting the miss as ``NotFoundError`` (message ``not_found``)
+    removes the window rather than translating inside it. The open stays on the
+    first iteration, so a stream that is opened but never consumed holds no
+    descriptor.
 
     ``byte_range`` is an inclusive ``(first, last)`` pair: the handle seeks to
     ``first`` and yields exactly ``last - first + 1`` bytes, so serving the tail
@@ -1942,7 +1953,10 @@ def _file_stream(
     """
 
     async def _gen() -> AsyncIterator[bytes]:
-        handle = await asyncio.to_thread(open, path, "rb")
+        try:
+            handle = await asyncio.to_thread(open, path, "rb")
+        except FileNotFoundError as exc:
+            raise NotFoundError(not_found) from exc
         try:
             remaining = None
             if byte_range is not None:
