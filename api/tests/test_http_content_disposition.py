@@ -59,3 +59,10 @@ def test_name_that_is_only_a_path_falls_back_to_download() -> None:
     # "../" leaves no last segment to name the payload with.
     cd = content_disposition("../../")
     assert cd == "attachment; filename=\"download\"; filename*=UTF-8''download"
+
+
+def test_blank_last_segment_falls_back_to_download() -> None:
+    # A segment of only whitespace is as unusable as one of only dots, and would
+    # otherwise name the payload " ".
+    cd = content_disposition("foo/ ")
+    assert cd == "attachment; filename=\"download\"; filename*=UTF-8''download"

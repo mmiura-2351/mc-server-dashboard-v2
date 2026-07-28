@@ -45,9 +45,9 @@ def _basename(filename: str) -> str:
     client. RFC 6266 tells recipients to ignore path information, but a sender
     must not emit it in the first place. Both separators are cut, because the
     saving client may be on Windows, where ``\\`` separates too. A name that is
-    only separators and dots leaves nothing usable, so it falls back to
-    ``download``.
+    only separators, dots and whitespace leaves nothing usable, so it falls back
+    to ``download``.
     """
 
-    last = filename.replace("\\", "/").rsplit("/", 1)[-1]
+    last = filename.replace("\\", "/").rsplit("/", 1)[-1].strip()
     return last if last.strip(".") else "download"

@@ -101,8 +101,10 @@ function pluginTabLabelKey(serverType: string): TranslationKey {
  * into a Blob just to attach the Bearer header (#2353): mint a short-lived
  * self-authenticating URL and hand it to the browser, which streams it to disk.
  * The grant lives ~30 s, so minting and clicking are one step — never minted on
- * render or cached. The export response carries no `Content-Disposition`
- * (#2357), so the anchor's `download` attribute is what names the saved file.
+ * render or cached. The export response names itself via `Content-Disposition`
+ * since #2357, so the anchor's `download` attribute is now redundant rather
+ * than load-bearing; it is kept because it names the file without waiting for
+ * the response headers, and same-origin it wins anyway.
  */
 function exportViaGrant(communityId: string, server: ServerResponse) {
   return async () => {
