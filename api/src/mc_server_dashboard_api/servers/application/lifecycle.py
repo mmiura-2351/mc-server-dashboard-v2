@@ -28,8 +28,9 @@ divergence shows up as ``desired_state`` not matching the Worker-reported
 is a reconciler's job, tracked separately; the in-line compensation above covers
 every failure where NO instance can be live on the assigned Worker — not only
 pre-dispatch ones. That includes the pre-dispatch failures where the start command
-demonstrably never reached the Worker (placement, jar provisioning, a failed
-hydrate, or a pre-dispatch ``WorkerUnavailableError``) AND a post-dispatch explicit
+demonstrably never reached the Worker (placement, jar provisioning, a failing
+skip-hydrate generation read, a failed hydrate, or a pre-dispatch
+``WorkerUnavailableError``) AND a post-dispatch explicit
 refusal that definitively did not start (``PORT_CONFLICT``, ``IMAGE_MISSING``,
 ``DRIVER_UNAVAILABLE``, ``INTERNAL``). Only a timeout/lost-response AFTER the start
 was sent (the command MAY have been applied), a post-dispatch ``BUSY`` outcome (the
@@ -293,12 +294,22 @@ class StartServer:
         # Hydrating would unpack the snapshot OVER the Worker's newer scratch,
         # rolling back region data while playerdata survives. Check the held
         # generation exactly as redispatch_start does (#763).
-        held_generation = self.control_plane.held_generation(
-            worker_id=worker_id, server_id=server_id
-        )
-        store_generation = await self.store_generation.current_generation(
-            community_id=community_id, server_id=server_id
-        )
+        # A failure of these reads (a transient Storage error on
+        # ``current_generation``) is a PRE-dispatch failure: no start command has
+        # been sent, so the committed intent compensates back exactly as a failed
+        # hydrate does (issue #2001). Without it the caller sees "start failed"
+        # while desired=running survives and the reconciler starts the server a
+        # grace window later.
+        try:
+            held_generation = self.control_plane.held_generation(
+                worker_id=worker_id, server_id=server_id
+            )
+            store_generation = await self.store_generation.current_generation(
+                community_id=community_id, server_id=server_id
+            )
+        except Exception as exc:
+            await self._compensate(community_id, server_id, worker_id, original=exc)
+            raise
         jar_changed = provisioned.key != previous_key and previous_key is not None
         skip_hydrate = (
             held_generation is not None and held_generation >= store_generation

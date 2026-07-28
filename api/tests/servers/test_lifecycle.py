@@ -720,6 +720,46 @@ async def test_start_hydrates_when_worker_holds_nothing() -> None:
     assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
 
 
+async def test_start_generation_read_failure_compensates_without_dispatching() -> None:
+    # The post-commit generation-gate read (#1007) is a PRE-dispatch step: a
+    # transient Storage failure there sent no start command, so the committed
+    # intent must compensate back to desired=stopped and the original error must
+    # reach the caller (issue #2001). Otherwise the caller sees "start failed"
+    # while the reconciler later starts the server from the surviving intent.
+    community, server_id, worker = _ids()
+
+    class _FailingStoreGeneration(FakeStoreGenerationReader):
+        async def current_generation(
+            self, *, community_id: CommunityId, server_id: ServerId
+        ) -> int:
+            raise OSError("storage hiccup")
+
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = FakeControlPlane(place_to=WorkerId(worker))
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=_FailingStoreGeneration(),
+        file_store=FakeFileStore(seed_eula=True),
+    )
+
+    with pytest.raises(OSError, match="storage hiccup"):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    # Nothing was ever sent to the Worker, and the intent is reverted.
+    assert cp.dispatched == []
+    reverted = uow.servers.by_id[ServerId(server_id)]
+    assert reverted.desired_state is DesiredState.STOPPED
+    assert reverted.assigned_worker_id is None
+    assert cp.incremented == [WorkerId(worker)]
+    assert cp.decremented == [WorkerId(worker)]
+
+
 async def test_start_hydrate_failure_compensates_without_dispatching_start() -> None:
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
