@@ -46,6 +46,7 @@ from mc_server_dashboard_api.dependencies import (
     require_permission,
     require_server_update_in_any_community,
 )
+from mc_server_dashboard_api.http_content_disposition import content_disposition
 from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.http_streaming import counted
@@ -272,7 +273,7 @@ async def download_resource_pack(
         counted(stream, size_bytes),
         media_type=_PACK_MEDIA_TYPE,
         headers={
-            "Content-Disposition": _content_disposition(pack.filename),
+            "Content-Disposition": content_disposition(pack.filename),
             "Content-Length": str(size_bytes),
         },
     )
@@ -313,7 +314,7 @@ async def public_download_resource_pack(
         counted(stream, size_bytes),
         media_type=_PACK_MEDIA_TYPE,
         headers={
-            "Content-Disposition": _content_disposition(pack.filename),
+            "Content-Disposition": content_disposition(pack.filename),
             "Content-Length": str(size_bytes),
         },
     )
@@ -333,16 +334,6 @@ async def _read_capped_upload(file: UploadFile) -> bytes:
             raise _too_large()
         chunks.append(chunk)
     return b"".join(chunks)
-
-
-def _content_disposition(filename: str) -> str:
-    """Build an attachment Content-Disposition header (RFC 6266 / RFC 5987)."""
-
-    ascii_fallback = "".join(
-        c if (0x20 <= ord(c) < 0x7F and c not in '"\\') else "_" for c in filename
-    )
-    encoded = quote(filename, safe="")
-    return f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{encoded}"
 
 
 def _not_found() -> ProblemException:

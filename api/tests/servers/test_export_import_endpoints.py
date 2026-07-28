@@ -61,6 +61,7 @@ from mc_server_dashboard_api.identity.application.authenticate_request import (
 )
 from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.servers.application.export_import import (
+    ServerExport,
     export_download_grant_resource,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
@@ -112,12 +113,17 @@ class _FakeChecker(PermissionChecker):
 
 class _FakeExport:
     def __init__(
-        self, *, chunks: list[bytes] | None = None, error: Exception | None = None
+        self,
+        *,
+        chunks: list[bytes] | None = None,
+        error: Exception | None = None,
+        server_name: str = "survival",
     ) -> None:
         self._chunks = chunks or [b"zip-bytes"]
         self._error = error
+        self._server_name = server_name
 
-    async def __call__(self, **kwargs: object) -> AsyncIterator[bytes]:
+    async def __call__(self, **kwargs: object) -> ServerExport:
         if self._error is not None:
             raise self._error
 
@@ -125,7 +131,7 @@ class _FakeExport:
             for chunk in self._chunks:
                 yield chunk
 
-        return _gen()
+        return ServerExport(server_name=self._server_name, stream=_gen())
 
 
 class _FakeResolveExport:
@@ -296,6 +302,44 @@ def test_export_streams_zip_and_audits() -> None:
     assert [e.operation for e in recorder.events] == [ops.SERVER_EXPORT]
     assert recorder.events[0].outcome is Outcome.SUCCESS
     assert recorder.events[0].target_type == ops.TARGET_SERVER
+
+
+def test_export_names_the_zip_after_the_server() -> None:
+    # A client that navigates the URL rather than being told the filename (a pasted
+    # grant link, a CLI fetch) would otherwise save the last path segment, "export".
+    app = _app(member=True, allow=True, export=_FakeExport(server_name="survival"))
+    client = next(_client(app))
+    resp = client.get(_export_url(uuid.uuid4(), uuid.uuid4()), headers=_bearer())
+    assert resp.status_code == 200
+    assert (
+        resp.headers["content-disposition"]
+        == "attachment; filename=\"survival.zip\"; filename*=UTF-8''survival.zip"
+    )
+
+
+def test_export_non_ascii_server_name_uses_the_rfc5987_form() -> None:
+    # A server name is free-form, so it can be non-ASCII; the raw name would 500 on
+    # the latin-1 header encode, so it rides percent-encoded in filename*.
+    app = _app(member=True, allow=True, export=_FakeExport(server_name="サバイバル"))
+    client = next(_client(app))
+    resp = client.get(_export_url(uuid.uuid4(), uuid.uuid4()), headers=_bearer())
+    assert resp.status_code == 200
+    cd = resp.headers["content-disposition"]
+    assert 'filename="_____.zip"' in cd  # 5 non-ASCII kana -> 5 underscores
+    assert "filename*=UTF-8''%E3%82%B5%E3%83%90%E3%82%A4%E3%83%90%E3%83%AB.zip" in cd
+
+
+def test_export_server_name_with_path_separators_cannot_traverse() -> None:
+    # Only whitespace is trimmed off a server name, so it can hold separators; the
+    # saved file must not escape the client's download directory.
+    app = _app(member=True, allow=True, export=_FakeExport(server_name="../../etc/pw"))
+    client = next(_client(app))
+    resp = client.get(_export_url(uuid.uuid4(), uuid.uuid4()), headers=_bearer())
+    assert resp.status_code == 200
+    assert (
+        resp.headers["content-disposition"]
+        == "attachment; filename=\"pw.zip\"; filename*=UTF-8''pw.zip"
+    )
 
 
 def test_export_running_is_409_and_audits_denied() -> None:

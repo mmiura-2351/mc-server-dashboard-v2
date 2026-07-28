@@ -48,6 +48,7 @@ from mc_server_dashboard_api.dependencies import (
     require_permission,
     require_platform_admin,
 )
+from mc_server_dashboard_api.http_content_disposition import content_disposition
 from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.http_range import (
@@ -680,7 +681,7 @@ async def download_backup(
     # disagrees corrupts or hangs the response over HTTP/2.
     declared = size_bytes if served is None else served.length
     headers = {
-        "Content-Disposition": _content_disposition(f"{backup_id}.tar.gz"),
+        "Content-Disposition": content_disposition(f"{backup_id}.tar.gz"),
         "Content-Length": str(declared),
         "Cache-Control": "no-store",
         "Accept-Ranges": "bytes",
@@ -882,23 +883,6 @@ async def _read_capped_upload(file: UploadFile) -> bytes:
             raise _too_large()
         chunks.append(chunk)
     return b"".join(chunks)
-
-
-def _content_disposition(filename: str) -> str:
-    """Build an attachment Content-Disposition header (RFC 6266 / RFC 5987).
-
-    Emits an ASCII-only ``filename`` fallback plus an RFC 5987 ``filename*`` with
-    the UTF-8 percent-encoded original, the #262 hardening (a crafted name cannot
-    inject extra header params or 500 on a non-latin-1 char). Backup names are
-    UUIDs, so this is straightforward here, but the helper keeps the same posture
-    as the files download edge.
-    """
-
-    ascii_fallback = "".join(
-        c if (0x20 <= ord(c) < 0x7F and c not in '"\\') else "_" for c in filename
-    )
-    encoded = quote(filename, safe="")
-    return f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{encoded}"
 
 
 def _archive_etag(backup_id: uuid.UUID, size_bytes: int) -> str:
