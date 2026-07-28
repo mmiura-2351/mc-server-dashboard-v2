@@ -139,6 +139,12 @@ _DIR_MARKER = ".dir"
 # so a live ``put_backup``/``upload_multipart`` is never aborted out from under
 # itself. Mirrors the fs adapter's spool-sweep age guard.
 _MULTIPART_SWEEP_MIN_AGE_S = 3600
+# Pause before the backup readability probe re-reads a body that ended early
+# (issue #2371), so a momentary fault has a chance to clear: a blip then returns
+# healthy or stops somewhere else, and only genuinely persistent damage still looks
+# reproducible. Short enough to be irrelevant next to the full read it precedes, and
+# only ever paid on the failure path.
+_REPROBE_BACKOFF_S = 1.0
 
 _LOG = logging.getLogger(__name__)
 
@@ -255,15 +261,16 @@ class _ArchiveProbe:
     """The outcome of one end-to-end read of a stored backup archive (issue #2371).
 
     Three outcomes, kept apart because they mean different things: both fields
-    ``None`` is a sound archive; ``defect`` names a deterministic readability
-    defect (a body short of its declared length, a gzip stream that never
-    terminates or whose trailer no longer matches); ``aborted_at`` is the byte
-    offset at which the store tore the body down, which on its own says nothing —
-    only whether it reproduces does.
+    ``None`` is a sound archive; ``defect`` is a verdict decided over the full
+    declared byte count (a gzip stream whose trailer no longer matches, a body
+    longer than declared) and needs no second opinion; ``ended_at`` is the byte
+    count the body stopped at — whether by a transport teardown or a clean early
+    EOF — which on its own says nothing, because only whether it reproduces
+    distinguishes damage from an outage.
     """
 
     defect: str | None = None
-    aborted_at: int | None = None
+    ended_at: int | None = None
 
 
 class ObjectStorage(Storage):
@@ -1321,9 +1328,9 @@ class ObjectStorage(Storage):
             if declared is None:
                 raise NotFoundError(f"backup not found: {key.value}")
             probe = await self._probe_archive(client, backup_key, declared)
-            if probe.aborted_at is not None:
-                probe = await self._reprobe_after_teardown(
-                    client, backup_key, declared, probe.aborted_at
+            if probe.ended_at is not None:
+                probe = await self._reprobe_short_body(
+                    client, backup_key, declared, probe.ended_at
                 )
             if probe.defect is not None:
                 raise ArchiveUnreadableError(
@@ -1349,48 +1356,73 @@ class ObjectStorage(Storage):
             async for chunk in await client.get_object(backup_key):
                 read += len(chunk)
                 gzip_probe.feed(chunk)
-            if read != declared:
+            if read < declared:
+                # A body that simply STOPPED early, with no transport error — some
+                # store/proxy combination can end the response cleanly. This is the
+                # same observation as a teardown ("the body ended at ``read``") and
+                # is just as unable, on one attempt, to tell damage from a store
+                # having a bad minute. So it takes the same path: report where the
+                # body ended and let the re-read decide. Treating it as a verdict
+                # here would be an unexplained asymmetry with the teardown branch.
+                return _ArchiveProbe(ended_at=read)
+            if read > declared:
+                # More bytes than HEAD promised is not "ended early" and no re-read
+                # can make it consistent: the store is contradicting itself.
                 raise ArchiveUnreadableError(
-                    f"the store delivered {read} of the {declared} declared bytes"
+                    f"the store delivered {read} bytes, past the {declared} declared"
                 )
             gzip_probe.finish()
         except ObjectStoreUnavailableError:
-            return _ArchiveProbe(aborted_at=read)
+            return _ArchiveProbe(ended_at=read)
         except ArchiveUnreadableError as exc:
+            # A content verdict over the FULL declared byte count (bad gzip header,
+            # mismatched trailer). Re-reading identical bytes cannot change it, so
+            # unlike a short body this is decided on the first attempt.
             return _ArchiveProbe(defect=str(exc))
         return _ArchiveProbe()
 
-    async def _reprobe_after_teardown(
+    async def _reprobe_short_body(
         self, client: S3Client, backup_key: str, declared: int, first_end: int
     ) -> _ArchiveProbe:
-        """Classify a body the store tore down mid-stream (issue #2371).
+        """Classify a body that ended short of its declared length (issue #2371).
 
-        This is the delicate distinction. A single torn-down read cannot tell
-        "this object's bytes are damaged" from "the store is having a bad minute" —
-        both surface as a connection abort partway through. The reported defect is
-        *deterministic*: the transfer runs at full speed to one fixed offset and
-        aborts there on every attempt, days apart. An outage is not.
+        This is the delicate distinction. A single short read cannot tell "this
+        object's bytes are damaged" from "the store is having a bad minute" — both
+        end the body early. The reported defect is *deterministic*: the transfer
+        runs at full speed to one fixed point and stops there on every attempt, days
+        apart. An outage is not.
 
-        So the read is repeated, and only a teardown that reproduces at the SAME
-        non-zero offset is called damage. Anything else — a different offset, no
-        byte ever delivered (the store refusing outright), or a complete read the
-        second time — stays an availability failure, because quarantining on it
-        would condemn every backup in the deployment over one bad minute. The cost
-        of the extra read is paid only on the failure path.
+        So the read is repeated, and only a body that reproducibly ends at the SAME
+        non-zero point is called damage. Anything else — a different point, no byte
+        ever delivered (the store refusing outright), or a complete read the second
+        time — stays an availability failure, because quarantining on it would
+        condemn every backup in the deployment over one bad minute. The extra read
+        is paid only on the failure path.
+
+        **Granularity.** ``_iter_body`` reads in 8 MiB chunks and a failed ``read()``
+        discards the partial chunk, so the byte count compared here moves in chunk
+        steps: this reproduces "the same 8 MiB boundary", not "the same byte". That
+        is ample to separate a fixed cut point from an outage's scattered ones,
+        which is all the comparison is asked to do — but it is not the byte-exact
+        guarantee the raw numbers suggest.
         """
 
+        # Let a momentary fault clear before re-reading, so a blip is more likely to
+        # come back healthy (or at a different point) than to look reproducible. This
+        # biases the ambiguous case toward "unavailable", which is the safe verdict.
+        await asyncio.sleep(_REPROBE_BACKOFF_S)
         second = await self._probe_archive(client, backup_key, declared)
-        if second.aborted_at == first_end and first_end > 0:
+        if second.ended_at == first_end and first_end > 0:
             return _ArchiveProbe(
                 defect=(
                     f"the store reproducibly ends the body at {first_end} of the "
                     f"{declared} declared bytes"
                 )
             )
-        if second.aborted_at is not None:
+        if second.ended_at is not None:
             raise ObjectStoreUnavailableError(
-                f"object store tore down the read of {backup_key} at {first_end} "
-                f"then {second.aborted_at} bytes"
+                f"object store could not serve the body of {backup_key}: it ended at "
+                f"{first_end} then {second.ended_at} of {declared} declared bytes"
             )
         return second
 

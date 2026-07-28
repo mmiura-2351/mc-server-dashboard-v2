@@ -1004,23 +1004,50 @@ translates to `BackupUnreadableError` and the sweep records as `QUARANTINED`,
 counted and logged apart from a structural quarantine so an operator can tell "the
 bytes are gone" from "the world is corrupt".
 
+A false *unhealthy* is as harmful as the false *healthy* being fixed — it
+quarantines a restorable backup and emits a spurious audit entry — so the probe's
+leniency is pinned to what restore accepts. Restore reads the archive with
+`tarfile.open(mode="r:gz")`, which stops at the tar end-of-archive marker inside
+the first gzip member. Anything after a **complete** member therefore cannot make
+the archive unreadable: a concatenated second member (legal gzip, and what the
+shell tools produce) is walked as well, and anything that does not carry the gzip
+magic is trailing padding that ends the walk. The one place the probe is
+deliberately **stricter** than restore is the trailer: because tarfile stops early
+it never verifies the CRC32/ISIZE at all and will open an archive whose trailer has
+rotted, but a stored object whose bytes have changed is damaged regardless — the
+next flipped bit lands in the payload, which restore *does* reject.
+
 Reading every archive is deliberate cost: the sweep is operator-invoked only
 (`integrity_sweep_cli`, never run on boot), so there is no sampling, cap, or
 config knob.
 
-**Damage vs. outage.** A body torn down mid-stream looks identical whether the
-object's bytes are damaged or the store is merely having a bad minute — and
-quarantining on the latter would condemn every backup in the deployment over one
-outage. The observed defect is *deterministic*: the transfer aborts at one fixed
-offset on every attempt. So the probe re-reads after a teardown, and calls the
-archive unreadable only when the body reproducibly ends at the **same non-zero
-offset**. A different offset, no byte delivered at all (the store refusing
-outright), or a complete read the second time all stay
+**Damage vs. outage.** A body that ends early looks identical whether the object's
+bytes are damaged or the store is merely having a bad minute — and quarantining on
+the latter would condemn every backup in the deployment over one outage. The
+observed defect is *deterministic*: the transfer stops at one fixed point on every
+attempt. So the probe re-reads (after a short backoff, so a momentary fault has a
+chance to clear) and calls the archive unreadable only when the body reproducibly
+ends at the **same non-zero point**. A different point, no byte delivered at all
+(the store refusing outright), or a complete read the second time all stay
 `ObjectStoreUnavailableError` → `BackupStorageUnavailableError`, which the sweep
-does not catch: the pass stops rather than misclassifying. The extra read is paid
-only on the failure path. Supporting this, `_iter_body` translates a botocore
-transport error raised mid-body to `ObjectStoreUnavailableError`, so the teardown
-is a typed storage outcome rather than a raw botocore type crossing the Port.
+does not catch: the pass stops, logging which backup it died on, and the CLI exits
+non-zero with an operator-facing message rather than a traceback. The extra read is
+paid only on the failure path. A clean early EOF takes the same re-read path as a
+transport teardown — it is the same observation and equally unable to tell damage
+from an outage on one attempt. The comparison is at the 8 MiB read-chunk
+granularity, not byte-exact, which is ample to separate a fixed cut point from an
+outage's scattered ones.
+
+Supporting this, `_iter_body` translates **any** exception raised while reading a
+response body to `ObjectStoreUnavailableError`, so a teardown is a typed storage
+outcome rather than a raw third-party type crossing the Port. The breadth is
+deliberate: the shapes a short body produces are spread across three libraries and
+none is in the upload-failure tuple — aiohttp's `ClientPayloadError` (what the
+reported defect raises) is a *sibling* of `ClientConnectionError`, which is all
+aiobotocore's `StreamingBody.read` maps, and botocore's `IncompleteReadError` is a
+bare `BotoCoreError`. A name-based enumeration there is a standing bug, because a
+miss does not degrade the probe, it disables it. `BaseException` is not caught, so
+`GeneratorExit` and `CancelledError` still pass through.
 
 ### 7.4 Why backend switching stays a configuration change
 

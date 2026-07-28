@@ -41,9 +41,8 @@ from mc_server_dashboard_api.storage.domain.errors import (
 # multipart parts while keeping per-call memory bounded.
 _PART = 8 * 1024 * 1024
 
-# Transport/backend failures the S3 client raises during an operation that mean the
-# object store could not complete it (issue #2270; #2371 extended this to the body
-# read of :func:`_iter_body`, so the tuple is no longer upload-only): a service
+# Transport/backend failures the S3 client raises during an upload that mean the
+# object store could not complete the operation (issue #2270): a service
 # ``ClientError`` (e.g. SeaweedFS's HTTP 500 ``InternalError`` on ``UploadPart``, the
 # 2026-07-23 incident) or a connection/timeout transport error. ``ConnectionError``
 # is botocore's own base for ``EndpointConnectionError`` / ``ConnectTimeoutError``;
@@ -52,7 +51,7 @@ _PART = 8 * 1024 * 1024
 # raw ``botocore`` type crosses the Storage Port. A ``botocore`` *usage* error
 # (bad params, missing credentials) is deliberately NOT included — that is a bug or
 # misconfiguration to surface loudly, not a backend-availability condition.
-_TRANSPORT_FAILURE_ERRORS = (
+_UPLOAD_FAILURE_ERRORS = (
     ClientError,
     botocore.exceptions.ConnectionError,
     botocore.exceptions.HTTPClientError,
@@ -84,7 +83,7 @@ class _Aioboto3S3Client:
         # mirroring upload_multipart (#2270), so no raw botocore type crosses the Port.
         try:
             await self._client.put_object(Bucket=self._bucket, Key=key, Body=body)
-        except _TRANSPORT_FAILURE_ERRORS as exc:
+        except _UPLOAD_FAILURE_ERRORS as exc:
             raise ObjectStoreUnavailableError(
                 f"object store put failed for {key}"
             ) from exc
@@ -142,7 +141,7 @@ class _Aioboto3S3Client:
                 with suppress(Exception):
                     await self.abort_multipart_upload(key, upload_id)
                 raise
-        except _TRANSPORT_FAILURE_ERRORS as exc:
+        except _UPLOAD_FAILURE_ERRORS as exc:
             raise ObjectStoreUnavailableError(
                 f"object store upload failed for {key}"
             ) from exc
@@ -188,7 +187,7 @@ class _Aioboto3S3Client:
         # mirroring upload_multipart (#2270), so no raw botocore type crosses the Port.
         try:
             await self._client.delete_object(Bucket=self._bucket, Key=key)
-        except _TRANSPORT_FAILURE_ERRORS as exc:
+        except _UPLOAD_FAILURE_ERRORS as exc:
             raise ObjectStoreUnavailableError(
                 f"object store delete failed for {key}"
             ) from exc
@@ -346,19 +345,39 @@ async def _iter_body(body: Any) -> AsyncIterator[bytes]:
     # aiobotocore's StreamingBody exposes an async ``read(n)``; read bounded chunks
     # so a large object never lands in memory whole.
     #
-    # A body torn down PARTWAY through raises a botocore transport error from
-    # ``read`` (the ``HTTP/2 INTERNAL_ERROR`` after a stall behind issue #2371).
-    # Translate it here, like the write paths above, so no raw botocore type crosses
-    # the Storage Port and a caller can tell a transport teardown apart from the
-    # delivered bytes themselves being bad — which is what lets the backup
-    # readability probe classify damage without condemning backups during an outage.
+    # A body torn down PARTWAY through must reach the caller as a typed storage
+    # outcome (issue #2371) — that is what lets the backup readability probe tell a
+    # store outage from damaged bytes instead of crashing the sweep on a raw
+    # third-party type.
+    #
+    # This catches broadly ON PURPOSE. Enumerating the failure types was tried and is
+    # wrong: the shapes a short body actually produces are spread across three
+    # libraries and none of them is in the upload tuple above.
+    #
+    #   * ``aiohttp.ClientPayloadError`` — what the reported defect raises. aiohttp's
+    #     parser hits ``ContentLengthError`` at ``feed_eof`` and surfaces this. It is
+    #     a SIBLING of ``ClientConnectionError`` under ``aiohttp.ClientError``, and
+    #     aiobotocore's ``StreamingBody.read`` maps only ``asyncio.TimeoutError`` and
+    #     ``ClientConnectionError``, so it escapes aiobotocore entirely.
+    #   * ``botocore.exceptions.IncompleteReadError`` — aiobotocore's own short-body
+    #     signal from ``_verify_content_length``; a bare ``BotoCoreError``, not an
+    #     ``HTTPClientError``.
+    #   * ``botocore.exceptions.ResponseStreamingError`` / ``ReadTimeoutError`` — the
+    #     dropped-connection and stalled-read shapes aiobotocore does map.
+    #
+    # That taxonomy spans two vendored dependencies and has already drifted once, so
+    # a name-based tuple is a standing bug: a miss here does not degrade the probe,
+    # it disables it. Everything ``read`` raises means the same thing to us — the
+    # store did not deliver the body — so it is translated. ``BaseException`` is
+    # deliberately NOT caught: ``GeneratorExit`` (a consumer closing the stream early)
+    # and ``CancelledError`` must pass through untouched.
     try:
         while True:
             chunk = await body.read(_PART)
             if not chunk:
                 return
             yield chunk
-    except _TRANSPORT_FAILURE_ERRORS as exc:
+    except Exception as exc:
         raise ObjectStoreUnavailableError(f"object store read failed: {exc}") from exc
     finally:
         body.close()

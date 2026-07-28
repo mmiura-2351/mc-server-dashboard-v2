@@ -9,19 +9,24 @@ the production code translates.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 from collections.abc import AsyncIterator
 
+import aiohttp
 import pytest
 from botocore.exceptions import (
     ClientError,
     ConnectTimeoutError,
     EndpointConnectionError,
+    IncompleteReadError,
     ReadTimeoutError,
+    ResponseStreamingError,
 )
 
 from mc_server_dashboard_api.storage.adapters.object_client import (
     _Aioboto3S3Client,
+    _iter_body,
     make_s3_client_factory,
 )
 from mc_server_dashboard_api.storage.domain.errors import (
@@ -491,7 +496,7 @@ async def test_copy_object_translates_not_found(code: str) -> None:
 # a botocore transport/backend failure must not cross the boundary as a raw type, so
 # it is translated to ObjectStoreUnavailableError with the original as the ``__cause__``
 # -- mirroring the upload_multipart translation (#2270). A botocore *usage* error is
-# deliberately NOT caught (it is excluded from ``_TRANSPORT_FAILURE_ERRORS``).
+# deliberately NOT caught (it is excluded from ``_UPLOAD_FAILURE_ERRORS``).
 
 
 class _RaisingWriteClient:
@@ -599,3 +604,119 @@ async def test_factory_builds_client_with_settings_sourced_timeouts_and_retries(
         assert config.read_timeout == 42.0
         assert config.retries["mode"] == "standard"
         assert config.retries["total_max_attempts"] == 3
+
+
+# --- Body-read translation (issue #2371) ------------------------------------
+#
+# The backup readability probe can only tell a store outage from damaged bytes if a
+# body torn down mid-stream arrives as a typed storage outcome. These tests pin that
+# against the shapes the REAL stack raises, verified end to end by the socket test
+# at the bottom: an enumeration of botocore's ``ClientError`` / ``ConnectionError`` /
+# ``HTTPClientError`` catches NONE of the short-body shapes, because aiohttp's
+# ``ClientPayloadError`` is a sibling of ``ClientConnectionError`` (so aiobotocore's
+# ``StreamingBody.read`` never maps it) and botocore's ``IncompleteReadError`` is a
+# bare ``BotoCoreError``.
+
+
+class _RaisingBody:
+    """An aiobotocore ``StreamingBody`` double whose ``read`` fails after one chunk."""
+
+    def __init__(self, error: BaseException) -> None:
+        self._error = error
+        self._served = False
+        self.closed = False
+
+    async def read(self, _amt: int) -> bytes:
+        if not self._served:
+            self._served = True
+            return b"payload"
+        raise self._error
+
+    def close(self) -> None:
+        self.closed = True
+
+
+async def _drain_body(body: _RaisingBody) -> int:
+    return sum([len(chunk) async for chunk in _iter_body(body)])
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        # What the real stack raises when a body ends short of its declared
+        # Content-Length: aiohttp's parser raises ContentLengthError at feed_eof and
+        # surfaces ClientPayloadError, which aiobotocore does not map.
+        aiohttp.ClientPayloadError("Response payload is not completed"),
+        # aiobotocore's own short-body signal, raised by _verify_content_length when
+        # the stream reaches EOF having read fewer bytes than Content-Length declared.
+        IncompleteReadError(actual_bytes=40000, expected_bytes=100000000),
+        # The one shape aiobotocore DOES map (a dropped connection); kept so the
+        # already-covered path cannot regress while the new ones are added.
+        ResponseStreamingError(error="connection reset"),
+    ],
+    ids=["aiohttp-payload", "botocore-incomplete-read", "response-streaming"],
+)
+async def test_body_read_failure_is_translated(error: BaseException) -> None:
+    body = _RaisingBody(error)
+
+    with pytest.raises(ObjectStoreUnavailableError) as excinfo:
+        await _drain_body(body)
+
+    assert excinfo.value.__cause__ is error
+    assert body.closed  # the body is still released on the failure path.
+
+
+async def test_short_body_over_a_real_socket_is_translated() -> None:
+    """End-to-end through the REAL aioboto3/aiobotocore/aiohttp stack: a server that
+    declares a large ``Content-Length`` and tears the connection down partway through
+    the body — the reported deployment signature (issue #2371).
+
+    This is the test that would have caught the round-1 defect, where the translation
+    enumerated botocore types and the raw ``aiohttp.ClientPayloadError`` escaped. It
+    drives the actual client rather than a double, so it stays honest if aiobotocore's
+    or aiohttp's exception taxonomy shifts under us.
+    """
+
+    declared = 100_000_000
+    delivered = 40_000
+
+    async def _handler(
+        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        while True:  # drain the request headers
+            line = await reader.readline()
+            if line in (b"\r\n", b"", b"\n"):
+                break
+        writer.write(
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Type: application/octet-stream\r\n"
+            + f"Content-Length: {declared}\r\n".encode()
+            + b"\r\n"
+        )
+        writer.write(b"\x1f\x8b" + b"A" * (delivered - 2))
+        await writer.drain()
+        writer.close()  # tear the body down well short of Content-Length
+
+    server = await asyncio.start_server(_handler, "127.0.0.1", 0)
+    try:
+        port = server.sockets[0].getsockname()[1]
+        factory = make_s3_client_factory(
+            endpoint=f"http://127.0.0.1:{port}",
+            bucket="bucket",
+            access_key="ak",
+            secret_key="sk",
+            connect_timeout=5.0,
+            read_timeout=30.0,
+            retry_max_attempts=1,
+        )
+        read = 0
+        with pytest.raises(ObjectStoreUnavailableError):
+            async with factory() as client:
+                async for chunk in await client.get_object("communities/k/x.tar.gz"):
+                    read += len(chunk)
+        # The bytes the store DID deliver reached the caller before the teardown —
+        # that partial count is what the readability probe classifies on.
+        assert read == delivered
+    finally:
+        server.close()
+        await server.wait_closed()

@@ -11,6 +11,7 @@ the same classification (idempotent).
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import uuid
 
 import pytest
@@ -261,6 +262,25 @@ async def test_store_outage_during_the_probe_never_quarantines() -> None:
 
     assert uow.backups.by_id[backup.id].health is BackupHealth.HEALTHY
     assert [e for e in audit.events if e.operation == BACKUP_QUARANTINE] == []
+
+
+async def test_store_outage_names_the_backup_the_pass_died_on(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The operator has to be able to resume from a known point, so the abort logs
+    WHICH backup it stopped at rather than only that it stopped (issue #2371)."""
+
+    sid = ServerId.new()
+    backup = _backup(sid, "fine", health=BackupHealth.UNKNOWN)
+    sweep, _uow, store, _audit = _wire(servers=[_server(sid)], backups=[backup])
+    store.unavailable_refs.add("fine")
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(BackupStorageUnavailableError):
+            await sweep()
+
+    assert str(backup.id.value) in caplog.text
+    assert str(sid.value) in caplog.text
 
 
 async def test_dangling_row_does_not_abort_remaining_backups() -> None:

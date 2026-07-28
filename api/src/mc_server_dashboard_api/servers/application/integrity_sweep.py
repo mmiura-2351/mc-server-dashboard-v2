@@ -45,6 +45,7 @@ from mc_server_dashboard_api.servers.domain.backup_store import BackupArchiveSto
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupNotFoundError,
+    BackupStorageUnavailableError,
     BackupUnreadableError,
 )
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
@@ -107,8 +108,12 @@ class IntegritySweep:
         snapshots_flagged = 0
         for server in servers:
             _LOG.info("integrity sweep: scanning server %s", server.id.value)
-            counts = await self._sweep_backups(server, actor_id)
-            healthy, quarantined, unreadable, dangling = counts
+            (
+                healthy,
+                quarantined,
+                unreadable,
+                dangling,
+            ) = await self._sweep_backups(server, actor_id)
             backups_healthy += healthy
             backups_quarantined += quarantined
             backups_unreadable += unreadable
@@ -168,39 +173,36 @@ class IntegritySweep:
                     "quarantining",
                     backup.id.value,
                 )
-                async with self.uow:
-                    await self.uow.backups.update_health(
-                        backup.id, BackupHealth.QUARANTINED
-                    )
-                    await self.uow.commit()
+                await self._quarantine(server, backup, actor_id)
                 dangling += 1
-                await self._audit_backup_quarantine(
-                    server.community_id, backup, actor_id
-                )
                 continue
             except BackupUnreadableError:
                 # The archive exists but the store cannot produce its bytes (#2371):
                 # unrestorable, so it is quarantined like a corrupt one — with its
                 # own log line, because "the bytes are gone" and "the world is
-                # corrupt" call for different operator responses. A backend OUTAGE
-                # is deliberately NOT caught here: BackupStorageUnavailableError
-                # propagates and stops the pass, so a sweep run mid-outage cannot
-                # condemn every backup in the deployment.
+                # corrupt" call for different operator responses.
                 _LOG.warning(
                     "integrity sweep: backup %s archive could not be read back "
                     "(the store cannot produce its bytes); quarantining",
                     backup.id.value,
                 )
-                async with self.uow:
-                    await self.uow.backups.update_health(
-                        backup.id, BackupHealth.QUARANTINED
-                    )
-                    await self.uow.commit()
+                await self._quarantine(server, backup, actor_id)
                 unreadable += 1
-                await self._audit_backup_quarantine(
-                    server.community_id, backup, actor_id
-                )
                 continue
+            except BackupStorageUnavailableError:
+                # An outage is no verdict about THIS archive (#2371), and re-running
+                # the pass against a down store would quarantine nothing correctly.
+                # Stop instead of misclassifying, naming the row the pass died on so
+                # the operator can resume from a known point; the CLI turns this into
+                # a clean failure rather than a traceback.
+                _LOG.error(
+                    "integrity sweep: aborting at backup %s on server %s — the "
+                    "object store could not serve the archive read. No verdict was "
+                    "written for it; re-run the sweep once the store is healthy.",
+                    backup.id.value,
+                    server.id.value,
+                )
+                raise
             health = BackupHealth.QUARANTINED if corrupt_count else BackupHealth.HEALTHY
             _LOG.info(
                 "integrity sweep: backup %s -> %s (%d corrupt region files)",
@@ -208,17 +210,31 @@ class IntegritySweep:
                 health.value,
                 corrupt_count,
             )
-            async with self.uow:
-                await self.uow.backups.update_health(backup.id, health)
-                await self.uow.commit()
             if health is BackupHealth.QUARANTINED:
+                await self._quarantine(server, backup, actor_id)
                 quarantined += 1
-                await self._audit_backup_quarantine(
-                    server.community_id, backup, actor_id
-                )
             else:
+                async with self.uow:
+                    await self.uow.backups.update_health(backup.id, health)
+                    await self.uow.commit()
                 healthy += 1
         return healthy, quarantined, unreadable, dangling
+
+    async def _quarantine(
+        self, server: Server, backup: Backup, actor_id: uuid.UUID | None
+    ) -> None:
+        """Persist QUARANTINED on a backup row and audit it.
+
+        Every reason a backup is condemned — a corrupt world, a missing archive, an
+        archive the store cannot produce — records the same verdict and the same
+        audit entry; only the count and the log line differ. Sharing the write keeps
+        the three from drifting apart.
+        """
+
+        async with self.uow:
+            await self.uow.backups.update_health(backup.id, BackupHealth.QUARANTINED)
+            await self.uow.commit()
+        await self._audit_backup_quarantine(server.community_id, backup, actor_id)
 
     async def _sweep_snapshot(
         self, server: Server, actor_id: uuid.UUID | None

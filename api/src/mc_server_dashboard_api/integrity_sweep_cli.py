@@ -45,6 +45,9 @@ from mc_server_dashboard_api.servers.application.integrity_sweep import (
     IntegritySweep,
     SweepSummary,
 )
+from mc_server_dashboard_api.servers.domain.errors import (
+    BackupStorageUnavailableError,
+)
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 
 _LOG = logging.getLogger(__name__)
@@ -93,7 +96,21 @@ def main(argv: list[str]) -> int:
             sys.stderr.write(f"invalid --server uuid: {args.server!r}\n")
             return 2
 
-    summary = asyncio.run(run(server_id=server_id))
+    try:
+        summary = asyncio.run(run(server_id=server_id))
+    except BackupStorageUnavailableError as exc:
+        # The store could not serve an archive read (issue #2371). The pass stops
+        # rather than misclassify — an outage is no verdict about a backup — so this
+        # is an expected operator-facing outcome, not a crash. The aborting backup is
+        # named in the preceding ERROR log line; the ref is repeated here so the
+        # message stands alone.
+        sys.stderr.write(
+            f"integrity sweep aborted: the object store could not serve the archive "
+            f"read for backup ref {exc}. No health verdict was written for it, and "
+            f"verdicts already written this run are committed. Re-run the sweep once "
+            f"the store is healthy.\n"
+        )
+        return 1
     print(
         f"servers scanned: {summary.servers_scanned}\n"
         f"backups healthy: {summary.backups_healthy}\n"

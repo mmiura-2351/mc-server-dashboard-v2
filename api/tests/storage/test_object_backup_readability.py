@@ -19,10 +19,13 @@ backup in the deployment.
 
 from __future__ import annotations
 
+import io
+import tarfile
 from collections.abc import AsyncIterator
 
 import pytest
 
+from mc_server_dashboard_api.storage.adapters import object_store
 from mc_server_dashboard_api.storage.adapters.object_store import ObjectStorage
 from mc_server_dashboard_api.storage.domain.errors import (
     ArchiveUnreadableError,
@@ -36,6 +39,14 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 )
 from tests.storage.fake_s3 import FakeS3Store, close_tracking_factory, fake_s3_factory
 from tests.storage.helpers import healthy_region_bytes, new_scope, region_targz
+
+
+@pytest.fixture(autouse=True)
+def _no_reprobe_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop the re-read backoff to zero (it is a production pacing detail, not
+    behaviour under test, and the failure-path cases would otherwise each pay it)."""
+
+    monkeypatch.setattr(object_store, "_REPROBE_BACKOFF_S", 0)
 
 
 def _store_and_storage() -> tuple[FakeS3Store, ObjectStorage]:
@@ -105,6 +116,73 @@ async def test_truncated_body_with_a_matching_declared_length_is_unreadable() ->
     key = await _put_backup(storage, community, server, archive)
     object_key = storage._backup_key(community, server, key)
     store.objects[object_key] = archive[: len(archive) // 2]
+
+    with pytest.raises(ArchiveUnreadableError):
+        await storage.check_backup_health(community, server, key)
+
+
+def _restore_accepts(archive: bytes) -> bool:
+    """Does the restore/upload path accept these bytes? (``tarfile.open(r:gz)``.)
+
+    The probe must never condemn an archive this returns ``True`` for: a false
+    "unhealthy" quarantines a restorable backup and emits a spurious audit entry,
+    which is the same class of defect as the false "healthy" this issue is about.
+    """
+
+    try:
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+            tar.getmembers()
+    except Exception:
+        return False
+    return True
+
+
+@pytest.mark.parametrize(
+    ("label", "suffix"),
+    [
+        # gzip permits members to be appended, and the shell tools do it.
+        ("concatenated second member", region_targz({"world/region/r.0.1.mca": b"y"})),
+        # Padding after a complete member: restore stops at the tar EOF marker and
+        # never reads this far, so it restores fine (measured, issue #2371 review).
+        ("trailing zero padding", b"\x00" * 1024),
+        ("trailing junk", b"not-a-gzip-member"),
+    ],
+    ids=["concatenated", "zero-padding", "junk"],
+)
+async def test_bytes_after_a_complete_member_stay_healthy(
+    label: str, suffix: bytes
+) -> None:
+    """Whatever follows a COMPLETE gzip member cannot make the archive unreadable —
+    the restore path accepts all of these, so the probe must too."""
+
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    archive = _sound_archive()
+    key = await _put_backup(storage, community, server, archive)
+    object_key = storage._backup_key(community, server, key)
+    store.objects[object_key] = archive + suffix
+
+    # The precondition that makes this a false-quarantine test rather than a
+    # preference: restore really does accept these bytes.
+    assert _restore_accepts(archive + suffix), label
+
+    report = await storage.check_backup_health(community, server, key)
+
+    assert report.healthy
+
+
+async def test_a_damaged_second_member_is_still_unreadable() -> None:
+    """Leniency stops at the gzip magic: bytes that announce themselves as another
+    member must actually be one, or the archive is damaged."""
+
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    archive = _sound_archive()
+    key = await _put_backup(storage, community, server, archive)
+    object_key = storage._backup_key(community, server, key)
+    second = bytearray(region_targz({"world/region/r.0.1.mca": b"y" * 64}))
+    second[-5] ^= 0xFF  # a real member header, a trailer that no longer matches.
+    store.objects[object_key] = archive + bytes(second)
 
     with pytest.raises(ArchiveUnreadableError):
         await storage.check_backup_health(community, server, key)
