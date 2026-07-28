@@ -331,11 +331,12 @@ real endpoint. `api/tests/servers/test_resource_pack_store_adapter.py` runs its
 green without an S3 instance. CI runs them in the api workflow's separate
 `live-s3` job, which starts a SeaweedFS container and supplies the endpoint
 (#2331); that job fails if either module skips. To run them locally against a
-throwaway SeaweedFS:
+throwaway SeaweedFS — the image tag below must track `compose.yaml`'s
+`seaweedfs` pin, so a local run exercises the deployed version:
 
 ```sh
 docker run -d --name swfs-test -p 8333:8333 \
-  -e AK=testak -e SK=testsk --entrypoint sh chrislusf/seaweedfs:4.33 -c \
+  -e AK=testak -e SK=testsk --entrypoint sh chrislusf/seaweedfs:4.39 -c \
   'mkdir -p /etc/seaweedfs && printf "{\"identities\":[{\"name\":\"t\",\"credentials\":[{\"accessKey\":\"%s\",\"secretKey\":\"%s\"}],\"actions\":[\"Admin\",\"Read\",\"Write\",\"List\",\"Tagging\"]}]}" "$AK" "$SK" > /etc/seaweedfs/s3.json && exec weed server -dir=/data -s3 -s3.config=/etc/seaweedfs/s3.json'
 
 cd api && MCD_TEST_S3_ENDPOINT=http://localhost:8333 \
