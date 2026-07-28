@@ -613,10 +613,13 @@ class FileStore(abc.ABC):
         absent, on the stream's FIRST iteration.
 
         The miss covers every path that names no readable file — gone, a
-        directory, or reached through one — and locating the file is part of
-        opening it, so a delete racing the open is the same miss as an unknown
-        path and never a backend-native error (issue #2391). The lease holds the
-        snapshot DIRECTORY, not the files in it, so that race is real.
+        directory, reached through one, or a symlink that loops (issue #2393) —
+        and locating the file is part of opening it, so a delete racing the open
+        is the same miss as an unknown path and never a backend-native error
+        (issue #2391). The lease holds the snapshot DIRECTORY, not the files in
+        it, so that race is real. A path that names a file the backend cannot
+        read — no permission, an I/O error — is NOT a miss and surfaces as
+        itself.
         """
 
     @abc.abstractmethod
