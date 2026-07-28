@@ -93,7 +93,10 @@ class WorkingSetView(abc.ABC):
     def open_file_stream(self, rel_path: RelPath) -> ByteStream:
         """Open a chunked read stream over one file in the pinned snapshot.
 
-        Raises :class:`~.errors.NotFoundError` if the file is absent.
+        Raises :class:`~.errors.NotFoundError` if the file is absent, on the
+        stream's FIRST iteration. The pin holds the snapshot as a whole, not the
+        individual files in it, so a delete of one pinned file races the read and
+        must surface as that same miss (issue #2391).
         """
 
     @abc.abstractmethod
@@ -607,7 +610,13 @@ class FileStore(abc.ABC):
         lease is released exactly once when the stream finishes, is closed early,
         or raises (Section 4.2 reader safety). Raises
         :class:`~.errors.NotFoundError` if the file (or any published snapshot) is
-        absent.
+        absent, on the stream's FIRST iteration.
+
+        The miss covers every path that names no readable file — gone, a
+        directory, or reached through one — and locating the file is part of
+        opening it, so a delete racing the open is the same miss as an unknown
+        path and never a backend-native error (issue #2391). The lease holds the
+        snapshot DIRECTORY, not the files in it, so that race is real.
         """
 
     @abc.abstractmethod

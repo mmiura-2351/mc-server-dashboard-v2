@@ -3,8 +3,9 @@
 The backend-agnostic file read/edit/version/rollback contract is in
 ``test_port_contract.py`` (run against both adapters). This file keeps only the
 fs realization details that reach into the filesystem: symlink-escape rejection
-(object storage has no symlinks, Section 6/7.3) and the fs version-id ordering /
-oldest-pruning, which depend on the fs module internals.
+(object storage has no symlinks, Section 6/7.3), the fs version-id ordering /
+oldest-pruning, and the delete-racing-a-read window of the fs stream helpers —
+all of which depend on the fs module internals.
 """
 
 from __future__ import annotations
@@ -24,9 +25,12 @@ from mc_server_dashboard_api.storage.adapters.fs import (
     _extract_tar_gz_into,
     _new_version_id,
 )
-from mc_server_dashboard_api.storage.domain.errors import PathTraversalError
+from mc_server_dashboard_api.storage.domain.errors import (
+    NotFoundError,
+    PathTraversalError,
+)
 from mc_server_dashboard_api.storage.domain.value_objects import RelPath
-from tests.storage.helpers import new_scope, publish, snapshot_dir
+from tests.storage.helpers import drain, new_scope, publish, snapshot_dir
 
 
 async def test_read_rejects_symlink_escape(tmp_path: Path) -> None:
@@ -94,6 +98,61 @@ async def test_make_dir_materializes_empty_dir_and_survives_hydrate(
     assert (live / "plugins").is_dir()
     # The empty dir lists as empty rather than 404-ing.
     assert await storage.list_dir(community, server, RelPath("plugins")) == []
+
+
+# --- a delete racing an in-flight read (issue #2391) -------------------------
+#
+# ``delete_file`` unlinks IN PLACE inside the live snapshot, and the
+# active-reader lease protects the snapshot DIRECTORY, not the files in it — so a
+# DELETE /files racing a download of the same file lands between the stream's
+# existence check and its open. The window is microseconds wide, so it is staged
+# rather than raced: the file is really deleted and ``Path.is_file`` is then
+# pinned to the pre-delete answer, which is exactly what a surviving pre-check
+# would have observed. The stream must report the Port's own NotFoundError; a
+# bare ``FileNotFoundError`` is not translated by the servers seam and reaches
+# the edge as a 500. Pinning ``is_file`` also makes these tests fail again if a
+# check-then-open pre-check is ever reintroduced.
+
+
+def _stale_existence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make ``Path.is_file`` report the pre-delete answer for every path."""
+
+    monkeypatch.setattr(Path, "is_file", lambda self, *args, **kwargs: True)
+
+
+async def test_open_file_stream_delete_racing_the_open_is_not_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"DATA"})
+
+    stream = storage.open_file_stream(community, server, RelPath("f"))
+    await storage.delete_file(community, server, RelPath("f"))
+    _stale_existence(monkeypatch)
+
+    with pytest.raises(NotFoundError):
+        await drain(stream)
+
+
+async def test_view_file_stream_delete_racing_the_open_is_not_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pinned working-set view has the same window: the pin holds the dir."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"DATA"})
+
+    async with storage.open_working_set_view(community, server) as view:
+        stream = view.open_file_stream(RelPath("f"))
+        await storage.delete_file(community, server, RelPath("f"))
+        # The lease did not hold the file back: it is gone from the pinned tree.
+        assert not (snapshot_dir(tmp_path, community, server) / "f").exists()
+        _stale_existence(monkeypatch)
+
+        with pytest.raises(NotFoundError):
+            await drain(stream)
 
 
 def test_version_ids_sort_chronologically_across_time_low_wrap(

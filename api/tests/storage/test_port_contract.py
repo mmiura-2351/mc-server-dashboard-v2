@@ -1205,6 +1205,34 @@ async def test_open_file_stream_missing_is_not_found(
         )
 
 
+async def test_open_file_stream_on_a_directory_is_not_found(
+    harness: StorageHarness,
+) -> None:
+    """A path that names no readable FILE is a miss, directories included."""
+
+    community, server = new_scope()
+    await harness.publish(community, server, {"world/level.dat": b"x"})
+    with pytest.raises(NotFoundError):
+        await drain(
+            harness.storage.open_file_stream(community, server, RelPath("world"))
+        )
+
+
+async def test_open_file_stream_through_a_file_is_not_found(
+    harness: StorageHarness,
+) -> None:
+    """A path whose parent is itself a file is a miss, not a backend-native error."""
+
+    community, server = new_scope()
+    await harness.publish(community, server, {"eula.txt": b"x"})
+    with pytest.raises(NotFoundError):
+        await drain(
+            harness.storage.open_file_stream(
+                community, server, RelPath("eula.txt/nope")
+            )
+        )
+
+
 async def test_open_file_stream_before_any_publish_is_not_found(
     harness: StorageHarness,
 ) -> None:
