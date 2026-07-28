@@ -222,7 +222,7 @@ export const en = {
   "dashboard.state.unknown": "unknown",
   // Lifecycle action feedback.
   "dashboard.actionFailed": "Could not complete that action. Please try again.",
-  // Conflict-flavoured (server_unsettled-style) lifecycle races (SPEC 7.4).
+  // Conflict-flavoured lifecycle races (SPEC 7.4).
   "dashboard.stateChanged": "State changed — refreshed.",
   // Sanitized 409 start-failure reasons (issue #225); specific, actionable
   // causes rather than the generic state-changed toast.
@@ -392,8 +392,10 @@ export const en = {
   "serverDetail.exportStarted": "Export download started.",
   "serverDetail.deleted": "Server deleted.",
   "serverDetail.error.notStopped": "Stop the server before making this change.",
-  "serverDetail.error.unsettled":
-    "The server must be stopped before exporting.",
+  // The at-rest precondition (409 server_unsettled). Shared by the danger-zone
+  // and actions-bar surfaces via the lifecycle mapping, so it names no single
+  // action (issue #2360).
+  "serverDetail.error.unsettled": "The server must be stopped for this action.",
   "serverDetail.error.portTaken": "That game port is already in use.",
   "serverDetail.error.portOutOfRange":
     "That game port is outside the allowed range.",
