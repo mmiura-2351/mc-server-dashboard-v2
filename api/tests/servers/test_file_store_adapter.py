@@ -96,6 +96,38 @@ async def test_open_file_stream_missing_translates_to_file_not_found(
         await anext(stream)
 
 
+async def test_open_file_stream_delete_racing_the_open_translates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A DELETE landing in the stream's check->open window still translates (#2391).
+
+    The seam translates :class:`NotFoundError` only, so a bare
+    ``FileNotFoundError`` from the fs backend escapes it and reaches the edge as
+    a 500. The window is staged the way the fs-adapter tests stage it: the file
+    is really deleted, then ``Path.is_file`` is pinned to the pre-delete answer.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await _seed(storage, community, server)
+    adapter = StorageFileStoreAdapter(storage=storage)
+
+    stream = adapter.open_file_stream(
+        community_id=CommunityId(community),
+        server_id=ServerId(server),
+        rel_path="server.properties",
+    )
+    await adapter.delete_file(
+        community_id=CommunityId(community),
+        server_id=ServerId(server),
+        rel_path="server.properties",
+    )
+    monkeypatch.setattr(Path, "is_file", lambda self, *args, **kwargs: True)
+
+    with pytest.raises(ServerFileNotFoundError):
+        await anext(stream)
+
+
 async def test_edit_history_rollback_round_trip(tmp_path: Path) -> None:
     storage = FsStorage(tmp_path)
     community, server = _scope()

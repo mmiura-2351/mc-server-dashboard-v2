@@ -1232,19 +1232,19 @@ class FsStorage(Storage):
         # time, so a stream opened but never consumed never pins a snapshot, and
         # the leased snapshot is exactly the one the file is read out of (Section
         # 4.2 reader safety). The lease protects the snapshot dir from a
-        # concurrent publish/sweep for the whole duration of a large read.
+        # concurrent publish/sweep for the whole duration of a large read -- but
+        # not the file itself (delete_file unlinks in place), so locating the
+        # file is left to the open rather than pre-checked here (issue #2391).
         def _open() -> tuple[Path, Callable[[], None]]:
             current, release = self._lease_current(community_id, server_id)
             try:
                 target = self._safe_target(current, rel_path)
-                if not target.is_file():
-                    raise NotFoundError(f"file not found: {rel_path.value}")
             except BaseException:
                 release()
                 raise
             return target, release
 
-        return _leased_file_stream(_open)
+        return _leased_file_stream(_open, not_found=f"file not found: {rel_path.value}")
 
     async def list_dir(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
@@ -1977,23 +1977,47 @@ def _file_stream(
     return _gen()
 
 
+# The ``open`` failures that all mean "no readable file at this path": it is gone
+# (a delete racing the open), it names a directory, or a parent component is not
+# one. The ``is_file()`` pre-check these per-file streams used to do folded the
+# three into a single miss, and the open that replaced it (issue #2391) must
+# report them the same way -- anything else is a backend-native error escaping
+# the storage seam.
+_NOT_A_READABLE_FILE = (FileNotFoundError, IsADirectoryError, NotADirectoryError)
+
+
 def _leased_file_stream(
     open_source: Callable[[], tuple[Path, Callable[[], None]]],
+    *,
+    not_found: str,
 ) -> AsyncIterator[bytes]:
     """Stream one file's bytes in chunks under an active-reader lease (issue #265).
 
     ``open_source`` is called on the first iteration: it resolves the live
-    snapshot, takes the active-reader lease, locates the target file, and returns
-    the file path plus the matching lease-release callback. Deferring it to first
-    iteration means a stream opened but never consumed never pins a snapshot
-    (mirroring :func:`_tar_stream`). The lease is released exactly once when the
-    stream finishes, is closed early, or raises.
+    snapshot, takes the active-reader lease, resolves the target path, and returns
+    it plus the matching lease-release callback. Deferring it to first iteration
+    means a stream opened but never consumed never pins a snapshot (mirroring
+    :func:`_tar_stream`). The lease is released exactly once when the stream
+    finishes, is closed early, or raises.
+
+    The open IS the existence check (issue #2391, the shape :func:`_file_stream`
+    took in #2341): the lease protects the snapshot DIRECTORY, not the files in
+    it, so a ``delete_file`` unlinking in place lands between a pre-check and this
+    open and makes the stream raise a bare ``FileNotFoundError`` -- which the
+    servers-side seam does not translate (it translates :class:`NotFoundError`
+    only), so it reaches the edge as a 500. Opening once and reporting the miss as
+    ``NotFoundError`` (message ``not_found``) removes the window. The open stays
+    on the first iteration, so a stream that is opened but never consumed holds no
+    descriptor.
     """
 
     async def _gen() -> AsyncIterator[bytes]:
         path, on_close = await asyncio.to_thread(open_source)
         try:
-            handle = await asyncio.to_thread(open, path, "rb")
+            try:
+                handle = await asyncio.to_thread(open, path, "rb")
+            except _NOT_A_READABLE_FILE as exc:
+                raise NotFoundError(not_found) from exc
             try:
                 while True:
                     chunk = await asyncio.to_thread(handle.read, _CHUNK)
@@ -2093,12 +2117,20 @@ def _extract_member_capped(
 
 
 def _pinned_file_stream(target: Path, rel_path: RelPath) -> AsyncIterator[bytes]:
-    """Stream one file's bytes without taking a lease (caller already holds one)."""
+    """Stream one file's bytes without taking a lease (caller already holds one).
+
+    The open IS the existence check, for the same reason it is in
+    :func:`_leased_file_stream` (issue #2391): the view's lease pins the snapshot
+    DIRECTORY, and ``delete_file`` unlinks a file inside that very directory, so a
+    pre-check here would leave the same window and the same bare
+    ``FileNotFoundError`` escaping the servers seam as a 500.
+    """
 
     async def _gen() -> AsyncIterator[bytes]:
-        if not target.is_file():
-            raise NotFoundError(f"file not found: {rel_path.value}")
-        handle = await asyncio.to_thread(open, target, "rb")
+        try:
+            handle = await asyncio.to_thread(open, target, "rb")
+        except _NOT_A_READABLE_FILE as exc:
+            raise NotFoundError(f"file not found: {rel_path.value}") from exc
         try:
             while True:
                 chunk = await asyncio.to_thread(handle.read, _CHUNK)
