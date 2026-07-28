@@ -1000,6 +1000,12 @@ export interface paths {
          *     ``POST .../export/download-grant`` instead of being buffered into a Blob to
          *     attach a Bearer header (issue #2352). Either credential runs the same
          *     ``file:read`` gate, and the response is identical.
+         *
+         *     The response names itself ``{server name}.zip`` via ``Content-Disposition``
+         *     (issue #2357), so a client that navigates the URL without supplying a filename
+         *     -- a pasted grant link, a CLI fetch -- does not save the last path segment,
+         *     ``export``. A server name is free-form, so the header is built by the shared
+         *     hardened helper (RFC 5987 ``filename*``, no traversal, no injection).
          */
         get: operations["export_server_api_communities__community_id__servers__server_id__export_get"];
         put?: never;
