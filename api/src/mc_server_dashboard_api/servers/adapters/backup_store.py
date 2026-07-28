@@ -199,9 +199,9 @@ class StorageBackupStoreAdapter(BackupArchiveStore):
         byte_range: tuple[int, int] | None = None,
     ) -> AsyncIterator[bytes]:
         community, server = _scope(community_id, server_id)
-        # open_backup may raise NotFoundError either at the call (fs) or on first
-        # iteration (object); a translating generator catches both into the servers
-        # error so no storage type leaks across the seam.
+        # open_backup raises NotFoundError on the stream's first iteration — both
+        # backends locate the archive as they open it (issue #2341) — so the
+        # translation into the servers error wraps the iteration, not the call.
         return self._open(community, server, BackupKey(storage_ref), byte_range)
 
     async def _open(
