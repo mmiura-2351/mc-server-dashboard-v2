@@ -195,7 +195,11 @@ func (t *Tunnel) run(ctx context.Context) {
 		cancel()
 	}()
 
-	go t.sweepLoop(runCtx)
+	sweepDone := make(chan struct{})
+	go func() {
+		defer close(sweepDone)
+		t.sweepLoop(runCtx)
+	}()
 
 	// Ingress is split across two goroutines joined by a bounded channel so the
 	// UDP reader never blocks on the QUIC send path (issue #1721): the reader
@@ -228,14 +232,25 @@ func (t *Tunnel) run(ctx context.Context) {
 	t.close("tunnel closing")
 	udpDone.Wait()
 
+	// Stop the idle sweep and join it (issue #1936). The sweep Ends the session
+	// of every promoted flow it evicts, and run() returning is what releases the
+	// handle goroutine the listener counts on inflight -- so without this join a
+	// sweep-driven End could land after Drain's shutdown barrier lifted and the
+	// reporter had stopped. cancel is also deferred, but the deferred call fires
+	// only after run() returns; calling it here is what makes the join
+	// terminate. The wait is bounded: sweepLoop returns on runCtx after at most
+	// one in-progress sweepOnce, whose work (a FlowTable eviction, ipcaps
+	// releases, and the same synchronous sessions.End the drain below performs)
+	// is work run() would block on anyway.
+	cancel()
+	<-sweepDone
+
 	// End any sessions still open when the tunnel tears down (Worker disconnect,
 	// takeover, or relay shutdown) so promoted Bedrock flows do not strand
 	// (issue #1904), and decrement the active-flows gauge by the whole abandoned
-	// flow table so it does not leak (issue #1909). The reader has stopped
-	// (udpDone), so no new flow can race this; the sweep may still run until the
-	// deferred cancel fires, but it and Drain both go through the FlowTable under
-	// its lock and Drain removes the entries, so each flow (and each session) is
-	// surfaced by exactly one of them.
+	// flow table so it does not leak (issue #1909). Both the reader (udpDone) and
+	// the sweep (sweepDone) have stopped, so nothing can race this: every flow
+	// left in the table is surfaced here exactly once.
 	endedSessions, drained := t.flows.Drain()
 	t.metrics.BedrockFlowsDrained(drained)
 	for _, sid := range endedSessions {
