@@ -37,6 +37,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     CatalogUnavailableError,
     InvalidFilePathError,
     PluginAlreadyExistsError,
+    PluginCacheBlobNotFoundError,
     PluginNotFoundError,
     ServerFileNotFoundError,
     ServerFilesUnsettledError,
@@ -174,6 +175,23 @@ async def _resolve_catalog_content(
     )
 
 
+async def _read_cached(cache: PluginCacheStore, sha256: str) -> bytes | None:
+    """Return the cached blob's bytes, or ``None`` when the cache does not have them.
+
+    The cache is a cache: a miss is a control-flow branch, not a fault, and the
+    caller falls through to the download path. Reading is the presence check, so
+    a blob the GC deletes while the resolver runs cannot slip through a
+    has()-then-open() window (issue #2346). The bytes are buffered inside the
+    ``try`` so a blob that disappears mid-stream discards its partial read
+    instead of returning a truncated jar.
+    """
+
+    try:
+        return b"".join([chunk async for chunk in cache.open(sha256)])
+    except PluginCacheBlobNotFoundError:
+        return None
+
+
 async def _resolve_sha256_content(
     *,
     catalog: CatalogProvider,
@@ -183,18 +201,18 @@ async def _resolve_sha256_content(
     """Resolve a file whose published integrity hash is SHA-256 (GeyserMC, #1905).
 
     The published SHA-256 *is* the content-cache key, so the cache lookup needs no
-    SHA-512 indirection: a present blob is served (and re-verified against the
+    SHA-512 indirection: a cached blob is served (and re-verified against the
     published hash, guarding storage tampering per #1402); otherwise the jar is
     downloaded, its SHA-256 verified, and the blob stored once (dedup-on-ingest).
     """
 
-    if await cache.has(file.sha256):
-        content = b"".join([chunk async for chunk in cache.open(file.sha256)])
-        if hashlib.sha256(content).hexdigest() != file.sha256:
+    cached = await _read_cached(cache, file.sha256)
+    if cached is not None:
+        if hashlib.sha256(cached).hexdigest() != file.sha256:
             raise CatalogChecksumMismatchError(
                 f"cached blob {file.sha256} failed SHA-256 re-verification"
             )
-        return content, file.sha256
+        return cached, file.sha256
 
     content = await catalog.download_file(file.url)
     computed_hash = hashlib.sha256(content).hexdigest()
@@ -227,15 +245,16 @@ async def _resolve_sha512_content(
 
     async with uow:
         cached_sha256 = await uow.plugins.find_sha256_by_sha512(file.sha512)
-    if cached_sha256 is not None and await cache.has(cached_sha256):
-        content = b"".join([chunk async for chunk in cache.open(cached_sha256)])
-        # Re-verify integrity: the blob may have been corrupted or tampered
-        # with in object storage since it was originally cached (issue #1402).
-        if hashlib.sha512(content).hexdigest() != file.sha512:
-            raise CatalogChecksumMismatchError(
-                f"cached blob {cached_sha256} failed SHA-512 re-verification"
-            )
-        return content, cached_sha256
+    if cached_sha256 is not None:
+        cached = await _read_cached(cache, cached_sha256)
+        if cached is not None:
+            # Re-verify integrity: the blob may have been corrupted or tampered
+            # with in object storage since it was originally cached (issue #1402).
+            if hashlib.sha512(cached).hexdigest() != file.sha512:
+                raise CatalogChecksumMismatchError(
+                    f"cached blob {cached_sha256} failed SHA-512 re-verification"
+                )
+            return cached, cached_sha256
 
     content = await catalog.download_file(file.url)
     computed_hash = hashlib.sha512(content).hexdigest()

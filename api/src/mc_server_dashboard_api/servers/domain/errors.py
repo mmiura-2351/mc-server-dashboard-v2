@@ -529,10 +529,12 @@ class PluginCacheBlobNotFoundError(ServerError):
 
     Raised at the ``PluginCacheStore`` seam when ``open`` hits a missing content
     key, so the storage ``NotFoundError`` never crosses into the servers layer
-    (mirroring ``backup_store.py`` and ``resource_pack_store.py``). Every caller
-    either gates on ``has`` first or opens a blob a plugin row still references,
-    so this is a storage-consistency fault (a GC race or an external deletion),
-    not a client error: no route maps it, and the edge reports it as a 500.
+    (mirroring ``backup_store.py`` and ``resource_pack_store.py``). The catalog
+    resolver catches it and falls back to downloading the jar -- the cache is an
+    optimisation there (issue #2346). Every other caller opens a blob a plugin
+    row still references, where a miss is a storage-consistency fault (a GC race
+    or an external deletion) with no local recovery, not a client error: no route
+    maps it, and the edge reports it as a 500.
     """
 
 
