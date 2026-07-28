@@ -491,7 +491,7 @@ async def test_copy_object_translates_not_found(code: str) -> None:
 # a botocore transport/backend failure must not cross the boundary as a raw type, so
 # it is translated to ObjectStoreUnavailableError with the original as the ``__cause__``
 # -- mirroring the upload_multipart translation (#2270). A botocore *usage* error is
-# deliberately NOT caught (it is excluded from ``_UPLOAD_FAILURE_ERRORS``).
+# deliberately NOT caught (it is excluded from ``_TRANSPORT_FAILURE_ERRORS``).
 
 
 class _RaisingWriteClient:

@@ -97,7 +97,9 @@ def main(argv: list[str]) -> int:
     print(
         f"servers scanned: {summary.servers_scanned}\n"
         f"backups healthy: {summary.backups_healthy}\n"
-        f"backups quarantined: {summary.backups_quarantined}\n"
+        f"backups quarantined (corrupt world): {summary.backups_quarantined}\n"
+        f"backups unreadable (archive bytes unproducible): "
+        f"{summary.backups_unreadable}\n"
         f"backups dangling: {summary.backups_dangling}\n"
         f"snapshots scanned: {summary.snapshots_scanned}\n"
         f"snapshots flagged: {summary.snapshots_flagged}"

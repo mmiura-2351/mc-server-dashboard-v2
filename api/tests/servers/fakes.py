@@ -48,6 +48,8 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
     BackupNotFoundError,
+    BackupStorageUnavailableError,
+    BackupUnreadableError,
     PluginCacheBlobNotFoundError,
     ResourcePackNotFoundError,
     ServerFileNotFoundError,
@@ -1316,6 +1318,14 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         # reports corruption. ``corrupt_count`` is the count carried on the error.
         self.corrupt_refs: set[str] = set()
         self.corrupt_count = 1
+        # refs whose stored archive cannot be streamed back in full (#2371): the
+        # sweep probe raises BackupUnreadableError for them. Distinct from
+        # ``corrupt_refs`` — the bytes are gone, not the world.
+        self.unreadable_refs: set[str] = set()
+        # refs whose probe hits a backend outage (#2371): the probe raises
+        # BackupStorageUnavailableError, which is a verdict about the STORE, not
+        # about the archive, so the sweep must not classify the row from it.
+        self.unavailable_refs: set[str] = set()
         # The sweep (#744) snapshot fsck: corrupt-region count of each server's
         # published ``current``; a server absent here has no published snapshot, so
         # ``check_current_health`` returns None (nothing to fsck).
@@ -1367,6 +1377,10 @@ class FakeBackupArchiveStore(BackupArchiveStore):
     ) -> int:
         if storage_ref not in self.archives:
             raise BackupNotFoundError(storage_ref)
+        if storage_ref in self.unreadable_refs:
+            raise BackupUnreadableError(storage_ref)
+        if storage_ref in self.unavailable_refs:
+            raise BackupStorageUnavailableError(storage_ref)
         return self.corrupt_count if storage_ref in self.corrupt_refs else 0
 
     async def check_current_health(

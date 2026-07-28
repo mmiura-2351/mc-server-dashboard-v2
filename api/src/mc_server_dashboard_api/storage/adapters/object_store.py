@@ -67,10 +67,12 @@ from mc_server_dashboard_api.storage.adapters.failure_seam import (
 )
 from mc_server_dashboard_api.storage.domain.errors import (
     ArchiveTooLargeError,
+    ArchiveUnreadableError,
     IncompleteTransferError,
     IntegrityCheckError,
     MissingRegionsError,
     NotFoundError,
+    ObjectStoreUnavailableError,
     PathTraversalError,
     SnapshotHandleError,
     StaleGenerationError,
@@ -97,6 +99,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     VersionId,
     is_version_ring_member,
 )
+from mc_server_dashboard_api.storage.integrity.archive import GzipReadProbe
 from mc_server_dashboard_api.storage.integrity.region import (
     RegionFinding,
     WorkingSetReport,
@@ -245,6 +248,22 @@ class _ObjectSnapshotHandle(SnapshotHandle):
         self.transfer_id = transfer_id
         # Set true on commit/abort so a reused handle is rejected (protocol safety).
         self.consumed = False
+
+
+@dataclass(frozen=True)
+class _ArchiveProbe:
+    """The outcome of one end-to-end read of a stored backup archive (issue #2371).
+
+    Three outcomes, kept apart because they mean different things: both fields
+    ``None`` is a sound archive; ``defect`` names a deterministic readability
+    defect (a body short of its declared length, a gzip stream that never
+    terminates or whose trailer no longer matches); ``aborted_at`` is the byte
+    offset at which the store tore the body down, which on its own says nothing —
+    only whether it reproduces does.
+    """
+
+    defect: str | None = None
+    aborted_at: int | None = None
 
 
 class ObjectStorage(Storage):
@@ -1288,18 +1307,92 @@ class ObjectStorage(Storage):
     async def check_backup_health(
         self, community_id: CommunityId, server_id: ServerId, key: BackupKey
     ) -> WorkingSetReport:
-        # The one-shot sweep's per-backup fsck (issue #744) extracts a local working
-        # set and walks it (issue #738), which the object backend does not stage —
-        # so this read-only sweep fsck stays fs-only for now even though the
-        # authoritative-create/restore gates ARE wired on this adapter (#750). The
-        # object's existence is still confirmed (so an unknown key is a
-        # NotFoundError, matching the fs adapter) before the healthy report is
-        # returned to satisfy the Port.
+        # The one-shot sweep's per-backup probe (issue #744). The structural ``.mca``
+        # fsck extracts a local working set and walks it (issue #738), which the
+        # object backend does not stage — that part stays fs-only. What this adapter
+        # DOES answer is the question a confirmed-exists ``HEAD`` never could
+        # (issue #2371): can the stored archive still be produced end to end? The
+        # returned ``WorkingSetReport`` is therefore always empty here — a sound
+        # archive is "healthy" and an unproducible one raises ArchiveUnreadableError,
+        # which is a verdict about the bytes, not about the world inside them.
         backup_key = self._backup_key(community_id, server_id, key)
         async with self._client_factory() as client:
-            if await client.head_object(backup_key) is None:
+            declared = await client.head_object(backup_key)
+            if declared is None:
                 raise NotFoundError(f"backup not found: {key.value}")
+            probe = await self._probe_archive(client, backup_key, declared)
+            if probe.aborted_at is not None:
+                probe = await self._reprobe_after_teardown(
+                    client, backup_key, declared, probe.aborted_at
+                )
+            if probe.defect is not None:
+                raise ArchiveUnreadableError(
+                    f"backup archive {key.value} could not be read back: {probe.defect}"
+                )
         return WorkingSetReport()
+
+    async def _probe_archive(
+        self, client: S3Client, backup_key: str, declared: int
+    ) -> _ArchiveProbe:
+        """Stream the stored archive once, proving it can be produced (issue #2371).
+
+        Reads the SAME object the download/restore path reads, checking both that
+        the store delivers exactly the ``declared`` bytes its ``HEAD`` promised and
+        that those bytes decompress to a well-formed gzip end. The decompressed
+        output is discarded as it is produced: nothing is staged to disk, nothing
+        is buffered whole.
+        """
+
+        gzip_probe = GzipReadProbe()
+        read = 0
+        try:
+            async for chunk in await client.get_object(backup_key):
+                read += len(chunk)
+                gzip_probe.feed(chunk)
+            if read != declared:
+                raise ArchiveUnreadableError(
+                    f"the store delivered {read} of the {declared} declared bytes"
+                )
+            gzip_probe.finish()
+        except ObjectStoreUnavailableError:
+            return _ArchiveProbe(aborted_at=read)
+        except ArchiveUnreadableError as exc:
+            return _ArchiveProbe(defect=str(exc))
+        return _ArchiveProbe()
+
+    async def _reprobe_after_teardown(
+        self, client: S3Client, backup_key: str, declared: int, first_end: int
+    ) -> _ArchiveProbe:
+        """Classify a body the store tore down mid-stream (issue #2371).
+
+        This is the delicate distinction. A single torn-down read cannot tell
+        "this object's bytes are damaged" from "the store is having a bad minute" —
+        both surface as a connection abort partway through. The reported defect is
+        *deterministic*: the transfer runs at full speed to one fixed offset and
+        aborts there on every attempt, days apart. An outage is not.
+
+        So the read is repeated, and only a teardown that reproduces at the SAME
+        non-zero offset is called damage. Anything else — a different offset, no
+        byte ever delivered (the store refusing outright), or a complete read the
+        second time — stays an availability failure, because quarantining on it
+        would condemn every backup in the deployment over one bad minute. The cost
+        of the extra read is paid only on the failure path.
+        """
+
+        second = await self._probe_archive(client, backup_key, declared)
+        if second.aborted_at == first_end and first_end > 0:
+            return _ArchiveProbe(
+                defect=(
+                    f"the store reproducibly ends the body at {first_end} of the "
+                    f"{declared} declared bytes"
+                )
+            )
+        if second.aborted_at is not None:
+            raise ObjectStoreUnavailableError(
+                f"object store tore down the read of {backup_key} at {first_end} "
+                f"then {second.aborted_at} bytes"
+            )
+        return second
 
     async def delete_backup(
         self, community_id: CommunityId, server_id: ServerId, key: BackupKey

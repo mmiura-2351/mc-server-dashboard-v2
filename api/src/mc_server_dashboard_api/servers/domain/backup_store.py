@@ -80,13 +80,22 @@ class BackupArchiveStore(abc.ABC):
     async def check_backup_health(
         self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
     ) -> int:
-        """Extract an archive and structurally fsck it (the sweep probe, issue #744).
+        """Check a stored archive (the sweep probe, issue #744).
 
-        Read-only: extracts the archive into throwaway staging, walks it for corrupt
-        ``.mca`` region files (issue #738), and discards the staging — ``current`` is
-        never touched. Returns the corrupt region-file count (``0`` when healthy) so
-        the sweep persists ``HEALTHY`` / ``QUARANTINED`` on the backup row. Raises
-        :class:`BackupNotFoundError` for an unknown ref.
+        Read-only — ``current`` is never touched. Returns the corrupt region-file
+        count (``0`` when healthy) so the sweep persists ``HEALTHY`` /
+        ``QUARANTINED`` on the backup row.
+
+        On the fs backend the probe extracts the archive into throwaway staging and
+        walks it for corrupt ``.mca`` region files (issue #738). On the object
+        backend it instead streams the stored archive end to end to prove the store
+        can still produce it (issue #2371), returning ``0`` when it can and raising
+        :class:`BackupUnreadableError` when it cannot.
+
+        Raises :class:`BackupNotFoundError` for an unknown ref, and
+        :class:`BackupStorageUnavailableError` when the backend could not serve the
+        read at all — an availability failure, NOT a verdict about the archive, so
+        the sweep must not classify the row from it.
         """
 
     @abc.abstractmethod

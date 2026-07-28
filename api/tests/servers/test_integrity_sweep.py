@@ -13,6 +13,8 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 
+import pytest
+
 from mc_server_dashboard_api.audit.domain.operations import (
     BACKUP_QUARANTINE,
     SNAPSHOT_QUARANTINE,
@@ -27,6 +29,9 @@ from mc_server_dashboard_api.servers.domain.backup import (
     BackupSource,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
+from mc_server_dashboard_api.servers.domain.errors import (
+    BackupStorageUnavailableError,
+)
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     DesiredState,
@@ -197,6 +202,65 @@ async def test_dangling_backup_row_is_quarantined_and_counted() -> None:
     quarantines = [e for e in audit.events if e.operation == BACKUP_QUARANTINE]
     assert len(quarantines) == 1
     assert quarantines[0].target_id == dangling.id.value
+
+
+async def test_unreadable_archive_is_quarantined_and_counted_separately() -> None:
+    """A backup whose archive cannot be streamed back in full (issue #2371) is
+    QUARANTINED with the same audit entry, but counted as ``backups_unreadable`` —
+    the summary tells "the bytes are gone" from "the world is corrupt"."""
+
+    sid = ServerId.new()
+    unreadable = _backup(sid, "torn", health=BackupHealth.HEALTHY)
+    sweep, uow, store, audit = _wire(servers=[_server(sid)], backups=[unreadable])
+    store.unreadable_refs.add("torn")
+
+    summary = await sweep()
+
+    assert uow.backups.by_id[unreadable.id].health is BackupHealth.QUARANTINED
+    assert summary.backups_unreadable == 1
+    assert summary.backups_quarantined == 0
+    assert summary.backups_healthy == 0
+    quarantines = [e for e in audit.events if e.operation == BACKUP_QUARANTINE]
+    assert len(quarantines) == 1
+    assert quarantines[0].target_type == TARGET_BACKUP
+    assert quarantines[0].target_id == unreadable.id.value
+
+
+async def test_unreadable_archive_does_not_abort_remaining_backups() -> None:
+    """One unreadable archive must not stop the pass: the rest of the server's
+    backups still get classified."""
+
+    sid = ServerId.new()
+    unreadable = _backup(sid, "torn", health=BackupHealth.UNKNOWN)
+    healthy = _backup(sid, "ok", health=BackupHealth.UNKNOWN)
+    sweep, uow, store, _audit = _wire(
+        servers=[_server(sid)], backups=[unreadable, healthy]
+    )
+    store.unreadable_refs.add("torn")
+
+    summary = await sweep()
+
+    assert uow.backups.by_id[unreadable.id].health is BackupHealth.QUARANTINED
+    assert uow.backups.by_id[healthy.id].health is BackupHealth.HEALTHY
+    assert summary.backups_unreadable == 1
+    assert summary.backups_healthy == 1
+
+
+async def test_store_outage_during_the_probe_never_quarantines() -> None:
+    """A backend outage says nothing about an archive (issue #2371). It surfaces as
+    the availability failure it is, leaving the health column untouched — a sweep
+    run mid-outage must not condemn the deployment's backups."""
+
+    sid = ServerId.new()
+    backup = _backup(sid, "fine", health=BackupHealth.HEALTHY)
+    sweep, uow, store, audit = _wire(servers=[_server(sid)], backups=[backup])
+    store.unavailable_refs.add("fine")
+
+    with pytest.raises(BackupStorageUnavailableError):
+        await sweep()
+
+    assert uow.backups.by_id[backup.id].health is BackupHealth.HEALTHY
+    assert [e for e in audit.events if e.operation == BACKUP_QUARANTINE] == []
 
 
 async def test_dangling_row_does_not_abort_remaining_backups() -> None:

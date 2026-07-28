@@ -360,6 +360,22 @@ class BackupCorruptError(ServerError):
         self.corrupt_count = corrupt_count
 
 
+class BackupUnreadableError(ServerError):
+    """A backup's stored archive could not be read back in full (issue #2371).
+
+    The seam translation of the storage ``ArchiveUnreadableError``: the sweep's
+    readability probe streamed the stored archive end to end and the store could not
+    reproduce it — the body stopped short of its declared length, or the gzip stream
+    never reached a trailer that matches its payload. The same read path backs
+    restore, so such a backup is unrestorable; the sweep quarantines it.
+
+    Distinct from :class:`BackupCorruptError` (the archived *world* is structurally
+    corrupt — the bytes are all there, the contents are bad) and from
+    :class:`BackupStorageUnavailableError` (the store could not serve the request at
+    all, which is a transient condition and no verdict about the archive).
+    """
+
+
 class BackupStorageUnavailableError(ServerError):
     """A backup operation failed because the storage backend was unavailable (#2270).
 
