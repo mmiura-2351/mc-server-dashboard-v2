@@ -23,6 +23,17 @@ import (
 	bedrocktunnelv1 "github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/controlplane/mcsd/bedrocktunnel/v1"
 )
 
+// starvationBudget is the ceiling these tests put on a positive-path wait that
+// completes in milliseconds when the process is scheduled normally: the
+// fakeRelay's TunnelHello handshake context, quic-go's own
+// HandshakeIdleTimeout (whose 5 s default is otherwise a hidden second window
+// on the same handshake), and the waits for an accepted connection and for an
+// observed CONNECTION_CLOSE. Nothing here measures elapsed time, so a generous
+// ceiling costs nothing on the happy path and only bounds a pathologically
+// CPU-starved run -- which a short fixed budget merely turns into a flake
+// (issue #2050; the relay-side twin of this helper carries the same constant).
+const starvationBudget = 60 * time.Second
+
 // discardLogger writes nowhere, keeping test output clean.
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -90,7 +101,7 @@ type fakeRelay struct {
 func newFakeRelay(t *testing.T, acceptFn func(*bedrocktunnelv1.TunnelHello) (bool, string)) *fakeRelay {
 	t.Helper()
 	tlsCfg, caPEM := selfSignedTLS(t)
-	ln, err := quic.ListenAddr("127.0.0.1:0", tlsCfg, &quic.Config{EnableDatagrams: true})
+	ln, err := quic.ListenAddr("127.0.0.1:0", tlsCfg, &quic.Config{EnableDatagrams: true, HandshakeIdleTimeout: starvationBudget})
 	if err != nil {
 		t.Fatalf("quic.ListenAddr: %v", err)
 	}
@@ -119,7 +130,7 @@ func (r *fakeRelay) serve() {
 // the relay's own posture (docs/app/BEDROCK_TUNNEL.md Section 3: "connection
 // closed by relay on rejection").
 func (r *fakeRelay) handle(conn *quic.Conn) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), starvationBudget)
 	defer cancel()
 
 	stream, err := conn.AcceptStream(ctx)
@@ -170,8 +181,8 @@ func (r *fakeRelay) waitAccepted(t *testing.T) acceptResult {
 	select {
 	case a := <-r.accepted:
 		return a
-	case <-time.After(5 * time.Second):
-		t.Fatal("no accepted connection from fakeRelay within 5s")
+	case <-time.After(starvationBudget):
+		t.Fatal("no accepted connection from fakeRelay")
 		return acceptResult{}
 	}
 }
@@ -190,7 +201,7 @@ func waitConnDone(t *testing.T, conn *quic.Conn) {
 	t.Helper()
 	select {
 	case <-conn.Context().Done():
-	case <-time.After(5 * time.Second):
-		t.Fatal("expected the QUIC connection to close within 5s")
+	case <-time.After(starvationBudget):
+		t.Fatal("expected the QUIC connection to close")
 	}
 }
