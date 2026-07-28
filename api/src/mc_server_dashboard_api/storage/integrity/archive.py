@@ -27,9 +27,16 @@ from mc_server_dashboard_api.storage.domain.errors import ArchiveUnreadableError
 # CRC32 + ISIZE trailer (the bit-rot check), rather than raw deflate.
 _GZIP_WBITS = 16 + zlib.MAX_WBITS
 
-# The two-byte gzip member signature. Used exactly the way CPython's ``gzip`` module
-# uses it: to decide whether bytes following a terminated member are another member
-# or trailing padding.
+# The two-byte gzip member signature, used to decide whether bytes following a
+# terminated member are another member or trailing padding.
+#
+# The authority for that decision is ``tarfile``, which is what restore actually
+# reads with — NOT CPython's ``gzip`` module, which is stricter than this probe:
+# ``gzip.decompress(archive + b"\x00" * 1024)`` succeeds but
+# ``gzip.decompress(archive + b"not-a-member")`` raises ``BadGzipFile``, so gzip
+# tolerates only zero padding. ``tarfile.open(mode="r:gz")`` accepts both, because
+# it stops at the tar end-of-archive marker and never reads that far, and matching
+# restore is what keeps the probe from quarantining a restorable backup.
 _GZIP_MAGIC = b"\x1f\x8b"
 
 # Cap the decompressed bytes materialized per ``decompress`` call. The output is

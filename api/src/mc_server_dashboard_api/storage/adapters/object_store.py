@@ -261,16 +261,22 @@ class _ArchiveProbe:
     """The outcome of one end-to-end read of a stored backup archive (issue #2371).
 
     Three outcomes, kept apart because they mean different things: both fields
-    ``None`` is a sound archive; ``defect`` is a verdict decided over the full
-    declared byte count (a gzip stream whose trailer no longer matches, a body
-    longer than declared) and needs no second opinion; ``ended_at`` is the byte
-    count the body stopped at — whether by a transport teardown or a clean early
-    EOF — which on its own says nothing, because only whether it reproduces
-    distinguishes damage from an outage.
+    ``None`` is a sound archive; ``defect`` is a content verdict that no second
+    opinion can change (a gzip stream that does not decompress, a body longer than
+    declared); ``ended_at`` is the byte count the body stopped at — whether by a
+    transport teardown or a clean early EOF — which on its own says nothing,
+    because only whether it reproduces distinguishes damage from an outage.
+
+    ``cause`` carries the transport error the read failed with, so the eventual
+    ``ObjectStoreUnavailableError`` can chain to it: without it the operator sees
+    "the store could not serve the body" and never the aiohttp/botocore error that
+    says *why*, which is what makes the broad ``except`` in ``_iter_body``
+    diagnosable rather than a black hole.
     """
 
     defect: str | None = None
     ended_at: int | None = None
+    cause: BaseException | None = None
 
 
 class ObjectStorage(Storage):
@@ -1372,12 +1378,16 @@ class ObjectStorage(Storage):
                     f"the store delivered {read} bytes, past the {declared} declared"
                 )
             gzip_probe.finish()
-        except ObjectStoreUnavailableError:
-            return _ArchiveProbe(ended_at=read)
+        except ObjectStoreUnavailableError as exc:
+            # Keep the transport error so the caller can chain to it: this is the
+            # only place the root cause of a failed read still exists.
+            return _ArchiveProbe(ended_at=read, cause=exc)
         except ArchiveUnreadableError as exc:
-            # A content verdict over the FULL declared byte count (bad gzip header,
-            # mismatched trailer). Re-reading identical bytes cannot change it, so
-            # unlike a short body this is decided on the first attempt.
+            # A content verdict: these bytes do not decompress. It may come from the
+            # very first chunk (a bad gzip header) or from the trailer after the full
+            # declared length was delivered — either way the store handed us bytes
+            # and they are not a readable archive, so re-reading the same object
+            # cannot change the answer and this is decided on the first attempt.
             return _ArchiveProbe(defect=str(exc))
         return _ArchiveProbe()
 
@@ -1420,10 +1430,14 @@ class ObjectStorage(Storage):
                 )
             )
         if second.ended_at is not None:
+            # Chain to the transport error the re-read failed with, so the traceback
+            # the sweep logs reaches the actual cause instead of stopping at this
+            # summary. ``None`` when the body ended on a clean EOF (no error to
+            # chain), which is the one case where there is nothing further to show.
             raise ObjectStoreUnavailableError(
                 f"object store could not serve the body of {backup_key}: it ended at "
                 f"{first_end} then {second.ended_at} of {declared} declared bytes"
-            )
+            ) from second.cause
         return second
 
     async def delete_backup(

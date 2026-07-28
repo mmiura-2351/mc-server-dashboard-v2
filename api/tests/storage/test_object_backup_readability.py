@@ -101,9 +101,16 @@ async def test_body_short_of_the_declared_length_is_unreadable() -> None:
     # The stored body is a clean prefix; HEAD keeps declaring the original length.
     store.objects[object_key] = archive[: len(archive) // 2]
     store.declared_sizes[object_key] = len(archive)
+    # Each get_object attempt pops one entry, so a drained queue proves the verdict
+    # took TWO reads: a body that ends early is re-read like a transport teardown
+    # rather than condemned on the first attempt. Condemning it immediately would
+    # still raise below, so without this the symmetry is untested.
+    store.read_aborts[object_key] = [None, None]
 
     with pytest.raises(ArchiveUnreadableError):
         await storage.check_backup_health(community, server, key)
+
+    assert store.read_aborts[object_key] == []
 
 
 async def test_truncated_body_with_a_matching_declared_length_is_unreadable() -> None:
@@ -171,7 +178,24 @@ async def test_bytes_after_a_complete_member_stay_healthy(
     assert report.healthy
 
 
-async def test_a_damaged_second_member_is_still_unreadable() -> None:
+def _damaged_second_member() -> bytes:
+    second = bytearray(region_targz({"world/region/r.0.1.mca": b"y" * 64}))
+    second[-5] ^= 0xFF  # a real member header, a trailer that no longer matches.
+    return bytes(second)
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        _damaged_second_member(),
+        # Nothing but the magic: a member that announces itself and then stops. This
+        # is the documented divergence from ``tarfile``, which accepts it because it
+        # never reads past the tar end-of-archive marker.
+        b"\x1f\x8b",
+    ],
+    ids=["damaged-member", "header-only"],
+)
+async def test_a_damaged_second_member_is_still_unreadable(suffix: bytes) -> None:
     """Leniency stops at the gzip magic: bytes that announce themselves as another
     member must actually be one, or the archive is damaged."""
 
@@ -180,9 +204,7 @@ async def test_a_damaged_second_member_is_still_unreadable() -> None:
     archive = _sound_archive()
     key = await _put_backup(storage, community, server, archive)
     object_key = storage._backup_key(community, server, key)
-    second = bytearray(region_targz({"world/region/r.0.1.mca": b"y" * 64}))
-    second[-5] ^= 0xFF  # a real member header, a trailer that no longer matches.
-    store.objects[object_key] = archive + bytes(second)
+    store.objects[object_key] = archive + suffix
 
     with pytest.raises(ArchiveUnreadableError):
         await storage.check_backup_health(community, server, key)
@@ -233,8 +255,14 @@ async def test_teardown_at_a_shifting_offset_reports_the_store_unavailable() -> 
     object_key = storage._backup_key(community, server, key)
     store.read_aborts[object_key] = [len(archive) // 2, len(archive) // 3]
 
-    with pytest.raises(ObjectStoreUnavailableError):
+    with pytest.raises(ObjectStoreUnavailableError) as excinfo:
         await storage.check_backup_health(community, server, key)
+
+    # The transport error that actually failed the read stays chained, so the
+    # traceback the sweep logs reaches the root cause instead of stopping at this
+    # summary — the object client translates every body-read failure, so this chain
+    # is the only place the underlying aiohttp/botocore error survives.
+    assert isinstance(excinfo.value.__cause__, ObjectStoreUnavailableError)
 
 
 async def test_teardown_before_any_byte_reports_the_store_unavailable() -> None:

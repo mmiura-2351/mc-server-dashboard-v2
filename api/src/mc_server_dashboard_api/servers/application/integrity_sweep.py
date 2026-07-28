@@ -195,12 +195,19 @@ class IntegritySweep:
                 # Stop instead of misclassifying, naming the row the pass died on so
                 # the operator can resume from a known point; the CLI turns this into
                 # a clean failure rather than a traceback.
+                # ``exc_info`` is load-bearing, not decoration: the object client
+                # translates ANY body-read failure to a storage error, so the
+                # aiohttp/botocore error naming the actual fault survives only in the
+                # ``__cause__`` chain. Without the traceback here an operator sees
+                # "the store could not serve the read" at every surface and never
+                # why — which is what would make that broad catch a black hole.
                 _LOG.error(
                     "integrity sweep: aborting at backup %s on server %s — the "
                     "object store could not serve the archive read. No verdict was "
                     "written for it; re-run the sweep once the store is healthy.",
                     backup.id.value,
                     server.id.value,
+                    exc_info=True,
                 )
                 raise
             health = BackupHealth.QUARANTINED if corrupt_count else BackupHealth.HEALTHY
