@@ -485,14 +485,27 @@ class BackupStore(abc.ABC):
     async def check_backup_health(
         self, community_id: CommunityId, server_id: ServerId, key: BackupKey
     ) -> WorkingSetReport:
-        """Extract a backup archive and structurally fsck it (issue #744).
+        """Check a stored backup archive (the one-shot sweep's per-backup probe, #744).
 
-        The one-shot sweep's per-backup probe: extract the archive into throwaway
-        staging under the decompressed-byte cap (the restore extractor), walk it for
-        corrupt ``.mca`` region files (issue #738), then discard the staging.
         Read-only — it never publishes and never touches ``current`` — so the caller
         persists the verdict (HEALTHY/QUARANTINED) in the DB. Re-running yields the
         same report. Raises :class:`~.errors.NotFoundError` for an unknown key.
+
+        What is checked is backend-specific, because the two backends can answer
+        different questions cheaply:
+
+        - The **fs** adapter extracts the archive into throwaway staging under the
+          decompressed-byte cap (the restore extractor), walks it for corrupt
+          ``.mca`` region files (issue #738), discards the staging, and reports the
+          findings in the returned :class:`~...integrity.region.WorkingSetReport`.
+        - The **object** adapter streams the stored object end to end and proves the
+          store can still *produce* the archive (issue #2371) — the precondition
+          restore depends on, which a ``HEAD`` alone never tested. It does not
+          extract, so its report is always empty; an archive the store cannot
+          reproduce raises :class:`~.errors.ArchiveUnreadableError`, and a backend
+          outage during the read raises
+          :class:`~.errors.ObjectStoreUnavailableError` (no verdict about the
+          archive).
         """
 
     @abc.abstractmethod

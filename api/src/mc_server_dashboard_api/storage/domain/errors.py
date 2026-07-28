@@ -56,6 +56,23 @@ class ObjectStoreUnavailableError(StorageError):
     """
 
 
+class ArchiveUnreadableError(StorageError):
+    """A stored backup archive's bytes could not be read back in full (issue #2371).
+
+    Raised by the object backend's ``check_backup_health`` readability probe when
+    streaming the stored object end to end does not reproduce a complete archive:
+    the delivered byte count disagrees with the length ``HEAD`` declares, the gzip
+    stream never reaches its trailer, or the trailer's CRC32/ISIZE no longer
+    describes the payload (silent bit-rot). Such a backup is unrestorable — the
+    same read path backs restore — so the sweep quarantines it.
+
+    Deliberately distinct from :class:`IntegrityCheckError` ("the archived world is
+    structurally corrupt") and from :class:`ObjectStoreUnavailableError` ("the store
+    could not serve the request"): the bytes are gone, which is neither a verdict
+    about the world's contents nor a transient backend condition.
+    """
+
+
 class ArchiveTooLargeError(StorageError):
     """A backup archive's members inflate past the restore decompressed-size cap.
 

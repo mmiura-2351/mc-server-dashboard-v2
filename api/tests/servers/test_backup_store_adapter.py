@@ -28,13 +28,17 @@ from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
     BackupNotFoundError,
     BackupStorageUnavailableError,
+    BackupUnreadableError,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     ServerId,
 )
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
-from mc_server_dashboard_api.storage.domain.errors import ObjectStoreUnavailableError
+from mc_server_dashboard_api.storage.domain.errors import (
+    ArchiveUnreadableError,
+    ObjectStoreUnavailableError,
+)
 from mc_server_dashboard_api.storage.domain.port import ByteStream
 from mc_server_dashboard_api.storage.domain.value_objects import (
     BackupKey,
@@ -543,6 +547,67 @@ async def test_check_backup_health_returns_corrupt_count(tmp_path: Path) -> None
         )
         == 1
     )
+
+
+class _UnreadableArchiveStorage(FsStorage):
+    """A ``Storage`` whose backup readability probe reports the bytes are gone (#2371).
+
+    Models the object adapter's verdict when the stored archive cannot be streamed
+    back in full — a *storage* type the servers seam must translate rather than let
+    cross back into the servers layer.
+    """
+
+    async def check_backup_health(
+        self,
+        community_id: StorageCommunityId,
+        server_id: StorageServerId,
+        key: BackupKey,
+    ) -> WorkingSetReport:
+        raise ArchiveUnreadableError("backup archive unreadable")
+
+
+async def test_check_backup_health_unreadable_archive_translates_to_unreadable(
+    tmp_path: Path,
+) -> None:
+    """The seam (issue #2371): a storage ``ArchiveUnreadableError`` becomes
+    :class:`BackupUnreadableError`, distinct from the corrupt-contents verdict."""
+
+    storage = _UnreadableArchiveStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+
+    with pytest.raises(BackupUnreadableError):
+        await adapter.check_backup_health(
+            community_id=community, server_id=server, storage_ref=_ref()
+        )
+
+
+class _HealthProbeUnavailableStorage(FsStorage):
+    """A ``Storage`` whose backup readability probe hits a store outage (#2371)."""
+
+    async def check_backup_health(
+        self,
+        community_id: StorageCommunityId,
+        server_id: StorageServerId,
+        key: BackupKey,
+    ) -> WorkingSetReport:
+        raise ObjectStoreUnavailableError("object store read failed")
+
+
+async def test_check_backup_health_store_outage_translates_to_unavailable(
+    tmp_path: Path,
+) -> None:
+    """The seam (issue #2371): an outage during the probe is an availability failure,
+    NOT a verdict about the archive — it must not reach the sweep as corruption."""
+
+    storage = _HealthProbeUnavailableStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+
+    with pytest.raises(BackupStorageUnavailableError):
+        await adapter.check_backup_health(
+            community_id=community, server_id=server, storage_ref=_ref()
+        )
 
 
 async def test_check_backup_health_unknown_ref_translates_to_backup_not_found(

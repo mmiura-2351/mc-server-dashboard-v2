@@ -26,7 +26,10 @@ from mc_server_dashboard_api.storage.adapters.object_store import (
     S3MultipartUpload,
     S3Object,
 )
-from mc_server_dashboard_api.storage.domain.errors import NotFoundError
+from mc_server_dashboard_api.storage.domain.errors import (
+    NotFoundError,
+    ObjectStoreUnavailableError,
+)
 
 
 class FakeS3Store:
@@ -57,6 +60,15 @@ class FakeS3Store:
         # MultipartUploadsUnsupportedError to model a backend without the operation.
         self.multipart_uploads: dict[str, tuple[str, dt.datetime]] = {}
         self.list_multipart_uploads_unsupported = False
+        # Read-path damage injection for the archive readability probe (#2371).
+        # ``declared_sizes`` overrides what ``head_object`` reports for a key, so a
+        # body can be delivered short of the length the store declares.
+        # ``read_aborts`` queues, per key, one entry per ``get_object`` attempt: a
+        # byte offset at which the body stream raises ObjectStoreUnavailableError
+        # (the mid-stream connection teardown), or ``None`` to deliver in full.
+        # An exhausted (or absent) queue delivers in full.
+        self.declared_sizes: dict[str, int] = {}
+        self.read_aborts: dict[str, list[int | None]] = {}
 
 
 class FakeS3Client:
@@ -69,8 +81,16 @@ class FakeS3Client:
         if key not in self._store.objects:
             raise NotFoundError(f"object not found: {key}")
         data = self._store.objects[key]
+        queued = self._store.read_aborts.get(key)
+        abort_at = queued.pop(0) if queued else None
 
         async def _gen() -> AsyncIterator[bytes]:
+            if abort_at is not None:
+                # Deliver up to the injected offset, then tear the body down the way
+                # the real client does on a mid-stream connection abort (#2371).
+                if abort_at:
+                    yield data[:abort_at]
+                raise ObjectStoreUnavailableError(f"object store read failed: {key}")
             # Yield in two chunks when large enough so streaming consumers see
             # more than one yield (the bounded-memory contract).
             half = len(data) // 2
@@ -102,7 +122,9 @@ class FakeS3Client:
 
     async def head_object(self, key: str) -> int | None:
         obj = self._store.objects.get(key)
-        return None if obj is None else len(obj)
+        if obj is None:
+            return None
+        return self._store.declared_sizes.get(key, len(obj))
 
     async def copy_object(self, src_key: str, dst_key: str) -> None:
         if src_key not in self._store.objects:

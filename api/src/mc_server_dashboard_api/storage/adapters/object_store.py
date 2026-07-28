@@ -67,10 +67,12 @@ from mc_server_dashboard_api.storage.adapters.failure_seam import (
 )
 from mc_server_dashboard_api.storage.domain.errors import (
     ArchiveTooLargeError,
+    ArchiveUnreadableError,
     IncompleteTransferError,
     IntegrityCheckError,
     MissingRegionsError,
     NotFoundError,
+    ObjectStoreUnavailableError,
     PathTraversalError,
     SnapshotHandleError,
     StaleGenerationError,
@@ -97,6 +99,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     VersionId,
     is_version_ring_member,
 )
+from mc_server_dashboard_api.storage.integrity.archive import GzipReadProbe
 from mc_server_dashboard_api.storage.integrity.region import (
     RegionFinding,
     WorkingSetReport,
@@ -136,6 +139,12 @@ _DIR_MARKER = ".dir"
 # so a live ``put_backup``/``upload_multipart`` is never aborted out from under
 # itself. Mirrors the fs adapter's spool-sweep age guard.
 _MULTIPART_SWEEP_MIN_AGE_S = 3600
+# Pause before the backup readability probe re-reads a body that ended early
+# (issue #2371), so a momentary fault has a chance to clear: a blip then returns
+# healthy or stops somewhere else, and only genuinely persistent damage still looks
+# reproducible. Short enough to be irrelevant next to the full read it precedes, and
+# only ever paid on the failure path.
+_REPROBE_BACKOFF_S = 1.0
 
 _LOG = logging.getLogger(__name__)
 
@@ -245,6 +254,29 @@ class _ObjectSnapshotHandle(SnapshotHandle):
         self.transfer_id = transfer_id
         # Set true on commit/abort so a reused handle is rejected (protocol safety).
         self.consumed = False
+
+
+@dataclass(frozen=True)
+class _ArchiveProbe:
+    """The outcome of one end-to-end read of a stored backup archive (issue #2371).
+
+    Three outcomes, kept apart because they mean different things: both fields
+    ``None`` is a sound archive; ``defect`` is a content verdict that no second
+    opinion can change (a gzip stream that does not decompress, a body longer than
+    declared); ``ended_at`` is the byte count the body stopped at — whether by a
+    transport teardown or a clean early EOF — which on its own says nothing,
+    because only whether it reproduces distinguishes damage from an outage.
+
+    ``cause`` carries the transport error the read failed with, so the eventual
+    ``ObjectStoreUnavailableError`` can chain to it: without it the operator sees
+    "the store could not serve the body" and never the aiohttp/botocore error that
+    says *why*, which is what makes the broad ``except`` in ``_iter_body``
+    diagnosable rather than a black hole.
+    """
+
+    defect: str | None = None
+    ended_at: int | None = None
+    cause: BaseException | None = None
 
 
 class ObjectStorage(Storage):
@@ -1288,18 +1320,125 @@ class ObjectStorage(Storage):
     async def check_backup_health(
         self, community_id: CommunityId, server_id: ServerId, key: BackupKey
     ) -> WorkingSetReport:
-        # The one-shot sweep's per-backup fsck (issue #744) extracts a local working
-        # set and walks it (issue #738), which the object backend does not stage —
-        # so this read-only sweep fsck stays fs-only for now even though the
-        # authoritative-create/restore gates ARE wired on this adapter (#750). The
-        # object's existence is still confirmed (so an unknown key is a
-        # NotFoundError, matching the fs adapter) before the healthy report is
-        # returned to satisfy the Port.
+        # The one-shot sweep's per-backup probe (issue #744). The structural ``.mca``
+        # fsck extracts a local working set and walks it (issue #738), which the
+        # object backend does not stage — that part stays fs-only. What this adapter
+        # DOES answer is the question a confirmed-exists ``HEAD`` never could
+        # (issue #2371): can the stored archive still be produced end to end? The
+        # returned ``WorkingSetReport`` is therefore always empty here — a sound
+        # archive is "healthy" and an unproducible one raises ArchiveUnreadableError,
+        # which is a verdict about the bytes, not about the world inside them.
         backup_key = self._backup_key(community_id, server_id, key)
         async with self._client_factory() as client:
-            if await client.head_object(backup_key) is None:
+            declared = await client.head_object(backup_key)
+            if declared is None:
                 raise NotFoundError(f"backup not found: {key.value}")
+            probe = await self._probe_archive(client, backup_key, declared)
+            if probe.ended_at is not None:
+                probe = await self._reprobe_short_body(
+                    client, backup_key, declared, probe.ended_at
+                )
+            if probe.defect is not None:
+                raise ArchiveUnreadableError(
+                    f"backup archive {key.value} could not be read back: {probe.defect}"
+                )
         return WorkingSetReport()
+
+    async def _probe_archive(
+        self, client: S3Client, backup_key: str, declared: int
+    ) -> _ArchiveProbe:
+        """Stream the stored archive once, proving it can be produced (issue #2371).
+
+        Reads the SAME object the download/restore path reads, checking both that
+        the store delivers exactly the ``declared`` bytes its ``HEAD`` promised and
+        that those bytes decompress to a well-formed gzip end. The decompressed
+        output is discarded as it is produced: nothing is staged to disk, nothing
+        is buffered whole.
+        """
+
+        gzip_probe = GzipReadProbe()
+        read = 0
+        try:
+            async for chunk in await client.get_object(backup_key):
+                read += len(chunk)
+                gzip_probe.feed(chunk)
+            if read < declared:
+                # A body that simply STOPPED early, with no transport error — some
+                # store/proxy combination can end the response cleanly. This is the
+                # same observation as a teardown ("the body ended at ``read``") and
+                # is just as unable, on one attempt, to tell damage from a store
+                # having a bad minute. So it takes the same path: report where the
+                # body ended and let the re-read decide. Treating it as a verdict
+                # here would be an unexplained asymmetry with the teardown branch.
+                return _ArchiveProbe(ended_at=read)
+            if read > declared:
+                # More bytes than HEAD promised is not "ended early" and no re-read
+                # can make it consistent: the store is contradicting itself.
+                raise ArchiveUnreadableError(
+                    f"the store delivered {read} bytes, past the {declared} declared"
+                )
+            gzip_probe.finish()
+        except ObjectStoreUnavailableError as exc:
+            # Keep the transport error so the caller can chain to it: this is the
+            # only place the root cause of a failed read still exists.
+            return _ArchiveProbe(ended_at=read, cause=exc)
+        except ArchiveUnreadableError as exc:
+            # A content verdict: these bytes do not decompress. It may come from the
+            # very first chunk (a bad gzip header) or from the trailer after the full
+            # declared length was delivered — either way the store handed us bytes
+            # and they are not a readable archive, so re-reading the same object
+            # cannot change the answer and this is decided on the first attempt.
+            return _ArchiveProbe(defect=str(exc))
+        return _ArchiveProbe()
+
+    async def _reprobe_short_body(
+        self, client: S3Client, backup_key: str, declared: int, first_end: int
+    ) -> _ArchiveProbe:
+        """Classify a body that ended short of its declared length (issue #2371).
+
+        This is the delicate distinction. A single short read cannot tell "this
+        object's bytes are damaged" from "the store is having a bad minute" — both
+        end the body early. The reported defect is *deterministic*: the transfer
+        runs at full speed to one fixed point and stops there on every attempt, days
+        apart. An outage is not.
+
+        So the read is repeated, and only a body that reproducibly ends at the SAME
+        non-zero point is called damage. Anything else — a different point, no byte
+        ever delivered (the store refusing outright), or a complete read the second
+        time — stays an availability failure, because quarantining on it would
+        condemn every backup in the deployment over one bad minute. The extra read
+        is paid only on the failure path.
+
+        **Granularity.** ``_iter_body`` reads in 8 MiB chunks and a failed ``read()``
+        discards the partial chunk, so the byte count compared here moves in chunk
+        steps: this reproduces "the same 8 MiB boundary", not "the same byte". That
+        is ample to separate a fixed cut point from an outage's scattered ones,
+        which is all the comparison is asked to do — but it is not the byte-exact
+        guarantee the raw numbers suggest.
+        """
+
+        # Let a momentary fault clear before re-reading, so a blip is more likely to
+        # come back healthy (or at a different point) than to look reproducible. This
+        # biases the ambiguous case toward "unavailable", which is the safe verdict.
+        await asyncio.sleep(_REPROBE_BACKOFF_S)
+        second = await self._probe_archive(client, backup_key, declared)
+        if second.ended_at == first_end and first_end > 0:
+            return _ArchiveProbe(
+                defect=(
+                    f"the store reproducibly ends the body at {first_end} of the "
+                    f"{declared} declared bytes"
+                )
+            )
+        if second.ended_at is not None:
+            # Chain to the transport error the re-read failed with, so the traceback
+            # the sweep logs reaches the actual cause instead of stopping at this
+            # summary. ``None`` when the body ended on a clean EOF (no error to
+            # chain), which is the one case where there is nothing further to show.
+            raise ObjectStoreUnavailableError(
+                f"object store could not serve the body of {backup_key}: it ended at "
+                f"{first_end} then {second.ended_at} of {declared} declared bytes"
+            ) from second.cause
+        return second
 
     async def delete_backup(
         self, community_id: CommunityId, server_id: ServerId, key: BackupKey

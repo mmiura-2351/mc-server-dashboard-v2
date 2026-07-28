@@ -344,12 +344,41 @@ def _is_unsupported(exc: ClientError) -> bool:
 async def _iter_body(body: Any) -> AsyncIterator[bytes]:
     # aiobotocore's StreamingBody exposes an async ``read(n)``; read bounded chunks
     # so a large object never lands in memory whole.
+    #
+    # A body torn down PARTWAY through must reach the caller as a typed storage
+    # outcome (issue #2371) — that is what lets the backup readability probe tell a
+    # store outage from damaged bytes instead of crashing the sweep on a raw
+    # third-party type.
+    #
+    # This catches broadly ON PURPOSE. Enumerating the failure types was tried and is
+    # wrong: the shapes a short body actually produces are spread across three
+    # libraries and none of them is in the upload tuple above.
+    #
+    #   * ``aiohttp.ClientPayloadError`` — what the reported defect raises. aiohttp's
+    #     parser hits ``ContentLengthError`` at ``feed_eof`` and surfaces this. It is
+    #     a SIBLING of ``ClientConnectionError`` under ``aiohttp.ClientError``, and
+    #     aiobotocore's ``StreamingBody.read`` maps only ``asyncio.TimeoutError`` and
+    #     ``ClientConnectionError``, so it escapes aiobotocore entirely.
+    #   * ``botocore.exceptions.IncompleteReadError`` — aiobotocore's own short-body
+    #     signal from ``_verify_content_length``; a bare ``BotoCoreError``, not an
+    #     ``HTTPClientError``.
+    #   * ``botocore.exceptions.ResponseStreamingError`` / ``ReadTimeoutError`` — the
+    #     dropped-connection and stalled-read shapes aiobotocore does map.
+    #
+    # That taxonomy spans two vendored dependencies and has already drifted once, so
+    # a name-based tuple is a standing bug: a miss here does not degrade the probe,
+    # it disables it. Everything ``read`` raises means the same thing to us — the
+    # store did not deliver the body — so it is translated. ``BaseException`` is
+    # deliberately NOT caught: ``GeneratorExit`` (a consumer closing the stream early)
+    # and ``CancelledError`` must pass through untouched.
     try:
         while True:
             chunk = await body.read(_PART)
             if not chunk:
                 return
             yield chunk
+    except Exception as exc:
+        raise ObjectStoreUnavailableError(f"object store read failed: {exc}") from exc
     finally:
         body.close()
 

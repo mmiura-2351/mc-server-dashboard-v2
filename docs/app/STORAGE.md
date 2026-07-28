@@ -965,24 +965,89 @@ socket read, not a whole transfer, so a multi-GB stream (chunked at 8 MiB) is
 unaffected while a genuinely stalled read is still capped; retries use botocore's
 `standard` mode (capped exponential backoff, broader retryable-error set).
 
-**At-rest integrity sweep limitation (issue #926).** The at-rest integrity sweep
-(`check_current_health`, Section 3.1; `check_backup_health`) returns a healthy
-`WorkingSetReport` unconditionally on the object backend — it does not inspect
-the stored objects. The reason is structural: the object backend has no local
-working-set directory to walk; the fsck implementation walks a local filesystem
-tree (the `current/` symlink target on fs), and no equivalent materialisation
-exists on the object side. The **publish-time** fsck (`_check_staged_regions`,
-wired on `commit_snapshot`, `restore_backup`, and `create_backup_from_current`)
-**is** implemented on the
+**At-rest integrity sweep limitation (issue #926).** The at-rest **structural**
+fsck (`check_current_health`, Section 3.1; the `.mca` walk behind
+`check_backup_health`) returns a healthy `WorkingSetReport` unconditionally on the
+object backend — it does not inspect the stored regions. The reason is structural:
+the object backend has no local working-set directory to walk; the fsck
+implementation walks a local filesystem tree (the `current/` symlink target on
+fs), and no equivalent materialisation exists on the object side. The
+**publish-time** fsck (`_check_staged_regions`, wired on `commit_snapshot`,
+`restore_backup`, and `create_backup_from_current`) **is** implemented on the
 object adapter and remains the authoritative gate — it downloads and validates
 each `.mca` member during staging, so a corrupt region is refused before it
 becomes authoritative. The gap is limited to the **read-only sweep** that
-re-checks already-published snapshots and backups at rest: on the object backend
-that sweep sees every server and backup as healthy regardless of actual content.
-A future enhancement could fetch and structurally check the `.mca` objects from
-the store (downloading headers only, mirroring the fs walker), but it is not
-implemented — the publish-time gate is the correctness guarantee today, and the
-sweep is defense-in-depth.
+re-checks already-published snapshots at rest: on the object backend that sweep
+sees every server's `current` as healthy regardless of actual content. A future
+enhancement could fetch and structurally check the `.mca` objects from the store
+(downloading headers only, mirroring the fs walker), but it is not implemented —
+the publish-time gate is the correctness guarantee today, and the sweep is
+defense-in-depth.
+
+**Backup readability probe (issue #2371).** `check_backup_health` on the object
+backend is *not* limited that way: it answers the question a `HEAD` never could —
+can the store still **produce** this archive? A deployment was found serving
+backups whose body ended deterministically short of the `Content-Length` its
+`HEAD` declared (the connection aborting after a ~12s stall at the same offset on
+every attempt, days apart). Those backups are unrestorable, and every one of them
+listed as `health: healthy`, because the probe read no bytes.
+
+The probe therefore streams the stored object end to end — the same object the
+download and restore paths read — and requires both that the delivered byte count
+equals the declared length **and** that the bytes decompress as a gzip stream
+terminating at a well-formed CRC32 + ISIZE trailer, so silent bit-rot is caught
+and not only truncation. Decompressed output is discarded as it is produced
+(`GzipReadProbe`): nothing is staged to disk, nothing is buffered whole. It does
+not extract or region-fsck — that stays fs-only, above. An archive the store
+cannot reproduce raises `ArchiveUnreadableError`, which the servers seam
+translates to `BackupUnreadableError` and the sweep records as `QUARANTINED`,
+counted and logged apart from a structural quarantine so an operator can tell "the
+bytes are gone" from "the world is corrupt".
+
+A false *unhealthy* is as harmful as the false *healthy* being fixed — it
+quarantines a restorable backup and emits a spurious audit entry — so the probe's
+leniency is pinned to what restore accepts. Restore reads the archive with
+`tarfile.open(mode="r:gz")`, which stops at the tar end-of-archive marker inside
+the first gzip member. Anything after a **complete** member therefore cannot make
+the archive unreadable: a concatenated second member (legal gzip, and what the
+shell tools produce) is walked as well, and anything that does not carry the gzip
+magic is trailing padding that ends the walk. The one place the probe is
+deliberately **stricter** than restore is the trailer: because tarfile stops early
+it never verifies the CRC32/ISIZE at all and will open an archive whose trailer has
+rotted, but a stored object whose bytes have changed is damaged regardless — the
+next flipped bit lands in the payload, which restore *does* reject.
+
+Reading every archive is deliberate cost: the sweep is operator-invoked only
+(`integrity_sweep_cli`, never run on boot), so there is no sampling, cap, or
+config knob.
+
+**Damage vs. outage.** A body that ends early looks identical whether the object's
+bytes are damaged or the store is merely having a bad minute — and quarantining on
+the latter would condemn every backup in the deployment over one outage. The
+observed defect is *deterministic*: the transfer stops at one fixed point on every
+attempt. So the probe re-reads (after a short backoff, so a momentary fault has a
+chance to clear) and calls the archive unreadable only when the body reproducibly
+ends at the **same non-zero point**. A different point, no byte delivered at all
+(the store refusing outright), or a complete read the second time all stay
+`ObjectStoreUnavailableError` → `BackupStorageUnavailableError`, which the sweep
+does not catch: the pass stops, logging which backup it died on, and the CLI exits
+non-zero with an operator-facing message rather than a traceback. The extra read is
+paid only on the failure path. A clean early EOF takes the same re-read path as a
+transport teardown — it is the same observation and equally unable to tell damage
+from an outage on one attempt. The comparison is at the 8 MiB read-chunk
+granularity, not byte-exact, which is ample to separate a fixed cut point from an
+outage's scattered ones.
+
+Supporting this, `_iter_body` translates **any** exception raised while reading a
+response body to `ObjectStoreUnavailableError`, so a teardown is a typed storage
+outcome rather than a raw third-party type crossing the Port. The breadth is
+deliberate: the shapes a short body produces are spread across three libraries and
+none is in the upload-failure tuple — aiohttp's `ClientPayloadError` (what the
+reported defect raises) is a *sibling* of `ClientConnectionError`, which is all
+aiobotocore's `StreamingBody.read` maps, and botocore's `IncompleteReadError` is a
+bare `BotoCoreError`. A name-based enumeration there is a standing bug, because a
+miss does not degrade the probe, it disables it. `BaseException` is not caught, so
+`GeneratorExit` and `CancelledError` still pass through.
 
 ### 7.4 Why backend switching stays a configuration change
 

@@ -8,8 +8,9 @@ bounded contexts (mirroring ``StorageFileStoreAdapter``); the servers *domain* a
 The seam translates the storage value objects (``BackupKey`` wraps the opaque
 archive ref) and the storage errors so no storage type crosses back into the
 servers layer: ``NotFoundError`` -> :class:`BackupNotFoundError`,
-``IntegrityCheckError`` -> :class:`BackupCorruptError`, and
-``ObjectStoreUnavailableError`` -> :class:`BackupStorageUnavailableError` (#2270).
+``IntegrityCheckError`` -> :class:`BackupCorruptError`,
+``ObjectStoreUnavailableError`` -> :class:`BackupStorageUnavailableError` (#2270),
+and ``ArchiveUnreadableError`` -> :class:`BackupUnreadableError` (#2371).
 """
 
 from __future__ import annotations
@@ -21,12 +22,14 @@ from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
     BackupNotFoundError,
     BackupStorageUnavailableError,
+    BackupUnreadableError,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     ServerId,
 )
 from mc_server_dashboard_api.storage.domain.errors import (
+    ArchiveUnreadableError,
     IntegrityCheckError,
     NotFoundError,
     ObjectStoreUnavailableError,
@@ -134,6 +137,19 @@ class StorageBackupStoreAdapter(BackupArchiveStore):
             )
         except NotFoundError as exc:
             raise BackupNotFoundError(storage_ref) from exc
+        except ArchiveUnreadableError as exc:
+            # The object backend's readability probe could not stream the stored
+            # archive back in full (issue #2371) — a verdict about the archive's
+            # BYTES, which has no ``WorkingSetReport`` to report a corrupt count
+            # from. Translate to its own servers error so the sweep can quarantine
+            # it and say why, without a storage type crossing the seam.
+            raise BackupUnreadableError(storage_ref) from exc
+        except ObjectStoreUnavailableError as exc:
+            # The probe reads every archive byte, so a backend outage lands here
+            # readily (issue #2371). It is NOT a verdict about the archive: keeping
+            # it a distinct servers error is what stops the sweep from quarantining
+            # every backup in the deployment over one bad minute.
+            raise BackupStorageUnavailableError(storage_ref) from exc
         return len(report.corrupt)
 
     async def check_current_health(

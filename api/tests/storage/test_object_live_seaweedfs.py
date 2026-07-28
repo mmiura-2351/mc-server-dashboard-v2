@@ -13,6 +13,10 @@ so a backend that violates one is caught before it ships as the default:
 3. **Multipart upload + prefix ListObjectsV2** — every working-set member is
    uploaded via multipart and listed by prefix.
 
+4. **Backup readability probe** — the sweep's per-backup health check pulls every
+   archive byte back out of the store (issue #2371), so a sound archive must read
+   back sound against a real endpoint, and a bit-rotted one must be flagged.
+
 It also exercises the startup ``sweep`` path against the real endpoint: SeaweedFS's
 ListMultipartUploads omits the optional ``Initiated`` timestamp, so the adapter
 age-gates uploads via ``ListParts`` (per-part ``LastModified``) instead — a recent
@@ -40,8 +44,12 @@ from mc_server_dashboard_api.storage.adapters.object_store import (
     ObjectStorage,
     S3ClientFactory,
 )
-from mc_server_dashboard_api.storage.domain.errors import NotFoundError
+from mc_server_dashboard_api.storage.domain.errors import (
+    ArchiveUnreadableError,
+    NotFoundError,
+)
 from mc_server_dashboard_api.storage.domain.value_objects import (
+    BackupKey,
     CommunityId,
     RelPath,
     ServerId,
@@ -51,8 +59,12 @@ from tests.storage.helpers import (
     healthy_region_bytes,
     new_scope,
     read_tar,
+    region_targz,
     tar_stream,
 )
+
+# One healthy region body, reused by the readability-probe archives below.
+_REGION = healthy_region_bytes()
 
 _ENDPOINT = os.environ.get("MCD_TEST_S3_ENDPOINT")
 _BUCKET = os.environ.get("MCD_TEST_S3_BUCKET", "mcsd")
@@ -273,6 +285,54 @@ async def test_fresh_bucketless_store_reads_as_empty_then_write_creates_it() -> 
         assert await _read(client, key) == b"{}"
         assert any(obj.key == key for obj in await client.list_objects("communities/"))
         await client.delete_object(key)
+
+
+async def test_backup_readability_probe_passes_a_sound_archive() -> None:
+    # Issue #2371: the object backend's health probe now pulls every archive byte
+    # back out of the store. Against a REAL endpoint, an archive that was just
+    # written must read back sound — otherwise the probe would quarantine healthy
+    # backups on the deployment's own storage.
+    storage = ObjectStorage(_factory())
+    community, server = _scope()
+    key = await _put_backup(
+        storage, community, server, region_targz({"world/region/r.0.0.mca": _REGION})
+    )
+
+    report = await storage.check_backup_health(community, server, key)
+
+    assert report.healthy
+
+
+async def test_backup_readability_probe_flags_a_bit_rotted_archive() -> None:
+    # The other half: bytes the store DOES produce in full, but which no longer
+    # decompress to a matching gzip trailer. HEAD still declares the right length —
+    # exactly why a length comparison alone cannot catch this class (issue #2371).
+    factory = _factory()
+    storage = ObjectStorage(factory)
+    community, server = _scope()
+    archive = region_targz({"world/region/r.0.0.mca": _REGION})
+    key = await _put_backup(storage, community, server, archive)
+    rotted = bytearray(archive)
+    rotted[-5] ^= 0xFF  # inside the CRC32 + ISIZE trailer; the length is unchanged.
+    object_key = storage._backup_key(community, server, key)
+    async with factory() as client:
+        await client.put_object(object_key, bytes(rotted))
+        assert await client.head_object(object_key) == len(archive)
+
+    with pytest.raises(ArchiveUnreadableError):
+        await storage.check_backup_health(community, server, key)
+
+
+async def _put_backup(
+    storage: ObjectStorage,
+    community: CommunityId,
+    server: ServerId,
+    archive: bytes,
+) -> BackupKey:
+    async def _stream() -> AsyncIterator[bytes]:
+        yield archive
+
+    return await storage.put_backup(community, server, _stream())
 
 
 async def _read(client: object, key: str) -> bytes:
