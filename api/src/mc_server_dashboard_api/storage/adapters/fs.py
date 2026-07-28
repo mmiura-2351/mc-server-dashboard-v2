@@ -30,7 +30,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import datetime as dt
+import errno
 import hashlib
+import io
 import os
 import shutil
 import tarfile
@@ -1933,6 +1935,48 @@ def _tar_into_fd(
         holder.append(exc)
 
 
+# The ``open`` errnos that all mean "no readable file at this path" -- exactly the
+# set the ``is_file()`` pre-check these per-file streams used to do answered False
+# for: the path is gone (ENOENT -- a delete racing the open, or a dangling
+# symlink), it names a directory (EISDIR), it is reached through a non-directory
+# (ENOTDIR), or it is a symlink that loops (ELOOP). The open that replaced the
+# pre-check (issues #2341, #2391) matched on exception TYPE, which silently
+# dropped ELOOP: it has no dedicated ``OSError`` subclass, so it escaped the
+# helper backend-native and the servers-side seam -- which translates
+# :class:`NotFoundError` only -- reported it as a 500 on a path ``read_file``
+# still answered as a clean miss (issue #2393).
+#
+# ENAMETOOLONG is deliberately absent: ``is_file()`` RAISES on it rather than
+# answering False, so it was never a modelled miss on any path, and folding it in
+# here alone would make a stream disagree with ``read_file`` -- the very
+# divergence this set exists to remove.
+#
+# It stays a filter rather than a bare ``except OSError``: EACCES and EIO name a
+# path that does exist, and reporting them as a missing file would hide a real
+# failure behind a 404.
+_NOT_A_READABLE_FILE = frozenset(
+    {errno.ENOENT, errno.EISDIR, errno.ENOTDIR, errno.ELOOP}
+)
+
+
+async def _open_readable(path: Path, not_found: str) -> io.BufferedReader:
+    """Open ``path`` for reading, reporting "names no readable file" as a miss.
+
+    The single translation point shared by all three per-file stream helpers: for
+    each of them the open IS the existence check, so every failure meaning the
+    path names no readable file has to arrive as the Port's own
+    :class:`NotFoundError` (message ``not_found``). Every other ``OSError``
+    propagates unchanged.
+    """
+
+    try:
+        return await asyncio.to_thread(open, path, "rb")
+    except OSError as exc:
+        if exc.errno in _NOT_A_READABLE_FILE:
+            raise NotFoundError(not_found) from exc
+        raise
+
+
 def _file_stream(
     path: Path, byte_range: tuple[int, int] | None = None, *, not_found: str
 ) -> AsyncIterator[bytes]:
@@ -1953,10 +1997,7 @@ def _file_stream(
     """
 
     async def _gen() -> AsyncIterator[bytes]:
-        try:
-            handle = await asyncio.to_thread(open, path, "rb")
-        except FileNotFoundError as exc:
-            raise NotFoundError(not_found) from exc
+        handle = await _open_readable(path, not_found)
         try:
             remaining = None
             if byte_range is not None:
@@ -1975,15 +2016,6 @@ def _file_stream(
             await asyncio.to_thread(handle.close)
 
     return _gen()
-
-
-# The ``open`` failures that all mean "no readable file at this path": it is gone
-# (a delete racing the open), it names a directory, or a parent component is not
-# one. The ``is_file()`` pre-check these per-file streams used to do folded the
-# three into a single miss, and the open that replaced it (issue #2391) must
-# report them the same way -- anything else is a backend-native error escaping
-# the storage seam.
-_NOT_A_READABLE_FILE = (FileNotFoundError, IsADirectoryError, NotADirectoryError)
 
 
 def _leased_file_stream(
@@ -2005,8 +2037,9 @@ def _leased_file_stream(
     it, so a ``delete_file`` unlinking in place lands between a pre-check and this
     open and makes the stream raise a bare ``FileNotFoundError`` -- which the
     servers-side seam does not translate (it translates :class:`NotFoundError`
-    only), so it reaches the edge as a 500. Opening once and reporting the miss as
-    ``NotFoundError`` (message ``not_found``) removes the window. The open stays
+    only), so it reaches the edge as a 500. Opening through
+    :func:`_open_readable`, which reports every "names no readable file" errno as
+    ``NotFoundError`` (message ``not_found``), removes the window. The open stays
     on the first iteration, so a stream that is opened but never consumed holds no
     descriptor.
     """
@@ -2014,10 +2047,7 @@ def _leased_file_stream(
     async def _gen() -> AsyncIterator[bytes]:
         path, on_close = await asyncio.to_thread(open_source)
         try:
-            try:
-                handle = await asyncio.to_thread(open, path, "rb")
-            except _NOT_A_READABLE_FILE as exc:
-                raise NotFoundError(not_found) from exc
+            handle = await _open_readable(path, not_found)
             try:
                 while True:
                     chunk = await asyncio.to_thread(handle.read, _CHUNK)
@@ -2127,10 +2157,7 @@ def _pinned_file_stream(target: Path, rel_path: RelPath) -> AsyncIterator[bytes]
     """
 
     async def _gen() -> AsyncIterator[bytes]:
-        try:
-            handle = await asyncio.to_thread(open, target, "rb")
-        except _NOT_A_READABLE_FILE as exc:
-            raise NotFoundError(f"file not found: {rel_path.value}") from exc
+        handle = await _open_readable(target, f"file not found: {rel_path.value}")
         try:
             while True:
                 chunk = await asyncio.to_thread(handle.read, _CHUNK)
