@@ -669,7 +669,7 @@ async def download_backup(
             backup_id=BackupId(backup_id),
             byte_range=served,
         )
-    except BackupNotFoundError as exc:
+    except (ServerNotFoundError, BackupNotFoundError) as exc:
         # Deleted between the size read and the open: still nothing on the wire.
         raise _not_found() from exc
     await _record(recorder, ops.BACKUP_DOWNLOAD, authorized, community_id, backup_id)

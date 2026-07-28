@@ -508,7 +508,8 @@ class _FakeDownload:
     consumer, and one test fetches the same archive twice). ``declared``
     overstates the size so a test can model the archive vanishing under an open
     stream (issue #2318); ``mid_stream_error`` raises after the first chunk for
-    the other half of that race.
+    the other half of that race. ``stream_error`` fails only the open, modelling
+    the backup disappearing between the size read and it.
     """
 
     def __init__(
@@ -518,11 +519,13 @@ class _FakeDownload:
         chunks: list[bytes] | None = None,
         declared: int | None = None,
         error: Exception | None = None,
+        stream_error: Exception | None = None,
         mid_stream_error: Exception | None = None,
     ) -> None:
         self._chunks = [data] if chunks is None else chunks
         self._declared = declared
         self._error = error
+        self._stream_error = stream_error
         self._mid_stream_error = mid_stream_error
         # Every byte_range the edge asked for, so a test can prove the range
         # reached the store rather than being sliced off a full stream (#2372).
@@ -540,6 +543,8 @@ class _FakeDownload:
     ) -> object:
         if self._error is not None:
             raise self._error
+        if self._stream_error is not None:
+            raise self._stream_error
         self.ranges.append(byte_range)
         return self._stream(byte_range)
 
@@ -646,6 +651,15 @@ def test_download_unknown_backup_is_404() -> None:
     app = _app(
         member=True, allow=True, download=_FakeDownload(error=BackupNotFoundError("x"))
     )
+    client = next(_client(app))
+    assert _download(client).status_code == 404
+
+
+@pytest.mark.parametrize("error", [BackupNotFoundError("x"), ServerNotFoundError("x")])
+def test_download_of_a_backup_deleted_before_the_open_is_404(error: Exception) -> None:
+    # The size is read before the stream is opened, so a delete can land between
+    # the two. Nothing is on the wire yet, so it is still a plain 404.
+    app = _app(member=True, allow=True, download=_FakeDownload(stream_error=error))
     client = next(_client(app))
     assert _download(client).status_code == 404
 
