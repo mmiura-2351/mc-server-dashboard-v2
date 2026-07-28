@@ -6,7 +6,8 @@ cases and authorization Ports faked (NFR-TEST-1, no database). Verifies:
 - the two-layer gate per route (non-member -> 404, member-without-permission ->
   403, authorized member -> 2xx);
 - the servers-backup-error -> HTTP-code mapping (missing 404, unsettled 409,
-  restore-running 409, worker-down 503);
+  restore-running 409, worker-down 503, store-down 503 on every route that
+  reaches the object store before a response body starts);
 - create records the acting user (created_by passed through);
 - list shape.
 """
@@ -83,6 +84,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
     BackupNotFoundError,
+    BackupStorageUnavailableError,
     BackupUnsettledError,
     FileTooLargeError,
     InvalidBackupArchiveError,
@@ -334,6 +336,25 @@ def test_create_worker_unavailable_is_503() -> None:
     assert resp.status_code == 503
 
 
+def test_create_storage_unavailable_is_503_with_reason() -> None:
+    # The object store was down mid-archive (issue #2378): a transient backend
+    # fault, so 503 storage_unavailable — not a generic 500 — telling the client
+    # to retry and keeping genuine 500s meaningful in monitoring.
+    use_case = _FakeUseCase(error=BackupStorageUnavailableError("x"))
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, create=use_case, recorder=recorder)
+    client = next(_client(app))
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4()))
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "storage_unavailable"
+    # No Retry-After: nothing in the request path knows when the store recovers.
+    assert "Retry-After" not in resp.headers
+    # Mirrors the worker-down path: an ERROR against the server (no backup id).
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_CREATE]
+    assert recorder.events[0].outcome is Outcome.ERROR
+    assert recorder.events[0].target_type == ops.TARGET_SERVER
+
+
 def test_create_corrupt_working_set_is_500_with_reason() -> None:
     # The integrity gate (#739) refused to archive a structurally corrupt working
     # set: a server-side data fault, surfaced as a 500 with a machine-readable
@@ -454,6 +475,21 @@ def test_restore_corrupt_without_force_is_500_with_reason() -> None:
     assert recorder.events[0].target_type == ops.TARGET_BACKUP
 
 
+def test_restore_storage_unavailable_is_503_with_reason() -> None:
+    # The store could not serve the archive back (issue #2378): a transient
+    # backend fault, 503 storage_unavailable rather than a generic 500.
+    use_case = _FakeUseCase(error=BackupStorageUnavailableError("x"))
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, restore=use_case, recorder=recorder)
+    client = next(_client(app))
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/restore"))
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "storage_unavailable"
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_RESTORE]
+    assert recorder.events[0].outcome is Outcome.ERROR
+    assert recorder.events[0].target_type == ops.TARGET_BACKUP
+
+
 def test_restore_with_force_query_param_passes_force_true() -> None:
     use_case = _FakeUseCase(result=RestoreResult(forced_corrupt=True, corrupt_count=2))
     recorder = RecordingAuditRecorder()
@@ -486,6 +522,18 @@ def test_delete_is_204() -> None:
     assert [e.operation for e in recorder.events] == [ops.BACKUP_DELETE]
     assert recorder.events[0].outcome is Outcome.SUCCESS
     assert recorder.events[0].target_type == ops.TARGET_BACKUP
+
+
+def test_delete_storage_unavailable_is_503_with_reason() -> None:
+    # The archive delete drives an object-store delete; an outage there is the same
+    # transient backend fault as on create/restore (issue #2378), so one outage
+    # produces one status across every backup route.
+    use_case = _FakeUseCase(error=BackupStorageUnavailableError("x"))
+    app = _app(member=True, allow=True, delete=use_case)
+    client = next(_client(app))
+    resp = client.delete(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}"))
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "storage_unavailable"
 
 
 def test_delete_unknown_backup_is_404() -> None:
@@ -583,6 +631,22 @@ def test_download_without_credentials_is_401() -> None:
     client = next(_client(app))
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download"))
     assert resp.status_code == 401
+
+
+def test_download_storage_unavailable_is_503_with_reason() -> None:
+    # The size probe runs BEFORE any byte is on the wire, so a store outage there
+    # can still choose the status (issue #2378): 503 storage_unavailable, not a
+    # generic 500. An outage that only strikes mid-stream cannot — the status is
+    # already committed — and stays a truncated body.
+    app = _app(
+        member=True,
+        allow=True,
+        download=_FakeDownload(error=BackupStorageUnavailableError("x")),
+    )
+    client = next(_client(app))
+    resp = _download(client)
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "storage_unavailable"
 
 
 def test_download_streams_archive_with_disposition() -> None:
@@ -1143,6 +1207,17 @@ def test_upload_too_large_is_413() -> None:
     client = next(_client(app))
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/upload"), files=_multipart())
     assert resp.status_code == 413
+
+
+def test_upload_storage_unavailable_is_503_with_reason() -> None:
+    # The validated archive could not be written to the store (issue #2378):
+    # 503 storage_unavailable, so the client knows to retry the upload.
+    use_case = _FakeUseCase(error=BackupStorageUnavailableError("x"))
+    app = _app(member=True, allow=True, upload=use_case)
+    client = next(_client(app))
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/upload"), files=_multipart())
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "storage_unavailable"
 
 
 def test_upload_unknown_server_is_404() -> None:

@@ -108,6 +108,7 @@ from mc_server_dashboard_api.servers.domain.cpu_allocation import (
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
+    BackupStorageUnavailableError,
     CommandDispatchError,
     EulaNotAcceptedError,
     FileTooLargeError,
@@ -994,6 +995,12 @@ async def delete_server(
         # A concurrent lifecycle op held the per-server lock past the acquire
         # budget (issue #876): a transient 409 the caller retries.
         raise _conflict("server_busy") from exc
+    except BackupStorageUnavailableError as exc:
+        # The mandatory final-snapshot pack (#777) and the archive enumeration that
+        # follows both drive the object store. The delete is fail-closed — the row is
+        # untouched — so a store outage is a transient 503 the caller retries once the
+        # store is back, not a generic 500 (issue #2378).
+        raise _service_unavailable("storage_unavailable") from exc
     await _record(recorder, ops.SERVER_DELETE, authorized, community_id, server_id)
 
 

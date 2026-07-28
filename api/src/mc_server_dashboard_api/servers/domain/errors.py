@@ -385,8 +385,12 @@ class BackupStorageUnavailableError(ServerError):
     one of the modelled outcomes. Translating it at the servers/storage seam keeps the
     raw storage type from crossing back into the servers layer (the seam's documented
     contract). The condition is a transient backend fault, distinct from a corrupt
-    working set (:class:`BackupCorruptError`); an unmapped ``ServerError`` surfaces as
-    a generic 500 at the edge, which a future dedicated handler may refine to a 503.
+    working set (:class:`BackupCorruptError`), so the edge maps it to 503
+    ``storage_unavailable`` (issue #2378) — the same treatment
+    :class:`~.control_plane.WorkerUnavailableError` gets. That tells a client the
+    request is worth retrying unchanged and keeps a genuine 500 meaningful in
+    monitoring. No ``Retry-After`` rides along: nothing in the request path knows when
+    the store recovers, and an invented number would be worse than none.
     """
 
 

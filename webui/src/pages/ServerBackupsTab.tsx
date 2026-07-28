@@ -71,6 +71,10 @@ function createErrorMessage(error: unknown): TranslationKey {
       return "backups.error.invalidArchive";
     case "worker_unavailable":
       return "backups.error.workerUnavailable";
+    case "storage_unavailable":
+      // The object store, not the server host, is down (issue #2378). Without
+      // this case the 503 below would blame the host for a storage outage.
+      return "backups.error.storageUnavailable";
   }
 
   // Check status (less specific).

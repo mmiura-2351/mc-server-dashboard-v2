@@ -66,6 +66,7 @@ from mc_server_dashboard_api.servers.domain.cpu_allocation import (
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
+    BackupStorageUnavailableError,
     InvalidCpuAllocationError,
     InvalidMemoryLimitError,
     InvalidSnapshotIntervalError,
@@ -1051,6 +1052,21 @@ def test_read_missing_server_is_404() -> None:
     client = next(_client(app))
     resp = client.get(f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}")
     assert resp.status_code == 404
+
+
+def test_delete_storage_unavailable_is_503_with_reason() -> None:
+    # The mandatory final-snapshot pack (#777) drives object-store writes; a
+    # store outage there is a transient backend fault, so the fail-closed delete
+    # surfaces 503 storage_unavailable rather than a generic 500 (issue #2378).
+    app = _app(
+        member=True,
+        allow=True,
+        delete=_FakeUseCase(error=BackupStorageUnavailableError("x")),
+    )
+    client = next(_client(app))
+    resp = client.delete(f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}")
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "storage_unavailable"
 
 
 def test_delete_success_is_204() -> None:
