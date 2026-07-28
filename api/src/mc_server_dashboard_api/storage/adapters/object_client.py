@@ -68,9 +68,18 @@ class _Aioboto3S3Client:
         self._client = client
         self._bucket = bucket
 
-    async def get_object(self, key: str) -> AsyncIterator[bytes]:
+    async def get_object(
+        self, key: str, byte_range: tuple[int, int] | None = None
+    ) -> AsyncIterator[bytes]:
+        # An inclusive (first, last) pair is exactly the S3 ``Range`` spelling
+        # (issue #2372), so a resumed download fetches only its tail.
+        extra = (
+            {}
+            if byte_range is None
+            else {"Range": f"bytes={byte_range[0]}-{byte_range[1]}"}
+        )
         try:
-            resp = await self._client.get_object(Bucket=self._bucket, Key=key)
+            resp = await self._client.get_object(Bucket=self._bucket, Key=key, **extra)
         except ClientError as exc:
             if _is_not_found(exc) or _is_no_such_bucket(exc):
                 raise NotFoundError(f"object not found: {key}") from exc

@@ -1407,11 +1407,21 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         self.pruned.append(server_id)
 
     async def open(
-        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        storage_ref: str,
+        byte_range: tuple[int, int] | None = None,
     ) -> AsyncIterator[bytes]:
         if storage_ref not in self.archives:
             raise BackupNotFoundError(storage_ref)
-        yield self.bytes_by_ref[storage_ref]
+        data = self.bytes_by_ref[storage_ref]
+        if byte_range is not None:
+            # The inclusive (first, last) pair the real adapters read (#2372).
+            first, last = byte_range
+            data = data[first : last + 1]
+        yield data
 
     async def store(
         self,

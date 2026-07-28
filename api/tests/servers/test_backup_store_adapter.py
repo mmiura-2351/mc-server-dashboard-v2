@@ -499,6 +499,49 @@ async def test_open_unknown_ref_translates_to_backup_not_found(
         )
 
 
+async def test_ranged_open_yields_that_slice_of_the_archive(tmp_path: Path) -> None:
+    """The seam passes a byte range through to Storage (issue #2372)."""
+
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    await _publish(storage, community, server, {"server.properties": b"motd=original"})
+    ref = _ref()
+    await adapter.create_from_current(
+        community_id=community, server_id=server, storage_ref=ref
+    )
+
+    archive = await drain(
+        adapter.open(community_id=community, server_id=server, storage_ref=ref)
+    )
+    tail = await drain(
+        adapter.open(
+            community_id=community,
+            server_id=server,
+            storage_ref=ref,
+            byte_range=(len(archive) - 10, len(archive) - 1),
+        )
+    )
+    assert tail == archive[-10:]
+
+
+async def test_ranged_open_unknown_ref_translates_to_backup_not_found(
+    tmp_path: Path,
+) -> None:
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    with pytest.raises(BackupNotFoundError):
+        await drain(
+            adapter.open(
+                community_id=community,
+                server_id=server,
+                storage_ref="nope",
+                byte_range=(0, 9),
+            )
+        )
+
+
 async def test_size_reports_archive_byte_count(tmp_path: Path) -> None:
     storage = FsStorage(tmp_path, version_retention=10)
     adapter = StorageBackupStoreAdapter(storage=storage)

@@ -77,10 +77,17 @@ class FakeS3Client:
     def __init__(self, store: FakeS3Store) -> None:
         self._store = store
 
-    async def get_object(self, key: str) -> AsyncIterator[bytes]:
+    async def get_object(
+        self, key: str, byte_range: tuple[int, int] | None = None
+    ) -> AsyncIterator[bytes]:
         if key not in self._store.objects:
             raise NotFoundError(f"object not found: {key}")
         data = self._store.objects[key]
+        if byte_range is not None:
+            # The S3 ``Range`` parameter: an inclusive (first, last) pair, and
+            # only those bytes come back (issue #2372).
+            first, last = byte_range
+            data = data[first : last + 1]
         queued = self._store.read_aborts.get(key)
         abort_at = queued.pop(0) if queued else None
 

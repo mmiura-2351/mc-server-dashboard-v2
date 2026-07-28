@@ -1139,14 +1139,20 @@ class FsStorage(Storage):
         )
 
     def open_backup(
-        self, community_id: CommunityId, server_id: ServerId, key: BackupKey
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        key: BackupKey,
+        *,
+        byte_range: tuple[int, int] | None = None,
     ) -> ByteStream:
         # Stream the stored archive bytes verbatim (no recompression): the file is
-        # already a self-contained tar.gz (issue #281).
+        # already a self-contained tar.gz (issue #281). A byte_range seeks to its
+        # first position rather than discarding a prefix (issue #2372).
         archive = self._backup_path(community_id, server_id, key)
         if not archive.is_file():
             raise NotFoundError(f"backup not found: {key.value}")
-        return _file_stream(archive)
+        return _file_stream(archive, byte_range)
 
     async def put_backup(
         self,
@@ -1925,16 +1931,31 @@ def _tar_into_fd(
         holder.append(exc)
 
 
-def _file_stream(path: Path) -> AsyncIterator[bytes]:
-    """Yield a stored file's bytes in chunks (JAR egress)."""
+def _file_stream(
+    path: Path, byte_range: tuple[int, int] | None = None
+) -> AsyncIterator[bytes]:
+    """Yield a stored file's bytes in chunks (JAR egress).
+
+    ``byte_range`` is an inclusive ``(first, last)`` pair: the handle seeks to
+    ``first`` and yields exactly ``last - first + 1`` bytes, so serving the tail
+    of a multi-GB archive never reads the head (issue #2372).
+    """
 
     async def _gen() -> AsyncIterator[bytes]:
         handle = await asyncio.to_thread(open, path, "rb")
         try:
-            while True:
-                chunk = await asyncio.to_thread(handle.read, _CHUNK)
+            remaining = None
+            if byte_range is not None:
+                first, last = byte_range
+                await asyncio.to_thread(handle.seek, first)
+                remaining = last - first + 1
+            while remaining is None or remaining > 0:
+                want = _CHUNK if remaining is None else min(_CHUNK, remaining)
+                chunk = await asyncio.to_thread(handle.read, want)
                 if not chunk:
                     return
+                if remaining is not None:
+                    remaining -= len(chunk)
                 yield chunk
         finally:
             await asyncio.to_thread(handle.close)
