@@ -1625,7 +1625,7 @@ class FakePluginCacheStore(PluginCacheStore):
     Keyed by SHA-256 content address. ``puts`` records each ``put`` call (even the
     deduped ones) and ``stored`` holds the keys actually persisted, so a test can
     assert dedup (a second put of identical bytes does not grow ``stored``) and the
-    download cache (a cached ``has`` short-circuits the HTTP download).
+    download cache (a cached blob short-circuits the HTTP download).
     """
 
     def __init__(self) -> None:

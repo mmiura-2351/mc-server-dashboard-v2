@@ -2144,6 +2144,96 @@ async def test_cache_hit_does_not_reupload_blob() -> None:
     assert cache.puts == []
 
 
+class _GcRacedPluginCacheStore(FakePluginCacheStore):
+    """Reports every content key as present while holding no blob (issue #2346).
+
+    Models the plugin-cache GC deleting a blob between a presence check and the
+    read that follows it: ``has`` answers yes, and ``open`` still raises
+    ``PluginCacheBlobNotFoundError`` on the first chunk.
+    """
+
+    async def has(self, sha256: str) -> bool:
+        return True
+
+
+async def test_cache_blob_deleted_after_lookup_falls_back_to_download() -> None:
+    """A blob the GC deleted under the resolver installs via the download path.
+
+    The download-cache index resolves the version's sha512 to a cached sha256,
+    but the blob is gone by the time it is read. The miss is a cache miss, not a
+    500: the jar is downloaded, verified, and re-ingested (issue #2346).
+    """
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+
+    project = _project()
+    version, content = _version()
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(project, [version])
+    catalog.seed_file(version.files[0].url, content)
+
+    sha256 = hashlib.sha256(content).hexdigest()
+    cache = _GcRacedPluginCacheStore()
+    # Seed the download-cache index: a prior install on another server.
+    prior = _plugin(
+        server_id=ServerId.new(),
+        checksum_sha512=version.files[0].sha512,
+        sha256=sha256,
+    )
+    uow.plugins.seed(prior)
+
+    uc = InstallFromCatalog(
+        uow=uow,
+        catalog=catalog,
+        file_store=FakeFileStore(),
+        cache=cache,
+        clock=FakeClock(_NOW),
+    )
+    plugin = await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        project_id="proj-1",
+        version_id="ver-1",
+    )
+    assert plugin.sha256 == sha256
+    # Recovered by downloading once and re-ingesting the blob once.
+    assert catalog.downloads == [version.files[0].url]
+    assert cache.puts == [sha256]
+
+
+async def test_geyser_cache_blob_deleted_after_lookup_falls_back_to_download() -> None:
+    """The sha256-keyed resolver recovers from the same GC race (issue #2346)."""
+    uow = FakeUnitOfWork()
+    server = _server(server_type=ServerType.PAPER)
+    uow.servers.seed(server)
+
+    project = _geyser_project()
+    version, content = _geyser_version()
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(project, [version])
+    catalog.seed_file(version.files[0].url, content)
+    cache = _GcRacedPluginCacheStore()
+
+    uc = InstallFromCatalog(
+        uow=uow,
+        catalog=catalog,
+        file_store=FakeFileStore(),
+        cache=cache,
+        clock=FakeClock(_NOW),
+    )
+    plugin = await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        project_id="geysermc-floodgate",
+        version_id="2.2.5-138",
+    )
+    expected_sha256 = hashlib.sha256(content).hexdigest()
+    assert plugin.sha256 == expected_sha256
+    assert catalog.downloads == [version.files[0].url]
+    assert cache.puts == [expected_sha256]
+
+
 # -- Bedrock port on Geyser detection via catalog install (issue #1541) --
 
 
