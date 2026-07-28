@@ -350,7 +350,7 @@ describe("selection reconciliation when the active community vanishes", () => {
   });
 
   it("keeps the selection when a refetch fails instead of treating it as absent", async () => {
-    let communitiesResponse: { id: string; name: string }[] = [
+    const communitiesResponse = [
       { id: "c1", name: "First" },
       { id: "c2", name: "Second" },
     ];
