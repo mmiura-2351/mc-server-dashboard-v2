@@ -5,7 +5,8 @@
  * refresh") and for start failures the Worker classified into a sanitized
  * category (issue #225) — e.g. `port_conflict` / `image_missing`. The latter
  * are real, actionable causes, so they get their own message instead of the
- * misleading generic state-changed toast. Every other 409 reason
+ * misleading generic state-changed toast; so is `server_unsettled`, the at-rest
+ * precondition on the export mint (issue #2360). Every other 409 reason
  * (`invalid_transition`, `transition_conflict`, `command_failed`,
  * `server_not_running`) is race-flavoured and keeps the state-changed
  * treatment. 503 responses with a recognized `reason` (`no_eligible_worker`,
@@ -23,12 +24,17 @@
 import { ApiError } from "../api/client.ts";
 import type { TranslationKey } from "../i18n/index.ts";
 
-// Sanitized 409 start-failure reasons that get a specific message; everything
-// else 409 stays race-flavoured (state changed). Mirrors the API's
-// `_SANITIZED_REASONS` (servers/application/command_dispatch.py).
+// 409 reasons that get a specific message; everything else 409 stays
+// race-flavoured (state changed). `port_conflict` / `image_missing` are the
+// sanitized start-failure categories, mirroring the API's `_SANITIZED_REASONS`
+// (servers/application/command_dispatch.py). `server_unsettled` is the at-rest
+// precondition on the export mint (servers/api/servers.py), which is a standing
+// requirement rather than a race, so it names the precondition here too — the
+// same message the danger-zone export already shows (issue #2360).
 const SPECIFIC_409_MESSAGE: Record<string, TranslationKey> = {
   port_conflict: "dashboard.lifecycle.portConflict",
   image_missing: "dashboard.lifecycle.imageMissing",
+  server_unsettled: "serverDetail.error.unsettled",
 };
 
 // 503 service-unavailable reasons (issue #1092): post-restart scenarios where

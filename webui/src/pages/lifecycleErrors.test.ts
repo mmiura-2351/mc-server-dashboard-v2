@@ -19,8 +19,12 @@ describe("lifecycleErrorMessage", () => {
     );
   });
 
+  it("maps a 409 server_unsettled to the at-rest precondition message", () => {
+    const error = new ApiError(409, { reason: "server_unsettled" });
+    expect(lifecycleErrorMessage(error)).toBe("serverDetail.error.unsettled");
+  });
+
   it.each([
-    "server_unsettled",
     "invalid_transition",
     "transition_conflict",
     "command_failed",

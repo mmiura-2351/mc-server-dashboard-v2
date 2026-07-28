@@ -231,7 +231,7 @@ export const ja: Record<TranslationKey, string> = {
   // Lifecycle action feedback.
   "dashboard.actionFailed":
     "操作を完了できませんでした。もう一度お試しください。",
-  // Conflict-flavoured (server_unsettled-style) lifecycle races (SPEC 7.4).
+  // Conflict-flavoured lifecycle races (SPEC 7.4).
   "dashboard.stateChanged": "状態が変化しました — 更新しました。",
   // Sanitized 409 start-failure reasons (issue #225).
   "dashboard.lifecycle.portConflict":
@@ -391,8 +391,8 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.deleted": "サーバーを削除しました。",
   "serverDetail.error.notStopped":
     "この変更を行う前にサーバーを停止してください。",
-  "serverDetail.error.unsettled":
-    "エクスポートの前にサーバーを停止する必要があります。",
+  // The at-rest precondition (409 server_unsettled); action-agnostic (#2360).
+  "serverDetail.error.unsettled": "この操作にはサーバーの停止が必要です。",
   "serverDetail.error.portTaken": "そのゲームポートはすでに使用されています。",
   "serverDetail.error.portOutOfRange":
     "そのゲームポートは許可された範囲外です。",

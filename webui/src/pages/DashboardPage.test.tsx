@@ -311,7 +311,7 @@ describe("DashboardPage lifecycle actions", () => {
   it("gives a 409 the state-changed treatment and refetches", async () => {
     mockApi.get.mockResolvedValue([server({ observed_state: "running" })]);
     mockApi.post.mockRejectedValue(
-      new ApiError(409, { reason: "server_unsettled" }),
+      new ApiError(409, { reason: "transition_conflict" }),
     );
     renderPage();
 
