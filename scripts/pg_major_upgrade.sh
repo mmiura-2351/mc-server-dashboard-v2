@@ -289,8 +289,8 @@ say "PostgreSQL ${pg_cluster_major} -> ${pg_target_major} upgrade of volume '${p
 # The recovery block has to name a checkout that starts PostgreSQL ${pg_cluster_major} against the
 # restored volume. This script runs after the pull, so that is no longer HEAD --
 # and nothing on this host records it reliably. `.last-deploy-sha` was the
-# obvious candidate and is not good enough: scripts/update.sh writes it only on
-# its own success path, so a deployment ever brought up with
+# obvious candidate and is not good enough: only scripts/deploy.sh and
+# scripts/update.sh write it, so a deployment ever brought up with
 # `docker compose up -d --build` (DEPLOYMENT.md Section 4) has none or has a
 # stale one, and neither is distinguishable from a current one by looking at it.
 # Measured on the canonical host while writing this, it was 24 commits behind the
