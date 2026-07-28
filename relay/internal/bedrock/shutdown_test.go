@@ -173,6 +173,64 @@ func TestListenerDrainBlocksUntilBedrockSessionEndReachesReporter(t *testing.T) 
 	}
 }
 
+// TestTunnelRunJoinsIdleSweepBeforeReturning covers issue #1936: the per-tunnel
+// idle-sweep goroutine Ends the session of every promoted flow it evicts, so
+// run() must join it before returning. run() returning is what lets the handle
+// goroutine finish, and that goroutine is what the listener counts on inflight,
+// so an unjoined sweep could land a SessionEnd after Drain's barrier lifted and
+// the reporter had already stopped. The sweep's End is held open on a gate:
+// while it is in flight, run() must not return.
+func TestTunnelRunJoinsIdleSweepBeforeReturning(t *testing.T) {
+	server, _ := quicConnPair(t)
+	gate := &gatedRecorder{inner: noopRecorder{}, endEntered: make(chan string, 1), release: make(chan struct{})}
+	tun, err := bind(0, testServerID, server, ipcaps.NewIPCaps(0, 0, 0, nil, nil), gate, nil, testLogger())
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	// A test sweep cadence over a table whose entries fall idle immediately, so
+	// the sweep fires within the test rather than after the production 15 s
+	// interval. Both are set before run() starts any goroutine, matching the
+	// other tunnel tests.
+	tun.sweepInterval = time.Millisecond
+	tun.flows = NewFlowTable(time.Millisecond, nil)
+	id := tun.flows.Create(&net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 19132}, false)
+	tun.flows.Promote(id, "sess-sweep")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runReturned := make(chan struct{})
+	go func() {
+		tun.run(ctx)
+		close(runReturned)
+	}()
+
+	// The sweep evicts the idle flow and enters End for its promoted session.
+	select {
+	case got := <-gate.endEntered:
+		if got != "sess-sweep" {
+			t.Fatalf("the idle sweep called End(%q), want End(%q)", got, "sess-sweep")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the idle sweep never called End for the evicted promoted flow")
+	}
+
+	// Tear the tunnel down while that End is still in flight.
+	cancel()
+	select {
+	case <-runReturned:
+		t.Fatal("run() returned while a sweep-driven End was still in flight -- the shutdown drain barrier would not cover it")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Releasing the sweep's End lets it finish, so the join lifts and run()
+	// returns -- the sweep goroutine cannot outlive it.
+	close(gate.release)
+	select {
+	case <-runReturned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("run() did not return after the sweep's End completed")
+	}
+}
+
 // waitForOpenSession polls the reporter until exactly one session is open and
 // returns its id, or fails after a short deadline. The promotion Start is made
 // on the reader goroutine, so a brief poll keeps the test deterministic without
