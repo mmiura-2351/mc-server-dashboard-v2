@@ -14,6 +14,7 @@ package controlplane
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -142,6 +143,15 @@ func (t *transport) RecvRegisterAck(_ context.Context) (session.RegisterAck, err
 	// Bound the wait: an API that opens the stream but never acks must not wedge
 	// the run loop forever (issue #786). The timer cancels the stream context,
 	// which unblocks the pending stream.Recv with a context error.
+	//
+	// settled decides which of the two paths owns the outcome when the ack lands
+	// exactly at the deadline (issue #2020): a tick already buffered in the timer
+	// channel cannot be retracted by Stop, and closing done does not stop the
+	// watcher from taking the deadline arm. Whichever path wins this single CAS
+	// wins the race — the watcher cancels only if it wins, and an ack that loses
+	// is reported as a timeout rather than returned on a context this call no
+	// longer owns.
+	var settled atomic.Bool
 	deadline := t.clock.NewTimer(registerAckTimeout)
 	defer deadline.Stop()
 	done := make(chan struct{})
@@ -149,7 +159,9 @@ func (t *transport) RecvRegisterAck(_ context.Context) (session.RegisterAck, err
 	go func() {
 		select {
 		case <-deadline.C():
-			t.cancel()
+			if settled.CompareAndSwap(false, true) {
+				t.cancel()
+			}
 		case <-done:
 		}
 	}()
@@ -157,6 +169,9 @@ func (t *transport) RecvRegisterAck(_ context.Context) (session.RegisterAck, err
 	msg, err := t.recvClassified()
 	if err != nil {
 		return session.RegisterAck{}, fmt.Errorf("controlplane: recv register ack: %w", err)
+	}
+	if !settled.CompareAndSwap(false, true) {
+		return session.RegisterAck{}, fmt.Errorf("controlplane: recv register ack: no ack within %s", registerAckTimeout)
 	}
 	ack := msg.GetRegisterAck()
 	if ack == nil {
