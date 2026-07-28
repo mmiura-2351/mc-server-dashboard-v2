@@ -28,8 +28,26 @@ from urllib.parse import quote
 def content_disposition(filename: str) -> str:
     """Return an ``attachment`` disposition naming ``filename``, safely."""
 
+    name = _basename(filename)
     ascii_fallback = "".join(
-        c if (0x20 <= ord(c) < 0x7F and c not in '"\\') else "_" for c in filename
+        c if (0x20 <= ord(c) < 0x7F and c not in '"\\') else "_" for c in name
     )
-    encoded = quote(filename, safe="")
+    encoded = quote(name, safe="")
     return f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{encoded}"
+
+
+def _basename(filename: str) -> str:
+    """Drop any directory component the name carries (RFC 6266 Section 4.3).
+
+    A name is free-form -- a server may be called ``../../etc/passwd`` -- and both
+    parameters would otherwise carry the separators through: the ASCII fallback
+    verbatim, and ``filename*`` percent-encoded but decoded straight back by the
+    client. RFC 6266 tells recipients to ignore path information, but a sender
+    must not emit it in the first place. Both separators are cut, because the
+    saving client may be on Windows, where ``\\`` separates too. A name that is
+    only separators and dots leaves nothing usable, so it falls back to
+    ``download``.
+    """
+
+    last = filename.replace("\\", "/").rsplit("/", 1)[-1]
+    return last if last.strip(".") else "download"
