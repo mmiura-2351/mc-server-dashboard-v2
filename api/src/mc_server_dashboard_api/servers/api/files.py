@@ -85,6 +85,7 @@ from mc_server_dashboard_api.dependencies import (
     require_download_access,
     require_permission,
 )
+from mc_server_dashboard_api.http_content_disposition import content_disposition
 from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.identity.domain.token_service import TokenService
@@ -621,7 +622,7 @@ async def download_file(
             response: Response = StreamingResponse(
                 stream,
                 media_type="application/zip",
-                headers={"Content-Disposition": _content_disposition(f"{name}.zip")},
+                headers={"Content-Disposition": content_disposition(f"{name}.zip")},
             )
         else:
             # Stream the file's bytes (issue #265) so a large single-file download
@@ -640,7 +641,7 @@ async def download_file(
                 rel_path=path,
             )
             name = posixpath.basename(path) or "download"
-            headers = {"Content-Disposition": _content_disposition(name)}
+            headers = {"Content-Disposition": content_disposition(name)}
             if size is not None:
                 headers["Content-Length"] = str(size)
             response = StreamingResponse(
@@ -999,25 +1000,6 @@ async def _read_capped_upload(file: UploadFile) -> bytes:
             raise _too_large()
         chunks.append(chunk)
     return b"".join(chunks)
-
-
-def _content_disposition(filename: str) -> str:
-    """Build an attachment Content-Disposition header (RFC 6266 / RFC 5987).
-
-    A filename can contain ``"`` (which would break out of the quoted-string and
-    let a crafted name inject extra header parameters) or non-latin-1 characters
-    (which raise ``UnicodeEncodeError`` when Starlette latin-1-encodes the header,
-    500-ing a legitimate Unicode upload). So emit two parameters: an ASCII-only
-    ``filename`` fallback (non-ASCII/quote/backslash/control chars replaced) for
-    legacy clients, plus an RFC 5987 ``filename*`` carrying the UTF-8 percent-
-    encoded original for modern clients, which prefer it.
-    """
-
-    ascii_fallback = "".join(
-        c if (0x20 <= ord(c) < 0x7F and c not in '"\\') else "_" for c in filename
-    )
-    encoded = quote(filename, safe="")
-    return f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{encoded}"
 
 
 async def _record_file(

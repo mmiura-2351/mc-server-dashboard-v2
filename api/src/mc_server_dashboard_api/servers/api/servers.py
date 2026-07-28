@@ -65,6 +65,7 @@ from mc_server_dashboard_api.dependencies import (
     require_download_access,
     require_permission,
 )
+from mc_server_dashboard_api.http_content_disposition import content_disposition
 from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.identity.domain.token_service import TokenService
@@ -723,10 +724,16 @@ async def export_server(
     ``POST .../export/download-grant`` instead of being buffered into a Blob to
     attach a Bearer header (issue #2352). Either credential runs the same
     ``file:read`` gate, and the response is identical.
+
+    The response names itself ``{server name}.zip`` via ``Content-Disposition``
+    (issue #2357), so a client that navigates the URL without supplying a filename
+    -- a pasted grant link, a CLI fetch -- does not save the last path segment,
+    ``export``. A server name is free-form, so the header is built by the shared
+    hardened helper (RFC 5987 ``filename*``, no traversal, no injection).
     """
 
     try:
-        stream = await use_case(
+        export = await use_case(
             community_id=CommunityId(community_id),
             server_id=ServerId(server_id),
         )
@@ -738,7 +745,13 @@ async def export_server(
         )
         raise _conflict("server_unsettled") from exc
     await _record(recorder, ops.SERVER_EXPORT, authorized, community_id, server_id)
-    return StreamingResponse(stream, media_type="application/zip")
+    return StreamingResponse(
+        export.stream,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": content_disposition(f"{export.server_name}.zip")
+        },
+    )
 
 
 class ServerExportDownloadGrantResponse(BaseModel):

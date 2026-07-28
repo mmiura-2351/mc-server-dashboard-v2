@@ -561,10 +561,11 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   an `<a download>` at it — same-origin (7.7), so the browser saves the
   response natively with no size ceiling and no bytes read by the application
   (#2314, #2353, #2354). The grant is minted on click, never on render or on
-  selection, and the `download` attribute names the file — load-bearing on
-  exactly one surface, the server export, the only download response that sets
-  no `Content-Disposition` (#2357); backups, directory ZIPs, resource packs and
-  plugins all send one, so there the attribute is redundant but harmless. A
+  selection, and the `download` attribute names the file — redundant but
+  harmless, since every download response now sends a `Content-Disposition`:
+  backups, directory ZIPs, resource packs and plugins always did, and the server
+  export joined them in #2357 (until then the attribute was load-bearing on that
+  one surface, and anything navigating the URL without it saved `export`). A
   **single file deliberately stays on the capped fetch** even though it shares
   the download route with a directory: the API declares its `Content-Length`
   whenever the size resolves from the parent listing, so an oversize one is
