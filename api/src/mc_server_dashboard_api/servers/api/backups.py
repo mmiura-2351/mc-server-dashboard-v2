@@ -50,6 +50,11 @@ from mc_server_dashboard_api.dependencies import (
 )
 from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_problem import ProblemException, problem
+from mc_server_dashboard_api.http_range import (
+    ByteRange,
+    RangeNotSatisfiableError,
+    parse_byte_range,
+)
 from mc_server_dashboard_api.http_streaming import counted
 from mc_server_dashboard_api.identity.domain.token_service import TokenService
 from mc_server_dashboard_api.identity.domain.value_objects import (
@@ -612,6 +617,7 @@ async def delete_backup(
     "/communities/{community_id}/servers/{server_id}/backups/{backup_id}/download",
 )
 async def download_backup(
+    request: Request,
     community_id: uuid.UUID,
     server_id: uuid.UUID,
     backup_id: uuid.UUID,
@@ -630,18 +636,22 @@ async def download_backup(
     The response declares the archive's exact size as ``Content-Length``, so a
     client can show download progress and refuse an over-cap archive up front.
 
+    **Resumable** (issue #2372): the response declares ``Accept-Ranges: bytes``
+    and an ``ETag``, and a single ``Range`` request is served as ``206`` over a
+    ranged read of the stored bytes — a multi-GB archive is never re-read from
+    the start to serve its tail. An interrupted transfer can therefore resume
+    instead of restarting. A ``?grant=`` URL still expires on its own short TTL,
+    so the browser's automatic retry is not what this buys (that is issue #2373);
+    a Bearer-token client (``curl -C -``, a script) resumes today.
+
     The caller authenticates with the usual Bearer access token, or — for a
     browser that cannot set a header on a plain navigation — with a short-lived
     ``?grant=`` minted by ``POST .../download-grant`` (issue #2313). Either way
     the same ``backup:read`` gate decides, and the response is identical.
     """
 
-    # Starlette populates no Content-Length for a streaming body, so without an
-    # explicit header the response is chunked (issue #2312). The declared value
-    # comes from the archive store, so it equals the streamed byte count — a
-    # length that disagrees corrupts or hangs the response over HTTP/2.
     try:
-        stream, size_bytes = await use_case(
+        size_bytes = await use_case.archive_size(
             community_id=CommunityId(community_id),
             server_id=ServerId(server_id),
             backup_id=BackupId(backup_id),
@@ -650,19 +660,46 @@ async def download_backup(
         raise _not_found() from exc
     except BackupNotFoundError as exc:
         raise _not_found() from exc
+    etag = _archive_etag(backup_id, size_bytes)
+    served = _served_range(request, size_bytes, etag)
+    try:
+        stream = await use_case.archive_stream(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+            backup_id=BackupId(backup_id),
+            byte_range=served,
+        )
+    except (ServerNotFoundError, BackupNotFoundError) as exc:
+        # Deleted between the size read and the open: still nothing on the wire.
+        raise _not_found() from exc
     await _record(recorder, ops.BACKUP_DOWNLOAD, authorized, community_id, backup_id)
+    # Starlette populates no Content-Length for a streaming body, so without an
+    # explicit header the response is chunked (issue #2312). The declared value is
+    # the archive size from the store, or — for a 206 — the requested range's
+    # length; either way it equals the streamed byte count, and a length that
+    # disagrees corrupts or hangs the response over HTTP/2.
+    declared = size_bytes if served is None else served.length
+    headers = {
+        "Content-Disposition": _content_disposition(f"{backup_id}.tar.gz"),
+        "Content-Length": str(declared),
+        "Cache-Control": "no-store",
+        "Accept-Ranges": "bytes",
+        "ETag": etag,
+    }
+    if served is not None:
+        headers["Content-Range"] = f"bytes {served.start}-{served.end}/{size_bytes}"
     # A concurrent DeleteBackup (or the retention prune) can remove the archive
     # underneath the open stream (issue #2318). The resulting short body already
     # fails at the wire; counting the streamed bytes fails it here instead, with
-    # both numbers named, and without depending on the HTTP layer to catch it.
+    # both numbers named, and without depending on the HTTP layer to catch it. A
+    # partial response is guarded the same way, against the range's length.
     return StreamingResponse(
-        counted(stream, size_bytes),
+        counted(stream, declared),
+        status_code=(
+            status.HTTP_200_OK if served is None else status.HTTP_206_PARTIAL_CONTENT
+        ),
         media_type=_BACKUP_MEDIA_TYPE,
-        headers={
-            "Content-Disposition": _content_disposition(f"{backup_id}.tar.gz"),
-            "Content-Length": str(size_bytes),
-            "Cache-Control": "no-store",
-        },
+        headers=headers,
     )
 
 
@@ -862,6 +899,54 @@ def _content_disposition(filename: str) -> str:
     )
     encoded = quote(filename, safe="")
     return f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{encoded}"
+
+
+def _archive_etag(backup_id: uuid.UUID, size_bytes: int) -> str:
+    """A strong entity-tag for one backup archive (issue #2372).
+
+    ``If-Range`` is compared with the strong function (RFC 9110 Section 13.1.5),
+    so a weak validator would make every resume fall back to a full transfer —
+    the tag has to be strong to be worth sending. Neither backend can supply one
+    for free: an S3 multipart object's ETag is not the content's MD5 (it is a
+    digest of the part digests, so it changes with the part layout and says
+    nothing about the bytes), and the filesystem has no ETag at all. Hashing a
+    multi-GB archive on every request is out of the question.
+
+    So the tag is derived from what already identifies the bytes: the backup id
+    and the archive's byte count. A backup's archive is written once under a
+    ref generated for that row and is never rewritten — create, upload, and
+    restore all leave it immutable (STORAGE.md Section 3.3) — so a given id
+    denotes exactly one sequence of bytes for its lifetime, and the length is a
+    second, independent term. This is at least as strong as the mtime-size tag
+    nginx serves static files with, and it is identical on both backends.
+    """
+
+    return f'"{backup_id.hex}-{size_bytes:x}"'
+
+
+def _served_range(request: Request, size_bytes: int, etag: str) -> ByteRange | None:
+    """Resolve the request's ``Range`` against the archive, honouring ``If-Range``.
+
+    Returns ``None`` to serve the whole archive (no usable range, or an
+    ``If-Range`` naming a different representation) and raises a 416 carrying
+    ``Content-Range: bytes */<size>`` when the range cannot be satisfied.
+
+    ``If-Range`` is compared verbatim: our tag is strong, so a weak tag or an
+    HTTP-date (we publish no ``Last-Modified``) never matches and the client
+    gets the current archive whole rather than two spliced representations.
+    """
+
+    if_range = request.headers.get("if-range")
+    if if_range is not None and if_range != etag:
+        return None
+    try:
+        return parse_byte_range(request.headers.get("range"), size=size_bytes)
+    except RangeNotSatisfiableError as exc:
+        raise problem(
+            status.HTTP_416_RANGE_NOT_SATISFIABLE,
+            "range_not_satisfiable",
+            headers={"Content-Range": f"bytes */{size_bytes}"},
+        ) from exc
 
 
 async def _record(

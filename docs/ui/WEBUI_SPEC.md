@@ -122,7 +122,7 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 | GET / POST | `…/{sid}/backups` | List / create on-demand backup. |
 | GET | `…/{sid}/backups/statistics` | count / total bytes / newest / oldest. |
 | POST | `…/{sid}/backups/upload` | Upload an off-host backup archive. |
-| GET | `…/{sid}/backups/{bid}/download` | Download archive. Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB archive straight to disk (#2313). |
+| GET | `…/{sid}/backups/{bid}/download` | Download archive. Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB archive straight to disk (#2313). **Resumable** (#2372): the response declares `Accept-Ranges: bytes` and a strong `ETag`, and a single `Range` request is served `206` with `Content-Range` over a ranged read (`416` + `Content-Range: bytes */<size>` when unsatisfiable; a malformed or multi-range `Range` is ignored and the whole archive served). `If-Range` is honoured, so a resumed request that names a stale representation gets the current archive whole. A `?grant=` URL still expires on its own short TTL, so a browser's automatic retry of an interrupted download is not covered by this (#2373). |
 | POST | `…/{sid}/backups/{bid}/download-grant` | Mint that grant: `{download_url, expires_at}`, `Cache-Control: no-store`. Same `backup:read` gate as the download; 30 s TTL (AUTH_API.md Section 3). |
 | POST | `…/{sid}/backups/{bid}/restore[?force=true]` | **Server must be stopped.** `?force=true` overrides the quarantine gate (#703). |
 | DELETE | `…/{sid}/backups/{bid}` | Delete. |

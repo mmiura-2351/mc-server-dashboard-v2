@@ -191,22 +191,30 @@ class StorageBackupStoreAdapter(BackupArchiveStore):
             raise BackupStorageUnavailableError(str(server_id.value)) from exc
 
     def open(
-        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        storage_ref: str,
+        byte_range: tuple[int, int] | None = None,
     ) -> AsyncIterator[bytes]:
         community, server = _scope(community_id, server_id)
         # open_backup may raise NotFoundError either at the call (fs) or on first
         # iteration (object); a translating generator catches both into the servers
         # error so no storage type leaks across the seam.
-        return self._open(community, server, BackupKey(storage_ref))
+        return self._open(community, server, BackupKey(storage_ref), byte_range)
 
     async def _open(
         self,
         community: StorageCommunityId,
         server: StorageServerId,
         key: BackupKey,
+        byte_range: tuple[int, int] | None,
     ) -> AsyncIterator[bytes]:
         try:
-            stream = self._storage.open_backup(community, server, key)
+            stream = self._storage.open_backup(
+                community, server, key, byte_range=byte_range
+            )
             async for chunk in stream:
                 yield chunk
         except NotFoundError as exc:

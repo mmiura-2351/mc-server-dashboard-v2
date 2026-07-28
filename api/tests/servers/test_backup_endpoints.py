@@ -242,21 +242,6 @@ def _app(
     return app
 
 
-async def _aiter(data: bytes) -> object:
-    yield data
-
-
-async def _aiter_chunks(chunks: list[bytes]) -> object:
-    for chunk in chunks:
-        yield chunk
-
-
-async def _aiter_then_raise(chunks: list[bytes], error: Exception) -> object:
-    for chunk in chunks:
-        yield chunk
-    raise error
-
-
 def _stats() -> BackupStatistics:
     return BackupStatistics(
         count=2,
@@ -513,36 +498,97 @@ def test_delete_unknown_backup_is_404() -> None:
 
 # --- download (issue #281) -------------------------------------------------
 
+_ARCHIVE = b"archive-bytes"
+
+
+class _FakeDownload:
+    """A download use case over fixed archive bytes, ranged like the real one.
+
+    A fresh stream per call (an async generator is exhausted by its first
+    consumer, and one test fetches the same archive twice). ``declared``
+    overstates the size so a test can model the archive vanishing under an open
+    stream (issue #2318); ``mid_stream_error`` raises after the first chunk for
+    the other half of that race. ``stream_error`` fails only the open, modelling
+    the backup disappearing between the size read and it.
+    """
+
+    def __init__(
+        self,
+        data: bytes = _ARCHIVE,
+        *,
+        chunks: list[bytes] | None = None,
+        declared: int | None = None,
+        error: Exception | None = None,
+        stream_error: Exception | None = None,
+        mid_stream_error: Exception | None = None,
+    ) -> None:
+        self._chunks = [data] if chunks is None else chunks
+        self._declared = declared
+        self._error = error
+        self._stream_error = stream_error
+        self._mid_stream_error = mid_stream_error
+        # Every byte_range the edge asked for, so a test can prove the range
+        # reached the store rather than being sliced off a full stream (#2372).
+        self.ranges: list[tuple[int, int] | None] = []
+
+    async def archive_size(self, **kwargs: object) -> int:
+        if self._error is not None:
+            raise self._error
+        if self._declared is not None:
+            return self._declared
+        return sum(len(chunk) for chunk in self._chunks)
+
+    async def archive_stream(
+        self, *, byte_range: tuple[int, int] | None = None, **kwargs: object
+    ) -> object:
+        if self._error is not None:
+            raise self._error
+        if self._stream_error is not None:
+            raise self._stream_error
+        self.ranges.append(byte_range)
+        return self._stream(byte_range)
+
+    async def _stream(self, byte_range: tuple[int, int] | None) -> object:
+        if byte_range is None:
+            for chunk in self._chunks:
+                yield chunk
+        else:
+            first, last = byte_range
+            yield b"".join(self._chunks)[first : last + 1]
+        if self._mid_stream_error is not None:
+            raise self._mid_stream_error
+
 
 def _bearer() -> dict[str, str]:
     return {"Authorization": f"Bearer {_tokens.issue_access_token(_user.id)}"}
 
 
-def test_member_without_permission_gets_403_on_download() -> None:
-    app = _app(member=True, allow=False, download=_FakeUseCase())
-    client = next(_client(app))
-    resp = client.get(
+def _download(
+    client: TestClient, headers: dict[str, str] | None = None
+) -> httpx2.Response:
+    return client.get(
         _url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download"),
-        headers=_bearer(),
+        headers=_bearer() if headers is None else headers,
     )
-    assert resp.status_code == 403
+
+
+def test_member_without_permission_gets_403_on_download() -> None:
+    app = _app(member=True, allow=False, download=_FakeDownload())
+    client = next(_client(app))
+    assert _download(client).status_code == 403
 
 
 def test_download_without_credentials_is_401() -> None:
-    app = _app(member=True, allow=True, download=_FakeUseCase())
+    app = _app(member=True, allow=True, download=_FakeDownload())
     client = next(_client(app))
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download"))
     assert resp.status_code == 401
 
 
 def test_download_streams_archive_with_disposition() -> None:
-    use_case = _FakeUseCase(result=(_aiter(b"archive-bytes"), len(b"archive-bytes")))
-    app = _app(member=True, allow=True, download=use_case)
+    app = _app(member=True, allow=True, download=_FakeDownload(b"archive-bytes"))
     client = next(_client(app))
-    resp = client.get(
-        _url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download"),
-        headers=_bearer(),
-    )
+    resp = _download(client)
     assert resp.status_code == 200
     assert resp.content == b"archive-bytes"
     assert resp.headers["content-type"] == "application/gzip"
@@ -554,16 +600,15 @@ def test_download_declares_content_length_matching_streamed_bytes() -> None:
     # The load-bearing invariant (issue #2312): a declared length that disagrees
     # with the streamed byte count corrupts or hangs the response over HTTP/2.
     chunks = [b"first-chunk", b"second-chunk", b"third"]
-    use_case = _FakeUseCase(
-        result=(_aiter_chunks(chunks), sum(len(chunk) for chunk in chunks))
-    )
     recorder = RecordingAuditRecorder()
-    app = _app(member=True, allow=True, download=use_case, recorder=recorder)
-    client = next(_client(app))
-    resp = client.get(
-        _url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download"),
-        headers=_bearer(),
+    app = _app(
+        member=True,
+        allow=True,
+        download=_FakeDownload(chunks=chunks),
+        recorder=recorder,
     )
+    client = next(_client(app))
+    resp = _download(client)
     assert resp.status_code == 200
     assert resp.content == b"".join(chunks)
     assert int(resp.headers["content-length"]) == len(resp.content)
@@ -579,15 +624,11 @@ def test_download_aborts_when_stream_ends_short_of_declared_length() -> None:
     # Content-Length. A real server (uvicorn + h11) already rejects that at the
     # wire; counting the bytes names the mismatch here instead, so the invariant
     # holds without depending on the ASGI server to notice.
-    chunks = [b"first-chunk", b"second-chunk"]
-    use_case = _FakeUseCase(result=(_aiter_chunks(chunks), 1024))
-    app = _app(member=True, allow=True, download=use_case)
+    download = _FakeDownload(chunks=[b"first-chunk", b"second-chunk"], declared=1024)
+    app = _app(member=True, allow=True, download=download)
     client = next(_client(app))
     with pytest.raises(ShortResponseBodyError):
-        client.get(
-            _url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download"),
-            headers=_bearer(),
-        )
+        _download(client)
 
 
 def test_download_aborts_when_archive_disappears_mid_stream() -> None:
@@ -595,46 +636,234 @@ def test_download_aborts_when_archive_disappears_mid_stream() -> None:
     # the stream is open and the next read raises, which the store seam translates
     # to BackupNotFoundError. Headers are already on the wire, so there is no 404
     # to send — the response must abort rather than end quietly short.
-    use_case = _FakeUseCase(
-        result=(_aiter_then_raise([b"first-chunk"], BackupNotFoundError("x")), 1024)
+    download = _FakeDownload(
+        chunks=[b"first-chunk"],
+        declared=1024,
+        mid_stream_error=BackupNotFoundError("x"),
     )
-    app = _app(member=True, allow=True, download=use_case)
+    app = _app(member=True, allow=True, download=download)
     client = next(_client(app))
     with pytest.raises(BackupNotFoundError):
-        client.get(
-            _url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download"),
-            headers=_bearer(),
-        )
+        _download(client)
 
 
 def test_download_unknown_backup_is_404() -> None:
-    use_case = _FakeUseCase(error=BackupNotFoundError("x"))
-    app = _app(member=True, allow=True, download=use_case)
-    client = next(_client(app))
-    resp = client.get(
-        _url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download"),
-        headers=_bearer(),
+    app = _app(
+        member=True, allow=True, download=_FakeDownload(error=BackupNotFoundError("x"))
     )
-    assert resp.status_code == 404
+    client = next(_client(app))
+    assert _download(client).status_code == 404
+
+
+@pytest.mark.parametrize("error", [BackupNotFoundError("x"), ServerNotFoundError("x")])
+def test_download_of_a_backup_deleted_before_the_open_is_404(error: Exception) -> None:
+    # The size is read before the stream is opened, so a delete can land between
+    # the two. Nothing is on the wire yet, so it is still a plain 404.
+    app = _app(member=True, allow=True, download=_FakeDownload(stream_error=error))
+    client = next(_client(app))
+    assert _download(client).status_code == 404
+
+
+# --- resumable download: Range (issue #2372) -------------------------------
+
+# 26 bytes, so a range's boundaries are readable in a failure message.
+_RANGED = b"abcdefghijklmnopqrstuvwxyz"
+
+
+def test_full_download_advertises_range_support_and_an_etag() -> None:
+    # Without Accept-Ranges a browser will not even attempt a ranged resume, and
+    # without an ETag it cannot validate that the bytes it resumes into are the
+    # same representation.
+    app = _app(member=True, allow=True, download=_FakeDownload(_RANGED))
+    client = next(_client(app))
+    resp = _download(client)
+    assert resp.status_code == 200
+    assert resp.headers["accept-ranges"] == "bytes"
+    assert resp.headers["etag"].startswith('"')
+
+
+def test_the_etag_covers_the_archive_size() -> None:
+    # The archive is immutable per backup id, so the id plus its byte count
+    # identifies the exact bytes: two archives of different length under the
+    # same id could never share a validator.
+    app = _app(member=True, allow=True, download=_FakeDownload(_RANGED))
+    client = next(_client(app))
+    path = _url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download")
+    first = client.get(path, headers=_bearer())
+    same = client.get(path, headers=_bearer())
+    assert first.headers["etag"] == same.headers["etag"]
+
+    app = _app(member=True, allow=True, download=_FakeDownload(_RANGED + b"!"))
+    other = next(_client(app)).get(path, headers=_bearer())
+    assert other.headers["etag"] != first.headers["etag"]
+
+
+def test_open_ended_range_resumes_from_the_offset() -> None:
+    download = _FakeDownload(_RANGED)
+    app = _app(member=True, allow=True, download=download)
+    client = next(_client(app))
+    resp = _download(client, {**_bearer(), "Range": "bytes=20-"})
+    assert resp.status_code == 206
+    assert resp.content == _RANGED[20:]
+    assert resp.headers["content-range"] == "bytes 20-25/26"
+    assert int(resp.headers["content-length"]) == 6
+    assert resp.headers["accept-ranges"] == "bytes"
+    # The store was asked for exactly those bytes, not the whole archive.
+    assert download.ranges == [(20, 25)]
+
+
+def test_closed_range_serves_exactly_that_span() -> None:
+    app = _app(member=True, allow=True, download=_FakeDownload(_RANGED))
+    client = next(_client(app))
+    resp = _download(client, {**_bearer(), "Range": "bytes=5-9"})
+    assert resp.status_code == 206
+    assert resp.content == b"fghij"
+    assert resp.headers["content-range"] == "bytes 5-9/26"
+    assert int(resp.headers["content-length"]) == 5
+
+
+def test_suffix_range_serves_the_final_bytes() -> None:
+    app = _app(member=True, allow=True, download=_FakeDownload(_RANGED))
+    client = next(_client(app))
+    resp = _download(client, {**_bearer(), "Range": "bytes=-3"})
+    assert resp.status_code == 206
+    assert resp.content == b"xyz"
+    assert resp.headers["content-range"] == "bytes 23-25/26"
+
+
+@pytest.mark.parametrize(
+    ("header", "expected", "content_range"),
+    [
+        ("bytes=0-0", b"a", "bytes 0-0/26"),
+        ("bytes=25-25", b"z", "bytes 25-25/26"),
+        ("bytes=0-25", _RANGED, "bytes 0-25/26"),
+        ("bytes=1-25", _RANGED[1:], "bytes 1-25/26"),
+        ("bytes=0-99", _RANGED, "bytes 0-25/26"),
+    ],
+)
+def test_range_boundaries(header: str, expected: bytes, content_range: str) -> None:
+    app = _app(member=True, allow=True, download=_FakeDownload(_RANGED))
+    client = next(_client(app))
+    resp = _download(client, {**_bearer(), "Range": header})
+    assert resp.status_code == 206
+    assert resp.content == expected
+    assert resp.headers["content-range"] == content_range
+    assert int(resp.headers["content-length"]) == len(expected)
+
+
+def test_unsatisfiable_range_is_416_naming_the_size() -> None:
+    recorder = RecordingAuditRecorder()
+    download = _FakeDownload(_RANGED)
+    app = _app(member=True, allow=True, download=download, recorder=recorder)
+    client = next(_client(app))
+    resp = _download(client, {**_bearer(), "Range": "bytes=26-"})
+    assert resp.status_code == 416
+    assert resp.headers["content-range"] == "bytes */26"
+    assert resp.json()["reason"] == "range_not_satisfiable"
+    # No stream is opened for a range that cannot be served...
+    assert download.ranges == []
+    # ... so nothing is recorded either — as for a 404.
+    assert recorder.events == []
+
+
+@pytest.mark.parametrize(
+    "header",
+    ["bytes=abc", "items=0-25", "bytes=10-5", "bytes=0-4,10-14"],
+)
+def test_unusable_range_serves_the_whole_archive(header: str) -> None:
+    # A malformed or multi-range request is answered as if Range were absent.
+    download = _FakeDownload(_RANGED)
+    app = _app(member=True, allow=True, download=download)
+    client = next(_client(app))
+    resp = _download(client, {**_bearer(), "Range": header})
+    assert resp.status_code == 200
+    assert resp.content == _RANGED
+    assert download.ranges == [None]
+
+
+def test_partial_download_is_audited_like_a_full_one() -> None:
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True, allow=True, download=_FakeDownload(_RANGED), recorder=recorder
+    )
+    client = next(_client(app))
+    resp = _download(client, {**_bearer(), "Range": "bytes=10-"})
+    assert resp.status_code == 206
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_DOWNLOAD]
+    assert recorder.events[0].outcome is Outcome.SUCCESS
+
+
+def test_partial_download_aborts_when_the_range_ends_short() -> None:
+    # The declared length of a 206 is the range's length, and the same
+    # short-body guard applies to it (issues #2312/#2318): the store returning
+    # fewer bytes than the range promised fails the response here.
+    download = _FakeDownload(chunks=[b"short"], declared=1024)
+    app = _app(member=True, allow=True, download=download)
+    client = next(_client(app))
+    with pytest.raises(ShortResponseBodyError):
+        _download(client, {**_bearer(), "Range": "bytes=0-99"})
+
+
+def test_if_range_matching_the_etag_applies_the_range() -> None:
+    app = _app(member=True, allow=True, download=_FakeDownload(_RANGED))
+    client = next(_client(app))
+    path = _url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download")
+    etag = client.get(path, headers=_bearer()).headers["etag"]
+
+    resp = client.get(
+        path, headers={**_bearer(), "Range": "bytes=20-", "If-Range": etag}
+    )
+    assert resp.status_code == 206
+    assert resp.content == _RANGED[20:]
+
+
+def test_if_range_not_matching_serves_the_whole_archive() -> None:
+    # The representation the client started from is gone, so resuming into it
+    # would splice two different archives: send the current one whole instead.
+    app = _app(member=True, allow=True, download=_FakeDownload(_RANGED))
+    client = next(_client(app))
+    resp = _download(
+        client, headers={**_bearer(), "Range": "bytes=20-", "If-Range": '"stale"'}
+    )
+    assert resp.status_code == 200
+    assert resp.content == _RANGED
+
+
+def test_if_range_carrying_the_weak_form_of_our_etag_serves_the_whole_archive() -> None:
+    # If-Range is compared with the STRONG function (RFC 9110 Section 13.1.5), so
+    # ``W/`` in front of our own tag is deliberately not a match.
+    app = _app(member=True, allow=True, download=_FakeDownload(_RANGED))
+    client = next(_client(app))
+    path = _url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download")
+    etag = client.get(path, headers=_bearer()).headers["etag"]
+
+    resp = client.get(
+        path, headers={**_bearer(), "Range": "bytes=20-", "If-Range": f"W/{etag}"}
+    )
+    assert resp.status_code == 200
+    assert resp.content == _RANGED
+
+
+def test_if_range_without_a_range_is_a_plain_full_download() -> None:
+    # If-Range only ever gates a Range; on its own it decides nothing, whether or
+    # not it matches.
+    download = _FakeDownload(_RANGED)
+    app = _app(member=True, allow=True, download=download)
+    client = next(_client(app))
+    path = _url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download")
+    etag = client.get(path, headers=_bearer()).headers["etag"]
+
+    matching = client.get(path, headers={**_bearer(), "If-Range": etag})
+    stale = client.get(path, headers={**_bearer(), "If-Range": '"stale"'})
+
+    assert matching.status_code == 200
+    assert matching.content == _RANGED
+    assert stale.status_code == 200
+    assert stale.content == _RANGED
+    assert download.ranges == [None, None, None]
 
 
 # --- download grants (issue #2313) -----------------------------------------
-
-_ARCHIVE = b"archive-bytes"
-
-
-class _FakeDownload:
-    """A download use case that yields a fresh stream on every call.
-
-    Needed where one test fetches the same archive twice: an async generator is
-    exhausted by its first consumer.
-    """
-
-    def __init__(self, data: bytes) -> None:
-        self._data = data
-
-    async def __call__(self, **kwargs: object) -> object:
-        return _aiter(self._data), len(self._data)
 
 
 def _grant_url(
@@ -707,7 +936,7 @@ def test_minting_a_grant_records_no_audit_event() -> None:
 
 def test_minted_url_downloads_without_an_authorization_header() -> None:
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
-    download = _FakeUseCase(result=(_aiter(_ARCHIVE), len(_ARCHIVE)))
+    download = _FakeDownload(_ARCHIVE)
     recorder = RecordingAuditRecorder()
     app = _app(
         member=True,

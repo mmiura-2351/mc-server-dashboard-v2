@@ -1060,6 +1060,50 @@ async def test_open_unknown_backup_is_not_found(harness: StorageHarness) -> None
         await drain(harness.storage.open_backup(community, server, BackupKey("nope")))
 
 
+async def test_ranged_open_backup_matches_a_slice_of_the_full_stream(
+    harness: StorageHarness,
+) -> None:
+    """A ranged read yields exactly the bytes slicing the full stream would.
+
+    The download edge resumes an interrupted transfer with ``Range`` (issue
+    #2372), which must be a real ranged read on the backend — not a prefix
+    discarded off the full stream. Every boundary is pinned: the first byte, the
+    last byte, a single-byte range, and a range ending exactly at EOF.
+    """
+
+    community, server = new_scope()
+    await harness.publish(community, server, {"world/level.dat": b"w" * 4096})
+    key = await harness.storage.create_backup_from_current(community, server)
+
+    full = await drain(harness.storage.open_backup(community, server, key))
+    last = len(full) - 1
+    for start, end in [
+        (0, 0),
+        (0, last),
+        (1, 1),
+        (5, 19),
+        (last, last),
+        (last - 9, last),
+        (len(full) // 2, last),
+    ]:
+        chunk = await drain(
+            harness.storage.open_backup(community, server, key, byte_range=(start, end))
+        )
+        assert chunk == full[start : end + 1], f"range {start}-{end}"
+
+
+async def test_ranged_open_of_an_unknown_backup_is_not_found(
+    harness: StorageHarness,
+) -> None:
+    community, server = new_scope()
+    with pytest.raises(NotFoundError):
+        await drain(
+            harness.storage.open_backup(
+                community, server, BackupKey("nope"), byte_range=(0, 0)
+            )
+        )
+
+
 async def test_backup_size_reports_archive_byte_count(
     harness: StorageHarness,
 ) -> None:

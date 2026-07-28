@@ -516,7 +516,12 @@ class BackupStore(abc.ABC):
 
     @abc.abstractmethod
     def open_backup(
-        self, community_id: CommunityId, server_id: ServerId, key: BackupKey
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        key: BackupKey,
+        *,
+        byte_range: tuple[int, int] | None = None,
     ) -> ByteStream:
         """Open a read stream over a stored backup archive in its native format.
 
@@ -524,6 +529,14 @@ class BackupStore(abc.ABC):
         Section 2) with **no** recompression so a download is the exact stored
         bytes; the edge sets the content-type/disposition (issue #281). Raises
         :class:`~.errors.NotFoundError` for an unknown key.
+
+        ``byte_range`` is an INCLUSIVE ``(first, last)`` byte-position pair,
+        already resolved against :meth:`backup_size` by the caller: the stream
+        then yields exactly ``last - first + 1`` bytes, which is what an
+        interrupted download resumes with (issue #2372). It is a real ranged
+        read on the backend (an object-store ranged GET, a filesystem seek), not
+        a prefix discarded off the full stream — a multi-GB archive must not be
+        re-read to serve its tail.
         """
 
     @abc.abstractmethod

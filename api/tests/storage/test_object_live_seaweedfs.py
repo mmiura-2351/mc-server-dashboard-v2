@@ -323,6 +323,28 @@ async def test_backup_readability_probe_flags_a_bit_rotted_archive() -> None:
         await storage.check_backup_health(community, server, key)
 
 
+async def test_ranged_backup_read_returns_only_the_requested_bytes() -> None:
+    # Issue #2372: a resumed download is served by a ranged GET. That the backend
+    # honours ``Range`` is load-bearing — one that ignored it would return the whole
+    # object while the 206 declares only the range's length, corrupting the
+    # response. Proven here against the real endpoint, not just the stub.
+    storage = ObjectStorage(_factory())
+    community, server = _scope()
+    key = await _put_backup(
+        storage, community, server, region_targz({"world/region/r.0.0.mca": _REGION})
+    )
+
+    full = await drain(storage.open_backup(community, server, key))
+    last = len(full) - 1
+    tail = await drain(
+        storage.open_backup(community, server, key, byte_range=(last - 9, last))
+    )
+    single = await drain(storage.open_backup(community, server, key, byte_range=(5, 5)))
+
+    assert tail == full[-10:]
+    assert single == full[5:6]
+
+
 async def _put_backup(
     storage: ObjectStorage,
     community: CommunityId,

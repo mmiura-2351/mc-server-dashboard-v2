@@ -777,6 +777,14 @@ export interface paths {
          *     The response declares the archive's exact size as ``Content-Length``, so a
          *     client can show download progress and refuse an over-cap archive up front.
          *
+         *     **Resumable** (issue #2372): the response declares ``Accept-Ranges: bytes``
+         *     and an ``ETag``, and a single ``Range`` request is served as ``206`` over a
+         *     ranged read of the stored bytes — a multi-GB archive is never re-read from
+         *     the start to serve its tail. An interrupted transfer can therefore resume
+         *     instead of restarting. A ``?grant=`` URL still expires on its own short TTL,
+         *     so the browser's automatic retry is not what this buys (that is issue #2373);
+         *     a Bearer-token client (``curl -C -``, a script) resumes today.
+         *
          *     The caller authenticates with the usual Bearer access token, or — for a
          *     browser that cannot set a header on a plain navigation — with a short-lived
          *     ``?grant=`` minted by ``POST .../download-grant`` (issue #2313). Either way

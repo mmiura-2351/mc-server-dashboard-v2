@@ -133,12 +133,23 @@ class BackupArchiveStore(abc.ABC):
 
     @abc.abstractmethod
     def open(
-        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        storage_ref: str,
+        byte_range: tuple[int, int] | None = None,
     ) -> AsyncIterator[bytes]:
         """Open a read stream over an archive in its native format (issue #281).
 
         Streams the stored bytes verbatim (no recompression) for download. Raises
         :class:`BackupNotFoundError` for an unknown ref.
+
+        ``byte_range`` is an INCLUSIVE ``(first, last)`` byte-position pair,
+        already resolved against :meth:`size`: the stream then yields exactly
+        ``last - first + 1`` bytes, which is what a download resumed with
+        ``Range`` needs (issue #2372). The storage side reads only those bytes —
+        the tail of a multi-GB archive never pulls the head.
         """
 
     @abc.abstractmethod

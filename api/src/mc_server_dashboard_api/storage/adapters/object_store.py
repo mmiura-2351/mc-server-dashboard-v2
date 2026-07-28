@@ -196,8 +196,14 @@ class S3Client(Protocol):
     behaviour be proven against a fake without any real cloud.
     """
 
-    async def get_object(self, key: str) -> AsyncIterator[bytes]:
-        """Stream an object's body in chunks. Raises :class:`NotFoundError`."""
+    async def get_object(
+        self, key: str, byte_range: tuple[int, int] | None = None
+    ) -> AsyncIterator[bytes]:
+        """Stream an object's body in chunks. Raises :class:`NotFoundError`.
+
+        ``byte_range`` is an inclusive ``(first, last)`` pair sent as the S3
+        ``Range`` parameter, so only those bytes cross the network (issue #2372).
+        """
         ...
 
     async def put_object(self, key: str, body: bytes) -> None:
@@ -1447,20 +1453,31 @@ class ObjectStorage(Storage):
             await client.delete_object(self._backup_key(community_id, server_id, key))
 
     def open_backup(
-        self, community_id: CommunityId, server_id: ServerId, key: BackupKey
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        key: BackupKey,
+        *,
+        byte_range: tuple[int, int] | None = None,
     ) -> ByteStream:
-        return self._backup_gen(community_id, server_id, key)
+        return self._backup_gen(community_id, server_id, key, byte_range)
 
     async def _backup_gen(
-        self, community_id: CommunityId, server_id: ServerId, key: BackupKey
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        key: BackupKey,
+        byte_range: tuple[int, int] | None,
     ) -> AsyncIterator[bytes]:
         backup_key = self._backup_key(community_id, server_id, key)
         async with self._client_factory() as client:
             if await client.head_object(backup_key) is None:
                 raise NotFoundError(f"backup not found: {key.value}")
             # Stream the stored archive object verbatim (no recompression): the
-            # object is already a self-contained tar.gz (issue #281).
-            async for chunk in await client.get_object(backup_key):
+            # object is already a self-contained tar.gz (issue #281). A byte_range
+            # becomes a ranged GET, so the tail of a multi-GB archive never pulls
+            # the head across the network (issue #2372).
+            async for chunk in await client.get_object(backup_key, byte_range):
                 yield chunk
 
     async def put_backup(

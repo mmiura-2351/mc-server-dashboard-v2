@@ -890,34 +890,51 @@ class DownloadBackup:
     recompression, the exact stored ``tar.gz`` bytes. An unknown / cross-server
     backup is :class:`BackupNotFoundError` (the edge 404s, no existence signal).
 
-    Returns ``(stream, size_bytes)`` so the edge can declare a ``Content-Length``
-    (issue #2312). The size is read from the store, never from ``Backup.size_bytes``
-    — that column is nullable on legacy rows (#661), while the declared length must
-    equal the streamed byte count exactly.
+    Size and stream are separate operations (mirroring :class:`DownloadFile`) so
+    the edge can resolve a ``Range`` request against the archive's size before it
+    opens anything (issue #2372): an unsatisfiable range must be answered without
+    a stream, and a satisfiable one opens a *ranged* stream. The size is read from
+    the store, never from ``Backup.size_bytes`` — that column is nullable on
+    legacy rows (#661), while the declared length must equal the streamed byte
+    count exactly (issue #2312).
     """
 
     uow: UnitOfWork
     backup_store: BackupArchiveStore
 
-    async def __call__(
+    async def archive_size(
         self,
         *,
         community_id: CommunityId,
         server_id: ServerId,
         backup_id: BackupId,
-    ) -> tuple[AsyncIterator[bytes], int]:
+    ) -> int:
+        """The stored archive's byte count — the whole representation's length."""
+
         backup = await _load_backup(self.uow, community_id, server_id, backup_id)
-        size_bytes = await self.backup_store.size(
+        return await self.backup_store.size(
             community_id=community_id,
             server_id=server_id,
             storage_ref=backup.storage_ref,
         )
-        stream = self.backup_store.open(
+
+    async def archive_stream(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        backup_id: BackupId,
+        byte_range: tuple[int, int] | None = None,
+    ) -> AsyncIterator[bytes]:
+        """Open the archive's bytes, or the inclusive ``byte_range`` slice of them."""
+
+        backup = await _load_backup(self.uow, community_id, server_id, backup_id)
+        return self.backup_store.open(
             community_id=community_id,
             server_id=server_id,
             storage_ref=backup.storage_ref,
+            byte_range=byte_range,
         )
-        return stream, size_bytes
 
 
 @dataclass(frozen=True)
