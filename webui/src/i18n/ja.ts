@@ -524,6 +524,8 @@ export const ja: Record<TranslationKey, string> = {
     "そのファイルは有効なバックアップアーカイブではありません。",
   "backups.error.workerUnavailable":
     "現在、バックアップを取得できるサーバーホストがありません。",
+  "backups.error.storageUnavailable":
+    "現在、バックアップストレージを利用できません。しばらくしてから再度お試しください。",
   "backups.error.serverMustBeStopped": "この操作にはサーバーの停止が必要です。",
   "backups.error.serverBusy":
     "別の操作が進行中です。完了するまでお待ちください。",

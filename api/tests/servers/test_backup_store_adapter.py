@@ -301,6 +301,85 @@ async def test_prune_storage_backend_failure_translates_to_unavailable(
         await adapter.prune_to_final_snapshot(community_id=community, server_id=server)
 
 
+class _SizeUnavailableStorage(FsStorage):
+    """An ``FsStorage`` whose backup_size fails with a storage-backend error (#2378)."""
+
+    async def backup_size(
+        self,
+        community_id: StorageCommunityId,
+        server_id: StorageServerId,
+        key: BackupKey,
+    ) -> int:
+        raise ObjectStoreUnavailableError("object store head failed")
+
+
+async def test_size_storage_backend_failure_translates_to_unavailable(
+    tmp_path: Path,
+) -> None:
+    """The seam (issue #2378): the size probe backs the download route's declared
+    ``Content-Length``, so an outage there must reach the edge as the typed servers
+    error the edge maps to 503 — not as a raw storage type routed to a generic 500."""
+
+    storage = _SizeUnavailableStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+
+    with pytest.raises(BackupStorageUnavailableError):
+        await adapter.size(community_id=community, server_id=server, storage_ref=_ref())
+
+
+class _DeleteUnavailableStorage(FsStorage):
+    """An ``FsStorage`` whose delete_backup fails with a storage-backend error."""
+
+    async def delete_backup(
+        self,
+        community_id: StorageCommunityId,
+        server_id: StorageServerId,
+        key: BackupKey,
+    ) -> None:
+        raise ObjectStoreUnavailableError("object store delete failed")
+
+
+async def test_delete_storage_backend_failure_translates_to_unavailable(
+    tmp_path: Path,
+) -> None:
+    """The seam (issue #2378): delete_backup drives an object-store delete, so an
+    outage there is translated like every other backup write."""
+
+    storage = _DeleteUnavailableStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+
+    with pytest.raises(BackupStorageUnavailableError):
+        await adapter.delete(
+            community_id=community, server_id=server, storage_ref=_ref()
+        )
+
+
+class _ListUnavailableStorage(FsStorage):
+    """An ``FsStorage`` whose list_backups fails with a storage-backend error."""
+
+    async def list_backups(
+        self, community_id: StorageCommunityId, server_id: StorageServerId
+    ) -> list[BackupKey]:
+        raise ObjectStoreUnavailableError("object store list failed")
+
+
+async def test_list_archive_refs_storage_backend_failure_translates_to_unavailable(
+    tmp_path: Path,
+) -> None:
+    """The seam (issue #2378): the delete-server reclaim enumerates archive refs from
+    the store between the pack and the row delete, so an outage there must surface as
+    the same typed error the pack already raises — one status for one outage."""
+
+    storage = _ListUnavailableStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+
+    with pytest.raises(BackupStorageUnavailableError):
+        await adapter.list_archive_refs(community_id=community, server_id=server)
+
+
 async def _put_backup(
     storage: FsStorage,
     community: CommunityId,

@@ -16,8 +16,8 @@ adapter's per-operation ``client_factory()`` usage.
 from __future__ import annotations
 
 import datetime as dt
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, suppress
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager, suppress
 from typing import Any
 
 import aioboto3
@@ -57,6 +57,66 @@ _UPLOAD_FAILURE_ERRORS = (
     botocore.exceptions.HTTPClientError,
 )
 
+# The transport half of the tuple above, on its own: the request never got a usable
+# HTTP response back (connection refused, connect/read timeout, connection closed).
+# Used by the READ paths, which cannot take the ``ClientError`` half wholesale — see
+# :func:`_translating_backend_faults`.
+_TRANSPORT_FAILURE_ERRORS = (
+    botocore.exceptions.ConnectionError,
+    botocore.exceptions.HTTPClientError,
+)
+
+
+def _is_backend_fault(exc: ClientError) -> bool:
+    """True when the store answered the request, but with a fault of its own.
+
+    Keyed on the HTTP status botocore parsed off the response rather than on a list
+    of error-code names: a 5xx is the store telling us it broke, whatever it chose to
+    call it. That is exactly the transient, retry-worthy condition (issue #2378), and
+    it does not drift the way a name tuple does — the failure ``_iter_body`` documents
+    at length. A response botocore could not attribute a status to is treated as NOT
+    a backend fault, so an unrecognized shape stays loud instead of silently reading
+    as "retry".
+    """
+
+    status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+    return isinstance(status, int) and status >= 500
+
+
+@contextmanager
+def _translating_backend_faults(operation: str, key: str) -> Iterator[None]:
+    """Translate a store outage into :class:`ObjectStoreUnavailableError` (#2376).
+
+    The read paths' counterpart to ``_UPLOAD_FAILURE_ERRORS``, and deliberately
+    NARROWER than it: that tuple catches ``ClientError`` wholesale, which on a read
+    would sweep in a 403 ``AccessDenied`` or an ``InvalidAccessKeyId`` — standing
+    credential/policy misconfigurations that retrying never fixes. Reporting those as
+    a transient backend outage would tell every client to retry forever and hide the
+    real cause from the operator, so only a 5xx (:func:`_is_backend_fault`) or a
+    transport failure is translated here; everything else propagates unchanged and
+    keeps whatever semantics it carried.
+
+    (The write paths' broader tuple has the same weakness. Widening this rule to them
+    is issue #2270's taxonomy question, not this seam's — the point here is not to
+    make it worse on the paths being fixed.)
+
+    Wraps the per-method handlers rather than replacing them: those run first and
+    re-raise what they do not recognize, which lands here for classification.
+    """
+
+    try:
+        yield
+    except ClientError as exc:
+        if _is_backend_fault(exc):
+            raise ObjectStoreUnavailableError(
+                f"object store {operation} failed for {key}"
+            ) from exc
+        raise
+    except _TRANSPORT_FAILURE_ERRORS as exc:
+        raise ObjectStoreUnavailableError(
+            f"object store {operation} failed for {key}"
+        ) from exc
+
 
 class _Aioboto3S3Client:
     """Implements :class:`S3Client` over one aioboto3 client and a fixed bucket."""
@@ -78,12 +138,18 @@ class _Aioboto3S3Client:
             if byte_range is None
             else {"Range": f"bytes={byte_range[0]}-{byte_range[1]}"}
         )
-        try:
-            resp = await self._client.get_object(Bucket=self._bucket, Key=key, **extra)
-        except ClientError as exc:
-            if _is_not_found(exc) or _is_no_such_bucket(exc):
-                raise NotFoundError(f"object not found: {key}") from exc
-            raise
+        # A store that is down at request INITIATION must reach the caller as a typed
+        # storage outcome, not a raw botocore type (issue #2376) — the mid-body case
+        # is already covered by ``_iter_body``.
+        with _translating_backend_faults("get", key):
+            try:
+                resp = await self._client.get_object(
+                    Bucket=self._bucket, Key=key, **extra
+                )
+            except ClientError as exc:
+                if _is_not_found(exc) or _is_no_such_bucket(exc):
+                    raise NotFoundError(f"object not found: {key}") from exc
+                raise
         return _iter_body(resp["Body"])
 
     async def put_object(self, key: str, body: bytes) -> None:
@@ -168,26 +234,30 @@ class _Aioboto3S3Client:
         return {"ETag": resp["ETag"], "PartNumber": part_number}
 
     async def head_object(self, key: str) -> int | None:
-        try:
-            resp = await self._client.head_object(Bucket=self._bucket, Key=key)
-        except ClientError as exc:
-            if _is_not_found(exc) or _is_no_such_bucket(exc):
-                return None
-            raise
+        # The size probe behind the backup download's declared Content-Length: an
+        # outage here decides that route's status, so it must be typed (issue #2378).
+        with _translating_backend_faults("head", key):
+            try:
+                resp = await self._client.head_object(Bucket=self._bucket, Key=key)
+            except ClientError as exc:
+                if _is_not_found(exc) or _is_no_such_bucket(exc):
+                    return None
+                raise
         size: int = resp["ContentLength"]
         return size
 
     async def copy_object(self, src_key: str, dst_key: str) -> None:
-        try:
-            await self._client.copy_object(
-                Bucket=self._bucket,
-                Key=dst_key,
-                CopySource={"Bucket": self._bucket, "Key": src_key},
-            )
-        except ClientError as exc:
-            if _is_not_found(exc) or _is_no_such_bucket(exc):
-                raise NotFoundError(f"object not found: {src_key}") from exc
-            raise
+        with _translating_backend_faults("copy", src_key):
+            try:
+                await self._client.copy_object(
+                    Bucket=self._bucket,
+                    Key=dst_key,
+                    CopySource={"Bucket": self._bucket, "Key": src_key},
+                )
+            except ClientError as exc:
+                if _is_not_found(exc) or _is_no_such_bucket(exc):
+                    raise NotFoundError(f"object not found: {src_key}") from exc
+                raise
 
     async def delete_object(self, key: str) -> None:
         # Delete is idempotent at the store (a missing key is a success, not an error),
@@ -206,24 +276,31 @@ class _Aioboto3S3Client:
         # bucket on first WRITE, so a fresh deployment's startup sweep lists before any
         # bucket exists and ListObjectsV2 raises NoSuchBucket. Treat that as an empty
         # listing — otherwise the sweep, and with it the FastAPI lifespan, crash-loops.
+        #
+        # An outage is NOT that case: the delete-server reclaim enumerates archive
+        # refs through here (issue #2378), so a store that is down must be typed
+        # rather than mistaken for a store that is merely empty.
         paginator = self._client.get_paginator("list_objects_v2")
         out: list[S3Object] = []
-        try:
-            async for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
-                for entry in page.get("Contents", []):
-                    # S3 ``LastModified`` is a timezone-aware datetime (UTC); the
-                    # JAR-pool GC safety window reads it through S3Object (#293).
-                    out.append(
-                        S3Object(
-                            key=entry["Key"],
-                            size=entry["Size"],
-                            last_modified=entry["LastModified"],
+        with _translating_backend_faults("list", prefix):
+            try:
+                async for page in paginator.paginate(
+                    Bucket=self._bucket, Prefix=prefix
+                ):
+                    for entry in page.get("Contents", []):
+                        # S3 ``LastModified`` is a timezone-aware datetime (UTC); the
+                        # JAR-pool GC safety window reads it through S3Object (#293).
+                        out.append(
+                            S3Object(
+                                key=entry["Key"],
+                                size=entry["Size"],
+                                last_modified=entry["LastModified"],
+                            )
                         )
-                    )
-        except ClientError as exc:
-            if _is_no_such_bucket(exc):
-                return []
-            raise
+            except ClientError as exc:
+                if _is_no_such_bucket(exc):
+                    return []
+                raise
         return out
 
     async def list_multipart_uploads(self, prefix: str) -> list[S3MultipartUpload]:

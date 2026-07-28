@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 
 import aiohttp
 import pytest
@@ -487,6 +487,127 @@ async def test_copy_object_translates_not_found(code: str) -> None:
     client = _Aioboto3S3Client(_CopyRaisingClient(code), "bucket")
     with pytest.raises(NotFoundError):
         await client.copy_object("src/key", "dst/key")
+
+
+# --- Read-path backend-fault translation (issues #2376, #2378) -------------
+#
+# The write paths translate a backend/transport failure; the read paths did not, so
+# an outage at request initiation leaked a raw botocore type across the Storage Port
+# (#2376) and made the edge's 503 unreachable on the read routes (#2378).
+#
+# These drive REAL botocore errors through ``_Aioboto3S3Client``. The seam tests one
+# layer up fake an already-typed error on an ``FsStorage`` subclass, which is exactly
+# why they cannot catch a regression here.
+#
+# The read paths use a NARROWER rule than ``_UPLOAD_FAILURE_ERRORS``: a bare
+# ``ClientError`` would sweep in a 403 ``AccessDenied``, a standing misconfiguration
+# that must stay loud rather than read as "retry".
+
+
+def _service_error(operation: str, status: int, code: str) -> ClientError:
+    """A ``ClientError`` shaped like a real botocore service error.
+
+    botocore populates ``ResponseMetadata.HTTPStatusCode`` from the response it
+    parsed; the read paths key on it to tell a backend fault from a refusal.
+    """
+
+    return ClientError(
+        {"Error": {"Code": code}, "ResponseMetadata": {"HTTPStatusCode": status}},
+        operation,
+    )
+
+
+class _RaisingErrorPaginator:
+    """A paginator double that raises a set error when iterated."""
+
+    def __init__(self, error: BaseException) -> None:
+        self._error = error
+
+    async def _pages(self) -> AsyncIterator[dict[str, object]]:
+        raise self._error
+        yield {}  # unreachable; makes this an async generator
+
+    def paginate(self, **_kwargs: object) -> AsyncIterator[dict[str, object]]:
+        return self._pages()
+
+
+class _RaisingReadClient:
+    """A client double whose read operations all raise a set error."""
+
+    def __init__(self, error: BaseException) -> None:
+        self._error = error
+
+    async def get_object(self, **_kwargs: object) -> dict[str, object]:
+        raise self._error
+
+    async def head_object(self, **_kwargs: object) -> dict[str, object]:
+        raise self._error
+
+    async def copy_object(self, **_kwargs: object) -> None:
+        raise self._error
+
+    def get_paginator(self, _name: str) -> _RaisingErrorPaginator:
+        return _RaisingErrorPaginator(self._error)
+
+
+# The four read operations that reach the store before a response body starts, each
+# with the call shape its test needs.
+_READ_CALLS: dict[str, Callable[[_Aioboto3S3Client], Awaitable[object]]] = {
+    "get_object": lambda c: c.get_object("communities/k"),
+    "head_object": lambda c: c.head_object("communities/k"),
+    "copy_object": lambda c: c.copy_object("src/k", "dst/k"),
+    "list_objects": lambda c: c.list_objects("communities/"),
+}
+
+
+@pytest.mark.parametrize("operation", sorted(_READ_CALLS))
+async def test_read_translates_backend_5xx(operation: str) -> None:
+    # The store answered, but with a fault of its own (the SeaweedFS HTTP 500
+    # ``InternalError`` shape of the 2026-07-23 incident, on a read this time). That is
+    # the transient condition the edge reports as 503, so it must not cross the Port
+    # as a raw botocore type.
+    error = _service_error("GetObject", 500, "InternalError")
+    client = _Aioboto3S3Client(_RaisingReadClient(error), "bucket")
+
+    with pytest.raises(ObjectStoreUnavailableError) as excinfo:
+        await _READ_CALLS[operation](client)
+
+    assert excinfo.value.__cause__ is error
+
+
+@pytest.mark.parametrize("operation", sorted(_READ_CALLS))
+@pytest.mark.parametrize(
+    "error",
+    [
+        EndpointConnectionError(endpoint_url="http://store:8333"),
+        ConnectTimeoutError(endpoint_url="http://store:8333"),
+        ReadTimeoutError(endpoint_url="http://store:8333"),
+    ],
+)
+async def test_read_translates_transport_errors(
+    operation: str, error: BaseException
+) -> None:
+    # The request never got a usable response back — connection refused, or a
+    # connect/read timeout at request initiation (issue #2376). Same verdict.
+    client = _Aioboto3S3Client(_RaisingReadClient(error), "bucket")
+
+    with pytest.raises(ObjectStoreUnavailableError) as excinfo:
+        await _READ_CALLS[operation](client)
+
+    assert excinfo.value.__cause__ is error
+
+
+@pytest.mark.parametrize("operation", sorted(_READ_CALLS))
+async def test_read_reraises_non_transient_refusal(operation: str) -> None:
+    # The care issue #2376 names: a ``ClientError`` carrying real semantics must keep
+    # them. A 403 ``AccessDenied`` is a standing credential/policy misconfiguration —
+    # retrying it never succeeds, so classifying it as a backend outage would both
+    # mislead the operator and tell every client to retry forever.
+    error = _service_error("GetObject", 403, "AccessDenied")
+    client = _Aioboto3S3Client(_RaisingReadClient(error), "bucket")
+
+    with pytest.raises(ClientError):
+        await _READ_CALLS[operation](client)
 
 
 # --- Single-object write translation (issue #2273) -------------------------

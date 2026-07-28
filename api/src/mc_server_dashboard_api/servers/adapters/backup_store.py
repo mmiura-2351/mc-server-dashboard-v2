@@ -11,6 +11,18 @@ servers layer: ``NotFoundError`` -> :class:`BackupNotFoundError`,
 ``IntegrityCheckError`` -> :class:`BackupCorruptError`,
 ``ObjectStoreUnavailableError`` -> :class:`BackupStorageUnavailableError` (#2270),
 and ``ArchiveUnreadableError`` -> :class:`BackupUnreadableError` (#2371).
+
+The ``ObjectStoreUnavailableError`` translation covers every method that reaches the
+store *before* a response body starts, so one outage yields one status at the edge
+(503 ``storage_unavailable``, issue #2378). The lone exception is :meth:`open`: the
+stream's failure surfaces after the headers are on the wire, where no status is left
+to choose, so it stays a truncated body guarded by the route's byte count (#2318).
+
+That claim holds only because the layer below produces the typed error in the first
+place: the object client translates a backend 5xx / transport failure on the read
+operations too, not just the writes (issues #2376, #2378). Translating here without
+that would be decorative — the ``FsStorage`` backend never raises the type at all,
+so a seam test alone cannot show the path works.
 """
 
 from __future__ import annotations
@@ -90,7 +102,14 @@ class StorageBackupStoreAdapter(BackupArchiveStore):
         self, *, community_id: CommunityId, server_id: ServerId
     ) -> list[str]:
         community, server = _scope(community_id, server_id)
-        keys = await self._storage.list_backups(community, server)
+        try:
+            keys = await self._storage.list_backups(community, server)
+        except ObjectStoreUnavailableError as exc:
+            # The delete-server reclaim enumerates archive refs between the pack and
+            # the row delete (issue #2378). Without this the same outage that makes
+            # the pack raise the typed error leaks a raw storage type here, so one
+            # DELETE would surface as 503 or 500 depending on which call lost.
+            raise BackupStorageUnavailableError(str(server_id.value)) from exc
         return [k.value for k in keys]
 
     async def restore(
@@ -171,7 +190,13 @@ class StorageBackupStoreAdapter(BackupArchiveStore):
         community, server = _scope(community_id, server_id)
         # delete_backup is idempotent (STORAGE.md Section 3.3): a missing archive
         # is a no-op, so no NotFoundError translation is needed here.
-        await self._storage.delete_backup(community, server, BackupKey(storage_ref))
+        try:
+            await self._storage.delete_backup(community, server, BackupKey(storage_ref))
+        except ObjectStoreUnavailableError as exc:
+            # A store outage is not the idempotent missing-archive case: the archive
+            # may still be there. Translate at the seam (issue #2378) so the edge
+            # reports the same transient 503 it reports for every other backup write.
+            raise BackupStorageUnavailableError(str(server_id.value)) from exc
 
     async def prune_to_final_snapshot(
         self, *, community_id: CommunityId, server_id: ServerId
@@ -250,3 +275,8 @@ class StorageBackupStoreAdapter(BackupArchiveStore):
             )
         except NotFoundError as exc:
             raise BackupNotFoundError(storage_ref) from exc
+        except ObjectStoreUnavailableError as exc:
+            # The size probe backs the download route's declared Content-Length and
+            # runs before any byte is on the wire (issue #2378), so translating here
+            # is what lets that route answer 503 instead of a generic 500.
+            raise BackupStorageUnavailableError(str(server_id.value)) from exc

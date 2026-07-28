@@ -49,6 +49,12 @@ class ObjectStoreUnavailableError(StorageError):
     ``UploadPart`` (the 2026-07-23 incident), or a connection/timeout transport error
     (``EndpointConnectionError``, ``ConnectTimeoutError``, ``ReadTimeoutError``, ...).
 
+    Raised on the READ operations too — ``get_object`` at request initiation,
+    ``head_object``, ``list_objects``, ``copy_object`` (issue #2376) — not only on the
+    writes. Those paths apply a narrower rule than the writes: only a backend 5xx or a
+    transport failure, so a 403 ``AccessDenied`` keeps its own semantics instead of
+    reading as a retryable outage.
+
     Translating it here keeps the raw third-party ``botocore`` type from crossing the
     Storage Port boundary, so callers receive a typed, categorizable storage error
     rather than an untranslated exception; the originating error is preserved as the

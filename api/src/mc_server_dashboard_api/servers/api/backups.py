@@ -90,6 +90,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
     BackupNotFoundError,
+    BackupStorageUnavailableError,
     BackupUnsettledError,
     CommandDispatchError,
     FileTooLargeError,
@@ -277,6 +278,19 @@ async def create_backup(
             server_id,
         )
         raise _service_unavailable("worker_unavailable") from exc
+    except BackupStorageUnavailableError as exc:
+        # The object store could not serve the archive write (issue #2378): a
+        # transient backend fault, not a bug in the request, so it joins the
+        # worker-down path as a 503 the client retries rather than a generic 500.
+        await _record_failure(
+            recorder,
+            ops.BACKUP_CREATE,
+            Outcome.ERROR,
+            authorized,
+            community_id,
+            server_id,
+        )
+        raise _service_unavailable("storage_unavailable") from exc
     except CommandDispatchError as exc:
         await _record_failure(
             recorder,
@@ -555,6 +569,20 @@ async def restore_backup(
             target_type=ops.TARGET_BACKUP,
         )
         raise _integrity_error("working_set_corrupt") from exc
+    except BackupStorageUnavailableError as exc:
+        # The store could not serve the archive read back (issue #2378). No verdict
+        # about the backup — unlike BackupCorruptError above, nothing is quarantined
+        # — so it is a transient 503 the caller retries, not a generic 500.
+        await _record_failure(
+            recorder,
+            ops.BACKUP_RESTORE,
+            Outcome.ERROR,
+            authorized,
+            community_id,
+            backup_id,
+            target_type=ops.TARGET_BACKUP,
+        )
+        raise _service_unavailable("storage_unavailable") from exc
     if result.forced_corrupt:
         # An operator forced the restore of a known-corrupt backup over the gate
         # (#703): it published. Log and audit the deliberate corrupt restore under a
@@ -611,6 +639,10 @@ async def delete_backup(
         # A concurrent lifecycle op held the per-server lock past the acquire
         # budget (issue #876): a transient 409 the caller retries.
         raise _conflict("server_busy") from exc
+    except BackupStorageUnavailableError as exc:
+        # The store could not take the archive delete (issue #2378). The row is left
+        # in place, so the delete is safe to retry once the store is back.
+        raise _service_unavailable("storage_unavailable") from exc
     await _record(recorder, ops.BACKUP_DELETE, authorized, community_id, backup_id)
 
 
@@ -661,6 +693,12 @@ async def download_backup(
         raise _not_found() from exc
     except BackupNotFoundError as exc:
         raise _not_found() from exc
+    except BackupStorageUnavailableError as exc:
+        # The size probe runs before any byte is on the wire, so a store outage here
+        # can still choose the status: 503 the client retries (issue #2378). An
+        # outage that only strikes mid-stream cannot — the status is already
+        # committed — and stays the short body the route's byte count already fails.
+        raise _service_unavailable("storage_unavailable") from exc
     etag = _archive_etag(backup_id, size_bytes)
     served = _served_range(request, size_bytes, etag)
     try:
@@ -812,6 +850,12 @@ async def upload_backup(
         raise _too_large() from exc
     except InvalidBackupArchiveError as exc:
         raise _unprocessable("invalid_archive") from exc
+    except BackupStorageUnavailableError as exc:
+        # The archive validated but the store could not take the write (issue
+        # #2378): a transient backend fault, so 503 tells the client the upload is
+        # worth retrying unchanged. The other upload failures here are verdicts
+        # about the submitted body and stay 4xx.
+        raise _service_unavailable("storage_unavailable") from exc
     await _record(
         recorder, ops.BACKUP_UPLOAD, authorized, community_id, backup.id.value
     )

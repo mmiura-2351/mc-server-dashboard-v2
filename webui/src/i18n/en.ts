@@ -525,6 +525,8 @@ export const en = {
   "backups.error.invalidArchive": "That file is not a valid backup archive.",
   "backups.error.workerUnavailable":
     "No server host is available to take the backup right now.",
+  "backups.error.storageUnavailable":
+    "Backup storage is unavailable right now. Please try again shortly.",
   "backups.error.serverMustBeStopped":
     "The server must be stopped for this operation.",
   "backups.error.serverBusy": "Another operation is in progress. Please wait.",

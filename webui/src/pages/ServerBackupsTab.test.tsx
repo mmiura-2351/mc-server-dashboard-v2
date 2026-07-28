@@ -739,6 +739,27 @@ describe("ServerBackupsTab permission gating", () => {
     expect(screen.queryByText(t("backups.loadError"))).not.toBeInTheDocument();
   });
 
+  it("names the object store on a 503 storage_unavailable create (#2378)", async () => {
+    // The status switch maps a bare 503 to the worker-unavailable toast, which
+    // would misattribute an object-store outage to the server host. The reason
+    // is checked first, so the specific message wins.
+    routeGet();
+    mockApi.post.mockRejectedValue(
+      new ApiError(503, { reason: "storage_unavailable" }),
+    );
+    await openBackups();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: t("backups.create") }),
+    );
+    expect(
+      await screen.findByText(t("backups.error.storageUnavailable")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("backups.error.workerUnavailable")),
+    ).not.toBeInTheDocument();
+  });
+
   it("routes a create 403 through the permission glue", async () => {
     routeGet();
     mockApi.post.mockRejectedValue(
