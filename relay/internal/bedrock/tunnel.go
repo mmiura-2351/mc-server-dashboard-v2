@@ -93,6 +93,11 @@ type Tunnel struct {
 	// reader returns it directly on the drop path (issue #1721).
 	framePool sync.Pool
 
+	// sweepInterval is how often sweepLoop evicts idle flows. bind defaults it
+	// to the flowSweepInterval const; it is a field so tests can inject a short
+	// cadence instead of waiting the production 15 s.
+	sweepInterval time.Duration
+
 	closeOnce sync.Once
 }
 
@@ -111,14 +116,15 @@ func bind(bedrockPort uint32, serverID string, quicConn *quic.Conn, caps *ipcaps
 		setUDPRecvBuffer(uc, logger)
 	}
 	t := &Tunnel{
-		udpConn:  udpConn,
-		quicConn: quicConn,
-		flows:    NewFlowTable(flowIdleTimeout, nil),
-		caps:     caps,
-		serverID: serverID,
-		sessions: sessions,
-		metrics:  m,
-		logger:   logger,
+		udpConn:       udpConn,
+		quicConn:      quicConn,
+		flows:         NewFlowTable(flowIdleTimeout, nil),
+		caps:          caps,
+		serverID:      serverID,
+		sessions:      sessions,
+		metrics:       m,
+		logger:        logger,
+		sweepInterval: flowSweepInterval,
 	}
 	t.framePool.New = func() any {
 		b := make([]byte, FlowIDSize+maxDatagramPayload)
@@ -417,7 +423,7 @@ func (t *Tunnel) pumpQueueToQUIC(sendCh <-chan *[]byte) {
 // sweepLoop periodically evicts idle flows and releases their ipcaps slots,
 // until ctx is cancelled.
 func (t *Tunnel) sweepLoop(ctx context.Context) {
-	ticker := time.NewTicker(flowSweepInterval)
+	ticker := time.NewTicker(t.sweepInterval)
 	defer ticker.Stop()
 	for {
 		select {
