@@ -238,6 +238,9 @@ export const ja: Record<TranslationKey, string> = {
     "起動できませんでした: ポートがすでに使用されています。",
   "dashboard.lifecycle.imageMissing":
     "起動できませんでした: サーバーのファイルが準備できていません。しばらくしてから再試行してください。",
+  // 409 worker_busy / server_busy (issue #2400); retry is the only remedy.
+  "dashboard.lifecycle.busy":
+    "このサーバーで別の操作が進行中です。しばらく待ってから再試行してください。",
   // 503 service-unavailable reasons (issue #1092).
   "dashboard.lifecycle.noEligibleWorker":
     "現在利用可能なサーバーホストがありません。システムが起動中の場合は、しばらく待ってから再試行してください。",
