@@ -356,7 +356,17 @@ func classify(err error) error {
 // complete within sendStallTimeout, the stream context is cancelled so the
 // blocked Send returns with a context error. This prevents a single backpressured
 // send from starving the heartbeat goroutine (issue #1714).
+//
+// settled decides which of the two paths owns the outcome when the send
+// completes exactly at the deadline (issue #2397): a tick already buffered in
+// the timer channel cannot be retracted by Stop, and closing done does not stop
+// the watchdog from taking the deadline arm. Whichever path wins this single CAS
+// wins the race — the watchdog cancels only if it wins, and a send that loses is
+// reported as a stall rather than as a success on a stream this call no longer
+// owns. The stall error carries no ErrTerminal, so the run loop classifies it
+// transient and reconnects (session.Run), exactly as it does for a genuine stall.
 func (t *transport) sendBounded(msg *controlplanev1.WorkerMessage) error {
+	var settled atomic.Bool
 	deadline := t.clock.NewTimer(sendStallTimeout)
 	defer deadline.Stop()
 	done := make(chan struct{})
@@ -364,11 +374,19 @@ func (t *transport) sendBounded(msg *controlplanev1.WorkerMessage) error {
 	go func() {
 		select {
 		case <-deadline.C():
-			t.cancel()
+			if settled.CompareAndSwap(false, true) {
+				t.cancel()
+			}
 		case <-done:
 		}
 	}()
-	return t.stream.Send(msg)
+	if err := t.stream.Send(msg); err != nil {
+		return err
+	}
+	if !settled.CompareAndSwap(false, true) {
+		return fmt.Errorf("send stalled: not completed within %s", sendStallTimeout)
+	}
+	return nil
 }
 
 // recvClassified reads the next stream message, classifying any error so the run
