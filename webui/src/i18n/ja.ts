@@ -241,6 +241,10 @@ export const ja: Record<TranslationKey, string> = {
   // 409 worker_busy / server_busy (issue #2400); retry is the only remedy.
   "dashboard.lifecycle.busy":
     "このサーバーで別の操作が進行中です。しばらく待ってから再試行してください。",
+  // 409 command_failed (issue #2420); the server may or may not have moved, and
+  // a retry is not known to help.
+  "dashboard.lifecycle.commandFailed":
+    "サーバーホストがこの操作を実行できませんでした。サーバーの現在の状態を確認してから再試行してください。",
   // 503 service-unavailable reasons (issue #1092).
   "dashboard.lifecycle.noEligibleWorker":
     "現在利用可能なサーバーホストがありません。システムが起動中の場合は、しばらく待ってから再試行してください。",

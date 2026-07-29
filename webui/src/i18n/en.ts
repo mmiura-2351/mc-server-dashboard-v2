@@ -235,6 +235,13 @@ export const en = {
   // once that operation finishes, so the only remedy is to retry.
   "dashboard.lifecycle.busy":
     "Another operation on this server is in progress. Please wait a moment and try again.",
+  // 409 command_failed (issue #2420): the host took the command and could not
+  // apply it, for a cause it did not classify. Whether the server moved depends
+  // on the verb (a failed restart can leave it down), and a retry is not known
+  // to help, so the toast points at the server's state rather than promising
+  // one.
+  "dashboard.lifecycle.commandFailed":
+    "The server host could not carry out that action. Check the server's current state before trying again.",
   // 503 service-unavailable reasons (issue #1092): post-restart scenarios where
   // a host or the server files are not yet ready.
   "dashboard.lifecycle.noEligibleWorker":

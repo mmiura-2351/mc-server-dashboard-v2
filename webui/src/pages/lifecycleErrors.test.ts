@@ -34,12 +34,17 @@ describe("lifecycleErrorMessage", () => {
     },
   );
 
-  it.each([
-    "invalid_transition",
-    "transition_conflict",
-    "command_failed",
-    "server_not_running",
-  ])(
+  // The dispatch reached the Worker and was not applied as asked; whether the
+  // server moved depends on the verb, so the toast names the failure rather
+  // than claiming a state change (issue #2420).
+  it("maps a 409 command_failed to the dispatch-failure message", () => {
+    const error = new ApiError(409, { reason: "command_failed" });
+    expect(lifecycleErrorMessage(error)).toBe(
+      "dashboard.lifecycle.commandFailed",
+    );
+  });
+
+  it.each(["invalid_transition", "transition_conflict", "server_not_running"])(
     "keeps the state-changed treatment for an unmapped 409 reason (%s)",
     (reason) => {
       const error = new ApiError(409, { reason });
