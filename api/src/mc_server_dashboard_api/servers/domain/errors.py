@@ -599,6 +599,20 @@ class ResourcePackNotFoundError(ServerError):
     """
 
 
+class ResourcePackStorageUnavailableError(ServerError):
+    """A resource pack blob could not be served because the store was down (#2455).
+
+    The seam translation of the storage ``ObjectStoreUnavailableError`` for the
+    resource pack blob store, mirroring :class:`BackupStorageUnavailableError`: the
+    object store surfaced a transport failure or a backend 5xx on the size probe or
+    on the read the download routes stream from. Translating it at the seam keeps
+    the raw storage type from crossing back into the servers layer, and lets the
+    edge answer 503 ``storage_unavailable`` — a transient condition worth retrying
+    unchanged, and distinct from :class:`ResourcePackNotFoundError`, which says the
+    pack is gone and asking again is pointless.
+    """
+
+
 class ResourcePackInUseError(ServerError):
     """A resource pack cannot be deleted because it is assigned to servers.
 

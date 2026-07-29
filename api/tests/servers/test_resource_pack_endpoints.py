@@ -44,6 +44,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PermissionDeniedError,
     ResourcePackInUseError,
     ResourcePackNotFoundError,
+    ResourcePackStorageUnavailableError,
     ServerBusyError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
@@ -95,7 +96,16 @@ class _FakeUseCase:
 
 
 class _FakeDownloadUseCase:
-    """Fake that returns a (stream, pack, size) tuple like DownloadResourcePack."""
+    """Fake that returns a (stream, pack, size) tuple like DownloadResourcePack.
+
+    ``error`` fails the call itself, modelling the size probe's outcome — the pack
+    row or its blob already gone when the length is read. ``stream_error`` fails
+    after the first chunk, once the headers are committed.
+
+    ``open_error`` fails the stream on its FIRST iteration, yielding nothing, and
+    is the shape the real store has (issue #2455): ``open`` performs no I/O, so a
+    blob deleted after the size probe is missed there rather than at this call.
+    """
 
     def __init__(
         self,
@@ -105,12 +115,14 @@ class _FakeDownloadUseCase:
         chunks: list[bytes] | None = None,
         error: Exception | None = None,
         declared: int | None = None,
+        open_error: Exception | None = None,
         stream_error: Exception | None = None,
     ):
         self._pack = pack or _pack()
         self._chunks = [data] if chunks is None else chunks
         self._error = error
         self._declared = declared
+        self._open_error = open_error
         self._stream_error = stream_error
 
     async def __call__(
@@ -120,6 +132,8 @@ class _FakeDownloadUseCase:
             raise self._error
 
         async def _stream() -> AsyncIterator[bytes]:
+            if self._open_error is not None:
+                raise self._open_error
             for chunk in self._chunks:
                 yield chunk
             if self._stream_error is not None:
@@ -398,6 +412,53 @@ class TestDownloadEndpoint:
         assert resp.status_code == 404
         assert recorder.events == []
 
+    def test_download_of_a_blob_deleted_before_the_first_read_is_404(self) -> None:
+        # The same race one step later, and the shape the real store has (issue
+        # #2455): ``open`` does no I/O, so a delete landing after the size probe is
+        # missed on the stream's FIRST iteration. Starlette writes the status and
+        # Content-Length before it touches the body iterator, so that miss used to
+        # arrive as a 200 declaring a length the body could never deliver. The
+        # route begins the stream first, which puts it back where a status can
+        # still be chosen.
+        p = _pack()
+        recorder = RecordingAuditRecorder()
+        uc = _FakeDownloadUseCase(
+            pack=p, open_error=ResourcePackNotFoundError("gone"), declared=1024
+        )
+        app = _app(download=uc, recorder=recorder)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.get(f"/api/resource-packs/{p.id.value}/download")
+        assert resp.status_code == 404
+        # It is the miss, not a truncated pack: nothing describes a representation...
+        assert resp.headers["content-type"] != "application/zip"
+        assert "content-disposition" not in resp.headers
+        # ... and nothing was audited, exactly as for the 404 above.
+        assert recorder.events == []
+
+    def test_download_storage_outage_at_the_open_is_503(self) -> None:
+        # The open reaches the store too, and now runs before any byte is on the
+        # wire (issue #2455), so an outage that begins after the size probe can
+        # still choose a retryable status rather than a generic 500.
+        p = _pack()
+        uc = _FakeDownloadUseCase(
+            pack=p, open_error=ResourcePackStorageUnavailableError("down")
+        )
+        app = _app(download=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.get(f"/api/resource-packs/{p.id.value}/download")
+        assert resp.status_code == 503
+        assert resp.json()["reason"] == "storage_unavailable"
+
+    def test_download_storage_outage_at_the_size_probe_is_503(self) -> None:
+        # The probe sits in the same window and answers the same route, so one
+        # outage must not be a 503 or a 500 depending on which call lost the race.
+        uc = _FakeDownloadUseCase(error=ResourcePackStorageUnavailableError("down"))
+        app = _app(download=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.get(f"/api/resource-packs/{uuid.uuid4()}/download")
+        assert resp.status_code == 503
+        assert resp.json()["reason"] == "storage_unavailable"
+
 
 class TestPublicDownloadEndpoint:
     def test_public_download_200(self) -> None:
@@ -478,6 +539,44 @@ class TestPublicDownloadEndpoint:
         with TestClient(app) as client:  # type: ignore[arg-type]
             resp = client.get(f"/api/public/resource-packs/{p.id.value}/my-pack.zip")
         assert resp.status_code == 404
+
+    def test_public_download_of_a_blob_deleted_before_the_first_read_is_404(
+        self,
+    ) -> None:
+        # The same window on the route every joining Minecraft client hits (issue
+        # #2455): the miss lands on the stream's first iteration, and must be the
+        # 404 it is rather than a 200 declaring a length nothing will deliver.
+        p = _pack(filename="my-pack.zip")
+        uc = _FakeDownloadUseCase(
+            pack=p, open_error=ResourcePackNotFoundError("gone"), declared=1024
+        )
+        app = _app(download=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.get(f"/api/public/resource-packs/{p.id.value}/my-pack.zip")
+        assert resp.status_code == 404
+        assert resp.headers["content-type"] != "application/zip"
+        assert "content-disposition" not in resp.headers
+
+    def test_public_download_storage_outage_at_the_open_is_503(self) -> None:
+        # A game client told "not found" would stop asking; 503 says the pack is
+        # there and the fetch is worth retrying (issue #2455).
+        p = _pack(filename="my-pack.zip")
+        uc = _FakeDownloadUseCase(
+            pack=p, open_error=ResourcePackStorageUnavailableError("down")
+        )
+        app = _app(download=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.get(f"/api/public/resource-packs/{p.id.value}/my-pack.zip")
+        assert resp.status_code == 503
+        assert resp.json()["reason"] == "storage_unavailable"
+
+    def test_public_download_storage_outage_at_the_size_probe_is_503(self) -> None:
+        uc = _FakeDownloadUseCase(error=ResourcePackStorageUnavailableError("down"))
+        app = _app(download=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.get(f"/api/public/resource-packs/{uuid.uuid4()}/any.zip")
+        assert resp.status_code == 503
+        assert resp.json()["reason"] == "storage_unavailable"
 
 
 # ---------------------------------------------------------------------------

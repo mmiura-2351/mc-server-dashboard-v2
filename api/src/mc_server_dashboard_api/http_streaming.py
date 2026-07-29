@@ -27,17 +27,24 @@ the invariant hold on its own terms rather than depending on the ASGI server and
 protocol version to notice.
 
 :func:`started` guards the same invariant from the other end, before the header
-is written (issue #2415). A store's read stream locates what it reads on its
-FIRST iteration — the open lives inside the generator so a stream that is never
-consumed holds no descriptor (issues #2341, #2390) — and Starlette sends
+is written (issues #2415, #2455). A store's read stream locates what it reads on
+its FIRST iteration — the open lives inside the generator so a stream that is
+never consumed holds no descriptor (issues #2341, #2390) — and Starlette sends
 ``http.response.start`` before it touches the body iterator. A delete landing
 between the size probe and the body therefore surfaced as a ``200`` carrying a
 ``Content-Length`` the body could never deliver. Beginning the stream while the
-status is still choosable turns that into the miss it is. It also takes the
-backup download's filesystem body out of the delete case above: past that first
-read the bytes come from an open descriptor, which an unlink cannot shorten. The
-object backend is not covered that way, and is what :func:`counted` still earns
-its place for there.
+status is still choosable turns that into the miss it is. Both downloads named
+above now do so, so neither delete case reaches the wire as a short body any
+more: it is a clean ``404`` instead. It also takes the backup download's
+filesystem body out of the delete case entirely — past that first read the bytes
+come from an open descriptor, which an unlink cannot shorten.
+
+The object backend is not covered by that descriptor argument, and is what
+:func:`counted` still earns its place for: its length comes from a ``HEAD`` and
+its bytes from a separate ``GET``, so a store serving fewer bytes than it
+reported ends the body cleanly short, with no exception to notice it by. The
+resource pack blob store is object storage only, so on those two routes that is
+the whole of what remains to guard.
 """
 
 from __future__ import annotations

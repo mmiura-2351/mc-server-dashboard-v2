@@ -49,7 +49,7 @@ from mc_server_dashboard_api.dependencies import (
 from mc_server_dashboard_api.http_content_disposition import content_disposition
 from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_problem import ProblemException, problem
-from mc_server_dashboard_api.http_streaming import counted
+from mc_server_dashboard_api.http_streaming import counted, started
 from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.servers.application.resource_packs import (
     MAX_RESOURCE_PACK_BYTES,
@@ -67,6 +67,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PermissionDeniedError,
     ResourcePackInUseError,
     ResourcePackNotFoundError,
+    ResourcePackStorageUnavailableError,
     ServerBusyError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
@@ -253,8 +254,22 @@ async def download_resource_pack(
         stream, pack, size_bytes = await use_case(
             resource_pack_id=ResourcePackId(resource_pack_id),
         )
+        # Begin the stream here, so the blob is located while the status can still
+        # be chosen (issue #2455). The size probe and the stream resolve the blob
+        # independently, and the stream resolves it on its FIRST iteration — the
+        # store's ``open`` does no I/O itself, so a stream that is never consumed
+        # costs no request — while Starlette writes the status and Content-Length
+        # before it touches the body iterator. A delete landing after the probe was
+        # therefore answered as a 200 declaring a length the body could never
+        # deliver. Beginning the stream makes it the plain 404 it is.
+        stream = await started(stream)
     except ResourcePackNotFoundError as exc:
         raise _not_found() from exc
+    except ResourcePackStorageUnavailableError as exc:
+        # Both the probe and the open reach the store, and both now run before any
+        # byte is on the wire, so an outage on either can still choose a status:
+        # 503 the client retries rather than a generic 500 (issue #2455).
+        raise _service_unavailable("storage_unavailable") from exc
 
     await recorder.record(
         AuditEvent(
@@ -265,10 +280,13 @@ async def download_resource_pack(
             target_id=resource_pack_id,
         )
     )
-    # A delete or a prune racing the download can remove the blob underneath the
-    # open stream (issue #2337). The resulting short body already fails at the
-    # wire; counting the streamed bytes fails it here instead, with both numbers
-    # named, and without depending on the HTTP layer to catch it.
+    # Fail the response if the body ends below the declared length (issue #2337).
+    # The blob store is object storage only: the length comes from a HEAD and the
+    # bytes from a separate GET, so a store serving fewer bytes than it reported
+    # ends the body cleanly short, with no exception to notice it by. Counting the
+    # streamed bytes names that with both numbers, rather than leaving it to
+    # whichever HTTP layer is underneath. The delete #2337 named no longer reaches
+    # here: started() above resolved the GET while a status was still choosable.
     return StreamingResponse(
         counted(stream, size_bytes),
         media_type=_PACK_MEDIA_TYPE,
@@ -304,12 +322,21 @@ async def public_download_resource_pack(
             resource_pack_id=ResourcePackId(resource_pack_id),
             expected_filename=filename,
         )
+        # Same window as on the authenticated route (issue #2455): begin the stream
+        # while a status can still be chosen, so a blob deleted after the size probe
+        # is the 404 it is rather than a 200 declaring a length nothing will
+        # deliver. A game client shown that 200 records a truncated pack.
+        stream = await started(stream)
     except ResourcePackNotFoundError as exc:
         raise _not_found() from exc
+    except ResourcePackStorageUnavailableError as exc:
+        # 503, not 404: the pack is there and the fetch is worth retrying, which is
+        # not what a client told "not found" would do (issue #2455).
+        raise _service_unavailable("storage_unavailable") from exc
 
-    # Same race as on the authenticated route (issue #2337), on the route every
-    # joining Minecraft client hits: a short body fails here rather than passing
-    # for a complete pack.
+    # Same short-body guard as on the authenticated route (issue #2337), on the
+    # route every joining Minecraft client hits: a body ending below the HEAD's
+    # length fails here rather than passing for a complete pack.
     return StreamingResponse(
         counted(stream, size_bytes),
         media_type=_PACK_MEDIA_TYPE,
@@ -354,6 +381,10 @@ def _unprocessable(reason: str) -> ProblemException:
 
 def _conflict(reason: str) -> ProblemException:
     return problem(status.HTTP_409_CONFLICT, reason)
+
+
+def _service_unavailable(reason: str) -> ProblemException:
+    return problem(status.HTTP_503_SERVICE_UNAVAILABLE, reason)
 
 
 # ---------------------------------------------------------------------------
