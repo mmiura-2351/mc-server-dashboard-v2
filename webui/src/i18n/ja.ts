@@ -245,6 +245,12 @@ export const ja: Record<TranslationKey, string> = {
   // a retry is not known to help.
   "dashboard.lifecycle.commandFailed":
     "サーバーホストがこの操作を実行できませんでした。サーバーの現在の状態を確認してから再試行してください。",
+  // 409 command_failed / worker_busy on stop, and command_failed on restart
+  // (issue #2435); the committed intent is still pending, not undone.
+  "dashboard.lifecycle.stopPending":
+    "サーバーを停止できませんでした: まだ稼働中です。システムが停止を試行し続けます。",
+  "dashboard.lifecycle.restartPending":
+    "サーバーを再起動できませんでした: 一時的に停止している可能性があります。システムが自動的に復帰させます。",
   // 503 service-unavailable reasons (issue #1092).
   "dashboard.lifecycle.noEligibleWorker":
     "現在利用可能なサーバーホストがありません。システムが起動中の場合は、しばらく待ってから再試行してください。",

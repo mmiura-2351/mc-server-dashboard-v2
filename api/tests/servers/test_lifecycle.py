@@ -2029,6 +2029,48 @@ async def test_stop_failed_dispatch_keeps_assignment() -> None:
     assert stored.assigned_worker_id == WorkerId(worker)
 
 
+@pytest.mark.parametrize(
+    "status",
+    [CommandStatus.INTERNAL, CommandStatus.BUSY],
+)
+async def test_stop_failed_dispatch_does_not_compensate_desired_stopped(
+    status: CommandStatus,
+) -> None:
+    # NOT compensating a failed stop is deliberate, not an oversight (issue
+    # #2435). No stop failure class establishes that the stop did not and will
+    # not take effect: BUSY leaves the outcome unknown (the in-flight command is
+    # typically a detached stop still confirming termination) and INTERNAL can
+    # leave an orphan that terminates moments later. Reverting to desired=running
+    # would arm the reconciler's start rule as soon as observed became stopped
+    # and resurrect the server the operator asked to stop, so the stop intent
+    # stands and redispatch_stop owns convergence. Do not "fix" this by copying
+    # StartServer's compensation (issue #2001).
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(
+        outcomes={"stop": CommandOutcome(status=status, message="boom")}
+    )
+    use_case = StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+
+    with pytest.raises(CommandDispatchError):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.desired_state is DesiredState.STOPPED
+    assert stored.assigned_worker_id == WorkerId(worker)
+
+
 async def test_stop_succeeds_even_when_final_snapshot_fails() -> None:
     # A failing final snapshot must not fail the stop itself: the server is down
     # and the stop already succeeded; the snapshot is best-effort (FR-DATA-7).

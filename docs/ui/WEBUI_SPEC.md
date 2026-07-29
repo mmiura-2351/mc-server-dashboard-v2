@@ -621,6 +621,26 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   restart can leave the server moved, and a retry is not known to help (#2420).
   The refetch is unconditional on every lifecycle mutation regardless of the
   toast, so a moved server still shows up.
+- On **stop** and **restart** those messages are replaced by verb-specific ones —
+  `command_failed` and `worker_busy` on stop, `command_failed` on restart
+  (`worker_busy` on restart applied nothing, and `server_busy` cannot occur on
+  either). The API dispatches after committing the intent and compensates only on
+  start, so these failures leave something *pending* rather than undone (#2435).
+  A failed stop keeps `desired_state=stopped` over a still-running process — no
+  stop failure class proves the stop will not take effect — so the message says
+  the server is still running and that the system will keep trying to stop it,
+  rather than asking for a retry that is already happening. `worker_busy` on stop
+  gets the same message for the same reason: the stop intent is committed before
+  the Worker refuses. A failed restart keeps `desired_state=running`, so a server
+  the Worker took down comes back on its own, and the message says so.
+- **Start keeps the verb-agnostic messages**, but not because nothing is ever
+  pending there. A start that demonstrably did not happen is compensated back to
+  stopped, which covers `command_failed`; a **post-dispatch** `worker_busy` is
+  not — the API keeps `desired_state=running` and the assignment so
+  `redispatch_start` can converge once the raced command settles (#824), while a
+  pre-dispatch one does compensate. The client sees one `worker_busy` for both,
+  so start stays on the generic "another operation is in progress" message; #2435
+  scoped that case out rather than resolving it, and it is tracked separately.
 - Destructive operations (delete server/community/user/backup-restore) use
   typed-confirm dialogs.
 

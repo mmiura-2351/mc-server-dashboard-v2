@@ -6,16 +6,22 @@ the authoritative ``server`` record (desired state + assigned Worker) with the
 fleet through the :class:`ControlPlane` seam (placement, command dispatch,
 placement-load tracking).
 
-Consistency model — *dispatch after commit, compensate on failure*. The DB write
-(desired state, assignment) and the control-plane dispatch cannot be one atomic
-unit: the dispatch crosses a network to a separate process. We commit the intent
-first, then dispatch; if the dispatch fails (Worker refusal or no live session)
-we honestly compensate the committed write back. The alternative — dispatch
-inside the transaction — would hold the transaction open across a network round
-trip and still could not roll back a command the Worker already applied. Choosing
+Consistency model — *dispatch after commit; compensate on a failed start only*.
+The DB write (desired state, assignment) and the control-plane dispatch cannot be
+one atomic unit: the dispatch crosses a network to a separate process. We commit
+the intent first, then dispatch. The alternative — dispatch inside the
+transaction — would hold the transaction open across a network round trip and
+still could not roll back a command the Worker already applied. Choosing
 commit-first keeps the desired state durable and the failure path explicit
 (CONTROL_PLANE.md Section 4.2; the API's desired state is authoritative,
 Section 4.4).
+
+Compensation is **start-scoped**, and only ``StartServer`` has ``_compensate`` /
+``_unassign``. Where a failed start would otherwise leave ``desired=running`` for
+a server that demonstrably did not start, it honestly reverts the committed write
+(the classification is spelled out below). ``StopServer`` and ``RestartServer``
+deliberately do NOT compensate — the committed intent stays and the reconciler
+converges it; each class docstring says why (issue #2435).
 
 Stale-intent window — *honest about the gap, not papered over*. If the process
 crashes (or the request is cancelled) between the commit and the dispatch, the
@@ -888,6 +894,23 @@ class StopServer:
     Graceful by default; ``force`` skips the Worker's graceful (RCON) path and
     takes the immediate-kill path (issue #270). The rest of the flow — desired
     flip, placement-load decrement, final snapshot, unassign — is identical.
+
+    No compensation on a failed dispatch (issue #2435). Unlike a start, there is
+    no stop failure class where the API can establish that the stop did not and
+    will not take effect: ``BUSY`` leaves the outcome unknown (the in-flight
+    command is typically a detached stop still confirming termination, which
+    usually succeeds), ``INTERNAL`` can leave an orphan that terminates moments
+    later, and a timeout/disconnect may already have been applied
+    (``SERVER_NOT_FOUND`` is the success path below, not a failure). So
+    ``desired_state=stopped`` stands and the reconciler's ``redispatch_stop``
+    owns convergence. Reverting it to ``desired=running`` would do active harm:
+    the row would match the reconciler's start rule as soon as ``observed``
+    became stopped/crashed/unknown — the expected evolution of the two commonest
+    failed stops — and resurrect the server the operator asked to stop. The
+    placement decrement above cannot be undone either
+    (``increment_assignment`` only confirms an existing reservation), so a revert
+    would additionally undercount the Worker's load until the next reconnect
+    rebuild.
     """
 
     uow: UnitOfWork
@@ -1474,7 +1497,14 @@ class StopServer:
 
 @dataclass(frozen=True)
 class RestartServer:
-    """Restart a running server in place (server:restart, FR-SRV-2)."""
+    """Restart a running server in place (server:restart, FR-SRV-2).
+
+    Nothing to compensate on a failed dispatch (issue #2435): restart commits no
+    desired-state change — the compare-and-set below only asserts the row is
+    still running — and ``desired_state=running`` remains the correct intent
+    whatever the Worker did, including the case where it stopped the server and
+    failed to relaunch it. The reconciler converges that from the same row.
+    """
 
     uow: UnitOfWork
     control_plane: ControlPlane
