@@ -16,6 +16,7 @@ into the servers layer.
 
 from __future__ import annotations
 
+import logging
 import zipfile
 from collections.abc import AsyncIterator
 
@@ -41,6 +42,8 @@ from mc_server_dashboard_api.storage.domain.value_objects import RelPath, Versio
 from mc_server_dashboard_api.storage.domain.value_objects import (
     ServerId as StorageServerId,
 )
+
+_LOG = logging.getLogger(__name__)
 
 
 def _scope(
@@ -297,7 +300,9 @@ class StorageFileStoreAdapter(FileStore):
             with zipfile.ZipFile(
                 sink, mode="w", compression=zipfile.ZIP_DEFLATED
             ) as zf:
-                async for arcname, member_stream in self._walk_files(view, rel_path):
+                async for arcname, member_stream in self._walk_files(
+                    view, server_id, rel_path
+                ):
                     # A listing describes every dirent, including ones that name
                     # no readable file: a dangling symlink or a link to a
                     # directory is listed as an entry (issue #2418) whose read is
@@ -308,12 +313,32 @@ class StorageFileStoreAdapter(FileStore):
                     # before the zip member is opened (the Storage stream locates
                     # the file on its first iteration), so a skipped member never
                     # leaves a truncated entry behind in the archive.
+                    #
+                    # A link that ESCAPES the working set is refused rather than
+                    # missed (containment runs before the symlink answer), and
+                    # letting that refusal out tore the zip mid-stream — after
+                    # the response headers were already on the wire, so the
+                    # client kept a truncated archive (issue #2427). It is the
+                    # same unreadable member: skipped, and logged because unlike
+                    # a delete race it is a standing misconfiguration an operator
+                    # has to go remove. Only the member's own refusal is skipped;
+                    # a traversal-invalid REQUESTED root is refused above, before
+                    # the stream starts.
                     stream = member_stream.__aiter__()
                     try:
                         first = await anext(stream)
                     except StopAsyncIteration:
                         first = b""
                     except ServerFileNotFoundError:
+                        continue
+                    except InvalidFilePathError:
+                        _LOG.warning(
+                            "dir zip: server %s: member %r under %r escapes the "
+                            "working set; skipping",
+                            server_id.value,
+                            arcname,
+                            rel_path,
+                        )
                         continue
                     with zf.open(arcname, mode="w") as member:
                         member.write(first)
@@ -333,7 +358,7 @@ class StorageFileStoreAdapter(FileStore):
                 yield out
 
     async def _walk_files(
-        self, view: WorkingSetView, rel_path: str
+        self, view: WorkingSetView, server_id: ServerId, rel_path: str
     ) -> AsyncIterator[tuple[str, AsyncIterator[bytes]]]:
         """Yield ``(arcname, byte_stream)`` for every file under ``rel_path``.
 
@@ -355,12 +380,24 @@ class StorageFileStoreAdapter(FileStore):
             # Skip it the way a vanished member is skipped rather than tearing
             # the download mid-stream over one directory that went away; the
             # requested root's own existence is checked before the walk starts,
-            # so a genuinely missing directory is still a 404. A traversal
-            # refusal still surfaces.
+            # so a genuinely missing directory is still a 404.
+            #
+            # A listed directory that has become a link out of the working set is
+            # refused rather than missed, and that refusal tore the zip the same
+            # way (issue #2427): skip it too, so the walk treats an escaping
+            # directory exactly as the caller above treats an escaping member.
+            # The requested root reaches this loop only after the pre-walk check
+            # has already refused an escaping one.
             try:
                 entries = await view.list_dir(_rel_path(current or "."))
-            except PathTraversalError as exc:
-                raise InvalidFilePathError(current) from exc
+            except PathTraversalError:
+                _LOG.warning(
+                    "dir zip: server %s: directory %r escapes the working set; "
+                    "skipping",
+                    server_id.value,
+                    current,
+                )
+                continue
             except NotFoundError:
                 continue
             for entry in entries:

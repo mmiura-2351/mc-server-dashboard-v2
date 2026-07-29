@@ -2606,6 +2606,44 @@ async def test_search_surfaces_a_subdirectory_it_cannot_list() -> None:
         )
 
 
+async def test_search_skips_a_subdirectory_whose_listing_is_refused() -> None:
+    """A listing refused as a traversal is skipped like the vanished one (#2427).
+
+    A listed directory that has become a link out of the working set is refused
+    rather than missed, and losing every other match over one such entry is the
+    same bad trade. The zip walk treats it identically.
+    """
+
+    class _EscapingDirFileStore(FakeFileStore):
+        async def list_dir(
+            self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+        ) -> list[FileEntry]:
+            if rel_path == "plugins":
+                raise InvalidFilePathError(rel_path)
+            return await super().list_dir(
+                community_id=community_id, server_id=server_id, rel_path=rel_path
+            )
+
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = _EscapingDirFileStore(strict_dirs=True)
+    store.dirs["."] = [
+        FileEntry(name="config", is_dir=True, size=0),
+        FileEntry(name="plugins", is_dir=True, size=0),
+    ]
+    store.dirs["config"] = [FileEntry(name="motd.txt", is_dir=False, size=11)]
+    use_case = SearchFiles(uow=_stopped_uow(community, server_id), file_store=store)
+
+    result = await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        query="txt",
+        by="name",
+        max_results=100,
+    )
+
+    assert set(result.paths) == {"config/motd.txt"}
+
+
 async def test_search_content_aggregate_scan_cap_sets_truncated() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore(strict_dirs=True)

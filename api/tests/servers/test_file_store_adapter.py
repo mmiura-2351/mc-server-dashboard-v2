@@ -656,6 +656,239 @@ async def test_download_dir_does_not_descend_into_a_symlinked_directory(
     assert contents == {"real/inner.txt": b"INNER"}
 
 
+def _plant_escaping_links(live: Path, outside: Path) -> None:
+    """Plant a live and a dangling escaping symlink between two healthy members.
+
+    Both links resolve out of the working set, so the Port refuses to read either
+    one (containment runs before the symlink answer, so it is the traversal
+    refusal rather than a miss). The healthy members sort either side of them
+    (``a-first`` < ``escape`` < ``escape-dangling`` < ``z-last``, and a listing is
+    sorted by name), so a walk that aborted on the refusal could not have zipped
+    or matched ``z-last``.
+    """
+
+    outside.mkdir(exist_ok=True)
+    (outside / "secret.txt").write_bytes(b"NEEDLE-secret")
+    (live / "escape").symlink_to(outside / "secret.txt")
+    (live / "escape-dangling").symlink_to(outside / "vanished.txt")
+
+
+async def test_download_dir_skips_a_member_whose_link_escapes_the_root(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An escaping link among the children must not tear the zip mid-stream.
+
+    Reading such an entry is the traversal refusal, not the miss the vanished
+    member skip catches, so it aborted the whole download *after* the response
+    headers were on the wire — the client got a truncated archive (issue #2427).
+    The member is skipped like any other unreadable one: it is unreadable through
+    the Port under any design, so the archive omits nothing that was ever
+    servable.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await publish(
+        storage,
+        StorageCommunityId(community),
+        StorageServerId(server),
+        {"a-first.txt": b"FIRST", "z-last.txt": b"LAST"},
+    )
+    live = snapshot_dir(
+        tmp_path, StorageCommunityId(community), StorageServerId(server)
+    )
+    _plant_escaping_links(live, tmp_path / "outside")
+    adapter = StorageFileStoreAdapter(storage=storage)
+
+    stream = adapter.download_dir(
+        community_id=CommunityId(community),
+        server_id=ServerId(server),
+        rel_path=".",
+    )
+    with caplog.at_level("WARNING"):
+        blob = b"".join([chunk async for chunk in stream])
+
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        assert zf.testzip() is None
+        contents = {name: zf.read(name) for name in zf.namelist()}
+    assert contents == {"a-first.txt": b"FIRST", "z-last.txt": b"LAST"}
+    # Skipped, but not silently: the operator needs the path to go remove it.
+    logged = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelname == "WARNING"
+        and "escapes the working set" in record.getMessage()
+    ]
+    assert [message for message in logged if "'escape'" in message]
+    assert [message for message in logged if "'escape-dangling'" in message]
+
+
+async def test_export_dir_skips_a_member_whose_link_escapes_the_root(
+    tmp_path: Path,
+) -> None:
+    """The export zip shares the walk, so it must not tear on one either (#2427)."""
+
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await publish(
+        storage,
+        StorageCommunityId(community),
+        StorageServerId(server),
+        {"a-first.txt": b"FIRST", "z-last.txt": b"LAST"},
+    )
+    live = snapshot_dir(
+        tmp_path, StorageCommunityId(community), StorageServerId(server)
+    )
+    _plant_escaping_links(live, tmp_path / "outside")
+    adapter = StorageFileStoreAdapter(storage=storage)
+
+    stream = adapter.export_dir(
+        community_id=CommunityId(community),
+        server_id=ServerId(server),
+        rel_path=".",
+        extra=[("export_metadata.json", b'{"format": 1}')],
+    )
+    blob = b"".join([chunk async for chunk in stream])
+
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        assert zf.testzip() is None
+        contents = {name: zf.read(name) for name in zf.namelist()}
+    assert contents == {
+        "a-first.txt": b"FIRST",
+        "z-last.txt": b"LAST",
+        "export_metadata.json": b'{"format": 1}',
+    }
+
+
+async def test_download_dir_skips_a_subdirectory_replaced_by_an_escaping_link(
+    tmp_path: Path,
+) -> None:
+    """The walk's own listing is refused the same way a member's read is (#2427).
+
+    A listed directory can become an escaping link before the walk descends into
+    it — the lease pins the snapshot as a whole, not the subtrees inside it. That
+    refusal tore the zip exactly like the member one, so it is skipped too.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await publish(
+        storage,
+        StorageCommunityId(community),
+        StorageServerId(server),
+        {"a-first.txt": b"FIRST", "swapped/inner.txt": b"INNER"},
+    )
+    live = snapshot_dir(
+        tmp_path, StorageCommunityId(community), StorageServerId(server)
+    )
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "loot.txt").write_bytes(b"LOOT")
+    adapter = StorageFileStoreAdapter(storage=storage)
+
+    stream = adapter.download_dir(
+        community_id=CommunityId(community),
+        server_id=ServerId(server),
+        rel_path=".",
+    )
+    chunks = []
+    async for chunk in stream:
+        # The first chunk is the root file's zip entry, so the root listing has
+        # happened and the walk has not yet descended: swap the subdirectory for
+        # a link out of the working set exactly in that window.
+        if (live / "swapped").is_dir() and not (live / "swapped").is_symlink():
+            shutil.rmtree(live / "swapped")
+            (live / "swapped").symlink_to(outside)
+        chunks.append(chunk)
+
+    with zipfile.ZipFile(io.BytesIO(b"".join(chunks))) as zf:
+        assert zf.testzip() is None
+        contents = {name: zf.read(name) for name in zf.namelist()}
+    assert contents == {"a-first.txt": b"FIRST"}
+
+
+async def test_download_dir_refuses_a_requested_root_that_escapes(
+    tmp_path: Path,
+) -> None:
+    """The per-member skip must not soften the REQUESTED root's refusal (#2427).
+
+    An escaping path asked for by the client is a traversal attempt, not an
+    unreadable child found while walking: it is refused before the stream starts,
+    so the edge answers 422 rather than an empty zip.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await publish(
+        storage,
+        StorageCommunityId(community),
+        StorageServerId(server),
+        {"a-first.txt": b"FIRST"},
+    )
+    live = snapshot_dir(
+        tmp_path, StorageCommunityId(community), StorageServerId(server)
+    )
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (live / "escape").symlink_to(outside)
+    adapter = StorageFileStoreAdapter(storage=storage)
+
+    for requested in ("../..", "escape"):
+        stream = adapter.download_dir(
+            community_id=CommunityId(community),
+            server_id=ServerId(server),
+            rel_path=requested,
+        )
+        with pytest.raises(InvalidFilePathError):
+            await anext(aiter(stream))
+
+
+async def test_search_skips_a_member_whose_link_escapes_the_root(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An escaping link among the children must not 500 the whole search (#2427).
+
+    Same refusal, same treatment as the zip walk: the entry matches nothing and
+    every other match is still reported.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await publish(
+        storage,
+        StorageCommunityId(community),
+        StorageServerId(server),
+        {"a-first.txt": b"NEEDLE-first", "z-last.txt": b"NEEDLE-last"},
+    )
+    live = snapshot_dir(
+        tmp_path, StorageCommunityId(community), StorageServerId(server)
+    )
+    _plant_escaping_links(live, tmp_path / "outside")
+    use_case = SearchFiles(
+        uow=_stopped_uow(community, server),
+        file_store=StorageFileStoreAdapter(storage=storage),
+    )
+
+    with caplog.at_level("WARNING"):
+        result = await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server),
+            query="NEEDLE",
+            by="content",
+            max_results=100,
+        )
+
+    assert set(result.paths) == {"a-first.txt", "z-last.txt"}
+    logged = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelname == "WARNING"
+        and "escapes the working set" in record.getMessage()
+    ]
+    assert [message for message in logged if "'escape'" in message]
+    assert [message for message in logged if "'escape-dangling'" in message]
+
+
 async def test_download_of_a_directory_link_answers_what_the_listing_showed(
     tmp_path: Path,
 ) -> None:
