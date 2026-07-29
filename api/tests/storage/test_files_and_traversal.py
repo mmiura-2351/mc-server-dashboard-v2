@@ -14,8 +14,10 @@ import builtins
 import errno
 import io
 import os
+import shutil
 import tarfile
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -426,6 +428,180 @@ async def test_over_long_name_is_a_miss_on_every_read_path(tmp_path: Path) -> No
             await drain(view.open_file_stream(rel))
         with pytest.raises(NotFoundError):
             await view.list_dir(rel)
+
+
+# --- a delete racing ONE LISTED CHILD (issue #2414) -------------------------
+#
+# #2394 closed the window on the listing TARGET; a second one sat on each listed
+# CHILD. ``Path.iterdir`` drains an ``os.scandir`` into a list before it yields
+# anything, so the listing works from an atomic snapshot of the directory and then
+# describes each name in it — and a name unlinked in between made the describing
+# ``stat`` raise a bare ``FileNotFoundError``, untranslated by the servers seam: a
+# measured 500 on ``GET .../files?path=d&list=true`` for one unlucky delete
+# anywhere in the directory. The entry is now omitted, matching the object backend,
+# whose listing is one ``list_objects`` response a concurrently deleted key simply
+# is not in.
+#
+# Staged as the real race rather than a stubbed predicate: the entry is really
+# unlinked as the snapshot is taken, which IS the window between the snapshot and
+# the stat that follows it.
+
+
+def _unlink_after_the_snapshot(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    """Really delete ``name`` in the window between the snapshot and the stats."""
+
+    real_iterdir = Path.iterdir
+
+    def snapshot_then_unlink(self: Path) -> Iterator[Path]:
+        children = list(real_iterdir(self))
+        for child in children:
+            if child.name == name:
+                child.unlink()
+        return iter(children)
+
+    monkeypatch.setattr(Path, "iterdir", snapshot_then_unlink)
+
+
+def _rmtree_after_the_snapshot(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    """Really delete the listed DIRECTORY itself, once its snapshot is taken."""
+
+    real_iterdir = Path.iterdir
+
+    def snapshot_then_rmtree(self: Path) -> Iterator[Path]:
+        children = list(real_iterdir(self))
+        if self.name == name:
+            shutil.rmtree(self)
+        return iter(children)
+
+    monkeypatch.setattr(Path, "iterdir", snapshot_then_rmtree)
+
+
+def _child_stat_fails(monkeypatch: pytest.MonkeyPatch, name: str, err: int) -> None:
+    """Fail the ``stat`` of one listed child with ``err``, leaving the rest real."""
+
+    real_stat = Path.stat
+
+    def _fake_stat(self: Path, *args: Any, **kwargs: Any) -> Any:
+        if self.name == name:
+            raise OSError(err, os.strerror(err), str(self))
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", _fake_stat)
+
+
+async def test_list_dir_omits_a_child_deleted_after_the_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"d/keep": b"DATA", "d/gone": b"DATA"})
+    _unlink_after_the_snapshot(monkeypatch, "gone")
+
+    entries = await storage.list_dir(community, server, RelPath("d"))
+
+    assert [entry.name for entry in entries] == ["keep"]
+
+
+async def test_view_list_dir_omits_a_child_deleted_after_the_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pinned working-set view describes its children the same way."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"d/keep": b"DATA", "d/gone": b"DATA"})
+
+    async with storage.open_working_set_view(community, server) as view:
+        _unlink_after_the_snapshot(monkeypatch, "gone")
+
+        entries = await view.list_dir(RelPath("d"))
+
+    assert [entry.name for entry in entries] == ["keep"]
+
+
+@pytest.mark.parametrize("err", [errno.EACCES, errno.EIO, errno.ENOTDIR])
+async def test_list_dir_propagates_a_non_vanish_child_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, err: int
+) -> None:
+    """Only the child's OWN disappearance is omitted.
+
+    EACCES and EIO name a child that does exist, and ENOTDIR means the PARENT
+    stopped being a directory under the listing — reporting any of them as "that
+    entry is gone" would hide a real failure behind a short listing.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"d/keep": b"DATA", "d/bad": b"DATA"})
+    _child_stat_fails(monkeypatch, "bad", err)
+
+    with pytest.raises(OSError) as caught:
+        await storage.list_dir(community, server, RelPath("d"))
+    assert caught.value.errno == err
+
+
+@pytest.mark.parametrize("err", [errno.EACCES, errno.EIO, errno.ENOTDIR])
+async def test_view_list_dir_propagates_a_non_vanish_child_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, err: int
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"d/keep": b"DATA", "d/bad": b"DATA"})
+
+    async with storage.open_working_set_view(community, server) as view:
+        _child_stat_fails(monkeypatch, "bad", err)
+
+        with pytest.raises(OSError) as caught:
+            await view.list_dir(RelPath("d"))
+        assert caught.value.errno == err
+
+
+async def test_list_dir_of_a_directory_deleted_after_the_snapshot_is_not_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Omitting the vanished entries must not report a deleted directory as empty.
+
+    Every child of a ``delete_dir``'d directory vanishes at once, so omitting them
+    all would answer ``[]`` — "this directory exists and is empty" — for a
+    directory that is gone, contradicting the miss #2394 pinned. The object
+    backend answers a prefix with no members the same way: ``directory not found``.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"d/f": b"DATA"})
+    _rmtree_after_the_snapshot(monkeypatch, "d")
+
+    with pytest.raises(NotFoundError):
+        await storage.list_dir(community, server, RelPath("d"))
+
+
+async def test_list_dir_omits_the_last_child_without_reporting_a_miss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A directory outlives its last entry: empty, not the miss above.
+
+    The boundary the guard has to get right — "every entry vanished because the
+    DIRECTORY went" is the miss; "the entries went" is an empty listing.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"d/gone": b"DATA"})
+    _unlink_after_the_snapshot(monkeypatch, "gone")
+
+    assert await storage.list_dir(community, server, RelPath("d")) == []
+
+
+async def test_list_dir_of_an_empty_directory_is_still_empty(tmp_path: Path) -> None:
+    """A directory that really is empty lists as empty, not as a miss."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"DATA"})
+    await storage.make_dir(community, server, RelPath("d"))
+
+    assert await storage.list_dir(community, server, RelPath("d")) == []
 
 
 def test_version_ids_sort_chronologically_across_time_low_wrap(
