@@ -2650,9 +2650,11 @@ async def test_search_by_name_returns_a_dirent_no_download_can_fetch() -> None:
     A directory listing describes every child it found (#2418) and the name
     branch reports what the listing reports, so the file browser shows these
     entries too. Fetching such a hit gets what fetching it from the browser
-    gets — the read seam's refusal: an escape from the working set is refused
-    (422), a contained or dangling link is the modelled miss (404). Dropping
-    them here would leave the search and the listing disagreeing about the same
+    gets — the read seam's refusal, which decides containment first, on the
+    resolved target: a link resolving outside the working set is an escape
+    (422) even when its target does not exist, and one resolving inside is the
+    modelled miss (404) whether it dangles or names a real file. Dropping them
+    here would leave the search and the listing disagreeing about the same
     tree, so they are returned.
     """
 
@@ -2670,10 +2672,11 @@ async def test_search_by_name_returns_a_dirent_no_download_can_fetch() -> None:
     store = _RefusingLeafFileStore(strict_dirs=True)
     store.dirs["."] = [FileEntry(name="config", is_dir=True, size=0)]
     store.dirs["config"] = [
-        # A link out of the working set: listed, but its read is refused.
+        # A link resolving outside the working set: listed, but its read is
+        # refused as an escape.
         FileEntry(name="outside.txt", is_dir=False, size=9),
-        # A contained or dangling link: listed, but nothing is behind the
-        # dirent, so its read is the modelled miss.
+        # A link resolving inside it: listed, but nothing readable is behind
+        # the dirent, so its read is the modelled miss.
         FileEntry(name="dangling.txt", is_dir=False, size=7),
     ]
     use_case = SearchFiles(uow=_stopped_uow(community, server_id), file_store=store)

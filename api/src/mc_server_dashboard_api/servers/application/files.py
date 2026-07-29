@@ -1144,8 +1144,10 @@ class SearchFiles:
     names nothing fetchable: it is returned rather than filtered out, so the
     search and the file browser describe the same tree, and fetching the hit
     gets what fetching that entry from the browser gets — the read seam's
-    refusal, 422 for a link out of the working set and 404 for a contained or
-    dangling one (#2438).
+    refusal. Containment is decided first, on the resolved target: a link
+    resolving outside the working set is refused as an escape (422) whether or
+    not its target exists, and one resolving inside is the modelled miss (404)
+    whether it dangles or names a real file (#2438).
     """
 
     uow: UnitOfWork
@@ -1183,9 +1185,12 @@ class SearchFiles:
                 # A name hit is a dirent and nothing more: the listing describes
                 # every child it found (#2418), and this branch reports exactly
                 # what the listing reports. So a symlink is a hit like any other
-                # entry, and a fetch of that hit is refused by the read seam —
-                # 422 for a link out of the working set, 404 (the modelled miss)
-                # for a contained or dangling one. Recorded decision (#2438):
+                # entry, and a fetch of that hit is refused by the read seam,
+                # which decides containment first, on the resolved target: a
+                # link resolving outside the working set is an escape (422) even
+                # when its target does not exist, and one resolving inside is
+                # the modelled miss (404) whether it dangles or names a real
+                # file. Recorded decision (#2438):
                 # return it anyway. Fetching a search hit then answers exactly
                 # what fetching the same entry from the file browser answers;
                 # filtering here would leave the two surfaces disagreeing about
