@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 from mc_server_dashboard_api.servers.adapters.file_store import StorageFileStoreAdapter
-from mc_server_dashboard_api.servers.application.files import SearchFiles
+from mc_server_dashboard_api.servers.application.files import DownloadFile, SearchFiles
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     InvalidFilePathError,
@@ -603,6 +603,55 @@ async def test_download_dir_does_not_descend_into_a_symlinked_directory(
     with zipfile.ZipFile(io.BytesIO(blob)) as zf:
         contents = {name: zf.read(name) for name in zf.namelist()}
     assert contents == {"real/inner.txt": b"INNER"}
+
+
+async def test_download_of_a_directory_link_answers_what_the_listing_showed(
+    tmp_path: Path,
+) -> None:
+    """One request path must not answer "is this a directory?" twice, differently.
+
+    The download endpoint picks the single-file or the directory-zip branch from
+    ``DownloadFile.is_dir``, which probes ``list_dir`` on the entry's own path.
+    That probe used to follow the link and succeed, so a download zipped the
+    target's subtree for an entry the file browser draws as a FILE (issue #2426).
+
+    The probe now agrees with the listing: the entry is not a directory, and it
+    names no readable file either (reading a symlink dirent is a miss, issue
+    #2418), so the download is the seam's own miss -- a 404 at the edge, decided
+    before any byte is streamed. Visible in the browser, not downloadable: the
+    same answer a link to a FILE already gives, and the same one the Worker gives
+    for a running server.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await publish(
+        storage,
+        StorageCommunityId(community),
+        StorageServerId(server),
+        {"real/inner.txt": b"INNER"},
+    )
+    live = snapshot_dir(
+        tmp_path, StorageCommunityId(community), StorageServerId(server)
+    )
+    (live / "alias").symlink_to("real")
+    adapter = StorageFileStoreAdapter(storage=storage)
+    use_case = DownloadFile(uow=_stopped_uow(community, server), file_store=adapter)
+
+    entries = await adapter.list_dir(
+        community_id=CommunityId(community),
+        server_id=ServerId(server),
+        rel_path=".",
+    )
+
+    listed = next(entry for entry in entries if entry.name == "alias")
+    assert listed.is_dir is False
+    with pytest.raises(ServerFileNotFoundError):
+        await use_case.is_dir(
+            community_id=CommunityId(community),
+            server_id=ServerId(server),
+            rel_path="alias",
+        )
 
 
 async def test_download_dir_missing_is_file_not_found(tmp_path: Path) -> None:

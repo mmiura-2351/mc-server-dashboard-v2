@@ -722,6 +722,73 @@ async def test_view_list_dir_does_not_follow_a_symlink_to_a_directory(
     assert alias.size == len("../real")
 
 
+# --- LISTING a symlink dirent by its own path (issue #2426) -----------------
+#
+# Describing the link left one resolution still following it: the parent listing
+# called ``alias`` a file, while ``list_dir("alias")`` realpathed the leaf and
+# listed the TARGET's children. Both answers met inside ONE request — the
+# download endpoint picks the single-file or the directory-zip branch from a
+# ``list_dir`` probe on the entry's own path — so a download zipped a subtree for
+# an entry the file browser draws as a file.
+#
+# The listing therefore resolves the way every other read already does: the LEAF
+# dirent is refused, an intermediate component still resolves, and containment
+# still runs first, so an escaping link stays a PathTraversalError.
+
+
+async def test_list_dir_of_a_symlink_to_a_directory_is_not_found(
+    tmp_path: Path,
+) -> None:
+    """The link's own path lists nothing, exactly as its parent describes it."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"real/inner": b"X"})
+    live = snapshot_dir(tmp_path, community, server)
+    (live / "alias").symlink_to("real")
+
+    entries = await storage.list_dir(community, server, RelPath("."))
+
+    listed = next(entry for entry in entries if entry.name == "alias")
+    assert listed.is_dir is False  # the parent's answer
+    with pytest.raises(NotFoundError):  # and the same answer by the link's path
+        await storage.list_dir(community, server, RelPath("alias"))
+
+
+async def test_view_list_dir_of_a_symlink_to_a_directory_is_not_found(
+    tmp_path: Path,
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"real/inner": b"X"})
+    live = snapshot_dir(tmp_path, community, server)
+    (live / "alias").symlink_to("real")
+
+    async with storage.open_working_set_view(community, server) as view:
+        entries = await view.list_dir(RelPath("."))
+
+        listed = next(entry for entry in entries if entry.name == "alias")
+        assert listed.is_dir is False
+        with pytest.raises(NotFoundError):
+            await view.list_dir(RelPath("alias"))
+
+
+async def test_listing_through_an_intermediate_symlink_still_works(
+    tmp_path: Path,
+) -> None:
+    """Only the LEAF is refused, so a directory reached THROUGH a link still lists."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"real/inner/data": b"inside"})
+    live = snapshot_dir(tmp_path, community, server)
+    (live / "alias").symlink_to("real")
+
+    entries = await storage.list_dir(community, server, RelPath("alias/inner"))
+
+    assert [entry.name for entry in entries] == ["data"]
+
+
 # --- READING a symlink dirent (issue #2418 review) --------------------------
 #
 # Describing the link rather than its target split the listing from the read: the
@@ -813,9 +880,9 @@ async def test_reading_through_an_intermediate_symlink_still_works(
 ) -> None:
     """Only the LEAF is refused; an intermediate component still resolves.
 
-    ``alias/data`` names a real file, and the listing that shows it (``list_dir``
-    on the link's own path still follows) sizes it truthfully — so the listing and
-    the read agree and there is nothing to fix here.
+    ``alias/data`` names a real file, and the listing that shows it sizes it
+    truthfully — so the listing and the read agree and there is nothing to fix
+    here.
     """
 
     storage = FsStorage(tmp_path)
