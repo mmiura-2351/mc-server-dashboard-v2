@@ -75,6 +75,18 @@ describe("lifecycleErrorMessage", () => {
     );
   });
 
+  // Restart is the one verb for which server_not_running is not a race: the
+  // dashboard deliberately offers restart for a crashed server that is still
+  // desired-running, so "state changed" names nothing that changed (issue
+  // #2441). What is left pending is what a failed restart always leaves —
+  // desired_state=running — so it shares that message.
+  it("maps a 409 server_not_running on restart to the pending-restart message", () => {
+    const error = new ApiError(409, { reason: "server_not_running" });
+    expect(lifecycleErrorMessage(error, "restart")).toBe(
+      "dashboard.lifecycle.restartPending",
+    );
+  });
+
   // worker_busy on restart applied nothing at all — the server keeps running —
   // so it stays on the retry-in-a-moment message (issue #2435).
   it.each(["start", "restart"] as const)(

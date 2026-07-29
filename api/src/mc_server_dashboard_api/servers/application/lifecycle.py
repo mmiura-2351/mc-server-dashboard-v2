@@ -1565,6 +1565,29 @@ class RestartServer:
         outcome = await self.control_plane.restart(
             worker_id=worker_id, server_id=server_id
         )
+        if outcome.status is CommandStatus.SERVER_NOT_FOUND:
+            # The Worker holds no live instance for this id, so there is nothing to
+            # restart. Its handleRestart returns SERVER_NOT_FOUND (takeNotFound),
+            # never INVALID_STATE, for that case — an in-flight command is BUSY
+            # instead, precisely so this status stays unambiguous
+            # (worker/internal/application/instancemanager/instancemanager.go,
+            # handleRestart). Surface it as not-running, exactly as
+            # SendServerCommand does for the same outcome (issue #2441), rather
+            # than letting it fall into the unclassified ``command_failed``
+            # catch-all, which is reserved for outcomes with no nameable cause
+            # (issue #2434).
+            #
+            # The status does not say WHY there is no instance: the id was never
+            # started on this Worker, the process crashed (``pump`` drops a crashed
+            # instance from the map via ``forgetIf``), or a failed-stop orphan is
+            # recorded (deliberately not taken by ``takeRunningReserve``, issue
+            # #251) — the last of which may still be alive. "Not running" is the
+            # one statement true of the Worker's view in all three, and it is the
+            # Worker's own wording ("instancemanager: server not running").
+            #
+            # No state change to undo: restart commits none (see the class
+            # docstring), so this only reports.
+            raise ServerNotRunningError(str(server_id.value))
         if not outcome.success:
             raise _dispatch_failure(
                 server_id=server_id, kind="RestartServer", outcome=outcome

@@ -608,7 +608,9 @@ backend support; the tab body also self-guards with an "unsupported" notice).
 - API error surfaced via toast + inline field errors (422 `errors` list).
 - Conflict-flavored errors get a "state changed — refresh" treatment, not a raw
   error dump: the lifecycle races `invalid_transition`, `transition_conflict`
-  and `server_not_running`. A 409 that reports something other than a race is
+  and `server_not_running` (the last only away from **restart**, which offers
+  the action for a crashed server on purpose and so gets a verb-specific message
+  below, #2441). A 409 that reports something other than a race is
   named instead, since refreshing is not the remedy: `server_unsettled` says the
   server must be stopped, on every surface that can receive it (#2360);
   `worker_busy` / `server_busy` say another operation on the server is still
@@ -622,10 +624,11 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   The refetch is unconditional on every lifecycle mutation regardless of the
   toast, so a moved server still shows up.
 - On **stop** and **restart** those messages are replaced by verb-specific ones —
-  `command_failed` and `worker_busy` on stop, `command_failed` on restart
-  (`worker_busy` on restart applied nothing, and `server_busy` cannot occur on
-  either). The API dispatches after committing the intent and compensates only on
-  start, so these failures leave something *pending* rather than undone (#2435).
+  `command_failed` and `worker_busy` on stop, `command_failed` and
+  `server_not_running` on restart (`worker_busy` on restart applied nothing, and
+  `server_busy` cannot occur on either). The API dispatches after committing the
+  intent and compensates only on start, so these failures leave something
+  *pending* rather than undone (#2435).
   A failed stop keeps `desired_state=stopped` over a still-running process — no
   stop failure class proves the stop will not take effect — so the message says
   the server is still running and that the system will keep trying to stop it,
@@ -633,6 +636,11 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   gets the same message for the same reason: the stop intent is committed before
   the Worker refuses. A failed restart keeps `desired_state=running`, so a server
   the Worker took down comes back on its own, and the message says so.
+  `server_not_running` on restart — the Worker holding no live instance for the
+  id (#2441) — shares that message: the lifecycle controls offer restart for a
+  server observed crashed or unknown under a running intent, so this refusal is
+  not the race it is on the command surface, and what it leaves behind is the
+  same `desired_state=running` the reconciler acts on.
 - The same verb-specific treatment extends to the **503 `worker_unavailable`** —
   the API's rendering of a dispatch that timed out or lost the Worker session
   (#2440), where the generic "wait a moment and try again" invites a retry of an

@@ -611,9 +611,11 @@ function useLifecycle(server: ServerResponse, communityId: string) {
       // 403 → the permission glue (toast + capability refetch). Everything
       // else → the shared lifecycle mapping: known non-race 409 reasons get a
       // specific toast, other 409s the "state changed — refresh" treatment
-      // (SPEC 7.4; the refetch already runs in onSettled), the rest a generic
-      // toast. The verb goes with it: for a few reasons what the failure left
-      // pending depends on it (issue #2435).
+      // (SPEC 7.4; the refetch already runs in onSettled), recognized 503
+      // reasons their own message, the rest a generic toast. The verb goes with
+      // it on both the 409 and the 503 path: for a few reasons what the failure
+      // left pending, or left unconfirmed, depends on it (issues #2435/#2440/
+      // #2441).
       if (onForbidden(error)) {
         return;
       }
