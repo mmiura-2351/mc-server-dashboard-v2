@@ -792,3 +792,88 @@ async def test_failed_stop_then_process_crashes_wedge_recovered_by_reconciler(
     )(community_id=community, server_id=server_id)
     assert restarted.desired_state is DesiredState.RUNNING
     assert restarted.assigned_worker_id == WorkerId(next_worker)
+
+
+# --- Chain 7: stopped/stopping/assigned wedge recovery (issue #2452) -------
+
+
+async def test_failed_stop_left_at_stopping_recovered_by_reconciler(
+    engine: AsyncEngine,
+) -> None:
+    """start -> stop whose dispatch FAILS -> the worker's StatusChange(stopping),
+    emitted on entry to its Stop, is the LAST report -> reconciler tick redispatches
+    the stop -> start succeeds.
+
+    Issue #2452. The worker emits ``stopping`` when its ``Stop`` begins, and both
+    of its failure paths restore the pre-stop state WITHOUT emitting, so no terminal
+    report ever follows a stop that failed after that emission. The row is left at
+    (stopped, stopping, assigned), which before the fix matched no arm of
+    ``list_reconcilable``. Nor could an operator escape it: ``StopServer`` and
+    ``RestartServer`` refuse (desired is already stopped), ``StartServer`` 409s on
+    ``require_unassigned``, and ``is_at_rest()`` is false so every file/backup
+    operation 409s "unsettled". The recovery is a real retry of the stop.
+    """
+
+    clock = _AdvancingClock(_NOW)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    server_id = server.id
+    community = server.community_id
+
+    worker = uuid.uuid4()
+    await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(worker)), clock
+    )(community_id=community, server_id=server_id)
+    await _sink(engine, clock).record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker), state="running"
+    )
+
+    # The operator stops; the dispatch fails. StopServer deliberately does NOT
+    # compensate (issue #2435), so desired=stopped stands and the row keeps its
+    # assignment.
+    failing_cp = FakeControlPlane(place_to=WorkerId(worker), unavailable_kinds={"stop"})
+    with pytest.raises(WorkerUnavailableError):
+        await _stop_server_use_case(engine, failing_cp, clock)(
+            community_id=community, server_id=server_id
+        )
+
+    # The worker had already emitted stopping on entry to its Stop; its failure
+    # paths restore the prior state without emitting, so this report is the last
+    # one the API will ever see for that stop.
+    await _sink(engine, clock).record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker), state="stopping"
+    )
+    wedged = await _load(engine, server_id)
+    assert wedged is not None
+    assert wedged.desired_state is DesiredState.STOPPED
+    assert wedged.observed_state is ObservedState.STOPPING
+    assert wedged.assigned_worker_id == WorkerId(worker)
+    # No operator action escapes: the row is not at rest, so every gated operation
+    # 409s "unsettled", and a start cannot re-place against the stale assignment.
+    assert not wedged.is_at_rest()
+    with pytest.raises(LifecycleTransitionConflictError):
+        await _start_server_use_case(
+            engine, FakeControlPlane(place_to=WorkerId(worker)), clock
+        )(community_id=community, server_id=server_id)
+
+    # The row IS a reconciler candidate (the arm this issue adds).
+    async with ServersUnitOfWork(create_session_factory(engine)) as uow:
+        candidates = await uow.servers.list_reconcilable()
+    assert [candidate.id for candidate in candidates] == [server_id]
+
+    # The reconciler retries the stop for real against the connected worker, then
+    # takes the final snapshot and releases the assignment.
+    recovery_cp = FakeControlPlane()
+    await _reconciler_tick(engine, recovery_cp, clock)
+    assert [kind for kind, _, _ in recovery_cp.dispatched] == ["stop", "snapshot"]
+    recovered = await _load(engine, server_id)
+    assert recovered is not None
+    assert recovered.observed_state is ObservedState.STOPPED
+    assert recovered.assigned_worker_id is None
+
+    # The next start re-places against the now-unassigned row.
+    next_worker = uuid.uuid4()
+    restarted = await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(next_worker)), clock
+    )(community_id=community, server_id=server_id)
+    assert restarted.desired_state is DesiredState.RUNNING
+    assert restarted.assigned_worker_id == WorkerId(next_worker)

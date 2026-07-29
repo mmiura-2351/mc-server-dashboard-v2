@@ -54,6 +54,23 @@ Divergence matrix (per candidate, after a grace window has lapsed):
   still-truthful, while ``is_at_rest()`` reads true so nothing else flagged it —
   the row sat unstartable (every start 409'd on ``require_unassigned``) for as
   long as the owning Worker stayed connected.
+- ``desired=stopped``, observed ``stopping``, still assigned (issue #2452): a stop
+  whose DISPATCH failed after the Worker emitted ``stopping`` on entry to its
+  ``Stop``. Same action split as the ``unknown`` arm: connected Worker ->
+  redispatch the stop (which retries the stop for real, reaching the orphan branch
+  of the Worker's ``takeStoppableReserve`` — also what retires the Worker-side
+  orphan record); disconnected Worker -> clear the assignment. This arm wedged the
+  row TOTALLY: unlike the ``crashed`` wedge the row is not even ``is_at_rest()``,
+  so file, backup, restore and delete all 409 "unsettled" on top of every
+  lifecycle action being refused. Its absence was masked by a docstring premise
+  that turned out to be false — that a transitional observed state under a stopped
+  intent "cannot persist" because the Worker's in-flight operation always settles
+  into a terminal state whose report moves the row onto another arm. Both of the
+  Worker's ``Stop`` failure paths restore the pre-stop state WITHOUT emitting, so
+  no terminal report follows a failed stop. ``starting`` and ``restarting`` stay
+  excluded for reasons of their own: a launch under a stop intent really does
+  settle (to ``running``/``crashed``, landing on an arm above), and ``restarting``
+  is never emitted by any Worker driver.
 - Disconnected Worker -> skip (``desired=running`` side only):
   ``observed=unknown`` is expected while the Worker is gone, and the reconnect
   assignment rebuild owns that case (FR-WRK-4). The orphan path has no assigned
@@ -302,8 +319,10 @@ class RunReconcilerTick:
         # desired=stopped: list_reconcilable returns observed=running (stop never
         # delivered), observed=stopped+assigned (a stop wedged mid final-snapshot,
         # issue #847 bug 2), observed=unknown+assigned (a stop interrupted
-        # mid-flight, issue #1599), and observed=crashed+assigned (the process died
-        # on its own under a stop intent, issue #2439).
+        # mid-flight, issue #1599), observed=crashed+assigned (the process died
+        # on its own under a stop intent, issue #2439), and
+        # observed=stopping+assigned (a stop whose dispatch failed after the worker
+        # emitted stopping, issue #2452).
         if server.assigned_worker_id is None:
             return None
         if server.observed_state in (ObservedState.STOPPED, ObservedState.CRASHED):
@@ -316,11 +335,18 @@ class RunReconcilerTick:
             # Worker forgot the crashed instance, so it answers SERVER_NOT_FOUND,
             # which unassigns WITHOUT snapshotting and loses the crash-window world.
             return "clear_stale_assignment"
-        if server.observed_state is ObservedState.UNKNOWN:
-            # Issue #1599: API restart or worker disconnect interrupted a stop
-            # mid-flight, leaving (stopped, unknown, assigned). If the worker is
-            # gone, clear the assignment (DB-only, same as the stopped wedge); if
-            # connected, redispatch the stop to converge.
+        if server.observed_state in (ObservedState.UNKNOWN, ObservedState.STOPPING):
+            # Issue #1599 (unknown): an API restart or worker disconnect interrupted
+            # a stop mid-flight. Issue #2452 (stopping): the stop's DISPATCH failed
+            # after the worker emitted stopping on entry to its Stop, and neither of
+            # the worker's Stop failure paths emits again, so no terminal report
+            # follows. Both leave a wedge whose owed work is the same: if the worker
+            # is connected, redispatch the stop — for #2452 that retries the stop for
+            # real (reaching the orphan branch of the worker's takeStoppableReserve,
+            # which is also what retires the worker-side orphan record). If the
+            # worker is gone there is nobody to command, so clear the assignment
+            # (DB-only, same as the stopped wedge). No final snapshot on either: the
+            # process may still be alive, so there is no settled working set.
             if not self.control_plane.is_worker_connected(
                 worker_id=server.assigned_worker_id
             ):

@@ -1248,3 +1248,65 @@ async def test_stopped_crashed_clear_is_not_counted_as_a_crash_loop(
         for r in caplog.records
         if r.levelno == logging.WARNING and "crash-looping" in r.getMessage()
     ]
+
+
+# --- stopped/stopping/assigned wedge recovery (issue #2452) ----------------
+
+
+async def test_stopped_stopping_assigned_connected_redispatches_stop() -> None:
+    # Issue #2452: a stop whose dispatch failed after the worker emitted stopping
+    # leaves (stopped, stopping, assigned) and NO terminal report ever follows —
+    # both of the worker's Stop failure paths restore the pre-stop state without
+    # emitting. With the worker connected the owed work is a real retry of the
+    # stop, which is also what retires the worker-side orphan record.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.STOPPING,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock).tick()
+    assert [k for k, _, _ in cp.dispatched] == ["stop", "snapshot"]
+    stored = uow.servers.by_id[server.id]
+    assert stored.observed_state is ObservedState.STOPPED
+    assert stored.assigned_worker_id is None
+
+
+async def test_stopped_stopping_assigned_disconnected_clears_assignment() -> None:
+    # Issue #2452: the same wedge with the worker GONE — there is nobody to retry
+    # the stop against, so release the assignment (DB-only) exactly as the
+    # observed=unknown arm does.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.STOPPING,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(connected={_WORKER: False})
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock).tick()
+    assert cp.dispatched == []
+    assert uow.servers.by_id[server.id].assigned_worker_id is None
+
+
+async def test_stopped_starting_assigned_is_not_reconcilable() -> None:
+    # Issue #2452: starting stays excluded from the stopped-intent arms. Unlike
+    # stopping, it is a genuine transient — the worker's launch settles into a
+    # terminal state whose report moves the row onto the (stopped, running) or
+    # (stopped, crashed) arm — so acting on it would race the in-flight launch.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.STARTING,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock).tick()
+    assert cp.dispatched == []
+    assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER

@@ -1314,14 +1314,17 @@ class StopServer:
     async def clear_stale_assignment(
         self, *, community_id: CommunityId, server_id: ServerId
     ) -> Server:
-        """Release a stop wedged at (stopped, stopped|unknown|crashed, assigned).
+        """Release a stop wedged at (stopped, stopped|unknown|crashed|stopping,
+        assigned).
 
         Originally issue #847 bug 2 (observed=stopped); extended by issue #1599 to
         also cover observed=unknown (a stop interrupted mid-flight by an API restart
-        or a worker disconnect) and by issue #2439 to cover observed=crashed (the
+        or a worker disconnect), by issue #2439 to cover observed=crashed (the
         process died on its own under a stop intent — typically a stop whose
         dispatch failed, with the process then exiting before the reconciler's
-        grace lapsed).
+        grace lapsed), and by issue #2452 to cover observed=stopping (a stop whose
+        dispatch failed after the worker emitted stopping, with no terminal report
+        to follow).
 
         The reconciler's recovery arm for a stop whose deferred unassign never ran
         — an API crash or an HTTP-task cancellation between the observed=stopped
@@ -1333,11 +1336,20 @@ class StopServer:
         (bug 1). This deliberate recovery replaces #217's sink-unassign, which used
         to rescue the case but raced the snapshot window.
 
-        For observed=unknown the reconciler only routes here when the worker is
-        DISCONNECTED; a connected worker takes the redispatch_stop path instead.
-        A live TOCTOU guard verifies the worker is still disconnected at execution
-        time — if it reconnected between list_reconcilable and now, this raises
-        InvalidLifecycleTransitionError so the next tick can redispatch_stop.
+        For observed=unknown and observed=stopping the reconciler only routes here
+        when the worker is DISCONNECTED; a connected worker takes the
+        redispatch_stop path instead. A live TOCTOU guard verifies the worker is
+        still disconnected at execution time — if it reconnected between
+        list_reconcilable and now, this raises InvalidLifecycleTransitionError so
+        the next tick can redispatch_stop. observed=stopping is accepted here (and
+        not only observed=unknown) because the disconnect teardown clears the
+        registry entry BEFORE its bulk observed=unknown write
+        (``mark_disconnected`` then ``mark_worker_servers_unknown``), so the
+        reconciler can legitimately read "disconnected" while the row still reads
+        stopping; rejecting it would arm a backoff for a row that is genuinely owed
+        a release. No final snapshot for either: the process may still be alive (a
+        stop that failed after the worker emitted stopping can leave a container
+        that survived the kill), so there is no settled working set to capture.
 
         For observed=stopped with a CONNECTED worker (issue #1004), the final
         snapshot is re-driven before clearing the assignment — the original stop
@@ -1379,16 +1391,21 @@ class StopServer:
                     ObservedState.STOPPED,
                     ObservedState.UNKNOWN,
                     ObservedState.CRASHED,
+                    ObservedState.STOPPING,
                 )
                 or worker_id is None
             ):
                 # The row moved since list_reconcilable snapshotted it; nothing for
                 # this recovery arm to do.
                 raise InvalidLifecycleTransitionError(str(server_id.value))
-            # TOCTOU guard for the unknown case (issue #1599): the reconciler routes
-            # here only when the worker is disconnected, but the worker may have
-            # reconnected in between. If so, bail — the next tick will redispatch.
-            if server.observed_state is ObservedState.UNKNOWN:
+            # TOCTOU guard for the unknown (issue #1599) and stopping (issue #2452)
+            # cases: the reconciler routes here only when the worker is
+            # disconnected, but the worker may have reconnected in between. If so,
+            # bail — the next tick will redispatch.
+            if server.observed_state in (
+                ObservedState.UNKNOWN,
+                ObservedState.STOPPING,
+            ):
                 if self.control_plane.is_worker_connected(worker_id=worker_id):
                     raise InvalidLifecycleTransitionError(str(server_id.value))
 
@@ -1421,6 +1438,15 @@ class StopServer:
                     "recovered a stop wedged at (stopped, unknown, assigned) for "
                     "server %s: released worker %s (issue #1599). The worker was "
                     "disconnected; the stop was interrupted mid-flight",
+                    server_id.value,
+                    worker_id.value,
+                )
+            elif server.observed_state is ObservedState.STOPPING:
+                _LOG.warning(
+                    "recovered a stop wedged at (stopped, stopping, assigned) for "
+                    "server %s: released worker %s (issue #2452). The worker was "
+                    "disconnected; the stop's dispatch failed after it emitted "
+                    "stopping, and no terminal report was ever going to follow",
                     server_id.value,
                     worker_id.value,
                 )
