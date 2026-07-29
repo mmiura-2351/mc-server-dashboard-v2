@@ -528,6 +528,44 @@ async def test_download_dir_skips_a_member_it_cannot_read(tmp_path: Path) -> Non
     assert contents == {"keep.txt": b"KEEP"}
 
 
+async def test_download_dir_does_not_descend_into_a_symlinked_directory(
+    tmp_path: Path,
+) -> None:
+    """A link to a directory is a listed FILE, so the walk neither recurses nor zips it.
+
+    The other side of describing the link rather than its target (issue #2418):
+    the walk branches on ``is_dir``, so a directory link stops being recursed —
+    which is what makes an unbounded walk of a cyclic link impossible — and its
+    own read is a miss, so it is skipped like any other unreadable member. The
+    target's files are still in the zip under their real path.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await publish(
+        storage,
+        StorageCommunityId(community),
+        StorageServerId(server),
+        {"real/inner.txt": b"INNER"},
+    )
+    live = snapshot_dir(
+        tmp_path, StorageCommunityId(community), StorageServerId(server)
+    )
+    (live / "alias").symlink_to("real")
+    adapter = StorageFileStoreAdapter(storage=storage)
+
+    stream = adapter.download_dir(
+        community_id=CommunityId(community),
+        server_id=ServerId(server),
+        rel_path=".",
+    )
+    blob = b"".join([chunk async for chunk in stream])
+
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        contents = {name: zf.read(name) for name in zf.namelist()}
+    assert contents == {"real/inner.txt": b"INNER"}
+
+
 async def test_download_dir_missing_is_file_not_found(tmp_path: Path) -> None:
     storage = FsStorage(tmp_path)
     community, server = _scope()
