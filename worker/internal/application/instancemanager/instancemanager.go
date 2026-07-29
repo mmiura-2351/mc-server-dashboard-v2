@@ -235,10 +235,12 @@ type Manager struct {
 	// #1712), reporting success only on confirmed termination; until then every
 	// other command over the id is refused with INVALID_STATE naming the orphan —
 	// start/hydrate/stopped-id snapshot through reserve, restart through
-	// takeRunningReserve, console and tunnel dial through notRunningRefusal — so
-	// no path claims the server is not running about a process that is probably
-	// alive (issue #2466). The instance's status pump clears the record if the
-	// orphan finally exits on its own.
+	// takeRunningReserve, console / relay tunnel dial / Bedrock tunnel open
+	// through notRunningRefusal — so no path claims the server is not running
+	// about a process that is probably alive (issue #2466). CloseBedrockTunnel is
+	// the deliberate exception: it takes no running check and stays a success, so
+	// the tunnel a failed stop left open can still be torn down. The instance's
+	// status pump clears the record if the orphan finally exits on its own.
 	orphans map[string]orphanEntry
 	// reserved marks a server id as having a mutating lifecycle command in flight so
 	// a duplicate re-issued after a stream reconnect cannot overlap the original
@@ -1635,8 +1637,9 @@ func (m *Manager) attemptStop(ctx context.Context, serverID string, inst executi
 		// The orphan record is otherwise invisible: nothing enumerates m.orphans, so
 		// "why is every command for this server refused?" was a code-reading exercise
 		// (issue #2466). Say it once, at the moment the state is entered — the id is
-		// now guarded against start / hydrate / restart / console / tunnel dial
-		// until a retry stop confirms termination or the process exits on its own.
+		// now guarded against start / hydrate / restart / console / relay tunnel
+		// dial / Bedrock tunnel open until a retry stop confirms termination or the
+		// process exits on its own.
 		m.logger.Warn("recorded failed-stop orphan; the process may still be running",
 			"server_id", serverID, "driver", driverName, "graceful", graceful, "error", err)
 		// The graceful path issued save-off before the flush; because the stop
@@ -1845,18 +1848,22 @@ func (m *Manager) handleTunnelDial(ctx context.Context, cmd session.Command) ses
 // handleOpenBedrockTunnel starts (or, for a repeated command with the same
 // credential, idempotently confirms) this server's Bedrock relay QUIC tunnel
 // (docs/app/BEDROCK_TUNNEL.md, issue #1546). Like TunnelDial, the server must
-// be running locally. Unlike TunnelDial, Open does not itself dial/handshake
+// be running locally, and a failed-stop orphan is refused as INVALID_STATE
+// rather than SERVER_NOT_FOUND (issue #2466) — a live orphan reaches this
+// handler in practice: the API reads the orphan's INVALID_STATE refusal of a
+// StartServer as already-running, converges observed=running, and syncs the
+// Bedrock tunnel off that write (servers/application/lifecycle.py, the
+// INVALID_STATE arms of StartServer / redispatch_start). Like TunnelDial the
+// dispatch is fire-and-forget, so the refusal reaches only the API's WARN log.
+//
+// Unlike TunnelDial, Open does not itself dial/handshake
 // synchronously: it registers the tunnel and returns, while the QUIC dial,
 // handshake, datagram pump, and any reconnect-with-backoff run off this
 // command on the tunneler's own long-lived context — a slow or rejected relay
 // dial must not hold up the command result.
 func (m *Manager) handleOpenBedrockTunnel(cmd session.Command) session.CommandResult {
-	m.mu.Lock()
-	_, running := m.instances[cmd.ServerID]
-	m.mu.Unlock()
-	if !running {
-		return fail(cmd.CommandID, session.CommandErrorServerNotFound,
-			"instancemanager: server not running")
+	if code, msg, refused := m.notRunningRefusal(cmd.ServerID); refused {
+		return fail(cmd.CommandID, code, msg)
 	}
 	if m.bedrock == nil {
 		return fail(cmd.CommandID, session.CommandErrorInternal,
@@ -1883,6 +1890,13 @@ func (m *Manager) handleOpenBedrockTunnel(cmd session.Command) session.CommandRe
 // (attemptStop), so a Close arriving after the instance is already evicted —
 // or for a server this Worker never opened a tunnel for — must still succeed,
 // not SERVER_NOT_FOUND.
+//
+// That makes it the one running-server command with nothing for the failed-stop
+// orphan refusal to fix (issue #2466): it takes no running check at all, so it
+// never reported an orphan as not-running, and over an orphan it does the useful
+// thing — a failed stop leaves the tunnel open (issue #2468) and this closes it.
+// Refusing it for an orphan would remove the only way to take that tunnel down
+// without terminating the process.
 func (m *Manager) handleCloseBedrockTunnel(cmd session.Command) session.CommandResult {
 	if m.bedrock != nil {
 		m.bedrock.Close(cmd.ServerID)

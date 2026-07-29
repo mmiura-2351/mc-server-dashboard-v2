@@ -234,6 +234,27 @@ func TestTunnelDialOverOrphanRejected(t *testing.T) {
 	}
 }
 
+// OpenBedrockTunnel for an orphaned id is refused before the tunneler is
+// consulted, with the orphan's INVALID_STATE rather than SERVER_NOT_FOUND. This
+// path is reached over a live orphan: a StartServer the orphan refused with
+// INVALID_STATE is read by the API as already-running, which converges
+// observed=running and dispatches OpenBedrockTunnel to this same Worker
+// (servers/application/lifecycle.py, the INVALID_STATE arms of StartServer and
+// redispatch_start -> bedrock_tunnel_sync). Like TunnelDial the dispatch is
+// fire-and-forget, so the code reaches only the API's WARN log — which must not
+// say the server is not running (issue #2466).
+func TestOpenBedrockTunnelOverOrphanRejected(t *testing.T) {
+	d := &orphanDriver{stopAfter: 1}
+	m := newManager(t, d, nil) // no bedrock tunneler: the orphan refusal precedes it
+	_ = m.Handle(context.Background(), startCmd())
+	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+
+	res := m.Handle(context.Background(), session.Command{CommandID: "b", ServerID: "s1", Kind: "OpenBedrockTunnel"})
+	if res.Success || res.ErrorCode != session.CommandErrorInvalidState {
+		t.Fatalf("open bedrock tunnel over orphan = %+v, want INVALID_STATE", res)
+	}
+}
+
 // A genuinely unknown id still gets SERVER_NOT_FOUND on those same paths: the
 // orphan refusal must not swallow the honest not-found answer (issue #2466).
 func TestRestartAndCommandForUnknownIDStillServerNotFound(t *testing.T) {
@@ -242,6 +263,7 @@ func TestRestartAndCommandForUnknownIDStillServerNotFound(t *testing.T) {
 		{CommandID: "r", ServerID: "ghost", Kind: "RestartServer"},
 		{CommandID: "c", ServerID: "ghost", Kind: "ServerCommand", Line: "list"},
 		{CommandID: "t", ServerID: "ghost", Kind: "TunnelDial"},
+		{CommandID: "b", ServerID: "ghost", Kind: "OpenBedrockTunnel"},
 	} {
 		res := m.Handle(context.Background(), cmd)
 		if res.Success || res.ErrorCode != session.CommandErrorServerNotFound {
