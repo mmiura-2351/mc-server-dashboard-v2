@@ -4,11 +4,15 @@ Binds :class:`StorageFileStoreAdapter` to a real :class:`FsStorage` (no fakes on
 the Storage side) and verifies the at-rest path the file use cases drive: a
 versioned edit round-trip (write -> history -> rollback) and the error
 translation (missing path -> ServerFileNotFoundError, traversal ->
-InvalidFilePathError, FR-FILE-4).
+InvalidFilePathError, FR-FILE-4). The search use case is driven over the real
+seam here too, for the one property a fake store cannot express: its per-file
+memory cap gates on a LISTED size, so only a real symlink can show whether the
+listed size still bounds what a read yields (issue #2418 review).
 """
 
 from __future__ import annotations
 
+import datetime as dt
 import io
 import uuid
 import zipfile
@@ -17,12 +21,21 @@ from pathlib import Path
 import pytest
 
 from mc_server_dashboard_api.servers.adapters.file_store import StorageFileStoreAdapter
+from mc_server_dashboard_api.servers.application.files import SearchFiles
+from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     InvalidFilePathError,
     InvalidVersionIdError,
     ServerFileNotFoundError,
 )
-from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
+from mc_server_dashboard_api.servers.domain.value_objects import (
+    CommunityId,
+    DesiredState,
+    ObservedState,
+    ServerId,
+    ServerName,
+    ServerType,
+)
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from mc_server_dashboard_api.storage.domain.value_objects import (
     CommunityId as StorageCommunityId,
@@ -34,11 +47,37 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 from mc_server_dashboard_api.storage.domain.value_objects import (
     ServerId as StorageServerId,
 )
+from tests.servers.fakes import FakeUnitOfWork
 from tests.storage.helpers import healthy_region_bytes, publish, snapshot_dir
 
 
 def _scope() -> tuple[uuid.UUID, uuid.UUID]:
     return uuid.uuid4(), uuid.uuid4()
+
+
+def _stopped_uow(community: uuid.UUID, server: uuid.UUID) -> FakeUnitOfWork:
+    """A uow holding one at-rest server, so the file use cases take the Storage path."""
+
+    now = dt.datetime(2025, 1, 1, tzinfo=dt.UTC)
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        Server(
+            id=ServerId(server),
+            community_id=CommunityId(community),
+            name=ServerName("survival"),
+            mc_edition="java",
+            mc_version="1.21.1",
+            server_type=ServerType.VANILLA,
+            config={},
+            desired_state=DesiredState.STOPPED,
+            observed_state=ObservedState.STOPPED,
+            observed_at=now,
+            assigned_worker_id=None,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    return uow
 
 
 async def _seed(storage: FsStorage, community: uuid.UUID, server: uuid.UUID) -> None:
@@ -940,3 +979,45 @@ async def test_download_dir_pins_snapshot_across_concurrent_publish(
         "world/region/r.0.0.mca": healthy_region_bytes(),
         "server.properties": b"PROPS_OLD",
     }
+
+
+async def test_search_per_file_cap_is_not_bypassed_by_a_symlink(
+    tmp_path: Path,
+) -> None:
+    """The listed size must bound what reading the entry can pull into memory.
+
+    The content search gates on the entry's LISTED size before reading, so the
+    cap is only real if a listing never under-states what the read yields. A
+    symlink broke exactly that: the link lists at 7 bytes (its target string) and
+    slips under any cap, while following it read the whole target. Reading a
+    symlink dirent is a miss, so the oversized bytes are never pulled in — and
+    the needle they contain is never reported through the link (issue #2418).
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await publish(
+        storage,
+        StorageCommunityId(community),
+        StorageServerId(server),
+        {"big.bin": b"NEEDLE" + b"x" * 4000, "small.txt": b"NEEDLE"},
+    )
+    live = snapshot_dir(
+        tmp_path, StorageCommunityId(community), StorageServerId(server)
+    )
+    (live / "link.bin").symlink_to("big.bin")
+    use_case = SearchFiles(
+        uow=_stopped_uow(community, server),
+        file_store=StorageFileStoreAdapter(storage=storage),
+        max_file_bytes=100,  # far below big.bin, far above the link's listed size
+    )
+
+    result = await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server),
+        query="NEEDLE",
+        by="content",
+        max_results=100,
+    )
+
+    assert set(result.paths) == {"small.txt"}
