@@ -754,11 +754,17 @@ async def download_backup(
     }
     if served is not None:
         headers["Content-Range"] = f"bytes {served.start}-{served.end}/{size_bytes}"
-    # A concurrent DeleteBackup (or the retention prune) can remove the archive
-    # underneath the open stream (issue #2318). The resulting short body already
-    # fails at the wire; counting the streamed bytes fails it here instead, with
-    # both numbers named, and without depending on the HTTP layer to catch it. A
-    # partial response is guarded the same way, against the range's length.
+    # Fail the response if the body ends below the declared length (issue #2318).
+    # That guard is now earned by the OBJECT backend: its length comes from a HEAD
+    # and its bytes from a separate GET, so a store serving fewer bytes than it
+    # reported ends the body cleanly short, with no exception to notice it by (a
+    # body torn mid-read does raise, and aborts). The filesystem case #2318 named —
+    # a concurrent DeleteBackup or the retention prune removing the archive under
+    # the open stream — no longer reaches here: started() opened the descriptor
+    # above, and unlinking the path cannot shorten what that descriptor serves
+    # (issue #2415). Counting names any remaining mismatch with both numbers,
+    # rather than leaving it to whichever HTTP layer is underneath. A partial
+    # response is guarded the same way, against the range's length.
     return StreamingResponse(
         counted(stream, declared),
         status_code=(

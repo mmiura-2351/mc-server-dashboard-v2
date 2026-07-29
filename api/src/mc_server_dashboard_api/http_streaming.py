@@ -33,7 +33,11 @@ consumed holds no descriptor (issues #2341, #2390) — and Starlette sends
 ``http.response.start`` before it touches the body iterator. A delete landing
 between the size probe and the body therefore surfaced as a ``200`` carrying a
 ``Content-Length`` the body could never deliver. Beginning the stream while the
-status is still choosable turns that into the miss it is.
+status is still choosable turns that into the miss it is. It also takes the
+backup download's filesystem body out of the delete case above: past that first
+read the bytes come from an open descriptor, which an unlink cannot shorten. The
+object backend is not covered that way, and is what :func:`counted` still earns
+its place for there.
 """
 
 from __future__ import annotations
