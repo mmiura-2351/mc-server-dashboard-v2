@@ -123,7 +123,7 @@ func TestListenerDrainBlocksUntilBedrockSessionEndReachesReporter(t *testing.T) 
 	serveCancel()
 	<-serveDone
 	drainReturned := make(chan bool, 1)
-	go func() { drainReturned <- ln.Drain(5 * time.Second) }()
+	go func() { drainReturned <- ln.Drain(starvationBudget) }()
 
 	// The tunnel's teardown reaches End for the still-open session ...
 	select {
@@ -131,7 +131,7 @@ func TestListenerDrainBlocksUntilBedrockSessionEndReachesReporter(t *testing.T) 
 		if gotID != openID {
 			t.Fatalf("teardown called End(%q), want End(%q)", gotID, openID)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(starvationBudget):
 		t.Fatal("tunnel teardown never called End on shutdown")
 	}
 
@@ -151,7 +151,7 @@ func TestListenerDrainBlocksUntilBedrockSessionEndReachesReporter(t *testing.T) 
 		if !ok {
 			t.Fatal("Drain timed out; in-flight Bedrock tunnels did not finish")
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(starvationBudget):
 		t.Fatal("Drain did not return after the teardown completed")
 	}
 
@@ -161,7 +161,7 @@ func TestListenerDrainBlocksUntilBedrockSessionEndReachesReporter(t *testing.T) 
 	reporterStop()
 	select {
 	case <-reporterDone:
-	case <-time.After(5 * time.Second):
+	case <-time.After(starvationBudget):
 		t.Fatal("reporter.Run did not return")
 	}
 
@@ -209,7 +209,7 @@ func TestTunnelRunJoinsIdleSweepBeforeReturning(t *testing.T) {
 		if got != "sess-sweep" {
 			t.Fatalf("the idle sweep called End(%q), want End(%q)", got, "sess-sweep")
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(starvationBudget):
 		t.Fatal("the idle sweep never called End for the evicted promoted flow")
 	}
 
@@ -226,18 +226,19 @@ func TestTunnelRunJoinsIdleSweepBeforeReturning(t *testing.T) {
 	close(gate.release)
 	select {
 	case <-runReturned:
-	case <-time.After(5 * time.Second):
+	case <-time.After(starvationBudget):
 		t.Fatal("run() did not return after the sweep's End completed")
 	}
 }
 
 // waitForOpenSession polls the reporter until exactly one session is open and
-// returns its id, or fails after a short deadline. The promotion Start is made
-// on the reader goroutine, so a brief poll keeps the test deterministic without
-// reaching into reporter internals.
+// returns its id, or fails once starvationBudget elapses. The promotion Start
+// is made on the reader goroutine, so a poll keeps the test deterministic
+// without reaching into reporter internals; it returns as soon as the session
+// opens, so the budget only bounds a starved run.
 func waitForOpenSession(t *testing.T, reporter *session.Reporter) string {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(starvationBudget)
 	for {
 		if ids := reporter.ActiveSessionIDs(); len(ids) == 1 {
 			return ids[0]

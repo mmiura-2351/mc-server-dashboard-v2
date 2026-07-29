@@ -57,7 +57,7 @@ func runTunnelRec(t *testing.T, server *quic.Conn, caps *ipcaps.IPCaps, serverID
 		cancel()
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(starvationBudget):
 			t.Fatal("tun.run did not return after ctx cancel")
 		}
 	}
@@ -119,13 +119,13 @@ func TestTunnelCloseUnblocksRunAndFreesPort(t *testing.T) {
 
 	select {
 	case <-runDone:
-	case <-time.After(5 * time.Second):
+	case <-time.After(starvationBudget):
 		t.Fatal("run() did not return after close() -- goroutine leak")
 	}
 
 	select {
 	case <-client.Context().Done():
-	case <-time.After(5 * time.Second):
+	case <-time.After(starvationBudget):
 		t.Fatal("expected the QUIC connection to be closed after close()")
 	}
 
@@ -155,7 +155,7 @@ func TestPumpFramingRoundTrip(t *testing.T) {
 		t.Fatalf("WriteTo: %v", err)
 	}
 
-	rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	rctx, rcancel := context.WithTimeout(context.Background(), starvationBudget)
 	defer rcancel()
 	frame, err := client.ReceiveDatagram(rctx)
 	if err != nil {
@@ -178,7 +178,7 @@ func TestPumpFramingRoundTrip(t *testing.T) {
 		t.Fatalf("SendDatagram: %v", err)
 	}
 
-	_ = fakeClient.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = fakeClient.SetReadDeadline(time.Now().Add(starvationBudget))
 	buf := make([]byte, 2048)
 	n, _, err := fakeClient.ReadFrom(buf)
 	if err != nil {
@@ -236,7 +236,7 @@ func TestPumpSurvivesMalformedReplyFrame(t *testing.T) {
 	if _, err := fakeClient.WriteTo(payload, udpAddr); err != nil {
 		t.Fatalf("WriteTo: %v", err)
 	}
-	rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	rctx, rcancel := context.WithTimeout(context.Background(), starvationBudget)
 	defer rcancel()
 	frame, err := client.ReceiveDatagram(rctx)
 	if err != nil {
@@ -269,7 +269,7 @@ func TestPumpConcurrentFlowCapEnforced(t *testing.T) {
 	if _, err := c1.WriteTo([]byte("client-1"), udpAddr); err != nil {
 		t.Fatalf("WriteTo: %v", err)
 	}
-	rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	rctx, rcancel := context.WithTimeout(context.Background(), starvationBudget)
 	defer rcancel()
 	if _, err := client.ReceiveDatagram(rctx); err != nil {
 		t.Fatalf("first client's datagram should be forwarded: %v", err)
@@ -308,7 +308,7 @@ func TestPumpNewFlowRateCapEnforced(t *testing.T) {
 	if _, err := c1.WriteTo([]byte("client-1"), udpAddr); err != nil {
 		t.Fatalf("WriteTo: %v", err)
 	}
-	rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	rctx, rcancel := context.WithTimeout(context.Background(), starvationBudget)
 	defer rcancel()
 	if _, err := client.ReceiveDatagram(rctx); err != nil {
 		t.Fatalf("first client's datagram should be forwarded: %v", err)
@@ -350,7 +350,7 @@ func TestPumpRateLimitsUnconnectedPingPerFlow(t *testing.T) {
 	if _, err := fakeClient.WriteTo(ping, udpAddr); err != nil {
 		t.Fatalf("WriteTo: %v", err)
 	}
-	rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	rctx, rcancel := context.WithTimeout(context.Background(), starvationBudget)
 	defer rcancel()
 	if _, err := client.ReceiveDatagram(rctx); err != nil {
 		t.Fatalf("first unconnected-ping should be forwarded: %v", err)
@@ -409,7 +409,7 @@ func TestPumpForwardsAllGameplayDatagramsPerFlow(t *testing.T) {
 		if _, err := fakeClient.WriteTo(gameplay, udpAddr); err != nil {
 			t.Fatalf("WriteTo: %v", err)
 		}
-		rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
+		rctx, rcancel := context.WithTimeout(context.Background(), starvationBudget)
 		_, err := client.ReceiveDatagram(rctx)
 		rcancel()
 		if err != nil {
@@ -465,9 +465,8 @@ func TestReaderDoesNotStallWhenSendQueueFull(t *testing.T) {
 	// Resend from every source until all flows are registered or we time out.
 	// Resends from an already-registered source only refresh its flow (a Lookup
 	// hit), so the count converges on the number of distinct sources; loopback
-	// UDP loss (rare) is absorbed by the retry. The bound is generous for the
-	// same reason as starvationBudget: convergence takes milliseconds unless the
-	// process is CPU-starved, and a fixed short budget only flakes (issue #2050).
+	// UDP loss (rare) is absorbed by the retry. Convergence takes milliseconds
+	// unless the process is CPU-starved, so the bound is starvationBudget.
 	deadline := time.Now().Add(starvationBudget)
 	for {
 		for _, src := range sources {
@@ -491,7 +490,7 @@ func TestReaderDoesNotStallWhenSendQueueFull(t *testing.T) {
 	tun.unbind()
 	select {
 	case <-readerDone:
-	case <-time.After(5 * time.Second):
+	case <-time.After(starvationBudget):
 		t.Fatal("pumpUDPToQueue did not return after the socket was closed")
 	}
 }
@@ -577,7 +576,7 @@ func TestFlowEvictionRacesPumps(t *testing.T) {
 	cancel()
 	select {
 	case <-runDone:
-	case <-time.After(5 * time.Second):
+	case <-time.After(starvationBudget):
 		t.Fatal("tun.run did not return after ctx cancel")
 	}
 }
