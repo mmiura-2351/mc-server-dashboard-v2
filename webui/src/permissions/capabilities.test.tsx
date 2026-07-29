@@ -531,7 +531,12 @@ describe("re-fetch on 403", () => {
         <button
           type="button"
           onClick={() =>
-            onForbidden(new ApiError(403, { reason: "server:start" }))
+            onForbidden(
+              new ApiError(403, {
+                reason: "forbidden",
+                permission: "server:start",
+              }),
+            )
           }
         >
           forbid

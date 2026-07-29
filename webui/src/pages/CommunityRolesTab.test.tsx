@@ -278,7 +278,12 @@ describe("CommunityRolesTab", () => {
 
   it("surfaces a delete failure with a toast", async () => {
     routeGet([role({ id: "r1", name: "Moderator" })]);
-    mockApi.delete.mockRejectedValue(new ApiError(409, { reason: "conflict" }));
+    // The delete handler is reason-blind, so this only has to be a real
+    // failure: `conflict` is not a reason the API emits at any status, while a
+    // 500 always carries `internal_error` (issue #2421).
+    mockApi.delete.mockRejectedValue(
+      new ApiError(500, { reason: "internal_error" }),
+    );
     renderPage();
     await openRolesTab();
 

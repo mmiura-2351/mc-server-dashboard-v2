@@ -150,7 +150,7 @@ describe("DashboardPage list", () => {
 
   it("surfaces a load error", async () => {
     mockApi.get.mockRejectedValue(
-      new ApiError(500, { reason: "server_error" }),
+      new ApiError(500, { reason: "internal_error" }),
     );
     renderPage();
 
@@ -166,7 +166,7 @@ describe("DashboardPage list", () => {
 
     // Simulate a transient API outage: the next background refetch fails.
     mockApi.get.mockRejectedValue(
-      new ApiError(500, { reason: "server_error" }),
+      new ApiError(500, { reason: "internal_error" }),
     );
     await act(() => queryClient.invalidateQueries());
     // The query-state notification lands a task after invalidateQueries
@@ -188,7 +188,7 @@ describe("DashboardPage list", () => {
     await screen.findByText("survival");
 
     mockApi.get.mockRejectedValue(
-      new ApiError(500, { reason: "server_error" }),
+      new ApiError(500, { reason: "internal_error" }),
     );
     await act(() => queryClient.invalidateQueries());
     await act(async () => {
@@ -364,7 +364,7 @@ describe("DashboardPage lifecycle actions", () => {
   it("falls back to a generic toast for other errors", async () => {
     mockApi.get.mockResolvedValue([server({ observed_state: "running" })]);
     mockApi.post.mockRejectedValue(
-      new ApiError(500, { reason: "server_error" }),
+      new ApiError(500, { reason: "internal_error" }),
     );
     renderPage();
 

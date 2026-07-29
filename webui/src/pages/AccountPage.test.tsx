@@ -102,7 +102,7 @@ describe("AccountPage profile", () => {
     mockApi.get.mockImplementation((path: string) => {
       if (path === "/api/users/me") return Promise.resolve(me);
       if (path === "/api/communities")
-        return Promise.reject(new ApiError(500, { reason: "server_error" }));
+        return Promise.reject(new ApiError(500, { reason: "internal_error" }));
       return Promise.reject(new Error(`unexpected GET ${path}`));
     });
     renderPage();
@@ -122,7 +122,7 @@ describe("AccountPage profile", () => {
 
     // Simulate a transient API outage: the next background refetch fails.
     mockApi.get.mockRejectedValue(
-      new ApiError(500, { reason: "server_error" }),
+      new ApiError(500, { reason: "internal_error" }),
     );
     await act(() => queryClient.invalidateQueries());
     // The query-state notification lands a task after invalidateQueries
@@ -371,7 +371,7 @@ describe("AccountPage memberships refetch failure (#1805)", () => {
 
     // Simulate a transient API outage: the next background refetch fails.
     mockApi.get.mockRejectedValue(
-      new ApiError(500, { reason: "server_error" }),
+      new ApiError(500, { reason: "internal_error" }),
     );
     await act(() => queryClient.invalidateQueries());
     await act(async () => {
