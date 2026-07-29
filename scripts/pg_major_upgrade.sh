@@ -375,9 +375,18 @@ fi
 # A file that is non-empty and looks plausible is not a verified dump: a broken
 # pipe or a full disk leaves exactly that, and the redirection above created the
 # file either way. pg_dumpall's own closing marker is the end-to-end evidence.
-if ! tail -n 5 "$backup" | grep -q 'PostgreSQL database cluster dump complete'; then
-	die "the dump at ${backup} does not end with PostgreSQL's completion marker, so it is truncated. NOTHING has been changed -- volume '${pg_volume_name}' still holds the PostgreSQL ${pg_cluster_major} cluster and 'docker compose up -d' brings the stack back."
-fi
+#
+# The tail is captured and then matched rather than piped into a quiet grep: the
+# marker is not the last of those five lines, so the grep exits while `tail`
+# still has some to write, `tail` takes SIGPIPE, and `pipefail` hands this check
+# a 141 -- a verified dump declared truncated and the migration abandoned over a
+# dump that was fine, at about 1 run in 2000 (#2447). What is matched is
+# unchanged: the marker was a plain substring to grep too.
+dump_tail="$(tail -n 5 "$backup")" || dump_tail=""
+case "$dump_tail" in
+	*"PostgreSQL database cluster dump complete"*) ;;
+	*) die "the dump at ${backup} does not end with PostgreSQL's completion marker, so it is truncated. NOTHING has been changed -- volume '${pg_volume_name}' still holds the PostgreSQL ${pg_cluster_major} cluster and 'docker compose up -d' brings the stack back." ;;
+esac
 say "dump verified: pg_dumpall exited 0 and the output ends with PostgreSQL's completion marker."
 
 # ── 6. Archive the old volume, and verify the archive ────────────────────────

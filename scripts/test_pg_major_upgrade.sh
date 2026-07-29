@@ -606,24 +606,29 @@ done
 
 	# The two collisions with what the new container's initdb already did are
 	# removed rather than tolerated -- that is what lets ON_ERROR_STOP stay on.
+	# Here-strings, not pipes: each of these matches a line with more of the dump
+	# behind it, so a quiet grep reading from a pipe leaves `printf` to die of
+	# SIGPIPE and `pipefail` to report the match as a miss -- the flake #2447 was
+	# opened for, seen once in ~2000 runs of this section. Section 14 keeps the
+	# shape from coming back.
 	fed="$(cat "$base/out/restore-stdin.sql" 2>/dev/null || true)"
-	if printf '%s\n' "$fed" | grep -qxF 'CREATE ROLE mcsd;'; then
+	if grep -qxF 'CREATE ROLE mcsd;' <<< "$fed"; then
 		fail_test "happy path: the bootstrap role's CREATE was fed to psql -- it errors"
 	else
 		ok "happy path: the bootstrap role's CREATE is filtered out"
 	fi
 	# ...and only that one line: the ALTER carries the attributes and password.
-	if printf '%s\n' "$fed" | grep -q '^ALTER ROLE mcsd WITH'; then
+	if grep -q '^ALTER ROLE mcsd WITH' <<< "$fed"; then
 		ok "happy path: the bootstrap role's ALTER still runs"
 	else
 		fail_test "happy path: the role's attributes were filtered away too -- $fed"
 	fi
-	if printf '%s\n' "$fed" | grep -q '^CREATE ROLE reporter;'; then
+	if grep -q '^CREATE ROLE reporter;' <<< "$fed"; then
 		ok "happy path: other roles are untouched"
 	else
 		fail_test "happy path: a non-bootstrap role was filtered out -- $fed"
 	fi
-	if printf '%s\n' "$fed" | grep -q '^CREATE DATABASE mcsd WITH'; then
+	if grep -q '^CREATE DATABASE mcsd WITH' <<< "$fed"; then
 		ok "happy path: the dump's own CREATE DATABASE runs (original encoding/locale)"
 	else
 		fail_test "happy path: CREATE DATABASE was filtered out -- $fed"
@@ -916,7 +921,11 @@ done
 	callers=""
 	for f in "$SCRIPTS_DIR/update.sh" "$SCRIPTS_DIR/deploy.sh" "$SCRIPTS_DIR/../Makefile"; do
 		# `make scripts-test` legitimately names THIS file; that is not a caller.
-		if grep 'pg_major_upgrade' "$f" 2>/dev/null | grep -qv 'test_pg_major_upgrade'; then
+		# The second grep is not quiet, so it reads its input to the end and the
+		# first one cannot be killed mid-write (section 14): a hit here would
+		# otherwise be reportable either way, and the false one names a caller
+		# that does not exist.
+		if [ -n "$(grep 'pg_major_upgrade' "$f" 2>/dev/null | grep -v 'test_pg_major_upgrade')" ]; then
 			callers="$callers $f"
 		fi
 	done
@@ -1286,6 +1295,37 @@ ADVANCEEOF
 		*) fail_test "no old revision: the block still names a revision -- $recovery_line" ;;
 	esac
 	rm -rf "$base"
+}
+
+# --- 14. No branch is decided by a pipeline the reader can leave early -------
+# The flake #2447 was opened for. A quiet grep stops reading at its first match
+# and exits, so a producer that has not finished writing takes SIGPIPE -- and
+# `set -o pipefail`, which all three files below run under, promotes that 141 to
+# the pipeline's status. The condition then reports the OPPOSITE of what the
+# data says: a dump whose completion marker IS present is declared truncated and
+# the migration aborts; a db-data volume that DOES exist is read as absent and
+# the run exits "nothing to do". Measured at ~1 in 2000 invocations here, which
+# is precisely the rate that teaches people to re-run a red gate rather than
+# read it.
+#
+# The guard is a source check because the defect cannot be pinned any other way:
+# an assertion that fails once in two thousand runs passes any test that runs it
+# a few times. What IS deterministic is the shape -- feeding a quiet grep from a
+# pipe leaves a writer that can be killed mid-write, and feeding it a file or a
+# here-string leaves none. So the shape is what is asserted, and the fix for a
+# hit is to remove the pipe, never to retry the assertion.
+{
+	offenders=""
+	for f in "$SCRIPT" "$SCRIPTS_DIR/pg_cluster_lib.sh" "$SCRIPTS_DIR/test_pg_major_upgrade.sh"; do
+		while IFS= read -r hit; do
+			offenders="$offenders ${f##*/}:${hit%%:*}"
+		done < <(grep -n "|[[:space:]]*grep -q" "$f" || true)
+	done
+	if [ -z "$offenders" ]; then
+		ok "no branch is decided by a quiet grep reading from a pipe"
+	else
+		fail_test "a quiet grep is fed from a pipe -- SIGPIPE under pipefail (#2447) at:$offenders"
+	fi
 }
 
 # ---------------------------------------------------------------------------
