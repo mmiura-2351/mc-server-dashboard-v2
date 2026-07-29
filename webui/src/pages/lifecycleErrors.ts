@@ -10,10 +10,13 @@
  * reasons `worker_busy` / `server_busy` (issue #2400), and the unclassified
  * dispatch failure `command_failed` (issue #2420).
  *
- * Three reasons keep the state-changed treatment, and all three are genuine
- * races: `invalid_transition`, `transition_conflict` and `server_not_running`
- * each mean the server really did move, or was never in the state the caller
- * assumed, so refreshing is the right response.
+ * Three reasons keep the state-changed treatment: `invalid_transition`,
+ * `transition_conflict` and `server_not_running` each mean the server really
+ * did move, or was never in the state the caller assumed, so refreshing is the
+ * right response. `server_not_running` is that only away from restart — the
+ * dashboard offers restart for a crashed server on purpose, so there the
+ * refusal is no race at all and it takes a verb-specific message (issue
+ * #2441).
  *
  * 503 responses with a recognized `reason` (`no_eligible_worker`,
  * `worker_unavailable`, `jar_unavailable`) get their own message (issue #1092).
@@ -92,7 +95,8 @@ const SPECIFIC_409_MESSAGE: Record<string, TranslationKey> = {
 
 // Reasons whose honest message depends on the verb, consulted before
 // SPECIFIC_409_MESSAGE and falling through to it when the caller did not supply
-// an action (issue #2435). The API dispatches AFTER committing the intent, and
+// an action — or, for a reason SPECIFIC_409_MESSAGE does not carry, to the
+// state-changed toast (issue #2435). The API dispatches AFTER committing the intent, and
 // compensation is start-scoped and not even universal there, so what a dispatch
 // failure leaves behind differs per verb (servers/application/lifecycle.py):
 //
@@ -134,6 +138,21 @@ const SPECIFIC_409_MESSAGE: Record<string, TranslationKey> = {
 //
 // `server_busy` is start-only and never commits an intent, so it is
 // verb-independent throughout.
+//
+// `server_not_running` is the API's rendering of a Worker that holds no live
+// instance for the id (lifecycle.py, RestartServer and SendServerCommand). On
+// the command surface it genuinely is a race — the caller had just been told
+// the server was running — but the dashboard offers restart for a server
+// observed crashed or unknown under a running intent ON PURPOSE
+// (serverState.ts `actionApplies`), so there the refusal is the expected answer
+// and "state changed" names nothing that changed (issue #2441). What it leaves
+// behind is what every failed restart leaves: desired=running stands, so the
+// reconciler starts the server back up once its observed state reflects that it
+// is down (reconciler.py `_NOT_RUNNING` -> redispatch_start). That is exactly
+// what restartPending says, so this reuses it rather than adding a second
+// string with the same content. Start and stop never see this reason:
+// StartServer cannot raise it, and StopServer reads the same Worker outcome as
+// convergence and succeeds.
 const VERB_SPECIFIC_409_MESSAGE: Record<
   string,
   Partial<Record<LifecycleAction, TranslationKey>>
@@ -144,6 +163,9 @@ const VERB_SPECIFIC_409_MESSAGE: Record<
   },
   worker_busy: {
     stop: "dashboard.lifecycle.stopPending",
+  },
+  server_not_running: {
+    restart: "dashboard.lifecycle.restartPending",
   },
 };
 

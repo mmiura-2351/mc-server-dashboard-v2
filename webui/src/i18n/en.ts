@@ -242,10 +242,13 @@ export const en = {
   // one.
   "dashboard.lifecycle.commandFailed":
     "The server host could not carry out that action. Check the server's current state before trying again.",
-  // 409 command_failed / worker_busy on stop, and command_failed on restart
-  // (issue #2435): the API committed the intent before dispatching, so the
-  // failure leaves it pending rather than undone. These name what is still
-  // going to happen instead of asking the operator to work it out.
+  // 409 command_failed / worker_busy on stop, and command_failed or
+  // server_not_running on restart (issues #2435/#2441): the API committed the
+  // intent before dispatching, so the failure leaves it pending rather than
+  // undone. These name what is still going to happen instead of asking the
+  // operator to work it out. The restart string covers both of its reasons: a
+  // restart the Worker could not carry out and one it refused because it was
+  // running nothing leave the same thing behind — desired_state=running.
   "dashboard.lifecycle.stopPending":
     "Could not stop the server: it is still running. The system will keep trying to stop it.",
   "dashboard.lifecycle.restartPending":

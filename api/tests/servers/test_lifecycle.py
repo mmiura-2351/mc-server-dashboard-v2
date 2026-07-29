@@ -2581,6 +2581,31 @@ async def test_restart_lost_race_is_conflict_without_dispatch() -> None:
     assert uow.commits == 0
 
 
+async def test_restart_of_not_running_server_is_not_running() -> None:
+    # Issue #2441: the Worker answers SERVER_NOT_FOUND when it holds no live
+    # instance for the id (handleRestart's takeNotFound). Surface it as
+    # not-running -- the same treatment SendServerCommand gives the same outcome
+    # -- instead of letting it fall into the unclassified command_failed 409.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(outcome=CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND))
+    use_case = RestartServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+
+    with pytest.raises(ServerNotRunningError):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+
 async def test_restart_when_stopped_is_conflict() -> None:
     community, server_id, _ = _ids()
     uow = FakeUnitOfWork()
