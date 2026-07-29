@@ -92,7 +92,8 @@ class WorkingSetView(abc.ABC):
         (issue #2394). Entries are described exactly as :meth:`FileStore.list_dir`
         describes them: one deleted while the listing is taken is omitted (issue
         #2414), and every other one describes itself rather than what it points at
-        (issue #2418).
+        (issue #2418). The set of paths that miss is the same too, symlink leaf
+        included (issue #2426).
         """
 
     @abc.abstractmethod
@@ -687,11 +688,57 @@ class FileStore(abc.ABC):
         running-server listing already ships, so a running and an at-rest listing
         describe the same entry the same way.
 
-        Passing a link's own path back to THIS method is a separate question from
-        how its parent listed it, and is deliberately left as it was: the path is
-        resolved, so listing a link to a directory still lists the target's
-        children. The entry is thus file-shaped in its parent's listing yet still
-        openable as a directory by path.
+        Passing a link's own path back to THIS method is the same question and
+        gets the same answer: the leaf is not followed, so listing a link to a
+        directory is the miss above rather than the target's children (issue
+        #2426). It has to be, because both answers are taken inside one request —
+        a download picks its single-file / directory-zip branch by probing
+        exactly this method on the entry's own path, and a probe that followed
+        the link zipped a subtree for an entry the same listing draws as a file.
+        A link to a directory is therefore a visible entry that is not navigable
+        and not downloadable, which is what the running-server browser already
+        does with it.
+
+        Only the LEAF is refused: an intermediate component still resolves
+        (listing ``alias/inner`` still lists the target's subdirectory), and a
+        link that escapes the server root is still the traversal refusal rather
+        than this miss.
+        """
+
+    @abc.abstractmethod
+    async def path_exists(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
+    ) -> bool:
+        """True if anything already occupies ``rel_path`` in ``current/`` (#2426).
+
+        The question a never-clobber pre-check asks before a rename/move: is this
+        NAME taken? Not "can I read it", not "can I list it" — a name is taken by
+        whatever sits at it, including something no read will return. On a backend
+        with symlinks that means the link itself counts and is NOT followed: it is
+        the entry :meth:`list_dir` shows in the parent, so a name the user can see
+        is a name a caller can refuse to overwrite. A dangling link and a link loop
+        occupy their names too.
+
+        Composing this out of the read methods is not possible and must not be
+        attempted: reading a symlink dirent is a miss (:meth:`read_file`) and so is
+        listing one (:meth:`list_dir`), so a probe built from them reports "free"
+        for an occupied name — and the caller then writes through the link onto
+        whatever it points at. Answering the parent listing instead only moves the
+        blind spot: the parent may itself be a link, whose listing is that same
+        miss, while the path still resolves through it.
+
+        Resolution therefore matches a READ exactly: intermediate components are
+        followed, only the leaf is described as itself. Containment runs first, so
+        a path escaping the server root raises
+        :class:`~.errors.PathTraversalError` rather than answering. Never raises
+        for a path that simply is not there, including one no backend can name
+        (over-long, issue #2394): absent is ``False``, not an error.
+
+        A server with no published working set holds nothing, so every path but
+        the (empty) root answers ``False``.
+
+        What a mutation should then ACT on when the entry is a link is a separate
+        question this does not answer (issue #2429).
         """
 
     @abc.abstractmethod

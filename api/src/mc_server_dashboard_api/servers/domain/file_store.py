@@ -82,6 +82,23 @@ class FileStore(abc.ABC):
         """
 
     @abc.abstractmethod
+    async def path_exists(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> bool:
+        """True if anything already occupies ``rel_path`` at rest (issue #2426).
+
+        The never-clobber pre-check a rename runs on its destination: is this NAME
+        taken? Not "is it readable" and not "is it listable" — on a backend with
+        symlinks a link occupies its name whatever it points at, and neither a
+        read nor a listing of that name returns anything (issue #2418). A probe
+        composed from those would report a link's name as free, and the rename
+        would then land on the link's target.
+
+        Absent is ``False``, never an error, including for a path no backend can
+        name. A traversal-unsafe path is still :class:`InvalidFilePathError`.
+        """
+
+    @abc.abstractmethod
     async def write_file(
         self,
         *,

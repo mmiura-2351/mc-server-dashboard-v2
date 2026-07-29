@@ -1591,6 +1591,33 @@ class ObjectStorage(Storage):
             raise NotFoundError(f"directory not found: {rel_path.value}")
         return _entries_at_level(objs, snapshot_prefix + dir_suffix)
 
+    async def path_exists(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
+    ) -> bool:
+        # There are no symlinks in an object store, so the Port's "the dirent
+        # itself, not what it points at" rule has nothing to disambiguate here: a
+        # name is occupied by an object at that key, or by a directory prefix that
+        # has members (the ``.dir`` marker among them, issue #1125).
+        sub = self._safe_subkey(rel_path)
+        async with self._client_factory() as client:
+            server_prefix = self._server_prefix(community_id, server_id)
+            if await self._read_pointer(client, server_prefix) is None:
+                # Nothing published -> nothing occupies any name but the root.
+                return not sub
+            if not sub:
+                return True
+            # Lease the live snapshot so a concurrent publish's post-flip GC
+            # cannot delete the resolved prefix mid-probe (issue #1953).
+            snapshot_prefix = await self._lease_live_snapshot(
+                client, community_id, server_id
+            )
+            try:
+                if await client.head_object(snapshot_prefix + sub) is not None:
+                    return True
+                return bool(await client.list_objects(snapshot_prefix + sub + "/"))
+            finally:
+                self._release_lease(snapshot_prefix)
+
     def open_working_set_view(
         self, community_id: CommunityId, server_id: ServerId
     ) -> AbstractAsyncContextManager[WorkingSetView]:

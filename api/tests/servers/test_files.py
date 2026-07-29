@@ -156,6 +156,17 @@ class FakeFileStore(FileStore):
             raise ServerFileNotFoundError(str(server_id.value))
         return self.dirs.get(rel_path, [])
 
+    async def path_exists(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> bool:
+        # A name is occupied by a seeded file or a seeded directory; the root is
+        # always there. Deliberately NOT derived from ``list_dir``: the real seam
+        # answers this one without a listing (issue #2426), because a listing
+        # misses on a symlink the name is nonetheless occupied by.
+        if self.bad_path:
+            raise InvalidFilePathError(rel_path)
+        return rel_path in ("", ".") or rel_path in self.files or rel_path in self.dirs
+
     async def write_file(
         self,
         *,

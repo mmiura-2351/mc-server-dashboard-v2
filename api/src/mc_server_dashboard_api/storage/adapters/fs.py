@@ -318,12 +318,21 @@ class FsStorage(Storage):
         them, hydrate rejects them -- so this forecloses a shape that only arrives
         out of band.
 
+        A LISTING resolves through here too (#2426). Reaching a directory by
+        following a link the listing just described as a file is the same
+        contradiction one level up, and it is not cosmetic either: the download
+        endpoint decides between its single-file and its directory-zip branch by
+        probing ``list_dir`` on the entry's own path, so a probe that followed the
+        link zipped a subtree for an entry the file browser draws as a file. One
+        rule for every read keeps the two answers to "is this a directory?" from
+        being taken in one request and disagreeing.
+
         Only the LEAF dirent is refused, never the resolution of the working-set
         root: ``current`` IS a symlink, but ``_current_dir`` readlinks it and
         passes the resolved snapshot DIRECTORY as ``base``, so the root is never a
         leaf here. An intermediate component still resolves (``alias/data`` reads
-        the real file), which is consistent because the listing that shows ``data``
-        sizes it truthfully.
+        the real file and ``alias/inner`` lists the real directory), which is
+        consistent because the listing that shows ``data`` sizes it truthfully.
 
         Containment runs FIRST, so a link that escapes the root keeps reporting the
         escape rather than being downgraded to an ordinary miss. Refusing to follow
@@ -1332,8 +1341,43 @@ class FsStorage(Storage):
         # check rather than an ``is_dir()`` pre-check (issue #2394).
         current, release = self._lease_current(community_id, server_id)
         try:
-            target = self._safe_target(current, rel_path)
+            target = self._safe_read_target(
+                current, rel_path, f"directory not found: {rel_path.value}"
+            )
             return _list_entries(target, f"directory not found: {rel_path.value}")
+        finally:
+            release()
+
+    async def path_exists(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
+    ) -> bool:
+        return await asyncio.to_thread(
+            self._path_exists, community_id, server_id, rel_path
+        )
+
+    def _path_exists(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
+    ) -> bool:
+        # Nothing is published, so nothing occupies any name but the root itself.
+        if not self._current_link(community_id, server_id).is_symlink():
+            return not rel_path.parts
+        # Lease the live snapshot for the same reason every other read does: a
+        # concurrent publish's post-flip GC must not delete the snapshot between
+        # resolve and probe (issue #1953).
+        current, release = self._lease_current(community_id, server_id)
+        try:
+            # Containment FIRST (the established ordering): a path escaping the
+            # root is refused rather than answered, exactly as a read refuses it.
+            self._safe_target(current, rel_path)
+            # ``lexists`` on the UNRESOLVED join, which is what makes this the
+            # question a rename destination asks: intermediate components are
+            # followed (as every read follows them), while the leaf is described
+            # as ITSELF -- a symlink occupies its name whatever it points at, and
+            # a dangling one does too. Like ``os.path.islink`` in
+            # ``_safe_read_target``, it ANSWERS for every path a client can ask
+            # for: a component past NAME_MAX is False, not an ENAMETOOLONG (issue
+            # #2394).
+            return os.path.lexists(current.joinpath(*rel_path.parts))
         finally:
             release()
 
@@ -2392,7 +2436,9 @@ class _FsWorkingSetView(WorkingSetView):
 
     def _list_dir_sync(self, rel_path: RelPath) -> list[DirEntry]:
         assert self._pinned is not None
-        target = self._storage._safe_target(self._pinned, rel_path)
+        target = self._storage._safe_read_target(
+            self._pinned, rel_path, f"directory not found: {rel_path.value}"
+        )
         # The listing IS the existence check, for the same reason it is in
         # ``FsStorage._list_dir`` (issue #2394): the view's lease pins the snapshot
         # DIRECTORY, and ``delete_dir`` removes a subtree inside that very

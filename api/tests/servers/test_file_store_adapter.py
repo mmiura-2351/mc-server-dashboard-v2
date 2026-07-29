@@ -22,9 +22,15 @@ from pathlib import Path
 import pytest
 
 from mc_server_dashboard_api.servers.adapters.file_store import StorageFileStoreAdapter
-from mc_server_dashboard_api.servers.application.files import SearchFiles
+from mc_server_dashboard_api.servers.application.files import (
+    DeleteFile,
+    DownloadFile,
+    RenameFile,
+    SearchFiles,
+)
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
+    FileAlreadyExistsError,
     InvalidFilePathError,
     InvalidVersionIdError,
     ServerFileNotFoundError,
@@ -648,6 +654,252 @@ async def test_download_dir_does_not_descend_into_a_symlinked_directory(
     with zipfile.ZipFile(io.BytesIO(blob)) as zf:
         contents = {name: zf.read(name) for name in zf.namelist()}
     assert contents == {"real/inner.txt": b"INNER"}
+
+
+async def test_download_of_a_directory_link_answers_what_the_listing_showed(
+    tmp_path: Path,
+) -> None:
+    """One request path must not answer "is this a directory?" twice, differently.
+
+    The download endpoint picks the single-file or the directory-zip branch from
+    ``DownloadFile.is_dir``, which probes ``list_dir`` on the entry's own path.
+    That probe used to follow the link and succeed, so a download zipped the
+    target's subtree for an entry the file browser draws as a FILE (issue #2426).
+
+    The probe now agrees with the listing: the entry is not a directory, and it
+    names no readable file either (reading a symlink dirent is a miss, issue
+    #2418), so the download is the seam's own miss -- a 404 at the edge, decided
+    before any byte is streamed. Visible in the browser, not downloadable: the
+    same answer a link to a FILE already gives, and the same one the Worker gives
+    for a running server.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await publish(
+        storage,
+        StorageCommunityId(community),
+        StorageServerId(server),
+        {"real/inner.txt": b"INNER"},
+    )
+    live = snapshot_dir(
+        tmp_path, StorageCommunityId(community), StorageServerId(server)
+    )
+    (live / "alias").symlink_to("real")
+    adapter = StorageFileStoreAdapter(storage=storage)
+    use_case = DownloadFile(uow=_stopped_uow(community, server), file_store=adapter)
+
+    entries = await adapter.list_dir(
+        community_id=CommunityId(community),
+        server_id=ServerId(server),
+        rel_path=".",
+    )
+
+    listed = next(entry for entry in entries if entry.name == "alias")
+    assert listed.is_dir is False
+    with pytest.raises(ServerFileNotFoundError):
+        await use_case.is_dir(
+            community_id=CommunityId(community),
+            server_id=ServerId(server),
+            rel_path="alias",
+        )
+
+
+# --- what the file ops do with a symlink DESTINATION / TARGET (issue #2426) --
+#
+# Refusing to follow a symlink leaf on every read moves the branch the file ops
+# pick for such an entry, because they pick it from the same listing. What a
+# mutation ACTS ON is unchanged and stays #2429's question; these pin the branch.
+#
+# The rename destination is the one that must not be answered from a read at all:
+# "is something already here?" is a question about the DIRENT, so it is answered
+# from the parent listing, which describes dirents (``lstat``, issue #2418). A
+# link is something, whatever it points at.
+
+
+async def test_rename_onto_a_directory_link_is_refused(tmp_path: Path) -> None:
+    """A name the browser shows as taken is taken, so the rename is the 409.
+
+    ``rename_file`` resolves its destination with a realpath, so proceeding here
+    would rename onto the link's TARGET DIRECTORY and raise a bare
+    ``IsADirectoryError`` -- an untranslated 500 for a path the never-clobber
+    pre-check is supposed to have refused.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await publish(
+        storage,
+        StorageCommunityId(community),
+        StorageServerId(server),
+        {"real/inner.txt": b"INNER", "f.txt": b"F"},
+    )
+    live = snapshot_dir(
+        tmp_path, StorageCommunityId(community), StorageServerId(server)
+    )
+    (live / "alias").symlink_to("real")
+    adapter = StorageFileStoreAdapter(storage=storage)
+    use_case = RenameFile(uow=_stopped_uow(community, server), file_store=adapter)
+
+    with pytest.raises(FileAlreadyExistsError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server),
+            from_path="f.txt",
+            to_path="alias",
+        )
+
+    assert (live / "real" / "inner.txt").read_bytes() == b"INNER"
+    assert (live / "f.txt").read_bytes() == b"F"
+
+
+async def test_rename_onto_a_file_link_does_not_overwrite_its_target(
+    tmp_path: Path,
+) -> None:
+    """The same rule closes the silent variant: the link's TARGET was clobbered.
+
+    Reading a symlink dirent became a miss in #2418, which is what made the
+    existence pre-check answer "nothing here" for a link to a FILE -- and the
+    rename then landed on the realpath, overwriting the target's bytes while the
+    link kept pointing at them. Answering from the listing refuses the name
+    instead, which is the same answer the directory-link case gets.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await publish(
+        storage,
+        StorageCommunityId(community),
+        StorageServerId(server),
+        {"big.bin": b"TARGET", "g.txt": b"G"},
+    )
+    live = snapshot_dir(
+        tmp_path, StorageCommunityId(community), StorageServerId(server)
+    )
+    (live / "link.bin").symlink_to("big.bin")
+    adapter = StorageFileStoreAdapter(storage=storage)
+    use_case = RenameFile(uow=_stopped_uow(community, server), file_store=adapter)
+
+    with pytest.raises(FileAlreadyExistsError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server),
+            from_path="g.txt",
+            to_path="link.bin",
+        )
+
+    assert (live / "big.bin").read_bytes() == b"TARGET"
+
+
+async def test_rename_onto_a_name_under_a_directory_link_is_refused(
+    tmp_path: Path,
+) -> None:
+    """The destination check must see through a link it does not itself describe.
+
+    ``alias/inner.txt`` is a real file every read resolves and streams, so the
+    name is taken. An answer derived from the destination's parent listing cannot
+    say so — listing ``alias`` is a miss (issue #2426) — and the rename would then
+    overwrite the real file's bytes with the never-clobber check none the wiser.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await publish(
+        storage,
+        StorageCommunityId(community),
+        StorageServerId(server),
+        {"real/inner.txt": b"INNER", "g.txt": b"G"},
+    )
+    live = snapshot_dir(
+        tmp_path, StorageCommunityId(community), StorageServerId(server)
+    )
+    (live / "alias").symlink_to("real")
+    adapter = StorageFileStoreAdapter(storage=storage)
+    use_case = RenameFile(uow=_stopped_uow(community, server), file_store=adapter)
+
+    with pytest.raises(FileAlreadyExistsError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server),
+            from_path="g.txt",
+            to_path="alias/inner.txt",
+        )
+
+    assert (live / "real" / "inner.txt").read_bytes() == b"INNER"
+    assert (live / "g.txt").read_bytes() == b"G"
+
+
+async def test_rename_onto_a_directory_under_a_directory_link_is_refused(
+    tmp_path: Path,
+) -> None:
+    """The same shape whose destination is a DIRECTORY: the 409, never a crash.
+
+    ``rename_file`` resolves through the link and would rename onto a directory,
+    raising a bare ``IsADirectoryError`` that no route maps — a 500 for a
+    destination the pre-check is supposed to have refused.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await publish(
+        storage,
+        StorageCommunityId(community),
+        StorageServerId(server),
+        {"real/sub/f.txt": b"F", "g.txt": b"G"},
+    )
+    live = snapshot_dir(
+        tmp_path, StorageCommunityId(community), StorageServerId(server)
+    )
+    (live / "alias").symlink_to("real")
+    adapter = StorageFileStoreAdapter(storage=storage)
+    use_case = RenameFile(uow=_stopped_uow(community, server), file_store=adapter)
+
+    with pytest.raises(FileAlreadyExistsError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server),
+            from_path="g.txt",
+            to_path="alias/sub",
+        )
+
+    assert (live / "real" / "sub" / "f.txt").read_bytes() == b"F"
+
+
+async def test_delete_of_a_directory_link_leaves_its_target_alone(
+    tmp_path: Path,
+) -> None:
+    """The delete branch follows the listing too, so it no longer rmtrees a target.
+
+    ``DeleteFile`` picks file-vs-directory from the same probe the download uses.
+    While it answered "directory" for a link, deleting the link ran ``delete_dir``
+    on the link's TARGET: the real subtree was destroyed and the link left
+    dangling. The entry is not a directory and names no readable file, so the
+    delete is the seam's miss. Removing the link itself is #2429's question.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await publish(
+        storage,
+        StorageCommunityId(community),
+        StorageServerId(server),
+        {"real/inner.txt": b"INNER"},
+    )
+    live = snapshot_dir(
+        tmp_path, StorageCommunityId(community), StorageServerId(server)
+    )
+    (live / "alias").symlink_to("real")
+    adapter = StorageFileStoreAdapter(storage=storage)
+    use_case = DeleteFile(uow=_stopped_uow(community, server), file_store=adapter)
+
+    with pytest.raises(ServerFileNotFoundError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server),
+            rel_path="alias",
+        )
+
+    assert (live / "real" / "inner.txt").read_bytes() == b"INNER"
 
 
 async def test_download_dir_missing_is_file_not_found(tmp_path: Path) -> None:

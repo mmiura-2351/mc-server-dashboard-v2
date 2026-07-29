@@ -939,13 +939,25 @@ async def _path_exists(
     server_id: ServerId,
     rel_path: str,
 ) -> bool:
-    """True if ``rel_path`` names an existing file or directory at rest."""
+    """True if anything already occupies ``rel_path`` at rest (issue #2426).
 
-    try:
-        await _path_is_dir(file_store, community_id, server_id, rel_path)
-        return True
-    except ServerFileNotFoundError:
-        return False
+    The never-clobber pre-check for a rename destination. It asks about the NAME,
+    not about what the name leads to, so it cannot be composed out of the read
+    methods: reading a symlink dirent is a miss and so is listing one (#2418,
+    #2426), which would report an occupied name as free and let the rename land on
+    the link's target. Answering from the destination's PARENT listing has the
+    same hole one level up — the parent may itself be a link, whose listing is
+    that same miss, while the path still resolves through it.
+
+    The seam therefore answers it directly, resolving exactly as a read does:
+    intermediate components followed, the leaf described as itself, containment
+    first. What a mutation should then ACT on when the entry is a link is a
+    separate question (issue #2429).
+    """
+
+    return await file_store.path_exists(
+        community_id=community_id, server_id=server_id, rel_path=rel_path
+    )
 
 
 @dataclass(frozen=True)
