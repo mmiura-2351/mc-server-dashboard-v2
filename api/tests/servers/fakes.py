@@ -602,12 +602,20 @@ class FakeServerRepository(ServerRepository):
                 and server.observed_state is ObservedState.UNKNOWN
                 and server.assigned_worker_id is not None
             )
+            # Issue #2439: the process died on its own under a stop intent, leaving
+            # (stopped, crashed, assigned) — a PERMANENT wedge without this arm.
+            stop_crashed_wedged = (
+                stopped
+                and server.observed_state is ObservedState.CRASHED
+                and server.assigned_worker_id is not None
+            )
             if (
                 stale_running
                 or orphan
                 or stop_undelivered
                 or stop_wedged
                 or stop_unknown_wedged
+                or stop_crashed_wedged
             ):
                 out.append(replace(server))
         return out

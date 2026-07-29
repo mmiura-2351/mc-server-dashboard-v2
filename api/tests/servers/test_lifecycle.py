@@ -3765,6 +3765,88 @@ async def test_clear_stale_assignment_benign_duplicate_clears(
     )
 
 
+async def test_clear_stale_assignment_crashed_connected_snapshots_then_clears() -> None:
+    # Issue #2439: (stopped, crashed, assigned) + worker connected. The process is
+    # gone but its working set is still in the worker's retained scratch (the
+    # scratch is GC'd only after a final snapshot publishes), and no final snapshot
+    # ever ran — so re-drive it before releasing, exactly as the (stopped, stopped)
+    # arm does for issue #1004.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.CRASHED,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(connected={WorkerId(worker): True})
+    result = await StopServer(
+        uow=uow, control_plane=cp, clock=FakeClock(_NOW)
+    ).clear_stale_assignment(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    assert result.assigned_worker_id is None
+    assert ("snapshot", WorkerId(worker), ServerId(server_id)) in cp.dispatched
+    # No stop is re-dispatched: the process is already gone.
+    assert [kind for kind, _, _ in cp.dispatched] == ["snapshot"]
+
+
+async def test_clear_stale_assignment_stopped_crashed_disconnected_skips_snapshot() -> (
+    None
+):
+    # Issue #2439: the same wedge with the worker GONE — no snapshot to take, but
+    # the assignment must still be released or the server can never start again.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.CRASHED,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(connected={WorkerId(worker): False})
+    result = await StopServer(
+        uow=uow, control_plane=cp, clock=FakeClock(_NOW)
+    ).clear_stale_assignment(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    assert result.assigned_worker_id is None
+    assert cp.dispatched == []
+
+
+async def test_clear_stale_assignment_stopped_crashed_keeps_observed_crashed() -> None:
+    # Issue #2439: the release does not rewrite observed=crashed to stopped. The
+    # crash is the truth about how the process ended and is what the operator sees;
+    # the row is already at rest (entities.is_at_rest) and, once unassigned, no
+    # longer reconcilable.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.CRASHED,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(connected={WorkerId(worker): True})
+    await StopServer(
+        uow=uow, control_plane=cp, clock=FakeClock(_NOW)
+    ).clear_stale_assignment(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.observed_state is ObservedState.CRASHED
+    assert stored.assigned_worker_id is None
+
+
 # --- bedrock tunnel sync (issue #1602) --------------------------------------
 
 

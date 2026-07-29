@@ -283,7 +283,7 @@ class ServerRepository(abc.ABC):
 
         The candidate set the periodic divergence reconciler iterates: servers
         where the operator's intent and the last Worker-reported reality could be
-        out of step and an intent re-dispatch may be owed. Five shapes qualify:
+        out of step and an intent re-dispatch may be owed. Six shapes qualify:
 
         - ``desired=running`` with an observed state that is neither ``starting``
           nor ``running`` (a start that was never delivered, or a crash that the
@@ -295,7 +295,20 @@ class ServerRepository(abc.ABC):
         - ``desired=stopped``, ``observed=stopped``, still assigned (issue #847
           bug 2: a stop wedged because its deferred unassign never ran);
         - ``desired=stopped``, ``observed=unknown``, still assigned (issue #1599:
-          a stop interrupted mid-flight by an API restart or worker disconnect).
+          a stop interrupted mid-flight by an API restart or worker disconnect);
+        - ``desired=stopped``, ``observed=crashed``, still assigned (issue #2439:
+          the process died on its own under a stop intent).
+
+        The remaining observed states under a stopped intent (``starting``,
+        ``stopping``, ``restarting``) are deliberately NOT candidates. Each is a
+        transitional cache of a Worker report and cannot persist: the Worker's
+        in-flight launch/stop/restart always settles into a TERMINAL state
+        (``running``, ``stopped`` or ``crashed``) whose report moves the row onto
+        one of the arms above, and ``reset_unverifiable_observed_states`` rewrites
+        exactly those three to ``unknown`` on API startup besides. ``crashed`` has
+        neither escape — it is terminal, so no further report follows, and the
+        startup reset leaves it alone as still-truthful — which is why it, alone,
+        wedged until #2439.
 
         Aligned servers (``running``/``starting`` under a running intent, settled
         ``stopped`` under a stopped intent) are excluded so the reconciler's tick
