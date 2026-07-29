@@ -646,10 +646,15 @@ class FileStore(abc.ABC):
         than a backend-native error — the lease holds the snapshot directory, not
         the subtrees inside it.
 
-        A listing describes the directory as of a moment, so an ENTRY deleted while
-        the listing is being taken is simply OMITTED — never an error, and never a
-        row with a made-up size (issue #2414). Only that entry's own disappearance
-        is omitted: a backend failure to describe an entry that still exists
+        A listing describes the directory as of a moment, so an ENTRY that resolves
+        to nothing when the backend describes it is simply OMITTED — never an
+        error, and never a row with a made-up size (issue #2414). The case that
+        drove this is an entry deleted while the listing is being taken; the same
+        answer necessarily covers an entry that resolves to nothing for another
+        reason — a dangling symlink is omitted too, while a symlink LOOP is not, and
+        how a listing should report the symlink cases is unsettled and tracked
+        separately (issue #2418). An entry that does resolve and that the backend
+        then fails to describe — no permission, an I/O error — is not omitted and
         surfaces as itself. The directory going away is still the miss above, not
         an empty listing.
         """

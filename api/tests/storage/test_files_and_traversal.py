@@ -433,13 +433,14 @@ async def test_over_long_name_is_a_miss_on_every_read_path(tmp_path: Path) -> No
 # --- a delete racing ONE LISTED CHILD (issue #2414) -------------------------
 #
 # #2394 closed the window on the listing TARGET; a second one sat on each listed
-# CHILD. ``Path.iterdir`` is a single eager ``os.listdir``, so the listing works
-# from an atomic snapshot of the directory and then describes each name in it —
-# and a name unlinked in between made the describing ``stat`` raise a bare
-# ``FileNotFoundError``, untranslated by the servers seam: a measured 500 on
-# ``GET .../files?path=d&list=true`` for one unlucky delete anywhere in the
-# directory. The entry is now omitted, matching the object backend, whose listing
-# is one ``list_objects`` response a concurrently deleted key simply is not in.
+# CHILD. ``Path.iterdir`` drains an ``os.scandir`` into a list before it yields
+# anything, so the listing works from an atomic snapshot of the directory and then
+# describes each name in it — and a name unlinked in between made the describing
+# ``stat`` raise a bare ``FileNotFoundError``, untranslated by the servers seam: a
+# measured 500 on ``GET .../files?path=d&list=true`` for one unlucky delete
+# anywhere in the directory. The entry is now omitted, matching the object backend,
+# whose listing is one ``list_objects`` response a concurrently deleted key simply
+# is not in.
 #
 # Staged as the real race rather than a stubbed predicate: the entry is really
 # unlinked as the snapshot is taken, which IS the window between the snapshot and

@@ -2019,12 +2019,13 @@ def _list_entries(target: Path, not_found: str) -> list[DirEntry]:
     """Describe one directory level: the shared body of both fs listings (#2414).
 
     ``_list_children`` closed the window on the listing TARGET (issue #2394); a
-    second one sat on each listed CHILD. ``iterdir`` is a single eager
-    ``os.listdir``, so what it returns is an atomic snapshot of the directory, and
-    every name in it is then described by a separate ``stat``. A child unlinked in
-    between made that stat raise a bare ``FileNotFoundError`` -- untranslated by
-    the servers seam, so one unlucky delete anywhere in the directory 500'd the
-    whole listing (measured on ``GET .../files?path=d&list=true``).
+    second one sat on each listed CHILD. ``iterdir`` drains an ``os.scandir`` into
+    a list before it yields anything, so what it returns is an atomic snapshot of
+    the directory, and every name in it is then described by a separate ``stat``.
+    A child unlinked in between made that stat raise a bare ``FileNotFoundError``
+    -- untranslated by the servers seam, so one unlucky delete anywhere in the
+    directory 500'd the whole listing (measured on
+    ``GET .../files?path=d&list=true``).
 
     Such an entry is OMITTED: the listing then describes the directory as of a
     moment just after the snapshot, which is both what a user expects (the file is
@@ -2038,6 +2039,13 @@ def _list_entries(target: Path, not_found: str) -> list[DirEntry]:
     a child that exists, and ENOTDIR means the PARENT stopped being a directory
     under the listing -- silently dropping entries for those would hide a real
     failure behind a short listing.
+
+    ENOENT is not exclusively a vanished entry, though: a DANGLING SYMLINK stats
+    the same way and is therefore omitted too, where it used to 500 the listing
+    (via the pre-single-stat ``is_dir()`` answering False). A symlink LOOP is the
+    neighbouring case and still surfaces as ``OSError(ELOOP)``. Neither is a race,
+    both are real dirents ``ls`` shows, and what a listing should report for them
+    is one decision taken separately (issue #2418).
     """
 
     children = _list_children(target, not_found)
