@@ -608,15 +608,19 @@ backend support; the tab body also self-guards with an "unsupported" notice).
 - API error surfaced via toast + inline field errors (422 `errors` list).
 - Conflict-flavored errors get a "state changed — refresh" treatment, not a raw
   error dump: the lifecycle races `invalid_transition`, `transition_conflict`
-  and `server_not_running`, plus `command_failed`, the catch-all for a dispatch
-  failure the Worker did not classify. A 409 that reports
-  something other than a race is named instead, since refreshing is not the
-  remedy: `server_unsettled` says the server must be stopped, on every surface
-  that can receive it (#2360); `worker_busy` / `server_busy` say another
-  operation on the server is still running and the request was refused without
-  being applied, so the operator retries in a moment (#2400); the sanitized
-  start/restart-failure categories `port_conflict` / `image_missing` name the
-  cause the Worker classified (#225).
+  and `server_not_running`. A 409 that reports something other than a race is
+  named instead, since refreshing is not the remedy: `server_unsettled` says the
+  server must be stopped, on every surface that can receive it (#2360);
+  `worker_busy` / `server_busy` say another operation on the server is still
+  running and the request was refused without being applied, so the operator
+  retries in a moment (#2400); the sanitized start/restart-failure categories
+  `port_conflict` / `image_missing` name the cause the Worker classified (#225);
+  `command_failed`, the catch-all for a dispatch failure the Worker did not
+  classify, says the action did not go through and sends the operator to check
+  the server's state — a failed start is compensated back, but a failed stop or
+  restart can leave the server moved, and a retry is not known to help (#2420).
+  The refetch is unconditional on every lifecycle mutation regardless of the
+  toast, so a moved server still shows up.
 - Destructive operations (delete server/community/user/backup-restore) use
   typed-confirm dialogs.
 
