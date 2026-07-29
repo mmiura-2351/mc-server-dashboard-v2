@@ -86,6 +86,10 @@ class FakeFileStore(FileStore):
 
     def __init__(self, *, strict_dirs: bool = False) -> None:
         self.files: dict[str, bytes] = {}
+        # Directory listings by rel_path. A rename's never-clobber pre-check asks
+        # the destination's PARENT listing whether the name is taken (issue
+        # #2426), so a test that needs a destination to count as occupied seeds it
+        # here as well as in ``files``.
         self.dirs: dict[str, list[FileEntry]] = {}
         self.versions: dict[str, list[str]] = {}
         # Retained version bytes keyed by (rel_path, version_id), so a test can
@@ -2254,6 +2258,11 @@ async def test_rename_existing_destination_is_conflict() -> None:
     store = FakeFileStore(strict_dirs=True)
     store.files["old.txt"] = b"a"
     store.files["taken.txt"] = b"b"
+    # Both are children of the root, which is where the occupied-name check looks.
+    store.dirs["."] = [
+        FileEntry(name="old.txt", is_dir=False, size=1),
+        FileEntry(name="taken.txt", is_dir=False, size=1),
+    ]
     use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
 
     with pytest.raises(FileAlreadyExistsError):
@@ -2345,6 +2354,11 @@ async def test_rename_dir_existing_destination_is_conflict() -> None:
     store = FakeFileStore(strict_dirs=True)
     store.dirs["old_world"] = [FileEntry(name="level.dat", is_dir=False, size=4)]
     store.dirs["taken"] = [FileEntry(name="x.dat", is_dir=False, size=1)]
+    # Both are children of the root, which is where the occupied-name check looks.
+    store.dirs["."] = [
+        FileEntry(name="old_world", is_dir=True, size=0),
+        FileEntry(name="taken", is_dir=True, size=0),
+    ]
     use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
 
     with pytest.raises(FileAlreadyExistsError):

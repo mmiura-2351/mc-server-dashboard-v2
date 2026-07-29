@@ -939,13 +939,35 @@ async def _path_exists(
     server_id: ServerId,
     rel_path: str,
 ) -> bool:
-    """True if ``rel_path`` names an existing file or directory at rest."""
+    """True if a DIRENT already occupies ``rel_path`` at rest (issue #2426).
 
+    The never-clobber pre-check for a rename destination, and it asks about the
+    NAME, not about what the name leads to: a directory entry exists whatever it
+    points at. So it is answered from the parent listing, which describes dirents
+    (``lstat``, issue #2418) — the same source that decides how the file browser
+    draws the entry, so a name the user can see is a name the rename refuses.
+
+    A read-based probe cannot answer this. Reading a symlink dirent is a miss
+    (#2418) and so is listing one (#2426), so a link would report "nothing here"
+    while ``rename_file`` resolves its destination through a realpath and lands on
+    the link's TARGET: it overwrote a linked-to file's bytes silently, and raised
+    a bare ``IsADirectoryError`` (an untranslated 500) for a linked-to directory.
+
+    Which dirent it is, and what a mutation should then ACT on, is a separate
+    question this does not touch (issue #2429).
+    """
+
+    if rel_path in ("", "."):
+        return True  # the working-set root is always there
+    parent, _, name = rel_path.rstrip("/").rpartition("/")
     try:
-        await _path_is_dir(file_store, community_id, server_id, rel_path)
-        return True
+        entries = await file_store.list_dir(
+            community_id=community_id, server_id=server_id, rel_path=parent or "."
+        )
     except ServerFileNotFoundError:
+        # Nothing can occupy a name under a directory that is not there itself.
         return False
+    return any(entry.name == name for entry in entries)
 
 
 @dataclass(frozen=True)
