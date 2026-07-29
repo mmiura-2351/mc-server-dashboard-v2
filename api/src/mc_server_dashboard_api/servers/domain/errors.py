@@ -199,8 +199,9 @@ class EulaNotAcceptedError(ServerError):
 class NoEligibleWorkerError(ServerError):
     """Placement found no Worker that can host the server (FR-WRK-3).
 
-    No connected, non-draining Worker has free capacity. The edge maps this to
-    a typed 409.
+    No connected, non-draining Worker has free capacity. A transient fleet-capacity
+    condition rather than a client-state conflict, so the edge maps this to 503
+    ``no_eligible_worker``.
     """
 
 
