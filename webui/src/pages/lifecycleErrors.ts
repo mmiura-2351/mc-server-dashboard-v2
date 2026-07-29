@@ -88,12 +88,15 @@ const SPECIFIC_409_MESSAGE: Record<string, TranslationKey> = {
 
 // Reasons whose honest message depends on the verb, consulted before
 // SPECIFIC_409_MESSAGE and falling through to it when the caller did not supply
-// an action (issue #2435). The API dispatches AFTER committing the intent and
-// compensates only on start, so what a dispatch failure leaves behind differs
-// per verb (servers/application/lifecycle.py):
+// an action (issue #2435). The API dispatches AFTER committing the intent, and
+// compensation is start-scoped and not even universal there, so what a dispatch
+// failure leaves behind differs per verb (servers/application/lifecycle.py):
 //
-// - start   — compensated back to stopped, so nothing is pending and the
-//             verb-agnostic messages already say the right thing. Absent here.
+// - start   — compensated back to stopped wherever the start demonstrably did
+//             not happen, which is every failure this mapping can see EXCEPT a
+//             post-dispatch BUSY (see the worker_busy note below). So for
+//             `command_failed` nothing is pending and the verb-agnostic message
+//             is already right. Absent here.
 // - stop    — desired=stopped is committed over a still-running process and no
 //             stop failure class proves the stop will not take effect, so the
 //             intent stands and the reconciler's redispatch_stop keeps trying.
@@ -107,9 +110,24 @@ const SPECIFIC_409_MESSAGE: Record<string, TranslationKey> = {
 // `worker_busy` gets the stop treatment for the same reason `command_failed`
 // does: StopServer commits and decrements before dispatch, so a BUSY refusal
 // still leaves the stop intent durable — "wait and try again" understates it.
-// On start and restart nothing was applied and nothing is pending, so those
-// keep the plain busy message. `server_busy` is start-only and never commits an
-// intent, so it is verb-independent throughout.
+// Restart keeps the plain busy message because a BUSY refusal there applied
+// nothing and left the server running as it was.
+//
+// Start is the subtle one, and it keeps the plain busy message DELIBERATELY,
+// not by oversight. A pre-dispatch BUSY (a hydrate refused for the same race)
+// compensates, so nothing is pending — but a POST-dispatch BUSY does not: the
+// Worker refused because another mutating command for this id is already in
+// flight with an unknown outcome, so StartServer keeps desired=running plus the
+// assignment and lets a later reconcile tick take redispatch_start to the same
+// Worker (issue #824, lifecycle.py StartServer.__call__ under
+// `dispatch.attempted`). That case DOES leave a start intent pending, and the
+// client cannot tell the two apart — both arrive as a bare `worker_busy`.
+// Issue #2435 scoped start out on the grounds that "wait and try again" is at
+// least not harmful there; whether it deserves its own pending message is
+// filed as its own follow-up.
+//
+// `server_busy` is start-only and never commits an intent, so it is
+// verb-independent throughout.
 const VERB_SPECIFIC_409_MESSAGE: Record<
   string,
   Partial<Record<LifecycleAction, TranslationKey>>
