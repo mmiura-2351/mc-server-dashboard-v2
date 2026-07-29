@@ -300,7 +300,17 @@ async def create_backup(
             community_id,
             server_id,
         )
-        raise _conflict("command_failed") from exc
+        # Honour the sanitized reason the way the lifecycle routes do (issue
+        # #2436): the running-server create dispatches a SnapshotTrigger, and the
+        # Worker refuses it with BUSY -> ``worker_busy`` when another mutating
+        # command for this id is already in flight. That is a retryable
+        # contention, and flattening it to the catch-all threw the retryable-ness
+        # away at the edge. Only ``worker_busy`` can arrive here — the other
+        # sanitized categories (port_conflict / image_missing) are start-only —
+        # and the raw Worker message is never the reason (log-only), so nothing
+        # leaks. ``command_failed`` stays the catch-all for a dispatch failure the
+        # Worker did not classify.
+        raise _conflict(exc.reason or "command_failed") from exc
     except BackupCorruptError as exc:
         # The working set is structurally corrupt (a crash-during-save truncation,
         # #703): the integrity gate refused to archive it (#739). This is a

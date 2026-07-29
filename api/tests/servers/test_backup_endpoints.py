@@ -86,6 +86,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     BackupNotFoundError,
     BackupStorageUnavailableError,
     BackupUnsettledError,
+    CommandDispatchError,
     FileTooLargeError,
     InvalidBackupArchiveError,
     InvalidRetentionPolicyError,
@@ -353,6 +354,37 @@ def test_create_storage_unavailable_is_503_with_reason() -> None:
     assert [e.operation for e in recorder.events] == [ops.BACKUP_CREATE]
     assert recorder.events[0].outcome is Outcome.ERROR
     assert recorder.events[0].target_type == ops.TARGET_SERVER
+
+
+def test_create_dispatch_failure_keeps_the_sanitized_reason() -> None:
+    # The running-server create dispatches a SnapshotTrigger, which the Worker
+    # refuses with BUSY when another mutating command for the id is already in
+    # flight (proto/contract/command_error_contract.json, SnapshotTrigger /
+    # command_in_flight). command_dispatch.py sanitizes that to ``worker_busy``;
+    # the edge must pass it through instead of flattening it to the catch-all,
+    # so the client can tell a retryable contention apart from a real failure
+    # (issue #2436).
+    use_case = _FakeUseCase(error=CommandDispatchError("busy", reason="worker_busy"))
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, create=use_case, recorder=recorder)
+    client = next(_client(app))
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4()))
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "worker_busy"
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_CREATE]
+    assert recorder.events[0].outcome is Outcome.DENIED
+    assert recorder.events[0].target_type == ops.TARGET_SERVER
+
+
+def test_create_unclassified_dispatch_failure_is_command_failed() -> None:
+    # A dispatch failure the Worker did not classify (no sanitized reason) keeps
+    # the catch-all so the reason stays a closed set (issue #2436).
+    use_case = _FakeUseCase(error=CommandDispatchError("boom"))
+    app = _app(member=True, allow=True, create=use_case)
+    client = next(_client(app))
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4()))
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "command_failed"
 
 
 def test_create_corrupt_working_set_is_500_with_reason() -> None:

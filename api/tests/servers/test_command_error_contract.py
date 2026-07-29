@@ -91,6 +91,12 @@ API_MATCH_SITES: tuple[tuple[str, CommandStatus], ...] = (
     ("StartServer", CommandStatus.PORT_CONFLICT),
     ("StartServer", CommandStatus.IMAGE_MISSING),
     ("StartServer", CommandStatus.BUSY),
+    # command_dispatch.py again, reached by a different kind: the backup-create
+    # route now renders the sanitized reason instead of the catch-all (#2436),
+    # and its only dispatch is the running-path SnapshotTrigger. BUSY is the one
+    # sanitized status that kind can produce (handleSnapshot's stopped-id
+    # reserve), so it is the one reason the backup 409 can now carry.
+    ("SnapshotTrigger", CommandStatus.BUSY),
 )
 
 
