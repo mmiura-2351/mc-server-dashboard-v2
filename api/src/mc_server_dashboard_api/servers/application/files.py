@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import logging
 import tarfile
 import uuid
 import zipfile
@@ -80,6 +81,8 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerId,
     ServerType,
 )
+
+_LOG = logging.getLogger(__name__)
 
 # The edit-size cap. File access rides the control plane for small, interactive
 # edits (server.properties, ops.json, a datapack file), not bulk world data —
@@ -1200,11 +1203,25 @@ class SearchFiles:
             # result is already a point-in-time snapshot (it can come back
             # ``truncated``), and one log line per vanished directory would be
             # unbounded noise during exactly the bulk delete that provokes it.
+            #
+            # A listed directory that has become a link out of the working set is
+            # refused rather than missed, and that refusal 500'd the whole search
+            # (issue #2427). Skip it too — the same trade — but log it: unlike
+            # the delete race it is a standing misconfiguration an operator has
+            # to go remove, and it cannot arrive through any supported write.
             try:
                 entries = await self.file_store.list_dir(
                     community_id=community_id, server_id=server_id, rel_path=current
                 )
             except ServerFileNotFoundError:
+                continue
+            except InvalidFilePathError:
+                _LOG.warning(
+                    "file search: server %s: directory %r escapes the working "
+                    "set; skipping",
+                    server_id.value,
+                    current,
+                )
                 continue
             base = "" if current == "." else current
             for entry in entries:
@@ -1231,11 +1248,25 @@ class SearchFiles:
         # (issue #2418) whose read is a miss, and so is a file deleted between the
         # listing and its read. Such an entry simply matches nothing — failing the
         # whole search over it would cost the operator every other match.
+        #
+        # A link that ESCAPES the working set is refused rather than missed
+        # (containment runs before the symlink answer), and letting that refusal
+        # out 500'd the whole search (issue #2427). It matches nothing either: it
+        # is unreadable through the seam under any design. It is logged, unlike
+        # the miss, because it is a standing misconfiguration an operator has to
+        # go remove rather than an ordinary race.
         try:
             data = await self.file_store.read_file(
                 community_id=community_id, server_id=server_id, rel_path=rel_path
             )
         except ServerFileNotFoundError:
+            return False
+        except InvalidFilePathError:
+            _LOG.warning(
+                "file search: server %s: %r escapes the working set; skipping",
+                server_id.value,
+                rel_path,
+            )
             return False
         return needle in data
 
