@@ -185,7 +185,12 @@ const SPECIFIC_503_MESSAGE: Record<string, TranslationKey> = {
 // reported by a Worker that answered, so the toast can say what the server did;
 // a timeout answers nothing — a graceful stop simply outliving the API's
 // dispatch deadline is the commonest case, and it usually succeeds — so these
-// say the outcome is unconfirmed and the intent stands.
+// say the outcome is unconfirmed. What survives the failure differs by verb, and
+// the strings differ with it: the stop INTENT is re-driven (redispatch_stop
+// keeps retrying it), so that string states the retry; restart keeps only
+// desired=running — an undelivered restart is never re-sent, and the reconciler
+// starts the server only if it does end up down — so that string is conditional
+// ("if it stays down") rather than a promise to bring it back.
 //
 // `no_eligible_worker` and `jar_unavailable` are absent: both are raised by
 // StartServer before any intent is committed, so nothing is ever pending.

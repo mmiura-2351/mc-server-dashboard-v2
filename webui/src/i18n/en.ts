@@ -263,7 +263,11 @@ export const en = {
   // undone and the outcome is simply unknown — a graceful stop outliving the
   // dispatch deadline is the commonest case. Distinct from the *Pending pair
   // above, which can say the server did not move; these can only say the
-  // result is unconfirmed and that the intent still stands.
+  // result is unconfirmed. What still stands differs by verb: the stop intent
+  // is re-driven (the reconciler keeps retrying it), while restart keeps only
+  // desired=running — an undelivered restart is never re-sent, and the
+  // reconciler starts the server only if it does end up down, which is why that
+  // string is conditional rather than a promise to bring it back.
   "dashboard.lifecycle.stopUnconfirmed":
     "Could not reach the server host to confirm the stop. The server may already be shutting down; the stop still stands and the system will keep trying.",
   "dashboard.lifecycle.restartUnconfirmed":
