@@ -1,20 +1,25 @@
 /**
  * Map a lifecycle mutation error to its toast message (WEBUI_SPEC.md 7.4).
  *
- * The API returns 409 both for lifecycle races (SPEC 7.4, "state changed —
- * refresh") and for causes that are not races at all. The non-races get their
- * own message instead of the misleading generic state-changed toast: the
- * sanitized start/restart-failure categories `port_conflict` / `image_missing`
- * (issue #225), `server_unsettled` — the at-rest precondition on the export
- * mint (issue #2360) — and the two contention reasons `worker_busy` /
- * `server_busy` (issue #2400). Only `invalid_transition`,
- * `transition_conflict`, `command_failed` and `server_not_running` are
- * race-flavoured and keep the state-changed treatment: each of those means the
- * server really did move (or was never in the state the caller assumed), so
- * refreshing is the right response. 503 responses with a recognized `reason`
- * (`no_eligible_worker`, `worker_unavailable`, `jar_unavailable`) get their own
- * message (issue #1092). All other errors fall back to the generic
- * action-failed toast.
+ * The API returns 409 for lifecycle races (SPEC 7.4, "state changed —
+ * refresh") and for several causes that are not races at all. A non-race whose
+ * cause is worth naming gets its own message instead of the misleading generic
+ * state-changed toast: the sanitized start/restart-failure categories
+ * `port_conflict` / `image_missing` (issue #225), `server_unsettled` — the
+ * at-rest precondition on the export mint (issue #2360) — and the two
+ * contention reasons `worker_busy` / `server_busy` (issue #2400).
+ *
+ * Four reasons keep the state-changed treatment. Three are genuine races:
+ * `invalid_transition`, `transition_conflict` and `server_not_running` each
+ * mean the server really did move, or was never in the state the caller
+ * assumed, so refreshing is the right response. `command_failed` is there for a
+ * different reason — it is the catch-all for a dispatch failure the Worker did
+ * not classify (e.g. an INTERNAL driver error), where nothing necessarily moved
+ * but there is also no specific cause to name.
+ *
+ * 503 responses with a recognized `reason` (`no_eligible_worker`,
+ * `worker_unavailable`, `jar_unavailable`) get their own message (issue #1092).
+ * All other errors fall back to the generic action-failed toast.
  *
  * 403 is intentionally NOT handled here: it carries a side effect (refetching
  * capabilities) that lives in `useOnForbidden`. Callers run that glue first and
@@ -27,10 +32,11 @@
 import { ApiError } from "../api/client.ts";
 import type { TranslationKey } from "../i18n/index.ts";
 
-// 409 reasons that get a specific message; everything else 409 stays
-// race-flavoured (state changed). `port_conflict` / `image_missing` / and
-// `worker_busy` are the sanitized dispatch categories, mirroring the API's
-// `_SANITIZED_REASONS` (servers/application/command_dispatch.py).
+// 409 reasons that get a specific message; every other 409 keeps the
+// state-changed treatment (see the header for why each one belongs there).
+// `port_conflict`, `image_missing` and `worker_busy` are the sanitized dispatch
+// categories, mirroring the API's `_SANITIZED_REASONS`
+// (servers/application/command_dispatch.py).
 // `server_unsettled` is the at-rest precondition on the export mint
 // (servers/api/servers.py), which is a standing requirement rather than a race,
 // so it names the precondition here too — the same message the danger-zone

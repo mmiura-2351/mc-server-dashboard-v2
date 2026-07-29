@@ -606,9 +606,10 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   `permission` member are enumerated in [`AUTH_API.md`](../app/AUTH_API.md)
   Section 2.
 - API error surfaced via toast + inline field errors (422 `errors` list).
-- Conflict-flavored errors (lifecycle races: `invalid_transition`,
-  `transition_conflict`, `command_failed`, `server_not_running`) get a "state
-  changed — refresh" treatment, not a raw error dump. A 409 that reports
+- Conflict-flavored errors get a "state changed — refresh" treatment, not a raw
+  error dump: the lifecycle races `invalid_transition`, `transition_conflict`
+  and `server_not_running`, plus `command_failed`, the catch-all for a dispatch
+  failure the Worker did not classify. A 409 that reports
   something other than a race is named instead, since refreshing is not the
   remedy: `server_unsettled` says the server must be stopped, on every surface
   that can receive it (#2360); `worker_busy` / `server_busy` say another

@@ -40,7 +40,7 @@ describe("lifecycleErrorMessage", () => {
     "command_failed",
     "server_not_running",
   ])(
-    "gives an unknown 409 reason (%s) the state-changed treatment",
+    "keeps the state-changed treatment for an unmapped 409 reason (%s)",
     (reason) => {
       const error = new ApiError(409, { reason });
       expect(lifecycleErrorMessage(error)).toBe("dashboard.stateChanged");
