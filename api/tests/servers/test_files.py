@@ -2506,6 +2506,95 @@ async def test_search_content_skips_a_listed_file_it_cannot_read() -> None:
     assert set(result.paths) == {"server.properties", "config/motd.txt"}
 
 
+class _VanishingDirFileStore(FakeFileStore):
+    """Deletes ``victim`` from the tree as soon as any directory is listed.
+
+    Reproduces the real race: the walk sees the subdirectory in its parent's
+    listing, and by the time it pops that subdirectory off the stack the
+    directory is gone, so its own ``list_dir`` is the modelled miss.
+    """
+
+    def __init__(self, victim: str) -> None:
+        super().__init__(strict_dirs=True)
+        self._victim = victim
+
+    async def list_dir(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> list[FileEntry]:
+        entries = await super().list_dir(
+            community_id=community_id, server_id=server_id, rel_path=rel_path
+        )
+        self.dirs.pop(self._victim, None)
+        return entries
+
+
+async def test_search_skips_a_subdirectory_that_vanishes_mid_walk() -> None:
+    """A subdirectory deleted mid-walk is skipped, not allowed to abort the search.
+
+    A search is a read-only pass over a live working set, so a directory going
+    away while it runs is ordinary. Losing every other match because one
+    subdirectory was deleted between its parent's listing and the descent into
+    it would be a bad trade.
+    """
+
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = _VanishingDirFileStore(victim="plugins")
+    store.dirs["."] = [
+        FileEntry(name="config", is_dir=True, size=0),
+        FileEntry(name="plugins", is_dir=True, size=0),
+    ]
+    store.dirs["config"] = [FileEntry(name="motd.txt", is_dir=False, size=11)]
+    store.dirs["plugins"] = [FileEntry(name="greeting.txt", is_dir=False, size=5)]
+    store.files["config/motd.txt"] = b"hello world"
+    store.files["plugins/greeting.txt"] = b"hello"
+    use_case = SearchFiles(uow=_stopped_uow(community, server_id), file_store=store)
+
+    result = await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        query="txt",
+        by="name",
+        max_results=100,
+    )
+    # The walk descends into the vanished directory FIRST (depth-first pops it
+    # off the stack before its sibling), so the surviving match can only be
+    # reported if the miss did not abort the walk.
+    assert set(result.paths) == {"config/motd.txt"}
+    assert result.truncated is False
+
+
+async def test_search_surfaces_a_subdirectory_it_cannot_list() -> None:
+    """Only the vanished-directory miss is skipped; every other failure surfaces.
+
+    A permission failure or an I/O error is not the delete race — reporting a
+    silently short result set for one would hide a real fault.
+    """
+
+    class _UnreadableDirFileStore(FakeFileStore):
+        async def list_dir(
+            self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+        ) -> list[FileEntry]:
+            if rel_path == "config":
+                raise PermissionError(rel_path)
+            return await super().list_dir(
+                community_id=community_id, server_id=server_id, rel_path=rel_path
+            )
+
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = _UnreadableDirFileStore(strict_dirs=True)
+    store.dirs["."] = [FileEntry(name="config", is_dir=True, size=0)]
+    use_case = SearchFiles(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(PermissionError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            query="txt",
+            by="name",
+            max_results=100,
+        )
+
+
 async def test_search_content_aggregate_scan_cap_sets_truncated() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore(strict_dirs=True)
