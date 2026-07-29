@@ -1179,9 +1179,21 @@ class SearchFiles:
         stack = ["."]
         while stack:
             current = stack.pop()
-            entries = await self.file_store.list_dir(
-                community_id=community_id, server_id=server_id, rel_path=current
-            )
+            # A directory listed by its parent can be deleted before the walk
+            # descends into it: a search is a read-only pass over a live working
+            # set, so that is ordinary rather than exceptional. Skip the vanished
+            # directory and keep walking — aborting would cost the operator every
+            # other match. Only the modelled miss is skipped; a traversal refusal
+            # or an I/O failure still surfaces. The skip is silent: a search
+            # result is already a point-in-time snapshot (it can come back
+            # ``truncated``), and one log line per vanished directory would be
+            # unbounded noise during exactly the bulk delete that provokes it.
+            try:
+                entries = await self.file_store.list_dir(
+                    community_id=community_id, server_id=server_id, rel_path=current
+                )
+            except ServerFileNotFoundError:
+                continue
             base = "" if current == "." else current
             for entry in entries:
                 child = f"{base}/{entry.name}" if base else entry.name
