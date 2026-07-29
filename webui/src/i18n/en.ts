@@ -230,6 +230,11 @@ export const en = {
     "Could not start: a port is already in use.",
   "dashboard.lifecycle.imageMissing":
     "Could not start: the server's files are not ready. Try again shortly.",
+  // 409 worker_busy / server_busy (issue #2400): another operation holds the
+  // server, so this one was refused without being applied. It clears on its own
+  // once that operation finishes, so the only remedy is to retry.
+  "dashboard.lifecycle.busy":
+    "Another operation on this server is in progress. Please wait a moment and try again.",
   // 503 service-unavailable reasons (issue #1092): post-restart scenarios where
   // a host or the server files are not yet ready.
   "dashboard.lifecycle.noEligibleWorker":
