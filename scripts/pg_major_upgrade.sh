@@ -376,12 +376,24 @@ fi
 # pipe or a full disk leaves exactly that, and the redirection above created the
 # file either way. pg_dumpall's own closing marker is the end-to-end evidence.
 #
-# The tail is captured and then matched rather than piped into a quiet grep: the
-# marker is not the last of those five lines, so the grep exits while `tail`
-# still has some to write, `tail` takes SIGPIPE, and `pipefail` hands this check
-# a 141 -- a verified dump declared truncated and the migration abandoned over a
-# dump that was fine, at about 1 run in 2000 (#2447). What is matched is
-# unchanged: the marker was a plain substring to grep too.
+# The tail is captured and then matched rather than piped into a quiet grep,
+# which is the shape #2447 was filed for: the grep exits at its first match, a
+# producer with bytes still to write takes SIGPIPE, and `pipefail` makes that
+# 141 the check's status -- here, a verified dump declared truncated and the
+# migration abandoned over a dump that was fine.
+#
+# The window at THIS site is theoretical, not measured. `tail -n 5` on a regular
+# file emits those lines in a single write (strace, GNU coreutils 9.4), so the
+# write carrying the marker has already completed by the time grep can exit:
+# 0 failures in 32000. The measured ~1-in-2000 belongs to producers that write
+# in several chunks, and scales with how much is left after the match -- see
+# pg_cluster_lib.sh's volume test, where `printf` is the producer.
+#
+# Converted anyway, and not only for the guard in test_pg_major_upgrade.sh: the
+# safety here rests on an implementation detail of one tool, so a later edit
+# that splices in a filter or swaps the producer reopens the window with nothing
+# to say it did. What is matched is unchanged -- the marker was a plain
+# substring to grep too.
 dump_tail="$(tail -n 5 "$backup")" || dump_tail=""
 case "$dump_tail" in
 	*"PostgreSQL database cluster dump complete"*) ;;
