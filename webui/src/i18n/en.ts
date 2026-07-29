@@ -258,6 +258,20 @@ export const en = {
     "Could not reach the server host. Please wait a moment and try again.",
   "dashboard.lifecycle.jarUnavailable":
     "Could not prepare the server files. Please wait a moment and try again.",
+  // 503 worker_unavailable on stop / restart (issue #2440): the dispatch timed
+  // out or its session dropped AFTER the intent was committed, so nothing was
+  // undone and the outcome is simply unknown — a graceful stop outliving the
+  // dispatch deadline is the commonest case. Distinct from the *Pending pair
+  // above, which can say the server did not move; these can only say the
+  // result is unconfirmed. What still stands differs by verb: the stop intent
+  // is re-driven (the reconciler keeps retrying it), while restart keeps only
+  // desired=running — an undelivered restart is never re-sent, and the
+  // reconciler starts the server only if it does end up down, which is why that
+  // string is conditional rather than a promise to bring it back.
+  "dashboard.lifecycle.stopUnconfirmed":
+    "Could not reach the server host to confirm the stop. The server may already be shutting down; the stop still stands and the system will keep trying.",
+  "dashboard.lifecycle.restartUnconfirmed":
+    "Could not reach the server host to confirm the restart. The server may already be coming back; if it stays down the system will start it again automatically.",
   // Live-status degraded indicator: WS down, polling fallback (SPEC 6.2 / 7.2).
   "dashboard.liveDegraded": "Reconnecting — updates may lag",
   // Clickable join-hostname copy feedback.

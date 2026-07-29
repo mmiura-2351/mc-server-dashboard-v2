@@ -17,16 +17,20 @@
  *
  * 503 responses with a recognized `reason` (`no_eligible_worker`,
  * `worker_unavailable`, `jar_unavailable`) get their own message (issue #1092).
- * All other errors fall back to the generic action-failed toast.
+ * `worker_unavailable` — the API's rendering of a dispatch that timed out or lost
+ * the Worker session — is verb-specific on stop and restart for the same reason
+ * some 409s are: the intent was already committed, so "try again" is wrong
+ * (issue #2440). All other errors fall back to the generic action-failed toast.
  *
  * 403 is intentionally NOT handled here: it carries a side effect (refetching
  * capabilities) that lives in `useOnForbidden`. Callers run that glue first and
  * only reach this helper for non-403 errors.
  *
- * Callers pass the lifecycle verb they asked for. A few 409 reasons leave
- * something pending that depends on it — a failed stop is still going to be
- * retried, a failed restart is still going to come back — and the message says
- * so (issue #2435). The verb is optional, and omitting it just keeps the
+ * Callers pass the lifecycle verb they asked for. A few reasons leave something
+ * pending that depends on it — a failed stop is still going to be retried, a
+ * failed restart is still going to come back — and the message says so, on both
+ * the 409 dispatch-refused path (issue #2435) and the 503 dispatch-unconfirmed
+ * one (issue #2440). The verb is optional, and omitting it just keeps the
  * verb-agnostic message.
  *
  * Returns a `TranslationKey` so both the dashboard quick actions and the
@@ -93,10 +97,12 @@ const SPECIFIC_409_MESSAGE: Record<string, TranslationKey> = {
 // failure leaves behind differs per verb (servers/application/lifecycle.py):
 //
 // - start   — compensated back to stopped wherever the start demonstrably did
-//             not happen, which is every failure this mapping can see EXCEPT a
-//             post-dispatch BUSY (see the worker_busy note below). So for
-//             `command_failed` nothing is pending and the verb-agnostic message
-//             is already right. Absent here.
+//             not happen, which is every 409 reason below EXCEPT a post-dispatch
+//             BUSY (see the worker_busy note below; a post-dispatch 503
+//             `worker_unavailable` is the same carve-out, see
+//             VERB_SPECIFIC_503_MESSAGE). So for `command_failed` nothing is
+//             pending and the verb-agnostic message is already right. Absent
+//             here.
 // - stop    — desired=stopped is committed over a still-running process and no
 //             stop failure class proves the stop will not take effect, so the
 //             intent stands and the reconciler's redispatch_stop keeps trying.
@@ -150,6 +156,66 @@ const SPECIFIC_503_MESSAGE: Record<string, TranslationKey> = {
   jar_unavailable: "dashboard.lifecycle.jarUnavailable",
 };
 
+// The 503 counterpart of VERB_SPECIFIC_409_MESSAGE, consulted the same way and
+// falling through to SPECIFIC_503_MESSAGE (issue #2440). `worker_unavailable` is
+// the API's rendering of a dispatch that TIMED OUT or lost the Worker session
+// (servers/api/servers.py `_SERVICE_UNAVAILABLE_REASONS`); the generic message
+// asks for a retry, which is wrong wherever the verb already committed its
+// intent:
+//
+// - stop    — the only way StopServer can raise it is the `control_plane.stop`
+//             call, which happens AFTER desired=stopped is committed and the
+//             placement load decremented, and nothing is compensated
+//             (lifecycle.py StopServer). So the stop intent is pending on every
+//             worker-unavailable stop, with no ambiguity.
+// - restart — desired stays running (restart commits no state change), so a
+//             Worker that stopped the server and failed to relaunch it leaves
+//             the server down with the reconciler about to start it again —
+//             the same reasoning as the 409 entry above.
+// - start   — absent DELIBERATELY. A PRE-dispatch unavailable (a failed hydrate,
+//             or a connect that never reached the Worker) IS compensated back to
+//             stopped, so nothing is pending and "try again" is right; a
+//             POST-dispatch one keeps desired=running plus the assignment for
+//             redispatch_start, so a start IS pending. Both arrive as a bare
+//             `worker_unavailable` and the client cannot tell them apart — the
+//             same ambiguity #2445 tracks for the BUSY start, so start stays on
+//             the verb-agnostic message here too.
+//
+// The wording is NOT the *Pending pair the 409 entries use. Those failures were
+// reported by a Worker that answered, so the toast can say what the server did;
+// a timeout answers nothing — a graceful stop simply outliving the API's
+// dispatch deadline is the commonest case, and it usually succeeds — so these
+// say the outcome is unconfirmed. What survives the failure differs by verb, and
+// the strings differ with it: the stop INTENT is re-driven (redispatch_stop
+// keeps retrying it), so that string states the retry; restart keeps only
+// desired=running — an undelivered restart is never re-sent, and the reconciler
+// starts the server only if it does end up down — so that string is conditional
+// ("if it stays down") rather than a promise to bring it back.
+//
+// `no_eligible_worker` and `jar_unavailable` are absent: both are raised by
+// StartServer before any intent is committed, so nothing is ever pending.
+const VERB_SPECIFIC_503_MESSAGE: Record<
+  string,
+  Partial<Record<LifecycleAction, TranslationKey>>
+> = {
+  worker_unavailable: {
+    stop: "dashboard.lifecycle.stopUnconfirmed",
+    restart: "dashboard.lifecycle.restartUnconfirmed",
+  },
+};
+
+// Look up the verb-specific override for a reason, if the caller supplied a verb
+// and the table has an entry for that verb. Shared by the 409 and 503 paths so
+// both mechanisms behave identically: a hit wins, a miss falls through to the
+// verb-agnostic table.
+function verbSpecificMessage(
+  table: Record<string, Partial<Record<LifecycleAction, TranslationKey>>>,
+  reason: string,
+  action: LifecycleAction | undefined,
+): TranslationKey | undefined {
+  return action === undefined ? undefined : table[reason]?.[action];
+}
+
 export function isEulaNotAccepted(error: unknown): boolean {
   return (
     error instanceof ApiError &&
@@ -164,11 +230,13 @@ export function lifecycleErrorMessage(
 ): TranslationKey {
   if (error instanceof ApiError && error.status === 409) {
     if (error.reason !== undefined) {
-      if (action !== undefined && error.reason in VERB_SPECIFIC_409_MESSAGE) {
-        const byVerb = VERB_SPECIFIC_409_MESSAGE[error.reason][action];
-        if (byVerb !== undefined) {
-          return byVerb;
-        }
+      const byVerb = verbSpecificMessage(
+        VERB_SPECIFIC_409_MESSAGE,
+        error.reason,
+        action,
+      );
+      if (byVerb !== undefined) {
+        return byVerb;
       }
       if (error.reason in SPECIFIC_409_MESSAGE) {
         return SPECIFIC_409_MESSAGE[error.reason];
@@ -177,8 +245,18 @@ export function lifecycleErrorMessage(
     return "dashboard.stateChanged";
   }
   if (error instanceof ApiError && error.status === 503) {
-    if (error.reason !== undefined && error.reason in SPECIFIC_503_MESSAGE) {
-      return SPECIFIC_503_MESSAGE[error.reason];
+    if (error.reason !== undefined) {
+      const byVerb = verbSpecificMessage(
+        VERB_SPECIFIC_503_MESSAGE,
+        error.reason,
+        action,
+      );
+      if (byVerb !== undefined) {
+        return byVerb;
+      }
+      if (error.reason in SPECIFIC_503_MESSAGE) {
+        return SPECIFIC_503_MESSAGE[error.reason];
+      }
     }
   }
   return "dashboard.actionFailed";
