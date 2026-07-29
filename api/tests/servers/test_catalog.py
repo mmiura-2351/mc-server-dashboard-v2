@@ -586,7 +586,7 @@ async def test_install_from_catalog_geyser_source_stores_provenance() -> None:
     assert plugin.sha256 == hashlib.sha256(content).hexdigest()
     assert plugin.rel_path == "plugins/floodgate-spigot.jar"
     assert plugin.size_bytes == len(content)
-    assert await cache.has(plugin.sha256)
+    assert b"".join([chunk async for chunk in cache.open(plugin.sha256)]) == content
 
 
 async def test_install_from_catalog_geyser_sha256_mismatch() -> None:
@@ -1955,7 +1955,8 @@ async def test_install_from_catalog_stores_sha256_and_caches_blob() -> None:
     expected_sha256 = hashlib.sha256(content).hexdigest()
     assert plugin.sha256 == expected_sha256
     assert plugin.checksum_sha512 == hashlib.sha512(content).hexdigest()
-    assert await cache.has(expected_sha256)
+    cached = b"".join([chunk async for chunk in cache.open(expected_sha256)])
+    assert cached == content
     # The first install downloaded once.
     assert catalog.downloads == [version.files[0].url]
 
@@ -2144,18 +2145,6 @@ async def test_cache_hit_does_not_reupload_blob() -> None:
     assert cache.puts == []
 
 
-class _GcRacedPluginCacheStore(FakePluginCacheStore):
-    """Reports every content key as present while holding no blob (issue #2346).
-
-    Models the plugin-cache GC deleting a blob between a presence check and the
-    read that follows it: ``has`` answers yes, and ``open`` still raises
-    ``PluginCacheBlobNotFoundError`` on the first chunk.
-    """
-
-    async def has(self, sha256: str) -> bool:
-        return True
-
-
 async def test_cache_blob_deleted_after_lookup_falls_back_to_download() -> None:
     """A blob the GC deleted under the resolver installs via the download path.
 
@@ -2174,7 +2163,9 @@ async def test_cache_blob_deleted_after_lookup_falls_back_to_download() -> None:
     catalog.seed_file(version.files[0].url, content)
 
     sha256 = hashlib.sha256(content).hexdigest()
-    cache = _GcRacedPluginCacheStore()
+    # Models the GC race: the index resolves the content key, but the cache holds
+    # no blob, so the read raises the modelled miss (issue #2346).
+    cache = FakePluginCacheStore()
     # Seed the download-cache index: a prior install on another server.
     prior = _plugin(
         server_id=ServerId.new(),
@@ -2213,7 +2204,9 @@ async def test_geyser_cache_blob_deleted_after_lookup_falls_back_to_download() -
     catalog = FakeCatalogProvider()
     catalog.seed_project(project, [version])
     catalog.seed_file(version.files[0].url, content)
-    cache = _GcRacedPluginCacheStore()
+    # Models the GC race: the published sha256 is the content key, but the cache
+    # holds no blob, so the read raises the modelled miss (issue #2346).
+    cache = FakePluginCacheStore()
 
     uc = InstallFromCatalog(
         uow=uow,

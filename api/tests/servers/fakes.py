@@ -1643,17 +1643,14 @@ class FakePluginCacheStore(PluginCacheStore):
     """In-memory content-addressed plugin cache for use-case tests (issue #1306).
 
     Keyed by SHA-256 content address. ``puts`` records each ``put`` call (even the
-    deduped ones) and ``stored`` holds the keys actually persisted, so a test can
-    assert dedup (a second put of identical bytes does not grow ``stored``) and the
+    deduped ones) and ``blobs`` holds the keys actually persisted, so a test can
+    assert dedup (a second put of identical bytes does not grow ``blobs``) and the
     download cache (a cached blob short-circuits the HTTP download).
     """
 
     def __init__(self) -> None:
         self.blobs: dict[str, bytes] = {}
         self.puts: list[str] = []
-
-    async def has(self, sha256: str) -> bool:
-        return sha256 in self.blobs
 
     async def put(self, sha256: str, stream: AsyncIterator[bytes]) -> None:
         self.puts.append(sha256)

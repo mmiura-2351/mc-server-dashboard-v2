@@ -39,10 +39,6 @@ class PluginCacheStore(abc.ABC):
     """Port: content-addressed blob storage for cached plugin/mod jars."""
 
     @abc.abstractmethod
-    async def has(self, sha256: str) -> bool:
-        """Return whether a blob with this content address is already cached."""
-
-    @abc.abstractmethod
     async def put(self, sha256: str, stream: ByteStream) -> None:
         """Store a jar blob under its content address (idempotent dedup)."""
 
