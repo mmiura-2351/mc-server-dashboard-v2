@@ -76,6 +76,13 @@ API_MATCH_SITES: tuple[tuple[str, CommandStatus], ...] = (
     # restart (handleRestart's takeNotFound); surfaced as server_not_running
     # instead of the unclassified command_failed.
     ("RestartServer", CommandStatus.SERVER_NOT_FOUND),
+    # lifecycle.py: RestartServer and SendServerCommand (#2466) -- INVALID_STATE
+    # on either kind is the Worker's failed-stop orphan refusal (its running check
+    # found an instance it could not confirm dead), the one settled state those
+    # kinds can report. Surfaced as the failed_stop_orphan 409 reason so neither
+    # says "not running" about a process that is probably still alive.
+    ("RestartServer", CommandStatus.INVALID_STATE),
+    ("ServerCommand", CommandStatus.INVALID_STATE),
     # lifecycle.py: _is_working_set_absent_refusal (#1790) -- SERVER_NOT_FOUND on
     # a final SnapshotTrigger is the Worker's working_set_absent refusal (#1713),
     # a benign duplicate after a published final snapshot; _final_snapshot logs
@@ -132,22 +139,23 @@ def test_no_undeclared_match_sites() -> None:
         len(pattern.findall(path.read_text()))
         for path in (_LIFECYCLE, _FILES, _COMMAND_DISPATCH)
     )
-    # lifecycle.py has 10 CommandStatus.<NAME> references (redispatch_start and
+    # lifecycle.py has 12 CommandStatus.<NAME> references (redispatch_start and
     # __call__ both read an INVALID_STATE start as already-running (#773/#774) and
     # both special-case a BUSY start as retry-no-converge (#824), stop convergence,
     # graceful-stop "not SERVER_NOT_FOUND", redispatch_stop's snapshot-skip
     # "not SERVER_NOT_FOUND" (#846), RestartServer's not-running refusal (#2441),
-    # SendServerCommand, and _is_working_set_absent_refusal's benign
-    # final-snapshot refusal (#1790));
+    # SendServerCommand, the failed-stop-orphan INVALID_STATE refusal on
+    # RestartServer and SendServerCommand (#2466), and
+    # _is_working_set_absent_refusal's benign final-snapshot refusal (#1790));
     # files.py has 2 (_map_file_status); command_dispatch.py has 3 (the sanitized
     # start-failure reason map: port_conflict, image_missing, worker_busy; issues
     # #225/#867).
     # Bump this with intent when a genuinely new convergence/special-case match is
     # added -- and add it to API_MATCH_SITES so it is checked against the contract
     # table.
-    assert found == 15, (
+    assert found == 17, (
         f"found {found} CommandStatus references in lifecycle.py/files.py/"
-        "command_dispatch.py, expected 15. A convergence/special-case match was "
+        "command_dispatch.py, expected 17. A convergence/special-case match was "
         "added or removed: update API_MATCH_SITES (so it is checked against the "
         "contract table) and this count."
     )

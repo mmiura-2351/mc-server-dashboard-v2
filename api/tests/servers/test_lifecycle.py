@@ -2606,6 +2606,73 @@ async def test_restart_of_not_running_server_is_not_running() -> None:
         )
 
 
+async def test_restart_over_failed_stop_orphan_names_the_orphan() -> None:
+    # Issue #2466: the Worker answers INVALID_STATE when it holds a failed-stop
+    # orphan for the id -- a process it could not confirm dead, so probably still
+    # alive. That is NOT "not running": it must not raise ServerNotRunningError
+    # (whose client message says the server moved), nor fall into the
+    # unclassified command_failed catch-all.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(
+            status=CommandStatus.INVALID_STATE,
+            message=(
+                "instancemanager: server has a failed-stop orphan pending termination"
+            ),
+        )
+    )
+    use_case = RestartServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+
+    with pytest.raises(CommandDispatchError) as excinfo:
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+    assert excinfo.value.reason == "failed_stop_orphan"
+
+
+async def test_command_over_failed_stop_orphan_names_the_orphan() -> None:
+    # Issue #2466: the console must not report "not running" over a process the
+    # Worker could not confirm dead.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(
+            status=CommandStatus.INVALID_STATE,
+            message=(
+                "instancemanager: server has a failed-stop orphan pending termination"
+            ),
+        )
+    )
+    use_case = SendServerCommand(uow=uow, control_plane=cp)
+
+    with pytest.raises(CommandDispatchError) as excinfo:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            line="list",
+        )
+    assert excinfo.value.reason == "failed_stop_orphan"
+
+
 async def test_restart_when_stopped_is_conflict() -> None:
     community, server_id, _ = _ids()
     uow = FakeUnitOfWork()

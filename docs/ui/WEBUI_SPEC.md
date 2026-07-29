@@ -620,7 +620,13 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   `command_failed`, the catch-all for a dispatch failure the Worker did not
   classify, says the action did not go through and sends the operator to check
   the server's state — a failed start is compensated back, but a failed stop or
-  restart can leave the server moved, and a retry is not known to help (#2420).
+  restart can leave the server moved, and a retry is not known to help (#2420);
+  `failed_stop_orphan` says an earlier stop never finished, so the server's
+  process is probably still running — it never went down, nothing is pending,
+  and repeating the action is refused identically, so the message names that
+  condition and its one remedy, stopping the server again, which is what retries
+  the termination (#2466). It stays verb-agnostic for that reason: the sentence
+  is about the server's state, not about what the refused verb would have done.
   The refetch is unconditional on every lifecycle mutation regardless of the
   toast, so a moved server still shows up.
 - On **stop** and **restart** those messages are replaced by verb-specific ones —

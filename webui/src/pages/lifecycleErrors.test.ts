@@ -87,6 +87,20 @@ describe("lifecycleErrorMessage", () => {
     );
   });
 
+  // The Worker refused because it could not confirm an earlier stop, so the
+  // server's process is probably still running — nothing is pending, nothing
+  // moved, and the remedy is a fresh stop. Verb-agnostic: the message names the
+  // server's condition, not what the refused verb would have done (issue #2466).
+  it.each([undefined, "restart"] as const)(
+    "maps a 409 failed_stop_orphan on %s to the orphan message",
+    (action) => {
+      const error = new ApiError(409, { reason: "failed_stop_orphan" });
+      expect(lifecycleErrorMessage(error, action)).toBe(
+        "dashboard.lifecycle.failedStopOrphan",
+      );
+    },
+  );
+
   // worker_busy on restart applied nothing at all — the server keeps running —
   // so it stays on the retry-in-a-moment message (issue #2435).
   it.each(["start", "restart"] as const)(

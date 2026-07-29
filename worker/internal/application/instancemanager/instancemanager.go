@@ -232,10 +232,15 @@ type Manager struct {
 	// and unassigns — over a process/container that may still be lingering (issue
 	// #251). Keeping the Instance and its driver name here lets a retry re-attempt
 	// the driver Stop against the same handle and resolve RCON identically (issue
-	// #1712), reporting success only on confirmed termination; until then
-	// start/hydrate over the id are rejected as they are for a running server. The
-	// instance's status pump clears the record if the orphan finally exits on its
-	// own.
+	// #1712), reporting success only on confirmed termination; until then every
+	// other command over the id is refused with INVALID_STATE naming the orphan —
+	// start/hydrate/stopped-id snapshot through reserve, restart through
+	// takeRunningReserve, console / relay tunnel dial / Bedrock tunnel open
+	// through notRunningRefusal — so no path claims the server is not running
+	// about a process that is probably alive (issue #2466). CloseBedrockTunnel is
+	// the deliberate exception: it takes no running check and stays a success, so
+	// the tunnel a failed stop left open can still be torn down. The instance's
+	// status pump clears the record if the orphan finally exits on its own.
 	orphans map[string]orphanEntry
 	// reserved marks a server id as having a mutating lifecycle command in flight so
 	// a duplicate re-issued after a stream reconnect cannot overlap the original
@@ -1525,17 +1530,30 @@ type orphanEntry struct {
 	driver string
 }
 
-// takeOutcome is the result of takeStoppableReserve: an instance to stop was
-// taken and reserved, no live instance exists (genuinely unknown -> SERVER_NOT_FOUND),
-// or a lifecycle command is already reserved in flight for the id (a detached stop
-// still confirming, or a start/hydrate mid-operation -> BUSY, issue #780/#824).
+// takeOutcome is the result of takeStoppableReserve / takeRunningReserve: an
+// instance was taken and reserved, no live instance exists (genuinely unknown ->
+// SERVER_NOT_FOUND), a lifecycle command is already reserved in flight for the id
+// (a detached stop still confirming, or a start/hydrate mid-operation -> BUSY,
+// issue #780/#824), or a failed-stop orphan is recorded for the id (a process
+// this Worker could not confirm dead -> INVALID_STATE, issue #2466).
+// takeOrphaned is reachable only from takeRunningReserve: takeStoppableReserve
+// TAKES the orphan (that is the retry path that terminates it).
 type takeOutcome int
 
 const (
 	takeFound takeOutcome = iota
 	takeNotFound
 	takeInFlight
+	takeOrphaned
 )
+
+// orphanPendingMsg is the precondition message every command refused over a
+// recorded failed-stop orphan carries. One constant so the reserve()-gated
+// commands (start/hydrate/stopped-id snapshot) and the ones that check the
+// orphan directly (restart/console/tunnel dial) say the same thing about the
+// same state — the point of issue #2466 is that the refusal reads honestly
+// wherever it surfaces. The API discriminates on the CODE, not this text.
+const orphanPendingMsg = "instancemanager: server has a failed-stop orphan pending termination"
 
 // takeStoppableReserve atomically (under mu) selects the instance to stop for
 // serverID and claims an in-flight reservation across the eviction -> stop-confirmed
@@ -1616,6 +1634,14 @@ func (m *Manager) attemptStop(ctx context.Context, serverID string, inst executi
 		m.mu.Lock()
 		m.orphans[serverID] = orphanEntry{inst: inst, driver: driverName}
 		m.mu.Unlock()
+		// The orphan record is otherwise invisible: nothing enumerates m.orphans, so
+		// "why is every command for this server refused?" was a code-reading exercise
+		// (issue #2466). Say it once, at the moment the state is entered — the id is
+		// now guarded against start / hydrate / restart / console / relay tunnel
+		// dial / Bedrock tunnel open until a retry stop confirms termination or the
+		// process exits on its own.
+		m.logger.Warn("recorded failed-stop orphan; the process may still be running",
+			"server_id", serverID, "driver", driverName, "graceful", graceful, "error", err)
 		// The graceful path issued save-off before the flush; because the stop
 		// failed, the server may still be alive with auto-save disabled. Re-enable
 		// it so player progress is not silently lost (issue #2021).
@@ -1640,7 +1666,14 @@ func (m *Manager) attemptStop(ctx context.Context, serverID string, inst executi
 // tracked but the id is already reserved (a detached stop or another lifecycle
 // command still in flight) and takeNotFound for a genuinely unknown id. A restart
 // applies only to a tracked running instance, so a recorded orphan is NOT taken
-// here (it is left for the stop-retry path, issue #251) and reports takeNotFound.
+// here (it is left for the stop-retry path, issue #251) — it reports takeOrphaned,
+// so the restart is refused as a settled INVALID_STATE naming the orphan rather
+// than as SERVER_NOT_FOUND, which would tell the operator the server is not
+// running about a process that is probably still alive (issue #2466). The
+// reservation is checked BEFORE the orphan for the same reason as in
+// takeStoppableReserve: while an orphan-retry stop is in flight the id carries
+// both, and the in-flight command's outcome is not yet known, so BUSY (retry
+// later) is the honest answer rather than a settled state.
 func (m *Manager) takeRunningReserve(serverID string) (execution.Instance, session.Command, takeOutcome) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1648,6 +1681,9 @@ func (m *Manager) takeRunningReserve(serverID string) (execution.Instance, sessi
 	if !ok {
 		if m.reserved[serverID] {
 			return nil, session.Command{}, takeInFlight
+		}
+		if _, orphaned := m.orphans[serverID]; orphaned {
+			return nil, session.Command{}, takeOrphaned
 		}
 		return nil, session.Command{}, takeNotFound
 	}
@@ -1666,6 +1702,13 @@ func (m *Manager) handleRestart(ctx context.Context, cmd session.Command) sessio
 	case takeNotFound:
 		return fail(cmd.CommandID, session.CommandErrorServerNotFound,
 			"instancemanager: server not running")
+	case takeOrphaned:
+		// A prior stop for this id could not confirm termination, so the process is
+		// probably still alive — restarting it is refused, but as the settled state
+		// it is, not as "not running" (issue #2466). The retry stop (StopServer) is
+		// the path that terminates the orphan; only once it confirms does the id
+		// become genuinely unknown.
+		return fail(cmd.CommandID, session.CommandErrorInvalidState, orphanPendingMsg)
 	case takeInFlight:
 		// A lifecycle command (e.g. a detached stop from a dropped stream, or a start/
 		// hydrate mid-operation) is already reserved in flight for this id (issue #780).
@@ -1719,13 +1762,32 @@ func (m *Manager) handleRestart(ctx context.Context, cmd session.Command) sessio
 	return res
 }
 
-func (m *Manager) handleServerCommand(ctx context.Context, cmd session.Command) session.CommandResult {
+// notRunningRefusal reports whether serverID has no tracked running instance and,
+// when it has none, the coded refusal the command must fail with. Both facts are
+// read in one critical section so the classification cannot straddle a concurrent
+// orphan record.
+//
+// A recorded failed-stop orphan is refused as INVALID_STATE naming the orphan,
+// not SERVER_NOT_FOUND: this Worker could not confirm the process dead, so it is
+// probably still alive, holding its port and writing its world, and "server not
+// running" is a false statement about it (issue #2466). Every other untracked id
+// keeps SERVER_NOT_FOUND — the code stays reserved for ids this Worker genuinely
+// knows nothing about.
+func (m *Manager) notRunningRefusal(serverID string) (session.CommandErrorCode, string, bool) {
 	m.mu.Lock()
-	_, running := m.instances[cmd.ServerID]
-	m.mu.Unlock()
-	if !running {
-		return fail(cmd.CommandID, session.CommandErrorServerNotFound,
-			"instancemanager: server not running")
+	defer m.mu.Unlock()
+	if _, running := m.instances[serverID]; running {
+		return 0, "", false
+	}
+	if _, orphaned := m.orphans[serverID]; orphaned {
+		return session.CommandErrorInvalidState, orphanPendingMsg, true
+	}
+	return session.CommandErrorServerNotFound, "instancemanager: server not running", true
+}
+
+func (m *Manager) handleServerCommand(ctx context.Context, cmd session.Command) session.CommandResult {
+	if code, msg, refused := m.notRunningRefusal(cmd.ServerID); refused {
+		return fail(cmd.CommandID, code, msg)
 	}
 
 	ctrl, err := m.openControl(ctx, cmd.ServerID, m.driverFor(cmd.ServerID))
@@ -1745,19 +1807,25 @@ func (m *Manager) handleServerCommand(ctx context.Context, cmd session.Command) 
 
 // handleTunnelDial opens a relay dial-back tunnel for one player session (RELAY.md
 // Section 5). The server must be running locally — a not-running server returns
-// SERVER_NOT_FOUND — and the dialer resolves its published loopback game port from
-// the working dir, dials the relay endpoint, presents the token, and splices the
+// SERVER_NOT_FOUND, a failed-stop orphan INVALID_STATE (issue #2466) — and the
+// dialer resolves its published loopback game port from the working dir, dials
+// the relay endpoint, presents the token, and splices the
 // two. It returns once the splice is established; the splice itself runs on the
 // dialer's own long-lived context, off this command, so it outlives the result. A
 // TunnelDial is a quick command: it bypasses the slow-lane cap (session layer) so
 // a join never queues behind a hydrate.
+//
+// The dial is dispatched fire-and-forget (RELAY.md Section 4): the API awaits no
+// result and the relay's real answer is the dial-back arriving, so this refusal
+// reaches nobody but the API's diagnostic log
+// (fleet/adapters/control_plane.py _log_fire_and_forget_result, which logs the
+// message at WARN). The joining player's experience is unchanged either way —
+// the join stalls until the relay times it out, because the route still says
+// running. Only the log line differs, and that is exactly the line an operator
+// reads when a "running" server refuses joins.
 func (m *Manager) handleTunnelDial(ctx context.Context, cmd session.Command) session.CommandResult {
-	m.mu.Lock()
-	_, running := m.instances[cmd.ServerID]
-	m.mu.Unlock()
-	if !running {
-		return fail(cmd.CommandID, session.CommandErrorServerNotFound,
-			"instancemanager: server not running")
+	if code, msg, refused := m.notRunningRefusal(cmd.ServerID); refused {
+		return fail(cmd.CommandID, code, msg)
 	}
 	if m.tunnel == nil {
 		return fail(cmd.CommandID, session.CommandErrorInternal,
@@ -1780,18 +1848,22 @@ func (m *Manager) handleTunnelDial(ctx context.Context, cmd session.Command) ses
 // handleOpenBedrockTunnel starts (or, for a repeated command with the same
 // credential, idempotently confirms) this server's Bedrock relay QUIC tunnel
 // (docs/app/BEDROCK_TUNNEL.md, issue #1546). Like TunnelDial, the server must
-// be running locally. Unlike TunnelDial, Open does not itself dial/handshake
+// be running locally, and a failed-stop orphan is refused as INVALID_STATE
+// rather than SERVER_NOT_FOUND (issue #2466) — a live orphan reaches this
+// handler in practice: the API reads the orphan's INVALID_STATE refusal of a
+// StartServer as already-running, converges observed=running, and syncs the
+// Bedrock tunnel off that write (servers/application/lifecycle.py, the
+// INVALID_STATE arms of StartServer / redispatch_start). Like TunnelDial the
+// dispatch is fire-and-forget, so the refusal reaches only the API's WARN log.
+//
+// Unlike TunnelDial, Open does not itself dial/handshake
 // synchronously: it registers the tunnel and returns, while the QUIC dial,
 // handshake, datagram pump, and any reconnect-with-backoff run off this
 // command on the tunneler's own long-lived context — a slow or rejected relay
 // dial must not hold up the command result.
 func (m *Manager) handleOpenBedrockTunnel(cmd session.Command) session.CommandResult {
-	m.mu.Lock()
-	_, running := m.instances[cmd.ServerID]
-	m.mu.Unlock()
-	if !running {
-		return fail(cmd.CommandID, session.CommandErrorServerNotFound,
-			"instancemanager: server not running")
+	if code, msg, refused := m.notRunningRefusal(cmd.ServerID); refused {
+		return fail(cmd.CommandID, code, msg)
 	}
 	if m.bedrock == nil {
 		return fail(cmd.CommandID, session.CommandErrorInternal,
@@ -1818,6 +1890,13 @@ func (m *Manager) handleOpenBedrockTunnel(cmd session.Command) session.CommandRe
 // (attemptStop), so a Close arriving after the instance is already evicted —
 // or for a server this Worker never opened a tunnel for — must still succeed,
 // not SERVER_NOT_FOUND.
+//
+// That makes it the one running-server command with nothing for the failed-stop
+// orphan refusal to fix (issue #2466): it takes no running check at all, so it
+// never reported an orphan as not-running, and over an orphan it does the useful
+// thing — a failed stop leaves the tunnel open (issue #2468) and this closes it.
+// Refusing it for an orphan would remove the only way to take that tunnel down
+// without terminating the process.
 func (m *Manager) handleCloseBedrockTunnel(cmd session.Command) session.CommandResult {
 	if m.bedrock != nil {
 		m.bedrock.Close(cmd.ServerID)
@@ -2240,7 +2319,7 @@ func (m *Manager) reserve(serverID string) (ok bool, code session.CommandErrorCo
 		// A prior stop could not confirm termination: the process/container may
 		// still be lingering. Starting/hydrating now would double-instance over it;
 		// the reconciler must retry the stop first (issue #251).
-		return false, session.CommandErrorInvalidState, "instancemanager: server has a failed-stop orphan pending termination"
+		return false, session.CommandErrorInvalidState, orphanPendingMsg
 	}
 	if m.reserved[serverID] {
 		// A re-issued duplicate arriving while the original is still in flight after
