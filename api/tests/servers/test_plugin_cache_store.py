@@ -33,7 +33,6 @@ async def test_put_stores_blob_under_content_key() -> None:
     await cache.put(sha256, _stream(content))
 
     assert f"plugin-cache/{sha256}" in store.objects
-    assert await cache.has(sha256) is True
 
 
 async def test_put_dedups_identical_content() -> None:
@@ -104,10 +103,12 @@ async def test_delete_removes_blob() -> None:
     content = b"to-delete"
     sha = hashlib.sha256(content).hexdigest()
     await cache.put(sha, _stream(content))
-    assert await cache.has(sha) is True
+    assert f"plugin-cache/{sha}" in store.objects
 
     await cache.delete(sha)
-    assert await cache.has(sha) is False
+    # The deleted blob reads as the servers-layer miss (issue #2338).
+    with pytest.raises(PluginCacheBlobNotFoundError):
+        _ = [chunk async for chunk in cache.open(sha)]
 
 
 async def test_delete_absent_is_idempotent() -> None:

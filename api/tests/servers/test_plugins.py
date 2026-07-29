@@ -699,7 +699,8 @@ async def test_install_stores_sha256_and_caches_blob() -> None:
         content=content,
     )
     assert plugin.sha256 == expected_sha256
-    assert await cache.has(expected_sha256)
+    cached = b"".join([chunk async for chunk in cache.open(expected_sha256)])
+    assert cached == content
 
 
 async def test_install_identical_content_dedups_blob() -> None:

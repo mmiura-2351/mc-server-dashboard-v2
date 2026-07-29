@@ -36,10 +36,6 @@ class ObjectPluginCacheStore(PluginCacheStore):
     def __init__(self, client_factory: S3ClientFactory) -> None:
         self._client_factory = client_factory
 
-    async def has(self, sha256: str) -> bool:
-        async with self._client_factory() as client:
-            return await client.head_object(_key(sha256)) is not None
-
     async def put(self, sha256: str, stream: AsyncIterator[bytes]) -> None:
         key = _key(sha256)
         async with self._client_factory() as client:
