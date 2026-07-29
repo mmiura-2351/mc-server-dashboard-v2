@@ -13,10 +13,12 @@ servers layer: ``NotFoundError`` -> :class:`BackupNotFoundError`,
 and ``ArchiveUnreadableError`` -> :class:`BackupUnreadableError` (#2371).
 
 The ``ObjectStoreUnavailableError`` translation covers every method that reaches the
-store *before* a response body starts, so one outage yields one status at the edge
-(503 ``storage_unavailable``, issue #2378). The lone exception is :meth:`open`: the
-stream's failure surfaces after the headers are on the wire, where no status is left
-to choose, so it stays a truncated body guarded by the route's byte count (#2318).
+store, so one outage yields one storage type at the seam and one status at the edge
+(503 ``storage_unavailable``, issue #2378). :meth:`open` included: the download
+route now begins the stream before it writes the headers (issue #2415), so the
+locating half of the read can still choose that status. Only an outage that strikes
+once the body is already flowing has no status left to choose, and stays the
+truncated body guarded by the route's byte count (#2318).
 
 That claim holds only because the layer below produces the typed error in the first
 place: the object client translates a backend 5xx / transport failure on the read
@@ -244,6 +246,14 @@ class StorageBackupStoreAdapter(BackupArchiveStore):
                 yield chunk
         except NotFoundError as exc:
             raise BackupNotFoundError(key.value) from exc
+        except ObjectStoreUnavailableError as exc:
+            # A store outage on the locating half of the read reaches the route
+            # before any byte is on the wire (issue #2415), so it must arrive as
+            # the servers type the route answers 503 for rather than as a storage
+            # type crossing the seam. An outage that strikes mid-body translates
+            # the same way and still aborts the response — the status is committed
+            # by then (issue #2318).
+            raise BackupStorageUnavailableError(str(server.value)) from exc
 
     async def store(
         self,

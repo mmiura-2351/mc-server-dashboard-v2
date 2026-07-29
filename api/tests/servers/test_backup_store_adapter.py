@@ -604,6 +604,47 @@ async def test_ranged_open_yields_that_slice_of_the_archive(tmp_path: Path) -> N
     assert tail == archive[-10:]
 
 
+class _OpenUnavailableStorage(FsStorage):
+    """An ``FsStorage`` whose open_backup stream fails with a backend error (#2415).
+
+    Models the object adapter locating the archive: its stream HEADs and GETs the
+    object on the first iteration, and the object client translates a backend 5xx
+    or a transport failure there into ``ObjectStoreUnavailableError`` (#2376).
+    """
+
+    def open_backup(
+        self,
+        community_id: StorageCommunityId,
+        server_id: StorageServerId,
+        key: BackupKey,
+        *,
+        byte_range: tuple[int, int] | None = None,
+    ) -> ByteStream:
+        async def _gen() -> AsyncIterator[bytes]:
+            raise ObjectStoreUnavailableError("object store get failed")
+            yield b""  # pragma: no cover - unreachable, keeps this a generator
+
+        return _gen()
+
+
+async def test_open_storage_backend_failure_translates_to_unavailable(
+    tmp_path: Path,
+) -> None:
+    """The seam (issue #2415): the download route begins the stream before it writes
+    the headers, so an outage on the locating half of the read still has a status to
+    choose — it must arrive as the servers type the edge maps to 503, not as a raw
+    storage type crossing back into the servers layer."""
+
+    storage = _OpenUnavailableStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+
+    with pytest.raises(BackupStorageUnavailableError):
+        await drain(
+            adapter.open(community_id=community, server_id=server, storage_ref=_ref())
+        )
+
+
 async def test_ranged_open_unknown_ref_translates_to_backup_not_found(
     tmp_path: Path,
 ) -> None:
