@@ -1297,6 +1297,61 @@ async def test_list_dir_on_a_file_path_is_not_found(harness: StorageHarness) -> 
         await harness.storage.list_dir(community, server, RelPath("server.properties"))
 
 
+async def test_path_exists_answers_for_a_file_a_dir_and_a_free_name(
+    harness: StorageHarness,
+) -> None:
+    """The occupied-name question, answered the same way by both backends (#2426).
+
+    A rename's never-clobber pre-check asks it, so a free name and a taken one
+    must be told apart identically whatever the store is; what makes a name taken
+    beyond a plain file or directory (a symlink dirent) is per-backend and pinned
+    with the fs specifics.
+    """
+
+    community, server = new_scope()
+    await harness.publish(
+        community, server, {"world/level.dat": b"abc", "server.properties": b"k=v"}
+    )
+
+    assert await harness.storage.path_exists(community, server, RelPath("."))
+    assert await harness.storage.path_exists(
+        community, server, RelPath("server.properties")
+    )
+    assert await harness.storage.path_exists(community, server, RelPath("world"))
+    assert await harness.storage.path_exists(
+        community, server, RelPath("world/level.dat")
+    )
+    assert not await harness.storage.path_exists(community, server, RelPath("free"))
+    assert not await harness.storage.path_exists(
+        community, server, RelPath("world/free")
+    )
+
+
+async def test_path_exists_is_false_rather_than_an_error_for_an_unnameable_path(
+    harness: StorageHarness,
+) -> None:
+    """An over-long component cannot name anything, so it is free, not a failure.
+
+    The same rule the read paths settled on (issue #2394): a client-supplied path
+    the backend cannot even name must not reach the edge as a 500.
+    """
+
+    community, server = new_scope()
+    await harness.publish(community, server, {"server.properties": b"k=v"})
+
+    assert not await harness.storage.path_exists(community, server, RelPath("x" * 300))
+
+
+async def test_path_exists_before_any_publish_is_false(
+    harness: StorageHarness,
+) -> None:
+    """A server with no working set holds nothing, so no name is taken (#205)."""
+
+    community, server = new_scope()
+
+    assert not await harness.storage.path_exists(community, server, RelPath("anything"))
+
+
 async def test_write_file_overwrites_and_retains_prior_version(
     harness: StorageHarness,
 ) -> None:

@@ -134,6 +134,17 @@ class StorageFileStoreAdapter(FileStore):
             for entry in entries
         ]
 
+    async def path_exists(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> bool:
+        community, server = _scope(community_id, server_id)
+        try:
+            return await self._storage.path_exists(
+                community, server, _rel_path(rel_path)
+            )
+        except PathTraversalError as exc:
+            raise InvalidFilePathError(rel_path) from exc
+
     async def write_file(
         self,
         *,

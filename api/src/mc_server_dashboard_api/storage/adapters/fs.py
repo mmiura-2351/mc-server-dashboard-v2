@@ -1348,6 +1348,39 @@ class FsStorage(Storage):
         finally:
             release()
 
+    async def path_exists(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
+    ) -> bool:
+        return await asyncio.to_thread(
+            self._path_exists, community_id, server_id, rel_path
+        )
+
+    def _path_exists(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
+    ) -> bool:
+        # Nothing is published, so nothing occupies any name but the root itself.
+        if not self._current_link(community_id, server_id).is_symlink():
+            return not rel_path.parts
+        # Lease the live snapshot for the same reason every other read does: a
+        # concurrent publish's post-flip GC must not delete the snapshot between
+        # resolve and probe (issue #1953).
+        current, release = self._lease_current(community_id, server_id)
+        try:
+            # Containment FIRST (the established ordering): a path escaping the
+            # root is refused rather than answered, exactly as a read refuses it.
+            self._safe_target(current, rel_path)
+            # ``lexists`` on the UNRESOLVED join, which is what makes this the
+            # question a rename destination asks: intermediate components are
+            # followed (as every read follows them), while the leaf is described
+            # as ITSELF -- a symlink occupies its name whatever it points at, and
+            # a dangling one does too. Like ``os.path.islink`` in
+            # ``_safe_read_target``, it ANSWERS for every path a client can ask
+            # for: a component past NAME_MAX is False, not an ENAMETOOLONG (issue
+            # #2394).
+            return os.path.lexists(current.joinpath(*rel_path.parts))
+        finally:
+            release()
+
     def open_working_set_view(
         self, community_id: CommunityId, server_id: ServerId
     ) -> contextlib.AbstractAsyncContextManager[WorkingSetView]:

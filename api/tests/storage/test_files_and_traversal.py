@@ -789,6 +789,71 @@ async def test_listing_through_an_intermediate_symlink_still_works(
     assert [entry.name for entry in entries] == ["data"]
 
 
+# --- the OCCUPIED-NAME question (issue #2426 review) ------------------------
+#
+# A rename's never-clobber pre-check asks whether a name is taken. It cannot be
+# composed out of the read methods, because the whole point of the two rules
+# above is that a symlink dirent answers neither a read nor a listing -- yet it
+# very much occupies its name, and a rename that believed otherwise would land on
+# whatever the link points at. Nor can it be answered from the PARENT listing:
+# the parent may itself be a link, whose listing is that same miss, while the
+# path still resolves through it.
+#
+# ``path_exists`` therefore resolves exactly as a read does -- intermediate
+# components followed, the leaf described as itself, containment first.
+
+
+async def test_a_symlink_occupies_its_name_although_nothing_can_read_it(
+    tmp_path: Path,
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"real/inner": b"X", "big.bin": b"B"})
+    live = snapshot_dir(tmp_path, community, server)
+    (live / "alias").symlink_to("real")
+    (live / "link.bin").symlink_to("big.bin")
+    (live / "broken").symlink_to("nowhere")
+    _plant_symlink_loop(live / "loop")
+
+    for name in ("alias", "link.bin", "broken", "loop"):
+        assert await storage.path_exists(community, server, RelPath(name)), name
+
+
+async def test_a_name_under_a_symlink_parent_is_occupied(tmp_path: Path) -> None:
+    """The parent is followed, so what is really there is what is reported.
+
+    The read paths resolve ``alias/inner`` to the real file, so a pre-check that
+    called that name free would let a rename overwrite it — the never-clobber
+    guarantee broken by the one shape a listing-based answer cannot see.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"real/inner": b"X", "real/sub/f": b"Y"})
+    live = snapshot_dir(tmp_path, community, server)
+    (live / "alias").symlink_to("real")
+
+    assert await storage.path_exists(community, server, RelPath("alias/inner"))
+    assert await storage.path_exists(community, server, RelPath("alias/sub"))
+    assert not await storage.path_exists(community, server, RelPath("alias/free"))
+
+
+async def test_path_exists_of_an_escaping_symlink_is_still_a_traversal_refusal(
+    tmp_path: Path,
+) -> None:
+    """Containment outranks the answer here too: an escape is refused, not reported."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"x"})
+    secret = tmp_path / "secret.txt"
+    secret.write_bytes(b"top-secret")
+    (snapshot_dir(tmp_path, community, server) / "escape").symlink_to(secret)
+
+    with pytest.raises(PathTraversalError):
+        await storage.path_exists(community, server, RelPath("escape"))
+
+
 # --- READING a symlink dirent (issue #2418 review) --------------------------
 #
 # Describing the link rather than its target split the listing from the read: the

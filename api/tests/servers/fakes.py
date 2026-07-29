@@ -271,6 +271,18 @@ class FakeFileStore(FileStore):
                 entries.append(FileEntry(name=rest, is_dir=False, size=len(content)))
         return entries
 
+    async def path_exists(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> bool:
+        # A name is occupied by a seeded file or by a directory some seeded file
+        # sits under; the root is always there.
+        if rel_path in ("", "."):
+            return True
+        prefix = rel_path.rstrip("/") + "/"
+        return rel_path in self.files or any(
+            path.startswith(prefix) for path in self.files
+        )
+
     async def write_file(
         self,
         *,

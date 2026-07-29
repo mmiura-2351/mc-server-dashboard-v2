@@ -746,6 +746,80 @@ async def test_rename_onto_a_file_link_does_not_overwrite_its_target(
     assert (live / "big.bin").read_bytes() == b"TARGET"
 
 
+async def test_rename_onto_a_name_under_a_directory_link_is_refused(
+    tmp_path: Path,
+) -> None:
+    """The destination check must see through a link it does not itself describe.
+
+    ``alias/inner.txt`` is a real file every read resolves and streams, so the
+    name is taken. An answer derived from the destination's parent listing cannot
+    say so — listing ``alias`` is a miss (issue #2426) — and the rename would then
+    overwrite the real file's bytes with the never-clobber check none the wiser.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await publish(
+        storage,
+        StorageCommunityId(community),
+        StorageServerId(server),
+        {"real/inner.txt": b"INNER", "g.txt": b"G"},
+    )
+    live = snapshot_dir(
+        tmp_path, StorageCommunityId(community), StorageServerId(server)
+    )
+    (live / "alias").symlink_to("real")
+    adapter = StorageFileStoreAdapter(storage=storage)
+    use_case = RenameFile(uow=_stopped_uow(community, server), file_store=adapter)
+
+    with pytest.raises(FileAlreadyExistsError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server),
+            from_path="g.txt",
+            to_path="alias/inner.txt",
+        )
+
+    assert (live / "real" / "inner.txt").read_bytes() == b"INNER"
+    assert (live / "g.txt").read_bytes() == b"G"
+
+
+async def test_rename_onto_a_directory_under_a_directory_link_is_refused(
+    tmp_path: Path,
+) -> None:
+    """The same shape whose destination is a DIRECTORY: the 409, never a crash.
+
+    ``rename_file`` resolves through the link and would rename onto a directory,
+    raising a bare ``IsADirectoryError`` that no route maps — a 500 for a
+    destination the pre-check is supposed to have refused.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await publish(
+        storage,
+        StorageCommunityId(community),
+        StorageServerId(server),
+        {"real/sub/f.txt": b"F", "g.txt": b"G"},
+    )
+    live = snapshot_dir(
+        tmp_path, StorageCommunityId(community), StorageServerId(server)
+    )
+    (live / "alias").symlink_to("real")
+    adapter = StorageFileStoreAdapter(storage=storage)
+    use_case = RenameFile(uow=_stopped_uow(community, server), file_store=adapter)
+
+    with pytest.raises(FileAlreadyExistsError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server),
+            from_path="g.txt",
+            to_path="alias/sub",
+        )
+
+    assert (live / "real" / "sub" / "f.txt").read_bytes() == b"F"
+
+
 async def test_delete_of_a_directory_link_leaves_its_target_alone(
     tmp_path: Path,
 ) -> None:

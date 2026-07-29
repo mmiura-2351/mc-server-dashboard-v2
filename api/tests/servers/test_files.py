@@ -86,10 +86,6 @@ class FakeFileStore(FileStore):
 
     def __init__(self, *, strict_dirs: bool = False) -> None:
         self.files: dict[str, bytes] = {}
-        # Directory listings by rel_path. A rename's never-clobber pre-check asks
-        # the destination's PARENT listing whether the name is taken (issue
-        # #2426), so a test that needs a destination to count as occupied seeds it
-        # here as well as in ``files``.
         self.dirs: dict[str, list[FileEntry]] = {}
         self.versions: dict[str, list[str]] = {}
         # Retained version bytes keyed by (rel_path, version_id), so a test can
@@ -159,6 +155,17 @@ class FakeFileStore(FileStore):
         if self.strict_dirs and rel_path not in self.dirs:
             raise ServerFileNotFoundError(str(server_id.value))
         return self.dirs.get(rel_path, [])
+
+    async def path_exists(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> bool:
+        # A name is occupied by a seeded file or a seeded directory; the root is
+        # always there. Deliberately NOT derived from ``list_dir``: the real seam
+        # answers this one without a listing (issue #2426), because a listing
+        # misses on a symlink the name is nonetheless occupied by.
+        if self.bad_path:
+            raise InvalidFilePathError(rel_path)
+        return rel_path in ("", ".") or rel_path in self.files or rel_path in self.dirs
 
     async def write_file(
         self,
@@ -2258,11 +2265,6 @@ async def test_rename_existing_destination_is_conflict() -> None:
     store = FakeFileStore(strict_dirs=True)
     store.files["old.txt"] = b"a"
     store.files["taken.txt"] = b"b"
-    # Both are children of the root, which is where the occupied-name check looks.
-    store.dirs["."] = [
-        FileEntry(name="old.txt", is_dir=False, size=1),
-        FileEntry(name="taken.txt", is_dir=False, size=1),
-    ]
     use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
 
     with pytest.raises(FileAlreadyExistsError):
@@ -2354,11 +2356,6 @@ async def test_rename_dir_existing_destination_is_conflict() -> None:
     store = FakeFileStore(strict_dirs=True)
     store.dirs["old_world"] = [FileEntry(name="level.dat", is_dir=False, size=4)]
     store.dirs["taken"] = [FileEntry(name="x.dat", is_dir=False, size=1)]
-    # Both are children of the root, which is where the occupied-name check looks.
-    store.dirs["."] = [
-        FileEntry(name="old_world", is_dir=True, size=0),
-        FileEntry(name="taken", is_dir=True, size=0),
-    ]
     use_case = RenameFile(uow=_stopped_uow(community, server_id), file_store=store)
 
     with pytest.raises(FileAlreadyExistsError):
