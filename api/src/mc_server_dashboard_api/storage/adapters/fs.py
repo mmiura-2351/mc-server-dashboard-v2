@@ -2040,19 +2040,27 @@ def _list_entries(target: Path, not_found: str) -> list[DirEntry]:
     under the listing -- silently dropping entries for those would hide a real
     failure behind a short listing.
 
-    ENOENT is not exclusively a vanished entry, though: a DANGLING SYMLINK stats
-    the same way and is therefore omitted too, where it used to 500 the listing
-    (via the pre-single-stat ``is_dir()`` answering False). A symlink LOOP is the
-    neighbouring case and still surfaces as ``OSError(ELOOP)``. Neither is a race,
-    both are real dirents ``ls`` shows, and what a listing should report for them
-    is one decision taken separately (issue #2418).
+    The describing call is an ``lstat``: an entry is described as what the
+    DIRENT is, never as what it points at (issue #2418). A target-following
+    ``stat`` cannot describe two children that have not vanished at all — a
+    dangling symlink raises ENOENT and was therefore swallowed by the rule
+    above, and a symlink loop raises ELOOP and escaped untranslated, 500'ing the
+    whole listing. Both are real dirents ``ls`` shows; ``lstat`` succeeds on both,
+    so they need no special case and neither can fail a listing any more. It also
+    makes an unbounded walk of a cyclic directory symlink structurally impossible.
+    The cost is that a symlink to a DIRECTORY is reported as a file carrying the
+    link's own size (the target string's length) rather than as a navigable
+    directory. That is accepted: it is exactly what the Worker's running-server
+    listing already does for the same entry (``unix.Fstatat`` with
+    ``AT_SYMLINK_NOFOLLOW``), so the at-rest and running file browsers now agree,
+    as the control-plane ``FileEntry`` contract already claims they do.
     """
 
     children = _list_children(target, not_found)
     entries = []
     for child in children:
         try:
-            info = child.stat()
+            info = child.lstat()
         except OSError as exc:
             if exc.errno == errno.ENOENT:
                 continue
@@ -2342,7 +2350,8 @@ class _FsWorkingSetView(WorkingSetView):
         # DIRECTORY, and ``delete_dir`` removes a subtree inside that very
         # directory, so a pre-check here would leave the same window. The body is
         # shared so the view cannot drift from ``_list_dir`` on any of it --
-        # including how a vanished child is reported (issue #2414).
+        # including how a vanished child is reported (issue #2414) and how a
+        # symlink child is described (issue #2418).
         return _list_entries(target, f"directory not found: {rel_path.value}")
 
     def open_file_stream(self, rel_path: RelPath) -> ByteStream:

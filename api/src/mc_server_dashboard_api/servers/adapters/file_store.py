@@ -287,8 +287,28 @@ class StorageFileStoreAdapter(FileStore):
                 sink, mode="w", compression=zipfile.ZIP_DEFLATED
             ) as zf:
                 async for arcname, member_stream in self._walk_files(view, rel_path):
+                    # A listing describes every dirent, including ones that name
+                    # no readable file: a dangling symlink or a link to a
+                    # directory is listed as an entry (issue #2418) whose read is
+                    # a miss, and so is a member deleted between the listing and
+                    # its read. Skip that member rather than aborting the zip —
+                    # one broken link must not cost the operator the whole
+                    # download. The miss is detected by pulling the FIRST chunk
+                    # before the zip member is opened (the Storage stream locates
+                    # the file on its first iteration), so a skipped member never
+                    # leaves a truncated entry behind in the archive.
+                    stream = member_stream.__aiter__()
+                    try:
+                        first = await anext(stream)
+                    except StopAsyncIteration:
+                        first = b""
+                    except ServerFileNotFoundError:
+                        continue
                     with zf.open(arcname, mode="w") as member:
-                        async for chunk in member_stream:
+                        member.write(first)
+                        for out in sink.drain():
+                            yield out
+                        async for chunk in stream:
                             member.write(chunk)
                             for out in sink.drain():
                                 yield out

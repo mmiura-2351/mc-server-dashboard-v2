@@ -2479,6 +2479,33 @@ async def test_search_content_skips_oversized_file_without_reading_it() -> None:
     assert "config/motd.txt" not in store.read_paths
 
 
+async def test_search_content_skips_a_listed_file_it_cannot_read() -> None:
+    """One unreadable entry is skipped, not allowed to abort the whole search.
+
+    A listing describes every dirent, including ones that name no readable file:
+    a dangling symlink is listed (issue #2418) but its read is a miss, and so is
+    a file deleted between the listing and its read. Failing the search over one
+    such entry would cost the operator every other match.
+    """
+
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = _search_store()
+    store.dirs["config"] = [
+        *store.dirs["config"],
+        FileEntry(name="broken", is_dir=False, size=7),
+    ]
+    use_case = SearchFiles(uow=_stopped_uow(community, server_id), file_store=store)
+
+    result = await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        query="hello",
+        by="content",
+        max_results=100,
+    )
+    assert set(result.paths) == {"server.properties", "config/motd.txt"}
+
+
 async def test_search_content_aggregate_scan_cap_sets_truncated() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore(strict_dirs=True)

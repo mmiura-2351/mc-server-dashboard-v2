@@ -604,6 +604,118 @@ async def test_list_dir_of_an_empty_directory_is_still_empty(tmp_path: Path) -> 
     assert await storage.list_dir(community, server, RelPath("d")) == []
 
 
+# --- a listed child that is a SYMLINK (issue #2418) --------------------------
+#
+# A listing describes the link itself (``lstat``), never its target. Two children
+# cannot be described by a target-following ``stat`` at all — a dangling link
+# (ENOENT, which #2414's vanished-child rule then silently omitted) and a link
+# loop (ELOOP, which escaped untranslated and 500'd the whole listing) — yet both
+# are real dirents ``ls`` shows and neither vanished. ``lstat`` succeeds on both,
+# so they need no special case: each is described as what it is, a link, with
+# ``is_dir=False`` and the link's own size (the target string's length).
+#
+# This is the contract the Worker's running-server listing already ships and pins
+# (``unix.Fstatat(..., AT_SYMLINK_NOFOLLOW)`` in ``instancemanager.go``), so the
+# at-rest and running browsers now describe the same entry the same way — which
+# is what ``FileEntry`` in the control-plane proto already claims. A link to a
+# DIRECTORY is therefore reported as a file too; that is the accepted trade.
+
+
+async def test_list_dir_describes_a_dangling_symlink_as_the_link(
+    tmp_path: Path,
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"d/keep": b"DATA"})
+    (snapshot_dir(tmp_path, community, server) / "d" / "broken").symlink_to("nowhere")
+
+    entries = await storage.list_dir(community, server, RelPath("d"))
+
+    broken = next(entry for entry in entries if entry.name == "broken")
+    assert broken.is_dir is False
+    assert broken.size == len("nowhere")
+
+
+async def test_view_list_dir_describes_a_dangling_symlink_as_the_link(
+    tmp_path: Path,
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"d/keep": b"DATA"})
+    (snapshot_dir(tmp_path, community, server) / "d" / "broken").symlink_to("nowhere")
+
+    async with storage.open_working_set_view(community, server) as view:
+        entries = await view.list_dir(RelPath("d"))
+
+    broken = next(entry for entry in entries if entry.name == "broken")
+    assert broken.is_dir is False
+    assert broken.size == len("nowhere")
+
+
+async def test_list_dir_describes_a_symlink_loop_as_the_link(tmp_path: Path) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"d/keep": b"DATA"})
+    _plant_symlink_loop(snapshot_dir(tmp_path, community, server) / "d" / "loop")
+
+    entries = await storage.list_dir(community, server, RelPath("d"))
+
+    loop = next(entry for entry in entries if entry.name == "loop")
+    assert loop.is_dir is False
+    assert loop.size == len("loop")
+
+
+async def test_view_list_dir_describes_a_symlink_loop_as_the_link(
+    tmp_path: Path,
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"d/keep": b"DATA"})
+    _plant_symlink_loop(snapshot_dir(tmp_path, community, server) / "d" / "loop")
+
+    async with storage.open_working_set_view(community, server) as view:
+        entries = await view.list_dir(RelPath("d"))
+
+    loop = next(entry for entry in entries if entry.name == "loop")
+    assert loop.is_dir is False
+    assert loop.size == len("loop")
+
+
+async def test_list_dir_does_not_follow_a_symlink_to_a_directory(
+    tmp_path: Path,
+) -> None:
+    """The link is described, not the directory it points at."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"d/keep": b"DATA", "real/inner": b"X"})
+    live = snapshot_dir(tmp_path, community, server)
+    (live / "d" / "alias").symlink_to("../real")
+
+    entries = await storage.list_dir(community, server, RelPath("d"))
+
+    alias = next(entry for entry in entries if entry.name == "alias")
+    assert alias.is_dir is False
+    assert alias.size == len("../real")
+
+
+async def test_view_list_dir_does_not_follow_a_symlink_to_a_directory(
+    tmp_path: Path,
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"d/keep": b"DATA", "real/inner": b"X"})
+    live = snapshot_dir(tmp_path, community, server)
+    (live / "d" / "alias").symlink_to("../real")
+
+    async with storage.open_working_set_view(community, server) as view:
+        entries = await view.list_dir(RelPath("d"))
+
+    alias = next(entry for entry in entries if entry.name == "alias")
+    assert alias.is_dir is False
+    assert alias.size == len("../real")
+
+
 def test_version_ids_sort_chronologically_across_time_low_wrap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

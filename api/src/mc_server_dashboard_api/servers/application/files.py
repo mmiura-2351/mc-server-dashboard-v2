@@ -1202,9 +1202,17 @@ class SearchFiles:
         # huge file without ever pulling it into memory (the per-file cap's point).
         if size > self.max_file_bytes:
             return False
-        data = await self.file_store.read_file(
-            community_id=community_id, server_id=server_id, rel_path=rel_path
-        )
+        # A listing describes every dirent, including ones that name no readable
+        # file: a dangling symlink or a link to a directory is listed as an entry
+        # (issue #2418) whose read is a miss, and so is a file deleted between the
+        # listing and its read. Such an entry simply matches nothing — failing the
+        # whole search over it would cost the operator every other match.
+        try:
+            data = await self.file_store.read_file(
+                community_id=community_id, server_id=server_id, rel_path=rel_path
+            )
+        except ServerFileNotFoundError:
+            return False
         return needle in data
 
     async def _require_at_rest(

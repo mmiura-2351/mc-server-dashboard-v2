@@ -34,7 +34,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 from mc_server_dashboard_api.storage.domain.value_objects import (
     ServerId as StorageServerId,
 )
-from tests.storage.helpers import healthy_region_bytes, publish
+from tests.storage.helpers import healthy_region_bytes, publish, snapshot_dir
 
 
 def _scope() -> tuple[uuid.UUID, uuid.UUID]:
@@ -490,6 +490,42 @@ async def test_export_dir_appends_extra_entries(tmp_path: Path) -> None:
         "world/level.dat": b"world-bytes",
         "export_metadata.json": b'{"format": 1}',
     }
+
+
+async def test_download_dir_skips_a_member_it_cannot_read(tmp_path: Path) -> None:
+    """One unreadable member is dropped, not allowed to abort the whole zip.
+
+    A listing describes every dirent, including ones that name no readable file:
+    a dangling symlink is listed (issue #2418) but its read is a miss, and so is
+    a member deleted between the listing and its read. Aborting the stream would
+    make one broken link cost the operator the entire directory download, so the
+    member is skipped and the zip stays valid without it.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await publish(
+        storage,
+        StorageCommunityId(community),
+        StorageServerId(server),
+        {"d/keep.txt": b"KEEP"},
+    )
+    live = snapshot_dir(
+        tmp_path, StorageCommunityId(community), StorageServerId(server)
+    )
+    (live / "d" / "broken").symlink_to("nowhere")
+    adapter = StorageFileStoreAdapter(storage=storage)
+
+    stream = adapter.download_dir(
+        community_id=CommunityId(community),
+        server_id=ServerId(server),
+        rel_path="d",
+    )
+    blob = b"".join([chunk async for chunk in stream])
+
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        contents = {name: zf.read(name) for name in zf.namelist()}
+    assert contents == {"keep.txt": b"KEEP"}
 
 
 async def test_download_dir_missing_is_file_not_found(tmp_path: Path) -> None:

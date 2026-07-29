@@ -89,8 +89,10 @@ class WorkingSetView(abc.ABC):
         :class:`~.errors.NotFoundError` for a missing subdirectory. The pin holds
         the snapshot as a whole, not the subtrees in it, so a ``delete_dir`` of a
         pinned directory races the listing and must surface as that same miss
-        (issue #2394), and an ENTRY deleted while the listing is taken is omitted
-        from it exactly as :meth:`FileStore.list_dir` omits it (issue #2414).
+        (issue #2394). Entries are described exactly as :meth:`FileStore.list_dir`
+        describes them: one deleted while the listing is taken is omitted (issue
+        #2414), and every other one describes itself rather than what it points at
+        (issue #2418).
         """
 
     @abc.abstractmethod
@@ -646,17 +648,22 @@ class FileStore(abc.ABC):
         than a backend-native error — the lease holds the snapshot directory, not
         the subtrees inside it.
 
-        A listing describes the directory as of a moment, so an ENTRY that resolves
-        to nothing when the backend describes it is simply OMITTED — never an
-        error, and never a row with a made-up size (issue #2414). The case that
-        drove this is an entry deleted while the listing is being taken; the same
-        answer necessarily covers an entry that resolves to nothing for another
-        reason — a dangling symlink is omitted too, while a symlink LOOP is not, and
-        how a listing should report the symlink cases is unsettled and tracked
-        separately (issue #2418). An entry that does resolve and that the backend
-        then fails to describe — no permission, an I/O error — is not omitted and
-        surfaces as itself. The directory going away is still the miss above, not
-        an empty listing.
+        A listing describes the directory as of a moment, so an ENTRY that is GONE
+        when the backend describes it is simply OMITTED — never an error, and never
+        a row with a made-up size (issue #2414). An entry that is still there and
+        that the backend then fails to describe — no permission, an I/O error — is
+        not omitted and surfaces as itself. The directory going away is still the
+        miss above, not an empty listing.
+
+        Every entry describes ITSELF, never what it points at (issue #2418). On a
+        backend with symlinks that means the link, not its target: a link is always
+        ``is_dir=False`` and carries the link's own size, so a link to a directory
+        is a file-shaped entry that is not navigable and whose read is a miss. It
+        also means a dangling link and a link loop are ordinary entries, not
+        failures and not omissions — neither vanished, so neither is the case
+        above. This is the contract the Worker's running-server listing already
+        ships, so a running and an at-rest listing describe the same entry the same
+        way.
         """
 
     @abc.abstractmethod
