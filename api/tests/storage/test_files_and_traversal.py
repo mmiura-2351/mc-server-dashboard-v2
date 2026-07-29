@@ -4,8 +4,8 @@ The backend-agnostic file read/edit/version/rollback contract is in
 ``test_port_contract.py`` (run against both adapters). This file keeps only the
 fs realization details that reach into the filesystem: symlink-escape rejection
 (object storage has no symlinks, Section 6/7.3), the fs version-id ordering /
-oldest-pruning, and the delete-racing-a-read window of the fs stream helpers —
-all of which depend on the fs module internals.
+oldest-pruning, and the delete-racing-a-read window of the fs read paths —
+streaming and whole-bytes alike — all of which depend on the fs module internals.
 """
 
 from __future__ import annotations
@@ -293,6 +293,139 @@ async def test_open_jar_propagates_a_non_miss_open_failure(
     with pytest.raises(OSError) as caught:
         await drain(storage.open_jar(key))
     assert caught.value.errno == err
+
+
+# --- a delete racing a NON-streaming read (issue #2394) ----------------------
+#
+# The same check-then-act window the stream helpers shed above survived on the
+# whole-bytes methods: ``read_file`` (is_file then read_bytes), ``backup_size``
+# (is_file then stat) and ``list_dir`` (is_dir then iterdir). The reader lease
+# does not close it -- ``delete_file`` / ``delete_dir`` remove in place, inside
+# the very tree the lease pins -- so a delete landing in the window made the
+# operation raise a bare ``FileNotFoundError``, which the servers seam does not
+# translate (it translates :class:`NotFoundError` only): a measured 500 on
+# ``GET .../files?path=``. Staged the same way as the stream races above: the
+# entry is really removed and the existence predicate is then pinned to the
+# pre-delete answer, which is what a surviving pre-check would have observed.
+
+
+def _stale_dir_existence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make ``Path.is_dir`` report the pre-delete answer for every path."""
+
+    monkeypatch.setattr(Path, "is_dir", lambda self, *args, **kwargs: True)
+
+
+async def test_read_file_delete_racing_the_read_is_not_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"DATA"})
+
+    await storage.delete_file(community, server, RelPath("f"))
+    _stale_existence(monkeypatch)
+
+    with pytest.raises(NotFoundError):
+        await storage.read_file(community, server, RelPath("f"))
+
+
+async def test_backup_size_delete_racing_the_stat_is_not_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"DATA"})
+    key = await storage.create_backup_from_current(community, server)
+
+    await storage.delete_backup(community, server, key)
+    _stale_existence(monkeypatch)
+
+    with pytest.raises(NotFoundError):
+        await storage.backup_size(community, server, key)
+
+
+async def test_list_dir_delete_racing_the_iterdir_is_not_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"d/f": b"DATA"})
+
+    await storage.delete_dir(community, server, RelPath("d"))
+    _stale_dir_existence(monkeypatch)
+
+    with pytest.raises(NotFoundError):
+        await storage.list_dir(community, server, RelPath("d"))
+
+
+async def test_view_list_dir_delete_racing_the_iterdir_is_not_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pinned working-set view has the same window: the pin holds the tree."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"d/f": b"DATA"})
+
+    async with storage.open_working_set_view(community, server) as view:
+        await storage.delete_dir(community, server, RelPath("d"))
+        _stale_dir_existence(monkeypatch)
+
+        with pytest.raises(NotFoundError):
+            await view.list_dir(RelPath("d"))
+
+
+async def test_list_dir_on_a_file_path_stays_a_miss(tmp_path: Path) -> None:
+    """Dropping the ``is_dir`` pre-check must not change what listing a FILE answers.
+
+    ``iterdir`` on a deleted directory (ENOENT) and ``iterdir`` on a path that is a
+    file (ENOTDIR) are different misses, and the pre-check folded both into the one
+    the Port models: ``directory not found``. The object backend answers a file
+    path the same way (an empty prefix listing under a non-empty sub-key), so the
+    fold is the contract rather than an fs accident — pinned across both backends
+    in ``test_port_contract.py``.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"DATA"})
+
+    with pytest.raises(NotFoundError):
+        await storage.list_dir(community, server, RelPath("f"))
+
+
+# --- an over-long path component (issue #2394) ------------------------------
+#
+# ``RelPath`` bounds neither component nor total length, so a name past the
+# filesystem's NAME_MAX is reachable from an ordinary ``?path=`` query. It used to
+# leave every read path as ``OSError(ENAMETOOLONG)`` — ``is_file`` / ``is_dir``
+# RAISE on it rather than answering False — and so reached the edge as a 500 for
+# what is purely a client-supplied bad path (measured on ``GET .../files?path=``).
+# A component longer than the filesystem allows cannot name an existing file, so
+# the honest answer is the Port's miss; the errno therefore joins the shared
+# ``_NOT_A_READABLE_FILE`` set, which keeps the read, stream and listing paths
+# agreeing on it instead of diverging.
+
+_TOO_LONG = "x" * 300  # past NAME_MAX (255) on every mainstream filesystem
+
+
+async def test_over_long_name_is_a_miss_on_every_read_path(tmp_path: Path) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"DATA"})
+    rel = RelPath(_TOO_LONG)
+
+    with pytest.raises(NotFoundError):
+        await storage.read_file(community, server, rel)
+    with pytest.raises(NotFoundError):
+        await drain(storage.open_file_stream(community, server, rel))
+    with pytest.raises(NotFoundError):
+        await storage.list_dir(community, server, rel)
+    async with storage.open_working_set_view(community, server) as view:
+        with pytest.raises(NotFoundError):
+            await drain(view.open_file_stream(rel))
+        with pytest.raises(NotFoundError):
+            await view.list_dir(rel)
 
 
 def test_version_ids_sort_chronologically_across_time_low_wrap(

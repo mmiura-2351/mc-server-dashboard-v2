@@ -1282,6 +1282,21 @@ async def test_list_dir_lists_entries(harness: StorageHarness) -> None:
     assert props.size == 3
 
 
+async def test_list_dir_on_a_file_path_is_not_found(harness: StorageHarness) -> None:
+    """Listing a path that names a FILE is the Port's miss, on both backends.
+
+    Pinned because the fs adapter reaches this answer through the failure of the
+    listing itself rather than an ``is_dir`` pre-check (issue #2394), and that must
+    not shift what a non-directory listing reports relative to the object backend.
+    """
+
+    community, server = new_scope()
+    await harness.publish(community, server, {"server.properties": b"k=v"})
+
+    with pytest.raises(NotFoundError):
+        await harness.storage.list_dir(community, server, RelPath("server.properties"))
+
+
 async def test_write_file_overwrites_and_retains_prior_version(
     harness: StorageHarness,
 ) -> None:

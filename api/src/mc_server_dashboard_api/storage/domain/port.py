@@ -86,7 +86,10 @@ class WorkingSetView(abc.ABC):
         """List a directory in the pinned snapshot.
 
         Returns ``[]`` for the root of an unpublished server. Raises
-        :class:`~.errors.NotFoundError` for a missing subdirectory.
+        :class:`~.errors.NotFoundError` for a missing subdirectory. The pin holds
+        the snapshot as a whole, not the subtrees in it, so a ``delete_dir`` of a
+        pinned directory races the listing and must surface as that same miss
+        (issue #2394).
         """
 
     @abc.abstractmethod
@@ -573,7 +576,9 @@ class BackupStore(abc.ABC):
         """Return a stored backup archive's size in bytes (issue #281).
 
         The on-disk archive byte count, recorded as ``size_bytes`` at create/upload.
-        Raises :class:`~.errors.NotFoundError` for an unknown key.
+        Raises :class:`~.errors.NotFoundError` for an unknown key — and for a key
+        deleted while the size was being taken, since locating the archive is part
+        of measuring it (issue #2394).
         """
 
 
@@ -594,6 +599,10 @@ class FileStore(abc.ABC):
         payload). A large single-file *download* must use
         :meth:`open_file_stream` instead so it does not buffer the whole file in
         RAM (issue #265).
+
+        The miss is exactly :meth:`open_file_stream`'s, including a delete racing
+        the read (issue #2394): the two must answer the same path the same way or
+        the ``?path=`` read and the download of the same file disagree.
         """
 
     @abc.abstractmethod
@@ -613,13 +622,13 @@ class FileStore(abc.ABC):
         absent, on the stream's FIRST iteration.
 
         The miss covers every path that names no readable file — gone, a
-        directory, reached through one, or a symlink that loops (issue #2393) —
-        and locating the file is part of opening it, so a delete racing the open
-        is the same miss as an unknown path and never a backend-native error
-        (issue #2391). The lease holds the snapshot DIRECTORY, not the files in
-        it, so that race is real. A path that names a file the backend cannot
-        read — no permission, an I/O error — is NOT a miss and surfaces as
-        itself.
+        directory, reached through one, a symlink that loops (issue #2393), or a
+        component longer than the backend can name (issue #2394) — and locating
+        the file is part of opening it, so a delete racing the open is the same
+        miss as an unknown path and never a backend-native error (issue #2391).
+        The lease holds the snapshot DIRECTORY, not the files in it, so that race
+        is real. A path that names a file the backend cannot read — no
+        permission, an I/O error — is NOT a miss and surfaces as itself.
         """
 
     @abc.abstractmethod
@@ -629,6 +638,12 @@ class FileStore(abc.ABC):
         """Browse a directory in ``current/``. Raises :class:`~.errors.NotFoundError`.
 
         Pass ``RelPath(".")`` to list the working-set root itself.
+
+        One miss covers every path that lists nothing: gone, a plain file, reached
+        through one, or over-long (issue #2394). Listing the directory is what
+        locates it, so a ``delete_dir`` racing the listing is that same miss rather
+        than a backend-native error — the lease holds the snapshot directory, not
+        the subtrees inside it.
         """
 
     @abc.abstractmethod

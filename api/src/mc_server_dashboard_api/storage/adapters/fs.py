@@ -1197,10 +1197,18 @@ class FsStorage(Storage):
     async def backup_size(
         self, community_id: CommunityId, server_id: ServerId, key: BackupKey
     ) -> int:
+        # The open IS the existence check (issue #2394): an ``is_file()`` pre-check
+        # plus a separate ``stat`` left a window in which a concurrent
+        # ``delete_backup`` made the stat raise a bare ``FileNotFoundError``, which
+        # the servers-side seam does not translate (it translates
+        # :class:`NotFoundError` only) and which therefore reached the edge as a
+        # 500. This is also what ``open_backup`` resolves the archive with, so a
+        # ranged download and the size it resolves its range against cannot
+        # disagree about whether the archive exists.
         archive = self._backup_path(community_id, server_id, key)
-        if not await asyncio.to_thread(archive.is_file):
-            raise NotFoundError(f"backup not found: {key.value}")
-        return await asyncio.to_thread(lambda: archive.stat().st_size)
+        return await asyncio.to_thread(
+            _size_of_readable, archive, f"backup not found: {key.value}"
+        )
 
     # --- file read / edit on the authoritative copy (Section 3.4) ----------
 
@@ -1216,13 +1224,18 @@ class FsStorage(Storage):
     ) -> bytes:
         # Resolve and lease the live snapshot so a concurrent publish's post-flip
         # GC cannot delete the snapshot between resolve and read (issue #1953),
-        # mirroring open_file_stream's lease discipline.
+        # mirroring open_file_stream's lease discipline. The lease protects the
+        # snapshot DIRECTORY, not the files in it, so locating the file is left to
+        # the open rather than pre-checked here (issue #2394) -- exactly as
+        # open_file_stream does it, which is what keeps the two paths' answers
+        # identical.
         current, release = self._lease_current(community_id, server_id)
         try:
             target = self._safe_target(current, rel_path)
-            if not target.is_file():
-                raise NotFoundError(f"file not found: {rel_path.value}")
-            return target.read_bytes()
+            with _open_readable_sync(
+                target, f"file not found: {rel_path.value}"
+            ) as handle:
+                return handle.read()
         finally:
             release()
 
@@ -1265,14 +1278,16 @@ class FsStorage(Storage):
             return []
         # Lease the live snapshot so a concurrent publish's post-flip GC cannot
         # delete the snapshot between resolve and iterdir/stat (issue #1953),
-        # mirroring open_file_stream's lease discipline.
+        # mirroring open_file_stream's lease discipline. The lease does not hold
+        # the subtrees inside the snapshot, so the listing itself is the existence
+        # check rather than an ``is_dir()`` pre-check (issue #2394).
         current, release = self._lease_current(community_id, server_id)
         try:
             target = self._safe_target(current, rel_path)
-            if not target.is_dir():
-                raise NotFoundError(f"directory not found: {rel_path.value}")
             entries = []
-            for child in sorted(target.iterdir(), key=lambda p: p.name):
+            for child in _list_children(
+                target, f"directory not found: {rel_path.value}"
+            ):
                 is_dir = child.is_dir()
                 entries.append(
                     DirEntry(
@@ -1935,9 +1950,9 @@ def _tar_into_fd(
         holder.append(exc)
 
 
-# The ``open`` errnos that all mean "no readable file at this path" -- exactly the
-# set the ``is_file()`` pre-check these per-file streams used to do answered False
-# for: the path is gone (ENOENT -- a delete racing the open, or a dangling
+# The ``open`` errnos that all mean "no readable file at this path" -- very nearly
+# the set the ``is_file()`` pre-check these per-file reads used to do answered
+# False for: the path is gone (ENOENT -- a delete racing the open, or a dangling
 # symlink), it names a directory (EISDIR), it is reached through a non-directory
 # (ENOTDIR), or it is a symlink that loops (ELOOP). The open that replaced the
 # pre-check (issues #2341, #2391) matched on exception TYPE, which silently
@@ -1946,35 +1961,83 @@ def _tar_into_fd(
 # :class:`NotFoundError` only -- reported it as a 500 on a path ``read_file``
 # still answered as a clean miss (issue #2393).
 #
-# ENAMETOOLONG is deliberately absent: ``is_file()`` RAISES on it rather than
-# answering False, so it was never a modelled miss on any path, and folding it in
-# here alone would make a stream disagree with ``read_file`` -- the very
-# divergence this set exists to remove.
+# ENAMETOOLONG is the one errno the pre-check did NOT answer False for: ``is_file``
+# / ``is_dir`` RAISE on it, so an over-long component was a 500 out of every read
+# path alike. It is folded in as a miss (issue #2394) rather than kept as an error:
+# a component longer than the filesystem allows cannot name an existing file, so
+# "no such file" is the honest answer; ``RelPath`` bounds no component length, so
+# the input arrives from an ordinary client ``?path=`` query; and answering a
+# user-supplied bad path with a 500 misattributes a client error to the server.
 #
 # It stays a filter rather than a bare ``except OSError``: EACCES and EIO name a
 # path that does exist, and reporting them as a missing file would hide a real
 # failure behind a 404.
 _NOT_A_READABLE_FILE = frozenset(
-    {errno.ENOENT, errno.EISDIR, errno.ENOTDIR, errno.ELOOP}
+    {errno.ENOENT, errno.EISDIR, errno.ENOTDIR, errno.ELOOP, errno.ENAMETOOLONG}
 )
 
+# The same set for a directory LISTING, derived rather than restated so the two can
+# never drift: ``opendir`` has no EISDIR case (a directory is what it wants), and
+# every remaining errno means the same "nothing listable here" -- including ENOTDIR,
+# which is how a path naming a plain file reports, the miss the ``is_dir()``
+# pre-check folded together with a vanished directory (issue #2394).
+_NOT_A_LISTABLE_DIR = _NOT_A_READABLE_FILE - {errno.EISDIR}
 
-async def _open_readable(path: Path, not_found: str) -> io.BufferedReader:
+
+def _open_readable_sync(path: Path, not_found: str) -> io.BufferedReader:
     """Open ``path`` for reading, reporting "names no readable file" as a miss.
 
-    The single translation point shared by all three per-file stream helpers: for
-    each of them the open IS the existence check, so every failure meaning the
-    path names no readable file has to arrive as the Port's own
-    :class:`NotFoundError` (message ``not_found``). Every other ``OSError``
-    propagates unchanged.
+    The single translation point shared by every fs read of one file -- the three
+    stream helpers, ``_read_file`` and ``backup_size``: for each of them the open
+    IS the existence check, so every failure meaning the path names no readable
+    file has to arrive as the Port's own :class:`NotFoundError` (message
+    ``not_found``). Every other ``OSError`` propagates unchanged.
     """
 
     try:
-        return await asyncio.to_thread(open, path, "rb")
+        return open(path, "rb")
     except OSError as exc:
         if exc.errno in _NOT_A_READABLE_FILE:
             raise NotFoundError(not_found) from exc
         raise
+
+
+async def _open_readable(path: Path, not_found: str) -> io.BufferedReader:
+    """:func:`_open_readable_sync` off the event loop, for the async stream helpers."""
+
+    return await asyncio.to_thread(_open_readable_sync, path, not_found)
+
+
+def _list_children(target: Path, not_found: str) -> list[Path]:
+    """List ``target``'s children sorted by name, reporting a miss as ``NotFoundError``.
+
+    The listing IS the existence check, for the reason the open is one in
+    :func:`_open_readable_sync` (issue #2394): the reader lease pins the snapshot
+    directory, not the subtrees inside it, so a ``delete_dir`` lands between an
+    ``is_dir()`` pre-check and this ``iterdir`` and makes it raise a bare
+    ``FileNotFoundError`` -- untranslated by the servers seam, hence a 500.
+    """
+
+    try:
+        return sorted(target.iterdir(), key=lambda p: p.name)
+    except OSError as exc:
+        if exc.errno in _NOT_A_LISTABLE_DIR:
+            raise NotFoundError(not_found) from exc
+        raise
+
+
+def _size_of_readable(path: Path, not_found: str) -> int:
+    """Size of a stored file, with the open as the existence check (issue #2394).
+
+    ``fstat`` on the handle rather than ``stat`` on the path, so the size reported
+    is the file that was actually opened and the miss is the same
+    :class:`NotFoundError` :func:`_open_readable_sync` raises everywhere else --
+    including for a path that names a directory, which a bare ``stat`` would
+    happily size.
+    """
+
+    with _open_readable_sync(path, not_found) as handle:
+        return os.fstat(handle.fileno()).st_size
 
 
 def _file_stream(
@@ -2223,10 +2286,12 @@ class _FsWorkingSetView(WorkingSetView):
     def _list_dir_sync(self, rel_path: RelPath) -> list[DirEntry]:
         assert self._pinned is not None
         target = self._storage._safe_target(self._pinned, rel_path)
-        if not target.is_dir():
-            raise NotFoundError(f"directory not found: {rel_path.value}")
+        # The listing IS the existence check, for the same reason it is in
+        # ``FsStorage._list_dir`` (issue #2394): the view's lease pins the snapshot
+        # DIRECTORY, and ``delete_dir`` removes a subtree inside that very
+        # directory, so a pre-check here would leave the same window.
         entries = []
-        for child in sorted(target.iterdir(), key=lambda p: p.name):
+        for child in _list_children(target, f"directory not found: {rel_path.value}"):
             is_dir = child.is_dir()
             entries.append(
                 DirEntry(
