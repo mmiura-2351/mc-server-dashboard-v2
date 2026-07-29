@@ -33,7 +33,10 @@ _LOG = logging.getLogger(__name__)
 # the assignment and self-heals once the in-flight command settles. Clients can
 # distinguish this from ``server_busy`` (#876), which is an API-side lifecycle
 # lock contention (a gated op holds the lock past the acquire budget), and retry
-# in a moment rather than treating it as a settled failure.
+# in a moment rather than treating it as a settled failure. It is not lifecycle-
+# only: the backup-create route renders the same reason for a SnapshotTrigger the
+# Worker refused with BUSY (issue #2436), which is the only sanitized status that
+# kind can produce.
 _SANITIZED_REASONS: dict[CommandStatus, str] = {
     CommandStatus.PORT_CONFLICT: "port_conflict",
     CommandStatus.IMAGE_MISSING: "image_missing",

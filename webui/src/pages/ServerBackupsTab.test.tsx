@@ -760,6 +760,25 @@ describe("ServerBackupsTab permission gating", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("names the contention on a 409 worker_busy create (#2436)", async () => {
+    // The API no longer flattens a dispatch failure to command_failed, so a
+    // SnapshotTrigger the Worker refused with BUSY now arrives as worker_busy.
+    // It is the same retryable contention as server_busy, so it takes the same
+    // message rather than the generic "something went wrong".
+    routeGet();
+    mockApi.post.mockRejectedValue(
+      new ApiError(409, { reason: "worker_busy" }),
+    );
+    await openBackups();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: t("backups.create") }),
+    );
+    expect(
+      await screen.findByText(t("backups.error.serverBusy")),
+    ).toBeInTheDocument();
+  });
+
   it("routes a create 403 through the permission glue", async () => {
     routeGet();
     mockApi.post.mockRejectedValue(
