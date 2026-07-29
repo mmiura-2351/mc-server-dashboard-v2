@@ -2,16 +2,19 @@
  * Map a lifecycle mutation error to its toast message (WEBUI_SPEC.md 7.4).
  *
  * The API returns 409 both for lifecycle races (SPEC 7.4, "state changed —
- * refresh") and for start failures the Worker classified into a sanitized
- * category (issue #225) — e.g. `port_conflict` / `image_missing`. The latter
- * are real, actionable causes, so they get their own message instead of the
- * misleading generic state-changed toast; so is `server_unsettled`, the at-rest
- * precondition on the export mint (issue #2360). Every other 409 reason
- * (`invalid_transition`, `transition_conflict`, `command_failed`,
- * `server_not_running`) is race-flavoured and keeps the state-changed
- * treatment. 503 responses with a recognized `reason` (`no_eligible_worker`,
- * `worker_unavailable`, `jar_unavailable`) get their own message (issue #1092).
- * All other errors fall back to the generic action-failed toast.
+ * refresh") and for causes that are not races at all. The non-races get their
+ * own message instead of the misleading generic state-changed toast: the
+ * sanitized start/restart-failure categories `port_conflict` / `image_missing`
+ * (issue #225), `server_unsettled` — the at-rest precondition on the export
+ * mint (issue #2360) — and the two contention reasons `worker_busy` /
+ * `server_busy` (issue #2400). Only `invalid_transition`,
+ * `transition_conflict`, `command_failed` and `server_not_running` are
+ * race-flavoured and keep the state-changed treatment: each of those means the
+ * server really did move (or was never in the state the caller assumed), so
+ * refreshing is the right response. 503 responses with a recognized `reason`
+ * (`no_eligible_worker`, `worker_unavailable`, `jar_unavailable`) get their own
+ * message (issue #1092). All other errors fall back to the generic
+ * action-failed toast.
  *
  * 403 is intentionally NOT handled here: it carries a side effect (refetching
  * capabilities) that lives in `useOnForbidden`. Callers run that glue first and
@@ -25,16 +28,29 @@ import { ApiError } from "../api/client.ts";
 import type { TranslationKey } from "../i18n/index.ts";
 
 // 409 reasons that get a specific message; everything else 409 stays
-// race-flavoured (state changed). `port_conflict` / `image_missing` are the
-// sanitized start-failure categories, mirroring the API's `_SANITIZED_REASONS`
-// (servers/application/command_dispatch.py). `server_unsettled` is the at-rest
-// precondition on the export mint (servers/api/servers.py), which is a standing
-// requirement rather than a race, so it names the precondition here too — the
-// same message the danger-zone export already shows (issue #2360).
+// race-flavoured (state changed). `port_conflict` / `image_missing` / and
+// `worker_busy` are the sanitized dispatch categories, mirroring the API's
+// `_SANITIZED_REASONS` (servers/application/command_dispatch.py).
+// `server_unsettled` is the at-rest precondition on the export mint
+// (servers/api/servers.py), which is a standing requirement rather than a race,
+// so it names the precondition here too — the same message the danger-zone
+// export already shows (issue #2360).
+//
+// `worker_busy` (the Worker already has a mutating lifecycle command in flight
+// for this server; start/stop/restart can all hit it) and `server_busy` (a
+// gated op held the API-side lifecycle lock past the acquire budget; start
+// only) share one message: both mean the request was refused without being
+// applied, both clear on their own once the other operation settles, and the
+// operator's only move for either is to retry — naming which layer was busy
+// would be Worker/API internals they cannot act on (issue #2400). The files and
+// plugins tabs already name `server_busy` this way (`files.error.serverBusy`,
+// `plugins.error.busy`); the lifecycle surfaces were the outlier.
 const SPECIFIC_409_MESSAGE: Record<string, TranslationKey> = {
   port_conflict: "dashboard.lifecycle.portConflict",
   image_missing: "dashboard.lifecycle.imageMissing",
   server_unsettled: "serverDetail.error.unsettled",
+  worker_busy: "dashboard.lifecycle.busy",
+  server_busy: "dashboard.lifecycle.busy",
 };
 
 // 503 service-unavailable reasons (issue #1092): post-restart scenarios where

@@ -24,6 +24,16 @@ describe("lifecycleErrorMessage", () => {
     expect(lifecycleErrorMessage(error)).toBe("serverDetail.error.unsettled");
   });
 
+  // Contention, not a race: the request was refused without being applied and
+  // clears on its own (issue #2400).
+  it.each(["worker_busy", "server_busy"])(
+    "maps a 409 %s to the busy message",
+    (reason) => {
+      const error = new ApiError(409, { reason });
+      expect(lifecycleErrorMessage(error)).toBe("dashboard.lifecycle.busy");
+    },
+  );
+
   it.each([
     "invalid_transition",
     "transition_conflict",
