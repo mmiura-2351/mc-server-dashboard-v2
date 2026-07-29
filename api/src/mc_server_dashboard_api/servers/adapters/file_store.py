@@ -349,12 +349,20 @@ class StorageFileStoreAdapter(FileStore):
         stack = [base]
         while stack:
             current = stack.pop()
+            # The lease pins the snapshot as a whole, not the subtrees inside it,
+            # so a directory listed by its parent can be deleted before the walk
+            # descends into it and surface as the modelled miss (issue #2394).
+            # Skip it the way a vanished member is skipped rather than tearing
+            # the download mid-stream over one directory that went away; the
+            # requested root's own existence is checked before the walk starts,
+            # so a genuinely missing directory is still a 404. A traversal
+            # refusal still surfaces.
             try:
                 entries = await view.list_dir(_rel_path(current or "."))
             except PathTraversalError as exc:
                 raise InvalidFilePathError(current) from exc
-            except NotFoundError as exc:
-                raise ServerFileNotFoundError(current) from exc
+            except NotFoundError:
+                continue
             for entry in entries:
                 child = f"{current}/{entry.name}" if current else entry.name
                 if entry.is_dir:

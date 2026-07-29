@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime as dt
 import io
+import shutil
 import uuid
 import zipfile
 from pathlib import Path
@@ -569,6 +570,50 @@ async def test_download_dir_skips_a_member_it_cannot_read(tmp_path: Path) -> Non
     blob = b"".join([chunk async for chunk in stream])
 
     with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        contents = {name: zf.read(name) for name in zf.namelist()}
+    assert contents == {"keep.txt": b"KEEP"}
+
+
+async def test_download_dir_skips_a_subdirectory_that_vanishes_mid_walk(
+    tmp_path: Path,
+) -> None:
+    """A subdirectory deleted mid-walk is skipped, not allowed to abort the zip.
+
+    The reader lease pins the snapshot as a whole, not the subtrees inside it, so
+    a delete of a listed directory races the walk's descent into it and surfaces
+    as the modelled miss (issue #2394). Aborting there would tear the download
+    mid-stream over one directory that went away, so the walk skips it and the
+    rest of the subtree is still zipped.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await publish(
+        storage,
+        StorageCommunityId(community),
+        StorageServerId(server),
+        {"keep.txt": b"KEEP", "gone/inner.txt": b"INNER"},
+    )
+    live = snapshot_dir(
+        tmp_path, StorageCommunityId(community), StorageServerId(server)
+    )
+    adapter = StorageFileStoreAdapter(storage=storage)
+
+    stream = adapter.download_dir(
+        community_id=CommunityId(community),
+        server_id=ServerId(server),
+        rel_path=".",
+    )
+    chunks = []
+    async for chunk in stream:
+        # The first chunk is the root file's zip entry, so the root listing has
+        # happened and the walk has not yet descended: delete the subdirectory
+        # exactly in that window.
+        if (live / "gone").exists():
+            shutil.rmtree(live / "gone")
+        chunks.append(chunk)
+
+    with zipfile.ZipFile(io.BytesIO(b"".join(chunks))) as zf:
         contents = {name: zf.read(name) for name in zf.namelist()}
     assert contents == {"keep.txt": b"KEEP"}
 
