@@ -621,6 +621,18 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   restart can leave the server moved, and a retry is not known to help (#2420).
   The refetch is unconditional on every lifecycle mutation regardless of the
   toast, so a moved server still shows up.
+- On **stop** and **restart** those last two messages are replaced by
+  verb-specific ones, because the API dispatches after committing the intent and
+  compensates only a start, so the failure leaves something *pending* rather than
+  undone (#2435). A failed stop keeps `desired_state=stopped` over a
+  still-running process — no stop failure class proves the stop will not take
+  effect — so the message says the server is still running and that the system
+  will keep trying to stop it, rather than asking for a retry that is already
+  happening. `worker_busy` on stop gets the same message for the same reason: the
+  stop intent is committed before the Worker refuses. A failed restart keeps
+  `desired_state=running`, so a server the Worker took down comes back on its
+  own, and the message says so. Start is unchanged — a failed start is
+  compensated back to stopped and nothing is pending.
 - Destructive operations (delete server/community/user/backup-restore) use
   typed-confirm dialogs.
 

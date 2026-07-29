@@ -242,6 +242,14 @@ export const en = {
   // one.
   "dashboard.lifecycle.commandFailed":
     "The server host could not carry out that action. Check the server's current state before trying again.",
+  // 409 command_failed / worker_busy on stop, and command_failed on restart
+  // (issue #2435): the API committed the intent before dispatching, so the
+  // failure leaves it pending rather than undone. These name what is still
+  // going to happen instead of asking the operator to work it out.
+  "dashboard.lifecycle.stopPending":
+    "Could not stop the server: it is still running. The system will keep trying to stop it.",
+  "dashboard.lifecycle.restartPending":
+    "Could not restart the server: it may be stopped for now. The system will bring it back automatically.",
   // 503 service-unavailable reasons (issue #1092): post-restart scenarios where
   // a host or the server files are not yet ready.
   "dashboard.lifecycle.noEligibleWorker":

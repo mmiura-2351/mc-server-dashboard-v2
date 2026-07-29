@@ -44,6 +44,58 @@ describe("lifecycleErrorMessage", () => {
     );
   });
 
+  // A failed start is compensated back to stopped, so nothing is pending and
+  // the verb-agnostic message is already honest (issue #2435).
+  it("keeps the dispatch-failure message for a failed start", () => {
+    const error = new ApiError(409, { reason: "command_failed" });
+    expect(lifecycleErrorMessage(error, "start")).toBe(
+      "dashboard.lifecycle.commandFailed",
+    );
+  });
+
+  // A failed stop leaves desired_state=stopped committed over a still-running
+  // process, so the stop intent is pending and the reconciler retries it. Both
+  // reasons the API can render for it say so (issue #2435).
+  it.each(["command_failed", "worker_busy"])(
+    "maps a 409 %s on stop to the pending-stop message",
+    (reason) => {
+      const error = new ApiError(409, { reason });
+      expect(lifecycleErrorMessage(error, "stop")).toBe(
+        "dashboard.lifecycle.stopPending",
+      );
+    },
+  );
+
+  // A failed restart leaves desired_state=running, so a server the Worker took
+  // down is brought back automatically (issue #2435).
+  it("maps a 409 command_failed on restart to the pending-restart message", () => {
+    const error = new ApiError(409, { reason: "command_failed" });
+    expect(lifecycleErrorMessage(error, "restart")).toBe(
+      "dashboard.lifecycle.restartPending",
+    );
+  });
+
+  // worker_busy on restart applied nothing at all — the server keeps running —
+  // so it stays on the retry-in-a-moment message (issue #2435).
+  it.each(["start", "restart"] as const)(
+    "keeps the busy message for a 409 worker_busy on %s",
+    (action) => {
+      const error = new ApiError(409, { reason: "worker_busy" });
+      expect(lifecycleErrorMessage(error, action)).toBe(
+        "dashboard.lifecycle.busy",
+      );
+    },
+  );
+
+  // server_busy is start-only and never commits an intent, so the verb never
+  // changes its message (issue #2435).
+  it("keeps the busy message for a 409 server_busy on start", () => {
+    const error = new ApiError(409, { reason: "server_busy" });
+    expect(lifecycleErrorMessage(error, "start")).toBe(
+      "dashboard.lifecycle.busy",
+    );
+  });
+
   it.each(["invalid_transition", "transition_conflict", "server_not_running"])(
     "keeps the state-changed treatment for an unmapped 409 reason (%s)",
     (reason) => {
