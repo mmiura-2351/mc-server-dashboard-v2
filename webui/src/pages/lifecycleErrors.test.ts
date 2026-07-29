@@ -122,7 +122,7 @@ describe("lifecycleErrorMessage", () => {
   });
 
   it("falls back to the generic message for non-409 errors", () => {
-    const error = new ApiError(500, { reason: "server_error" });
+    const error = new ApiError(500, { reason: "internal_error" });
     expect(lifecycleErrorMessage(error)).toBe("dashboard.actionFailed");
   });
 

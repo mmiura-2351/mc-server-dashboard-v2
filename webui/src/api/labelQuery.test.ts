@@ -25,7 +25,7 @@ describe("labelQueryFn", () => {
   });
 
   it("rethrows a non-403 ApiError (500)", async () => {
-    const err = new ApiError(500, { reason: "server_error" });
+    const err = new ApiError(500, { reason: "internal_error" });
     const fn = labelQueryFn(() => Promise.reject(err), []);
     await expect(fn()).rejects.toBe(err);
   });

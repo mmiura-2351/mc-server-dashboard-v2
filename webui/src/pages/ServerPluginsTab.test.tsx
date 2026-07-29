@@ -782,10 +782,18 @@ describe("ServerPluginsTab error messages (issue #1345)", () => {
     vi.clearAllMocks();
   });
 
-  /** Trigger the file upload mutation with a failing ApiError. */
-  async function triggerUploadError(reason: string) {
+  /**
+   * Trigger the file upload mutation with a failing ApiError.
+   *
+   * The status/reason pair must be one the API actually emits — every plugin
+   * mutation shares one `onError`, so a fixture is read as a description of a
+   * real response (issue #2421).
+   */
+  async function triggerUploadError(status: number, reason: string) {
     mockGets({ plugins: [plugin()], validation: EMPTY_VALIDATION });
-    mockPostFormWithProgress.mockRejectedValue(new ApiError(409, { reason }));
+    mockPostFormWithProgress.mockRejectedValue(
+      new ApiError(status, { reason }),
+    );
     renderTab();
     await waitFor(() => {
       expect(screen.getByText("Sodium")).toBeInTheDocument();
@@ -802,7 +810,7 @@ describe("ServerPluginsTab error messages (issue #1345)", () => {
   }
 
   it("shows a specific message for plugin_already_exists", async () => {
-    await triggerUploadError("plugin_already_exists");
+    await triggerUploadError(409, "plugin_already_exists");
     await waitFor(() => {
       expect(
         screen.getByText(
@@ -813,7 +821,7 @@ describe("ServerPluginsTab error messages (issue #1345)", () => {
   });
 
   it("shows a specific message for server_unsettled", async () => {
-    await triggerUploadError("server_unsettled");
+    await triggerUploadError(409, "server_unsettled");
     await waitFor(() => {
       expect(
         screen.getByText(
@@ -824,7 +832,10 @@ describe("ServerPluginsTab error messages (issue #1345)", () => {
   });
 
   it("shows a specific message for catalog_unavailable", async () => {
-    await triggerUploadError("catalog_unavailable");
+    // 502 is the status the catalog-backed plugin routes render this reason
+    // with (plugins.py `_bad_gateway`); the upload mock is only the vehicle,
+    // since every plugin mutation shares one `onError`.
+    await triggerUploadError(502, "catalog_unavailable");
     await waitFor(() => {
       expect(
         screen.getByText("Could not reach Modrinth. Please try again later."),
@@ -833,7 +844,7 @@ describe("ServerPluginsTab error messages (issue #1345)", () => {
   });
 
   it("shows a specific message for invalid_path", async () => {
-    await triggerUploadError("invalid_path");
+    await triggerUploadError(422, "invalid_path");
     await waitFor(() => {
       expect(
         screen.getByText(
@@ -844,7 +855,7 @@ describe("ServerPluginsTab error messages (issue #1345)", () => {
   });
 
   it("shows a specific message for file_too_large", async () => {
-    await triggerUploadError("file_too_large");
+    await triggerUploadError(413, "file_too_large");
     await waitFor(() => {
       expect(
         screen.getByText(
@@ -855,7 +866,9 @@ describe("ServerPluginsTab error messages (issue #1345)", () => {
   });
 
   it("falls back to the generic message for an unknown reason", async () => {
-    await triggerUploadError("some_unknown_reason");
+    // A deliberately synthetic reason on a real upload status: the point is a
+    // reason the mapping table does not know, so it must not be a real one.
+    await triggerUploadError(409, "some_unknown_reason");
     await waitFor(() => {
       expect(
         screen.getByText("Something went wrong. Please try again."),
@@ -1393,8 +1406,11 @@ describe("ServerPluginsTab upload progress (issue #1419)", () => {
 
   it("hides the progress bar on upload error", async () => {
     mockGets({ plugins: [plugin()], validation: EMPTY_VALIDATION });
+    // The assertion is reason-agnostic — it only needs the mutation to reject —
+    // so this is the API's generic failure: a 500 always carries
+    // `internal_error` (http_problem.py INTERNAL_ERROR_REASON).
     mockPostFormWithProgress.mockRejectedValue(
-      new ApiError(500, { reason: "server_busy" }),
+      new ApiError(500, { reason: "internal_error" }),
     );
     renderTab();
     await waitFor(() => {
