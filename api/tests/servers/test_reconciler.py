@@ -1152,3 +1152,99 @@ async def test_stopped_unknown_assigned_within_grace_is_skipped() -> None:
     await _reconciler(uow, cp, clock).tick()
     assert cp.dispatched == []
     assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
+
+
+# --- stopped/crashed/assigned wedge recovery (issue #2439) -----------------
+
+
+async def test_stopped_crashed_assigned_connected_snapshots_then_clears(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Issue #2439: a stop whose dispatch failed left (stopped, running, assigned)
+    # and the process then died on its own, so the worker reported crashed. The
+    # process is gone, so the owed work is the release half of the stop path: take
+    # the final snapshot the crash never got (the worker retains the scratch), then
+    # release the assignment. No second stop dispatch — the worker has already
+    # forgotten the crashed instance, so a stop would answer SERVER_NOT_FOUND and
+    # skip the snapshot, losing the crash-window world.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.CRASHED,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    with caplog.at_level(logging.INFO):
+        await _reconciler(uow, cp, clock).tick()
+    assert [k for k, _, _ in cp.dispatched] == ["snapshot"]
+    assert uow.servers.by_id[server.id].assigned_worker_id is None
+    assert any("recovered" in record.message.lower() for record in caplog.records)
+
+
+async def test_stopped_crashed_assigned_disconnected_clears_without_snapshot() -> None:
+    # Issue #2439: the same wedge with the worker GONE — the snapshot cannot run,
+    # but the assignment must still be released (DB-only), exactly as the
+    # (stopped, stopped, assigned) arm does.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.CRASHED,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(connected={_WORKER: False})
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock).tick()
+    assert cp.dispatched == []
+    assert uow.servers.by_id[server.id].assigned_worker_id is None
+
+
+async def test_stopped_crashed_assigned_within_grace_is_skipped() -> None:
+    # Issue #2439: the recovery only fires past grace, like every other stop-side
+    # arm — a crash report arriving while a stop is still settling must not have
+    # its assignment yanked out from under the in-flight path.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.CRASHED,
+        worker=_WORKER,
+        observed_at=_NOW - dt.timedelta(seconds=_GRACE - 1),
+        updated_at=_NOW - dt.timedelta(seconds=_GRACE - 1),
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock).tick()
+    assert cp.dispatched == []
+    assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
+
+
+async def test_stopped_crashed_clear_is_not_counted_as_a_crash_loop(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Issue #2439: the post-dispatch crash check exists to damp a boot-crash LOOP
+    # under a start intent (#343). The stop-side release leaves observed=crashed
+    # standing (it is the truth: the process died), so that check must not fire
+    # here — it would log a false "crash-looping" WARN and arm a backoff for an
+    # action that fully succeeded.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.CRASHED,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock)
+    with caplog.at_level(logging.WARNING):
+        await reconciler.tick()
+    assert uow.servers.by_id[server.id].assigned_worker_id is None
+    assert server.id not in reconciler._attempts
+    assert not [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "crash-looping" in r.getMessage()
+    ]

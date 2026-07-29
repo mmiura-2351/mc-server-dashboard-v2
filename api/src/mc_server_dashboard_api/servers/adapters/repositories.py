@@ -415,6 +415,24 @@ class SqlAlchemyServerRepository(ServerRepository):
                     ServerModel.observed_state == ObservedState.UNKNOWN.value,
                     ServerModel.assigned_worker_id.is_not(None),
                 ),
+                # desired=stopped, observed=crashed, still assigned (issue #2439):
+                # the process died on its own under a stop intent (typically a stop
+                # whose dispatch failed, leaving (stopped, running, assigned), with
+                # the process then exiting before the reconciler's grace lapsed).
+                # This one WEDGES without this arm: crashed is terminal, so the
+                # worker sends no further StatusChange and
+                # reset_unverifiable_observed_states (API restart) deliberately
+                # leaves it alone as still-truthful. Nothing else flags the row
+                # either — is_at_rest() reads true — so the assignment stands and
+                # every later start 409s on require_unassigned, for as long as the
+                # owning worker stays connected. (A disconnect does rewrite it to
+                # unknown, but only by accident of that invalidation being
+                # unfiltered; an operator cannot be told to unplug a worker.)
+                and_(
+                    ServerModel.desired_state == stopped,
+                    ServerModel.observed_state == ObservedState.CRASHED.value,
+                    ServerModel.assigned_worker_id.is_not(None),
+                ),
             )
         )
         rows = (await self._session.execute(stmt)).scalars().all()

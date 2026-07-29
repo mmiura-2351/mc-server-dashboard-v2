@@ -61,6 +61,9 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
     WorkerUnavailableError,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
+from mc_server_dashboard_api.servers.domain.errors import (
+    LifecycleTransitionConflictError,
+)
 from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -701,6 +704,86 @@ async def test_worker_disconnect_mid_stop_wedge_recovered_by_reconciler(
     recovered = await _load(engine, server_id)
     assert recovered is not None
     assert recovered.assigned_worker_id is None
+
+    # The next start re-places against the now-unassigned row.
+    next_worker = uuid.uuid4()
+    restarted = await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(next_worker)), clock
+    )(community_id=community, server_id=server_id)
+    assert restarted.desired_state is DesiredState.RUNNING
+    assert restarted.assigned_worker_id == WorkerId(next_worker)
+
+
+# --- Chain 6: stopped/crashed/assigned wedge recovery (issue #2439) --------
+
+
+async def test_failed_stop_then_process_crashes_wedge_recovered_by_reconciler(
+    engine: AsyncEngine,
+) -> None:
+    """start -> stop whose dispatch FAILS (desired=stopped stands, still assigned)
+    -> the process then dies on its own and the worker reports crashed via the REAL
+    sink -> reconciler tick releases the assignment -> start succeeds.
+
+    Issue #2439. The failed stop leaves (stopped, running, assigned), which IS
+    reconcilable — but the process dies before the reconciler's grace window
+    elapses, so the row moves to (stopped, crashed, assigned) instead. Before the
+    fix that triple matched no arm of ``list_reconcilable``: the reconciler never
+    touched it, the assignment was never released, and every subsequent start 409'd
+    on ``require_unassigned`` forever. ``is_at_rest()`` is true for the row, so
+    nothing else flagged it either. The recovery is the release half of the stop
+    path: the final snapshot the crash never got, then the unassign.
+    """
+
+    clock = _AdvancingClock(_NOW)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    server_id = server.id
+    community = server.community_id
+
+    worker = uuid.uuid4()
+    await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(worker)), clock
+    )(community_id=community, server_id=server_id)
+    await _sink(engine, clock).record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker), state="running"
+    )
+
+    # The operator stops; the dispatch fails. StopServer deliberately does NOT
+    # compensate (issue #2435), so desired=stopped stands and the row is left
+    # (stopped, running, assigned) for the reconciler.
+    failing_cp = FakeControlPlane(place_to=WorkerId(worker), unavailable_kinds={"stop"})
+    with pytest.raises(WorkerUnavailableError):
+        await _stop_server_use_case(engine, failing_cp, clock)(
+            community_id=community, server_id=server_id
+        )
+
+    # Before the grace window elapses the process dies on its own; the owning
+    # worker's StatusChange(crashed) lands through the real sink.
+    await _sink(engine, clock).record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker), state="crashed"
+    )
+    wedged = await _load(engine, server_id)
+    assert wedged is not None
+    assert wedged.desired_state is DesiredState.STOPPED
+    assert wedged.observed_state is ObservedState.CRASHED
+    assert wedged.assigned_worker_id == WorkerId(worker)
+    # The row looks healthy to every gated operation, yet a start cannot proceed:
+    # require_unassigned 409s against the stale assignment.
+    assert wedged.is_at_rest()
+    with pytest.raises(LifecycleTransitionConflictError):
+        await _start_server_use_case(
+            engine, FakeControlPlane(place_to=WorkerId(worker)), clock
+        )(community_id=community, server_id=server_id)
+
+    # The reconciler recovers it: final snapshot (the worker is connected and still
+    # holds the crash-window working set in its retained scratch), then unassign.
+    recovery_cp = FakeControlPlane()
+    await _reconciler_tick(engine, recovery_cp, clock)
+    assert [kind for kind, _, _ in recovery_cp.dispatched] == ["snapshot"]
+    recovered = await _load(engine, server_id)
+    assert recovered is not None
+    assert recovered.assigned_worker_id is None
+    # The crash is left standing as the truth about how the process ended.
+    assert recovered.observed_state is ObservedState.CRASHED
 
     # The next start re-places against the now-unassigned row.
     next_worker = uuid.uuid4()

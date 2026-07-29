@@ -1314,11 +1314,14 @@ class StopServer:
     async def clear_stale_assignment(
         self, *, community_id: CommunityId, server_id: ServerId
     ) -> Server:
-        """Release a stop wedged at (stopped, stopped|unknown, assigned).
+        """Release a stop wedged at (stopped, stopped|unknown|crashed, assigned).
 
         Originally issue #847 bug 2 (observed=stopped); extended by issue #1599 to
         also cover observed=unknown (a stop interrupted mid-flight by an API restart
-        or a worker disconnect).
+        or a worker disconnect) and by issue #2439 to cover observed=crashed (the
+        process died on its own under a stop intent — typically a stop whose
+        dispatch failed, with the process then exiting before the reconciler's
+        grace lapsed).
 
         The reconciler's recovery arm for a stop whose deferred unassign never ran
         — an API crash or an HTTP-task cancellation between the observed=stopped
@@ -1347,6 +1350,18 @@ class StopServer:
         (working_set_absent) proceeds to clear — the loud log from
         ``_final_snapshot`` records the loss or non-loss.
 
+        observed=crashed (issue #2439) takes that SAME snapshot-then-clear leg,
+        and for the same reason: no final snapshot ever ran for this server, and
+        the worker still holds the crash-window working set — its scratch is GC'd
+        only after a final snapshot publishes, and the crashed instance has been
+        dropped from its instance map, so the trigger takes the at-rest snapshot
+        path over the retained dir. Re-dispatching the STOP instead would be
+        strictly worse: the worker answers SERVER_NOT_FOUND, which unassigns
+        WITHOUT snapshotting and loses everything since the last periodic snapshot.
+        ``observed_state`` is deliberately left at crashed — the crash is the truth
+        about how the process ended and what the operator sees; the row is already
+        ``is_at_rest`` and, once unassigned, no longer reconcilable.
+
         The clear uses the same guard the deferred clear uses
         (``clear_assignment_after_final_snapshot``): a still desired=stopped row
         still assigned to that worker. No placement-load decrement (the stop that
@@ -1360,7 +1375,11 @@ class StopServer:
             if (
                 server.desired_state is not DesiredState.STOPPED
                 or server.observed_state
-                not in (ObservedState.STOPPED, ObservedState.UNKNOWN)
+                not in (
+                    ObservedState.STOPPED,
+                    ObservedState.UNKNOWN,
+                    ObservedState.CRASHED,
+                )
                 or worker_id is None
             ):
                 # The row moved since list_reconcilable snapshotted it; nothing for
@@ -1373,11 +1392,12 @@ class StopServer:
                 if self.control_plane.is_worker_connected(worker_id=worker_id):
                     raise InvalidLifecycleTransitionError(str(server_id.value))
 
-        # --- Step B: re-drive the final snapshot for stopped+connected ----
-        if (
-            server.observed_state is ObservedState.STOPPED
-            and self.control_plane.is_worker_connected(worker_id=worker_id)
-        ):
+        # --- Step B: re-drive the final snapshot when the process is gone and
+        # the worker is still reachable (observed stopped, #1004; crashed, #2439)
+        if server.observed_state in (
+            ObservedState.STOPPED,
+            ObservedState.CRASHED,
+        ) and self.control_plane.is_worker_connected(worker_id=worker_id):
             upload_may_be_live = await self._final_snapshot(
                 worker_id=worker_id,
                 community_id=community_id,
@@ -1401,6 +1421,15 @@ class StopServer:
                     "recovered a stop wedged at (stopped, unknown, assigned) for "
                     "server %s: released worker %s (issue #1599). The worker was "
                     "disconnected; the stop was interrupted mid-flight",
+                    server_id.value,
+                    worker_id.value,
+                )
+            elif server.observed_state is ObservedState.CRASHED:
+                _LOG.warning(
+                    "recovered a stop wedged at (stopped, crashed, assigned) for "
+                    "server %s: released worker %s (issue #2439). The process died "
+                    "on its own under a stop intent; without this the row was at "
+                    "rest yet permanently unstartable",
                     server_id.value,
                     worker_id.value,
                 )

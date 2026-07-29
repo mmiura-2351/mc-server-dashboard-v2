@@ -40,6 +40,20 @@ Divergence matrix (per candidate, after a grace window has lapsed):
   interrupted mid-flight (API restart maps STOPPING->unknown, or worker disconnect
   sets unknown without unassigning). Connected Worker -> redispatch the stop.
   Disconnected Worker -> clear the assignment (DB-only; same as the stopped wedge).
+- ``desired=stopped``, observed ``crashed``, still assigned (issue #2439): the
+  process died on its own under a stop intent — the usual route is a stop whose
+  dispatch failed (leaving the reconcilable ``(stopped, running, assigned)``) with
+  the process then exiting before grace lapsed. Same action as the stopped wedge:
+  final snapshot on a connected Worker, THEN clear the assignment. Deliberately not
+  ``redispatch_stop`` — the process is gone, the Worker has forgotten the crashed
+  instance, so a stop answers SERVER_NOT_FOUND and unassigns WITHOUT snapshotting,
+  losing the crash-window working set. ``observed`` stays ``crashed``: it is the
+  truth about how the process ended, and once unassigned the row is settled.
+  This arm is the one whose absence WEDGED a server: ``crashed`` is terminal, so
+  no further Worker report follows and the API-restart reset leaves it alone as
+  still-truthful, while ``is_at_rest()`` reads true so nothing else flagged it —
+  the row sat unstartable (every start 409'd on ``require_unassigned``) for as
+  long as the owning Worker stayed connected.
 - Disconnected Worker -> skip (``desired=running`` side only):
   ``observed=unknown`` is expected while the Worker is gone, and the reconnect
   assignment rebuild owns that case (FR-WRK-4). The orphan path has no assigned
@@ -287,15 +301,20 @@ class RunReconcilerTick:
             return "redispatch_start"
         # desired=stopped: list_reconcilable returns observed=running (stop never
         # delivered), observed=stopped+assigned (a stop wedged mid final-snapshot,
-        # issue #847 bug 2), and observed=unknown+assigned (a stop interrupted
-        # mid-flight, issue #1599).
+        # issue #847 bug 2), observed=unknown+assigned (a stop interrupted
+        # mid-flight, issue #1599), and observed=crashed+assigned (the process died
+        # on its own under a stop intent, issue #2439).
         if server.assigned_worker_id is None:
             return None
-        if server.observed_state is ObservedState.STOPPED:
-            # The wedge recovery re-drives the final snapshot (if the Worker is
-            # connected, issue #1004) then clears the assignment. It runs even
-            # when the Worker is gone — the snapshot is skipped but the clear
-            # proceeds, exactly the crash case it recovers.
+        if server.observed_state in (ObservedState.STOPPED, ObservedState.CRASHED):
+            # The process is gone either way, so the owed work is the RELEASE half
+            # of the stop path, not another stop dispatch: re-drive the final
+            # snapshot (if the Worker is connected, issues #1004/#2439) then clear
+            # the assignment. It runs even when the Worker is gone — the snapshot is
+            # skipped but the clear proceeds, exactly the crash case it recovers.
+            # A stop dispatch would be strictly worse for observed=crashed: the
+            # Worker forgot the crashed instance, so it answers SERVER_NOT_FOUND,
+            # which unassigns WITHOUT snapshotting and loses the crash-window world.
             return "clear_stale_assignment"
         if server.observed_state is ObservedState.UNKNOWN:
             # Issue #1599: API restart or worker disconnect interrupted a stop
@@ -338,7 +357,10 @@ class RunReconcilerTick:
         # copy and returns it (lifecycle.py); the snapshot predates the dispatch and
         # still reads CRASHED. Reading the returned entity is what keeps a server that
         # genuinely converged to running from being miscounted as a crash here.
-        if dispatched.observed_state is ObservedState.CRASHED:
+        if (
+            action in ("place_and_start", "redispatch_start")
+            and dispatched.observed_state is ObservedState.CRASHED
+        ):
             # A start re-dispatched at a server still observed CRASHED is a RETRY of
             # a launch that evidently died: the dispatch succeeds (the Worker
             # launches the container) but the process crashes again, so the row stays
@@ -349,6 +371,12 @@ class RunReconcilerTick:
             # through starting (when the row drops out of list_reconcilable): the
             # entry is not membership-cleaned, only time-expired (_expire_stale), and
             # a flapping server re-arrives long before its expiry instant.
+            #
+            # Scoped to the START actions (issue #2439): the stop-side release for a
+            # (stopped, crashed, assigned) wedge leaves observed=crashed standing —
+            # it is the truth about how the process ended, not a failed relaunch —
+            # and the action fully succeeded. Counting it here would log a false
+            # "crash-looping" WARN and arm a backoff for a completed recovery.
             self._record_failure(server.id, now)
             _LOG.warning(
                 "reconcile action %s dispatched for crash-looping server %s; "
