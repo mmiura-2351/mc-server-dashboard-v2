@@ -1350,6 +1350,9 @@ class StopServer:
         a release. No final snapshot for either: the process may still be alive (a
         stop that failed after the worker emitted stopping can leave a container
         that survived the kill), so there is no settled working set to capture.
+        The stopping leg additionally converges ``observed`` to ``unknown`` in the
+        same write as the release, so both legs settle on the identical terminal
+        shape — see Step C.
 
         For observed=stopped with a CONNECTED worker (issue #1004), the final
         snapshot is re-driven before clearing the assignment — the original stop
@@ -1426,14 +1429,51 @@ class StopServer:
                 )
 
         # --- Step C: clear the assignment ---------------------------------
-        async with self.uow:
-            cleared = await self.uow.servers.clear_assignment_after_final_snapshot(
-                server_id, worker_id
-            )
-            await self.uow.commit()
+        # The state the row was wedged at, read before Step C rewrites it: the
+        # stopping leg below converges observed, so the log branches must key off
+        # the wedge that was recovered, not the state left behind.
+        wedged_at = server.observed_state
+        if wedged_at is ObservedState.STOPPING:
+            # Issue #2452: converge observed to unknown IN THE SAME WRITE as the
+            # release. Clearing the assignment alone would leave
+            # (stopped, stopping, unassigned) — still not is_at_rest(), so file,
+            # backup, restore and delete keep 409ing "unsettled"; matching no
+            # list_reconcilable arm, since every stopped-intent arm requires an
+            # assignment; and not healed by an API restart either, because
+            # reset_unverifiable_observed_states only rewrites ASSIGNED rows. That
+            # is this issue's own wedge shape one step over, escapable only by an
+            # operator happening to press start. unknown is not a guess: it is what
+            # the disconnect's bulk mark_worker_servers_unknown would have recorded,
+            # and the TOCTOU guard above has just established the worker really is
+            # disconnected. It lands the same terminal shape the #1599 unknown leg
+            # produces — at rest, unassigned, startable, claimed by no arm.
+            observed_at = self.clock.now()
+            async with self.uow:
+                cleared = await self.uow.servers.record_observed_state(
+                    server_id,
+                    observed_state=ObservedState.UNKNOWN,
+                    observed_at=observed_at,
+                    unassign=True,
+                    # Same ownership guard the clear below carries (issue #1708/#847):
+                    # the write lands only while this worker is STILL the assigned
+                    # one, so a row that moved on since Step A is left untouched.
+                    expected_worker=worker_id,
+                )
+                await self.uow.commit()
+            # Keep the return honest (issue #292): mutate the entity only when the
+            # guarded write landed.
+            if cleared:
+                server.observed_state = ObservedState.UNKNOWN
+                server.observed_at = observed_at
+        else:
+            async with self.uow:
+                cleared = await self.uow.servers.clear_assignment_after_final_snapshot(
+                    server_id, worker_id
+                )
+                await self.uow.commit()
         if cleared:
             server.assigned_worker_id = None
-            if server.observed_state is ObservedState.UNKNOWN:
+            if wedged_at is ObservedState.UNKNOWN:
                 _LOG.warning(
                     "recovered a stop wedged at (stopped, unknown, assigned) for "
                     "server %s: released worker %s (issue #1599). The worker was "
@@ -1441,16 +1481,17 @@ class StopServer:
                     server_id.value,
                     worker_id.value,
                 )
-            elif server.observed_state is ObservedState.STOPPING:
+            elif wedged_at is ObservedState.STOPPING:
                 _LOG.warning(
                     "recovered a stop wedged at (stopped, stopping, assigned) for "
-                    "server %s: released worker %s (issue #2452). The worker was "
-                    "disconnected; the stop's dispatch failed after it emitted "
-                    "stopping, and no terminal report was ever going to follow",
+                    "server %s: released worker %s and converged observed to "
+                    "unknown (issue #2452). The worker was disconnected; the stop's "
+                    "dispatch failed after it emitted stopping, and no terminal "
+                    "report was ever going to follow",
                     server_id.value,
                     worker_id.value,
                 )
-            elif server.observed_state is ObservedState.CRASHED:
+            elif wedged_at is ObservedState.CRASHED:
                 _LOG.warning(
                     "recovered a stop wedged at (stopped, crashed, assigned) for "
                     "server %s: released worker %s (issue #2439). The process died "

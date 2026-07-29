@@ -1278,7 +1278,8 @@ async def test_stopped_stopping_assigned_connected_redispatches_stop() -> None:
 async def test_stopped_stopping_assigned_disconnected_clears_assignment() -> None:
     # Issue #2452: the same wedge with the worker GONE — there is nobody to retry
     # the stop against, so release the assignment (DB-only) exactly as the
-    # observed=unknown arm does.
+    # observed=unknown arm does, converging observed to unknown so the released
+    # row is at rest rather than stranded at (stopped, stopping, unassigned).
     uow = FakeUnitOfWork()
     server = _server(
         desired=DesiredState.STOPPED,
@@ -1290,7 +1291,12 @@ async def test_stopped_stopping_assigned_disconnected_clears_assignment() -> Non
     clock = FakeClock(_NOW)
     await _reconciler(uow, cp, clock).tick()
     assert cp.dispatched == []
-    assert uow.servers.by_id[server.id].assigned_worker_id is None
+    stored = uow.servers.by_id[server.id]
+    assert stored.assigned_worker_id is None
+    assert stored.observed_state is ObservedState.UNKNOWN
+    assert stored.is_at_rest()
+    # The released row is settled: no arm claims it again on a later tick.
+    assert await uow.servers.list_reconcilable() == []
 
 
 async def test_stopped_starting_assigned_is_not_reconcilable() -> None:

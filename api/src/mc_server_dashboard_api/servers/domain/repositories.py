@@ -319,10 +319,11 @@ class ServerRepository(abc.ABC):
           (the ``SERVER_STATE_RESTARTING`` contract value has zero producers in
           ``worker/internal/``), so no row can reach it.
 
-        ``reset_unverifiable_observed_states`` also rewrites every non-terminal
-        observed state to ``unknown`` on API startup, but that is an accidental
-        escape, not a design: it needs an API restart, which is precisely why it
-        did not save the ``stopping`` wedge. ``crashed`` has no escape — it is
+        ``reset_unverifiable_observed_states`` also rewrites every ASSIGNED row's
+        non-terminal observed state to ``unknown`` on API startup, but that is an
+        accidental escape, not a design: it needs an API restart, which is
+        precisely why it did not save the ``stopping`` wedge. ``crashed`` has no
+        escape — it is
         terminal, so no further report follows, and the startup reset leaves it
         alone as still-truthful — which is why it wedged until #2439.
 

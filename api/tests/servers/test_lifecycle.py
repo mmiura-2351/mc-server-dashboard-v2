@@ -3901,6 +3901,42 @@ async def test_clear_stale_assignment_stopping_disconnected_skips_snapshot() -> 
     assert cp.dispatched == []
 
 
+async def test_clear_stale_assignment_stopping_converges_observed_to_unknown() -> None:
+    # Issue #2452 (PR #2469 review): releasing the assignment while leaving
+    # observed=stopping would land the row at (stopped, stopping, unassigned) —
+    # still not is_at_rest() (file/backup/restore/delete keep 409ing), matching no
+    # list_reconcilable arm (every stopped-intent arm requires an assignment), and
+    # not healed by an API restart (reset_unverifiable_observed_states filters on
+    # assigned IS NOT NULL). That repeats this issue's own wedge shape one step
+    # over. Converge observed to unknown instead: it is what the disconnect's bulk
+    # write would have recorded, the TOCTOU guard has just established the worker
+    # really is gone, and it lands the SAME terminal shape the #1599 unknown leg
+    # produces — at rest, unassigned, startable.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.STOPPING,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(connected={WorkerId(worker): False})
+    result = await StopServer(
+        uow=uow, control_plane=cp, clock=FakeClock(_NOW)
+    ).clear_stale_assignment(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    assert result.observed_state is ObservedState.UNKNOWN
+    assert result.is_at_rest()
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.observed_state is ObservedState.UNKNOWN
+    assert stored.assigned_worker_id is None
+    assert stored.is_at_rest()
+
+
 async def test_clear_stale_assignment_stopping_reconnected_worker_bails() -> None:
     # Issue #2452: the same TOCTOU guard the unknown case carries (#1599). The
     # reconciler only routes a stopping row here when the worker is disconnected;

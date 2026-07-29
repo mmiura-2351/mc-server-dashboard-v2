@@ -59,7 +59,10 @@ Divergence matrix (per candidate, after a grace window has lapsed):
   ``Stop``. Same action split as the ``unknown`` arm: connected Worker ->
   redispatch the stop (which retries the stop for real, reaching the orphan branch
   of the Worker's ``takeStoppableReserve`` — also what retires the Worker-side
-  orphan record); disconnected Worker -> clear the assignment. This arm wedged the
+  orphan record); disconnected Worker -> clear the assignment AND converge
+  ``observed`` to ``unknown``, so the released row is at rest rather than stranded
+  at ``(stopped, stopping, unassigned)`` — the same terminal shape the ``unknown``
+  leg reaches. This arm wedged the
   row TOTALLY: unlike the ``crashed`` wedge the row is not even ``is_at_rest()``,
   so file, backup, restore and delete all 409 "unsettled" on top of every
   lifecycle action being refused. Its absence was masked by a docstring premise
@@ -345,8 +348,11 @@ class RunReconcilerTick:
             # real (reaching the orphan branch of the worker's takeStoppableReserve,
             # which is also what retires the worker-side orphan record). If the
             # worker is gone there is nobody to command, so clear the assignment
-            # (DB-only, same as the stopped wedge). No final snapshot on either: the
-            # process may still be alive, so there is no settled working set.
+            # (DB-only, same as the stopped wedge) — for #2452 that also converges
+            # observed to unknown, so the released row is at rest instead of
+            # stranded at (stopped, stopping, unassigned). No final snapshot on
+            # either: the process may still be alive, so there is no settled
+            # working set.
             if not self.control_plane.is_worker_connected(
                 worker_id=server.assigned_worker_id
             ):
