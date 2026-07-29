@@ -633,14 +633,33 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   gets the same message for the same reason: the stop intent is committed before
   the Worker refuses. A failed restart keeps `desired_state=running`, so a server
   the Worker took down comes back on its own, and the message says so.
+- The same verb-specific treatment extends to the **503 `worker_unavailable`** —
+  the API's rendering of a dispatch that timed out or lost the Worker session
+  (#2440), where the generic "wait a moment and try again" invites a retry of an
+  intent that already stands. On stop it is unambiguous: `StopServer` can only
+  raise it from the dispatch itself, which runs *after* `desired_state=stopped`
+  is committed and the placement load decremented, and nothing is compensated. On
+  restart `desired_state=running` stands, exactly as for `command_failed`. The
+  wording is deliberately *not* the pending pair above: a refusal was reported by
+  a host that answered, so those messages can say what the server did, while a
+  timeout answers nothing — a graceful stop merely outliving the API's dispatch
+  deadline is the commonest case, and it usually succeeds — so the 503 messages
+  say the outcome is **unconfirmed** and the intent stands. `no_eligible_worker`
+  and `jar_unavailable` stay verb-agnostic: both are raised before any intent is
+  committed.
 - **Start keeps the verb-agnostic messages**, but not because nothing is ever
   pending there. A start that demonstrably did not happen is compensated back to
   stopped, which covers `command_failed`; a **post-dispatch** `worker_busy` is
   not — the API keeps `desired_state=running` and the assignment so
   `redispatch_start` can converge once the raced command settles (#824), while a
-  pre-dispatch one does compensate. The client sees one `worker_busy` for both,
-  so start stays on the generic "another operation is in progress" message; #2435
-  scoped that case out rather than resolving it, and it is tracked separately.
+  pre-dispatch one does compensate. A **post-dispatch** `worker_unavailable` is
+  the same carve-out for the same reason (the start may have been applied), while
+  its pre-dispatch twin — a failed hydrate, or a call that never reached the
+  Worker — compensates. The client sees one `worker_busy` and one
+  `worker_unavailable` for both halves of each pair, so start stays on the
+  generic "another operation is in progress" / "could not reach the server host"
+  messages; #2435 and #2440 scoped that case out rather than resolving it, and it
+  is tracked separately (#2445).
 - Destructive operations (delete server/community/user/backup-restore) use
   typed-confirm dialogs.
 

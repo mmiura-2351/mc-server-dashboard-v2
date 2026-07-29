@@ -258,6 +258,12 @@ export const ja: Record<TranslationKey, string> = {
     "サーバーホストとの通信に失敗しました。しばらく待ってから再試行してください。",
   "dashboard.lifecycle.jarUnavailable":
     "サーバーファイルを準備できませんでした。しばらく待ってから再試行してください。",
+  // 503 worker_unavailable on stop / restart (issue #2440); the intent was
+  // already committed and the outcome is unknown, not undone.
+  "dashboard.lifecycle.stopUnconfirmed":
+    "サーバーホストと通信できず、停止を確認できませんでした。すでに停止処理が進んでいる可能性があります。停止の指示は有効なままで、システムが試行を続けます。",
+  "dashboard.lifecycle.restartUnconfirmed":
+    "サーバーホストと通信できず、再起動を確認できませんでした。すでに復帰している可能性があります。停止したままの場合は、システムが自動的に起動します。",
   // Live-status degraded indicator: WS down, polling fallback (SPEC 6.2 / 7.2).
   "dashboard.liveDegraded": "再接続中 — 表示の更新が遅れることがあります",
   // Clickable join-hostname copy feedback.

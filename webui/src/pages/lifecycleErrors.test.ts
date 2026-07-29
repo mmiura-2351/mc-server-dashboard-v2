@@ -140,6 +140,46 @@ describe("lifecycleErrorMessage", () => {
     );
   });
 
+  // A stop dispatch that timed out or lost its session failed AFTER the API
+  // committed desired_state=stopped, so the stop intent stands and the
+  // reconciler redispatches it — but the outcome is unknown, so the message
+  // can only say it is unconfirmed (issue #2440).
+  it("maps a 503 worker_unavailable on stop to the unconfirmed-stop message", () => {
+    const error = new ApiError(503, { reason: "worker_unavailable" });
+    expect(lifecycleErrorMessage(error, "stop")).toBe(
+      "dashboard.lifecycle.stopUnconfirmed",
+    );
+  });
+
+  // A restart dispatch that could not be confirmed leaves desired_state=running,
+  // so a server the Worker took down and failed to relaunch comes back on its
+  // own (issue #2440).
+  it("maps a 503 worker_unavailable on restart to the unconfirmed-restart message", () => {
+    const error = new ApiError(503, { reason: "worker_unavailable" });
+    expect(lifecycleErrorMessage(error, "restart")).toBe(
+      "dashboard.lifecycle.restartUnconfirmed",
+    );
+  });
+
+  // Start is ambiguous: a pre-dispatch unavailable compensates back to stopped
+  // (nothing pending), a post-dispatch one does not, and both arrive as a bare
+  // worker_unavailable — so it keeps the verb-agnostic message (issue #2440).
+  it("keeps the worker-unavailable message for a failed start", () => {
+    const error = new ApiError(503, { reason: "worker_unavailable" });
+    expect(lifecycleErrorMessage(error, "start")).toBe(
+      "dashboard.lifecycle.workerUnavailable",
+    );
+  });
+
+  // no_eligible_worker is raised before any intent is committed, on every verb
+  // that can see it, so it never becomes verb-specific (issue #2440).
+  it("keeps the no-eligible-worker message on stop", () => {
+    const error = new ApiError(503, { reason: "no_eligible_worker" });
+    expect(lifecycleErrorMessage(error, "stop")).toBe(
+      "dashboard.lifecycle.noEligibleWorker",
+    );
+  });
+
   it("maps a 503 jar_unavailable to its specific message", () => {
     const error = new ApiError(503, { reason: "jar_unavailable" });
     expect(lifecycleErrorMessage(error)).toBe(
