@@ -1450,7 +1450,8 @@ func (m *Manager) sweepDisplaced(serverID string) {
 // hydrate for serverID left in the scratch root. The next start's leftover sweep
 // (datatransfer.sweepHydrateLeftovers) clears them too, but only if the server is
 // re-placed onto this Worker; a deleted/re-placed-elsewhere id would otherwise leak
-// the world-sized orphan permanently. The prefix matches datatransfer.hydrateTmpPrefix
+// the world-sized orphan permanently. The prefix is built from hydratePrefix — the
+// same constant the held-set scans skip on — and matches datatransfer.hydrateTmpPrefix
 // exactly (".hydrate-<id>-"), so only this id's leftovers are touched — not another
 // server's dir or a similarly named one. Best-effort: a removal failure is ignored
 // (a leftover is wasted disk, never a correctness problem).
@@ -1459,7 +1460,7 @@ func (m *Manager) sweepHydrateLeftovers(serverID string) {
 	if err != nil {
 		return
 	}
-	prefix := ".hydrate-" + serverID + "-"
+	prefix := hydratePrefix + serverID + "-"
 	for _, e := range entries {
 		if strings.HasPrefix(e.Name(), prefix) {
 			_ = os.RemoveAll(filepath.Join(m.scratchDir, e.Name()))
