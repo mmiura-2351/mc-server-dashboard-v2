@@ -283,7 +283,7 @@ class ServerRepository(abc.ABC):
 
         The candidate set the periodic divergence reconciler iterates: servers
         where the operator's intent and the last Worker-reported reality could be
-        out of step and an intent re-dispatch may be owed. Six shapes qualify:
+        out of step and an intent re-dispatch may be owed. Seven shapes qualify:
 
         - ``desired=running`` with an observed state that is neither ``starting``
           nor ``running`` (a start that was never delivered, or a crash that the
@@ -297,18 +297,35 @@ class ServerRepository(abc.ABC):
         - ``desired=stopped``, ``observed=unknown``, still assigned (issue #1599:
           a stop interrupted mid-flight by an API restart or worker disconnect);
         - ``desired=stopped``, ``observed=crashed``, still assigned (issue #2439:
-          the process died on its own under a stop intent).
+          the process died on its own under a stop intent);
+        - ``desired=stopped``, ``observed=stopping``, still assigned (issue #2452:
+          a stop whose dispatch failed after the Worker emitted ``stopping``).
 
-        The remaining observed states under a stopped intent (``starting``,
-        ``stopping``, ``restarting``) are deliberately NOT candidates. Each is a
-        transitional cache of a Worker report and cannot persist: the Worker's
-        in-flight launch/stop/restart always settles into a TERMINAL state
-        (``running``, ``stopped`` or ``crashed``) whose report moves the row onto
-        one of the arms above, and ``reset_unverifiable_observed_states`` rewrites
-        exactly those three to ``unknown`` on API startup besides. ``crashed`` has
-        neither escape — it is terminal, so no further report follows, and the
-        startup reset leaves it alone as still-truthful — which is why it, alone,
-        wedged until #2439.
+        The remaining observed states under a stopped intent (``starting`` and
+        ``restarting``) are deliberately NOT candidates, and the reasons are
+        specific to each rather than the blanket "a transitional state cannot
+        persist" this docstring used to assert. That premise was FALSE (issue
+        #2452) and is what let the ``stopping`` wedge ship unnoticed when #2439 was
+        fixed: the Worker's ``Stop`` emits ``stopping`` on entry, and BOTH of its
+        failure paths (the kill call erroring, and the container surviving the
+        kill) restore the pre-stop state WITHOUT emitting, so a failed stop is
+        followed by no terminal report at all. The actual reasons:
+
+        - ``starting`` is a genuine transient here: the Worker's in-flight launch
+          proceeds independently of the stop intent and settles into ``running``
+          (or ``crashed``), whose report moves the row onto one of the arms above.
+          Acting on it would race that launch.
+        - ``restarting`` is never emitted at all — no Worker driver produces it
+          (the ``SERVER_STATE_RESTARTING`` contract value has zero producers in
+          ``worker/internal/``), so no row can reach it.
+
+        ``reset_unverifiable_observed_states`` also rewrites every ASSIGNED row's
+        non-terminal observed state to ``unknown`` on API startup, but that is an
+        accidental escape, not a design: it needs an API restart, which is
+        precisely why it did not save the ``stopping`` wedge. ``crashed`` has no
+        escape — it is
+        terminal, so no further report follows, and the startup reset leaves it
+        alone as still-truthful — which is why it wedged until #2439.
 
         Aligned servers (``running``/``starting`` under a running intent, settled
         ``stopped`` under a stopped intent) are excluded so the reconciler's tick

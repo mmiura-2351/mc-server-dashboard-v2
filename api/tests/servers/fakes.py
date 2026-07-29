@@ -609,6 +609,14 @@ class FakeServerRepository(ServerRepository):
                 and server.observed_state is ObservedState.CRASHED
                 and server.assigned_worker_id is not None
             )
+            # Issue #2452: a stop whose dispatch failed after the worker emitted
+            # stopping leaves (stopped, stopping, assigned) with no terminal report
+            # to follow — a TOTAL wedge (not even is_at_rest) without this arm.
+            stop_stopping_wedged = (
+                stopped
+                and server.observed_state is ObservedState.STOPPING
+                and server.assigned_worker_id is not None
+            )
             if (
                 stale_running
                 or orphan
@@ -616,6 +624,7 @@ class FakeServerRepository(ServerRepository):
                 or stop_wedged
                 or stop_unknown_wedged
                 or stop_crashed_wedged
+                or stop_stopping_wedged
             ):
                 out.append(replace(server))
         return out

@@ -433,6 +433,23 @@ class SqlAlchemyServerRepository(ServerRepository):
                     ServerModel.observed_state == ObservedState.CRASHED.value,
                     ServerModel.assigned_worker_id.is_not(None),
                 ),
+                # desired=stopped, observed=stopping, still assigned (issue #2452):
+                # a stop whose dispatch failed AFTER the worker emitted stopping on
+                # entry to its Stop. Both of the worker's Stop failure paths (the
+                # kill call erroring, and the container surviving the kill) restore
+                # the pre-stop state WITHOUT emitting, so no terminal report ever
+                # follows and observed sticks at stopping. This WEDGES the row
+                # completely: is_at_rest() is false so file/backup/restore/delete all
+                # 409 "unsettled", StopServer and RestartServer raise
+                # InvalidLifecycleTransitionError (desired is already stopped) and
+                # StartServer 409s on require_unassigned. The reconciler routes this
+                # to redispatch_stop (connected worker) or clear_stale_assignment
+                # (disconnected worker).
+                and_(
+                    ServerModel.desired_state == stopped,
+                    ServerModel.observed_state == ObservedState.STOPPING.value,
+                    ServerModel.assigned_worker_id.is_not(None),
+                ),
             )
         )
         rows = (await self._session.execute(stmt)).scalars().all()
