@@ -46,15 +46,26 @@ func clientTLS() *tls.Config {
 	return &tls.Config{NextProtos: []string{ALPN}, InsecureSkipVerify: true, MinVersion: tls.VersionTLS13} //nolint:gosec
 }
 
-// starvationBudget is the ceiling these tests put on a positive-path wait that
-// completes in milliseconds when the process is scheduled normally: the
-// loopback QUIC handshake's dial context, its accept context, and quic-go's own
-// HandshakeIdleTimeout (whose 5 s default is otherwise a hidden third window on
-// the same handshake). Nothing here measures elapsed time, so a generous
-// ceiling costs nothing on the happy path and only bounds a pathologically
-// CPU-starved run -- which a short fixed budget merely turns into a flake
-// (issue #2050).
-const starvationBudget = 60 * time.Second
+// starvationBudget is the single ceiling every positive-path wait in this
+// package puts on work that completes in milliseconds when the process is
+// scheduled normally: the loopback QUIC handshake (dial context, accept
+// context, and quic-go's own HandshakeIdleTimeout, whose 5 s default is
+// otherwise a hidden third window on the same handshake), datagram round
+// trips, goroutine joins, and the convergence polls. Nothing here measures
+// elapsed time, so the ceiling costs nothing on the happy path and only bounds
+// a pathologically CPU-starved run -- which a short fixed budget merely turns
+// into a flake (issue #2050).
+//
+// 30 s is ~2.5x the worst stall #2050's starvation rig actually measured
+// (starved handshakes finished in 1-12 s), and leaves room for 20 budget-
+// expiring failures inside `go test`'s 10 m default package timeout, so a
+// genuinely broken package still reports readable per-test failures rather
+// than a timeout panic (issue #2389).
+//
+// Negative assertions ("nothing arrived within X") deliberately keep their own
+// short windows: they always run to their deadline and fail safe under load,
+// so stretching them would only cost suite time.
+const starvationBudget = 30 * time.Second
 
 // newQUICListener binds a bare quic.Listener for tests that drive the
 // handshake themselves (bypassing bedrock.Listener), returning it plus a

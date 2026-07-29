@@ -64,12 +64,15 @@ func labelsMatch(pairs []*dto.LabelPair, want map[string]string) bool {
 	return true
 }
 
-// waitForSeries polls seriesValue until it reaches at least want or a short
-// deadline elapses, returning the final value. Used for drop metrics whose
-// increment is observed asynchronously (the reader/pumps run in goroutines).
+// waitForSeries polls seriesValue until it reaches at least want or
+// starvationBudget elapses, returning the final value. Used for drop metrics
+// whose increment is observed asynchronously (the reader/pumps run in
+// goroutines). Every caller asserts the series did reach want, so the poll
+// returns as soon as the increment lands and the budget only bounds a starved
+// run.
 func waitForSeries(t *testing.T, reg *prometheus.Registry, name string, labels map[string]string, want float64) float64 {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(starvationBudget)
 	for {
 		got := seriesValue(t, reg, name, labels)
 		if got >= want || time.Now().After(deadline) {
@@ -103,7 +106,7 @@ func runInstrumentedTunnel(t *testing.T, server *quic.Conn, caps *ipcaps.IPCaps,
 		cancel()
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(starvationBudget):
 			t.Fatal("tun.run did not return after ctx cancel")
 		}
 	}
@@ -183,7 +186,7 @@ func TestBedrockFlowCreateAndEvictTrackGaugeAndCounters(t *testing.T) {
 	cancel()
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(starvationBudget):
 		t.Fatal("tun.run did not return")
 	}
 }
@@ -246,7 +249,7 @@ func TestBedrockDatagramsInAndOut(t *testing.T) {
 	if _, err := fakeClient.WriteTo(payload, dialAddr); err != nil {
 		t.Fatalf("WriteTo: %v", err)
 	}
-	rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	rctx, rcancel := context.WithTimeout(context.Background(), starvationBudget)
 	defer rcancel()
 	frame, err := client.ReceiveDatagram(rctx)
 	if err != nil {
@@ -260,7 +263,7 @@ func TestBedrockDatagramsInAndOut(t *testing.T) {
 	if err := client.SendDatagram(frame); err != nil {
 		t.Fatalf("SendDatagram: %v", err)
 	}
-	_ = fakeClient.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = fakeClient.SetReadDeadline(time.Now().Add(starvationBudget))
 	buf := make([]byte, 2048)
 	if _, _, err := fakeClient.ReadFrom(buf); err != nil {
 		t.Fatalf("ReadFrom: %v", err)
@@ -323,7 +326,7 @@ func TestBedrockQueueFullDropMetric(t *testing.T) {
 
 	// One flow, many datagrams: after the queue fills, every further datagram
 	// is dropped at the queue_full site. Keep sending until the metric ticks.
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(starvationBudget)
 	for time.Now().Before(deadline) {
 		for i := 0; i < 50; i++ {
 			if _, err := fakeClient.WriteTo([]byte{0x84, 0x00}, dialAddr); err != nil {
@@ -345,7 +348,7 @@ func TestBedrockQueueFullDropMetric(t *testing.T) {
 	tun.unbind()
 	select {
 	case <-readerDone:
-	case <-time.After(5 * time.Second):
+	case <-time.After(starvationBudget):
 		t.Fatal("pumpUDPToQueue did not return after the socket was closed")
 	}
 }
@@ -480,7 +483,7 @@ func TestBedrockUDPWriteErrorDropMetric(t *testing.T) {
 	_ = server.CloseWithError(0, "test done")
 	select {
 	case <-pumpDone:
-	case <-time.After(5 * time.Second):
+	case <-time.After(starvationBudget):
 		t.Fatal("pumpQUICToUDP did not return")
 	}
 }
@@ -531,7 +534,7 @@ func newInstrumentedListenerWithCaps(t *testing.T, validator Validator, preAuthC
 		cancel()
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(starvationBudget):
 			t.Fatal("Serve did not return after ctx cancel")
 		}
 	}
@@ -590,12 +593,12 @@ func TestBedrockPreAuthCapRejectionUsesBedrockListener(t *testing.T) {
 	}
 	defer ln.caps.Release("127.0.0.1")
 
-	dctx, dcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	dctx, dcancel := context.WithTimeout(context.Background(), starvationBudget)
 	defer dcancel()
 	conn := dialQUIC(dctx, t, ln.Addr().String())
 	select {
 	case <-conn.Context().Done():
-	case <-time.After(4 * time.Second):
+	case <-time.After(starvationBudget):
 		t.Fatal("expected the over-cap connection to be closed")
 	}
 
@@ -691,7 +694,7 @@ func TestBedrockMetricsCarryNoSourceAddressLabel(t *testing.T) {
 	if _, err := fakeClient.WriteTo([]byte{0x84, 0x00}, dialAddr); err != nil {
 		t.Fatalf("WriteTo: %v", err)
 	}
-	rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	rctx, rcancel := context.WithTimeout(context.Background(), starvationBudget)
 	defer rcancel()
 	frame, err := client.ReceiveDatagram(rctx)
 	if err != nil {

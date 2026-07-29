@@ -23,16 +23,27 @@ import (
 	bedrocktunnelv1 "github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/controlplane/mcsd/bedrocktunnel/v1"
 )
 
-// starvationBudget is the ceiling these tests put on a positive-path wait that
-// completes in milliseconds when the process is scheduled normally: the
-// fakeRelay's TunnelHello handshake context, quic-go's own
-// HandshakeIdleTimeout (whose 5 s default is otherwise a hidden second window
-// on the same handshake), and the waits for an accepted connection and for an
-// observed CONNECTION_CLOSE. Nothing here measures elapsed time, so a generous
-// ceiling costs nothing on the happy path and only bounds a pathologically
-// CPU-starved run -- which a short fixed budget merely turns into a flake
-// (issue #2050; the relay-side twin of this helper carries the same constant).
-const starvationBudget = 60 * time.Second
+// starvationBudget is the single ceiling every positive-path wait in this
+// package puts on work that completes in milliseconds when the process is
+// scheduled normally: the fakeRelay's TunnelHello handshake context, quic-go's
+// own HandshakeIdleTimeout (whose 5 s default is otherwise a hidden second
+// window on the same handshake), the waits for an accepted connection and for
+// an observed CONNECTION_CLOSE, the datagram round trips, and the convergence
+// polls. Nothing here measures elapsed time, so the ceiling costs nothing on
+// the happy path and only bounds a pathologically CPU-starved run -- which a
+// short fixed budget merely turns into a flake (issue #2050).
+//
+// 30 s is ~2.5x the worst stall #2050's starvation rig actually measured
+// (starved handshakes finished in 1-12 s), and leaves room for 20 budget-
+// expiring failures inside `go test`'s 10 m default package timeout, so a
+// genuinely broken package still reports readable per-test failures rather
+// than a timeout panic (issue #2389). The relay-side twin of this helper
+// carries the same constant at the same value.
+//
+// Negative assertions ("nothing arrived within X") deliberately keep their own
+// short windows: they always run to their deadline and fail safe under load,
+// so stretching them would only cost suite time.
+const starvationBudget = 30 * time.Second
 
 // discardLogger writes nowhere, keeping test output clean.
 func discardLogger() *slog.Logger {
