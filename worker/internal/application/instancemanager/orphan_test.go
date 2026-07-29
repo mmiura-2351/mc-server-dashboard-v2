@@ -3,7 +3,9 @@ package instancemanager
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -172,6 +174,106 @@ func TestHydrateOverOrphanRejected(t *testing.T) {
 	res := m.Handle(context.Background(), session.Command{CommandID: "h", ServerID: "s1", Kind: "HydrateTrigger"})
 	if res.Success || res.ErrorCode != session.CommandErrorInvalidState {
 		t.Fatalf("hydrate over orphan = %+v, want INVALID_STATE", res)
+	}
+}
+
+// RestartServer for an orphaned id must be refused as the settled INVALID_STATE
+// it is, not as SERVER_NOT_FOUND: the process this Worker could not confirm dead
+// is probably still running, and "server not running" is a false statement about
+// it (issue #2466). The orphan record must survive the refusal so the retry stop
+// can still terminate it.
+func TestRestartOverOrphanRejected(t *testing.T) {
+	d := &orphanDriver{stopAfter: 1}
+	m := newManager(t, d, nil)
+	_ = m.Handle(context.Background(), startCmd())
+	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+
+	res := m.Handle(context.Background(), session.Command{CommandID: "r", ServerID: "s1", Kind: "RestartServer"})
+	if res.Success || res.ErrorCode != session.CommandErrorInvalidState {
+		t.Fatalf("restart over orphan = %+v, want INVALID_STATE", res)
+	}
+	if d.inst.stopCount() != 1 {
+		t.Fatalf("restart over orphan should not Stop the orphan; stop calls = %d", d.inst.stopCount())
+	}
+	// The refusal must not have consumed the orphan (taken it, or left the id
+	// reserved): the stop-retry path is still the only way the orphan is resolved.
+	if retry := m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: "s1", Kind: "StopServer"}); !retry.Success {
+		t.Fatalf("retry stop after refused restart = %+v, want success", retry)
+	}
+}
+
+// ServerCommand for an orphaned id is refused the same way: the console must not
+// tell the operator the server is not running while its process is probably
+// still alive (issue #2466).
+func TestServerCommandOverOrphanRejected(t *testing.T) {
+	d := &orphanDriver{stopAfter: 1}
+	m := newManager(t, d, &fakeControl{reply: "ok"})
+	_ = m.Handle(context.Background(), startCmd())
+	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+
+	res := m.Handle(context.Background(), session.Command{CommandID: "c", ServerID: "s1", Kind: "ServerCommand", Line: "list"})
+	if res.Success || res.ErrorCode != session.CommandErrorInvalidState {
+		t.Fatalf("server command over orphan = %+v, want INVALID_STATE", res)
+	}
+}
+
+// TunnelDial for an orphaned id is refused before the dialer is consulted, with
+// the orphan's INVALID_STATE rather than SERVER_NOT_FOUND. The dial is
+// fire-and-forget, so the code reaches only the API's diagnostic log — which is
+// exactly where an operator looks when a "running" server refuses joins (issue
+// #2466).
+func TestTunnelDialOverOrphanRejected(t *testing.T) {
+	d := &orphanDriver{stopAfter: 1}
+	m := newManager(t, d, nil) // no tunnel dialer: the orphan refusal precedes it
+	_ = m.Handle(context.Background(), startCmd())
+	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+
+	res := m.Handle(context.Background(), session.Command{CommandID: "t", ServerID: "s1", Kind: "TunnelDial"})
+	if res.Success || res.ErrorCode != session.CommandErrorInvalidState {
+		t.Fatalf("tunnel dial over orphan = %+v, want INVALID_STATE", res)
+	}
+}
+
+// A genuinely unknown id still gets SERVER_NOT_FOUND on those same paths: the
+// orphan refusal must not swallow the honest not-found answer (issue #2466).
+func TestRestartAndCommandForUnknownIDStillServerNotFound(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, &fakeControl{reply: "ok"})
+	for _, cmd := range []session.Command{
+		{CommandID: "r", ServerID: "ghost", Kind: "RestartServer"},
+		{CommandID: "c", ServerID: "ghost", Kind: "ServerCommand", Line: "list"},
+		{CommandID: "t", ServerID: "ghost", Kind: "TunnelDial"},
+	} {
+		res := m.Handle(context.Background(), cmd)
+		if res.Success || res.ErrorCode != session.CommandErrorServerNotFound {
+			t.Fatalf("%s for unknown id = %+v, want SERVER_NOT_FOUND", cmd.Kind, res)
+		}
+	}
+}
+
+// Recording an orphan must be visible in the Worker log: nothing enumerates
+// m.orphans, so without this line "every command for this server is refused" is
+// a code-reading exercise rather than an operator-visible fact (issue #2466).
+func TestFailedStopLogsOrphanRecord(t *testing.T) {
+	h := &capturingSlogHandler{}
+	d := &orphanDriver{stopAfter: 1}
+	m := newManager(t, d, nil).WithLogger(slog.New(h))
+	_ = m.Handle(context.Background(), startCmd())
+	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+
+	var found bool
+	for _, r := range h.records {
+		if r.Level != slog.LevelWarn || !strings.Contains(r.Message, "failed-stop orphan") {
+			continue
+		}
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "server_id" && a.Value.String() == "s1" {
+				found = true
+			}
+			return true
+		})
+	}
+	if !found {
+		t.Fatalf("no WARN naming the recorded orphan for s1; records = %v", h.records)
 	}
 }
 

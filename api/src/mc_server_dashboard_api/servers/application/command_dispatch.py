@@ -43,11 +43,31 @@ _SANITIZED_REASONS: dict[CommandStatus, str] = {
     CommandStatus.BUSY: "worker_busy",
 }
 
+# The Worker refused the command because it holds a failed-stop orphan for the
+# server: an instance whose driver Stop could not confirm termination, so the
+# process is probably still alive (issue #2466, Worker issue #251). It is NOT in
+# ``_SANITIZED_REASONS``: that map is keyed by status alone, and ``INVALID_STATE``
+# means different things per kind -- "already running or orphaned" for a start or
+# a hydrate, the orphan and nothing else for ``RestartServer`` /
+# ``ServerCommand``, whose only other refusals carry different codes. So the two
+# callers that can name it pass it explicitly.
+FAILED_STOP_ORPHAN_REASON = "failed_stop_orphan"
+
 
 def dispatch_failure(
-    *, server_id: ServerId, kind: str, outcome: CommandOutcome
+    *,
+    server_id: ServerId,
+    kind: str,
+    outcome: CommandOutcome,
+    reason: str | None = None,
 ) -> CommandDispatchError:
-    """Log a failed command outcome at WARN and build the typed dispatch error."""
+    """Log a failed command outcome at WARN and build the typed dispatch error.
+
+    ``reason`` names the 409 body reason for a refusal the caller classified from
+    the *kind* as well as the status (e.g. ``FAILED_STOP_ORPHAN_REASON``), which
+    the status-keyed ``_SANITIZED_REASONS`` cannot express. It wins over that map;
+    omitted, the map decides as before.
+    """
 
     detail = outcome.message or outcome.status.value
     _LOG.warning(
@@ -56,4 +76,6 @@ def dispatch_failure(
         server_id.value,
         detail,
     )
-    return CommandDispatchError(detail, reason=_SANITIZED_REASONS.get(outcome.status))
+    return CommandDispatchError(
+        detail, reason=reason or _SANITIZED_REASONS.get(outcome.status)
+    )

@@ -7,8 +7,10 @@
  * state-changed toast: the sanitized start/restart-failure categories
  * `port_conflict` / `image_missing` (issue #225), `server_unsettled` — the
  * at-rest precondition on the export mint (issue #2360) — the two contention
- * reasons `worker_busy` / `server_busy` (issue #2400), and the unclassified
- * dispatch failure `command_failed` (issue #2420).
+ * reasons `worker_busy` / `server_busy` (issue #2400), the unclassified
+ * dispatch failure `command_failed` (issue #2420), and `failed_stop_orphan` —
+ * a Worker that could not confirm an earlier stop, so the server's process is
+ * probably still running (issue #2466).
  *
  * Three reasons keep the state-changed treatment: `invalid_transition`,
  * `transition_conflict` and `server_not_running` each mean the server really
@@ -79,6 +81,18 @@ export type LifecycleAction = "start" | "stop" | "restart";
 // server's state; with one it says what is actually pending, which is what
 // VERB_SPECIFIC_409_MESSAGE below is for.
 //
+// `failed_stop_orphan` is the API's rendering of a Worker that refused because
+// it holds a failed-stop orphan for this server: an instance whose stop it could
+// not confirm, so the process is probably still running (issue #2466). It is
+// deliberately NOT verb-specific and deliberately not any of the messages above.
+// Nothing is pending (`restartPending` would promise a comeback for a server
+// that never went down), nothing is in progress (`busy` would ask for a retry
+// that is refused identically), and nothing changed state (`stateChanged` names
+// no change). What IS true is the server's condition and its one remedy — stop
+// it again, which is the path that retries the termination — and that holds
+// whichever verb was refused, so it lives here rather than in
+// VERB_SPECIFIC_409_MESSAGE.
+//
 // The refetch is deliberately kept (issue #2420): it is not a side effect of
 // this mapping — every lifecycle mutation invalidates in `onSettled` regardless
 // of outcome (DashboardPage.tsx / ServerDetailPage.tsx) — and for the stop and
@@ -91,6 +105,7 @@ const SPECIFIC_409_MESSAGE: Record<string, TranslationKey> = {
   worker_busy: "dashboard.lifecycle.busy",
   server_busy: "dashboard.lifecycle.busy",
   command_failed: "dashboard.lifecycle.commandFailed",
+  failed_stop_orphan: "dashboard.lifecycle.failedStopOrphan",
 };
 
 // Reasons whose honest message depends on the verb, consulted before

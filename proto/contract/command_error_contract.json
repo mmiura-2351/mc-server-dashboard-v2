@@ -66,10 +66,12 @@
 
     {"kind": "RestartServer", "precondition": "instance_running", "code": "ok"},
     {"kind": "RestartServer", "precondition": "instance_absent", "code": "server_not_found"},
+    {"kind": "RestartServer", "precondition": "orphan_pending", "code": "invalid_state"},
     {"kind": "RestartServer", "precondition": "command_in_flight", "code": "busy"},
 
     {"kind": "ServerCommand", "precondition": "instance_running", "code": "ok"},
     {"kind": "ServerCommand", "precondition": "instance_absent", "code": "server_not_found"},
+    {"kind": "ServerCommand", "precondition": "orphan_pending", "code": "invalid_state"},
 
     {"kind": "HydrateTrigger", "precondition": "instance_stopped", "code": "ok"},
     {"kind": "HydrateTrigger", "precondition": "instance_running", "code": "invalid_state"},

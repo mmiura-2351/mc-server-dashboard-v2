@@ -80,6 +80,9 @@ import logging
 from dataclasses import dataclass
 
 from mc_server_dashboard_api.servers.application.command_dispatch import (
+    FAILED_STOP_ORPHAN_REASON,
+)
+from mc_server_dashboard_api.servers.application.command_dispatch import (
     dispatch_failure as _dispatch_failure,
 )
 from mc_server_dashboard_api.servers.domain.bedrock_tunnel import (
@@ -1645,16 +1648,36 @@ class RestartServer:
             # (issue #2434).
             #
             # The status does not say WHY there is no instance: the id was never
-            # started on this Worker, the process crashed (``pump`` drops a crashed
-            # instance from the map via ``forgetIf``), or a failed-stop orphan is
-            # recorded (deliberately not taken by ``takeRunningReserve``, issue
-            # #251) — the last of which may still be alive. "Not running" is the
-            # one statement true of the Worker's view in all three, and it is the
-            # Worker's own wording ("instancemanager: server not running").
+            # started on this Worker, or the process crashed (``pump`` drops a
+            # crashed instance from the map via ``forgetIf``). Both are genuinely
+            # down, so "not running" is true of them, and it is the Worker's own
+            # wording ("instancemanager: server not running"). The third case —
+            # a recorded failed-stop orphan, which may still be alive — is NOT
+            # here: it answers INVALID_STATE (issue #2466, next arm).
             #
             # No state change to undo: restart commits none (see the class
             # docstring), so this only reports.
             raise ServerNotRunningError(str(server_id.value))
+        if outcome.status is CommandStatus.INVALID_STATE:
+            # The Worker holds a failed-stop orphan for this id: an instance whose
+            # driver Stop could not confirm termination, so its process is probably
+            # still alive, holding its port and writing its world (issue #2466).
+            # ``handleRestart`` refuses the restart over it — the orphan is left for
+            # the stop-retry path — and INVALID_STATE is the only way a restart
+            # reaches this line, so the reason is unambiguous: the running/reserved
+            # cases answer ok / BUSY, and a genuinely unknown id SERVER_NOT_FOUND.
+            #
+            # It must NOT be reported as not-running (the operator would read a
+            # live server as down) and must not fall into ``command_failed``, whose
+            # message sends the operator to check a state that is not the problem.
+            # Naming it lets the client say the honest thing: stop the server again
+            # to retry the termination.
+            raise _dispatch_failure(
+                server_id=server_id,
+                kind="RestartServer",
+                outcome=outcome,
+                reason=FAILED_STOP_ORPHAN_REASON,
+            )
         if not outcome.success:
             raise _dispatch_failure(
                 server_id=server_id, kind="RestartServer", outcome=outcome
@@ -1690,10 +1713,22 @@ class SendServerCommand:
         if outcome.status is CommandStatus.SERVER_NOT_FOUND:
             # The server stopped between the observed-running check above and this
             # dispatch: the Worker's handleServerCommand returns SERVER_NOT_FOUND
-            # (no live instance), never INVALID_STATE, for a not-running target
-            # (worker/internal/application/instancemanager/instancemanager.go:412-419,
-            # pinned by the #204 contract guard). Surface it as not-running.
+            # for a target it holds no instance for and knows nothing else about
+            # (worker/internal/application/instancemanager/instancemanager.go,
+            # notRunningRefusal, pinned by the #204 contract guard). Surface it as
+            # not-running.
             raise ServerNotRunningError(str(server_id.value))
+        if outcome.status is CommandStatus.INVALID_STATE:
+            # The same check found a failed-stop orphan instead: the process is
+            # probably still alive, so the console must not answer "not running"
+            # about it (issue #2466). INVALID_STATE is the only other refusal
+            # ``handleServerCommand`` can produce, so the reason is unambiguous.
+            raise _dispatch_failure(
+                server_id=server_id,
+                kind="ServerCommand",
+                outcome=outcome,
+                reason=FAILED_STOP_ORPHAN_REASON,
+            )
         if not outcome.success:
             raise _dispatch_failure(
                 server_id=server_id, kind="ServerCommand", outcome=outcome
