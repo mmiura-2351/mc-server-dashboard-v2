@@ -589,7 +589,12 @@ class _FakeDownload:
     overstates the size so a test can model the archive vanishing under an open
     stream (issue #2318); ``mid_stream_error`` raises after the first chunk for
     the other half of that race. ``stream_error`` fails only the open, modelling
-    the backup disappearing between the size read and it.
+    the backup row disappearing between the size read and it.
+
+    ``open_error`` is that same race one step later and is the shape the real
+    store has (issue #2415): both backends locate the archive on the stream's
+    FIRST iteration, so a delete landing after the size probe fails there, not at
+    the ``archive_stream`` call.
     """
 
     def __init__(
@@ -600,12 +605,14 @@ class _FakeDownload:
         declared: int | None = None,
         error: Exception | None = None,
         stream_error: Exception | None = None,
+        open_error: Exception | None = None,
         mid_stream_error: Exception | None = None,
     ) -> None:
         self._chunks = [data] if chunks is None else chunks
         self._declared = declared
         self._error = error
         self._stream_error = stream_error
+        self._open_error = open_error
         self._mid_stream_error = mid_stream_error
         # Every byte_range the edge asked for, so a test can prove the range
         # reached the store rather than being sliced off a full stream (#2372).
@@ -629,6 +636,8 @@ class _FakeDownload:
         return self._stream(byte_range)
 
     async def _stream(self, byte_range: tuple[int, int] | None) -> object:
+        if self._open_error is not None:
+            raise self._open_error
         if byte_range is None:
             for chunk in self._chunks:
                 yield chunk
@@ -758,6 +767,46 @@ def test_download_of_a_backup_deleted_before_the_open_is_404(error: Exception) -
     app = _app(member=True, allow=True, download=_FakeDownload(stream_error=error))
     client = next(_client(app))
     assert _download(client).status_code == 404
+
+
+@pytest.mark.parametrize("header", [None, "bytes=0-4"])
+def test_download_of_an_archive_deleted_before_the_first_read_is_404(
+    header: str | None,
+) -> None:
+    # The same race one step later, and the shape the real store actually has
+    # (issue #2415): both backends locate the archive on the stream's FIRST
+    # iteration, so a delete landing after the size probe fails there. Starlette
+    # writes the status and Content-Length before it touches the body iterator, so
+    # that failure used to arrive as a 200 declaring a length the body could never
+    # deliver. The route begins the stream first, which puts the miss back where a
+    # status can still be chosen.
+    #
+    # The ranged path is the same window with a length derived from the same probe
+    # (issue #2382), so it is answered the same way.
+    recorder = RecordingAuditRecorder()
+    download = _FakeDownload(open_error=BackupNotFoundError("x"), declared=1024)
+    app = _app(member=True, allow=True, download=download, recorder=recorder)
+    client = next(_client(app))
+    headers = _bearer() if header is None else {**_bearer(), "Range": header}
+    resp = _download(client, headers)
+    assert resp.status_code == 404
+    # It is the miss, not a partial: no representation was described...
+    assert "content-range" not in resp.headers
+    assert resp.headers["content-type"] != "application/gzip"
+    # ... and nothing was recorded, exactly as for the 404s above.
+    assert recorder.events == []
+
+
+def test_download_storage_outage_at_the_open_is_503() -> None:
+    # The open reaches the store too, and now runs before any byte is on the wire
+    # (issue #2415), so an outage that begins after the size probe can still
+    # choose the retryable status the probe's own outage answers with (#2378).
+    download = _FakeDownload(open_error=BackupStorageUnavailableError("x"))
+    app = _app(member=True, allow=True, download=download)
+    client = next(_client(app))
+    resp = _download(client)
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "storage_unavailable"
 
 
 # --- resumable download: Range (issue #2372) -------------------------------

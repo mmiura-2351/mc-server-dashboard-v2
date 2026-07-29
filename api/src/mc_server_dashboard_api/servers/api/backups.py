@@ -56,7 +56,7 @@ from mc_server_dashboard_api.http_range import (
     RangeNotSatisfiableError,
     parse_byte_range,
 )
-from mc_server_dashboard_api.http_streaming import counted
+from mc_server_dashboard_api.http_streaming import counted, started
 from mc_server_dashboard_api.identity.domain.token_service import TokenService
 from mc_server_dashboard_api.identity.domain.value_objects import (
     UserId as IdentityUserId,
@@ -718,9 +718,26 @@ async def download_backup(
             backup_id=BackupId(backup_id),
             byte_range=served,
         )
+        # Begin the stream here, so the archive is located while the status can
+        # still be chosen (issue #2415). The size probe and the stream resolve the
+        # archive independently, and the stream resolves it on its FIRST iteration
+        # — the open stays inside the generator so a stream that is never consumed
+        # holds no descriptor (issues #2341, #2390) — while Starlette writes the
+        # status and Content-Length before it touches the body iterator. A delete
+        # landing after the probe was therefore answered as a 200 declaring a
+        # length the body could never deliver. Beginning the stream makes it the
+        # plain 404 the comment below always claimed it was. Past that first read
+        # the filesystem backend is serving an open descriptor, which a later
+        # unlink cannot shorten, so the declared length and the body agree.
+        stream = await started(stream)
     except (ServerNotFoundError, BackupNotFoundError) as exc:
         # Deleted between the size read and the open: still nothing on the wire.
         raise _not_found() from exc
+    except BackupStorageUnavailableError as exc:
+        # The open reaches the store too, and now runs before any byte is on the
+        # wire, so an outage that begins after the size probe can still choose the
+        # same retryable 503 that probe answers with (issue #2378).
+        raise _service_unavailable("storage_unavailable") from exc
     await _record(recorder, ops.BACKUP_DOWNLOAD, authorized, community_id, backup_id)
     # Starlette populates no Content-Length for a streaming body, so without an
     # explicit header the response is chunked (issue #2312). The declared value is
