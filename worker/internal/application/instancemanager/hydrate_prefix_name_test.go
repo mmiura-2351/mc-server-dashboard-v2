@@ -18,11 +18,13 @@ import (
 //     superseded-set aside under it, using its own local hydrateTmpPrefix in
 //     worker/internal/adapters/datatransfer/datatransfer.go.
 //   - the held-set scans here SKIP it, using hydratePrefix in scratchscan.go.
+//   - both leftover SWEEPS RECLAIM it — Manager.sweepHydrateLeftovers here and
+//     datatransfer.sweepHydrateLeftovers there (issue #2409).
 //
-// So this test and its twin — TestHydrateTempTreesUseTheSharedHydratePrefix in
-// worker/internal/adapters/datatransfer — each assert the SAME hardcoded
-// literal from their own side. Renaming either constant then fails CI here
-// instead of degrading the invariant silently.
+// So this test, its sweep companion below, and their twins in
+// worker/internal/adapters/datatransfer each assert the SAME hardcoded literal
+// from their own side. Renaming either constant then fails CI here instead of
+// degrading the invariant silently.
 //
 // A crash between a hydrate's aside/unpack and its swap-in leaves such a tree in
 // the scratch root as a FULL working set carrying a generation marker (the
@@ -47,6 +49,41 @@ func TestHeldScansSkipTheSharedHydrateTempPrefix(t *testing.T) {
 	want := []session.HeldServer{{ServerID: "s1", Generation: 7}}
 	assertHeld(t, "ScanHeldServers", ScanHeldServers(scratch, nil), want)
 	assertHeld(t, "HeldServers", New(nil, scratch, nil).HeldServers(), want)
+}
+
+// The leftover SWEEP side of the same contract (issue #2409). The held-set scans
+// only skip a crash-left tree; the sweep is what actually reclaims it, so the
+// prefix it matches on must be pinned to the creation site too — otherwise a
+// coordinated rename that updates the creation site, the scan constant and the
+// scan tests above can still leave the sweep matching the OLD literal, at which
+// point crash-left trees are never reclaimed and CI stays green.
+//
+// This is the reclamation of last resort for an id the API deleted or re-placed
+// elsewhere (issue #806): datatransfer's own sweep runs only when the id is
+// re-hydrated onto this Worker, so a miss here leaks the world-sized orphan
+// permanently.
+func TestHydrateLeftoverSweepMatchesTheSharedHydratePrefix(t *testing.T) {
+	scratch := t.TempDir()
+
+	// Hardcoded on purpose, exactly as in the scan test above: building these from
+	// hydratePrefix would make the test follow a rename rather than catch it.
+	leftovers := []string{
+		filepath.Join(scratch, ".hydrate-s1-123456"),
+		filepath.Join(scratch, ".hydrate-s1-superseded-654321"),
+	}
+	for _, dir := range leftovers {
+		seedHydrateShapedTree(t, dir, 7)
+	}
+
+	New(nil, scratch, nil).sweepHydrateLeftovers("s1")
+
+	for _, dir := range leftovers {
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Fatalf("sweepHydrateLeftovers left %q behind: stat err = %v; the sweep must "+
+				"match the same %q prefix datatransfer creates these trees under "+
+				"(issue #2409)", filepath.Base(dir), err, ".hydrate-")
+		}
+	}
 }
 
 // seedHydrateShapedTree creates a directory holding a real working set (world content
