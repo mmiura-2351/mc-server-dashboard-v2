@@ -89,7 +89,8 @@ class WorkingSetView(abc.ABC):
         :class:`~.errors.NotFoundError` for a missing subdirectory. The pin holds
         the snapshot as a whole, not the subtrees in it, so a ``delete_dir`` of a
         pinned directory races the listing and must surface as that same miss
-        (issue #2394).
+        (issue #2394), and an ENTRY deleted while the listing is taken is omitted
+        from it exactly as :meth:`FileStore.list_dir` omits it (issue #2414).
         """
 
     @abc.abstractmethod
@@ -644,6 +645,13 @@ class FileStore(abc.ABC):
         locates it, so a ``delete_dir`` racing the listing is that same miss rather
         than a backend-native error — the lease holds the snapshot directory, not
         the subtrees inside it.
+
+        A listing describes the directory as of a moment, so an ENTRY deleted while
+        the listing is being taken is simply OMITTED — never an error, and never a
+        row with a made-up size (issue #2414). Only that entry's own disappearance
+        is omitted: a backend failure to describe an entry that still exists
+        surfaces as itself. The directory going away is still the miss above, not
+        an empty listing.
         """
 
     @abc.abstractmethod

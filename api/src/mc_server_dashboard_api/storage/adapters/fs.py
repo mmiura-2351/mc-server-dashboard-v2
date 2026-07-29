@@ -35,6 +35,7 @@ import hashlib
 import io
 import os
 import shutil
+import stat
 import tarfile
 import tempfile
 import threading
@@ -1284,19 +1285,7 @@ class FsStorage(Storage):
         current, release = self._lease_current(community_id, server_id)
         try:
             target = self._safe_target(current, rel_path)
-            entries = []
-            for child in _list_children(
-                target, f"directory not found: {rel_path.value}"
-            ):
-                is_dir = child.is_dir()
-                entries.append(
-                    DirEntry(
-                        name=child.name,
-                        is_dir=is_dir,
-                        size=0 if is_dir else child.stat().st_size,
-                    )
-                )
-            return entries
+            return _list_entries(target, f"directory not found: {rel_path.value}")
         finally:
             release()
 
@@ -2026,6 +2015,60 @@ def _list_children(target: Path, not_found: str) -> list[Path]:
         raise
 
 
+def _list_entries(target: Path, not_found: str) -> list[DirEntry]:
+    """Describe one directory level: the shared body of both fs listings (#2414).
+
+    ``_list_children`` closed the window on the listing TARGET (issue #2394); a
+    second one sat on each listed CHILD. ``iterdir`` is a single eager
+    ``os.listdir``, so what it returns is an atomic snapshot of the directory, and
+    every name in it is then described by a separate ``stat``. A child unlinked in
+    between made that stat raise a bare ``FileNotFoundError`` -- untranslated by
+    the servers seam, so one unlucky delete anywhere in the directory 500'd the
+    whole listing (measured on ``GET .../files?path=d&list=true``).
+
+    Such an entry is OMITTED: the listing then describes the directory as of a
+    moment just after the snapshot, which is both what a user expects (the file is
+    gone, so it is not listed) and what the object backend already does -- its
+    listing is one ``list_objects`` response, which a concurrently deleted key
+    simply is not in, and which never fails per entry.
+
+    ENOENT alone, and one ``stat`` rather than ``is_dir()`` + ``stat()`` so the
+    entry is described from a single observation. Every other errno means
+    something other than "this entry is gone" and still surfaces: EACCES/EIO name
+    a child that exists, and ENOTDIR means the PARENT stopped being a directory
+    under the listing -- silently dropping entries for those would hide a real
+    failure behind a short listing.
+    """
+
+    children = _list_children(target, not_found)
+    entries = []
+    for child in children:
+        try:
+            info = child.stat()
+        except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                continue
+            raise
+        is_dir = stat.S_ISDIR(info.st_mode)
+        entries.append(
+            DirEntry(
+                name=child.name,
+                is_dir=is_dir,
+                size=0 if is_dir else info.st_size,
+            )
+        )
+    # Every entry vanishing is how a ``delete_dir`` of this very directory looks
+    # from here, and answering ``[]`` would report a directory that is GONE as one
+    # that exists and is empty -- a worse lie than the 500 above, and a
+    # contradiction of the miss #2394 pins. Confirming the directory afterwards is
+    # not the pre-check that issue removed: it acts on the LATER observation, and
+    # only in the one case the omission above created (a genuinely empty directory
+    # has no children to omit and never reaches it).
+    if children and not entries and not target.is_dir():
+        raise NotFoundError(not_found)
+    return entries
+
+
 def _size_of_readable(path: Path, not_found: str) -> int:
     """Size of a stored file, with the open as the existence check (issue #2394).
 
@@ -2289,18 +2332,10 @@ class _FsWorkingSetView(WorkingSetView):
         # The listing IS the existence check, for the same reason it is in
         # ``FsStorage._list_dir`` (issue #2394): the view's lease pins the snapshot
         # DIRECTORY, and ``delete_dir`` removes a subtree inside that very
-        # directory, so a pre-check here would leave the same window.
-        entries = []
-        for child in _list_children(target, f"directory not found: {rel_path.value}"):
-            is_dir = child.is_dir()
-            entries.append(
-                DirEntry(
-                    name=child.name,
-                    is_dir=is_dir,
-                    size=0 if is_dir else child.stat().st_size,
-                )
-            )
-        return entries
+        # directory, so a pre-check here would leave the same window. The body is
+        # shared so the view cannot drift from ``_list_dir`` on any of it --
+        # including how a vanished child is reported (issue #2414).
+        return _list_entries(target, f"directory not found: {rel_path.value}")
 
     def open_file_stream(self, rel_path: RelPath) -> ByteStream:
         if self._pinned is None:
