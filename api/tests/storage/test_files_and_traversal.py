@@ -477,7 +477,13 @@ def _rmtree_after_the_snapshot(monkeypatch: pytest.MonkeyPatch, name: str) -> No
 
 
 def _child_stat_fails(monkeypatch: pytest.MonkeyPatch, name: str, err: int) -> None:
-    """Fail the ``stat`` of one listed child with ``err``, leaving the rest real."""
+    """Fail the ``stat`` of one listed child with ``err``, leaving the rest real.
+
+    Patching ``Path.stat`` still intercepts the listing's ``Path.lstat`` (issue
+    #2418) because pathlib implements ``lstat`` as ``stat(follow_symlinks=False)``.
+    If that delegation ever changes, these tests fail loudly (the injected errno
+    never arrives) rather than silently passing, so the coupling is safe to rely on.
+    """
 
     real_stat = Path.stat
 
@@ -602,6 +608,225 @@ async def test_list_dir_of_an_empty_directory_is_still_empty(tmp_path: Path) -> 
     await storage.make_dir(community, server, RelPath("d"))
 
     assert await storage.list_dir(community, server, RelPath("d")) == []
+
+
+# --- a listed child that is a SYMLINK (issue #2418) --------------------------
+#
+# A listing describes the link itself (``lstat``), never its target. Two children
+# cannot be described by a target-following ``stat`` at all — a dangling link
+# (ENOENT, which #2414's vanished-child rule then silently omitted) and a link
+# loop (ELOOP, which escaped untranslated and 500'd the whole listing) — yet both
+# are real dirents ``ls`` shows and neither vanished. ``lstat`` succeeds on both,
+# so they need no special case: each is described as what it is, a link, with
+# ``is_dir=False`` and the link's own size (the target string's length).
+#
+# This is the contract the Worker's running-server listing already ships and pins
+# (``unix.Fstatat(..., AT_SYMLINK_NOFOLLOW)`` in ``instancemanager.go``), so the
+# at-rest and running browsers now describe the same entry the same way — which
+# is what ``FileEntry`` in the control-plane proto already claims. A link to a
+# DIRECTORY is therefore reported as a file too; that is the accepted trade.
+
+
+async def test_list_dir_describes_a_dangling_symlink_as_the_link(
+    tmp_path: Path,
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"d/keep": b"DATA"})
+    (snapshot_dir(tmp_path, community, server) / "d" / "broken").symlink_to("nowhere")
+
+    entries = await storage.list_dir(community, server, RelPath("d"))
+
+    broken = next(entry for entry in entries if entry.name == "broken")
+    assert broken.is_dir is False
+    assert broken.size == len("nowhere")
+
+
+async def test_view_list_dir_describes_a_dangling_symlink_as_the_link(
+    tmp_path: Path,
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"d/keep": b"DATA"})
+    (snapshot_dir(tmp_path, community, server) / "d" / "broken").symlink_to("nowhere")
+
+    async with storage.open_working_set_view(community, server) as view:
+        entries = await view.list_dir(RelPath("d"))
+
+    broken = next(entry for entry in entries if entry.name == "broken")
+    assert broken.is_dir is False
+    assert broken.size == len("nowhere")
+
+
+async def test_list_dir_describes_a_symlink_loop_as_the_link(tmp_path: Path) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"d/keep": b"DATA"})
+    _plant_symlink_loop(snapshot_dir(tmp_path, community, server) / "d" / "loop")
+
+    entries = await storage.list_dir(community, server, RelPath("d"))
+
+    loop = next(entry for entry in entries if entry.name == "loop")
+    assert loop.is_dir is False
+    assert loop.size == len("loop")
+
+
+async def test_view_list_dir_describes_a_symlink_loop_as_the_link(
+    tmp_path: Path,
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"d/keep": b"DATA"})
+    _plant_symlink_loop(snapshot_dir(tmp_path, community, server) / "d" / "loop")
+
+    async with storage.open_working_set_view(community, server) as view:
+        entries = await view.list_dir(RelPath("d"))
+
+    loop = next(entry for entry in entries if entry.name == "loop")
+    assert loop.is_dir is False
+    assert loop.size == len("loop")
+
+
+async def test_list_dir_does_not_follow_a_symlink_to_a_directory(
+    tmp_path: Path,
+) -> None:
+    """The link is described, not the directory it points at."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"d/keep": b"DATA", "real/inner": b"X"})
+    live = snapshot_dir(tmp_path, community, server)
+    (live / "d" / "alias").symlink_to("../real")
+
+    entries = await storage.list_dir(community, server, RelPath("d"))
+
+    alias = next(entry for entry in entries if entry.name == "alias")
+    assert alias.is_dir is False
+    assert alias.size == len("../real")
+
+
+async def test_view_list_dir_does_not_follow_a_symlink_to_a_directory(
+    tmp_path: Path,
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"d/keep": b"DATA", "real/inner": b"X"})
+    live = snapshot_dir(tmp_path, community, server)
+    (live / "d" / "alias").symlink_to("../real")
+
+    async with storage.open_working_set_view(community, server) as view:
+        entries = await view.list_dir(RelPath("d"))
+
+    alias = next(entry for entry in entries if entry.name == "alias")
+    assert alias.is_dir is False
+    assert alias.size == len("../real")
+
+
+# --- READING a symlink dirent (issue #2418 review) --------------------------
+#
+# Describing the link rather than its target split the listing from the read: the
+# listing sized the LINK while the read still followed it to the target. That is
+# not cosmetic. ``DownloadFile.file_size`` hands the parent listing's size
+# straight to a ``Content-Length`` header while the body comes from the stream, so
+# a 7-byte header over a 1000-byte body is a protocol abort or a silent
+# truncation; and the search's per-file memory cap gates on the same listed size,
+# so a link to a multi-GiB file slipped under the cap and was read whole.
+#
+# An at-rest read of a symlink dirent is therefore a MISS. One rule closes both,
+# and it is the same convergence that decided the listing: the Worker already
+# refuses to follow a symlink on read, #2393 already answers a dangling link and a
+# loop as a miss on this very path, and a working set cannot legitimately contain
+# a symlink anyway (uploads refuse symlink members, the Worker's snapshot tar
+# skips them, hydrate rejects them).
+#
+# It is the LEAF dirent that is refused, never the resolution of the working-set
+# root: ``current`` IS a symlink (``current -> snapshots/<id>``), but
+# ``_current_dir`` readlinks it and hands ``_safe_target`` the resolved snapshot
+# DIRECTORY, so the root is never a leaf under test here. Containment still runs
+# first, so an escaping link stays a PathTraversalError.
+
+
+async def test_a_listed_symlink_never_promises_a_size_the_read_contradicts(
+    tmp_path: Path,
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"big.bin": b"B" * 1000})
+    (snapshot_dir(tmp_path, community, server) / "link.bin").symlink_to("big.bin")
+
+    entries = await storage.list_dir(community, server, RelPath("."))
+
+    listed = next(entry for entry in entries if entry.name == "link.bin")
+    assert listed.size == len("big.bin")  # the link's own size, not the target's
+    with pytest.raises(NotFoundError):
+        await storage.read_file(community, server, RelPath("link.bin"))
+
+
+async def test_open_file_stream_of_a_symlink_is_not_found(tmp_path: Path) -> None:
+    """The stream is the path that would emit the body under the wrong header."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"big.bin": b"B" * 1000})
+    (snapshot_dir(tmp_path, community, server) / "link.bin").symlink_to("big.bin")
+
+    with pytest.raises(NotFoundError):
+        await drain(storage.open_file_stream(community, server, RelPath("link.bin")))
+
+
+async def test_view_file_stream_of_a_symlink_is_not_found(tmp_path: Path) -> None:
+    """The pinned view reads the same way, so the export walk skips the link."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"big.bin": b"B" * 1000})
+    (snapshot_dir(tmp_path, community, server) / "link.bin").symlink_to("big.bin")
+
+    async with storage.open_working_set_view(community, server) as view:
+        with pytest.raises(NotFoundError):
+            await drain(view.open_file_stream(RelPath("link.bin")))
+
+
+async def test_reading_an_escaping_symlink_is_still_a_traversal_refusal(
+    tmp_path: Path,
+) -> None:
+    """Refusing the leaf must not soften containment: escape still outranks the miss.
+
+    Containment is evaluated first, so a link out of the root keeps reporting the
+    escape it is rather than being downgraded to an ordinary missing file. Not
+    following the leaf makes escape strictly harder, never easier.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"x"})
+    secret = tmp_path / "secret.txt"
+    secret.write_bytes(b"top-secret")
+    (snapshot_dir(tmp_path, community, server) / "escape").symlink_to(secret)
+
+    with pytest.raises(PathTraversalError):
+        await storage.read_file(community, server, RelPath("escape"))
+
+
+async def test_reading_through_an_intermediate_symlink_still_works(
+    tmp_path: Path,
+) -> None:
+    """Only the LEAF is refused; an intermediate component still resolves.
+
+    ``alias/data`` names a real file, and the listing that shows it (``list_dir``
+    on the link's own path still follows) sizes it truthfully — so the listing and
+    the read agree and there is nothing to fix here.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"real/data": b"inside"})
+    live = snapshot_dir(tmp_path, community, server)
+    (live / "alias").symlink_to("real")
+
+    assert (
+        await storage.read_file(community, server, RelPath("alias/data")) == b"inside"
+    )
 
 
 def test_version_ids_sort_chronologically_across_time_low_wrap(

@@ -300,6 +300,50 @@ class FsStorage(Storage):
             )
         return Path(resolved)
 
+    def _safe_read_target(self, base: Path, rel_path: RelPath, not_found: str) -> Path:
+        """:meth:`_safe_target` for a READ, refusing a symlink leaf as a miss (#2418).
+
+        A listing describes each entry as the dirent it is rather than as its
+        target, so a read that still followed the link would contradict the very
+        listing that offered it: the entry's listed size is the link's, and
+        ``DownloadFile`` hands that size straight to a ``Content-Length`` header
+        whose body then comes from this read -- a protocol abort, not a cosmetic
+        mismatch -- while the content search's per-file memory cap gates on that
+        same listed size and would let a link to a huge file through. Answering the
+        Port's own miss keeps the listing and the read telling one story, and it
+        converges on what the rest of the system already does: the Worker refuses
+        to follow a symlink on read, and a dangling link and a loop are already a
+        miss here (issue #2393). A working set cannot legitimately carry a symlink
+        anyway -- uploads refuse symlink members, the Worker's snapshot tar skips
+        them, hydrate rejects them -- so this forecloses a shape that only arrives
+        out of band.
+
+        Only the LEAF dirent is refused, never the resolution of the working-set
+        root: ``current`` IS a symlink, but ``_current_dir`` readlinks it and
+        passes the resolved snapshot DIRECTORY as ``base``, so the root is never a
+        leaf here. An intermediate component still resolves (``alias/data`` reads
+        the real file), which is consistent because the listing that shows ``data``
+        sizes it truthfully.
+
+        Containment runs FIRST, so a link that escapes the root keeps reporting the
+        escape rather than being downgraded to an ordinary miss. Refusing to follow
+        the leaf can only narrow what a read reaches, never widen it.
+        """
+
+        target = self._safe_target(base, rel_path)
+        # Tested on the UNRESOLVED join: ``_safe_target`` returns the realpath, in
+        # which the leaf symlink has already been resolved away.
+        #
+        # ``os.path.islink`` rather than ``Path.is_symlink``: the probe must ANSWER
+        # for every path a client can ask for, never raise. ``Path.is_symlink``
+        # re-raises ENAMETOOLONG, which would make an over-long ``?path=`` a 500
+        # again -- the exact regression #2393 fixed by folding that errno into the
+        # miss. ``os.path.islink`` answers False on any lstat failure, leaving the
+        # open below to produce that miss.
+        if os.path.islink(base.joinpath(*rel_path.parts)):
+            raise NotFoundError(not_found)
+        return target
+
     # --- crash-recovery sweep (Section 4.3) --------------------------------
 
     def sweep(self) -> None:
@@ -1232,7 +1276,9 @@ class FsStorage(Storage):
         # identical.
         current, release = self._lease_current(community_id, server_id)
         try:
-            target = self._safe_target(current, rel_path)
+            target = self._safe_read_target(
+                current, rel_path, f"file not found: {rel_path.value}"
+            )
             with _open_readable_sync(
                 target, f"file not found: {rel_path.value}"
             ) as handle:
@@ -1254,7 +1300,9 @@ class FsStorage(Storage):
         def _open() -> tuple[Path, Callable[[], None]]:
             current, release = self._lease_current(community_id, server_id)
             try:
-                target = self._safe_target(current, rel_path)
+                target = self._safe_read_target(
+                    current, rel_path, f"file not found: {rel_path.value}"
+                )
             except BaseException:
                 release()
                 raise
@@ -2040,19 +2088,27 @@ def _list_entries(target: Path, not_found: str) -> list[DirEntry]:
     under the listing -- silently dropping entries for those would hide a real
     failure behind a short listing.
 
-    ENOENT is not exclusively a vanished entry, though: a DANGLING SYMLINK stats
-    the same way and is therefore omitted too, where it used to 500 the listing
-    (via the pre-single-stat ``is_dir()`` answering False). A symlink LOOP is the
-    neighbouring case and still surfaces as ``OSError(ELOOP)``. Neither is a race,
-    both are real dirents ``ls`` shows, and what a listing should report for them
-    is one decision taken separately (issue #2418).
+    The describing call is an ``lstat``: an entry is described as what the
+    DIRENT is, never as what it points at (issue #2418). A target-following
+    ``stat`` cannot describe two children that have not vanished at all — a
+    dangling symlink raises ENOENT and was therefore swallowed by the rule
+    above, and a symlink loop raises ELOOP and escaped untranslated, 500'ing the
+    whole listing. Both are real dirents ``ls`` shows; ``lstat`` succeeds on both,
+    so they need no special case and neither can fail a listing any more. It also
+    makes an unbounded walk of a cyclic directory symlink structurally impossible.
+    The cost is that a symlink to a DIRECTORY is reported as a file carrying the
+    link's own size (the target string's length) rather than as a navigable
+    directory. That is accepted: it is exactly what the Worker's running-server
+    listing already does for the same entry (``unix.Fstatat`` with
+    ``AT_SYMLINK_NOFOLLOW``), so the at-rest and running file browsers now agree,
+    as the control-plane ``FileEntry`` contract already claims they do.
     """
 
     children = _list_children(target, not_found)
     entries = []
     for child in children:
         try:
-            info = child.stat()
+            info = child.lstat()
         except OSError as exc:
             if exc.errno == errno.ENOENT:
                 continue
@@ -2342,14 +2398,19 @@ class _FsWorkingSetView(WorkingSetView):
         # DIRECTORY, and ``delete_dir`` removes a subtree inside that very
         # directory, so a pre-check here would leave the same window. The body is
         # shared so the view cannot drift from ``_list_dir`` on any of it --
-        # including how a vanished child is reported (issue #2414).
+        # including how a vanished child is reported (issue #2414) and how a
+        # symlink child is described (issue #2418).
         return _list_entries(target, f"directory not found: {rel_path.value}")
 
     def open_file_stream(self, rel_path: RelPath) -> ByteStream:
         if self._pinned is None:
             raise NotFoundError(f"file not found: {rel_path.value}")
-        # Resolve the target synchronously (the pinned path is stable).
-        target = self._storage._safe_target(self._pinned, rel_path)
+        # Resolve the target synchronously (the pinned path is stable). Reads go
+        # through the read-side resolve so the view answers a symlink dirent with
+        # the same miss the unpinned read paths do (issue #2418).
+        target = self._storage._safe_read_target(
+            self._pinned, rel_path, f"file not found: {rel_path.value}"
+        )
         # The lease is already held by the view; stream the file without an
         # additional per-file lease.
         return _pinned_file_stream(target, rel_path)

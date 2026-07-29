@@ -89,18 +89,30 @@ class WorkingSetView(abc.ABC):
         :class:`~.errors.NotFoundError` for a missing subdirectory. The pin holds
         the snapshot as a whole, not the subtrees in it, so a ``delete_dir`` of a
         pinned directory races the listing and must surface as that same miss
-        (issue #2394), and an ENTRY deleted while the listing is taken is omitted
-        from it exactly as :meth:`FileStore.list_dir` omits it (issue #2414).
+        (issue #2394). Entries are described exactly as :meth:`FileStore.list_dir`
+        describes them: one deleted while the listing is taken is omitted (issue
+        #2414), and every other one describes itself rather than what it points at
+        (issue #2418).
         """
 
     @abc.abstractmethod
     def open_file_stream(self, rel_path: RelPath) -> ByteStream:
         """Open a chunked read stream over one file in the pinned snapshot.
 
-        Raises :class:`~.errors.NotFoundError` if the file is absent, on the
-        stream's FIRST iteration. The pin holds the snapshot as a whole, not the
-        individual files in it, so a delete of one pinned file races the read and
-        must surface as that same miss (issue #2391).
+        Raises :class:`~.errors.NotFoundError` if the file is absent. The pin
+        holds the snapshot as a whole, not the individual files in it, so a delete
+        of one pinned file races the read and must surface as that same miss
+        (issue #2391); because locating the file is part of opening it, that race
+        can only be reported on the stream's FIRST iteration. What the view can
+        settle without touching the file — an unpinned (unpublished) view, and a
+        path whose leaf is a symlink (issue #2418) — is raised when the stream is
+        constructed instead. Callers therefore have to be ready for the miss at
+        either point; every caller in the tree reaches it through a generator, so
+        both arrive at the same place.
+
+        The set of paths that miss is exactly :meth:`FileStore.open_file_stream`'s,
+        symlink leaf included, or the export walk would read bytes the view's own
+        listing did not describe.
         """
 
     @abc.abstractmethod
@@ -630,6 +642,18 @@ class FileStore(abc.ABC):
         The lease holds the snapshot DIRECTORY, not the files in it, so that race
         is real. A path that names a file the backend cannot read — no
         permission, an I/O error — is NOT a miss and surfaces as itself.
+
+        It also covers a path whose LEAF is a symlink of any kind, not only one
+        that loops (issue #2418): a read never follows a link, because
+        :meth:`list_dir` describes that entry as the link and a following read
+        would return bytes the listed size does not account for — the size a
+        caller has already put on the wire as a ``Content-Length``, and the size
+        a content search gates its per-file memory cap on. Only the leaf is
+        refused; an intermediate component still resolves, and a link that
+        escapes the server root is still the traversal refusal rather than this
+        miss. A working set has no legitimate symlink in it anyway (uploads
+        refuse symlink members, the Worker's snapshot tar skips them, hydrate
+        rejects them), so this closes a shape that can only arrive out of band.
         """
 
     @abc.abstractmethod
@@ -646,17 +670,28 @@ class FileStore(abc.ABC):
         than a backend-native error — the lease holds the snapshot directory, not
         the subtrees inside it.
 
-        A listing describes the directory as of a moment, so an ENTRY that resolves
-        to nothing when the backend describes it is simply OMITTED — never an
-        error, and never a row with a made-up size (issue #2414). The case that
-        drove this is an entry deleted while the listing is being taken; the same
-        answer necessarily covers an entry that resolves to nothing for another
-        reason — a dangling symlink is omitted too, while a symlink LOOP is not, and
-        how a listing should report the symlink cases is unsettled and tracked
-        separately (issue #2418). An entry that does resolve and that the backend
-        then fails to describe — no permission, an I/O error — is not omitted and
-        surfaces as itself. The directory going away is still the miss above, not
-        an empty listing.
+        A listing describes the directory as of a moment, so an ENTRY that is GONE
+        when the backend describes it is simply OMITTED — never an error, and never
+        a row with a made-up size (issue #2414). An entry that is still there and
+        that the backend then fails to describe — no permission, an I/O error — is
+        not omitted and surfaces as itself. The directory going away is still the
+        miss above, not an empty listing.
+
+        Every entry describes ITSELF, never what it points at (issue #2418). On a
+        backend with symlinks that means the link, not its target: a link is always
+        ``is_dir=False`` and carries the link's own size, and READING that entry is
+        a miss (see :meth:`read_file`) — so the size a listing publishes is never
+        contradicted by what reading it yields. A dangling link and a link loop are
+        therefore ordinary entries, not failures and not omissions: neither
+        vanished, so neither is the case above. This is the contract the Worker's
+        running-server listing already ships, so a running and an at-rest listing
+        describe the same entry the same way.
+
+        Passing a link's own path back to THIS method is a separate question from
+        how its parent listed it, and is deliberately left as it was: the path is
+        resolved, so listing a link to a directory still lists the target's
+        children. The entry is thus file-shaped in its parent's listing yet still
+        openable as a directory by path.
         """
 
     @abc.abstractmethod
