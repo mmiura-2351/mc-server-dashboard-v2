@@ -2644,6 +2644,51 @@ async def test_search_skips_a_subdirectory_whose_listing_is_refused() -> None:
     assert set(result.paths) == {"config/motd.txt"}
 
 
+async def test_search_by_name_returns_a_dirent_no_download_can_fetch() -> None:
+    """A name hit is a dirent, including one that names nothing fetchable (#2438).
+
+    A directory listing describes every child it found (#2418) and the name
+    branch reports what the listing reports, so the file browser shows these
+    entries too. Fetching such a hit gets what fetching it from the browser
+    gets — the read seam's refusal: an escape from the working set is refused
+    (422), a contained or dangling link is the modelled miss (404). Dropping
+    them here would leave the search and the listing disagreeing about the same
+    tree, so they are returned.
+    """
+
+    class _RefusingLeafFileStore(FakeFileStore):
+        async def read_file(
+            self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+        ) -> bytes:
+            if rel_path == "config/outside.txt":
+                raise InvalidFilePathError(rel_path)
+            return await super().read_file(
+                community_id=community_id, server_id=server_id, rel_path=rel_path
+            )
+
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = _RefusingLeafFileStore(strict_dirs=True)
+    store.dirs["."] = [FileEntry(name="config", is_dir=True, size=0)]
+    store.dirs["config"] = [
+        # A link out of the working set: listed, but its read is refused.
+        FileEntry(name="outside.txt", is_dir=False, size=9),
+        # A contained or dangling link: listed, but nothing is behind the
+        # dirent, so its read is the modelled miss.
+        FileEntry(name="dangling.txt", is_dir=False, size=7),
+    ]
+    use_case = SearchFiles(uow=_stopped_uow(community, server_id), file_store=store)
+
+    result = await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        query="txt",
+        by="name",
+        max_results=100,
+    )
+
+    assert set(result.paths) == {"config/outside.txt", "config/dangling.txt"}
+
+
 async def test_search_content_aggregate_scan_cap_sets_truncated() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore(strict_dirs=True)

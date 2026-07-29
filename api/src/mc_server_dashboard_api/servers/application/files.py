@@ -1139,6 +1139,13 @@ class SearchFiles:
     :data:`MAX_SEARCH_RESULTS`) and the whole walk is bounded to
     :data:`MAX_SEARCH_SCANNED` files; hitting either bound sets ``truncated``
     rather than erroring (a partial result is still useful).
+
+    A name hit is a dirent the listing shows too (#2418), including one that
+    names nothing fetchable: it is returned rather than filtered out, so the
+    search and the file browser describe the same tree, and fetching the hit
+    gets what fetching that entry from the browser gets — the read seam's
+    refusal, 422 for a link out of the working set and 404 for a contained or
+    dangling one (#2438).
     """
 
     uow: UnitOfWork
@@ -1173,6 +1180,17 @@ class SearchFiles:
                 break
             scanned += 1
             if by == "name":
+                # A name hit is a dirent and nothing more: the listing describes
+                # every child it found (#2418), and this branch reports exactly
+                # what the listing reports. So a symlink is a hit like any other
+                # entry, and a fetch of that hit is refused by the read seam —
+                # 422 for a link out of the working set, 404 (the modelled miss)
+                # for a contained or dangling one. Recorded decision (#2438):
+                # return it anyway. Fetching a search hit then answers exactly
+                # what fetching the same entry from the file browser answers;
+                # filtering here would leave the two surfaces disagreeing about
+                # the same tree, and filtering the listing instead is the #2418
+                # decision, not this one.
                 matched = name_needle in name.lower()
             else:
                 matched = await self._content_matches(
