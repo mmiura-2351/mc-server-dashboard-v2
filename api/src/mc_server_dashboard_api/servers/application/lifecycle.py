@@ -824,7 +824,7 @@ class StartServer:
         """
 
         committed = committed_resources_by_worker(
-            await self.uow.servers.list_running_assigned()
+            await self.uow.servers.list_desired_running_assigned()
         )
         return await self.control_plane.place(
             server_id=server.id,

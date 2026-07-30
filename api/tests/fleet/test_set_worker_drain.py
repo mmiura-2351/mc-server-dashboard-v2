@@ -161,7 +161,7 @@ async def test_drain_skips_already_stopped_server() -> None:
         worker_id=WorkerId(str(_WORKER_UUID)), draining=True
     )
 
-    # list_running_assigned excludes desired=stopped, so nothing is flipped.
+    # list_desired_running_assigned excludes desired=stopped, so nothing is flipped.
     assert count == 0
 
 

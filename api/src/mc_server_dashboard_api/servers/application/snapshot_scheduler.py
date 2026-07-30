@@ -5,8 +5,9 @@ API knows the (community, server) scope). Two surfaces live here:
 
 - :class:`RunSnapshotCadenceTick` — the periodic scheduler's one tick. The edge
   runs it on a loop as a lifespan task (like the gRPC server). Each tick lists
-  the running, Worker-assigned servers, and dispatches a SnapshotTrigger to those
-  that are due, honouring the per-server interval and a deterministic jitter.
+  the desired-running, Worker-assigned servers, and dispatches a SnapshotTrigger
+  to those that are due, honouring the per-server interval and a deterministic
+  jitter.
 
 - :class:`SnapshotServer` — an on-demand snapshot of one server, an internal use
   case the backup epic (#9) calls (save-all -> snapshot -> archive). No HTTP
@@ -101,10 +102,10 @@ class RunSnapshotCadenceTick:
     async def tick(self) -> None:
         now = self.clock.now()
         async with self.uow:
-            servers = await self.uow.servers.list_running_assigned()
+            servers = await self.uow.servers.list_desired_running_assigned()
         live_ids = {server.id for server in servers}
-        # Forget servers that are no longer running/assigned so the map does not
-        # grow without bound; a server that comes back is re-scheduled afresh.
+        # Forget servers that are no longer desired-running/assigned so the map
+        # does not grow without bound; one that comes back is re-scheduled afresh.
         for stale in self._next_due.keys() - live_ids:
             del self._next_due[stale]
         for server in servers:
@@ -124,7 +125,7 @@ class RunSnapshotCadenceTick:
             return
         if now < due_at:
             return
-        assert server.assigned_worker_id is not None  # running-assigned invariant
+        assert server.assigned_worker_id is not None  # desired-running-assigned
         if not self.control_plane.is_worker_connected(
             worker_id=server.assigned_worker_id
         ):

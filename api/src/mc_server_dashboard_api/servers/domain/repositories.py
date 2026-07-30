@@ -256,13 +256,30 @@ class ServerRepository(abc.ABC):
         """
 
     @abc.abstractmethod
-    async def list_running_assigned(self) -> list[Server]:
+    async def list_desired_running_assigned(self) -> list[Server]:
         """Return every server with desired=running and an assigned Worker.
 
-        The candidate set the periodic snapshot scheduler iterates (FR-DATA-7):
-        servers the operator wants running that have a Worker to snapshot. It
-        spans all communities — the scheduler is a process-wide background task,
-        not a request scoped to one community.
+        DESIRED state only — there is deliberately no observed-state predicate, so
+        a crashed (or otherwise not-yet-running) server is in the result as long as
+        the operator wants it running and a Worker holds it. The name says
+        ``desired`` for exactly that reason (issue #2480): the former
+        ``list_running_assigned`` claimed an observed state it never filtered on.
+        It spans all communities — every caller is a process-wide background task
+        or a fleet-wide tally, not a request scoped to one community.
+
+        All three callers REQUIRE the desired-only semantics:
+
+        - The periodic snapshot scheduler's candidate set (FR-DATA-7). Dispatching
+          to a crashed member is the decision, not an accident: under a running
+          intent it is the only path that durably captures the crash-time world
+          (see :class:`RunSnapshotCadenceTick`).
+        - Worker drain (FR-WRK-5), which flips ``desired=stopped`` on everything
+          assigned to the draining Worker. Skipping crashed rows would leave them
+          ``desired=running`` on that Worker, and the reconciler would then restart
+          them on the very host being drained.
+        - Placement's committed-resource tally (#710), the declared CPU each host
+          has promised. Dropping a crashed-but-assigned server would understate the
+          host right before the reconciler restarts that server there.
         """
 
     @abc.abstractmethod
@@ -270,9 +287,9 @@ class ServerRepository(abc.ABC):
         """Return every server, spanning all communities (FR-BAK-3).
 
         The candidate set the periodic scheduled-backup scheduler iterates: unlike
-        the snapshot scheduler (running-only), a scheduled backup applies to an
-        at-rest server too (archived directly from Storage, no Worker), so the
-        scheduler must see every server and branch on each one's state. The
+        the snapshot scheduler (desired-running only), a scheduled backup applies
+        to an at-rest server too (archived directly from Storage, no Worker), so
+        the scheduler must see every server and branch on each one's state. The
         scheduler filters to those carrying a per-server schedule in config. A
         process-wide background task, not scoped to one community.
         """
