@@ -413,6 +413,14 @@ session. A stricter posture — require a custom `X-Requested-With` header that
 cross-origin callers cannot set without a CORS preflight — is recorded in the
 router docstring as an optional future upgrade, not built now.
 
+The **download cookie** (Section 3, issue #2373) is the second ambient credential
+and adds no CSRF surface worth mitigating. It carries the same `SameSite=Strict`,
+so the browser never attaches it cross-site, and its `Path` is one download's own
+URL, so it reaches no other route at all. The only request it authorizes is a
+`GET` that changes nothing: a forced request would make the victim's own browser
+re-download a file the victim was already authorized to read, and — unlike the
+refresh cookie — it can rotate nothing and revoke nothing.
+
 ## 6. Audit events
 
 The endpoints record audit events (FR-AUD-1) for forensics, independent of the
