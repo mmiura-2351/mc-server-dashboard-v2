@@ -17,6 +17,7 @@ import uuid
 
 import pytest
 
+from mc_server_dashboard_api.fleet.adapters.grpc_server import _STATE_BY_PROTO
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
 from mc_server_dashboard_api.fleet.domain.control_plane import (
     Command as FleetCommand,
@@ -55,6 +56,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerType,
     WorkerId,
 )
+from mcsd.controlplane.v1 import control_plane_pb2 as pb
 from tests.fleet.fakes import FakeClock as FleetFakeClock
 from tests.fleet.fakes import make_worker
 from tests.servers.fakes import (
@@ -1420,3 +1422,69 @@ async def test_stopped_starting_assigned_is_not_reconcilable() -> None:
     await _reconciler(uow, cp, clock).tick()
     assert cp.dispatched == []
     assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
+
+
+# --- Worker-reported unknown lands on existing arms (issue #2474) -----------
+#
+# SERVER_STATE_UNKNOWN joined the wire enum, so ``unknown`` now reaches a row from a
+# Worker's StatusChange and not only from the API's own disconnect inference. Three
+# wedges of the "no arm matches this shape" kind were fixed in this cycle (#1599,
+# #2439, #2452), so the landing is pinned rather than assumed. These tests derive the
+# observed state from the INGEST MAPPING itself, so they fail if that mapping ever
+# routes the wire value onto a different state.
+
+_WORKER_REPORTED_UNKNOWN = ObservedState(_STATE_BY_PROTO[pb.SERVER_STATE_UNKNOWN])
+
+
+async def test_worker_reported_unknown_under_running_intent_redispatches_start() -> (
+    None
+):
+    # desired=running, assigned, worker connected -> UNKNOWN is in _NOT_RUNNING, so
+    # the stale-start arm claims it and re-dispatches (hydrate + start).
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=_WORKER_REPORTED_UNKNOWN,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock).tick()
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
+
+
+async def test_worker_reported_unknown_under_stopped_intent_redispatches_stop() -> None:
+    # desired=stopped, assigned, worker connected -> the #1599 arm claims it and
+    # retries the stop (then the post-stop final snapshot).
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=_WORKER_REPORTED_UNKNOWN,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock).tick()
+    assert [k for k, _, _ in cp.dispatched] == ["stop", "snapshot"]
+    assert uow.servers.by_id[server.id].assigned_worker_id is None
+
+
+async def test_worker_reported_unknown_unassigned_is_at_rest_not_wedged() -> None:
+    # The terminal shape: nothing left to release and no intent to replay, so every
+    # stopped-intent arm (each requires an assignment) correctly passes. It must be
+    # SETTLED rather than inert — at rest, so a later start can re-place it.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=_WORKER_REPORTED_UNKNOWN,
+        worker=None,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock).tick()
+    assert cp.dispatched == []
+    assert await uow.servers.list_reconcilable() == []
+    assert uow.servers.by_id[server.id].is_at_rest()
