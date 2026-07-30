@@ -437,8 +437,11 @@ func TestOrphanClearedAfterSuccessfulRetry(t *testing.T) {
 }
 
 // StartServer for an orphaned id must NOT launch a second instance over the
-// lingering orphan; it is rejected as INVALID_STATE (the same family as
-// "already running"), pending termination (issue #251).
+// lingering orphan; it is rejected pending termination (issue #251) — as BUSY,
+// because the converger (issue #2475) is actively resolving the orphan, so THIS
+// start succeeds once it does. INVALID_STATE would be read by the API as "already
+// running" and converge observed=running off a refusal that may equally mean the
+// process is already dead (issue #2476/#2467).
 func TestStartOverOrphanRejected(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1}
 	m := newManager(t, d, nil)
@@ -446,8 +449,8 @@ func TestStartOverOrphanRejected(t *testing.T) {
 	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
 
 	res := m.Handle(context.Background(), startCmd())
-	if res.Success || res.ErrorCode != session.CommandErrorInvalidState {
-		t.Fatalf("start over orphan = %+v, want INVALID_STATE", res)
+	if res.Success || res.ErrorCode != session.CommandErrorBusy {
+		t.Fatalf("start over orphan = %+v, want BUSY", res)
 	}
 	if d.inst.stopCount() != 1 {
 		t.Fatalf("start over orphan should not Stop the orphan; stop calls = %d", d.inst.stopCount())
@@ -456,7 +459,9 @@ func TestStartOverOrphanRejected(t *testing.T) {
 
 // HydrateTrigger for an orphaned id gets the same protection as a running
 // server: hydrating would replace the working set out from under a process that
-// may still be alive, so it is rejected as INVALID_STATE (issue #251).
+// may still be alive, so it is rejected (issue #251) — as BUSY for the same
+// reason a start is (issue #2476): the hydrate will be accepted once the orphan
+// converges, so the API must retry it rather than read a settled state off it.
 func TestHydrateOverOrphanRejected(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1}
 	m := newManager(t, d, nil).WithTransfer(&fakeTransfer{})
@@ -464,8 +469,8 @@ func TestHydrateOverOrphanRejected(t *testing.T) {
 	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
 
 	res := m.Handle(context.Background(), session.Command{CommandID: "h", ServerID: "s1", Kind: "HydrateTrigger"})
-	if res.Success || res.ErrorCode != session.CommandErrorInvalidState {
-		t.Fatalf("hydrate over orphan = %+v, want INVALID_STATE", res)
+	if res.Success || res.ErrorCode != session.CommandErrorBusy {
+		t.Fatalf("hydrate over orphan = %+v, want BUSY", res)
 	}
 }
 
@@ -527,14 +532,15 @@ func TestTunnelDialOverOrphanRejected(t *testing.T) {
 }
 
 // OpenBedrockTunnel for an orphaned id is refused before the tunneler is
-// consulted, with the orphan's INVALID_STATE rather than SERVER_NOT_FOUND. This
-// path is reached over a live orphan: a StartServer the orphan refused with
-// INVALID_STATE is read by the API as already-running, which converges
-// observed=running and dispatches OpenBedrockTunnel to this same Worker
-// (servers/application/lifecycle.py, the INVALID_STATE arms of StartServer and
-// redispatch_start -> bedrock_tunnel_sync). Like TunnelDial the dispatch is
-// fire-and-forget, so the code reaches only the API's WARN log — which must not
-// say the server is not running (issue #2466).
+// consulted, with the orphan's INVALID_STATE rather than SERVER_NOT_FOUND. The
+// path is reached whenever the API's freshest known state for the server is still
+// running while this Worker has already recorded the orphan — the tunnel sync
+// fires on that cached state (servers/adapters/bedrock_tunnel_sync.py), and the
+// stop that produced the orphan does not change it until the Worker's own report
+// lands. Like TunnelDial the dispatch is fire-and-forget, so the code reaches only
+// the API's WARN log — which must not say the server is not running (issue #2466).
+// This verb keeps INVALID_STATE under issue #2476: unlike a start, it is refused
+// for what the state IS and will not be carried out once the orphan converges.
 func TestOpenBedrockTunnelOverOrphanRejected(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1}
 	m := newManager(t, d, nil) // no bedrock tunneler: the orphan refusal precedes it
