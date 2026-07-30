@@ -564,7 +564,7 @@ class FakeServerRepository(ServerRepository):
             and server.desired_state is DesiredState.RUNNING
         }
 
-    async def list_running_assigned(self) -> list[Server]:
+    async def list_desired_running_assigned(self) -> list[Server]:
         return [
             replace(server)
             for server in self.by_id.values()

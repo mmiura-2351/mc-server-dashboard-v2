@@ -164,13 +164,17 @@ _DEFAULT_JAR_RELPATH = "server.jar"
 _WORKING_SET_ABSENT_MARKER = "working dir absent"
 
 
-def _is_working_set_absent_refusal(outcome: CommandOutcome) -> bool:
+def is_working_set_absent_refusal(outcome: CommandOutcome) -> bool:
     """Whether a snapshot outcome is the Worker's benign working_set_absent refusal.
 
     True exactly for the issue-#1713 refusal: a stopped-id SnapshotTrigger whose
     scratch the Worker already GC'd after a PUBLISHED final snapshot — i.e. a
     duplicate dispatch whose original result was lost, not a data-loss event
     (issue #1790).
+
+    Public because the periodic snapshot scheduler reads the same refusal to mean
+    "nothing left to capture" (issue #2480); the marker constant stays here, where
+    the Worker-side comment cross-references it.
     """
 
     return (
@@ -820,7 +824,7 @@ class StartServer:
         """
 
         committed = committed_resources_by_worker(
-            await self.uow.servers.list_running_assigned()
+            await self.uow.servers.list_desired_running_assigned()
         )
         return await self.control_plane.place(
             server_id=server.id,
@@ -1271,7 +1275,7 @@ class StopServer:
                 final=True,
             )
             if not snapshot.success:
-                if _is_working_set_absent_refusal(snapshot):
+                if is_working_set_absent_refusal(snapshot):
                     # The Worker's working_set_absent refusal (issue #1713): the
                     # scratch was already GC'd — which only happens AFTER a final
                     # snapshot published — so this dispatch is a benign duplicate

@@ -114,7 +114,7 @@ class SetWorkerDrain:
         async with self.uow:
             assigned = [
                 server
-                for server in await self.uow.servers.list_running_assigned()
+                for server in await self.uow.servers.list_desired_running_assigned()
                 if server.assigned_worker_id == servers_worker_id
             ]
             for server in assigned:

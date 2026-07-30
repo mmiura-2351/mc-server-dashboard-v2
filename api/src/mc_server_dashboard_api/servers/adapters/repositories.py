@@ -356,7 +356,7 @@ class SqlAlchemyServerRepository(ServerRepository):
             str(row.id): memory_limit_from_config(dict(row.config)) or 0 for row in rows
         }
 
-    async def list_running_assigned(self) -> list[Server]:
+    async def list_desired_running_assigned(self) -> list[Server]:
         stmt = select(ServerModel).where(
             ServerModel.desired_state == DesiredState.RUNNING.value,
             ServerModel.assigned_worker_id.is_not(None),
