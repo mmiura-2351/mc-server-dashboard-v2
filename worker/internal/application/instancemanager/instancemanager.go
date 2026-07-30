@@ -211,6 +211,13 @@ type Manager struct {
 	// the real filesystem.
 	scanRegion func(root string) (regionState, error)
 
+	// orphanProbeInterval / orphanProbeMaxInterval are the failed-stop-orphan
+	// converger's probe cadence and its exponential-backoff cap (issue #2475).
+	// They are fields (not consts) so tests can shrink them to milliseconds,
+	// mirroring fsckRetryDelay. Defaulted in New; the waits go through m.clock.
+	orphanProbeInterval    time.Duration
+	orphanProbeMaxInterval time.Duration
+
 	// transferDeadlineNanos bounds a single data-plane transfer (snapshot upload /
 	// hydrate download) Worker-side (issue #874). The session pushes it from the
 	// RegisterAck after registration (SetTransferDeadline); the hydrate/snapshot
@@ -239,9 +246,17 @@ type Manager struct {
 	// through notRunningRefusal — so no path claims the server is not running
 	// about a process that is probably alive (issue #2466). CloseBedrockTunnel is
 	// the deliberate exception: it takes no running check and stays a success, so
-	// the tunnel a failed stop left open can still be torn down. The instance's
-	// status pump clears the record if the orphan finally exits on its own.
+	// a tunnel that outlived its server can still be torn down. The instance's
+	// status pump clears the record if the orphan finally exits on its own, and
+	// the per-id converger (issue #2475) drives it to a settled outcome meanwhile
+	// instead of leaving the id guarded until an operator intervenes.
 	orphans map[string]orphanEntry
+	// converging marks server ids that already have a convergeOrphan goroutine
+	// running, so the orphan its own retry stop re-records does not spawn a second
+	// one (issue #2475). It is claimed with the record in recordOrphan and cleared
+	// in currentOrphan, in the same critical section that observes the record gone,
+	// so the flag can never outlive its goroutine or block its successor.
+	converging map[string]bool
 	// reserved marks a server id as having a mutating lifecycle command in flight so
 	// a duplicate re-issued after a stream reconnect cannot overlap the original
 	// (issue #780). It is claimed under mu and held across the long operation, then
@@ -318,6 +333,10 @@ func New(drivers map[string]execution.ExecutionDriver, scratchDir string, openCo
 		pendingStatus:      map[string]session.StatusEvent{},
 		coalescing:         map[string]bool{},
 		statusNotify:       make(chan struct{}, 1),
+
+		orphanProbeInterval:    defaultOrphanProbeInterval,
+		orphanProbeMaxInterval: defaultOrphanProbeMaxInterval,
+		converging:             map[string]bool{},
 	}
 	go m.statusDispatcher()
 	return m
@@ -1631,9 +1650,12 @@ func (m *Manager) attemptStop(ctx context.Context, serverID string, inst executi
 		}
 	}
 	if err := inst.Stop(ctx, graceful, preFallback); err != nil {
-		m.mu.Lock()
-		m.orphans[serverID] = orphanEntry{inst: inst, driver: driverName}
-		m.mu.Unlock()
+		// Record the orphan and hand it to a converger, so the Worker keeps working
+		// the stop on its own instead of waiting for an operator to notice (issue
+		// #2475). recordOrphan is idempotent on the converger: the retries the
+		// converger itself issues land back here and re-record without spawning a
+		// second one.
+		m.recordOrphan(serverID, inst, driverName)
 		// The orphan record is otherwise invisible: nothing enumerates m.orphans, so
 		// "why is every command for this server refused?" was a code-reading exercise
 		// (issue #2466). Say it once, at the moment the state is entered — the id is
@@ -1642,6 +1664,14 @@ func (m *Manager) attemptStop(ctx context.Context, serverID string, inst executi
 		// process exits on its own.
 		m.logger.Warn("recorded failed-stop orphan; the process may still be running",
 			"server_id", serverID, "driver", driverName, "graceful", graceful, "error", err)
+		// Close the Bedrock relay tunnel here too, not only on a confirmed stop
+		// (issue #2468 item 2): the stop intent is the operator's, and an instance
+		// this Worker is still trying to terminate must not keep taking joins for
+		// however long convergence takes. Close is idempotent and takes no running
+		// check, so the operator can still tear it down by hand either way.
+		if m.bedrock != nil {
+			m.bedrock.Close(serverID)
+		}
 		// The graceful path issued save-off before the flush; because the stop
 		// failed, the server may still be alive with auto-save disabled. Re-enable
 		// it so player progress is not silently lost (issue #2021).
@@ -2372,13 +2402,18 @@ func (m *Manager) pump(serverID string, inst execution.Instance, done chan struc
 
 // forgetOrphanIf removes serverID's failed-stop orphan record only if it is still
 // the given inst, so it does not clear a record belonging to a different instance
-// (issue #251).
-func (m *Manager) forgetOrphanIf(serverID string, inst execution.Instance) {
+// (issue #251). It reports whether it removed anything: the pump ignores that (it
+// is retiring a record that may not exist), while the converger emits the terminal
+// `stopped` only when this call is the one that actually retired the record
+// (issue #2475).
+func (m *Manager) forgetOrphanIf(serverID string, inst execution.Instance) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if e, ok := m.orphans[serverID]; ok && e.inst == inst {
 		delete(m.orphans, serverID)
+		return true
 	}
+	return false
 }
 
 // ResyncStatus re-emits a StatusChange for every instance the manager still
@@ -2387,26 +2422,37 @@ func (m *Manager) forgetOrphanIf(serverID string, inst execution.Instance) {
 // reconciler grace window (issue #985). The instance manager persists across
 // control-plane reconnects, so its instances map still names the live servers;
 // re-emitting their current Status() reflects reality (running/starting/etc.).
-// On a fresh process the map is empty (the orphan sweep removed leftovers and no
-// instances are re-created), so this is a harmless no-op.
+// On a fresh process both maps are empty (the orphan sweep removed leftovers and
+// no instances are re-created), so this is a harmless no-op.
 //
-// The instances are snapshotted under the lock, which is then RELEASED before any
+// Failed-stop orphans are reported too, as `unknown` (issue #2468 item 3): they
+// have been evicted from instances, so a resync that snapshotted only that map
+// left the reconnected API's row asserting a staler state as fact about a process
+// this Worker could not confirm dead. `unknown` is the honest answer and the one
+// the API's #1599 arm already redispatches a stop for. The two maps are disjoint —
+// an instance is evicted before its orphan record is written — so no id is
+// reported twice.
+//
+// Both maps are snapshotted under the lock, which is then RELEASED before any
 // emit: sendStatus can coalesce and wake the dispatcher, so it must never run
 // while m.mu is held.
 func (m *Manager) ResyncStatus() {
 	m.mu.Lock()
 	type snap struct {
 		serverID string
-		state    execution.ServerState
+		state    string
 	}
-	snaps := make([]snap, 0, len(m.instances))
+	snaps := make([]snap, 0, len(m.instances)+len(m.orphans))
 	for serverID, inst := range m.instances {
-		snaps = append(snaps, snap{serverID: serverID, state: inst.Status()})
+		snaps = append(snaps, snap{serverID: serverID, state: inst.Status().String()})
+	}
+	for serverID := range m.orphans {
+		snaps = append(snaps, snap{serverID: serverID, state: orphanUnknownState})
 	}
 	m.mu.Unlock()
 
 	for _, s := range snaps {
-		m.sendStatus(session.StatusEvent{ServerID: s.serverID, State: s.state.String()})
+		m.sendStatus(session.StatusEvent{ServerID: s.serverID, State: s.state})
 	}
 }
 

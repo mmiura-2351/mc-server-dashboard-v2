@@ -295,7 +295,11 @@ class ServerRepository(abc.ABC):
         - ``desired=stopped``, ``observed=stopped``, still assigned (issue #847
           bug 2: a stop wedged because its deferred unassign never ran);
         - ``desired=stopped``, ``observed=unknown``, still assigned (issue #1599:
-          a stop interrupted mid-flight by an API restart or worker disconnect);
+          a stop interrupted mid-flight by an API restart or worker disconnect —
+          and, since issue #2475, also a Worker actively reporting ``unknown``
+          because it holds a failed-stop orphan whose backend daemon it cannot
+          reach. Both mean the same thing for this arm: nobody can say whether
+          the process is alive, so the stop is re-dispatched);
         - ``desired=stopped``, ``observed=crashed``, still assigned (issue #2439:
           the process died on its own under a stop intent);
         - ``desired=stopped``, ``observed=stopping``, still assigned (issue #2452:
@@ -308,8 +312,13 @@ class ServerRepository(abc.ABC):
         #2452) and is what let the ``stopping`` wedge ship unnoticed when #2439 was
         fixed: the Worker's ``Stop`` emits ``stopping`` on entry, and BOTH of its
         failure paths (the kill call erroring, and the container surviving the
-        kill) restore the pre-stop state WITHOUT emitting, so a failed stop is
-        followed by no terminal report at all. The actual reasons:
+        kill) restore the pre-stop state WITHOUT emitting. That is still true of
+        the driver; what changed with issue #2475 is that the Worker's instance
+        manager now converges the failed stop above it — probing, retrying, and
+        reporting ``stopped`` on confirmed death or ``unknown`` while it cannot
+        tell — so a failed stop is no longer followed by silence. These arms
+        remain the backstop for the cases no Worker can report at all (it is
+        gone, or the stream is down). The actual reasons:
 
         - ``starting`` is a genuine transient here: the Worker's in-flight launch
           proceeds independently of the stop intent and settles into ``running``

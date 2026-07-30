@@ -71,6 +71,298 @@ func (d *orphanDriver) Start(_ context.Context, spec execution.InstanceSpec) (ex
 	return d.inst, nil
 }
 
+// shrinkOrphanConverger collapses the per-orphan converger's cadence so a test
+// drives it in milliseconds rather than waiting out the production 30s..5min
+// backoff. It must be applied before the orphan that spawns the converger is
+// recorded.
+func shrinkOrphanConverger(m *Manager) {
+	m.orphanProbeInterval = time.Millisecond
+	m.orphanProbeMaxInterval = 2 * time.Millisecond
+}
+
+// awaitStatus drains the merged status stream until serverID reports state.
+func awaitStatus(t *testing.T, m *Manager, serverID, state string) {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case ev := <-m.Events():
+			if ev.ServerID == serverID && ev.State == state {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("no %q status for %s", state, serverID)
+		}
+	}
+}
+
+// An orphan whose container is still alive is re-stopped by the Worker ITSELF:
+// no operator (and no API redispatch) is involved. The manager probes the
+// orphan, sees it alive, re-runs the same stop through the manual-retry
+// machinery, and on confirmed termination retires the record and reports the
+// terminal `stopped` (issue #2475). Before this, a failed stop under a wedged
+// daemon was never looked at again.
+func TestOrphanConvergesWithoutOperatorAction(t *testing.T) {
+	d := &orphanDriver{stopAfter: 1} // stop #1 fails; the converger's retry succeeds
+	m := newManager(t, d, nil)
+	shrinkOrphanConverger(m)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+
+	first := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+	if first.Success {
+		t.Fatalf("first stop = %+v, want failure (driver could not confirm termination)", first)
+	}
+
+	// No further command is issued: every step below must be the manager's own work.
+	waitFor(t, func() bool { return d.inst.stopCount() >= 2 })
+	awaitStatus(t, m, "s1", "stopped")
+	waitFor(t, func() bool {
+		res := m.Handle(context.Background(), session.Command{CommandID: "probe", ServerID: "s1", Kind: "StopServer"})
+		return res.ErrorCode == session.CommandErrorServerNotFound
+	})
+}
+
+// The converger keeps working an orphan whose own retry could not confirm
+// termination either: it re-records the orphan, does not spawn a second
+// converger, and converges on a later round (issue #2475). A converger that
+// treated its first failed retry as final would leave exactly the wedge this
+// issue removes.
+func TestOrphanConvergesAcrossAFailedRetry(t *testing.T) {
+	// Stop #1 (the operator's) and stop #2 (the converger's first retry) both fail;
+	// only stop #3, also the converger's, confirms termination.
+	d := &orphanDriver{stopAfter: 2}
+	m := newManager(t, d, nil)
+	shrinkOrphanConverger(m)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+
+	first := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+	if first.Success {
+		t.Fatalf("first stop = %+v, want failure", first)
+	}
+
+	// No further command is issued: both retries below are the manager's own work.
+	waitFor(t, func() bool { return d.inst.stopCount() >= 3 })
+	awaitStatus(t, m, "s1", "stopped")
+	waitFor(t, func() bool {
+		res := m.Handle(context.Background(), session.Command{CommandID: "probe", ServerID: "s1", Kind: "StopServer"})
+		return res.ErrorCode == session.CommandErrorServerNotFound
+	})
+}
+
+// takeOrphanReserve refuses a retry whose instance is no longer the id's
+// recorded orphan, and it never reaches for the RUNNING instance the way
+// takeStoppableReserve does. That identity guard is the whole reason the
+// converger has its own take: it decides on a probe and acts afterwards, so
+// between the two the orphan can exit on its own and a re-placed StartServer can
+// register a fresh instance under the same id — which a take that fell through to
+// m.instances would evict and SIGKILL (issue #2475).
+//
+// The state below (an orphan recorded AND an instance registered for one id) is
+// constructed, not reachable: an instance is evicted before its orphan record is
+// written. It is set up that way deliberately, so one call can observe both
+// halves of the contract — the refusal, and that the running instance is left
+// alone.
+func TestTakeOrphanReserveRefusesAnInstanceThatIsNoLongerTheOrphan(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	recorded := newFakeInstance("s1")
+	replaced := newFakeInstance("s1")
+	m.orphans["s1"] = orphanEntry{inst: recorded, driver: "container"}
+	m.instances["s1"] = replaced
+
+	driver, outcome := m.takeOrphanReserve("s1", newFakeInstance("s1"))
+
+	if outcome != takeNotFound {
+		t.Fatalf("takeOrphanReserve with a stale instance = %v (driver %q), want takeNotFound", outcome, driver)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.reserved["s1"] {
+		t.Fatal("a refused take claimed the reservation; the id is now wedged against every lifecycle command")
+	}
+	if m.instances["s1"] != replaced {
+		t.Fatal("takeOrphanReserve evicted the registered instance: it must never fall through to m.instances")
+	}
+	if e := m.orphans["s1"]; e.inst != recorded {
+		t.Fatal("a refused take consumed the orphan record")
+	}
+}
+
+// A failed stop must close the server's Bedrock relay tunnel: the stop intent is
+// the operator's, so players must not keep reaching an instance the Worker is
+// trying to terminate. Before this the tunnel was closed only on a CONFIRMED
+// stop, so a failed stop left it open indefinitely (issue #2468 item 2).
+func TestFailedStopClosesBedrockTunnel(t *testing.T) {
+	d := &orphanDriver{stopAfter: 1000} // never confirms: only the failure path runs
+	bt := &fakeBedrockTunneler{}
+	m := newManager(t, d, nil).WithBedrockTunneler(bt)
+	shrinkOrphanConverger(m)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+
+	first := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+	if first.Success {
+		t.Fatalf("first stop = %+v, want failure", first)
+	}
+	if got := bt.closeCalls(); len(got) == 0 {
+		t.Fatal("failed stop did not close the Bedrock tunnel; players can still reach the instance")
+	} else if got[0] != "s1" {
+		t.Fatalf("Bedrock tunnel closed for %q, want %q", got[0], "s1")
+	}
+
+	retireOrphan(t, m, d.inst.fakeInstance)
+}
+
+// retireOrphan lets a test's orphan die so its converger retires the record and
+// exits. Without it a test whose stop never confirms leaves a converger running
+// inside the test binary, still probing and re-stopping the fixtures of a
+// finished test.
+func retireOrphan(t *testing.T, m *Manager, inst *fakeInstance) {
+	t.Helper()
+	inst.setAlive(false, nil)
+	waitFor(t, func() bool {
+		res := m.Handle(context.Background(), session.Command{CommandID: "retired", ServerID: inst.serverID, Kind: "StopServer"})
+		return res.ErrorCode == session.CommandErrorServerNotFound
+	})
+}
+
+// While the backend daemon cannot answer whether the orphan is alive, the Worker
+// reports `unknown` for the id rather than staying silent, and it NEVER gives up
+// probing: a bounded give-up would recreate the "Worker gives up" root cause
+// (issue #2475). The report is level-triggered — one event per transition into
+// the state, not one per probe.
+func TestUnknownEmittedWhileDaemonUnreachable(t *testing.T) {
+	d := &orphanDriver{stopAfter: 1000}
+	m := newManager(t, d, nil)
+	shrinkOrphanConverger(m)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	// The daemon goes unreachable: the probe can give no honest answer at all.
+	m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+	d.inst.setAlive(false, errors.New("driver: daemon unreachable"))
+
+	awaitStatus(t, m, "s1", "unknown")
+
+	// Probing continues past the report.
+	before := d.inst.probeCount()
+	waitFor(t, func() bool { return d.inst.probeCount() >= before+3 })
+	// ...but the report does not repeat: it is level-triggered on the transition.
+	select {
+	case ev := <-m.Events():
+		if ev.State == "unknown" {
+			t.Fatalf("unknown re-emitted without a state transition: %+v", ev)
+		}
+	default:
+	}
+
+	retireOrphan(t, m, d.inst.fakeInstance)
+}
+
+// A stranded orphan record self-heals (issue #2468 item 4). The pump's
+// forgetOrphanIf can run BEFORE attemptStop writes the record — the instance
+// terminated while the stop was still in flight — leaving a record nothing will
+// ever clear. The converger observes the instance dead across a probe interval
+// and retires it directly, reporting the terminal `stopped`.
+func TestStrandedOrphanRecordIsRetired(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	shrinkOrphanConverger(m)
+	inst := newFakeInstance("s1")
+	// Terminal: the instance already exited, its event channel is closed, and its
+	// pump has already run forgetOrphanIf — so nothing else will clear the record.
+	close(inst.events)
+	inst.setAlive(false, nil)
+
+	m.recordOrphan("s1", inst, "container")
+
+	awaitStatus(t, m, "s1", "stopped")
+	waitFor(t, func() bool {
+		res := m.Handle(context.Background(), session.Command{CommandID: "probe", ServerID: "s1", Kind: "StopServer"})
+		return res.ErrorCode == session.CommandErrorServerNotFound
+	})
+}
+
+// The converger and an operator stop cannot double-drive one orphan: they
+// contend for the SAME per-id reservation, so while the converger's retry is in
+// flight an operator StopServer is refused BUSY (not a second driver Stop over
+// the same handle), and the converger still finishes its own attempt.
+func TestConvergerAndOperatorStopDoNotDoubleDriveOrphan(t *testing.T) {
+	d := &gatedOrphanDriver{}
+	m := newManager(t, d, nil)
+	shrinkOrphanConverger(m)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	if first := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"}); first.Success {
+		t.Fatalf("first stop = %+v, want failure", first)
+	}
+
+	// The converger's retry is now blocked inside the driver, holding the id.
+	awaitEnter(t, d.inst.stopEntered)
+
+	res := m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: "s1", Kind: "StopServer"})
+	if res.Success || res.ErrorCode != session.CommandErrorBusy {
+		t.Fatalf("operator stop during a converger retry = %+v, want BUSY", res)
+	}
+	if got := d.inst.stopCount(); got != 2 {
+		t.Fatalf("driver Stop called %d times, want 2: the operator stop must not drive the orphan a second time", got)
+	}
+
+	close(d.inst.stopRelease)
+	awaitStatus(t, m, "s1", "stopped")
+}
+
+// The mirror case: while an OPERATOR stop holds the id, the converger skips the
+// round rather than driving a second Stop — and, critically, keeps looping. A
+// converger that treated "cannot reserve" as "nothing left to do" would abandon
+// every orphan whose operator retry happened to be in flight, which is the
+// give-up this issue exists to remove. The converger is parked on a fake clock so
+// the two actors are ordered by the test, not by timing.
+func TestConvergerSkipsRoundWhileOperatorStopInFlight(t *testing.T) {
+	clk := &fakeClock{}
+	d := &gatedOrphanDriver{}
+	m := New(map[string]execution.ExecutionDriver{"container": d}, t.TempDir(),
+		func(context.Context, string, string) (execution.ServerControl, error) {
+			return nil, errors.New("test: no rcon control configured")
+		}).WithMetrics(clk, time.Hour)
+
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	// Stop #1 fails and records the orphan, spawning the converger. Both it and the
+	// metrics pump park on the fake clock; nothing advances until this test ticks.
+	if first := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"}); first.Success {
+		t.Fatalf("first stop = %+v, want failure", first)
+	}
+	waitFor(t, func() bool { return clk.registered() >= 2 })
+
+	// An operator retry now holds the id, blocked inside the driver.
+	stopped := make(chan session.CommandResult, 1)
+	go func() {
+		stopped <- m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: "s1", Kind: "StopServer"})
+	}()
+	awaitEnter(t, d.inst.stopEntered)
+
+	parked := clk.registered()
+	clk.tick()
+	waitFor(t, func() bool { return d.inst.probeCount() >= 1 })
+	if got := d.inst.stopCount(); got != 2 {
+		t.Fatalf("driver Stop called %d times, want 2: the converger must skip a round it cannot reserve", got)
+	}
+	// Re-parking on the clock is the observable for "still converging": an exited
+	// converger never registers again.
+	waitFor(t, func() bool { return clk.registered() > parked+1 })
+
+	close(d.inst.stopRelease)
+	if res := <-stopped; !res.Success {
+		t.Fatalf("operator retry = %+v, want success", res)
+	}
+}
+
 // A failed driver Stop records the instance as an orphan; a retry StopServer
 // re-attempts the driver Stop against the same instance and returns success only
 // once termination is confirmed (issue #251).

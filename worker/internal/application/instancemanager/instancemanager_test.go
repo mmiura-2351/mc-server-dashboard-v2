@@ -46,13 +46,31 @@ type fakeInstance struct {
 	events   chan execution.StatusEvent
 	stopped  bool
 	graceful bool
+	// alive/aliveErr are what ProbeAlive answers, held INDEPENDENTLY of state
+	// (issue #2475). ProbeAlive exists precisely because the two can diverge: a
+	// failed driver Stop restores the cached state to its pre-stop value while the
+	// container's real fate is whatever the daemon says (issue #2473). A fake that
+	// derived liveness from state could not express that divergence, so a
+	// converger test written against it would be a tautology. Tests set these via
+	// setAlive; the base fake starts alive and a successful Stop makes it dead, so
+	// an instance nobody touches still behaves as before.
+	alive    bool
+	aliveErr error
+	// probes counts ProbeAlive calls so a test can anchor on the converger's own
+	// progress instead of a wall-clock sleep.
+	probes int
 	// seq, when set, records a "stop" marker on Stop so a test can assert the
 	// terminate ordered against the RCON recorder (the #1007 flush-before-stop).
 	seq *[]string
 }
 
 func newFakeInstance(id string) *fakeInstance {
-	i := &fakeInstance{serverID: id, state: execution.StateRunning, events: make(chan execution.StatusEvent, 8)}
+	i := &fakeInstance{
+		serverID: id,
+		state:    execution.StateRunning,
+		alive:    true,
+		events:   make(chan execution.StatusEvent, 8),
+	}
 	i.events <- execution.StatusEvent{ServerID: id, State: execution.StateRunning}
 	return i
 }
@@ -62,6 +80,7 @@ func (i *fakeInstance) Stop(_ context.Context, graceful bool, _ ...func(context.
 	i.stopped = true
 	i.graceful = graceful
 	i.state = execution.StateStopped
+	i.alive = false
 	if i.seq != nil {
 		*i.seq = append(*i.seq, "stop")
 	}
@@ -76,12 +95,32 @@ func (i *fakeInstance) Status() execution.ServerState {
 	return i.state
 }
 
-// ProbeAlive answers from the fake's recorded state, which only Stop changes: a
-// fresh fakeInstance is running, a stopped one is not.
+// ProbeAlive answers from the independently-held alive/aliveErr, never from
+// state (issue #2475). A non-nil aliveErr models a daemon that cannot answer at
+// all — the case the converger reports as `unknown`.
 func (i *fakeInstance) ProbeAlive(context.Context) (bool, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	return i.state == execution.StateRunning, nil
+	i.probes++
+	if i.aliveErr != nil {
+		return false, i.aliveErr
+	}
+	return i.alive, nil
+}
+
+// setAlive fixes what the next ProbeAlive answers, independently of state.
+func (i *fakeInstance) setAlive(alive bool, err error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.alive = alive
+	i.aliveErr = err
+}
+
+// probeCount reports how many times the converger has probed this instance.
+func (i *fakeInstance) probeCount() int {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.probes
 }
 
 func (i *fakeInstance) Events() <-chan execution.StatusEvent { return i.events }
