@@ -26,8 +26,10 @@ every denial into ``invalid_path``. The file-API problem-reason catalog is:
   an unrefined denial / an older Worker). This is also the at-rest reason.
 - ``is_a_directory`` (422) — a read or write whose path is a directory.
 - ``not_a_directory`` (422) — a directory listing whose path is a regular file.
-- ``symlink_refused`` (422) — the Worker refused to follow a path-component
-  symlink (the FR-FILE-4 escape-vector defence).
+- ``symlink_refused`` (422) — a path-component symlink was refused rather than
+  followed (the FR-FILE-4 escape-vector defence). Both branches produce it: the
+  Worker for a running server, and Storage for one at rest (issue #2432), so the
+  same request gets the same reason in either state.
 - ``invalid_version_id`` (422) — a malformed ``version_id`` (outside the
   ``VersionId`` charset) on the rollback / version-preview routes.
 - ``file_too_large`` (413) — a read result or an edit payload past the
@@ -253,9 +255,10 @@ async def read_or_list_files(
         except ServerFileNotFoundError as exc:
             raise _not_found() from exc
         except InvalidFilePathError as exc:
-            # exc.reason refines a running-server file denial (issue #548): a
-            # non-path condition (not_a_directory / symlink_refused) surfaces
-            # honestly instead of a blanket invalid_path.
+            # exc.reason refines a file denial (issue #548): a non-path condition
+            # (not_a_directory / symlink_refused) surfaces honestly instead of a
+            # blanket invalid_path. Running or at rest — Storage refuses a
+            # path-component symlink with the same reason (issue #2432).
             raise _unprocessable(exc.reason) from exc
         except ServerFilesUnsettledError as exc:
             raise _conflict("server_unsettled") from exc
@@ -285,9 +288,10 @@ async def read_or_list_files(
     except ServerFileNotFoundError as exc:
         raise _not_found() from exc
     except InvalidFilePathError as exc:
-        # exc.reason refines a running-server file denial (issue #548): a
-        # non-path condition (is_a_directory / symlink_refused) surfaces honestly
-        # instead of a blanket invalid_path.
+        # exc.reason refines a file denial (issue #548): a non-path condition
+        # (is_a_directory / symlink_refused) surfaces honestly instead of a blanket
+        # invalid_path. Running or at rest — Storage refuses a path-component
+        # symlink with the same reason (issue #2432).
         raise _unprocessable(exc.reason) from exc
     except FileTooLargeError as exc:
         # A running-server read of a file past the control-plane cap (issue #548):
@@ -346,9 +350,10 @@ async def write_file(
     except ServerFileNotFoundError as exc:
         raise _not_found() from exc
     except InvalidFilePathError as exc:
-        # exc.reason refines a running-server file denial (issue #548): a non-path
-        # condition (is_a_directory / symlink_refused) surfaces honestly instead
-        # of a blanket invalid_path. An at-rest write keeps the default invalid_path.
+        # exc.reason refines a file denial (issue #548): a non-path condition
+        # (is_a_directory / symlink_refused) surfaces honestly instead of a blanket
+        # invalid_path. An at-rest write keeps invalid_path except under a symlink
+        # parent, which Storage refuses with symlink_refused (issue #2432).
         raise _unprocessable(exc.reason) from exc
     except FileTooLargeError as exc:
         # The edge cap (MAX_EDIT_BYTES) and the Worker's payload_too_large reason

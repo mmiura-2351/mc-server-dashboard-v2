@@ -524,6 +524,25 @@ def test_read_is_a_directory_surfaces_reason() -> None:
     assert resp.json()["reason"] == "is_a_directory"
 
 
+def test_read_symlink_refused_surfaces_reason() -> None:
+    # The reason both branches now produce for a path-component symlink: the Worker
+    # for a running server, Storage for one at rest (issue #2432). It must ride
+    # through to the 422 body, because that reason is what selects the browser's
+    # "Symbolic links are not allowed." sentence -- the one answer the operator gets
+    # for the same click in either state.
+    app = _app(
+        member=True,
+        allow=True,
+        read=_FakeUseCase(error=InvalidFilePathError("x", reason="symlink_refused")),
+    )
+    client = next(_client(app))
+    resp = client.get(
+        _url(uuid.uuid4(), uuid.uuid4()), params={"path": "alias/inner.txt"}
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "symlink_refused"
+
+
 def test_read_payload_too_large_is_413() -> None:
     # A running-server read past the control-plane cap (issue #548) -> 413.
     app = _app(member=True, allow=True, read=_FakeUseCase(error=FileTooLargeError("x")))

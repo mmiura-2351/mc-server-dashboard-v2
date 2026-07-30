@@ -33,6 +33,7 @@ from mc_server_dashboard_api.storage.adapters.fs import (
 from mc_server_dashboard_api.storage.domain.errors import (
     NotFoundError,
     PathTraversalError,
+    SymlinkRefusedError,
 )
 from mc_server_dashboard_api.storage.domain.value_objects import RelPath
 from tests.storage.helpers import (
@@ -74,8 +75,18 @@ async def test_list_dir_rejects_symlink_escape(tmp_path: Path) -> None:
         await storage.list_dir(community, server, RelPath("escape_dir"))
 
 
-async def test_internal_symlink_within_root_is_allowed(tmp_path: Path) -> None:
-    """A symlink that resolves to a location still inside current/ is fine."""
+async def test_internal_symlink_within_root_is_refused_not_followed(
+    tmp_path: Path,
+) -> None:
+    """Staying inside current/ is not a licence to follow the link (issue #2432).
+
+    This test used to assert the opposite -- that a contained intermediate link
+    resolved and the read returned the target's bytes. Containment answers only
+    "does this path leave the root", never "may this path be followed": a symlink
+    is refused at EVERY component, so contained means ``symlink_refused`` rather
+    than allowed. Escaping still outranks it (the test above), which is what keeps
+    the two verdicts in the order Section 6 fixes.
+    """
 
     storage = FsStorage(tmp_path)
     community, server = new_scope()
@@ -83,9 +94,8 @@ async def test_internal_symlink_within_root_is_allowed(tmp_path: Path) -> None:
 
     live = snapshot_dir(tmp_path, community, server)
     os.symlink(live / "real", live / "alias")
-    assert (
-        await storage.read_file(community, server, RelPath("alias/data")) == b"inside"
-    )
+    with pytest.raises(SymlinkRefusedError):
+        await storage.read_file(community, server, RelPath("alias/data"))
 
 
 async def test_make_dir_materializes_empty_dir_and_survives_hydrate(
@@ -731,12 +741,15 @@ async def test_view_list_dir_does_not_follow_a_symlink_to_a_directory(
 # ``list_dir`` probe on the entry's own path — so a download zipped a subtree for
 # an entry the file browser draws as a file.
 #
-# The listing therefore resolves the way every other read already does: the LEAF
-# dirent is refused, an intermediate component still resolves, and containment
-# still runs first, so an escaping link stays a PathTraversalError.
+# The listing therefore resolves the way every other read already does: a symlink
+# component is refused, and containment still runs first, so an escaping link stays
+# a PathTraversalError. The refusal was the Port's own MISS when it landed; issue
+# #2432 moved it to the modelled ``SymlinkRefusedError`` -- 422 ``symlink_refused``
+# at the edge -- so a listing that shows the entry and a click that refuses it stop
+# contradicting each other, and say the same sentence at rest and while running.
 
 
-async def test_list_dir_of_a_symlink_to_a_directory_is_not_found(
+async def test_list_dir_of_a_symlink_to_a_directory_is_refused(
     tmp_path: Path,
 ) -> None:
     """The link's own path lists nothing, exactly as its parent describes it."""
@@ -751,11 +764,13 @@ async def test_list_dir_of_a_symlink_to_a_directory_is_not_found(
 
     listed = next(entry for entry in entries if entry.name == "alias")
     assert listed.is_dir is False  # the parent's answer
-    with pytest.raises(NotFoundError):  # and the same answer by the link's path
+    # and the same answer by the link's own path (issue #2432: the refusal, not a
+    # miss -- the entry is right there in the listing above)
+    with pytest.raises(SymlinkRefusedError):
         await storage.list_dir(community, server, RelPath("alias"))
 
 
-async def test_view_list_dir_of_a_symlink_to_a_directory_is_not_found(
+async def test_view_list_dir_of_a_symlink_to_a_directory_is_refused(
     tmp_path: Path,
 ) -> None:
     storage = FsStorage(tmp_path)
@@ -769,14 +784,20 @@ async def test_view_list_dir_of_a_symlink_to_a_directory_is_not_found(
 
         listed = next(entry for entry in entries if entry.name == "alias")
         assert listed.is_dir is False
-        with pytest.raises(NotFoundError):
+        with pytest.raises(SymlinkRefusedError):
             await view.list_dir(RelPath("alias"))
 
 
-async def test_listing_through_an_intermediate_symlink_still_works(
+async def test_listing_through_an_intermediate_symlink_is_refused(
     tmp_path: Path,
 ) -> None:
-    """Only the LEAF is refused, so a directory reached THROUGH a link still lists."""
+    """A directory reached THROUGH a link no longer lists either (issue #2432).
+
+    This test used to assert that ``alias/inner`` listed the target's children,
+    because only the leaf was refused. That split rule meant every probe had to
+    know which half applied to it; the listing now refuses a link at any
+    component, exactly as the Worker's running-server listing already does.
+    """
 
     storage = FsStorage(tmp_path)
     community, server = new_scope()
@@ -784,9 +805,8 @@ async def test_listing_through_an_intermediate_symlink_still_works(
     live = snapshot_dir(tmp_path, community, server)
     (live / "alias").symlink_to("real")
 
-    entries = await storage.list_dir(community, server, RelPath("alias/inner"))
-
-    assert [entry.name for entry in entries] == ["data"]
+    with pytest.raises(SymlinkRefusedError):
+        await storage.list_dir(community, server, RelPath("alias/inner"))
 
 
 # --- the OCCUPIED-NAME question (issue #2426 review) ------------------------
@@ -819,12 +839,20 @@ async def test_a_symlink_occupies_its_name_although_nothing_can_read_it(
         assert await storage.path_exists(community, server, RelPath(name)), name
 
 
-async def test_a_name_under_a_symlink_parent_is_occupied(tmp_path: Path) -> None:
-    """The parent is followed, so what is really there is what is reported.
+async def test_a_name_under_a_symlink_parent_is_refused_not_probed(
+    tmp_path: Path,
+) -> None:
+    """The probe stops following the parent chain too (issue #2432).
 
-    The read paths resolve ``alias/inner`` to the real file, so a pre-check that
-    called that name free would let a rename overwrite it — the never-clobber
-    guarantee broken by the one shape a listing-based answer cannot see.
+    This test used to assert that ``alias/inner`` was reported OCCUPIED, and the
+    justification was that the read paths resolved it to the real file — so a
+    pre-check calling the name free would have let a rename overwrite it. Once no
+    read follows an intermediate link that rationale dissolves with it: nothing can
+    reach the name any more, so nothing has to be protected from clobbering it, and
+    the probe answers the same refusal every read does. Never-clobber is preserved
+    by the rename's own resolve refusing the same path, not by this probe.
+
+    The LEAF stays described as itself (the test above): a link occupies its name.
     """
 
     storage = FsStorage(tmp_path)
@@ -833,9 +861,9 @@ async def test_a_name_under_a_symlink_parent_is_occupied(tmp_path: Path) -> None
     live = snapshot_dir(tmp_path, community, server)
     (live / "alias").symlink_to("real")
 
-    assert await storage.path_exists(community, server, RelPath("alias/inner"))
-    assert await storage.path_exists(community, server, RelPath("alias/sub"))
-    assert not await storage.path_exists(community, server, RelPath("alias/free"))
+    for name in ("alias/inner", "alias/sub", "alias/free"):
+        with pytest.raises(SymlinkRefusedError):
+            await storage.path_exists(community, server, RelPath(name))
 
 
 async def test_path_exists_of_an_escaping_symlink_is_still_a_traversal_refusal(
@@ -854,6 +882,47 @@ async def test_path_exists_of_an_escaping_symlink_is_still_a_traversal_refusal(
         await storage.path_exists(community, server, RelPath("escape"))
 
 
+# --- a MUTATION reached through a symlink parent (issue #2432) ---------------
+#
+# One resolve rule for every Port operation, mutations included: a mutation that
+# still followed an intermediate link would edit, move or destroy something no read
+# can reach and no listing describes, through a name the browser draws under a
+# different parent. So the parent chain refuses for a mutation exactly as it does
+# for a read.
+#
+# What a mutation does with a link as its LEAF is deliberately untouched here and
+# stays #2429's question, so these plant the link strictly ABOVE the leaf.
+
+
+async def test_mutations_under_a_symlink_parent_are_refused(tmp_path: Path) -> None:
+    """Every mutation refuses the path, and the link's target is left intact."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"real/inner": b"X", "g": b"G"})
+    live = snapshot_dir(tmp_path, community, server)
+    (live / "alias").symlink_to("real")
+
+    with pytest.raises(SymlinkRefusedError):
+        await storage.write_file(community, server, RelPath("alias/inner"), b"EDITED")
+    with pytest.raises(SymlinkRefusedError):
+        await storage.delete_file(community, server, RelPath("alias/inner"))
+    with pytest.raises(SymlinkRefusedError):
+        await storage.make_dir(community, server, RelPath("alias/new"))
+    with pytest.raises(SymlinkRefusedError):
+        await storage.rename_file(
+            community, server, RelPath("alias/inner"), RelPath("moved")
+        )
+    with pytest.raises(SymlinkRefusedError):
+        await storage.rename_file(
+            community, server, RelPath("g"), RelPath("alias/inner")
+        )
+
+    assert (live / "real" / "inner").read_bytes() == b"X"
+    assert not (live / "real" / "new").exists()
+    assert (live / "g").read_bytes() == b"G"
+
+
 # --- READING a symlink dirent (issue #2418 review) --------------------------
 #
 # Describing the link rather than its target split the listing from the read: the
@@ -864,18 +933,23 @@ async def test_path_exists_of_an_escaping_symlink_is_still_a_traversal_refusal(
 # truncation; and the search's per-file memory cap gates on the same listed size,
 # so a link to a multi-GiB file slipped under the cap and was read whole.
 #
-# An at-rest read of a symlink dirent is therefore a MISS. One rule closes both,
+# An at-rest read of a symlink dirent is therefore REFUSED. One rule closes both,
 # and it is the same convergence that decided the listing: the Worker already
 # refuses to follow a symlink on read, #2393 already answers a dangling link and a
 # loop as a miss on this very path, and a working set cannot legitimately contain
 # a symlink anyway (uploads refuse symlink members, the Worker's snapshot tar
 # skips them, hydrate rejects them).
 #
-# It is the LEAF dirent that is refused, never the resolution of the working-set
-# root: ``current`` IS a symlink (``current -> snapshots/<id>``), but
-# ``_current_dir`` readlinks it and hands ``_safe_target`` the resolved snapshot
-# DIRECTORY, so the root is never a leaf under test here. Containment still runs
-# first, so an escaping link stays a PathTraversalError.
+# The refusal landed as the Port's own MISS and became the modelled
+# ``SymlinkRefusedError`` in #2432: a miss told the operator a file was gone while
+# the listing right above it showed the entry, whereas the refusal is the same 422
+# ``symlink_refused`` sentence the running-server browser already shows.
+#
+# The resolution of the working-set root is never in question: ``current`` IS a
+# symlink (``current -> snapshots/<id>``), but ``_current_dir`` readlinks it and
+# hands the resolve the already-resolved snapshot DIRECTORY as its base, so no
+# component under test here is the root's own link. Containment still runs first,
+# so an escaping link stays a PathTraversalError.
 
 
 async def test_a_listed_symlink_never_promises_a_size_the_read_contradicts(
@@ -890,11 +964,11 @@ async def test_a_listed_symlink_never_promises_a_size_the_read_contradicts(
 
     listed = next(entry for entry in entries if entry.name == "link.bin")
     assert listed.size == len("big.bin")  # the link's own size, not the target's
-    with pytest.raises(NotFoundError):
+    with pytest.raises(SymlinkRefusedError):
         await storage.read_file(community, server, RelPath("link.bin"))
 
 
-async def test_open_file_stream_of_a_symlink_is_not_found(tmp_path: Path) -> None:
+async def test_open_file_stream_of_a_symlink_is_refused(tmp_path: Path) -> None:
     """The stream is the path that would emit the body under the wrong header."""
 
     storage = FsStorage(tmp_path)
@@ -902,11 +976,11 @@ async def test_open_file_stream_of_a_symlink_is_not_found(tmp_path: Path) -> Non
     await publish(storage, community, server, {"big.bin": b"B" * 1000})
     (snapshot_dir(tmp_path, community, server) / "link.bin").symlink_to("big.bin")
 
-    with pytest.raises(NotFoundError):
+    with pytest.raises(SymlinkRefusedError):
         await drain(storage.open_file_stream(community, server, RelPath("link.bin")))
 
 
-async def test_view_file_stream_of_a_symlink_is_not_found(tmp_path: Path) -> None:
+async def test_view_file_stream_of_a_symlink_is_refused(tmp_path: Path) -> None:
     """The pinned view reads the same way, so the export walk skips the link."""
 
     storage = FsStorage(tmp_path)
@@ -915,8 +989,28 @@ async def test_view_file_stream_of_a_symlink_is_not_found(tmp_path: Path) -> Non
     (snapshot_dir(tmp_path, community, server) / "link.bin").symlink_to("big.bin")
 
     async with storage.open_working_set_view(community, server) as view:
-        with pytest.raises(NotFoundError):
+        with pytest.raises(SymlinkRefusedError):
             await drain(view.open_file_stream(RelPath("link.bin")))
+
+
+async def test_reading_a_dangling_symlink_is_refused_not_missed(
+    tmp_path: Path,
+) -> None:
+    """A dangling link is a link, so it gets the link answer (issue #2432).
+
+    Its answer moves with every other leaf link's: it used to be the miss, and the
+    miss is exactly what made a visible-but-broken entry read as "not there". The
+    Worker answers it the same way (its ``O_NOFOLLOW`` open reports ELOOP on a
+    dangling link too, not ENOENT), so at rest and running agree here as well.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"x"})
+    (snapshot_dir(tmp_path, community, server) / "broken").symlink_to("nowhere")
+
+    with pytest.raises(SymlinkRefusedError):
+        await storage.read_file(community, server, RelPath("broken"))
 
 
 async def test_reading_an_escaping_symlink_is_still_a_traversal_refusal(
@@ -940,14 +1034,16 @@ async def test_reading_an_escaping_symlink_is_still_a_traversal_refusal(
         await storage.read_file(community, server, RelPath("escape"))
 
 
-async def test_reading_through_an_intermediate_symlink_still_works(
+async def test_reading_through_an_intermediate_symlink_is_refused(
     tmp_path: Path,
 ) -> None:
-    """Only the LEAF is refused; an intermediate component still resolves.
+    """Every read path refuses an intermediate link, not just the leaf (#2432).
 
-    ``alias/data`` names a real file, and the listing that shows it sizes it
-    truthfully — so the listing and the read agree and there is nothing to fix
-    here.
+    This test used to assert that ``alias/data`` streamed the real bytes, on the
+    grounds that the listing showing ``data`` sized it truthfully. What it left was
+    one request answering the same ``?path=alias/data`` with the real bytes at rest
+    and 422 ``symlink_refused`` while running -- the Worker refuses at every
+    component. The at-rest paths were the outlier, so all three converge here.
     """
 
     storage = FsStorage(tmp_path)
@@ -956,9 +1052,13 @@ async def test_reading_through_an_intermediate_symlink_still_works(
     live = snapshot_dir(tmp_path, community, server)
     (live / "alias").symlink_to("real")
 
-    assert (
-        await storage.read_file(community, server, RelPath("alias/data")) == b"inside"
-    )
+    with pytest.raises(SymlinkRefusedError):
+        await storage.read_file(community, server, RelPath("alias/data"))
+    with pytest.raises(SymlinkRefusedError):
+        await drain(storage.open_file_stream(community, server, RelPath("alias/data")))
+    async with storage.open_working_set_view(community, server) as view:
+        with pytest.raises(SymlinkRefusedError):
+            await drain(view.open_file_stream(RelPath("alias/data")))
 
 
 def test_version_ids_sort_chronologically_across_time_low_wrap(

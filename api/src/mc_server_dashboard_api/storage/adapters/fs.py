@@ -57,6 +57,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     PathTraversalError,
     SnapshotHandleError,
     StaleGenerationError,
+    SymlinkRefusedError,
 )
 from mc_server_dashboard_api.storage.domain.port import (
     API_EDIT_PUBLISHER,
@@ -280,28 +281,61 @@ class FsStorage(Storage):
         with self._lease_lock:
             return staging in self._active_staging
 
-    # --- path-traversal containment (Section 6) ----------------------------
+    # --- the resolve rule: containment + symlink refusal (Section 6) --------
 
-    def _safe_target(self, base: Path, rel_path: RelPath) -> Path:
-        """Join ``rel_path`` under ``base`` and verify the result stays inside it.
+    def _contained(self, base: Path, rel_path: RelPath) -> tuple[str, str]:
+        """Contain ``rel_path`` under ``base``; return (literal join, realpath).
 
         ``RelPath`` already rejected absolute paths and ``..`` at the string level;
         this catches the filesystem vector — a symlink component that resolves out
-        of ``base``. The realpath of the candidate (and of each existing parent) is
-        checked against the realpath of ``base``.
+        of ``base``. Containment is decided on the fully resolved candidate and is
+        decided FIRST, so a link out of the root keeps reporting the escape rather
+        than being downgraded to the symlink refusal the callers below apply.
+
+        The literal join is built under the ALREADY-REAL base, so comparing it
+        against the realpath asks precisely "did resolving this path cross a
+        symlink?" — the whole per-component rule, out of the realpath every resolve
+        already paid for and a string compare (issue #2432). The comparison
+        classifies every shape: a plain path matches; a symlink at any position does
+        not; a loop, an over-long component and a missing path all match (a
+        non-strict realpath leaves them literal) and so fall through to the caller's
+        open, which answers them exactly as it did before.
         """
 
         base_real = os.path.realpath(base)
-        candidate = base.joinpath(*rel_path.parts)
-        resolved = os.path.realpath(candidate)
+        literal = os.path.join(base_real, *rel_path.parts)
+        resolved = os.path.realpath(base.joinpath(*rel_path.parts))
         if resolved != base_real and not resolved.startswith(base_real + os.sep):
             raise PathTraversalError(
                 f"rel_path {rel_path.value!r} escapes the server root"
             )
+        return literal, resolved
+
+    def _safe_target(self, base: Path, rel_path: RelPath) -> Path:
+        """The MUTATION / ``path_exists`` resolve: containment, then no link PARENT.
+
+        A mutation that followed an intermediate link would edit, move or destroy
+        something no read can reach and no listing describes, through a name the
+        browser draws under a different parent — so the parent chain refuses here
+        exactly as it does for a read (issue #2432). ``path_exists`` resolves the
+        same way for the same reason: its old justification for following an
+        intermediate link was that the reads followed one.
+
+        The LEAF is deliberately still resolved, so this returns the realpath. That
+        is what leaves a mutation's leaf semantics (issue #2429) and
+        ``path_exists``'s "a link occupies its name" (issue #2426) exactly as they
+        are: a leaf link keeps whatever each caller does with it today.
+        """
+
+        literal, resolved = self._contained(base, rel_path)
+        if resolved != literal and _crosses_a_symlink_parent(literal):
+            raise SymlinkRefusedError(
+                f"rel_path {rel_path.value!r} resolves through a symlink"
+            )
         return Path(resolved)
 
-    def _safe_read_target(self, base: Path, rel_path: RelPath, not_found: str) -> Path:
-        """:meth:`_safe_target` for a READ, refusing a symlink leaf as a miss (#2418).
+    def _safe_read_target(self, base: Path, rel_path: RelPath) -> Path:
+        """A READ's resolve: containment, then refuse a symlink at ANY component.
 
         A listing describes each entry as the dirent it is rather than as its
         target, so a read that still followed the link would contradict the very
@@ -309,49 +343,42 @@ class FsStorage(Storage):
         ``DownloadFile`` hands that size straight to a ``Content-Length`` header
         whose body then comes from this read -- a protocol abort, not a cosmetic
         mismatch -- while the content search's per-file memory cap gates on that
-        same listed size and would let a link to a huge file through. Answering the
-        Port's own miss keeps the listing and the read telling one story, and it
-        converges on what the rest of the system already does: the Worker refuses
-        to follow a symlink on read, and a dangling link and a loop are already a
-        miss here (issue #2393). A working set cannot legitimately carry a symlink
-        anyway -- uploads refuse symlink members, the Worker's snapshot tar skips
-        them, hydrate rejects them -- so this forecloses a shape that only arrives
-        out of band.
-
-        A LISTING resolves through here too (#2426). Reaching a directory by
+        same listed size and would let a link to a huge file through (issue #2418).
+        A LISTING resolves through here too (#2426): reaching a directory by
         following a link the listing just described as a file is the same
-        contradiction one level up, and it is not cosmetic either: the download
-        endpoint decides between its single-file and its directory-zip branch by
-        probing ``list_dir`` on the entry's own path, so a probe that followed the
-        link zipped a subtree for an entry the file browser draws as a file. One
-        rule for every read keeps the two answers to "is this a directory?" from
-        being taken in one request and disagreeing.
+        contradiction one level up, and the download endpoint picks its single-file
+        or directory-zip branch by probing ``list_dir`` on the entry's own path, so
+        a probe that followed the link zipped a subtree for an entry the file
+        browser draws as a file.
 
-        Only the LEAF dirent is refused, never the resolution of the working-set
-        root: ``current`` IS a symlink, but ``_current_dir`` readlinks it and
-        passes the resolved snapshot DIRECTORY as ``base``, so the root is never a
-        leaf here. An intermediate component still resolves (``alias/data`` reads
-        the real file and ``alias/inner`` lists the real directory), which is
-        consistent because the listing that shows ``data`` sizes it truthfully.
+        EVERY component is refused, not only the leaf (issue #2432). While an
+        intermediate one still resolved, the same ``?path=alias/inner`` returned the
+        real bytes at rest and 422 ``symlink_refused`` while running -- the Worker
+        refuses at every component -- and every probe in the tree had to know which
+        of the two rules applied to it. A working set cannot legitimately carry a
+        symlink at all (uploads refuse symlink members, the Worker's snapshot tar
+        skips them, hydrate rejects them), so one rule forecloses a shape that only
+        arrives out of band.
 
-        Containment runs FIRST, so a link that escapes the root keeps reporting the
-        escape rather than being downgraded to an ordinary miss. Refusing to follow
-        the leaf can only narrow what a read reaches, never widen it.
+        The resolution of the working-set root is never in question: ``current`` IS
+        a symlink, but ``_current_dir`` readlinks it and passes the resolved
+        snapshot DIRECTORY as ``base``, so no component seen here is the root's own
+        link.
+
+        Returns the LITERAL join for the caller to open. It equals the realpath by
+        construction once the comparison has passed, so this only makes explicit
+        that nothing was followed. Residue (stated, not fixed): the window between
+        this comparison and the caller's open is the same one the ``os.path.islink``
+        probe it replaces had, and at rest only operator SSH can race it. Closing it
+        wants an ``O_NOFOLLOW`` open, out of scope here (issue #2432).
         """
 
-        target = self._safe_target(base, rel_path)
-        # Tested on the UNRESOLVED join: ``_safe_target`` returns the realpath, in
-        # which the leaf symlink has already been resolved away.
-        #
-        # ``os.path.islink`` rather than ``Path.is_symlink``: the probe must ANSWER
-        # for every path a client can ask for, never raise. ``Path.is_symlink``
-        # re-raises ENAMETOOLONG, which would make an over-long ``?path=`` a 500
-        # again -- the exact regression #2393 fixed by folding that errno into the
-        # miss. ``os.path.islink`` answers False on any lstat failure, leaving the
-        # open below to produce that miss.
-        if os.path.islink(base.joinpath(*rel_path.parts)):
-            raise NotFoundError(not_found)
-        return target
+        literal, resolved = self._contained(base, rel_path)
+        if resolved != literal:
+            raise SymlinkRefusedError(
+                f"rel_path {rel_path.value!r} resolves through a symlink"
+            )
+        return Path(literal)
 
     # --- crash-recovery sweep (Section 4.3) --------------------------------
 
@@ -1285,9 +1312,7 @@ class FsStorage(Storage):
         # identical.
         current, release = self._lease_current(community_id, server_id)
         try:
-            target = self._safe_read_target(
-                current, rel_path, f"file not found: {rel_path.value}"
-            )
+            target = self._safe_read_target(current, rel_path)
             with _open_readable_sync(
                 target, f"file not found: {rel_path.value}"
             ) as handle:
@@ -1309,9 +1334,7 @@ class FsStorage(Storage):
         def _open() -> tuple[Path, Callable[[], None]]:
             current, release = self._lease_current(community_id, server_id)
             try:
-                target = self._safe_read_target(
-                    current, rel_path, f"file not found: {rel_path.value}"
-                )
+                target = self._safe_read_target(current, rel_path)
             except BaseException:
                 release()
                 raise
@@ -1341,9 +1364,7 @@ class FsStorage(Storage):
         # check rather than an ``is_dir()`` pre-check (issue #2394).
         current, release = self._lease_current(community_id, server_id)
         try:
-            target = self._safe_read_target(
-                current, rel_path, f"directory not found: {rel_path.value}"
-            )
+            target = self._safe_read_target(current, rel_path)
             return _list_entries(target, f"directory not found: {rel_path.value}")
         finally:
             release()
@@ -1368,15 +1389,18 @@ class FsStorage(Storage):
         try:
             # Containment FIRST (the established ordering): a path escaping the
             # root is refused rather than answered, exactly as a read refuses it.
+            # The same resolve then refuses an intermediate symlink (issue #2432):
+            # the probe's old justification for following one was that the reads
+            # followed it, and that rationale dissolved with them. Never-clobber is
+            # preserved by the rename's own resolve refusing the same path rather
+            # than by an answer here.
             self._safe_target(current, rel_path)
             # ``lexists`` on the UNRESOLVED join, which is what makes this the
-            # question a rename destination asks: intermediate components are
-            # followed (as every read follows them), while the leaf is described
-            # as ITSELF -- a symlink occupies its name whatever it points at, and
-            # a dangling one does too. Like ``os.path.islink`` in
-            # ``_safe_read_target``, it ANSWERS for every path a client can ask
-            # for: a component past NAME_MAX is False, not an ENAMETOOLONG (issue
-            # #2394).
+            # question a rename destination asks: the LEAF is described as ITSELF --
+            # a symlink occupies its name whatever it points at, and a dangling one
+            # does too (issue #2426, unchanged by #2432). It ANSWERS for every path
+            # a client can ask for: a component past NAME_MAX is False, not an
+            # ENAMETOOLONG (issue #2394).
             return os.path.lexists(current.joinpath(*rel_path.parts))
         finally:
             release()
@@ -1891,6 +1915,24 @@ def _dir_has_entries(path: Path) -> bool:
     """True if ``path`` contains at least one entry (the empty-commit gate)."""
 
     return any(path.iterdir())
+
+
+def _crosses_a_symlink_parent(literal: str) -> bool:
+    """True when a component ABOVE ``literal``'s leaf is a symlink (issue #2432).
+
+    ``literal`` is joined under an already-real base, so its parent chain is clean
+    exactly when its realpath is itself — one resolve, no per-component walk. Only
+    reached when the full resolve already disagreed with the literal join, so a
+    plain path never pays for it; the paths that do are the ones that carry a
+    symlink, which only operator SSH can create.
+
+    Splitting leaf from parent is what keeps a mutation's leaf semantics (issue
+    #2429) and ``path_exists``'s "a link occupies its name" (issue #2426) intact
+    while the parent chain stops being followed.
+    """
+
+    parent = os.path.dirname(literal)
+    return os.path.realpath(parent) != parent
 
 
 def _rmtree(path: Path) -> None:
@@ -2436,9 +2478,7 @@ class _FsWorkingSetView(WorkingSetView):
 
     def _list_dir_sync(self, rel_path: RelPath) -> list[DirEntry]:
         assert self._pinned is not None
-        target = self._storage._safe_read_target(
-            self._pinned, rel_path, f"directory not found: {rel_path.value}"
-        )
+        target = self._storage._safe_read_target(self._pinned, rel_path)
         # The listing IS the existence check, for the same reason it is in
         # ``FsStorage._list_dir`` (issue #2394): the view's lease pins the snapshot
         # DIRECTORY, and ``delete_dir`` removes a subtree inside that very
@@ -2452,11 +2492,9 @@ class _FsWorkingSetView(WorkingSetView):
         if self._pinned is None:
             raise NotFoundError(f"file not found: {rel_path.value}")
         # Resolve the target synchronously (the pinned path is stable). Reads go
-        # through the read-side resolve so the view answers a symlink dirent with
-        # the same miss the unpinned read paths do (issue #2418).
-        target = self._storage._safe_read_target(
-            self._pinned, rel_path, f"file not found: {rel_path.value}"
-        )
+        # through the read-side resolve so the view refuses a symlink component
+        # exactly as the unpinned read paths do (issues #2418, #2432).
+        target = self._storage._safe_read_target(self._pinned, rel_path)
         # The lease is already held by the view; stream the file without an
         # additional per-file lease.
         return _pinned_file_stream(target, rel_path)
