@@ -40,7 +40,8 @@ skip-hydrate generation read, a failed hydrate, or a pre-dispatch
 refusal that definitively did not start (``PORT_CONFLICT``, ``IMAGE_MISSING``,
 ``DRIVER_UNAVAILABLE``, ``INTERNAL``). Only a timeout/lost-response AFTER the start
 was sent (the command MAY have been applied), a post-dispatch ``BUSY`` outcome (the
-Worker refusing because another mutating command is already in flight — outcome
+Worker refusing because another mutating command is already in flight, or because a
+failed-stop orphan it is still converging holds the id — either way the outcome is
 unknown), and an ``INVALID_STATE`` outcome (the Worker refusing because an instance
 is already live there), do NOT compensate — see the assignment-stickiness note
 below.
@@ -65,12 +66,21 @@ command MAY have been applied KEEPS the assignment and ``desired=running`` so th
 next reconcile tick redispatches to the SAME Worker (where an ``INVALID_STATE``
 resolves the lost-response case as already-running). An ``INVALID_STATE`` outcome
 returned straight to ``__call__`` is the same case observed synchronously: the
-instance is DEFINITELY live on the assigned Worker (already running, or a pending
-failed-stop orphan), so it likewise keeps the assignment and ``desired=running``
-and records observed=running rather than compensating. The Worker's double-start
-guard is per-process, so reverting a possibly-started or definitely-running server
-— and letting a later start place it elsewhere — would spawn a second live
-instance (issue #773/#774).
+instance is DEFINITELY live on the assigned Worker, so it likewise keeps the
+assignment and ``desired=running`` and records observed=running rather than
+compensating. The Worker's double-start guard is per-process, so reverting a
+possibly-started or definitely-running server — and letting a later start place it
+elsewhere — would spawn a second live instance (issue #773/#774).
+
+"Definitely live" is now the WHOLE meaning of an ``INVALID_STATE`` start outcome,
+and that is what makes both convergence sites sound. Until issue #2476 the Worker
+answered the same code for a pending failed-stop orphan — an instance it could not
+confirm dead, which is as likely to be a corpse as a live process — so the
+convergence could manufacture ``observed=running`` for a server that was down, with
+no StatusChange ever coming to repair it (issue #2467). The Worker now answers
+``BUSY`` for that case (its converger is resolving the orphan, so the start will be
+accepted on a later tick), which the ``BUSY`` arms below already handle: retry, do
+not converge. Nothing else reaches ``INVALID_STATE`` on a start or a hydrate.
 """
 
 from __future__ import annotations
@@ -365,11 +375,16 @@ class StartServer:
             return server
         if dispatch.attempted and outcome.status is CommandStatus.INVALID_STATE:
             # The Worker refused the START because an instance for this server is
-            # ALREADY live on the assigned Worker — INVALID_STATE on a start is only
-            # "already running" or a pending failed-stop orphan, never a "nothing
-            # started" refusal (instancemanager handleStart). (Gate on
-            # ``dispatch.attempted`` so a PRE-dispatch INVALID_STATE — a failed
-            # hydrate — still compensates: that one never reached the start.)
+            # ALREADY live on the assigned Worker. That is the code's ONLY meaning on
+            # a start or a hydrate (instancemanager's reserve()): a pending
+            # failed-stop orphan — the other state that gate refuses — answers BUSY
+            # since issue #2476, precisely because it is NOT evidence of a live
+            # instance, and no other condition reaches INVALID_STATE here. So
+            # converging observed=running off this code is unconditionally sound;
+            # before that split it was not, and a dead orphan's refusal wedged the row
+            # at a false running (issue #2467). (Gate on ``dispatch.attempted`` so a
+            # PRE-dispatch INVALID_STATE — a hydrate refused over a running instance —
+            # still compensates: that one never reached the start.)
             # Compensating here (desired=stopped + unassign) would orphan that live
             # instance: its StatusChange(running) is dropped at the ownership guard
             # once unassigned, the row wedges at
@@ -408,17 +423,20 @@ class StartServer:
             server_id=server_id, kind="StartServer", outcome=outcome
         )
         if dispatch.attempted and outcome.status is CommandStatus.BUSY:
-            # The Worker refused the START with BUSY: another mutating lifecycle
-            # command for this id is already in flight and its outcome is UNKNOWN
-            # (issue #824). Unlike INVALID_STATE (a settled "already running"), we
-            # MUST NOT converge observed=running here — the raced original may still
-            # FAIL and leave the server down. So neither record-running nor
+            # The Worker refused the START with BUSY, which means one of two unsettled
+            # states — another mutating lifecycle command for this id is already in
+            # flight (issue #824), or the Worker holds a failed-stop orphan its
+            # converger is still resolving (issue #2476). Both say the same thing:
+            # the outcome is UNKNOWN and this exact start will be accepted later.
+            # Unlike INVALID_STATE (a settled "already running"), we MUST NOT converge
+            # observed=running here — the raced original may still FAIL, and the orphan
+            # may be a process that is already dead. So neither record-running nor
             # compensate: KEEP desired=running + the assignment, and raise so the
             # caller sees a retryable conflict. A later reconcile tick takes the
-            # redispatch_start path to the SAME Worker once the in-flight command
-            # settles (a genuine success then emits a StatusChange; a failure leaves
-            # the row diverged for the next retry). Gate on ``dispatch.attempted`` so
-            # a PRE-dispatch BUSY — a hydrate refused for the same race — still
+            # redispatch_start path to the SAME Worker once the Worker settles (a
+            # genuine success then emits a StatusChange; a failure leaves the row
+            # diverged for the next retry). Gate on ``dispatch.attempted`` so a
+            # PRE-dispatch BUSY — a hydrate refused for either reason — still
             # compensates below: that one never reached the start.
             raise failure
         await self._compensate(community_id, server_id, worker_id, original=failure)
@@ -572,6 +590,15 @@ class StartServer:
         unassign: the instance is live and keeps its Worker (mirror of the genuine
         success path, which the Worker's StatusChange(running) already covers, so it
         writes nothing here).
+
+        That convergence is unconditionally sound because "already running" is the
+        code's only meaning on either leg. This arm is deliberately NOT gated on
+        whether the start was reached, so it also converges a refused HYDRATE — and
+        until issue #2476 the hydrate guard answered ``INVALID_STATE`` for a pending
+        failed-stop orphan too, which is where a row whose process was already dead
+        acquired a permanent false ``observed=running`` (issue #2467): a converged row
+        is settled, so this method never ran for it again. The orphan now answers
+        ``BUSY``, handled by the arm below.
         """
 
         async with self.uow:
@@ -639,14 +666,18 @@ class StartServer:
                 )
             return server
         if outcome.status is CommandStatus.BUSY:
-            # A BUSY start means another mutating lifecycle command for this id is
-            # already in flight on the Worker and its outcome is UNKNOWN (issue
-            # #824) — NOT the settled "already running" INVALID_STATE above. So we
-            # must NOT record observed=running: if the raced original later FAILS,
-            # the server is down and a speculative observed=running would stick
-            # (the reconciler never re-selects it). Raise instead, changing no row;
-            # the assignment and running intent stand, so a later reconcile tick
-            # retries the redispatch once the in-flight command settles.
+            # A BUSY start (or hydrate) means the Worker is in one of two UNSETTLED
+            # states — another mutating lifecycle command for this id is already in
+            # flight (issue #824), or it holds a failed-stop orphan its converger is
+            # still resolving (issue #2476) — NOT the settled "already running"
+            # INVALID_STATE above. So we must NOT record observed=running: if the
+            # raced original later FAILS, or the orphan turns out to be a process
+            # that already died, the server is down and a speculative
+            # observed=running would stick (the reconciler never re-selects it).
+            # Raise instead, changing no row; the assignment and running intent
+            # stand, so a later reconcile tick retries the redispatch once the Worker
+            # settles. The row sits honestly diverged meanwhile — backoff-bounded
+            # WARN noise, which is the deliberate trade for never lying about it.
             raise _dispatch_failure(
                 server_id=server_id, kind="StartServer", outcome=outcome
             )

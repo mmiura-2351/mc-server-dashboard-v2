@@ -253,11 +253,12 @@ export const ja: Record<TranslationKey, string> = {
   "dashboard.lifecycle.restartPending":
     "サーバーを再起動できませんでした: 一時的に停止している可能性があります。システムが自動的に復帰させます。",
   // 409 failed_stop_orphan (issue #2466): the host could not confirm an earlier
-  // stop, so the process is probably still running. Nothing is pending and a
-  // retry of the same action is refused identically; stopping again is what
-  // retries the termination.
+  // stop, so the process may still be running. A retry of the same action is
+  // refused identically, and since issue #2475 the host converges the orphan on
+  // its own, so the message says the work is already under way rather than asking
+  // the operator to stop it again (issue #2476).
   "dashboard.lifecycle.failedStopOrphan":
-    "前回の停止が完了していないため、このサーバーのプロセスがまだ稼働している可能性があります。もう一度停止してください。",
+    "前回の停止が完了していないため、このサーバーのプロセスがまだ稼働している可能性があります。システムが自動的に停止処理を進めているため、しばらく待ってから再試行してください。",
   // 503 service-unavailable reasons (issue #1092).
   "dashboard.lifecycle.noEligibleWorker":
     "現在利用可能なサーバーホストがありません。システムが起動中の場合は、しばらく待ってから再試行してください。",

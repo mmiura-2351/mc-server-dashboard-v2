@@ -68,6 +68,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerType,
     WorkerId,
 )
+from tests.servers.contract_table import worker_status
 from tests.servers.fakes import (
     FakeBedrockTunnelSync,
     FakeClock,
@@ -1127,6 +1128,132 @@ async def test_start_pre_dispatch_busy_compensates() -> None:
     assert reverted.assigned_worker_id is None
     assert cp.incremented == [WorkerId(worker)]
     assert cp.decremented == [WorkerId(worker)]
+
+
+async def test_start_refused_over_failed_stop_orphan_never_converges_running() -> None:
+    # Issue #2476 / #2467. The Worker refused the START because it holds a
+    # failed-stop orphan for this id — an instance whose driver Stop could not
+    # confirm termination. That process may be ALIVE or already DEAD, and the
+    # Worker cannot tell which until its converger (issue #2475) probes it, so the
+    # refusal is NOT evidence the server is running. __call__ must therefore not
+    # manufacture observed=running from it: a dead orphan converged to running
+    # wedges the row at a state no StatusChange will ever repair (#2467's wedge).
+    #
+    # The status comes from the contract row, not a hand-picked constant, so this
+    # asserts what the Worker really answers for that precondition.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = FakeControlPlane(
+        place_to=WorkerId(worker),
+        outcomes={
+            "start": CommandOutcome(
+                status=worker_status("StartServer", "orphan_pending"),
+                message="instancemanager: server has a failed-stop orphan pending "
+                "termination",
+            )
+        },
+    )
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
+    )
+
+    with pytest.raises(CommandDispatchError) as excinfo:
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    # A retryable contention the client can name, not the unclassified catch-all:
+    # the converger is working the orphan, so this exact start succeeds later.
+    assert excinfo.value.reason == "worker_busy"
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.observed_state is not ObservedState.RUNNING
+    # The row sits honestly diverged: the intent and the assignment stand so the
+    # reconciler redispatches to the SAME Worker once the orphan is converged.
+    assert stored.desired_state is DesiredState.RUNNING
+    assert stored.assigned_worker_id == WorkerId(worker)
+    assert cp.decremented == []
+
+
+async def test_redispatch_start_refused_over_orphan_never_converges_running() -> None:
+    # The reconciler's replay hits the same refusal (issue #2476). This is the site
+    # #2467 reported: redispatch_start converged observed=running on it, so a row
+    # whose orphan was already DEAD sat falsely running forever — the reconciler
+    # never re-selects a converged row, and a dead process emits no StatusChange.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.UNKNOWN,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(
+        outcomes={
+            "start": CommandOutcome(
+                status=worker_status("StartServer", "orphan_pending"),
+                message="instancemanager: server has a failed-stop orphan pending "
+                "termination",
+            )
+        }
+    )
+
+    with pytest.raises(CommandDispatchError):
+        await _start_server(uow, cp).redispatch_start(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.observed_state is ObservedState.UNKNOWN
+    assert stored.desired_state is DesiredState.RUNNING
+    assert stored.assigned_worker_id == WorkerId(worker)
+
+
+async def test_redispatch_start_refused_at_hydrate_over_orphan_never_converges() -> (
+    None
+):
+    # The orphan refuses the HYDRATE leg too, and redispatch_start's convergence
+    # arm has no ``dispatch.attempted`` gate — so before issue #2476 a hydrate
+    # refused over an orphan converged observed=running without any start ever
+    # being sent. The reclassified code closes that route as well.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.UNKNOWN,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(
+        outcomes={
+            "hydrate": CommandOutcome(
+                status=worker_status("HydrateTrigger", "orphan_pending"),
+                message="instancemanager: server has a failed-stop orphan pending "
+                "termination",
+            )
+        }
+    )
+
+    with pytest.raises(CommandDispatchError):
+        await _start_server(uow, cp).redispatch_start(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    # The start was never sent, and no observed state was manufactured.
+    assert [kind for kind, _, _ in cp.dispatched] == ["hydrate"]
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.observed_state is ObservedState.UNKNOWN
 
 
 async def test_start_failure_logs_warning_with_server_and_kind(

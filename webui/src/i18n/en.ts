@@ -254,12 +254,14 @@ export const en = {
   "dashboard.lifecycle.restartPending":
     "Could not restart the server: it may be stopped for now. The system will bring it back automatically.",
   // 409 failed_stop_orphan (issue #2466): the host could not confirm an earlier
-  // stop, so the server's process is probably still running — it never went
-  // down, nothing is pending, and repeating the same action is refused
-  // identically. Stopping the server again is what retries the termination, so
-  // the message names the condition and that one remedy.
+  // stop, so the server's process may still be running — it never went down, and
+  // repeating the same action is refused identically. Asking the operator to stop
+  // it again stopped being the honest remedy at issue #2475: the host now
+  // converges the orphan itself (probing the process, retrying the stop while it
+  // is alive, retiring the record once it is confirmed gone), so the message names
+  // the condition and says the work is already under way (issue #2476).
   "dashboard.lifecycle.failedStopOrphan":
-    "The server's previous stop did not finish, so its process may still be running. Try stopping the server again.",
+    "The server's previous stop did not finish, so its process may still be running. The system is shutting it down automatically; wait a moment and try again.",
   // 503 service-unavailable reasons (issue #1092): post-restart scenarios where
   // a host or the server files are not yet ready.
   "dashboard.lifecycle.noEligibleWorker":

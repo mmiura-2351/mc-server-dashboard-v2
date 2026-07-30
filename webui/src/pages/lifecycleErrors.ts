@@ -83,15 +83,18 @@ export type LifecycleAction = "start" | "stop" | "restart";
 //
 // `failed_stop_orphan` is the API's rendering of a Worker that refused because
 // it holds a failed-stop orphan for this server: an instance whose stop it could
-// not confirm, so the process is probably still running (issue #2466). It is
-// deliberately NOT verb-specific and deliberately not any of the messages above.
-// Nothing is pending (`restartPending` would promise a comeback for a server
-// that never went down), nothing is in progress (`busy` would ask for a retry
-// that is refused identically), and nothing changed state (`stateChanged` names
-// no change). What IS true is the server's condition and its one remedy — stop
-// it again, which is the path that retries the termination — and that holds
-// whichever verb was refused, so it lives here rather than in
-// VERB_SPECIFIC_409_MESSAGE.
+// not confirm, so the process may still be running (issue #2466). Only restart
+// and console reach it — a start, hydrate or snapshot over the same orphan now
+// arrives as `worker_busy` instead, because those WILL be carried out once the
+// orphan clears while a restart will not (issue #2476). It is deliberately NOT
+// verb-specific and deliberately not any of the messages above. Nothing is
+// pending (`restartPending` would promise a comeback for a server that never went
+// down), nothing changed state (`stateChanged` names no change), and `busy` is
+// wrong even though the wait is similar — it says another *operation* is running
+// and will finish, not that the server is in a state the host is repairing. What
+// IS true is the server's condition plus the fact that the host is already
+// converging it on its own (issue #2475), and that holds whichever verb was
+// refused, so it lives here rather than in VERB_SPECIFIC_409_MESSAGE.
 //
 // The refetch is deliberately kept (issue #2420): it is not a side effect of
 // this mapping — every lifecycle mutation invalidates in `onSettled` regardless
