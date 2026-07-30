@@ -101,6 +101,15 @@ func (noopTimer) C() <-chan time.Time { return nil }
 func (noopTimer) Reset(time.Duration) {}
 func (noopTimer) Stop()               {}
 
+// registered reports how many After registrations have ever been made. A
+// goroutine still in its loop re-registers before parking, so a growing count is
+// the observable for "still running" (and a stable one for "exited").
+func (c *fakeClock) registered() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.registers
+}
+
 // tick fires every pending After channel, advancing the metrics ticker one step.
 func (c *fakeClock) tick() {
 	c.mu.Lock()

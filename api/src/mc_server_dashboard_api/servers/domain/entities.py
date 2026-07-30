@@ -73,12 +73,20 @@ class Server:
         """Return whether the server is fully stopped for edits/deletion.
 
         At rest means the operator wants it stopped *and* the last observed state
-        is one with no live working set to diverge from: ``stopped``, the
-        API-inferred ``unknown`` (the owning Worker is gone), or ``crashed`` (the
-        process died, so there is no live working set — strictly safer than
-        ``unknown``, where the Worker may still hold a live instance we cannot
-        see). Config/name edits and deletion are gated on this (Section 6.9
-        spirit).
+        is one with no live working set to diverge from: ``stopped``,
+        ``unknown``, or ``crashed`` (the process died, so there is no live
+        working set — strictly safer than ``unknown``, where the Worker may still
+        hold a live instance we cannot see). Config/name edits and deletion are
+        gated on this (Section 6.9 spirit).
+
+        ``unknown`` has two provenances and the caveat above covers both.
+        API-inferred: the owning Worker is gone, so nobody can speak for the
+        instance. Worker-asserted (issue #2475): the Worker holds a failed-stop
+        orphan and its backend daemon cannot answer whether the container is
+        alive. The second is the same claim made from closer up — the Worker
+        knows it holds an instance and cannot confirm it dead — so it is if
+        anything a stronger reason to treat ``unknown`` as "possibly still live"
+        rather than a settled rest state.
         """
 
         return self.desired_state is DesiredState.STOPPED and self.observed_state in (
