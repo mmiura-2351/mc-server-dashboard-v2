@@ -659,7 +659,11 @@ async def download_file(
     except ServerFileNotFoundError as exc:
         raise _not_found() from exc
     except InvalidFilePathError as exc:
-        raise _unprocessable("invalid_path") from exc
+        # exc.reason, not a hardcoded invalid_path: a download is a READ, so it owes
+        # the same answer the ``?path=`` read gives for the same path (issue #2432).
+        # This route is at-rest only, so the reachable reasons are the escape's
+        # invalid_path and Storage's symlink_refused.
+        raise _unprocessable(exc.reason) from exc
     except ServerFilesUnsettledError as exc:
         await _record_file_failure(
             recorder, ops.FILE_DOWNLOAD, authorized, community_id, server_id
@@ -719,7 +723,8 @@ async def issue_file_download_grant(
     boundary — is the right bar here.
 
     The pre-flight reuses ``DownloadFile.is_dir``, so a missing path is 404, a
-    traversal-unsafe one 422 ``invalid_path``, and a running server 409
+    traversal-unsafe one 422 ``invalid_path``, one with a path-component symlink 422
+    ``symlink_refused`` (issue #2432), and a running server 409
     ``server_unsettled`` — exactly what the download returns. The 409 records the
     DENIED ``file:download`` row the download would have recorded; once the Web UI
     mints first the download is never reached, and the denial would otherwise
@@ -740,7 +745,12 @@ async def issue_file_download_grant(
     except ServerFileNotFoundError as exc:
         raise _not_found() from exc
     except InvalidFilePathError as exc:
-        raise _unprocessable("invalid_path") from exc
+        # The mint is where the Web UI meets a refused download path: since issue
+        # #2352 it mints BEFORE downloading, so the download is never reached and
+        # this is the operator-visible answer. It therefore forwards exc.reason for
+        # the same reason the download does (issue #2432) — otherwise the browser
+        # says "Invalid path" for a symlink the read route calls a symlink.
+        raise _unprocessable(exc.reason) from exc
     except ServerFilesUnsettledError as exc:
         await _record_file_failure(
             recorder, ops.FILE_DOWNLOAD, authorized, community_id, server_id
