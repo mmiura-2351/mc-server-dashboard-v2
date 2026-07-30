@@ -112,25 +112,59 @@ class JwtTokenService(TokenService):
     def issue_download_grant(
         self, user_id: UserId, resource: str
     ) -> IssuedDownloadGrant:
-        now = self._clock.now()
-        # ``exp`` is whole seconds, so the advertised deadline is derived from the
-        # truncated claim rather than from ``now + ttl``: otherwise a grant minted
-        # mid-second stops verifying up to a second before the instant the caller
-        # was told (issue #2324).
-        exp = int((now + self._download_grant_ttl).timestamp())
-        claims = {
-            "sub": str(user_id.value),
-            "iat": int(now.timestamp()),
-            "exp": exp,
-            "purpose": _DOWNLOAD_PURPOSE,
-            "res": resource,
-        }
-        token = jwt.encode(claims, self._signing_key, algorithm=self._algorithm)
+        token, exp = self._issue_resource_scoped(
+            user_id=user_id,
+            resource=resource,
+            purpose=_DOWNLOAD_PURPOSE,
+            ttl=self._download_grant_ttl,
+        )
         return IssuedDownloadGrant(
             token=token, expires_at=dt.datetime.fromtimestamp(exp, tz=dt.timezone.utc)
         )
 
     def verify_download_grant(self, token: str, resource: str) -> UserId:
+        return self._verify_resource_scoped(
+            token,
+            resource,
+            purpose=_DOWNLOAD_PURPOSE,
+            error=InvalidDownloadGrantError,
+        )
+
+    def _issue_resource_scoped(
+        self, *, user_id: UserId, resource: str, purpose: str, ttl: dt.timedelta
+    ) -> tuple[str, int]:
+        """Mint a resource-scoped JWT; return it with its whole-second ``exp``.
+
+        ``exp`` is returned rather than recomputed because it is whole seconds: a
+        deadline derived from ``now + ttl`` would be up to a second later than the
+        instant the token actually stops verifying (issue #2324).
+        """
+
+        now = self._clock.now()
+        exp = int((now + ttl).timestamp())
+        claims = {
+            "sub": str(user_id.value),
+            "iat": int(now.timestamp()),
+            "exp": exp,
+            "purpose": purpose,
+            "res": resource,
+        }
+        return jwt.encode(claims, self._signing_key, algorithm=self._algorithm), exp
+
+    def _verify_resource_scoped(
+        self,
+        token: str,
+        resource: str,
+        *,
+        purpose: str,
+        error: type[Exception],
+    ) -> UserId:
+        """Return the subject of a JWT bound to ``purpose`` and ``resource``.
+
+        Raises ``error`` on any failure, so each credential kind keeps its own
+        error type and neither verifier accepts the other's token.
+        """
+
         try:
             # Same posture as verify_access_token: PyJWT checks the signature,
             # the injected Clock checks the expiry.
@@ -141,13 +175,13 @@ class JwtTokenService(TokenService):
                 options={"verify_exp": False},
             )
             if int(self._clock.now().timestamp()) >= int(claims["exp"]):
-                raise InvalidDownloadGrantError
-            if claims.get("purpose") != _DOWNLOAD_PURPOSE:
-                raise InvalidDownloadGrantError
-            # KeyError on a missing ``res`` is caught below: a grant bound to
+                raise error
+            if claims.get("purpose") != purpose:
+                raise error
+            # KeyError on a missing ``res`` is caught below: a credential bound to
             # nothing must never open an arbitrary resource.
             if claims["res"] != resource:
-                raise InvalidDownloadGrantError
+                raise error
             return UserId(uuid.UUID(claims["sub"]))
         except (jwt.InvalidTokenError, KeyError, ValueError) as exc:
-            raise InvalidDownloadGrantError from exc
+            raise error from exc
