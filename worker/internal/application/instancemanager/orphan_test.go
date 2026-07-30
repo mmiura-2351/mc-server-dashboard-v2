@@ -124,6 +124,73 @@ func TestOrphanConvergesWithoutOperatorAction(t *testing.T) {
 	})
 }
 
+// The converger keeps working an orphan whose own retry could not confirm
+// termination either: it re-records the orphan, does not spawn a second
+// converger, and converges on a later round (issue #2475). A converger that
+// treated its first failed retry as final would leave exactly the wedge this
+// issue removes.
+func TestOrphanConvergesAcrossAFailedRetry(t *testing.T) {
+	// Stop #1 (the operator's) and stop #2 (the converger's first retry) both fail;
+	// only stop #3, also the converger's, confirms termination.
+	d := &orphanDriver{stopAfter: 2}
+	m := newManager(t, d, nil)
+	shrinkOrphanConverger(m)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+
+	first := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
+	if first.Success {
+		t.Fatalf("first stop = %+v, want failure", first)
+	}
+
+	// No further command is issued: both retries below are the manager's own work.
+	waitFor(t, func() bool { return d.inst.stopCount() >= 3 })
+	awaitStatus(t, m, "s1", "stopped")
+	waitFor(t, func() bool {
+		res := m.Handle(context.Background(), session.Command{CommandID: "probe", ServerID: "s1", Kind: "StopServer"})
+		return res.ErrorCode == session.CommandErrorServerNotFound
+	})
+}
+
+// takeOrphanReserve refuses a retry whose instance is no longer the id's
+// recorded orphan, and it never reaches for the RUNNING instance the way
+// takeStoppableReserve does. That identity guard is the whole reason the
+// converger has its own take: it decides on a probe and acts afterwards, so
+// between the two the orphan can exit on its own and a re-placed StartServer can
+// register a fresh instance under the same id — which a take that fell through to
+// m.instances would evict and SIGKILL (issue #2475).
+//
+// The state below (an orphan recorded AND an instance registered for one id) is
+// constructed, not reachable: an instance is evicted before its orphan record is
+// written. It is set up that way deliberately, so one call can observe both
+// halves of the contract — the refusal, and that the running instance is left
+// alone.
+func TestTakeOrphanReserveRefusesAnInstanceThatIsNoLongerTheOrphan(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	recorded := newFakeInstance("s1")
+	replaced := newFakeInstance("s1")
+	m.orphans["s1"] = orphanEntry{inst: recorded, driver: "container"}
+	m.instances["s1"] = replaced
+
+	driver, outcome := m.takeOrphanReserve("s1", newFakeInstance("s1"))
+
+	if outcome != takeNotFound {
+		t.Fatalf("takeOrphanReserve with a stale instance = %v (driver %q), want takeNotFound", outcome, driver)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.reserved["s1"] {
+		t.Fatal("a refused take claimed the reservation; the id is now wedged against every lifecycle command")
+	}
+	if m.instances["s1"] != replaced {
+		t.Fatal("takeOrphanReserve evicted the registered instance: it must never fall through to m.instances")
+	}
+	if e := m.orphans["s1"]; e.inst != recorded {
+		t.Fatal("a refused take consumed the orphan record")
+	}
+}
+
 // A failed stop must close the server's Bedrock relay tunnel: the stop intent is
 // the operator's, so players must not keep reaching an instance the Worker is
 // trying to terminate. Before this the tunnel was closed only on a CONFIRMED
@@ -132,6 +199,7 @@ func TestFailedStopClosesBedrockTunnel(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1000} // never confirms: only the failure path runs
 	bt := &fakeBedrockTunneler{}
 	m := newManager(t, d, nil).WithBedrockTunneler(bt)
+	shrinkOrphanConverger(m)
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -145,6 +213,21 @@ func TestFailedStopClosesBedrockTunnel(t *testing.T) {
 	} else if got[0] != "s1" {
 		t.Fatalf("Bedrock tunnel closed for %q, want %q", got[0], "s1")
 	}
+
+	retireOrphan(t, m, d.inst.fakeInstance)
+}
+
+// retireOrphan lets a test's orphan die so its converger retires the record and
+// exits. Without it a test whose stop never confirms leaves a converger running
+// inside the test binary, still probing and re-stopping the fixtures of a
+// finished test.
+func retireOrphan(t *testing.T, m *Manager, inst *fakeInstance) {
+	t.Helper()
+	inst.setAlive(false, nil)
+	waitFor(t, func() bool {
+		res := m.Handle(context.Background(), session.Command{CommandID: "retired", ServerID: inst.serverID, Kind: "StopServer"})
+		return res.ErrorCode == session.CommandErrorServerNotFound
+	})
 }
 
 // While the backend daemon cannot answer whether the orphan is alive, the Worker
@@ -176,6 +259,8 @@ func TestUnknownEmittedWhileDaemonUnreachable(t *testing.T) {
 		}
 	default:
 	}
+
+	retireOrphan(t, m, d.inst.fakeInstance)
 }
 
 // A stranded orphan record self-heals (issue #2468 item 4). The pump's

@@ -100,6 +100,10 @@ func (m *Manager) convergeOrphan(serverID string) {
 		}
 		if entry.inst != probed {
 			probed, sawDead, reportedUnknown = entry.inst, false, false
+			// Back to the base cadence with them: this is a NEW orphan, and inheriting
+			// a backoff the previous one earned would leave a freshly re-orphaned id
+			// waiting out the cap before its first probe.
+			delay = m.orphanProbeInterval
 		}
 
 		alive, err := probeAliveWithTimeout(entry.inst, delay)

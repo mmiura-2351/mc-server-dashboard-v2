@@ -85,8 +85,16 @@ class Server:
         orphan and its backend daemon cannot answer whether the container is
         alive. The second is the same claim made from closer up — the Worker
         knows it holds an instance and cannot confirm it dead — so it is if
-        anything a stronger reason to treat ``unknown`` as "possibly still live"
-        rather than a settled rest state.
+        anything a stronger reason to read ``unknown`` as "possibly still live".
+
+        It stays in the at-rest set anyway, because this predicate is not what
+        protects the world. The owning Worker's own reservation guard is: while
+        it has a failed-stop orphan recorded for the id, that Worker refuses
+        start, hydrate, stopped-id snapshot and scratch reclamation for it, so
+        nothing can overwrite or capture a possibly-live working set whatever
+        this returns. What this gates is API-side editing and deletion of the
+        row, and excluding ``unknown`` would wedge those forever for a server
+        whose Worker is gone — nothing will ever report a terminal state for it.
         """
 
         return self.desired_state is DesiredState.STOPPED and self.observed_state in (
