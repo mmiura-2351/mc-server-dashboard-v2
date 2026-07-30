@@ -110,6 +110,10 @@ from mc_server_dashboard_api.core.adapters.readiness import (
 )
 from mc_server_dashboard_api.core.domain.health import DatabasePing
 from mc_server_dashboard_api.core.domain.readiness import ControlPlaneReadiness
+from mc_server_dashboard_api.download_cookie import (
+    DOWNLOAD_COOKIE_NAME,
+    remember_download_cookie,
+)
 from mc_server_dashboard_api.fleet.application.list_workers import ListWorkers
 from mc_server_dashboard_api.fleet.application.set_worker_drain import SetWorkerDrain
 from mc_server_dashboard_api.fleet.domain.control_plane import (
@@ -177,6 +181,7 @@ from mc_server_dashboard_api.identity.domain.brute_force import BruteForceConfig
 from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.identity.domain.errors import (
     InvalidAccessTokenError,
+    InvalidDownloadCookieError,
     InvalidDownloadGrantError,
 )
 from mc_server_dashboard_api.identity.domain.password_hasher import PasswordHasher
@@ -186,6 +191,9 @@ from mc_server_dashboard_api.identity.domain.password_policy import (
 )
 from mc_server_dashboard_api.identity.domain.registration import RegistrationConfig
 from mc_server_dashboard_api.identity.domain.token_service import TokenService
+from mc_server_dashboard_api.identity.domain.value_objects import (
+    UserId as IdentityUserId,
+)
 from mc_server_dashboard_api.servers.adapters.backup_author_directory import (
     IdentityBackupAuthorDirectory,
 )
@@ -931,6 +939,7 @@ def _build_token_service(token: TokenSettings, clock: SystemClock) -> TokenServi
         algorithm=token.algorithm,
         access_ttl=dt.timedelta(seconds=token.access_ttl_seconds),
         download_grant_ttl=dt.timedelta(seconds=token.download_grant_ttl_seconds),
+        download_cookie_ttl=dt.timedelta(seconds=token.download_cookie_ttl_seconds),
         clock=clock,
     )
 
@@ -2790,19 +2799,35 @@ def require_download_access(
     operation: Permission,
     resource_from_request: Callable[[Request], str],
 ) -> Callable[..., Awaitable[AuthUser]]:
-    """Build a download gate on ``operation``, by Bearer token *or* grant (#2313).
+    """Build a download gate on ``operation``: Bearer token, grant, or cookie.
 
     A browser cannot put an ``Authorization`` header on a plain navigation, so a
     multi-GB body is fetched from a URL carrying a short-lived ``?grant=``
-    instead. ``resource_from_request`` builds the opaque resource string the grant
-    must be bound to, straight off the request, so the *same* callable can build
-    it at issuance and at redemption — a binding that cannot drift.
+    instead (issue #2313). ``resource_from_request`` builds the opaque resource
+    string the grant must be bound to, straight off the request, so the *same*
+    callable can build it at issuance and at redemption — a binding that cannot
+    drift.
 
-    Whichever way the subject is resolved, the same two-layer check runs — a grant
-    proves identity, never authority, so it survives neither a permission
-    revocation nor a membership removal within its TTL. The ``Authorization``
-    header wins when both are present: the grant is the fallback transport, not an
-    escalation path.
+    Three transports, tried in order, all resolving the same thing — *who* is
+    asking:
+
+    1. **``Authorization: Bearer``** wins whenever it is present, and a bad one is
+       a 401 rather than a fall-through: the other two are the browser's fallback
+       transports, never an escalation path around a rejected session token.
+    2. **``?grant=``** — valid for its short ``download_grant_ttl_seconds`` window.
+    3. **The download cookie** (issue #2373) — tried when the grant is absent or no
+       longer verifies, which is exactly the browser's retry of an interrupted
+       transfer: it re-requests the original URL, whose grant has expired. A
+       successful grant redemption mints that cookie
+       (:mod:`mc_server_dashboard_api.download_cookie`), so the credential that
+       outlives the transfer is one no access log ever saw. Falling through from a
+       rejected grant to the cookie widens nothing: the cookie is verified against
+       this request's resource on its own, and the holder of a leaked grant URL has
+       no cookie to present.
+
+    Whichever transport resolves the subject, the same two-layer check runs — none
+    of the three proves *authority*, so none survives a permission revocation or a
+    membership removal within its TTL.
 
     Every download this gates is server-scoped, so the Layer-2 lookup is fixed to
     ``resource_type='server'`` / ``resource_id_param='server_id'`` (FR-AUTHZ-2);
@@ -2825,24 +2850,37 @@ def require_download_access(
         ],
         visibility: Annotated[MembershipVisibility, Depends(get_membership_visibility)],
         checker: Annotated[PermissionChecker, Depends(get_permission_checker)],
+        tokens: Annotated[TokenService, Depends(get_token_service)],
+        settings: Annotated[Settings, Depends(get_settings)],
         grant: str | None = None,
     ) -> AuthUser:
+        # The resource a successful grant redemption should mint a cookie for;
+        # ``None`` on every other path, which is every path that must not mint one.
+        mint_for_resource: str | None = None
         if credentials is not None:
             try:
                 user = await authenticate(access_token=credentials.credentials)
             except InvalidAccessTokenError as exc:
                 raise _unauthenticated() from exc
-        elif grant is not None:
-            try:
-                user = await authenticate_grant(
-                    grant=grant, resource=resource_from_request(request)
-                )
-            except InvalidDownloadGrantError as exc:
-                raise _unauthenticated() from exc
         else:
-            raise _unauthenticated()
+            cookie = request.cookies.get(DOWNLOAD_COOKIE_NAME)
+            if grant is None and cookie is None:
+                # No credential at all, answered before the resource is composed
+                # so a malformed path id still reports whatever it reported before.
+                raise _unauthenticated()
+            resource = resource_from_request(request)
+            redeemed = await _redeem_download_grant(
+                authenticate_grant, grant=grant, resource=resource
+            )
+            if redeemed is not None:
+                user = redeemed
+                mint_for_resource = resource
+            else:
+                user = await _redeem_download_cookie(
+                    authenticate_grant, cookie=cookie, resource=resource
+                )
 
-        return await authorize_two_layer(
+        auth_user = await authorize_two_layer(
             request=request,
             user=user,
             visibility=visibility,
@@ -2851,8 +2889,53 @@ def require_download_access(
             resource_type="server",
             resource_id_param="server_id",
         )
+        if mint_for_resource is not None:
+            # After the two-layer check, so a 403/404 mints nothing; the middleware
+            # additionally withholds it from a non-2xx the route itself chooses.
+            # Only a grant redemption mints: a cookie-authenticated retry does NOT
+            # renew, so a cookie's life is bounded by the redemption that made it.
+            token_cfg = settings.auth.token
+            remember_download_cookie(
+                request,
+                value=tokens.issue_download_cookie(
+                    IdentityUserId(auth_user.user_id.value), mint_for_resource
+                ),
+                path=request.url.path,
+                max_age=token_cfg.download_cookie_ttl_seconds,
+                secure=token_cfg.download_cookie_secure,
+            )
+        return auth_user
 
     return _dependency
+
+
+async def _redeem_download_grant(
+    authenticate_grant: AuthenticateDownloadGrant, *, grant: str | None, resource: str
+) -> User | None:
+    """The grant's subject, or ``None`` so the caller can try the cookie."""
+
+    if grant is None:
+        return None
+    try:
+        return await authenticate_grant(grant=grant, resource=resource)
+    except InvalidDownloadGrantError:
+        return None
+
+
+async def _redeem_download_cookie(
+    authenticate_grant: AuthenticateDownloadGrant, *, cookie: str | None, resource: str
+) -> User:
+    """The cookie's subject; 401 when it is missing or does not verify.
+
+    The last transport, so this is where the request runs out of credentials.
+    """
+
+    if cookie is None:
+        raise _unauthenticated()
+    try:
+        return await authenticate_grant.from_cookie(cookie=cookie, resource=resource)
+    except InvalidDownloadCookieError as exc:
+        raise _unauthenticated() from exc
 
 
 def path_uuid(request: Request, param: str) -> uuid.UUID:

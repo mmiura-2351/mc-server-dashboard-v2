@@ -104,7 +104,7 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 |---|---|---|
 | GET / POST | `/communities/{cid}/servers` | List / create (`name`, `mc_edition`, `mc_version`, `server_type`, `config`, `accept_eula`, optional `game_port`). |
 | POST | `/communities/{cid}/servers/import` | ZIP import (multipart). |
-| GET | `…/{sid}/export` | ZIP export (download). Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB export straight to disk (#2352). |
+| GET | `…/{sid}/export` | ZIP export (download). Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB export straight to disk (#2352), or the `HttpOnly` download cookie a redemption sets so an interrupted transfer can be retried (#2373). |
 | POST | `…/{sid}/export/download-grant` | Mint that grant: `{download_url, expires_at}`, `Cache-Control: no-store`. Same `file:read` gate as the export, and the same pre-flight — a running server is 409 `server_unsettled` and no grant is issued; 30 s TTL (AUTH_API.md Section 3). |
 | GET / PATCH / DELETE | `…/{sid}` | Read / update (name, config, game_port) / delete. Every PATCH edit needs `server:update`. The retired `backup_interval_hours` key is a `422` (`retired_config_key`, #1840) — backup cadence is a `backup` schedule now. |
 | POST | `…/{sid}/start` · `/stop?force=` · `/restart` | Lifecycle. Stop supports force. |
@@ -112,7 +112,7 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 | GET | `…/{sid}/files?path=&list=` | Read file (base64) or list directory (entries + `truncated`). |
 | PUT / DELETE | `…/{sid}/files?path=` | Write (base64, versioned) / delete. |
 | POST | `…/{sid}/files/directories?path=` | mkdir. |
-| GET | `…/{sid}/files/download?path=` | Raw download (file bytes, or a streamed ZIP for a directory). Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB directory straight to disk (#2352). |
+| GET | `…/{sid}/files/download?path=` | Raw download (file bytes, or a streamed ZIP for a directory). Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB directory straight to disk (#2352), or the `HttpOnly` download cookie a redemption sets so an interrupted transfer can be retried (#2373). |
 | POST | `…/{sid}/files/download-grant?path=` | Mint that grant: `{download_url, expires_at}`, `Cache-Control: no-store`. Same `file:read` gate as the download, and the same pre-flight — missing path 404, traversal 422 `invalid_path`, running server 409 `server_unsettled`. `path` is a **query** parameter so mint and redemption bind the identical string; 30 s TTL (AUTH_API.md Section 3). |
 | POST | `…/{sid}/files/upload?path=&extract=` | Multipart upload, optional ZIP extract. |
 | POST | `…/{sid}/files/rename` | `{from, to}`. |
@@ -122,7 +122,7 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 | GET / POST | `…/{sid}/backups` | List / create on-demand backup. |
 | GET | `…/{sid}/backups/statistics` | count / total bytes / newest / oldest. |
 | POST | `…/{sid}/backups/upload` | Upload an off-host backup archive. |
-| GET | `…/{sid}/backups/{bid}/download` | Download archive. Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB archive straight to disk (#2313). **Resumable** (#2372): the response declares `Accept-Ranges: bytes` and a strong `ETag`, and a single `Range` request is served `206` with `Content-Range` over a ranged read (`416` + `Content-Range: bytes */<size>` when unsatisfiable; a malformed or multi-range `Range` is ignored and the whole archive served). `If-Range` is honoured, so a resumed request that names a stale representation gets the current archive whole. A `?grant=` URL still expires on its own short TTL, so a browser's automatic retry of an interrupted download is not covered by this (#2373). |
+| GET | `…/{sid}/backups/{bid}/download` | Download archive. Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB archive straight to disk (#2313), or the `HttpOnly` download cookie a redemption sets so an interrupted transfer can be retried (#2373). **Resumable** (#2372): the response declares `Accept-Ranges: bytes` and a strong `ETag`, and a single `Range` request is served `206` with `Content-Range` over a ranged read (`416` + `Content-Range: bytes */<size>` when unsatisfiable; a malformed or multi-range `Range` is ignored and the whole archive served). `If-Range` is honoured, so a resumed request that names a stale representation gets the current archive whole. The browser's own retry of an interrupted transfer authenticates with the `HttpOnly` download cookie a grant redemption sets, since the `?grant=` in the retried URL has expired by then (#2373, AUTH_API.md Section 3). |
 | POST | `…/{sid}/backups/{bid}/download-grant` | Mint that grant: `{download_url, expires_at}`, `Cache-Control: no-store`. Same `backup:read` gate as the download; 30 s TTL (AUTH_API.md Section 3). |
 | POST | `…/{sid}/backups/{bid}/restore[?force=true]` | **Server must be stopped.** `?force=true` overrides the quarantine gate (#703). |
 | DELETE | `…/{sid}/backups/{bid}` | Delete. |
@@ -576,6 +576,12 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   precondition) surface as toasts; once the click is handed off, the browser's
   download manager owns progress and errors — for an incrementally built zip
   that means bytes-so-far with no total, since there is no `Content-Length`.
+  The tab does nothing further to keep such a download alive: redeeming the grant
+  sets an `HttpOnly` download cookie the tab cannot see, and the browser's own
+  retry of an interrupted transfer authenticates with that (#2373, AUTH_API.md
+  Section 3). It is scoped to the one download's URL path, so it is never
+  attached to an API call the SPA makes, and JS never reads it — the SPA's session
+  model (in-memory access token, refresh cookie on `/api/auth`) is untouched.
 
 ### 7.2 Real-time strategy
 - One WS per open server-detail page + one community WS for the dashboard.

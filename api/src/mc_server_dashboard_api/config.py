@@ -655,6 +655,18 @@ class TokenSettings(_Section):
     # access log; it only has to cover the round trip from mint to the browser
     # starting the download.
     download_grant_ttl_seconds: int = Field(default=30, gt=0)
+    # Lifetime of the download cookie a redeemed grant is exchanged for (issue
+    # #2373) — the credential that survives an interrupted transfer, so a browser's
+    # retry authenticates after the 30 s query-string window has closed. It never
+    # reaches an access log, a browser history or a Referer (httpOnly, and no URL
+    # carries it), so it can be longer than the grant; it is still the window in
+    # which a leftover cookie in a shared browser re-reads its one resource, so it
+    # defaults to ``access_ttl_seconds`` — no longer than an access token the same
+    # user already holds. Its Path/SameSite/httpOnly are fixed in
+    # ``download_cookie.py``; ``download_cookie_secure`` defaults to True (HTTPS
+    # only), turn it off for plain-HTTP localhost dev so the browser stores it.
+    download_cookie_ttl_seconds: int = Field(default=900, gt=0)
+    download_cookie_secure: bool = True
 
     @model_validator(mode="after")
     def _enforce_hs256_key_length(self) -> TokenSettings:

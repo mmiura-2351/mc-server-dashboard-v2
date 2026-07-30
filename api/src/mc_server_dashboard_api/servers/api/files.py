@@ -607,8 +607,10 @@ async def download_file(
     and a browser cannot cap it up front; a multi-GB ``world`` is therefore fetched
     as a plain navigation to a URL carrying a short-lived ``?grant=`` minted by
     ``POST .../files/download-grant`` instead of being buffered into a Blob to
-    attach a Bearer header (issue #2352). Either credential runs the same
-    ``file:read`` gate, and the response is identical.
+    attach a Bearer header (issue #2352). Redeeming a grant also sets an httpOnly
+    download cookie, which authenticates the browser's retry of an interrupted
+    transfer once the grant's own window has closed (issue #2373). Every
+    credential runs the same ``file:read`` gate, and the response is identical.
     """
 
     try:

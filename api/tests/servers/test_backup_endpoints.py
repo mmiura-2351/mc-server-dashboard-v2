@@ -53,9 +53,11 @@ from mc_server_dashboard_api.dependencies import (
     get_restore_backup,
     get_server_backup_statistics,
     get_set_backup_retention,
+    get_settings,
     get_token_service,
     get_upload_backup,
 )
+from mc_server_dashboard_api.download_cookie import DOWNLOAD_COOKIE_NAME
 from mc_server_dashboard_api.http_streaming import ShortResponseBodyError
 from mc_server_dashboard_api.identity.adapters.token_service import JwtTokenService
 from mc_server_dashboard_api.identity.application.authenticate_download_grant import (
@@ -102,6 +104,7 @@ _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 # A 32-byte HS256 key; the value is irrelevant, only that mint and verify share it.
 _SIGNING_KEY = "0123456789abcdef0123456789abcdef"
 _GRANT_TTL_SECONDS = 30
+_COOKIE_TTL_SECONDS = 900
 
 
 class _FakeVisibility(MembershipVisibility):
@@ -198,6 +201,7 @@ def _app(
         algorithm="HS256",
         access_ttl=dt.timedelta(minutes=15),
         download_grant_ttl=dt.timedelta(seconds=_GRANT_TTL_SECONDS),
+        download_cookie_ttl=dt.timedelta(seconds=_COOKIE_TTL_SECONDS),
         clock=_clock,
     )
     identity_uow = FakeUnitOfWork()
@@ -1234,6 +1238,418 @@ def test_grant_for_a_deactivated_subject_is_rejected() -> None:
     resp = client.get(_grant_url(community, server, backup, subject=_user))
 
     assert resp.status_code == 401
+
+
+# --- the download cookie (issue #2373) -------------------------------------
+#
+# A grant lives 30 s but a multi-GB transfer does not, so the browser's retry of
+# an interrupted download re-presented an expired grant and got a 401. Redeeming
+# a grant now also mints an httpOnly cookie carrying the same resource-scoped
+# authority for longer, and the retry authenticates with that.
+
+
+def _set_cookie_header(resp: httpx2.Response) -> str:
+    # The TestClient runs over plain HTTP, so a Secure cookie is never stored in
+    # the jar; inspect the raw Set-Cookie header instead.
+    headers: list[str] = resp.headers.get_list("set-cookie")
+    for header in headers:
+        if header.startswith(f"{DOWNLOAD_COOKIE_NAME}="):
+            return header
+    raise AssertionError(f"no download cookie in {headers!r}")
+
+
+def _assert_no_download_cookie(resp: httpx2.Response) -> None:
+    headers: list[str] = resp.headers.get_list("set-cookie")
+    assert not any(h.startswith(f"{DOWNLOAD_COOKIE_NAME}=") for h in headers), (
+        f"unexpected download cookie in {headers!r}"
+    )
+
+
+def _cookie_header(
+    community: uuid.UUID,
+    server: uuid.UUID,
+    backup: uuid.UUID,
+    *,
+    subject: User | None = None,
+) -> dict[str, str]:
+    """The Cookie header a browser holding this triple's download cookie sends."""
+
+    value = _tokens.issue_download_cookie(
+        (subject if subject is not None else _user).id,
+        download_grant_resource(community, server, backup),
+    )
+    return {"Cookie": f"{DOWNLOAD_COOKIE_NAME}={value}"}
+
+
+def test_grant_redemption_sets_a_path_scoped_httponly_cookie() -> None:
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeDownload(_ARCHIVE))
+    client = next(_client(app))
+
+    resp = client.get(_grant_url(community, server, backup, subject=_user))
+
+    assert resp.status_code == 200
+    cookie = _set_cookie_header(resp)
+    assert "HttpOnly" in cookie
+    assert "Secure" in cookie
+    # Starlette renders the SameSite value lowercase.
+    assert "SameSite=strict" in cookie
+    # Scoped to this one download's own URL path: the browser attaches it to no
+    # other route, this server's other backups included.
+    assert (
+        f"Path=/api/communities/{community}/servers/{server}"
+        f"/backups/{backup}/download" in cookie
+    )
+    assert f"Max-Age={_COOKIE_TTL_SECONDS}" in cookie
+
+
+def test_a_bearer_download_sets_no_cookie() -> None:
+    # A non-browser client never asked for one (the posture issue #372 set for the
+    # refresh cookie), and it already carries a credential that outlives the grant.
+    app = _app(member=True, allow=True, download=_FakeDownload(_ARCHIVE))
+    client = next(_client(app))
+
+    resp = _download(client)
+
+    assert resp.status_code == 200
+    _assert_no_download_cookie(resp)
+
+
+def test_expired_grant_download_is_retried_with_the_cookie() -> None:
+    # The whole point: the URL the browser retries still carries the grant it was
+    # given, which has expired by then.
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeDownload(_ARCHIVE))
+    client = next(_client(app))
+    url = _grant_url(community, server, backup, subject=_user)
+    cookie = _cookie_header(community, server, backup)
+
+    _clock.set(_NOW + dt.timedelta(seconds=_GRANT_TTL_SECONDS))
+
+    assert client.get(url).status_code == 401
+    resumed = client.get(url, headers=cookie)
+    assert resumed.status_code == 200
+    assert resumed.content == _ARCHIVE
+
+
+def test_expired_grant_ranged_retry_is_served_a_206_with_the_cookie() -> None:
+    # The retry a resume actually issues (issue #2372): a Range request, which the
+    # cookie has to authenticate exactly like a full one.
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeDownload(_ARCHIVE))
+    client = next(_client(app))
+    url = _grant_url(community, server, backup, subject=_user)
+    headers = _cookie_header(community, server, backup) | {"Range": "bytes=5-"}
+
+    _clock.set(_NOW + dt.timedelta(seconds=_GRANT_TTL_SECONDS))
+    resp = client.get(url, headers=headers)
+
+    assert resp.status_code == 206
+    assert resp.content == _ARCHIVE[5:]
+    assert (
+        resp.headers["content-range"] == f"bytes 5-{len(_ARCHIVE) - 1}/{len(_ARCHIVE)}"
+    )
+
+
+def test_cookie_alone_downloads_without_any_grant_in_the_url() -> None:
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeDownload(_ARCHIVE))
+    client = next(_client(app))
+
+    resp = client.get(
+        _url(community, server, f"/{backup}/download"),
+        headers=_cookie_header(community, server, backup),
+    )
+
+    assert resp.status_code == 200
+    assert resp.content == _ARCHIVE
+
+
+def test_cookie_is_rejected_after_its_own_ttl() -> None:
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeUseCase())
+    client = next(_client(app))
+    headers = _cookie_header(community, server, backup)
+
+    _clock.set(_NOW + dt.timedelta(seconds=_COOKIE_TTL_SECONDS))
+
+    resp = client.get(_url(community, server, f"/{backup}/download"), headers=headers)
+    assert resp.status_code == 401
+
+
+def test_cookie_is_rejected_on_another_backup() -> None:
+    # The Path scope narrows what the browser sends; the signed resource claim is
+    # what decides. A cookie replayed onto a sibling resource opens nothing.
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeUseCase())
+    client = next(_client(app))
+    headers = _cookie_header(community, server, uuid.uuid4())
+
+    resp = client.get(
+        _url(community, server, f"/{uuid.uuid4()}/download"), headers=headers
+    )
+
+    assert resp.status_code == 401
+
+
+def test_cookie_is_rejected_under_another_server_or_community() -> None:
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeUseCase())
+    client = next(_client(app))
+    headers = _cookie_header(community, server, backup)
+
+    other_server = client.get(
+        _url(community, uuid.uuid4(), f"/{backup}/download"), headers=headers
+    )
+    other_community = client.get(
+        _url(uuid.uuid4(), server, f"/{backup}/download"), headers=headers
+    )
+
+    assert other_server.status_code == 401
+    assert other_community.status_code == 401
+
+
+def test_cookie_is_not_accepted_in_the_query_string() -> None:
+    # The separation that keeps the longer-lived credential out of access logs,
+    # browser history and any Referer.
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeUseCase())
+    client = next(_client(app))
+    value = _tokens.issue_download_cookie(
+        _user.id, download_grant_resource(community, server, backup)
+    )
+
+    resp = client.get(_url(community, server, f"/{backup}/download?grant={value}"))
+
+    assert resp.status_code == 401
+
+
+def test_grant_is_not_accepted_as_the_cookie() -> None:
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeUseCase())
+    client = next(_client(app))
+    issued = _tokens.issue_download_grant(
+        _user.id, download_grant_resource(community, server, backup)
+    )
+
+    resp = client.get(
+        _url(community, server, f"/{backup}/download"),
+        headers={"Cookie": f"{DOWNLOAD_COOKIE_NAME}={issued.token}"},
+    )
+
+    assert resp.status_code == 401
+
+
+def test_cookie_is_not_accepted_as_a_bearer_token() -> None:
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeUseCase())
+    client = next(_client(app))
+    value = _tokens.issue_download_cookie(
+        _user.id, download_grant_resource(community, server, backup)
+    )
+
+    resp = client.get(
+        _url(community, server, f"/{backup}/download"),
+        headers={"Authorization": f"Bearer {value}"},
+    )
+
+    assert resp.status_code == 401
+
+
+def test_cookie_does_not_rescue_a_rejected_bearer_token() -> None:
+    # The header still wins outright: the cookie is a fallback transport for a
+    # browser, never a way around a session token the server refused.
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeUseCase())
+    client = next(_client(app))
+    headers = _cookie_header(community, server, backup) | {
+        "Authorization": "Bearer not-a-token"
+    }
+
+    resp = client.get(_url(community, server, f"/{backup}/download"), headers=headers)
+
+    assert resp.status_code == 401
+
+
+def test_a_cookie_authenticated_download_does_not_renew_the_cookie() -> None:
+    # No sliding window: a cookie's life is bounded by the redemption that minted
+    # it, so repeated retries cannot extend it indefinitely.
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeDownload(_ARCHIVE))
+    client = next(_client(app))
+
+    resp = client.get(
+        _url(community, server, f"/{backup}/download"),
+        headers=_cookie_header(community, server, backup),
+    )
+
+    assert resp.status_code == 200
+    _assert_no_download_cookie(resp)
+
+
+def test_a_cookie_authenticated_download_acts_as_the_cookies_subject() -> None:
+    # The cookie is the identity: the bytes leave attributed to whoever it names,
+    # not to whatever subject some other channel would have resolved.
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True, allow=True, download=_FakeDownload(_ARCHIVE), recorder=recorder
+    )
+    client = next(_client(app))
+
+    resp = client.get(
+        _url(community, server, f"/{backup}/download"),
+        headers=_cookie_header(community, server, backup),
+    )
+
+    assert resp.status_code == 200
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_DOWNLOAD]
+    assert recorder.events[0].actor_id == _user.id.value
+
+
+def test_a_cookie_naming_an_unknown_user_is_rejected() -> None:
+    # Nothing but the signature vouches for the ``sub`` claim, so the row is loaded:
+    # a cookie for a user this deployment does not have opens nothing.
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeUseCase())
+    client = next(_client(app))
+
+    resp = client.get(
+        _url(community, server, f"/{backup}/download"),
+        headers=_cookie_header(
+            community,
+            server,
+            backup,
+            subject=make_user(),  # never seeded
+        ),
+    )
+
+    assert resp.status_code == 401
+
+
+def test_cookie_loses_to_a_permission_revoked_after_the_mint() -> None:
+    # Identity, never authority — the same posture the grant has.
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=False, download=_FakeUseCase())
+    client = next(_client(app))
+
+    resp = client.get(
+        _url(community, server, f"/{backup}/download"),
+        headers=_cookie_header(community, server, backup),
+    )
+
+    assert resp.status_code == 403
+
+
+def test_cookie_for_a_deactivated_subject_is_rejected() -> None:
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    app = _app(
+        member=True,
+        allow=True,
+        subject=make_user(active=False),
+        download=_FakeUseCase(),
+    )
+    client = next(_client(app))
+
+    resp = client.get(
+        _url(community, server, f"/{backup}/download"),
+        headers=_cookie_header(community, server, backup),
+    )
+
+    assert resp.status_code == 401
+
+
+def test_a_grant_redemption_that_fails_the_gate_mints_no_cookie() -> None:
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=False, download=_FakeUseCase())
+    client = next(_client(app))
+
+    resp = client.get(_grant_url(community, server, backup, subject=_user))
+
+    assert resp.status_code == 403
+    _assert_no_download_cookie(resp)
+
+
+def test_a_grant_redemption_that_404s_mints_no_cookie() -> None:
+    # The gate passed but the archive is gone: no credential for bytes never served.
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    app = _app(
+        member=True,
+        allow=True,
+        download=_FakeDownload(error=BackupNotFoundError("x")),
+    )
+    client = next(_client(app))
+
+    resp = client.get(_grant_url(community, server, backup, subject=_user))
+
+    assert resp.status_code == 404
+    _assert_no_download_cookie(resp)
+
+
+def test_the_browser_jar_carries_the_cookie_back_to_the_retry() -> None:
+    """End to end through a real cookie jar, over https so Secure applies.
+
+    The attribute assertions above cannot show that the Path and Secure scoping
+    actually let a client resend the cookie — a mistake in either fails silently,
+    as a download that simply stops resuming.
+    """
+
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeDownload(_ARCHIVE))
+    url = _grant_url(community, server, backup, subject=_user)
+    with TestClient(app, base_url="https://testserver") as client:  # type: ignore[arg-type]
+        assert client.get(url).status_code == 200
+        # The grant in the URL has expired; only the jar's cookie is left.
+        _clock.set(_NOW + dt.timedelta(seconds=_GRANT_TTL_SECONDS))
+        assert client.get(url).status_code == 200
+        # ...and it is scoped to this download alone.
+        other = _url(community, server, f"/{uuid.uuid4()}/download")
+        assert client.get(other).status_code == 401
+
+
+def test_a_download_with_no_credential_at_all_is_401_before_the_path_is_parsed() -> (
+    None
+):
+    # Reading the cookie must not pull the resource composition ahead of the
+    # no-credential 401: composing it parses the path ids, which would turn this
+    # into a 422 (issue #630's re-raise) instead of the 401 it has always been.
+    app = _app(member=True, allow=True, download=_FakeUseCase())
+    client = next(_client(app))
+
+    resp = client.get(
+        f"/api/communities/notauuid/servers/{uuid.uuid4()}"
+        f"/backups/{uuid.uuid4()}/download"
+    )
+
+    assert resp.status_code == 401
+
+
+def test_cookie_omits_secure_when_configured_for_plain_http() -> None:
+    # The localhost-dev knob: with Secure set the browser stores nothing over
+    # plain HTTP and every resume silently reverts to the 401 this fixes.
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeDownload(_ARCHIVE))
+    settings = _shared_app.state.settings
+    insecure = settings.model_copy(
+        update={
+            "auth": settings.auth.model_copy(
+                update={
+                    "token": settings.auth.token.model_copy(
+                        update={"download_cookie_secure": False}
+                    )
+                }
+            )
+        }
+    )
+    _shared_app.dependency_overrides[get_settings] = lambda: insecure
+    client = next(_client(app))
+
+    resp = client.get(_grant_url(community, server, backup, subject=_user))
+
+    assert resp.status_code == 200
+    cookie = _set_cookie_header(resp)
+    assert "Secure" not in cookie
+    assert "HttpOnly" in cookie
 
 
 # --- upload (issue #281) ---------------------------------------------------
