@@ -52,6 +52,7 @@ from mc_server_dashboard_api.dependencies import (
     get_resolve_server_export,
     get_token_service,
 )
+from mc_server_dashboard_api.download_cookie import DOWNLOAD_COOKIE_NAME
 from mc_server_dashboard_api.identity.adapters.token_service import JwtTokenService
 from mc_server_dashboard_api.identity.application.authenticate_download_grant import (
     AuthenticateDownloadGrant,
@@ -91,6 +92,7 @@ _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 # A 32-byte HS256 key; the value is irrelevant, only that mint and verify share it.
 _SIGNING_KEY = "0123456789abcdef0123456789abcdef"
 _GRANT_TTL_SECONDS = 30
+_COOKIE_TTL_SECONDS = 900
 
 
 class _FakeVisibility(MembershipVisibility):
@@ -221,6 +223,7 @@ def _app(
         algorithm="HS256",
         access_ttl=dt.timedelta(minutes=15),
         download_grant_ttl=dt.timedelta(seconds=_GRANT_TTL_SECONDS),
+        download_cookie_ttl=dt.timedelta(seconds=_COOKIE_TTL_SECONDS),
         clock=_clock,
     )
     identity_uow = FakeUnitOfWork()
@@ -575,6 +578,90 @@ def test_export_grant_for_a_deactivated_subject_is_rejected() -> None:
     resp = client.get(_export_grant_url(community, server, subject=_user))
 
     assert resp.status_code == 401
+
+
+# --- the export download cookie (issue #2373) -------------------------------
+#
+# The export shares one mechanism with the backup and file downloads
+# (``require_download_access`` + ``download_cookie``), which is where the property
+# matrix is pinned (test_backup_endpoints.py). What is per-route here is the Path
+# scope and that the retry of *this* URL resumes.
+
+
+def _export_cookie_header(community: uuid.UUID, server: uuid.UUID) -> dict[str, str]:
+    value = _tokens.issue_download_cookie(
+        _user.id, export_download_grant_resource(community, server)
+    )
+    return {"Cookie": f"{DOWNLOAD_COOKIE_NAME}={value}"}
+
+
+def test_export_grant_redemption_sets_a_path_scoped_cookie() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, export=_FakeExport(chunks=[b"zip-bytes"]))
+    client = next(_client(app))
+
+    resp = client.get(_export_grant_url(community, server, subject=_user))
+
+    assert resp.status_code == 200
+    cookie = next(
+        h
+        for h in resp.headers.get_list("set-cookie")
+        if h.startswith(f"{DOWNLOAD_COOKIE_NAME}=")
+    )
+    assert "HttpOnly" in cookie
+    assert "Secure" in cookie
+    assert "SameSite=strict" in cookie
+    assert f"Path={_export_url(community, server)}" in cookie
+    # The export declared no freshness of its own, so a shared cache could have
+    # replayed this Set-Cookie to a second client (RFC 6265 Section 8.6).
+    assert resp.headers["cache-control"] == "no-store"
+
+
+def test_expired_export_grant_is_retried_with_the_cookie() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, export=_FakeExport(chunks=[b"zip-bytes"]))
+    client = next(_client(app))
+    url = _export_grant_url(community, server, subject=_user)
+
+    _clock.set(_NOW + dt.timedelta(seconds=_GRANT_TTL_SECONDS))
+
+    assert client.get(url).status_code == 401
+    resumed = client.get(url, headers=_export_cookie_header(community, server))
+    assert resumed.status_code == 200
+    assert resumed.content == b"zip-bytes"
+
+
+def test_export_cookie_is_rejected_under_another_server_or_community() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, export=_FakeExport())
+    client = next(_client(app))
+    headers = _export_cookie_header(community, server)
+
+    other_server = client.get(_export_url(community, uuid.uuid4()), headers=headers)
+    other_community = client.get(_export_url(uuid.uuid4(), server), headers=headers)
+
+    assert other_server.status_code == 401
+    assert other_community.status_code == 401
+
+
+def test_an_unsettled_export_mints_no_cookie() -> None:
+    # The 409 the export's precondition raises: no credential for a ZIP that was
+    # never served.
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(
+        member=True,
+        allow=True,
+        export=_FakeExport(error=ServerFilesUnsettledError("x")),
+    )
+    client = next(_client(app))
+
+    resp = client.get(_export_grant_url(community, server, subject=_user))
+
+    assert resp.status_code == 409
+    assert not any(
+        h.startswith(f"{DOWNLOAD_COOKIE_NAME}=")
+        for h in resp.headers.get_list("set-cookie")
+    )
 
 
 # --- import ----------------------------------------------------------------

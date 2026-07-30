@@ -150,6 +150,7 @@ def _login(engine: AsyncEngine) -> Login:
             algorithm="HS256",
             access_ttl=dt.timedelta(minutes=15),
             download_grant_ttl=dt.timedelta(seconds=30),
+            download_cookie_ttl=dt.timedelta(seconds=900),
             clock=clock,
         ),
         clock=clock,

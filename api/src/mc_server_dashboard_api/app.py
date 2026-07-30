@@ -47,6 +47,7 @@ from mc_server_dashboard_api.dependencies import (
     build_registration_config,
 )
 from mc_server_dashboard_api.docs import mount_docs
+from mc_server_dashboard_api.download_cookie import download_cookie_middleware
 from mc_server_dashboard_api.fleet.adapters.clock import SystemClock as FleetSystemClock
 from mc_server_dashboard_api.fleet.adapters.control_plane import (
     ControlPlaneState,
@@ -1199,6 +1200,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Starlette attaches to ServerErrorMiddleware outside all user middleware
     # (issue #1951).
     app.middleware("http")(unhandled_exception_middleware)
+    # Stamp the download cookie a redeemed grant minted (issue #2373). Registered
+    # right outside the catch-all so it sees the download route's own response:
+    # the three download routes RETURN their StreamingResponse, which is the one
+    # case FastAPI does not merge a dependency sub-response's headers into, so the
+    # gate cannot set the cookie itself.
+    app.middleware("http")(download_cookie_middleware)
     # Adding the correlation-id middleware after the catch-all makes it wrap it,
     # so the correlation contextvar is set when the catch-all runs and the 500
     # response carries the correlation ID header.

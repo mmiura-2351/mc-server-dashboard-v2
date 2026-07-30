@@ -244,6 +244,72 @@ A grant is:
   access token presented as `?grant=` is rejected. Without that separation a grant
   leaking into a reverse-proxy access log would be a full session credential.
 
+#### The download cookie — surviving an interrupted transfer
+
+A grant's TTL *is* its exposure, and the window above is shorter than any
+multi-GB transfer. So a browser that lost one and retried re-presented the same
+URL with an expired grant and got a 401 — which Chrome renders as "Sign in to the
+site, then try downloading again" on a page the user is already signed into
+(issue #2373). Raising the TTL was rejected: it would put a minutes-to-hours
+credential in every access log. Instead, **a redeemed grant is exchanged for a
+cookie**:
+
+```
+GET …/backups/{bid}/download?grant=…
+-> 200 Set-Cookie: mcd_dl=<jwt>; Max-Age=900; Path=…/backups/{bid}/download;
+                   HttpOnly; Secure; SameSite=strict
+```
+
+The cookie carries the *same* resource-scoped authority as the grant, for
+`auth.token.download_cookie_ttl_seconds` (default **900s**, the access-token TTL).
+It is what the retry authenticates with, and it never appears in a URL — so the
+query-string window is left exactly as it was, and the credential that outlives
+the transfer is one no log, browser history or `Referer` ever saw.
+
+- **Three transports, one gate.** The download route resolves its subject from
+  `Authorization: Bearer`, then `?grant=`, then the cookie. A **Bearer header wins
+  outright** and a bad one is a 401, never a fall-through: the other two are a
+  browser's fallback transports, not a way around a refused session token. The
+  grant → cookie fall-through is what makes a retry work, and widens nothing — the
+  cookie is verified against the request's own resource, and whoever read a grant
+  out of a log holds no cookie.
+- **Non-interchangeable, in every direction.** A cookie presented as `?grant=` or
+  as a Bearer token is rejected, and a grant presented as the cookie is rejected.
+  The first is the point: the longer-lived credential must never be loggable.
+- **Scoped to one resource, and to one URL path.** The `Path` is the download's
+  own URL, so the browser attaches it to nothing else — not the mint endpoint's
+  siblings, not another backup. That is containment; the *authorization* is the
+  signed resource claim, checked exactly as a grant's is. The `?path=` of a file
+  download is not part of a cookie's `Path`, so two downloads on one server share
+  the cookie slot and the second mint replaces the first — the displaced one's
+  retry is the 401 it would have been anyway, never another resource's bytes.
+- **Minted only by a grant redemption, and only on a 2xx.** A Bearer client gets
+  no `Set-Cookie` it never asked for (the posture of issue #372), a 403 / 404 /
+  409 hands out no credential for bytes it did not serve, and a request that
+  authenticated *with* the cookie does **not** renew it — no sliding window, so a
+  cookie's life is bounded by the redemption that minted it.
+- **Identity, never authority**, exactly like a grant: every request re-runs the
+  full permission gate, so a revocation, a membership removal or a deactivated
+  account invalidates the cookie immediately.
+- **Never cached.** A response carrying the cookie is stamped
+  `Cache-Control: no-store` (RFC 6265 Section 8.6). The backup download already
+  declared that; the export and directory ZIPs declared no freshness at all, so a
+  shared cache could otherwise have handed the `Set-Cookie` to a second client.
+- **Not cleared by logout.** Nothing enumerates the per-resource paths a jar might
+  hold, so logout clears only the refresh cookie (`Path=/api/auth`). The residual
+  is one resource, re-authorized on every read, for the cookie's TTL — the same
+  posture the stateless access token already has, which is why the TTL defaults to
+  `access_ttl_seconds` rather than to something a long transfer would prefer.
+  Raising the TTL widens exactly this window (on a shared browser, a leftover
+  cookie plus the URL from history re-reads that one resource as the user who
+  downloaded it).
+- **No interaction with the SPA session.** The Web UI keeps its access token in
+  memory and its refresh token in an `HttpOnly` cookie on `/api/auth`
+  ([`WEBUI_SPEC.md`](../ui/WEBUI_SPEC.md) Section 7.1). The download cookie's path
+  scope disjoins it from both: it is never sent to an auth endpoint or to any JSON
+  API call, JS cannot read it, and a token refresh neither needs nor is able to
+  touch it.
+
 Each mint endpoint is gated by the same permission its download is, and runs the
 same pre-flight, so it returns the download's own errors: an unknown or
 cross-server backup is 404 with no existence signal; a `?path=` that does not

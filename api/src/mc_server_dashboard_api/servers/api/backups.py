@@ -682,15 +682,16 @@ async def download_backup(
     **Resumable** (issue #2372): the response declares ``Accept-Ranges: bytes``
     and an ``ETag``, and a single ``Range`` request is served as ``206`` over a
     ranged read of the stored bytes — a multi-GB archive is never re-read from
-    the start to serve its tail. An interrupted transfer can therefore resume
-    instead of restarting. A ``?grant=`` URL still expires on its own short TTL,
-    so the browser's automatic retry is not what this buys (that is issue #2373);
-    a Bearer-token client (``curl -C -``, a script) resumes today.
+    the start to serve its tail. An interrupted transfer therefore resumes
+    instead of restarting.
 
     The caller authenticates with the usual Bearer access token, or — for a
     browser that cannot set a header on a plain navigation — with a short-lived
-    ``?grant=`` minted by ``POST .../download-grant`` (issue #2313). Either way
-    the same ``backup:read`` gate decides, and the response is identical.
+    ``?grant=`` minted by ``POST .../download-grant`` (issue #2313). Redeeming a
+    grant also sets an httpOnly download cookie, which is what authenticates the
+    browser's retry once the grant's own short window has closed (issue #2373).
+    Whichever credential arrives, the same ``backup:read`` gate decides and the
+    response body is identical.
     """
 
     try:

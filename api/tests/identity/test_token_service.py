@@ -17,6 +17,7 @@ from mc_server_dashboard_api.identity.adapters.token_service import JwtTokenServ
 from mc_server_dashboard_api.identity.domain.clock import Clock
 from mc_server_dashboard_api.identity.domain.errors import (
     InvalidAccessTokenError,
+    InvalidDownloadCookieError,
     InvalidDownloadGrantError,
 )
 from mc_server_dashboard_api.identity.domain.value_objects import UserId
@@ -46,12 +47,14 @@ def _service(
     key: str = _KEY,
     access_seconds: int = 900,
     grant_seconds: int = 30,
+    cookie_seconds: int = 900,
 ) -> JwtTokenService:
     return JwtTokenService(
         signing_key=key,
         algorithm="HS256",
         access_ttl=dt.timedelta(seconds=access_seconds),
         download_grant_ttl=dt.timedelta(seconds=grant_seconds),
+        download_cookie_ttl=dt.timedelta(seconds=cookie_seconds),
         clock=clock,
     )
 
@@ -209,3 +212,83 @@ def test_access_token_is_not_a_download_grant() -> None:
     token = svc.issue_access_token(_USER)
     with pytest.raises(InvalidDownloadGrantError):
         svc.verify_download_grant(token, _RESOURCE)
+
+
+# --- download cookies (issue #2373) ----------------------------------------
+
+
+def test_download_cookie_round_trips_subject_for_its_resource() -> None:
+    clock = _FakeClock(dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc))
+    svc = _service(clock)
+    cookie = svc.issue_download_cookie(_USER, _RESOURCE)
+    assert svc.verify_download_cookie(cookie, _RESOURCE) == _USER
+
+
+def test_download_cookie_rejected_for_another_resource() -> None:
+    clock = _FakeClock(dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc))
+    svc = _service(clock)
+    cookie = svc.issue_download_cookie(_USER, _RESOURCE)
+    with pytest.raises(InvalidDownloadCookieError):
+        svc.verify_download_cookie(cookie, "backup-download:c:s:other")
+
+
+def test_download_cookie_lives_on_its_own_ttl_not_the_grant_ttl() -> None:
+    # The point of the exchange: the cookie outlives the 30 s query-string window
+    # so an interrupted transfer can be retried (issue #2373).
+    clock = _FakeClock(dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc))
+    svc = _service(clock, grant_seconds=30, cookie_seconds=900)
+    cookie = svc.issue_download_cookie(_USER, _RESOURCE)
+    clock.set(dt.datetime(2026, 6, 4, 0, 14, 59, tzinfo=dt.timezone.utc))
+    assert svc.verify_download_cookie(cookie, _RESOURCE) == _USER
+
+
+def test_download_cookie_rejected_after_expiry() -> None:
+    clock = _FakeClock(dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc))
+    svc = _service(clock, cookie_seconds=900)
+    cookie = svc.issue_download_cookie(_USER, _RESOURCE)
+    clock.set(dt.datetime(2026, 6, 4, 0, 15, tzinfo=dt.timezone.utc))
+    with pytest.raises(InvalidDownloadCookieError):
+        svc.verify_download_cookie(cookie, _RESOURCE)
+
+
+def test_download_cookie_with_tampered_signature_is_rejected() -> None:
+    clock = _FakeClock(dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc))
+    cookie = _service(clock, key="a" * 32).issue_download_cookie(_USER, _RESOURCE)
+    with pytest.raises(InvalidDownloadCookieError):
+        _service(clock, key="b" * 32).verify_download_cookie(cookie, _RESOURCE)
+
+
+def test_download_cookie_is_not_a_download_grant() -> None:
+    # The cookie is the longer-lived credential, so it must never be accepted in
+    # the query string — the transport whose exposure the 30 s TTL bounds.
+    clock = _FakeClock(dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc))
+    svc = _service(clock)
+    cookie = svc.issue_download_cookie(_USER, _RESOURCE)
+    with pytest.raises(InvalidDownloadGrantError):
+        svc.verify_download_grant(cookie, _RESOURCE)
+
+
+def test_download_grant_is_not_a_download_cookie() -> None:
+    # The other direction: a grant read out of an access log must not be replayable
+    # as the cookie, which is verified against the longer cookie TTL.
+    clock = _FakeClock(dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc))
+    svc = _service(clock)
+    issued = svc.issue_download_grant(_USER, _RESOURCE)
+    with pytest.raises(InvalidDownloadCookieError):
+        svc.verify_download_cookie(issued.token, _RESOURCE)
+
+
+def test_download_cookie_is_not_an_access_token() -> None:
+    clock = _FakeClock(dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc))
+    svc = _service(clock)
+    cookie = svc.issue_download_cookie(_USER, _RESOURCE)
+    with pytest.raises(InvalidAccessTokenError):
+        svc.verify_access_token(cookie)
+
+
+def test_access_token_is_not_a_download_cookie() -> None:
+    clock = _FakeClock(dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc))
+    svc = _service(clock)
+    token = svc.issue_access_token(_USER)
+    with pytest.raises(InvalidDownloadCookieError):
+        svc.verify_download_cookie(token, _RESOURCE)

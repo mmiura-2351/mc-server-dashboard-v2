@@ -18,6 +18,12 @@ edge from ``auth.token.*`` (CONFIGURATION.md Section 5.3):
   ``verify_access_token`` rejects any token carrying a ``purpose`` claim at all.
   Without that second half, a grant that leaks into an access log would be a
   full session credential.
+- **Download cookies** are the same shape with ``purpose="download-cookie"`` and
+  the longer ``download_cookie_ttl`` (issue #2373). The third kind is separated
+  from the other two the same way: a cookie presented as ``?grant=`` or as a
+  Bearer token is rejected, and a grant presented as the cookie is rejected. The
+  first half is what keeps the longer-lived credential out of URLs, where the
+  grant's short TTL is the whole exposure bound.
 
 The signing key is held in memory only and never logged.
 """
@@ -34,6 +40,7 @@ import jwt
 from mc_server_dashboard_api.identity.domain.clock import Clock
 from mc_server_dashboard_api.identity.domain.errors import (
     InvalidAccessTokenError,
+    InvalidDownloadCookieError,
     InvalidDownloadGrantError,
 )
 from mc_server_dashboard_api.identity.domain.token_service import (
@@ -50,6 +57,10 @@ _REFRESH_SECRET_BYTES = 32
 # access token. Its presence is what each verifier keys off (see module docstring).
 _DOWNLOAD_PURPOSE = "download"
 
+# The ``purpose`` claim marking a JWT as a download cookie — the same authority as
+# a grant on a longer TTL, admissible only from the cookie header (issue #2373).
+_DOWNLOAD_COOKIE_PURPOSE = "download-cookie"
+
 
 class JwtTokenService(TokenService):
     """:class:`TokenService` adapter: PyJWT access tokens + opaque refresh secrets."""
@@ -61,12 +72,14 @@ class JwtTokenService(TokenService):
         algorithm: str,
         access_ttl: dt.timedelta,
         download_grant_ttl: dt.timedelta,
+        download_cookie_ttl: dt.timedelta,
         clock: Clock,
     ) -> None:
         self._signing_key = signing_key
         self._algorithm = algorithm
         self._access_ttl = access_ttl
         self._download_grant_ttl = download_grant_ttl
+        self._download_cookie_ttl = download_cookie_ttl
         self._clock = clock
 
     def issue_access_token(self, user_id: UserId) -> str:
@@ -128,6 +141,23 @@ class JwtTokenService(TokenService):
             resource,
             purpose=_DOWNLOAD_PURPOSE,
             error=InvalidDownloadGrantError,
+        )
+
+    def issue_download_cookie(self, user_id: UserId, resource: str) -> str:
+        token, _exp = self._issue_resource_scoped(
+            user_id=user_id,
+            resource=resource,
+            purpose=_DOWNLOAD_COOKIE_PURPOSE,
+            ttl=self._download_cookie_ttl,
+        )
+        return token
+
+    def verify_download_cookie(self, token: str, resource: str) -> UserId:
+        return self._verify_resource_scoped(
+            token,
+            resource,
+            purpose=_DOWNLOAD_COOKIE_PURPOSE,
+            error=InvalidDownloadCookieError,
         )
 
     def _issue_resource_scoped(
