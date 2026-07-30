@@ -1178,7 +1178,8 @@ export interface paths {
          *     boundary — is the right bar here.
          *
          *     The pre-flight reuses ``DownloadFile.is_dir``, so a missing path is 404, a
-         *     traversal-unsafe one 422 ``invalid_path``, and a running server 409
+         *     traversal-unsafe one 422 ``invalid_path``, one with a path-component symlink 422
+         *     ``symlink_refused`` (issue #2432), and a running server 409
          *     ``server_unsettled`` — exactly what the download returns. The 409 records the
          *     DENIED ``file:download`` row the download would have recorded; once the Web UI
          *     mints first the download is never reached, and the denial would otherwise
