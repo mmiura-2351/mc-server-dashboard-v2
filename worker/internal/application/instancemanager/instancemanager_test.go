@@ -76,6 +76,14 @@ func (i *fakeInstance) Status() execution.ServerState {
 	return i.state
 }
 
+// ProbeAlive answers from the fake's recorded state, which only Stop changes: a
+// fresh fakeInstance is running, a stopped one is not.
+func (i *fakeInstance) ProbeAlive(context.Context) (bool, error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.state == execution.StateRunning, nil
+}
+
 func (i *fakeInstance) Events() <-chan execution.StatusEvent { return i.events }
 
 func (i *fakeInstance) wasStopped() (stopped, graceful bool) {

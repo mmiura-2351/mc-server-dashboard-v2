@@ -49,6 +49,9 @@ func (i *richInstance) Status() execution.ServerState        { return execution.
 func (i *richInstance) Events() <-chan execution.StatusEvent { return i.events }
 func (i *richInstance) Logs() <-chan execution.LogEvent      { return i.logs }
 
+// ProbeAlive matches Status: this fake models a live instance.
+func (i *richInstance) ProbeAlive(context.Context) (bool, error) { return true, nil }
+
 func (i *richInstance) Sample(context.Context) (execution.MetricsSample, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
