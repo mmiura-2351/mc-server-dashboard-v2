@@ -2058,9 +2058,28 @@ type CommandResult struct {
 	//	*CommandResult_CommandOutput
 	//	*CommandResult_FileContent
 	//	*CommandResult_FileListing
-	Result        isCommandResult_Result `protobuf_oneof:"result"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Result isCommandResult_Result `protobuf_oneof:"result"`
+	// held_generation is the Worker DECLARING that it still holds this server's
+	// working set in local scratch, at this generation, now the command has
+	// finished (issue #2481). Only a SnapshotTrigger sets it, and only when the
+	// Worker's own generation marker was published at that value — the same
+	// on-disk fact Register.held_servers re-advertises after a reconnect, so the
+	// API mirrors one number rather than reconciling two.
+	//
+	// The field is OPTIONAL rather than a 0 sentinel because generation 0 already
+	// means "held at an unknown generation" in HeldServer: absent means "declared
+	// nothing", which is what a snapshot that DELETED the scratch reports (the
+	// stopped-id branch GCs it, issue #762/#841) and what a snapshot whose marker
+	// stamp was refused reports (the working dir was replaced mid-flight, issue
+	// #2284). The API records a held generation only when this is present, so an
+	// absent field — including from an older Worker that never sets it — leaves
+	// its inventory stale and the next start hydrates, which is the safe
+	// direction: understating what a Worker holds costs one hydrate, while
+	// overstating it makes a start skip a hydrate it needs and boot an empty or
+	// stale world (issue #696).
+	HeldGeneration *uint64 `protobuf:"varint,6,opt,name=held_generation,json=heldGeneration,proto3,oneof" json:"held_generation,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *CommandResult) Reset() {
@@ -2139,6 +2158,13 @@ func (x *CommandResult) GetFileListing() *FileListing {
 		}
 	}
 	return nil
+}
+
+func (x *CommandResult) GetHeldGeneration() uint64 {
+	if x != nil && x.HeldGeneration != nil {
+		return *x.HeldGeneration
+	}
+	return 0
 }
 
 type isCommandResult_Result interface {
@@ -2813,14 +2839,16 @@ const file_mcsd_controlplane_v1_control_plane_proto_rawDesc = "" +
 	"\n" +
 	"tls_ca_pem\x18\x05 \x01(\tR\btlsCaPem\"1\n" +
 	"\x12CloseBedrockTunnel\x12\x1b\n" +
-	"\tserver_id\x18\x01 \x01(\tR\bserverId\"\x83\x02\n" +
+	"\tserver_id\x18\x01 \x01(\tR\bserverId\"\xc5\x02\n" +
 	"\rCommandResult\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x128\n" +
 	"\x05error\x18\x02 \x01(\v2\".mcsd.controlplane.v1.CommandErrorR\x05error\x12'\n" +
 	"\x0ecommand_output\x18\x03 \x01(\tH\x00R\rcommandOutput\x12#\n" +
 	"\ffile_content\x18\x04 \x01(\fH\x00R\vfileContent\x12F\n" +
-	"\ffile_listing\x18\x05 \x01(\v2!.mcsd.controlplane.v1.FileListingH\x00R\vfileListingB\b\n" +
-	"\x06result\"f\n" +
+	"\ffile_listing\x18\x05 \x01(\v2!.mcsd.controlplane.v1.FileListingH\x00R\vfileListing\x12,\n" +
+	"\x0fheld_generation\x18\x06 \x01(\x04H\x01R\x0eheldGeneration\x88\x01\x01B\b\n" +
+	"\x06resultB\x12\n" +
+	"\x10_held_generation\"f\n" +
 	"\vFileListing\x129\n" +
 	"\aentries\x18\x01 \x03(\v2\x1f.mcsd.controlplane.v1.FileEntryR\aentries\x12\x1c\n" +
 	"\ttruncated\x18\x02 \x01(\bR\ttruncated\"J\n" +

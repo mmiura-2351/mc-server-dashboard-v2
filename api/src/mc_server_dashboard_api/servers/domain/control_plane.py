@@ -137,6 +137,11 @@ class CommandOutcome:
     listing: FileListing | None = None
     # Refines a FILE_ACCESS_DENIED status (issue #548); UNSPECIFIED otherwise.
     file_access_reason: FileAccessReason = FileAccessReason.UNSPECIFIED
+    # The Worker DECLARING it still holds this server's working set locally, at
+    # this generation (issue #2481). Set by a snapshot outcome only, and only
+    # when the Worker's own generation marker was published at that value;
+    # ``None`` is "declared nothing". See :meth:`ControlPlane.record_held_generation`.
+    held_generation: int | None = None
 
     @property
     def success(self) -> bool:
@@ -203,21 +208,24 @@ class ControlPlane(abc.ABC):
         #696-class world rollback. The bar for a caller is therefore not "the Worker
         probably holds this" but "the API can PROVE the Worker holds at least this".
 
-        One event currently clears that bar: a SUCCESSFUL hydrate. Pass the store
-        generation read immediately BEFORE the transfer was dispatched — the data plane
-        serves the store's generation at pull time, which the monotonic counter puts at
-        or after that read, so the value can only understate.
+        Two events clear that bar, and each proves retention differently:
 
-        A snapshot publication does NOT clear it, and the reason is worth recording
-        because it looks like it should. Whether the Worker still holds the working set
-        it just published depends on which branch the Worker took: a running-id
-        snapshot keeps the scratch, a stopped-id one GCs it (``removeScratch``,
-        #762/#841) and holds nothing afterwards. That choice is made Worker-side from
-        its own instance map, both branches report an undifferentiated success, and no
-        API-side state predicts it — a server observed CRASHED under
-        ``desired=running`` reaches the stopped-id branch with no race at all. So the
-        API cannot prove retention from a publish, and does not record one; the publish
-        bumps the store past whatever is recorded, which correctly ages the entry out.
+        - A SUCCESSFUL hydrate (#2477). Pass the store generation read immediately
+          BEFORE the transfer was dispatched — the data plane serves the store's
+          generation at pull time, which the monotonic counter puts at or after that
+          read, so the value can only understate.
+        - A snapshot publish on which the WORKER DECLARED the generation it still
+          holds (#2481, ``CommandOutcome.held_generation``). The API cannot derive
+          this one itself: whether the Worker still holds what it published depends
+          on which branch it took Worker-side — a running-id snapshot keeps the
+          scratch, a stopped-id one GCs it (``removeScratch``, #762/#841) and holds
+          nothing afterwards, and a server observed CRASHED under ``desired=running``
+          reaches the stopped-id branch with no race at all. So the Worker states it:
+          it sets the field from the result of writing its own generation marker, the
+          same on-disk fact it re-advertises in ``Register.held_servers``, and leaves
+          it unset on both branches that end with no marker at that generation. Pass
+          the declared value through unchanged; never substitute an API-side reading
+          of the store, which cannot tell the two branches apart.
         """
 
     @abc.abstractmethod

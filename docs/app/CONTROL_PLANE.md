@@ -161,14 +161,15 @@ A→B→A leftover scratch B has advanced past) must still hydrate (issue #763,
 generalizing #696, see Section 5).
 
 `Register` only ever describes the Worker's scratch *at connect time*, so the API
-also refreshes its record **within** the session from a successful hydrate, at the
-generation that transfer served (issue #2477). Without that refresh every server
-**placed since** the Worker last registered was absent from the advertisement and
-read back as "nothing held" for the whole session — so the skip gate below, and the
-reconciler's short held-start grace, almost never applied. A re-registration
-replaces the whole record: the Worker's own on-disk scan always wins over the API's
-within-session tracking. The API never records a generation it cannot *prove* the
-Worker holds — see Section 5.1.
+also refreshes its record **within** the session: from a successful hydrate, at the
+generation that transfer served (issue #2477), and from a snapshot publish on which
+the Worker **declared** the generation it still holds (`CommandResult.held_generation`,
+issue #2481). Without that refresh every server **placed since** the Worker last
+registered was absent from the advertisement and read back as "nothing held" for the
+whole session — so the skip gate below, and the reconciler's short held-start grace,
+almost never applied. A re-registration replaces the whole record: the Worker's own
+on-disk scan always wins over the API's within-session tracking. The API never records
+a generation it cannot *prove* the Worker holds — see Section 5.1.
 
 A snapshot advances that persisted generation **only while the working dir is still the
 directory the snapshot pinned when it began** (issue #2284). A running-id snapshot holds
@@ -370,28 +371,33 @@ held, or a Worker too old to report) AND a *stale* held set (a generation older
 than the store) both still hydrate, rather than booting an empty world or starting
 on stale leftover scratch.
 
-That knowledge comes from `Register.held_servers` (Section 4.1) plus the one
-within-session event the API can *prove* advances the Worker's scratch (issue
-#2477): a **successful hydrate**, recorded at the store generation read immediately
-*before* the transfer. The data plane serves the generation current at pull time,
-which the monotonic counter puts at or after that read, so the recorded value can
-only understate what the Worker ends up holding.
+That knowledge comes from `Register.held_servers` (Section 4.1) plus the two
+within-session events the API can *prove* advance the Worker's scratch:
+
+- A **successful hydrate** (issue #2477), recorded at the store generation read
+  immediately *before* the transfer. The data plane serves the generation current at
+  pull time, which the monotonic counter puts at or after that read, so the recorded
+  value can only understate what the Worker ends up holding.
+- A **snapshot publish the Worker declared it retained** (issue #2481), recorded at
+  the generation the Worker states in `CommandResult.held_generation`.
 
 The asymmetry is the point: understating what a Worker holds only costs an
 unnecessary hydrate, while overstating it would make a start skip a hydrate it needs
-and boot a stale or absent world. So a **snapshot publication does not refresh the
-record**, even though it is the other event that advances the Worker's local
-generation marker. Whether the Worker still holds what it published depends on which
-branch it took — a running-id snapshot keeps the scratch, a stopped-id one GCs it
-(issue #762/#841) and then holds nothing at all — and that choice is made
-Worker-side from its own instance map, with both branches reporting an
-undifferentiated success. A server observed **crashed** under `desired=running`
-reaches the stopped-id branch with no race involved, since the crash drops the
-instance from that map. The API therefore cannot prove retention from a publish. The
-consequence is bounded and safe: the publish advances the store past whatever was
-recorded, so the record ages back to "stale" and the next start hydrates. Refreshing
-across a snapshot needs a Worker-declared retention signal and is tracked
-separately. The store generation is a per-server counter the
+and boot a stale or absent world. The snapshot case is the one where only the Worker
+can supply the proof, so the API does not infer it. Whether the Worker still holds
+what it published depends on which branch it took — a running-id snapshot keeps the
+scratch, a stopped-id one GCs it (issue #762/#841) and then holds nothing at all —
+and that choice is made Worker-side from its own instance map. A server observed
+**crashed** under `desired=running` reaches the stopped-id branch with no race
+involved, since the crash drops the instance from that map. So the Worker states the
+outcome rather than the API guessing it, and states it from the *same fact that
+decides the deletion*: the field is set from the result of writing the Worker's own
+generation marker — the on-disk value `Register.held_servers` re-advertises — and the
+deleting branch never reaches that write. A running-id snapshot whose marker stamp is
+refused because the working dir was replaced mid-flight (issue #2284) likewise
+declares nothing, so the wire signal cannot claim a generation the marker does not
+carry. An absent declaration leaves the record untouched, the publish advances the
+store past it, and the next start hydrates. The store generation is a per-server counter the
 authoritative Storage bumps on each `commit_snapshot` and stamps onto each hydrate
 / snapshot transfer, so the Worker's reported generation and the store's share one
 number space. A fresh placement always hydrates: a first launch or a relocation

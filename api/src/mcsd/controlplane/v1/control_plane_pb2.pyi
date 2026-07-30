@@ -1166,12 +1166,33 @@ class CommandResult(_message.Message):
     COMMAND_OUTPUT_FIELD_NUMBER: _builtins.int
     FILE_CONTENT_FIELD_NUMBER: _builtins.int
     FILE_LISTING_FIELD_NUMBER: _builtins.int
+    HELD_GENERATION_FIELD_NUMBER: _builtins.int
     success: _builtins.bool
     """success is true when the command was applied without error."""
     command_output: _builtins.str
     """command_output is the console/RCON output for a ServerCommand."""
     file_content: _builtins.bytes
     """file_content is the bytes read for a ReadFile."""
+    held_generation: _builtins.int
+    """held_generation is the Worker DECLARING that it still holds this server's
+    working set in local scratch, at this generation, now the command has
+    finished (issue #2481). Only a SnapshotTrigger sets it, and only when the
+    Worker's own generation marker was published at that value — the same
+    on-disk fact Register.held_servers re-advertises after a reconnect, so the
+    API mirrors one number rather than reconciling two.
+
+    The field is OPTIONAL rather than a 0 sentinel because generation 0 already
+    means "held at an unknown generation" in HeldServer: absent means "declared
+    nothing", which is what a snapshot that DELETED the scratch reports (the
+    stopped-id branch GCs it, issue #762/#841) and what a snapshot whose marker
+    stamp was refused reports (the working dir was replaced mid-flight, issue
+    #2284). The API records a held generation only when this is present, so an
+    absent field — including from an older Worker that never sets it — leaves
+    its inventory stale and the next start hydrates, which is the safe
+    direction: understating what a Worker holds costs one hydrate, while
+    overstating it makes a start skip a hydrate it needs and boot an empty or
+    stale world (issue #696).
+    """
     @_builtins.property
     def error(self) -> Global___CommandError:
         """error describes the failure; absent when success is true."""
@@ -1188,13 +1209,19 @@ class CommandResult(_message.Message):
         command_output: _builtins.str = ...,
         file_content: _builtins.bytes = ...,
         file_listing: Global___FileListing | None = ...,
+        held_generation: _builtins.int | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _typing.Literal["command_output", b"command_output", "error", b"error", "file_content", b"file_content", "file_listing", b"file_listing", "result", b"result"]  # noqa: Y015
+    _HasFieldArgType: _TypeAlias = _typing.Literal["_held_generation", b"_held_generation", "command_output", b"command_output", "error", b"error", "file_content", b"file_content", "file_listing", b"file_listing", "held_generation", b"held_generation", "result", b"result"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["command_output", b"command_output", "error", b"error", "file_content", b"file_content", "file_listing", b"file_listing", "result", b"result", "success", b"success"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["_held_generation", b"_held_generation", "command_output", b"command_output", "error", b"error", "file_content", b"file_content", "file_listing", b"file_listing", "held_generation", b"held_generation", "result", b"result", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+    _WhichOneofReturnType__held_generation: _TypeAlias = _typing.Literal["held_generation"]  # noqa: Y015
+    _WhichOneofArgType__held_generation: _TypeAlias = _typing.Literal["_held_generation", b"_held_generation"]  # noqa: Y015
     _WhichOneofReturnType_result: _TypeAlias = _typing.Literal["command_output", "file_content", "file_listing"]  # noqa: Y015
     _WhichOneofArgType_result: _TypeAlias = _typing.Literal["result", b"result"]  # noqa: Y015
+    @_typing.overload
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__held_generation) -> _WhichOneofReturnType__held_generation | None: ...
+    @_typing.overload
     def WhichOneof(self, oneof_group: _WhichOneofArgType_result) -> _WhichOneofReturnType_result | None: ...
 
 Global___CommandResult: _TypeAlias = CommandResult  # noqa: Y015

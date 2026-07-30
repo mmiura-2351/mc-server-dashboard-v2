@@ -839,3 +839,91 @@ async def test_place_memory_gate_survives_confirm_between_snapshot_and_place() -
     )
 
     assert chosen_b is None
+
+
+# --- a publish records a held generation only when the Worker declared it (#2481) ---
+#
+# The Worker decides retention branch-side and states the result on the
+# CommandResult: a running-id snapshot that stamped its generation marker
+# declares that generation, while a stopped-id snapshot (which GCs the scratch,
+# #762/#841) and a running-id snapshot whose stamp was refused (#2284) declare
+# nothing. The adapter is the single funnel every snapshot dispatch passes
+# through — periodic tick, on-demand backup, and post-stop final — so the record
+# happens here, synchronously with the outcome and with no await between reading
+# the declaration and writing the inventory.
+
+
+def _snapshot_adapter(
+    registry: InMemoryWorkerRegistry, *, held_generation: int | None
+) -> FleetControlPlaneAdapter:
+    return FleetControlPlaneAdapter(
+        registry=registry,
+        control_plane=_CapturingFleetControlPlane(
+            result=CommandResult(
+                code=CommandResultCode.OK, held_generation=held_generation
+            )
+        ),
+        data_plane_base_url="https://api.example/",
+        worker_credential="shhh",
+    )
+
+
+async def test_snapshot_records_the_generation_the_worker_declared() -> None:
+    worker_uuid, server_uuid = uuid.uuid4(), uuid.uuid4()
+    registry = InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT)
+    registry.register(make_worker(worker_id=str(worker_uuid), at=_T0))
+    adapter = _snapshot_adapter(registry, held_generation=9)
+    worker_id, server_id = WorkerId(worker_uuid), ServerId(server_uuid)
+
+    outcome = await adapter.snapshot(
+        worker_id=worker_id,
+        community_id=CommunityId(uuid.uuid4()),
+        server_id=server_id,
+    )
+
+    assert outcome.held_generation == 9
+    # Read back through the SAME seam the skip-hydrate gate and the reconciler's
+    # short held-start grace consult.
+    assert adapter.held_generation(worker_id=worker_id, server_id=server_id) == 9
+
+
+async def test_snapshot_records_nothing_when_the_worker_declared_nothing() -> None:
+    # The stopped-id publish: the Worker deleted the scratch right after publishing,
+    # so it declares nothing. Recording the published generation here would let a
+    # later start read held >= store, skip the hydrate, and boot into a freshly
+    # created empty directory — the #696-class rollback the gate exists to prevent.
+    worker_uuid, server_uuid = uuid.uuid4(), uuid.uuid4()
+    registry = InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT)
+    registry.register(make_worker(worker_id=str(worker_uuid), at=_T0))
+    adapter = _snapshot_adapter(registry, held_generation=None)
+    worker_id, server_id = WorkerId(worker_uuid), ServerId(server_uuid)
+
+    outcome = await adapter.snapshot(
+        worker_id=worker_id,
+        community_id=CommunityId(uuid.uuid4()),
+        server_id=server_id,
+        final=True,
+    )
+
+    assert outcome.held_generation is None
+    assert adapter.held_generation(worker_id=worker_id, server_id=server_id) is None
+
+
+async def test_a_declaration_on_a_non_snapshot_command_is_not_recorded() -> None:
+    # Only a snapshot outcome may refresh the inventory. Every other dispatch
+    # shares the same _to_outcome plumbing, so the record must be attached to the
+    # snapshot call rather than to the generic dispatch path — otherwise a future
+    # command that happens to carry the field would silently widen the gate.
+    worker_uuid, server_uuid = uuid.uuid4(), uuid.uuid4()
+    registry = InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT)
+    registry.register(make_worker(worker_id=str(worker_uuid), at=_T0))
+    adapter = _snapshot_adapter(registry, held_generation=9)
+    worker_id, server_id = WorkerId(worker_uuid), ServerId(server_uuid)
+
+    await adapter.hydrate(
+        worker_id=worker_id,
+        community_id=CommunityId(uuid.uuid4()),
+        server_id=server_id,
+    )
+
+    assert adapter.held_generation(worker_id=worker_id, server_id=server_id) is None
