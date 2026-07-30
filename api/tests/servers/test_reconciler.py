@@ -17,6 +17,23 @@ import uuid
 
 import pytest
 
+from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
+from mc_server_dashboard_api.fleet.domain.control_plane import (
+    Command as FleetCommand,
+)
+from mc_server_dashboard_api.fleet.domain.control_plane import (
+    CommandResult,
+    CommandResultCode,
+    HydrateCommand,
+    StartServerCommand,
+)
+from mc_server_dashboard_api.fleet.domain.control_plane import (
+    ControlPlane as FleetControlPlane,
+)
+from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId as FleetWorkerId
+from mc_server_dashboard_api.servers.adapters.control_plane import (
+    FleetControlPlaneAdapter,
+)
 from mc_server_dashboard_api.servers.application.lifecycle import (
     StartServer,
     StopServer,
@@ -25,6 +42,7 @@ from mc_server_dashboard_api.servers.application.reconciler import RunReconciler
 from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandOutcome,
     CommandStatus,
+    ControlPlane,
     WorkerUnavailableError,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
@@ -37,6 +55,8 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerType,
     WorkerId,
 )
+from tests.fleet.fakes import FakeClock as FleetFakeClock
+from tests.fleet.fakes import make_worker
 from tests.servers.fakes import (
     FakeClock,
     FakeControlPlane,
@@ -81,9 +101,36 @@ def _server(
     )
 
 
+class _CapturingFleet(FleetControlPlane):
+    """A fleet control plane that answers every dispatch OK and records the kinds.
+
+    Lets the #2477 test drive the REAL :class:`FleetControlPlaneAdapter` over a real
+    registry — so the held-working-set inventory is the production one — while the
+    hydrate/start round trips succeed without a live Worker.
+    """
+
+    def __init__(self) -> None:
+        self.kinds: list[str] = []
+
+    async def dispatch(
+        self,
+        *,
+        worker_id: FleetWorkerId,
+        server_id: str,
+        command: FleetCommand,
+        timeout_override: float | None = None,
+        snapshot_is_final: bool = False,
+    ) -> CommandResult:
+        if isinstance(command, HydrateCommand):
+            self.kinds.append("hydrate")
+        elif isinstance(command, StartServerCommand):
+            self.kinds.append("start")
+        return CommandResult(code=CommandResultCode.OK)
+
+
 def _reconciler(
     uow: FakeUnitOfWork,
-    cp: FakeControlPlane,
+    cp: ControlPlane,
     clock: FakeClock,
     *,
     store_generation: int = 0,
@@ -508,6 +555,58 @@ async def test_clear_stale_assignment_uses_full_grace_despite_held() -> None:
     assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
 
 
+async def test_server_placed_after_registration_gets_the_short_held_grace() -> None:
+    # Issue #2477: the held inventory must reflect what the Worker holds NOW, not
+    # only what it advertised at registration. Register the Worker with an EMPTY
+    # held inventory -- the state of every server placed SINCE that registration --
+    # then let a real start hydrate the working set onto it. The Worker now
+    # demonstrably holds the hydrated generation, so a later divergence aged between
+    # the short and the full grace must be acted on under held_start_grace_seconds
+    # (command-only re-dispatch), not left waiting the full hydrate-based grace.
+    fleet = _CapturingFleet()
+    registry = InMemoryWorkerRegistry(
+        clock=FleetFakeClock(_NOW), heartbeat_timeout=dt.timedelta(seconds=30)
+    )
+    registry.register(make_worker(worker_id=str(_WORKER.value), at=_NOW))
+    cp = FleetControlPlaneAdapter(
+        registry=registry,
+        control_plane=fleet,
+        data_plane_base_url="http://data-plane.test",
+        worker_credential="test-credential",
+    )
+    uow = FakeUnitOfWork()
+    aged = _NOW - dt.timedelta(seconds=_HELD_GRACE + 1)
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.UNKNOWN,
+        worker=_WORKER,
+        observed_at=aged,
+        updated_at=aged,
+    )
+    uow.servers.seed(server)
+    clock = FakeClock(_NOW)
+    # The start that placed this server on the Worker: it hydrates, because nothing
+    # was held for an id that did not exist at registration time.
+    await StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=clock,
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(generation=2),
+        file_store=FakeFileStore(seed_eula=True),
+    ).redispatch_start(community_id=server.community_id, server_id=server.id)
+    assert fleet.kinds == ["hydrate", "start"]
+    # Sanity: the divergence is still WITHIN the full grace, so only the short
+    # held-start grace can act here.
+    assert (_NOW - aged) < dt.timedelta(seconds=_GRACE)
+
+    await _reconciler(uow, cp, clock, store_generation=2).tick()
+
+    # A second, command-only start: the short grace applied AND the re-dispatch
+    # skipped the destructive hydrate, the same held >= store predicate (#763).
+    assert fleet.kinds == ["hydrate", "start", "start"]
+
+
 # --- backoff ---------------------------------------------------------------
 
 
@@ -585,7 +684,12 @@ async def test_crash_loop_start_backs_off_despite_successful_dispatch() -> None:
     # dispatch SUCCEEDS (the Worker launches the container) but the MC process dies
     # again, so the row stays reconcilable across ticks. The successful dispatch
     # must NOT clear the backoff; consecutive crash restarts must space out
-    # exponentially instead of re-hydrating + re-starting at full cadence forever.
+    # exponentially instead of re-starting at full cadence forever.
+    #
+    # The dispatch shape changed deliberately in #2442/#2477: the FIRST attempt's
+    # hydrate refreshes the held-working-set inventory, so every later retry sees the
+    # Worker holding a fresh working set and is command-only. Only the first attempt
+    # hydrates now. The subject here is the backoff, and it is unchanged.
     uow = FakeUnitOfWork()
     server = _server(
         desired=DesiredState.RUNNING,
@@ -607,14 +711,14 @@ async def test_crash_loop_start_backs_off_despite_successful_dispatch() -> None:
 
     clock.set(_NOW + dt.timedelta(seconds=40))
     await reconciler.tick()  # past 30s backoff -> retried, crash counted -> 60s
-    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start", "hydrate", "start"]
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start", "start"]
     assert reconciler._attempts[server.id].failures == 2
 
     # The grown window now spaces the next retry out: 31s after the second attempt
     # is still inside the 60s window.
     clock.set(_NOW + dt.timedelta(seconds=40 + 31))
     await reconciler.tick()
-    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start", "hydrate", "start"]
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start", "start"]
 
 
 async def test_crash_loop_flapping_through_starting_keeps_backoff_growing() -> None:

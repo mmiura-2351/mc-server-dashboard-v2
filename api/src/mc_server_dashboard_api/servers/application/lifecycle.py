@@ -692,9 +692,28 @@ class StartServer:
         over the Worker's newer scratch and roll the world back. Only
         ``place_and_start`` (orphan re-placement) always hydrates — the Worker was
         freshly placed and may have an empty/absent scratch.
+
+        A hydrate that SUCCEEDS refreshes the held-working-set inventory (issue #2477)
+        so the generation-gated check above, and the reconciler's short held-start
+        grace (#999), see what the Worker holds now rather than only what it
+        advertised at registration. The refresh does NOT survive the next published
+        snapshot (which advances the store past the recorded generation), so the entry
+        ages back to "stale" and the following start hydrates — the safe direction, and
+        the reason this is a partial fix by design (see ``record_held_generation``).
         """
 
         if not skip_hydrate:
+            # Read the authoritative generation BEFORE the transfer (issue #2477): the
+            # data plane serves the store's generation at PULL time, and the counter is
+            # monotonic (commit_snapshot, a restore #873 and an at-rest edit #889 all
+            # bump it; nothing lowers it), so this read is at or below what the Worker
+            # ends up holding. Recording it therefore never overstates the held set —
+            # the one thing that would be unsafe, because a later start would then skip
+            # a hydrate it needs. A failed read costs only the refresh (the entry stays
+            # as it was, so the next start hydrates), so it must not fail the launch.
+            hydrated_generation = await self._generation_before_hydrate(
+                community_id, server_id
+            )
             hydrate = await self.control_plane.hydrate(
                 worker_id=worker_id,
                 community_id=community_id,
@@ -702,6 +721,15 @@ class StartServer:
             )
             if not hydrate.success:
                 return hydrate
+            # The unpack succeeded, so the Worker's scratch IS the store's working set
+            # at (at least) that generation. Record it ONLY now: a failed hydrate
+            # leaves a torn tree the Worker's own marker does not claim either.
+            if hydrated_generation is not None:
+                self.control_plane.record_held_generation(
+                    worker_id=worker_id,
+                    server_id=server_id,
+                    generation=hydrated_generation,
+                )
         if dispatch is not None:
             dispatch.attempted = True
         # Source the per-server memory limit from the config blob (#705 helper) and
@@ -724,6 +752,31 @@ class StartServer:
             memory_limit_bytes=memory_limit_bytes,
             cpu_millis=cpu_millis,
         )
+
+    async def _generation_before_hydrate(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> int | None:
+        """Read the store generation a pending hydrate will serve at least (#2477).
+
+        ``None`` when Storage could not be read: the held-inventory refresh is an
+        optimisation over a mirror the Worker's next registration rebuilds anyway, so a
+        transient read failure must not turn a working hydrate-then-start into a failed
+        start. Skipping the refresh only costs the next start a hydrate it may not have
+        needed — the pre-#2477 behaviour.
+        """
+
+        try:
+            return await self.store_generation.current_generation(
+                community_id=community_id, server_id=server_id
+            )
+        except Exception:
+            _LOG.warning(
+                "could not read the store generation before hydrating server %s; "
+                "the held-working-set inventory keeps its previous value",
+                server_id.value,
+                exc_info=True,
+            )
+            return None
 
     async def _place(self, server: Server) -> WorkerId | None:
         """Place ``server`` with commit-based resource awareness (#710).

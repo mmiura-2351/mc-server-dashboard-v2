@@ -604,6 +604,32 @@ def test_held_generation_reflects_reported_servers() -> None:
     )
 
 
+def test_record_held_generation_is_read_back_by_held_generation() -> None:
+    # Issue #2477: a server placed AFTER the Worker registered is absent from the
+    # registration advertisement, so it reads back as None. Recording the generation a
+    # hydrate/snapshot established makes it visible through the SAME seam the
+    # skip-hydrate and short-grace decisions read, with the UUID -> wire-string
+    # bridging applied on both sides.
+    worker_uuid = uuid.uuid4()
+    server_uuid = uuid.uuid4()
+    clock = FakeClock(_T0)
+    registry = InMemoryWorkerRegistry(clock=clock, heartbeat_timeout=_TIMEOUT)
+    registry.register(make_worker(worker_id=str(worker_uuid), at=_T0))
+    adapter = _registry_adapter(registry)
+    worker_id = WorkerId(worker_uuid)
+    server_id = ServerId(server_uuid)
+    assert adapter.held_generation(worker_id=worker_id, server_id=server_id) is None
+
+    adapter.record_held_generation(
+        worker_id=worker_id, server_id=server_id, generation=4
+    )
+
+    assert adapter.held_generation(worker_id=worker_id, server_id=server_id) == 4
+    assert adapter.holds_fresh_working_set(
+        worker_id=worker_id, server_id=server_id, store_generation=4
+    )
+
+
 def test_holds_fresh_working_set_mirrors_held_store_comparison() -> None:
     # holds_fresh_working_set is True exactly when held >= store (the #763
     # skip-hydrate predicate the reconciler reuses for its short grace, #999).

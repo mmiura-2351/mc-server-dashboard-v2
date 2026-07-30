@@ -160,6 +160,16 @@ snapshot over it and roll the world back, while a *stale* held set (e.g. an
 A→B→A leftover scratch B has advanced past) must still hydrate (issue #763,
 generalizing #696, see Section 5).
 
+`Register` only ever describes the Worker's scratch *at connect time*, so the API
+also refreshes its record **within** the session from a successful hydrate, at the
+generation that transfer served (issue #2477). Without that refresh every server
+**placed since** the Worker last registered was absent from the advertisement and
+read back as "nothing held" for the whole session — so the skip gate below, and the
+reconciler's short held-start grace, almost never applied. A re-registration
+replaces the whole record: the Worker's own on-disk scan always wins over the API's
+within-session tracking. The API never records a generation it cannot *prove* the
+Worker holds — see Section 5.1.
+
 A snapshot advances that persisted generation **only while the working dir is still the
 directory the snapshot pinned when it began** (issue #2284). A running-id snapshot holds
 no per-server reservation (#829 item 4), so a new stream can re-place the server onto
@@ -353,12 +363,35 @@ restart (the reconciler's same-worker re-dispatch, where the assigned Worker is
 unchanged) starts on the Worker's **existing** working set when it is current: the
 persistent scratch is the live, newer copy (snapshots are pushed *from* it), so a
 hydrate there would clobber it with the last snapshot and roll the world back. The
-API skips the hydrate when, and only when, the assigned Worker reported that
-server in its `Register.held_servers` (Section 4.1) at a **generation at least the
-authoritative store generation** — so a fresh/wiped/GC'd scratch (reported as not
+API skips the hydrate when, and only when, the assigned Worker is known to hold that
+server's working set at a **generation at least the authoritative store generation**
+— so a fresh/wiped/GC'd scratch (reported as not
 held, or a Worker too old to report) AND a *stale* held set (a generation older
 than the store) both still hydrate, rather than booting an empty world or starting
-on stale leftover scratch. The store generation is a per-server counter the
+on stale leftover scratch.
+
+That knowledge comes from `Register.held_servers` (Section 4.1) plus the one
+within-session event the API can *prove* advances the Worker's scratch (issue
+#2477): a **successful hydrate**, recorded at the store generation read immediately
+*before* the transfer. The data plane serves the generation current at pull time,
+which the monotonic counter puts at or after that read, so the recorded value can
+only understate what the Worker ends up holding.
+
+The asymmetry is the point: understating what a Worker holds only costs an
+unnecessary hydrate, while overstating it would make a start skip a hydrate it needs
+and boot a stale or absent world. So a **snapshot publication does not refresh the
+record**, even though it is the other event that advances the Worker's local
+generation marker. Whether the Worker still holds what it published depends on which
+branch it took — a running-id snapshot keeps the scratch, a stopped-id one GCs it
+(issue #762/#841) and then holds nothing at all — and that choice is made
+Worker-side from its own instance map, with both branches reporting an
+undifferentiated success. A server observed **crashed** under `desired=running`
+reaches the stopped-id branch with no race involved, since the crash drops the
+instance from that map. The API therefore cannot prove retention from a publish. The
+consequence is bounded and safe: the publish advances the store past whatever was
+recorded, so the record ages back to "stale" and the next start hydrates. Refreshing
+across a snapshot needs a Worker-declared retention signal and is tracked
+separately. The store generation is a per-server counter the
 authoritative Storage bumps on each `commit_snapshot` and stamps onto each hydrate
 / snapshot transfer, so the Worker's reported generation and the store's share one
 number space. A fresh placement always hydrates: a first launch or a relocation

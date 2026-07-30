@@ -1175,6 +1175,9 @@ class FakeControlPlane(ControlPlane):
         # a (worker, server) pair absent here returns None (NOT held), so the default
         # is to hydrate.
         self._held = held or {}
+        # Every record_held_generation call (issue #2477) — (worker, server, generation)
+        # — so a test can pin the value recorded and the paths that record nothing.
+        self.recorded_held: list[tuple[WorkerId, ServerId, int]] = []
         self.dispatched: list[tuple[str, WorkerId, ServerId]] = []
         # Command lines forwarded through command() — (server, line) — so a test
         # can assert the exact broadcast a scheduled warning sends (issue #1839).
@@ -1208,6 +1211,14 @@ class FakeControlPlane(ControlPlane):
 
     def is_worker_connected(self, *, worker_id: WorkerId) -> bool:
         return self._connected.get(worker_id, True)
+
+    def record_held_generation(
+        self, *, worker_id: WorkerId, server_id: ServerId, generation: int
+    ) -> None:
+        # Mirror the real registry: refresh the held entry (issue #2477) and record the
+        # call so a test can assert WHICH generation was recorded, and when it was not.
+        self._held[(worker_id, server_id)] = generation
+        self.recorded_held.append((worker_id, server_id, generation))
 
     def held_generation(
         self, *, worker_id: WorkerId, server_id: ServerId

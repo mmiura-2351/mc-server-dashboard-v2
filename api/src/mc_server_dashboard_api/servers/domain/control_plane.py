@@ -186,14 +186,50 @@ class ControlPlane(abc.ABC):
         """
 
     @abc.abstractmethod
+    def record_held_generation(
+        self, *, worker_id: WorkerId, server_id: ServerId, generation: int
+    ) -> None:
+        """Record that ``worker_id`` now holds ``server_id`` at ``generation`` (#2477).
+
+        The held-working-set inventory is seeded by the Worker's registration
+        advertisement, which says nothing about a server placed since — so without
+        this the inventory is permanently ``None`` for those servers and both the
+        skip-hydrate decision (#763) and the reconciler's short held-start grace
+        (#999) degrade to "always hydrate, always wait the full grace".
+
+        ``generation`` MUST NOT be newer than the working set the Worker actually
+        holds. Understating it only costs an unnecessary hydrate; overstating it makes
+        a later start skip a hydrate it needs and boot a stale/absent working set — a
+        #696-class world rollback. The bar for a caller is therefore not "the Worker
+        probably holds this" but "the API can PROVE the Worker holds at least this".
+
+        One event currently clears that bar: a SUCCESSFUL hydrate. Pass the store
+        generation read immediately BEFORE the transfer was dispatched — the data plane
+        serves the store's generation at pull time, which the monotonic counter puts at
+        or after that read, so the value can only understate.
+
+        A snapshot publication does NOT clear it, and the reason is worth recording
+        because it looks like it should. Whether the Worker still holds the working set
+        it just published depends on which branch the Worker took: a running-id
+        snapshot keeps the scratch, a stopped-id one GCs it (``removeScratch``,
+        #762/#841) and holds nothing afterwards. That choice is made Worker-side from
+        its own instance map, both branches report an undifferentiated success, and no
+        API-side state predicts it — a server observed CRASHED under
+        ``desired=running`` reaches the stopped-id branch with no race at all. So the
+        API cannot prove retention from a publish, and does not record one; the publish
+        bumps the store past whatever is recorded, which correctly ages the entry out.
+        """
+
+    @abc.abstractmethod
     def held_generation(
         self, *, worker_id: WorkerId, server_id: ServerId
     ) -> int | None:
         """Return the generation ``worker_id`` reported holding for ``server_id``.
 
         Answers from the held-working-set inventory the Worker advertised on its
-        current registration (issue #763). The lifecycle layer consults it on a
-        same-worker restart (``redispatch_start``): it skips the destructive hydrate
+        current registration, kept current within that session by
+        :meth:`record_held_generation` (issue #2477). The lifecycle layer consults it on
+        a same-worker restart (``redispatch_start``): it skips the destructive hydrate
         only when the held generation is at least the authoritative store generation
         (the Worker's scratch is at least as fresh as the store, so hydrating would
         clobber the newer scratch with the last snapshot). ``None`` for a
