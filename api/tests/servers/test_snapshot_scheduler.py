@@ -36,6 +36,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerType,
     WorkerId,
 )
+from tests.servers.contract_table import worker_status
 from tests.servers.fakes import FakeClock, FakeControlPlane, FakeUnitOfWork
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
@@ -220,6 +221,33 @@ async def test_on_demand_snapshot_failed_dispatch_raises() -> None:
         await SnapshotServer(uow=uow, control_plane=cp)(
             community_id=server.community_id, server_id=server.id
         )
+
+
+async def test_on_demand_snapshot_over_failed_stop_orphan_is_worker_busy() -> None:
+    # A manual backup taken during the failed-stop-orphan window (issue #2471):
+    # the row still reads observed=running, so CreateBackup takes the running path
+    # and dispatches this SnapshotTrigger, which the Worker refuses because it
+    # holds the orphan. Under issue #2476 that refusal is BUSY — the converger is
+    # working the orphan, so the snapshot succeeds once it settles — and the
+    # sanitized reason carries the retryable-ness to the client instead of the
+    # unclassified ``command_failed`` catch-all.
+    uow = FakeUnitOfWork()
+    server = _running_server()
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(
+            status=worker_status("SnapshotTrigger", "orphan_pending"),
+            message="instancemanager: server has a failed-stop orphan pending "
+            "termination",
+        )
+    )
+
+    with pytest.raises(CommandDispatchError) as excinfo:
+        await SnapshotServer(uow=uow, control_plane=cp)(
+            community_id=server.community_id, server_id=server.id
+        )
+
+    assert excinfo.value.reason == "worker_busy"
 
 
 async def test_on_demand_snapshot_failure_logs_warning_with_server_and_kind(

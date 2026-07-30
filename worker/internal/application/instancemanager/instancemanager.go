@@ -240,11 +240,14 @@ type Manager struct {
 	// #251). Keeping the Instance and its driver name here lets a retry re-attempt
 	// the driver Stop against the same handle and resolve RCON identically (issue
 	// #1712), reporting success only on confirmed termination; until then every
-	// other command over the id is refused with INVALID_STATE naming the orphan —
-	// start/hydrate/stopped-id snapshot through reserve, restart through
-	// takeRunningReserve, console / relay tunnel dial / Bedrock tunnel open
-	// through notRunningRefusal — so no path claims the server is not running
-	// about a process that is probably alive (issue #2466). CloseBedrockTunnel is
+	// other command over the id is refused naming the orphan, so no path claims
+	// the server is not running about a process that is probably alive (issue
+	// #2466). The refusal CODE splits by whether the refused command will succeed
+	// once the orphan converges (issue #2476): BUSY for start / hydrate /
+	// stopped-id snapshot through reserve, which the API retries until it is let
+	// through; INVALID_STATE for restart through takeRunningReserve and console /
+	// relay tunnel dial / Bedrock tunnel open through notRunningRefusal, which are
+	// refused for what the state IS and are never executed later. CloseBedrockTunnel is
 	// the deliberate exception: it takes no running check and stays a success, so
 	// a tunnel that outlived its server can still be torn down. The instance's
 	// status pump clears the record if the orphan finally exits on its own, and
@@ -1571,7 +1574,10 @@ const (
 // commands (start/hydrate/stopped-id snapshot) and the ones that check the
 // orphan directly (restart/console/tunnel dial) say the same thing about the
 // same state — the point of issue #2466 is that the refusal reads honestly
-// wherever it surfaces. The API discriminates on the CODE, not this text.
+// wherever it surfaces. The API discriminates on the CODE, not this text, and
+// the code deliberately differs between those two groups (issue #2476): the
+// message describes the STATE, which is identical; the code answers whether THIS
+// command will succeed once the converger resolves it, which is not.
 const orphanPendingMsg = "instancemanager: server has a failed-stop orphan pending termination"
 
 // takeStoppableReserve atomically (under mu) selects the instance to stop for
@@ -1879,12 +1885,18 @@ func (m *Manager) handleTunnelDial(ctx context.Context, cmd session.Command) ses
 // credential, idempotently confirms) this server's Bedrock relay QUIC tunnel
 // (docs/app/BEDROCK_TUNNEL.md, issue #1546). Like TunnelDial, the server must
 // be running locally, and a failed-stop orphan is refused as INVALID_STATE
-// rather than SERVER_NOT_FOUND (issue #2466) — a live orphan reaches this
-// handler in practice: the API reads the orphan's INVALID_STATE refusal of a
-// StartServer as already-running, converges observed=running, and syncs the
-// Bedrock tunnel off that write (servers/application/lifecycle.py, the
-// INVALID_STATE arms of StartServer / redispatch_start). Like TunnelDial the
-// dispatch is fire-and-forget, so the refusal reaches only the API's WARN log.
+// rather than SERVER_NOT_FOUND (issue #2466) — an orphan reaches this handler
+// because the API dispatches Open off an observed=running WRITE (the sink's hook
+// on an applied StatusChange(running), or a lifecycle convergence;
+// servers/adapters/bedrock_tunnel_sync.py) and that dispatch is fire-and-forget,
+// so a stop whose driver Stop cannot confirm termination in the gap records the
+// orphan before the command lands: the API's cached running state does not move
+// until the Worker's own next report. The refusal therefore reaches only the
+// API's WARN log, which must not say the server is not running about a process
+// that may still be alive. This verb keeps INVALID_STATE where start / hydrate /
+// stopped-id snapshot moved to BUSY (issue #2476): it is refused for what the
+// state IS and is never carried out once the orphan converges, so BUSY would
+// promise a success that never comes.
 //
 // Unlike TunnelDial, Open does not itself dial/handshake
 // synchronously: it registers the tunnel and returns, while the QUIC dial,
@@ -2335,10 +2347,11 @@ func (m *Manager) driverFor(serverID string) string {
 // checks, so there is no check-then-act gap — when the id is already running, has
 // a failed-stop orphan pending, or already carries a reservation, and otherwise
 // marks it reserved. ok reports whether the claim was taken; on a rejection, code
-// classifies the failure (CommandErrorInvalidState for the settled running/orphan
-// states, CommandErrorBusy for the unsettled reservation race, issue #824) and
-// msg is the precondition message the caller fails with. It must be paired with
-// release on every exit path.
+// classifies the failure (CommandErrorInvalidState for the one SETTLED state this
+// gate sees, "already running"; CommandErrorBusy for the two unsettled ones, the
+// reservation race of issue #824 and the pending orphan of issue #2476) and msg is
+// the precondition message the caller fails with. It must be paired with release
+// on every exit path.
 func (m *Manager) reserve(serverID string) (ok bool, code session.CommandErrorCode, msg string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -2347,9 +2360,23 @@ func (m *Manager) reserve(serverID string) (ok bool, code session.CommandErrorCo
 	}
 	if _, orphaned := m.orphans[serverID]; orphaned {
 		// A prior stop could not confirm termination: the process/container may
-		// still be lingering. Starting/hydrating now would double-instance over it;
-		// the reconciler must retry the stop first (issue #251).
-		return false, session.CommandErrorInvalidState, orphanPendingMsg
+		// still be lingering. Starting/hydrating now would double-instance over it,
+		// so the command is refused (issue #251) — but as BUSY, not INVALID_STATE
+		// (issue #2476). Since issue #2475 the orphan is never a settled state: a
+		// converger is probing the process, retrying the stop while it is alive and
+		// retiring the record once it is confirmed gone, so THIS command succeeds on
+		// a later retry. That is exactly the BUSY contract (issue #824) — outcome not
+		// yet known, retry rather than converge.
+		//
+		// INVALID_STATE here was the #2467 wedge: reserve() cannot tell an orphan
+		// whose process is alive from one already dead, yet it answered the same code
+		// the API reads as "already running" on a start, so a dead orphan's refusal
+		// manufactured observed=running on a server that was down. The verbs that
+		// check m.orphans directly — restart / console / tunnel dial / Bedrock tunnel
+		// open — keep INVALID_STATE on purpose: they are refused for what the state
+		// IS and will never be executed later, so BUSY would promise a success that
+		// never comes.
+		return false, session.CommandErrorBusy, orphanPendingMsg
 	}
 	if m.reserved[serverID] {
 		// A re-issued duplicate arriving while the original is still in flight after
