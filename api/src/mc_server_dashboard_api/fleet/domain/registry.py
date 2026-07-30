@@ -89,19 +89,19 @@ class WorkerRegistry(abc.ABC):
     ) -> None:
         """Record that ``worker_id`` now holds ``server_id`` at ``generation`` (#2477).
 
-        The registration map alone goes stale the moment anything changes on the
-        Worker's scratch, so every server PLACED SINCE the Worker registered read back
-        as "nothing held" (:meth:`held_generation` ``None``) — the short held-start
+        The registration map alone says nothing about a server PLACED SINCE the Worker
+        registered, so every such server read back as "nothing held"
+        (:meth:`held_generation` ``None``) for the whole session — the short held-start
         grace and the skip-hydrate it gates almost never applied. Callers refresh the
-        entry from the two events that advance what the Worker's scratch holds: a
-        successful hydrate, and a snapshot the Worker published from a working set it
-        keeps.
+        entry from an event that advances what the Worker's scratch holds; today that is
+        a successful hydrate.
 
         The caller owns the ONE invariant this map must never break: ``generation``
         must never be NEWER than the working set the Worker actually holds. An
         understated entry only costs a hydrate that was not needed (the pre-#2477
         behaviour); an overstated one makes the lifecycle SKIP a hydrate it needs and
-        boot a stale/absent working set — a #696-class world rollback. Ignored for an
+        boot a stale/absent working set — a #696-class world rollback. So a caller must
+        be able to PROVE retention, not merely expect it. Ignored for an
         unknown Worker, and superseded wholesale by the next :meth:`register` (the
         Worker's own on-disk scan always wins over this mirror).
         """
@@ -112,8 +112,8 @@ class WorkerRegistry(abc.ABC):
 
         Answers from the held map, seeded by the Worker's advertisement on its current
         registration (issue #763) and refreshed by
-        :meth:`record_held_generation` as hydrates and snapshots advance what the
-        Worker's scratch holds (issue #2477). ``None`` when the Worker does not report
+        :meth:`record_held_generation` as hydrates advance what the Worker's scratch
+        holds (issue #2477). ``None`` when the Worker does not report
         holding the server
         (an unknown Worker, or one that re-registered without that id because its
         scratch was wiped or GC'd) — the lifecycle layer then hydrates rather than

@@ -775,6 +775,58 @@ async def test_start_records_nothing_as_held_when_hydrate_is_skipped() -> None:
     assert cp.recorded_held == []
 
 
+async def test_start_survives_a_generation_read_failure_before_the_hydrate() -> None:
+    # The #2477 held-inventory refresh reads the store generation a SECOND time, right
+    # before the hydrate. That read feeds a bookkeeping mirror, not a gate, so a
+    # transient Storage failure there must not fail the launch it rides on: the hydrate
+    # and the start must still be dispatched, the start must still succeed, and the
+    # committed intent must NOT be compensated. Only the refresh is skipped, leaving
+    # the entry as it was so the next start hydrates.
+    #
+    # The FIRST read is the skip-hydrate gate and keeps its own contract — a failure
+    # there compensates and raises (#2001), pinned by the test below.
+    community, server_id, worker = _ids()
+
+    class _FlakySecondRead(FakeStoreGenerationReader):
+        """Succeeds on the gate read, fails on the refresh read."""
+
+        def __init__(self) -> None:
+            super().__init__(generation=6)
+            self.reads = 0
+
+        async def current_generation(
+            self, *, community_id: CommunityId, server_id: ServerId
+        ) -> int:
+            self.reads += 1
+            if self.reads == 2:
+                raise OSError("storage hiccup")
+            return await super().current_generation(
+                community_id=community_id, server_id=server_id
+            )
+
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = FakeControlPlane(place_to=WorkerId(worker))
+    store_generation = _FlakySecondRead()
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=store_generation,
+        file_store=FakeFileStore(seed_eula=True),
+    )
+
+    await use_case(community_id=CommunityId(community), server_id=ServerId(server_id))
+
+    assert store_generation.reads == 2  # the refresh read really did happen and fail
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
+    assert cp.recorded_held == []  # refresh skipped, entry left as it was
+    started = uow.servers.by_id[ServerId(server_id)]
+    assert started.desired_state is DesiredState.RUNNING
+    assert started.assigned_worker_id == WorkerId(worker)
+
+
 async def test_start_generation_read_failure_compensates_without_dispatching() -> None:
     # The post-commit generation-gate read (#1007) is a PRE-dispatch step: a
     # transient Storage failure there sent no start command, so the committed

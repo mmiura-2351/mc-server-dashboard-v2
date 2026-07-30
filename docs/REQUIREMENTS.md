@@ -410,11 +410,9 @@ Requirements:
     boots out-of-date world data (issues #696, #763). Each published snapshot
     increments a monotonic generation counter; the Worker records the generation
     locally after each snapshot commit and reports it to the API at
-    (re-)registration via `Register.held_servers`. The API keeps that record
-    current between registrations from the events it can prove advance the
-    Worker's scratch — a successful hydrate, and a snapshot the Worker published
-    from a working set it keeps (issue #2477) — never claiming a generation newer
-    than the Worker holds. The skip is gated on
+    (re-)registration via `Register.held_servers`. The API also refreshes that
+    record between registrations from a successful hydrate (issue #2477), never
+    claiming a generation newer than the Worker holds. The skip is gated on
     `held_generation >= store_generation`.
   - **Running**: MC writes to the Worker's local scratch; the authoritative copy
     is temporarily stale.

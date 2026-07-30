@@ -696,7 +696,10 @@ class StartServer:
         A hydrate that SUCCEEDS refreshes the held-working-set inventory (issue #2477)
         so the generation-gated check above, and the reconciler's short held-start
         grace (#999), see what the Worker holds now rather than only what it
-        advertised at registration.
+        advertised at registration. The refresh does NOT survive the next published
+        snapshot (which advances the store past the recorded generation), so the entry
+        ages back to "stale" and the following start hydrates — the safe direction, and
+        the reason this is a partial fix by design (see ``record_held_generation``).
         """
 
         if not skip_hydrate:

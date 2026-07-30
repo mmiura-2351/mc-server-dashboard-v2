@@ -173,23 +173,16 @@ class FakeStoreGenerationReader(StoreGenerationReader):
     Returns a fixed generation for every server (default 0, the "no snapshot
     published" case). Pass ``generation`` to pin a non-zero authoritative store
     generation (issue #763) so a test can drive the reconciler's
-    ``held >= store`` comparison, and ``publisher`` to pin who published it (issue
-    #2477) so a test can drive the held-inventory refresh's same-publisher check.
+    ``held >= store`` comparison.
     """
 
-    def __init__(self, *, generation: int = 0, publisher: str | None = None) -> None:
+    def __init__(self, *, generation: int = 0) -> None:
         self._generation = generation
-        self._publisher = publisher
 
     async def current_generation(
         self, *, community_id: CommunityId, server_id: ServerId
     ) -> int:
         return self._generation
-
-    async def current_publisher(
-        self, *, community_id: CommunityId, server_id: ServerId
-    ) -> str | None:
-        return self._publisher
 
 
 class FakeVersionValidator(VersionValidator):

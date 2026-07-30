@@ -36,12 +36,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerType,
     WorkerId,
 )
-from tests.servers.fakes import (
-    FakeClock,
-    FakeControlPlane,
-    FakeStoreGenerationReader,
-    FakeUnitOfWork,
-)
+from tests.servers.fakes import FakeClock, FakeControlPlane, FakeUnitOfWork
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 _WORKER = WorkerId(uuid.uuid4())
@@ -74,14 +69,11 @@ def _scheduler(
     uow: FakeUnitOfWork,
     cp: FakeControlPlane,
     clock: FakeClock,
-    *,
-    store_generation: FakeStoreGenerationReader | None = None,
 ) -> RunSnapshotCadenceTick:
     return RunSnapshotCadenceTick(
         uow=uow,
         control_plane=cp,
         clock=clock,
-        store_generation=store_generation or FakeStoreGenerationReader(),
         default_interval_seconds=3600,
         min_interval_seconds=300,
     )
@@ -206,88 +198,6 @@ async def test_on_demand_snapshot_dispatches() -> None:
     )
     assert result.id == server.id
     assert [k for k, _, _ in cp.dispatched] == ["snapshot"]
-
-
-# --- the periodic snapshot refreshes the held-working-set inventory (#2477) ---
-
-
-async def test_periodic_snapshot_records_the_published_generation_as_held() -> None:
-    # A snapshot published by the assigned Worker proves the store's current working
-    # set came FROM that Worker's scratch, so the scratch is at least as fresh as the
-    # store. Record it as held (issue #2477) — otherwise every periodic snapshot
-    # advances the store past what the held inventory says, and the next restart falls
-    # back to a full hydrate plus the long reconciler grace.
-    uow = FakeUnitOfWork()
-    server = _running_server()
-    uow.servers.seed(server)
-    cp = FakeControlPlane()
-    clock = FakeClock(_NOW)
-    scheduler = _scheduler(
-        uow,
-        cp,
-        clock,
-        store_generation=FakeStoreGenerationReader(
-            generation=7, publisher=str(_WORKER.value)
-        ),
-    )
-    await scheduler.tick()
-    clock.set(_NOW + dt.timedelta(seconds=3600))
-
-    await scheduler.tick()
-
-    assert cp.recorded_held == [(_WORKER, server.id, 7)]
-
-
-async def test_periodic_snapshot_records_nothing_when_another_publisher_won() -> None:
-    # The store's current generation was published by someone ELSE (an at-rest edit, a
-    # restore, or another Worker) after ours committed: that generation did NOT come
-    # from this Worker's scratch, so claiming it as held would let a later start skip a
-    # hydrate it needs and boot the pre-edit world. Record nothing — the entry stays
-    # stale, so the next start hydrates (issue #2477).
-    uow = FakeUnitOfWork()
-    server = _running_server()
-    uow.servers.seed(server)
-    cp = FakeControlPlane()
-    clock = FakeClock(_NOW)
-    scheduler = _scheduler(
-        uow,
-        cp,
-        clock,
-        store_generation=FakeStoreGenerationReader(generation=8, publisher="api-edit"),
-    )
-    await scheduler.tick()
-    clock.set(_NOW + dt.timedelta(seconds=3600))
-
-    await scheduler.tick()
-
-    assert [k for k, _, _ in cp.dispatched] == ["snapshot"]
-    assert cp.recorded_held == []
-
-
-async def test_failed_periodic_snapshot_records_nothing_as_held() -> None:
-    # A snapshot that never published leaves the store where it was, and the Worker's
-    # scratch is whatever it already was — there is nothing new to record (#2477).
-    uow = FakeUnitOfWork()
-    server = _running_server()
-    uow.servers.seed(server)
-    cp = FakeControlPlane(
-        outcome=CommandOutcome(status=CommandStatus.TRANSFER_FAILED, message="boom")
-    )
-    clock = FakeClock(_NOW)
-    scheduler = _scheduler(
-        uow,
-        cp,
-        clock,
-        store_generation=FakeStoreGenerationReader(
-            generation=7, publisher=str(_WORKER.value)
-        ),
-    )
-    await scheduler.tick()
-    clock.set(_NOW + dt.timedelta(seconds=3600))
-
-    await scheduler.tick()
-
-    assert cp.recorded_held == []
 
 
 async def test_on_demand_snapshot_unknown_server_is_not_found() -> None:

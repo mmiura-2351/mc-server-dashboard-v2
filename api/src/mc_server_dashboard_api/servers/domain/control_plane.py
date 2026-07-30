@@ -200,16 +200,24 @@ class ControlPlane(abc.ABC):
         ``generation`` MUST NOT be newer than the working set the Worker actually
         holds. Understating it only costs an unnecessary hydrate; overstating it makes
         a later start skip a hydrate it needs and boot a stale/absent working set — a
-        #696-class world rollback. Two events establish it honestly:
+        #696-class world rollback. The bar for a caller is therefore not "the Worker
+        probably holds this" but "the API can PROVE the Worker holds at least this".
 
-        - a SUCCESSFUL hydrate — pass the store generation read immediately BEFORE the
-          transfer was dispatched. The data plane serves the store's generation at pull
-          time, which the monotonic counter puts at or after that read, so the value
-          can only understate.
-        - a snapshot the Worker PUBLISHED from a working set it keeps — pass the
-          published generation, which that scratch is the source of. A stopped-id
-          (final) snapshot does NOT qualify: the Worker GCs its scratch right after
-          publishing one, so it then holds nothing.
+        One event currently clears that bar: a SUCCESSFUL hydrate. Pass the store
+        generation read immediately BEFORE the transfer was dispatched — the data plane
+        serves the store's generation at pull time, which the monotonic counter puts at
+        or after that read, so the value can only understate.
+
+        A snapshot publication does NOT clear it, and the reason is worth recording
+        because it looks like it should. Whether the Worker still holds the working set
+        it just published depends on which branch the Worker took: a running-id
+        snapshot keeps the scratch, a stopped-id one GCs it (``removeScratch``,
+        #762/#841) and holds nothing afterwards. That choice is made Worker-side from
+        its own instance map, both branches report an undifferentiated success, and no
+        API-side state predicts it — a server observed CRASHED under
+        ``desired=running`` reaches the stopped-id branch with no race at all. So the
+        API cannot prove retention from a publish, and does not record one; the publish
+        bumps the store past whatever is recorded, which correctly ages the entry out.
         """
 
     @abc.abstractmethod
