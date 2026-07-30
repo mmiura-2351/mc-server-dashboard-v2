@@ -453,6 +453,26 @@ message CommandResult {
     // file_listing is the directory listing for a ListFiles.
     FileListing file_listing = 5;
   }
+
+  // held_generation is the Worker DECLARING that it still holds this server's
+  // working set in local scratch, at this generation, now the command has
+  // finished (issue #2481). Only a SnapshotTrigger sets it, and only when the
+  // Worker's own generation marker was published at that value — the same
+  // on-disk fact Register.held_servers re-advertises after a reconnect, so the
+  // API mirrors one number rather than reconciling two.
+  //
+  // The field is OPTIONAL rather than a 0 sentinel because generation 0 already
+  // means "held at an unknown generation" in HeldServer: absent means "declared
+  // nothing", which is what a snapshot that DELETED the scratch reports (the
+  // stopped-id branch GCs it, issue #762/#841) and what a snapshot whose marker
+  // stamp was refused reports (the working dir was replaced mid-flight, issue
+  // #2284). The API records a held generation only when this is present, so an
+  // absent field — including from an older Worker that never sets it — leaves
+  // its inventory stale and the next start hydrates, which is the safe
+  // direction: understating what a Worker holds costs one hydrate, while
+  // overstating it makes a start skip a hydrate it needs and boot an empty or
+  // stale world (issue #696).
+  optional uint64 held_generation = 6;
 }
 
 // FileListing is the directory listing returned for a ListFiles command. Entries

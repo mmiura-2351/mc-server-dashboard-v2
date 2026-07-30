@@ -345,6 +345,28 @@ def test_to_result_carries_file_access_reason(
     assert result.file_access_reason is domain_reason
 
 
+def test_to_result_carries_a_declared_held_generation() -> None:
+    """A Worker-declared retention reaches the domain result (issue #2481)."""
+
+    result = _to_result(pb.CommandResult(success=True, held_generation=9))
+
+    assert result.held_generation == 9
+
+
+def test_to_result_reports_no_held_generation_when_the_field_is_absent() -> None:
+    """Absence must not read back as 0 (issue #2481).
+
+    A snapshot that GC'd the scratch, and any Worker too old to set the field,
+    leave it unset. Proto3 scalars default to 0 on read, so the mapping has to
+    test presence — reading 0 as a declaration would record a held generation for
+    a working set no Worker claimed.
+    """
+
+    result = _to_result(pb.CommandResult(success=True))
+
+    assert result.held_generation is None
+
+
 async def test_start_carries_forge_launch_mode_on_the_wire(harness: _Harness) -> None:
     stub = await harness.start()
     call = await _registered_call(harness, stub)

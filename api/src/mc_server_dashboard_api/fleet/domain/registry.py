@@ -93,8 +93,9 @@ class WorkerRegistry(abc.ABC):
         registered, so every such server read back as "nothing held"
         (:meth:`held_generation` ``None``) for the whole session — the short held-start
         grace and the skip-hydrate it gates almost never applied. Callers refresh the
-        entry from an event that advances what the Worker's scratch holds; today that is
-        a successful hydrate.
+        entry from an event that advances what the Worker's scratch holds: a successful
+        hydrate, and a snapshot publish on which the Worker DECLARED it still holds the
+        tree it published (#2481).
 
         The caller owns the ONE invariant this map must never break: ``generation``
         must never be NEWER than the working set the Worker actually holds. An

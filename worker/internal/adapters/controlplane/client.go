@@ -201,7 +201,12 @@ func (t *transport) SendHeartbeat(_ context.Context) error {
 }
 
 func (t *transport) SendCommandResult(_ context.Context, result session.CommandResult) error {
-	cr := &controlplanev1.CommandResult{Success: result.Success}
+	// held_generation rides alongside the result oneof rather than in it: it is not
+	// a command's OUTPUT but the Worker's declaration about its own local scratch
+	// (issue #2481), and it is carried through verbatim — nil stays absent, so a
+	// snapshot that GC'd the scratch or skipped its marker stamp declares nothing
+	// and the API keeps hydrating.
+	cr := &controlplanev1.CommandResult{Success: result.Success, HeldGeneration: result.HeldGeneration}
 	if result.Success {
 		// A successful ServerCommand carries its console output, a ReadFile its
 		// bytes, and a ListFiles its directory listing (mutually exclusive); other

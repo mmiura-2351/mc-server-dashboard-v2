@@ -547,7 +547,14 @@ func (m *Manager) recordGeneration(workingDir, serverID string, gen uint64) {
 // last sliver, while rewriting the shared, fsync-ordered writeGeneration the hydrate path
 // also uses and writing a marker into the displaced tree that STORAGE.md Section 4.6's
 // manual recovery reads. See writeGenerationGuarded for the case analysis.
-func (m *Manager) recordGenerationIfUnchanged(ref *workingDirRef, workingDir, serverID string, gen uint64) {
+//
+// It REPORTS whether the marker was published, and that return value is the sole source
+// of the Worker-declared held generation on the snapshot's CommandResult (issue #2481).
+// The API mirrors that declaration into the inventory its skip-hydrate gate reads, so the
+// declaration has to be the marker write's own outcome rather than a second opinion about
+// it: every skip above returns false through the same statement that suppresses the write,
+// so no code path can report a generation this function did not stamp.
+func (m *Manager) recordGenerationIfUnchanged(ref *workingDirRef, workingDir, serverID string, gen uint64) bool {
 	reason := ""
 	guard := func() bool {
 		ok, why := ref.current()
@@ -562,16 +569,18 @@ func (m *Manager) recordGenerationIfUnchanged(ref *workingDirRef, workingDir, se
 	}
 	if !guard() {
 		warnSkipped()
-		return
+		return false
 	}
 	if err := writeGenerationGuarded(workingDir, gen, guard); err != nil {
 		if errors.Is(err, errWorkingDirReplaced) {
 			warnSkipped()
-			return
+			return false
 		}
 		m.logger.Warn("could not record working-set generation",
 			"server_id", serverID, "generation", gen, "error", err)
+		return false
 	}
+	return true
 }
 
 // restoreSaveTimeout bounds the re-enable-auto-save RCON call on the snapshot
@@ -675,6 +684,18 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	// pin guards the running path's marker stamp; nil (and unused) on the stopped path,
 	// which records no generation. Declared here so the post-upload tail below can see it.
 	var pin *workingDirRef
+	// declaredGeneration is what this command DECLARES the Worker still holds when it
+	// returns (issue #2481); nil declares nothing. It has exactly one assignment, in
+	// the running branch's tail, and its value comes from recordGenerationIfUnchanged
+	// reporting that the marker write landed — so the declaration cannot disagree with
+	// the marker, and the stopped-id branch (which calls removeScratch instead of that
+	// function, and is the else of the same if) has no statement that can set it.
+	//
+	// Deliberately NOT named heldGeneration: that is the package function
+	// (scratchscan.go) computing the register-time advertisement this value mirrors,
+	// and shadowing it here would hide the very identifier a reader needs to follow to
+	// see that the two report the same marker.
+	var declaredGeneration *uint64
 	if running {
 		// Pin the working dir's IDENTITY for the whole window, from before the quiesce
 		// to the post-upload marker stamp (issue #2284). Because this branch takes no
@@ -911,7 +932,15 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// outcome that must not happen — it is what the skip-hydrate gate reads, so a
 		// marker newer than its tree makes the API skip the hydrate that would correct
 		// it. Skipped instead: see recordGenerationIfUnchanged.
-		m.recordGenerationIfUnchanged(pin, workingDir, cmd.ServerID, gen)
+		//
+		// Declare the generation to the API only when that stamp actually landed (issue
+		// #2481). The API mirrors the declaration into the same inventory the gate reads,
+		// so a declaration the marker does not back would defeat the guard above over the
+		// wire instead of on disk — hence the value is taken FROM the write's report, not
+		// from being in this branch.
+		if m.recordGenerationIfUnchanged(pin, workingDir, cmd.ServerID, gen) {
+			declaredGeneration = &gen
+		}
 		// GC the displaced tree a prior hydrate kept aside (issue #906): a successful
 		// publish proves the store now holds (and supersedes) this server's world, so the
 		// recovery copy is no longer needed. Mirrors the #845 GC-on-success pattern.
@@ -934,10 +963,15 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// intact, so nothing is lost. The reservation taken in the stopped branch is
 		// still held (released by the deferred release on return), so no racing hydrate
 		// or start can recreate the dir between the publish and this removal. Recording
-		// the new generation would be pointless work on a dir we are about to delete.
+		// the new generation would be pointless work on a dir we are about to delete —
+		// and declaring one to the API (issue #2481) would be a world-loss path: the API
+		// would record held == store for a scratch that no longer exists, take the short
+		// held-start grace, and start with skip_hydrate into an empty directory.
 		m.removeScratch(cmd.ServerID)
 	}
-	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
+	return session.CommandResult{
+		CommandID: cmd.CommandID, Success: true, HeldGeneration: declaredGeneration,
+	}
 }
 
 // checkWorkingSet runs the pre-pack region fsck (issue #927: ONE rule set — a
