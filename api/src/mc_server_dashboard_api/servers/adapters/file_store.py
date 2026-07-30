@@ -9,9 +9,9 @@ contract).
 The seam translates the storage value objects (``RelPath`` rejects traversal at
 construction; ``VersionId`` names a retained version, rejecting a malformed id)
 and the storage errors (``NotFoundError`` -> :class:`ServerFileNotFoundError`,
-``PathTraversalError`` -> :class:`InvalidFilePathError`, a ``VersionId``
-``ValueError`` -> :class:`InvalidVersionIdError`) so no storage type crosses back
-into the servers layer.
+``PathTraversalError`` / ``SymlinkRefusedError`` -> :class:`InvalidFilePathError`,
+a ``VersionId`` ``ValueError`` -> :class:`InvalidVersionIdError`) so no storage
+type crosses back into the servers layer.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 from mc_server_dashboard_api.storage.domain.errors import (
     NotFoundError,
     PathTraversalError,
+    SymlinkRefusedError,
 )
 from mc_server_dashboard_api.storage.domain.port import Storage, WorkingSetView
 from mc_server_dashboard_api.storage.domain.value_objects import (
@@ -44,6 +45,26 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 )
 
 _LOG = logging.getLogger(__name__)
+
+# The two ways Storage refuses a path outright (as opposed to missing it). Caught
+# as one tuple everywhere so no call site can handle the escape and forget the
+# symlink refusal — the drift that would leave a raw storage error crossing back
+# into the servers layer as a 500 (issue #2432).
+_PATH_REFUSED = (PathTraversalError, SymlinkRefusedError)
+
+
+def _refused(rel_path: str, exc: Exception) -> InvalidFilePathError:
+    """Translate a Storage path refusal, keeping the two reasons distinguishable.
+
+    A symlink at any path component carries the ``symlink_refused`` reason the
+    Worker's running path already answers with (issue #2432), so the browser shows
+    one sentence — ``files.error.symlinkRefused`` — whether the server is at rest or
+    running. A genuine escape keeps the default ``invalid_path``.
+    """
+
+    if isinstance(exc, SymlinkRefusedError):
+        return InvalidFilePathError(rel_path, reason="symlink_refused")
+    return InvalidFilePathError(rel_path)
 
 
 def _scope(
@@ -92,8 +113,8 @@ class StorageFileStoreAdapter(FileStore):
         community, server = _scope(community_id, server_id)
         try:
             return await self._storage.read_file(community, server, _rel_path(rel_path))
-        except PathTraversalError as exc:
-            raise InvalidFilePathError(rel_path) from exc
+        except _PATH_REFUSED as exc:
+            raise _refused(rel_path, exc) from exc
         except NotFoundError as exc:
             raise ServerFileNotFoundError(str(server_id.value)) from exc
 
@@ -115,8 +136,8 @@ class StorageFileStoreAdapter(FileStore):
                 community, server, _rel_path(rel_path)
             ):
                 yield chunk
-        except PathTraversalError as exc:
-            raise InvalidFilePathError(rel_path) from exc
+        except _PATH_REFUSED as exc:
+            raise _refused(rel_path, exc) from exc
         except NotFoundError as exc:
             raise ServerFileNotFoundError(str(server_id.value)) from exc
 
@@ -128,8 +149,8 @@ class StorageFileStoreAdapter(FileStore):
             entries = await self._storage.list_dir(
                 community, server, _rel_path(rel_path)
             )
-        except PathTraversalError as exc:
-            raise InvalidFilePathError(rel_path) from exc
+        except _PATH_REFUSED as exc:
+            raise _refused(rel_path, exc) from exc
         except NotFoundError as exc:
             raise ServerFileNotFoundError(str(server_id.value)) from exc
         return [
@@ -145,8 +166,8 @@ class StorageFileStoreAdapter(FileStore):
             return await self._storage.path_exists(
                 community, server, _rel_path(rel_path)
             )
-        except PathTraversalError as exc:
-            raise InvalidFilePathError(rel_path) from exc
+        except _PATH_REFUSED as exc:
+            raise _refused(rel_path, exc) from exc
 
     async def write_file(
         self,
@@ -161,8 +182,8 @@ class StorageFileStoreAdapter(FileStore):
             await self._storage.write_file(
                 community, server, _rel_path(rel_path), content
             )
-        except PathTraversalError as exc:
-            raise InvalidFilePathError(rel_path) from exc
+        except _PATH_REFUSED as exc:
+            raise _refused(rel_path, exc) from exc
 
     async def retain_if_changed(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
@@ -172,8 +193,8 @@ class StorageFileStoreAdapter(FileStore):
             await self._storage.retain_file_version(
                 community, server, _rel_path(rel_path)
             )
-        except PathTraversalError as exc:
-            raise InvalidFilePathError(rel_path) from exc
+        except _PATH_REFUSED as exc:
+            raise _refused(rel_path, exc) from exc
 
     async def delete_file(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
@@ -181,8 +202,8 @@ class StorageFileStoreAdapter(FileStore):
         community, server = _scope(community_id, server_id)
         try:
             await self._storage.delete_file(community, server, _rel_path(rel_path))
-        except PathTraversalError as exc:
-            raise InvalidFilePathError(rel_path) from exc
+        except _PATH_REFUSED as exc:
+            raise _refused(rel_path, exc) from exc
         except NotFoundError as exc:
             raise ServerFileNotFoundError(str(server_id.value)) from exc
 
@@ -192,8 +213,8 @@ class StorageFileStoreAdapter(FileStore):
         community, server = _scope(community_id, server_id)
         try:
             await self._storage.delete_dir(community, server, _rel_path(rel_path))
-        except PathTraversalError as exc:
-            raise InvalidFilePathError(rel_path) from exc
+        except _PATH_REFUSED as exc:
+            raise _refused(rel_path, exc) from exc
         except NotFoundError as exc:
             raise ServerFileNotFoundError(str(server_id.value)) from exc
 
@@ -210,8 +231,8 @@ class StorageFileStoreAdapter(FileStore):
             await self._storage.rename_file(
                 community, server, _rel_path(from_path), _rel_path(to_path)
             )
-        except PathTraversalError as exc:
-            raise InvalidFilePathError(from_path) from exc
+        except _PATH_REFUSED as exc:
+            raise _refused(from_path, exc) from exc
         except NotFoundError as exc:
             raise ServerFileNotFoundError(str(server_id.value)) from exc
 
@@ -228,8 +249,8 @@ class StorageFileStoreAdapter(FileStore):
             await self._storage.rename_dir(
                 community, server, _rel_path(from_path), _rel_path(to_path)
             )
-        except PathTraversalError as exc:
-            raise InvalidFilePathError(from_path) from exc
+        except _PATH_REFUSED as exc:
+            raise _refused(from_path, exc) from exc
         except NotFoundError as exc:
             raise ServerFileNotFoundError(str(server_id.value)) from exc
 
@@ -239,8 +260,8 @@ class StorageFileStoreAdapter(FileStore):
         community, server = _scope(community_id, server_id)
         try:
             await self._storage.make_dir(community, server, _rel_path(rel_path))
-        except PathTraversalError as exc:
-            raise InvalidFilePathError(rel_path) from exc
+        except _PATH_REFUSED as exc:
+            raise _refused(rel_path, exc) from exc
         except NotFoundError as exc:
             raise ServerFileNotFoundError(str(server_id.value)) from exc
 
@@ -286,8 +307,8 @@ class StorageFileStoreAdapter(FileStore):
             # and the walk see the same snapshot (issue #1966 review finding 1).
             try:
                 await view.list_dir(_rel_path(rel_path))
-            except PathTraversalError as exc:
-                raise InvalidFilePathError(rel_path) from exc
+            except _PATH_REFUSED as exc:
+                raise _refused(rel_path, exc) from exc
             except NotFoundError as exc:
                 raise ServerFileNotFoundError(str(server_id.value)) from exc
             # An unseekable sink drives zipfile's streaming mode (data
@@ -304,26 +325,24 @@ class StorageFileStoreAdapter(FileStore):
                     view, server_id, rel_path
                 ):
                     # A listing describes every dirent, including ones that name
-                    # no readable file: a dangling symlink or a link to a
-                    # directory is listed as an entry (issue #2418) whose read is
-                    # a miss, and so is a member deleted between the listing and
-                    # its read. Skip that member rather than aborting the zip —
-                    # one broken link must not cost the operator the whole
-                    # download. The miss is detected by pulling the FIRST chunk
-                    # before the zip member is opened (the Storage stream locates
-                    # the file on its first iteration), so a skipped member never
-                    # leaves a truncated entry behind in the archive.
+                    # no readable file: a member deleted between the listing and
+                    # its read is a miss. Skip that member rather than aborting
+                    # the zip — one broken entry must not cost the operator the
+                    # whole download. The miss is detected by pulling the FIRST
+                    # chunk before the zip member is opened (the Storage stream
+                    # locates the file on its first iteration), so a skipped
+                    # member never leaves a truncated entry behind in the archive.
                     #
-                    # A link that ESCAPES the working set is refused rather than
-                    # missed (containment runs before the symlink answer), and
-                    # letting that refusal out tore the zip mid-stream — after
-                    # the response headers were already on the wire, so the
-                    # client kept a truncated archive (issue #2427). It is the
-                    # same unreadable member: skipped, and logged because unlike
-                    # a delete race it is a standing misconfiguration an operator
-                    # has to go remove. Only the member's own refusal is skipped;
-                    # a traversal-invalid REQUESTED root is refused above, before
-                    # the stream starts.
+                    # A member the read REFUSES rather than misses — a link out of
+                    # the working set (issue #2427) or, since issue #2432, any
+                    # symlink dirent, dangling ones included — tore the zip
+                    # mid-stream after the response headers were already on the
+                    # wire, so the client kept a truncated archive. It is the same
+                    # unreadable member: skipped, and logged (with the refusal
+                    # reason) because unlike a delete race it is a standing
+                    # misconfiguration an operator has to go remove. Only the
+                    # member's own refusal is skipped; a refused REQUESTED root is
+                    # refused above, before the stream starts.
                     stream = member_stream.__aiter__()
                     try:
                         first = await anext(stream)
@@ -331,13 +350,14 @@ class StorageFileStoreAdapter(FileStore):
                         first = b""
                     except ServerFileNotFoundError:
                         continue
-                    except InvalidFilePathError:
+                    except InvalidFilePathError as exc:
                         _LOG.warning(
-                            "dir zip: server %s: member %r under %r escapes the "
-                            "working set; skipping",
+                            "dir zip: server %s: member %r under %r is refused "
+                            "(%s); skipping",
                             server_id.value,
                             arcname,
                             rel_path,
+                            exc.reason,
                         )
                         continue
                     with zf.open(arcname, mode="w") as member:
@@ -382,18 +402,17 @@ class StorageFileStoreAdapter(FileStore):
             # requested root's own existence is checked before the walk starts,
             # so a genuinely missing directory is still a 404.
             #
-            # A listed directory that has become a link out of the working set is
-            # refused rather than missed, and that refusal tore the zip the same
-            # way (issue #2427): skip it too, so the walk treats an escaping
-            # directory exactly as the caller above treats an escaping member.
-            # The requested root reaches this loop only after the pre-walk check
-            # has already refused an escaping one.
+            # A listed directory the listing then REFUSES rather than misses — a
+            # link out of the working set (issue #2427) or, since issue #2432, one
+            # that has become a symlink at all — tore the zip the same way: skip it
+            # too, so the walk treats a refused directory exactly as the caller
+            # above treats a refused member. The requested root reaches this loop
+            # only after the pre-walk check has already refused it.
             try:
                 entries = await view.list_dir(_rel_path(current or "."))
-            except PathTraversalError:
+            except _PATH_REFUSED:
                 _LOG.warning(
-                    "dir zip: server %s: directory %r escapes the working set; "
-                    "skipping",
+                    "dir zip: server %s: directory %r is refused; skipping",
                     server_id.value,
                     current,
                 )
@@ -423,8 +442,8 @@ class StorageFileStoreAdapter(FileStore):
         try:
             async for chunk in view.open_file_stream(_rel_path(rel_path)):
                 yield chunk
-        except PathTraversalError as exc:
-            raise InvalidFilePathError(rel_path) from exc
+        except _PATH_REFUSED as exc:
+            raise _refused(rel_path, exc) from exc
         except NotFoundError as exc:
             raise ServerFileNotFoundError(str(rel_path)) from exc
 
@@ -436,8 +455,8 @@ class StorageFileStoreAdapter(FileStore):
             versions = await self._storage.list_file_versions(
                 community, server, _rel_path(rel_path)
             )
-        except PathTraversalError as exc:
-            raise InvalidFilePathError(rel_path) from exc
+        except _PATH_REFUSED as exc:
+            raise _refused(rel_path, exc) from exc
         except NotFoundError as exc:
             raise ServerFileNotFoundError(str(server_id.value)) from exc
         return [version.value for version in versions]
@@ -455,8 +474,8 @@ class StorageFileStoreAdapter(FileStore):
             return await self._storage.read_file_version(
                 community, server, _rel_path(rel_path), _version_id(version_id)
             )
-        except PathTraversalError as exc:
-            raise InvalidFilePathError(rel_path) from exc
+        except _PATH_REFUSED as exc:
+            raise _refused(rel_path, exc) from exc
         except NotFoundError as exc:
             raise ServerFileNotFoundError(str(server_id.value)) from exc
 
@@ -473,8 +492,8 @@ class StorageFileStoreAdapter(FileStore):
             await self._storage.rollback_file(
                 community, server, _rel_path(rel_path), _version_id(version_id)
             )
-        except PathTraversalError as exc:
-            raise InvalidFilePathError(rel_path) from exc
+        except _PATH_REFUSED as exc:
+            raise _refused(rel_path, exc) from exc
         except NotFoundError as exc:
             raise ServerFileNotFoundError(str(server_id.value)) from exc
 

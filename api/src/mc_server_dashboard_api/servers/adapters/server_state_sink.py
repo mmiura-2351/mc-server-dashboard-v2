@@ -17,7 +17,8 @@ It is also where the Bedrock relay tunnel lifecycle is driven (issue #1544): a
 observed state changed, so it is the natural single hook for both directions —
 ``OpenBedrockTunnel`` when a Bedrock-enabled server's freshest known state is
 ``running``, ``CloseBedrockTunnel`` for every other freshest known state
-(starting/stopping/stopped/restarting/crashed). Gating on "freshest known"
+(starting/stopping/stopped/restarting/crashed, and unknown once a Worker could
+report it, issue #2474). Gating on "freshest known"
 (the repository's existing monotonic write guard, issue #216) matters here: an
 out-of-order/stale report must not flip the tunnel the wrong way.
 """

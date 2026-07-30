@@ -386,12 +386,11 @@ are a cache of reality, never an authority. Divergence between them is normal an
 expected (a server can be `desired=running, observed=crashed`); reconciliation
 (re-issuing commands, marking servers on a dead Worker) reads both. This mirrors
 [`ARCHITECTURE.md`](ARCHITECTURE.md) Section 3.3 (API holds desired state, Worker
-reports observed state). The reportable values (`starting` / `running` /
-`stopping` / `stopped` / `restarting` / `crashed`) mirror the control-plane
-`ServerState` enum ([`CONTROL_PLANE.md`](CONTROL_PLANE.md)); `unknown` is
-**API-inferred** — set by the API when the owning Worker disconnects and never
-reported by a Worker, which is why the proto `ServerState` enum has no `UNKNOWN`
-value.
+reports observed state). The values (`starting` / `running` / `stopping` /
+`stopped` / `restarting` / `crashed` / `unknown`) mirror the control-plane
+`ServerState` enum ([`CONTROL_PLANE.md`](CONTROL_PLANE.md)) exactly. `unknown` has
+two producers (issue #2474): the API infers it when the owning Worker disconnects,
+and a Worker reports it when it cannot currently confirm an instance's fate.
 
 **`assigned_worker_id` nullability and the missing FK.** A server is not
 permanently pinned to a Worker (FR-WRK-6). The column is null when stopped/unplaced,

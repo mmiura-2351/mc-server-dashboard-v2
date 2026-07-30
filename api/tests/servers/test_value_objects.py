@@ -66,8 +66,10 @@ def test_desired_state_values_match_database_check_enum() -> None:
     assert {s.value for s in DesiredState} == {"running", "stopped"}
 
 
-def test_observed_state_includes_api_inferred_unknown() -> None:
-    # The reportable values plus the API-inferred ``unknown`` (CONTROL_PLANE.md 6).
+def test_observed_state_values_mirror_the_wire_enum() -> None:
+    # The persisted vocabulary equals the control-plane ``ServerState`` vocabulary
+    # (CONTROL_PLANE.md Section 6). ``unknown`` joined the wire enum in issue #2474,
+    # so it is no longer an API-only inference.
     assert {s.value for s in ObservedState} == {
         "starting",
         "running",

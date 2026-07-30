@@ -865,8 +865,8 @@ enforces, inside the adapter, before any I/O:
 - The path is **canonicalized** and must resolve to a location **inside** the
   server's namespace root. Any result escaping the root (via `..`, symlinks, or
   encoding tricks) is rejected with a domain error, not silently clamped.
-- **Symlinks** within `current/` are not followed out of the root; a symlink that
-  points outside the server root is rejected.
+- **Symlinks** are refused at **every** path component, not followed — see the
+  per-component rule below.
 - The `(community_id, server_id)` scope is applied by the adapter from
   trusted, API-minted ids (Section 2), never from the `rel_path`, so cross-server
   or cross-Community access is structurally impossible.
@@ -874,6 +874,48 @@ enforces, inside the adapter, before any I/O:
 This is enforced in the adapter (not the use case) so that **every** backend gets
 the protection and a future backend cannot forget it; the rejection is a typed
 domain error so the API surface can map it to a uniform response.
+
+### 6.1 The per-component symlink rule (#2432)
+
+**Symlinks in a working set are unsupported, full stop — at rest included.** A
+working set cannot acquire one through any supported write: uploads refuse symlink
+members, hydrate rejects them, and the Worker's snapshot tar skips them. One can
+therefore only arrive out of band, from an operator over SSH.
+
+Every operation that takes a `rel_path` resolves it the same way, in this order:
+
+1. **Containment** — the resolved candidate must stay inside the server root.
+   Failing it is `PathTraversalError`, and it is decided **first**, so a link out
+   of the root always reports the escape rather than the refusal below.
+2. **The symlink refusal** — if resolving the path crossed a symlink at any
+   component, it is `SymlinkRefusedError`, distinct from `PathTraversalError`. The
+   edge renders it as `422 symlink_refused`, which is the reason the Worker's
+   running-server path already returns (`FileAccessReasonSymlinkRefused`), so one
+   browser click gets the same sentence whether the server is at rest or running.
+3. **The literal join is opened** — nothing has been followed, so the open answers
+   what is really at the path.
+
+Consequences worth stating:
+
+- Read-through of an operator-created **intermediate** symlink is deliberately
+  foreclosed on the fs backend (browsing a subfolder SSH-symlinked onto another
+  disk, say). That workflow is already broken system-wide — the running path
+  refuses it and hydrate will not start such a server at all.
+- A symlink **loop** and an over-long component stay the modelled **miss**: a
+  non-strict canonicalization leaves both literal, so step 2 sees nothing crossed
+  and the open reports `ELOOP` / `ENAMETOOLONG`, which the read paths already fold
+  into the miss (#2393/#2394).
+- **Mutations** apply the rule to their parent chain only; what a mutation does
+  with a **leaf** that is a link is a separate question (#2429), so a leaf link is
+  still resolved there.
+- `path_exists` likewise applies it to the parent chain only: its leaf is described
+  as itself, because a link occupies its name whatever it points at (#2426).
+- The fs realization compares the already-computed canonical path against the
+  literal join, so the rule costs no syscall beyond the one every resolve already
+  paid; it replaces the `lstat` the leaf-only rule needed. It leaves a
+  resolve-then-open window (only operator SSH can race it at rest); closing that
+  wants an `O_NOFOLLOW` open and is not done.
+- On a backend without symlinks (object storage, Section 7.3) step 2 is vacuous.
 
 ---
 

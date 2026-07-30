@@ -541,11 +541,11 @@ async def test_export_dir_appends_extra_entries(tmp_path: Path) -> None:
 async def test_download_dir_skips_a_member_it_cannot_read(tmp_path: Path) -> None:
     """One unreadable member is dropped, not allowed to abort the whole zip.
 
-    A listing describes every dirent, including ones that name no readable file:
-    a dangling symlink is listed (issue #2418) but its read is a miss, and so is
-    a member deleted between the listing and its read. Aborting the stream would
-    make one broken link cost the operator the entire directory download, so the
-    member is skipped and the zip stays valid without it.
+    A listing describes every dirent, including ones no read will serve: a
+    dangling symlink is listed (issue #2418) but its read is refused (issue #2432),
+    and a member deleted between the listing and its read is the miss. Aborting the
+    stream would make one broken link cost the operator the entire directory
+    download, so the member is skipped either way and the zip stays valid.
     """
 
     storage = FsStorage(tmp_path)
@@ -626,8 +626,8 @@ async def test_download_dir_does_not_descend_into_a_symlinked_directory(
     The other side of describing the link rather than its target (issue #2418):
     the walk branches on ``is_dir``, so a directory link stops being recursed —
     which is what makes an unbounded walk of a cyclic link impossible — and its
-    own read is a miss, so it is skipped like any other unreadable member. The
-    target's files are still in the zip under their real path.
+    own read is refused (issue #2432), so it is skipped like any other unreadable
+    member. The target's files are still in the zip under their real path.
     """
 
     storage = FsStorage(tmp_path)
@@ -716,8 +716,7 @@ async def test_download_dir_skips_a_member_whose_link_escapes_the_root(
     logged = [
         record.getMessage()
         for record in caplog.records
-        if record.levelname == "WARNING"
-        and "escapes the working set" in record.getMessage()
+        if record.levelname == "WARNING" and "is refused" in record.getMessage()
     ]
     assert [message for message in logged if "'escape'" in message]
     assert [message for message in logged if "'escape-dangling'" in message]
@@ -882,8 +881,7 @@ async def test_search_skips_a_member_whose_link_escapes_the_root(
     logged = [
         record.getMessage()
         for record in caplog.records
-        if record.levelname == "WARNING"
-        and "escapes the working set" in record.getMessage()
+        if record.levelname == "WARNING" and "is refused" in record.getMessage()
     ]
     assert [message for message in logged if "'escape'" in message]
     assert [message for message in logged if "'escape-dangling'" in message]
@@ -899,12 +897,12 @@ async def test_download_of_a_directory_link_answers_what_the_listing_showed(
     That probe used to follow the link and succeed, so a download zipped the
     target's subtree for an entry the file browser draws as a FILE (issue #2426).
 
-    The probe now agrees with the listing: the entry is not a directory, and it
-    names no readable file either (reading a symlink dirent is a miss, issue
-    #2418), so the download is the seam's own miss -- a 404 at the edge, decided
+    The probe now agrees with the listing: the entry is not a directory, and the
+    probe's own listing refuses a symlink dirent (issues #2418, #2432), so the
+    download is that refusal -- a 422 ``symlink_refused`` at the edge, decided
     before any byte is streamed. Visible in the browser, not downloadable: the
-    same answer a link to a FILE already gives, and the same one the Worker gives
-    for a running server.
+    same answer a link to a FILE already gives, and the same reason the Worker
+    gives for a running server.
     """
 
     storage = FsStorage(tmp_path)
@@ -930,12 +928,67 @@ async def test_download_of_a_directory_link_answers_what_the_listing_showed(
 
     listed = next(entry for entry in entries if entry.name == "alias")
     assert listed.is_dir is False
-    with pytest.raises(ServerFileNotFoundError):
+    with pytest.raises(InvalidFilePathError) as caught:
         await use_case.is_dir(
             community_id=CommunityId(community),
             server_id=ServerId(server),
             rel_path="alias",
         )
+    assert caught.value.reason == "symlink_refused"
+
+
+async def test_at_rest_reads_through_a_link_carry_the_worker_s_reason(
+    tmp_path: Path,
+) -> None:
+    """The at-rest branch mints the reason the running branch already returns.
+
+    This is the whole point of issue #2432 at the seam: ``?path=alias/inner.txt``
+    used to return the real bytes at rest and 422 ``symlink_refused`` while running,
+    so one browser click answered two different things depending on server state.
+    Storage now refuses the same path, and the seam labels it with the very reason
+    the Worker's ``FileAccessReasonSymlinkRefused`` maps to -- so the browser shows
+    one sentence (``files.error.symlinkRefused``) in either state, with no new i18n
+    key.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await publish(
+        storage,
+        StorageCommunityId(community),
+        StorageServerId(server),
+        {"real/inner.txt": b"INNER", "real/sub/f.txt": b"F"},
+    )
+    live = snapshot_dir(
+        tmp_path, StorageCommunityId(community), StorageServerId(server)
+    )
+    (live / "alias").symlink_to("real")
+    adapter = StorageFileStoreAdapter(storage=storage)
+    cid, sid = CommunityId(community), ServerId(server)
+
+    with pytest.raises(InvalidFilePathError) as read_refusal:
+        await adapter.read_file(
+            community_id=cid, server_id=sid, rel_path="alias/inner.txt"
+        )
+    assert read_refusal.value.reason == "symlink_refused"
+
+    with pytest.raises(InvalidFilePathError) as list_refusal:
+        await adapter.list_dir(community_id=cid, server_id=sid, rel_path="alias/sub")
+    assert list_refusal.value.reason == "symlink_refused"
+
+    stream = adapter.open_file_stream(
+        community_id=cid, server_id=sid, rel_path="alias/inner.txt"
+    )
+    with pytest.raises(InvalidFilePathError) as stream_refusal:
+        await anext(aiter(stream))
+    assert stream_refusal.value.reason == "symlink_refused"
+
+    # An ESCAPING link keeps its own reason: containment outranks the symlink rule,
+    # so the two verdicts stay distinguishable at the edge as well.
+    (live / "escape").symlink_to(tmp_path / "outside.txt")
+    with pytest.raises(InvalidFilePathError) as escape_refusal:
+        await adapter.read_file(community_id=cid, server_id=sid, rel_path="escape")
+    assert escape_refusal.value.reason == "invalid_path"
 
 
 # --- what the file ops do with a symlink DESTINATION / TARGET (issue #2426) --
@@ -1027,12 +1080,14 @@ async def test_rename_onto_a_file_link_does_not_overwrite_its_target(
 async def test_rename_onto_a_name_under_a_directory_link_is_refused(
     tmp_path: Path,
 ) -> None:
-    """The destination check must see through a link it does not itself describe.
+    """A destination under a link parent is refused rather than clobber-checked.
 
-    ``alias/inner.txt`` is a real file every read resolves and streams, so the
-    name is taken. An answer derived from the destination's parent listing cannot
-    say so — listing ``alias`` is a miss (issue #2426) — and the rename would then
-    overwrite the real file's bytes with the never-clobber check none the wiser.
+    While an intermediate link resolved, ``alias/inner.txt`` was a real file every
+    read streamed, so the name was TAKEN and the rename had to be the 409 — the one
+    shape no parent listing could see. Refusing a symlink at every component (issue
+    #2432) removes the hazard instead of pre-checking it: nothing can reach that
+    name any more, so the destination resolve refuses it outright with the same
+    422 ``symlink_refused`` the Worker's running path answers with.
     """
 
     storage = FsStorage(tmp_path)
@@ -1050,13 +1105,14 @@ async def test_rename_onto_a_name_under_a_directory_link_is_refused(
     adapter = StorageFileStoreAdapter(storage=storage)
     use_case = RenameFile(uow=_stopped_uow(community, server), file_store=adapter)
 
-    with pytest.raises(FileAlreadyExistsError):
+    with pytest.raises(InvalidFilePathError) as caught:
         await use_case(
             community_id=CommunityId(community),
             server_id=ServerId(server),
             from_path="g.txt",
             to_path="alias/inner.txt",
         )
+    assert caught.value.reason == "symlink_refused"
 
     assert (live / "real" / "inner.txt").read_bytes() == b"INNER"
     assert (live / "g.txt").read_bytes() == b"G"
@@ -1065,11 +1121,12 @@ async def test_rename_onto_a_name_under_a_directory_link_is_refused(
 async def test_rename_onto_a_directory_under_a_directory_link_is_refused(
     tmp_path: Path,
 ) -> None:
-    """The same shape whose destination is a DIRECTORY: the 409, never a crash.
+    """The same shape whose destination is a DIRECTORY: a 4xx, never a crash.
 
-    ``rename_file`` resolves through the link and would rename onto a directory,
-    raising a bare ``IsADirectoryError`` that no route maps — a 500 for a
-    destination the pre-check is supposed to have refused.
+    Following the link would rename onto a directory and raise a bare
+    ``IsADirectoryError`` that no route maps — a 500 for a destination that must be
+    refused. It was refused as the never-clobber 409; since issue #2432 the
+    destination resolve refuses the link component itself, one step earlier.
     """
 
     storage = FsStorage(tmp_path)
@@ -1087,13 +1144,14 @@ async def test_rename_onto_a_directory_under_a_directory_link_is_refused(
     adapter = StorageFileStoreAdapter(storage=storage)
     use_case = RenameFile(uow=_stopped_uow(community, server), file_store=adapter)
 
-    with pytest.raises(FileAlreadyExistsError):
+    with pytest.raises(InvalidFilePathError) as caught:
         await use_case(
             community_id=CommunityId(community),
             server_id=ServerId(server),
             from_path="g.txt",
             to_path="alias/sub",
         )
+    assert caught.value.reason == "symlink_refused"
 
     assert (live / "real" / "sub" / "f.txt").read_bytes() == b"F"
 
@@ -1106,8 +1164,10 @@ async def test_delete_of_a_directory_link_leaves_its_target_alone(
     ``DeleteFile`` picks file-vs-directory from the same probe the download uses.
     While it answered "directory" for a link, deleting the link ran ``delete_dir``
     on the link's TARGET: the real subtree was destroyed and the link left
-    dangling. The entry is not a directory and names no readable file, so the
-    delete is the seam's miss. Removing the link itself is #2429's question.
+    dangling. The entry is not a directory, and the probe's listing refuses a
+    symlink dirent, so the delete is that refusal (issue #2432 moved it from the
+    seam's miss to 422 ``symlink_refused``). Removing the link ITSELF is still
+    #2429's question -- this only pins that the target survives.
     """
 
     storage = FsStorage(tmp_path)
@@ -1125,12 +1185,13 @@ async def test_delete_of_a_directory_link_leaves_its_target_alone(
     adapter = StorageFileStoreAdapter(storage=storage)
     use_case = DeleteFile(uow=_stopped_uow(community, server), file_store=adapter)
 
-    with pytest.raises(ServerFileNotFoundError):
+    with pytest.raises(InvalidFilePathError) as caught:
         await use_case(
             community_id=CommunityId(community),
             server_id=ServerId(server),
             rel_path="alias",
         )
+    assert caught.value.reason == "symlink_refused"
 
     assert (live / "real" / "inner.txt").read_bytes() == b"INNER"
 
@@ -1520,8 +1581,9 @@ async def test_search_per_file_cap_is_not_bypassed_by_a_symlink(
     cap is only real if a listing never under-states what the read yields. A
     symlink broke exactly that: the link lists at 7 bytes (its target string) and
     slips under any cap, while following it read the whole target. Reading a
-    symlink dirent is a miss, so the oversized bytes are never pulled in — and
-    the needle they contain is never reported through the link (issue #2418).
+    symlink dirent is refused, so the oversized bytes are never pulled in — and
+    the needle they contain is never reported through the link (issues #2418,
+    #2432).
     """
 
     storage = FsStorage(tmp_path)

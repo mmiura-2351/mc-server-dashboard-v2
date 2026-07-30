@@ -435,10 +435,21 @@ running / stopped / starting / crashed; the contract adds the transient
 `STOPPING` and `RESTARTING` states the lifecycle commands pass through, so a
 client sees an accurate live state during a transition. The `ServerState` enum
 is the full set of values a Worker can report; the API caches the last-reported
-value in `observed_state` ([`DATABASE.md`](DATABASE.md)). The `unknown` value
-that column also allows is an API-side inference (set when the owning Worker
-disconnects), never reported by a Worker, so it is deliberately outside this wire
-contract and the enum has no `UNKNOWN` value.
+value in `observed_state` ([`DATABASE.md`](DATABASE.md)), whose value set this
+enum mirrors exactly.
+
+`SERVER_STATE_UNKNOWN` is part of that set as of issue #2474. It has two
+producers, and the wire value exists for the second:
+
+- the **API** infers it for every server assigned to a Worker whose session drops
+  (Section 4.4) — that path writes the column directly, not over this contract;
+- a **Worker** asserts it when it cannot currently confirm an instance's fate —
+  it neither observed a clean exit nor can it see the process (a failed-stop
+  orphan under an unreachable daemon). Reporting `STOPPED` or `RUNNING` there
+  would be a guess the API would cache as fact.
+
+The ingest maps every value in this enum onto the persisted state; only
+`SERVER_STATE_UNSPECIFIED` (the proto zero value) is dropped.
 
 Real-time delivery is best-effort end to end: if the control plane is down the
 API's REST endpoints still function and clients simply miss live updates

@@ -919,6 +919,11 @@ async def _path_is_dir(
     otherwise a successful ``list_dir`` means a directory, and a
     :class:`ServerFileNotFoundError` from it falls back to a file read (re-raising
     if that is missing too). Validates the path first.
+
+    Only the MISS falls back: a path the listing REFUSES — one with a symlink at
+    any component (#2432), or one escaping the working set — is neither a directory
+    nor a file, so the refusal propagates rather than being re-asked as a read that
+    would refuse it identically.
     """
 
     if rel_path in ("", "."):
@@ -946,16 +951,16 @@ async def _path_exists(
 
     The never-clobber pre-check for a rename destination. It asks about the NAME,
     not about what the name leads to, so it cannot be composed out of the read
-    methods: reading a symlink dirent is a miss and so is listing one (#2418,
+    methods: reading a symlink dirent is refused and so is listing one (#2418,
     #2426), which would report an occupied name as free and let the rename land on
     the link's target. Answering from the destination's PARENT listing has the
     same hole one level up — the parent may itself be a link, whose listing is
-    that same miss, while the path still resolves through it.
+    that same refusal, while the name is still occupied under it.
 
     The seam therefore answers it directly, resolving exactly as a read does:
-    intermediate components followed, the leaf described as itself, containment
-    first. What a mutation should then ACT on when the entry is a link is a
-    separate question (issue #2429).
+    containment first, then a symlink ABOVE the leaf is the refusal rather than
+    followed (#2432), and the leaf itself is described as itself. What a mutation
+    should then ACT on when the entry is a link is a separate question (#2429).
     """
 
     return await file_store.path_exists(
@@ -1145,9 +1150,10 @@ class SearchFiles:
     search and the file browser describe the same tree, and fetching the hit
     gets what fetching that entry from the browser gets — the read seam's
     refusal. Containment is decided first, on the resolved target: a link
-    resolving outside the working set is refused as an escape (422) whether or
-    not its target exists, and one resolving inside is the modelled miss (404)
-    whether it dangles or names a real file (#2438).
+    resolving outside the working set is refused as an escape (422
+    ``invalid_path``) whether or not its target exists, and one resolving inside is
+    refused as a symlink (422 ``symlink_refused``, #2432) whether it dangles or
+    names a real file (#2438).
     """
 
     uow: UnitOfWork
@@ -1187,10 +1193,11 @@ class SearchFiles:
                 # what the listing reports. So a symlink is a hit like any other
                 # entry, and a fetch of that hit is refused by the read seam,
                 # which decides containment first, on the resolved target: a
-                # link resolving outside the working set is an escape (422) even
-                # when its target does not exist, and one resolving inside is
-                # the modelled miss (404) whether it dangles or names a real
-                # file. Recorded decision (#2438):
+                # link resolving outside the working set is an escape (422
+                # invalid_path) even when its target does not exist, and one
+                # resolving inside is the symlink refusal (422 symlink_refused,
+                # #2432) whether it dangles or names a real file. Recorded
+                # decision (#2438):
                 # return it anyway. Fetching a search hit then answers exactly
                 # what fetching the same entry from the file browser answers;
                 # filtering here would leave the two surfaces disagreeing about
@@ -1227,23 +1234,24 @@ class SearchFiles:
             # ``truncated``), and one log line per vanished directory would be
             # unbounded noise during exactly the bulk delete that provokes it.
             #
-            # A listed directory that has become a link out of the working set is
-            # refused rather than missed, and that refusal 500'd the whole search
-            # (issue #2427). Skip it too — the same trade — but log it: unlike
-            # the delete race it is a standing misconfiguration an operator has
-            # to go remove, and it cannot arrive through any supported write.
+            # A listed directory the listing then REFUSES rather than misses — a
+            # link out of the working set (issue #2427) or, since issue #2432, one
+            # that has become a symlink at all — 500'd the whole search. Skip it
+            # too — the same trade — but log it with its reason: unlike the delete
+            # race it is a standing misconfiguration an operator has to go remove,
+            # and it cannot arrive through any supported write.
             try:
                 entries = await self.file_store.list_dir(
                     community_id=community_id, server_id=server_id, rel_path=current
                 )
             except ServerFileNotFoundError:
                 continue
-            except InvalidFilePathError:
+            except InvalidFilePathError as exc:
                 _LOG.warning(
-                    "file search: server %s: directory %r escapes the working "
-                    "set; skipping",
+                    "file search: server %s: directory %r is refused (%s); skipping",
                     server_id.value,
                     current,
+                    exc.reason,
                 )
                 continue
             base = "" if current == "." else current
@@ -1267,28 +1275,28 @@ class SearchFiles:
         if size > self.max_file_bytes:
             return False
         # A listing describes every dirent, including ones that name no readable
-        # file: a dangling symlink or a link to a directory is listed as an entry
-        # (issue #2418) whose read is a miss, and so is a file deleted between the
-        # listing and its read. Such an entry simply matches nothing — failing the
-        # whole search over it would cost the operator every other match.
+        # file: a file deleted between the listing and its read is a miss. Such an
+        # entry simply matches nothing — failing the whole search over it would
+        # cost the operator every other match.
         #
-        # A link that ESCAPES the working set is refused rather than missed
-        # (containment runs before the symlink answer), and letting that refusal
-        # out 500'd the whole search (issue #2427). It matches nothing either: it
-        # is unreadable through the seam under any design. It is logged, unlike
-        # the miss, because it is a standing misconfiguration an operator has to
-        # go remove rather than an ordinary race.
+        # A dirent the read REFUSES rather than misses — a link out of the working
+        # set (issue #2427) or, since issue #2432, any symlink dirent, dangling ones
+        # included — 500'd the whole search. It matches nothing either: it is
+        # unreadable through the seam under any design. It is logged with its
+        # reason, unlike the miss, because it is a standing misconfiguration an
+        # operator has to go remove rather than an ordinary race.
         try:
             data = await self.file_store.read_file(
                 community_id=community_id, server_id=server_id, rel_path=rel_path
             )
         except ServerFileNotFoundError:
             return False
-        except InvalidFilePathError:
+        except InvalidFilePathError as exc:
             _LOG.warning(
-                "file search: server %s: %r escapes the working set; skipping",
+                "file search: server %s: %r is refused (%s); skipping",
                 server_id.value,
                 rel_path,
+                exc.reason,
             )
             return False
         return needle in data

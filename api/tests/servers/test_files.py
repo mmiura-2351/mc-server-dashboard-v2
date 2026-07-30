@@ -162,7 +162,7 @@ class FakeFileStore(FileStore):
         # A name is occupied by a seeded file or a seeded directory; the root is
         # always there. Deliberately NOT derived from ``list_dir``: the real seam
         # answers this one without a listing (issue #2426), because a listing
-        # misses on a symlink the name is nonetheless occupied by.
+        # refuses a symlink the name is nonetheless occupied by.
         if self.bad_path:
             raise InvalidFilePathError(rel_path)
         return rel_path in ("", ".") or rel_path in self.files or rel_path in self.dirs
@@ -2493,10 +2493,11 @@ async def test_search_content_skips_oversized_file_without_reading_it() -> None:
 async def test_search_content_skips_a_listed_file_it_cannot_read() -> None:
     """One unreadable entry is skipped, not allowed to abort the whole search.
 
-    A listing describes every dirent, including ones that name no readable file:
-    a dangling symlink is listed (issue #2418) but its read is a miss, and so is
-    a file deleted between the listing and its read. Failing the search over one
-    such entry would cost the operator every other match.
+    A listing describes every dirent, including ones no read will serve: a file
+    deleted between the listing and its read is the miss this pins (a dangling
+    symlink is listed too, but its read is the refusal — issue #2432 — which the
+    fs-backed tests cover). Failing the search over one such entry would cost the
+    operator every other match.
     """
 
     community, server_id = uuid.uuid4(), uuid.uuid4()

@@ -9,8 +9,11 @@ layer's :class:`ControlPlane` seam).
 
 The Port speaks the servers domain's own ids and raises the servers file errors
 (:class:`ServerFileNotFoundError`, :class:`InvalidFilePathError`); the adapter
-translates the storage ``NotFoundError`` / ``PathTraversalError`` at the seam, so
-no storage type crosses into the application layer.
+translates the storage ``NotFoundError`` / ``PathTraversalError`` /
+``SymlinkRefusedError`` at the seam, so no storage type crosses into the
+application layer. The last two both become :class:`InvalidFilePathError`, with the
+``symlink_refused`` reason distinguishing a refused path-component symlink from a
+traversal escape (issue #2432).
 """
 
 from __future__ import annotations

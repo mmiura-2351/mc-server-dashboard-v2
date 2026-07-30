@@ -527,6 +527,25 @@ def test_read_is_a_directory_surfaces_reason() -> None:
     assert resp.json()["reason"] == "is_a_directory"
 
 
+def test_read_symlink_refused_surfaces_reason() -> None:
+    # The reason both branches now produce for a path-component symlink: the Worker
+    # for a running server, Storage for one at rest (issue #2432). It must ride
+    # through to the 422 body, because that reason is what selects the browser's
+    # "Symbolic links are not allowed." sentence -- the one answer the operator gets
+    # for the same click in either state.
+    app = _app(
+        member=True,
+        allow=True,
+        read=_FakeUseCase(error=InvalidFilePathError("x", reason="symlink_refused")),
+    )
+    client = next(_client(app))
+    resp = client.get(
+        _url(uuid.uuid4(), uuid.uuid4()), params={"path": "alias/inner.txt"}
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "symlink_refused"
+
+
 def test_read_payload_too_large_is_413() -> None:
     # A running-server read past the control-plane cap (issue #548) -> 413.
     app = _app(member=True, allow=True, read=_FakeUseCase(error=FileTooLargeError("x")))
@@ -1651,6 +1670,47 @@ def test_file_download_grant_for_a_traversal_path_is_422() -> None:
     resp = _mint(client, uuid.uuid4(), uuid.uuid4(), "../escape")
     assert resp.status_code == 422
     assert resp.json()["reason"] == "invalid_path"
+
+
+def test_file_download_grant_for_a_symlink_path_surfaces_the_symlink_reason() -> None:
+    # The mint is the operator-visible failure point on the download surface: since
+    # issue #2352 the Web UI mints a grant BEFORE any download, so a symlink path is
+    # refused here and the download is never reached. Collapsing the reason to
+    # invalid_path made the browser say "Invalid path" for a path the read route
+    # already answers "Symbolic links are not allowed." for -- the parity issue
+    # #2432 exists to reach, on the one at-rest read surface it had missed.
+    app = _app(
+        member=True,
+        allow=True,
+        download=_FakeDownload(
+            error=InvalidFilePathError("x", reason="symlink_refused")
+        ),
+    )
+    client = next(_client(app))
+    resp = _mint(client, uuid.uuid4(), uuid.uuid4(), "alias/inner.txt")
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "symlink_refused"
+
+
+def test_download_of_a_symlink_path_surfaces_the_symlink_reason() -> None:
+    # The redemption side of the same surface: a grant minted before the link was
+    # planted, or a direct Bearer download, still has to answer with the reason the
+    # read route gives rather than a blanket invalid_path (issue #2432).
+    app = _app(
+        member=True,
+        allow=True,
+        download=_FakeDownload(
+            error=InvalidFilePathError("x", reason="symlink_refused")
+        ),
+    )
+    client = next(_client(app))
+    resp = client.get(
+        _url(uuid.uuid4(), uuid.uuid4(), "/download"),
+        params={"path": "alias/inner.txt"},
+        headers=_bearer(),
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "symlink_refused"
 
 
 def test_file_download_grant_for_a_running_server_is_409_and_audits_denied() -> None:
