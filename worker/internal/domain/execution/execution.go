@@ -206,6 +206,18 @@ type Instance interface {
 	Stop(ctx context.Context, graceful bool, preFallback ...func(context.Context) bool) error
 	// Status reports the last observed state.
 	Status() ServerState
+	// ProbeAlive reports whether the instance's underlying process/container is
+	// currently alive, by direct observation (not cached state): neither Status
+	// nor Events can answer it, since both Stop failure paths reset the cached
+	// state to its pre-stop value and Events only carries transitions the driver
+	// could confirm. err != nil means the answer is genuinely unavailable (e.g.
+	// the backend daemon is unreachable) — never a guessed false. It is
+	// single-shot: the caller owns the retry cadence.
+	//
+	// A core method rather than an optional capability (LogSource/StatsSource):
+	// converging on a container that outlived a failed stop is a correctness
+	// obligation of every driver, not an optional nicety (issue #2467).
+	ProbeAlive(ctx context.Context) (alive bool, err error)
 	// Events streams state transitions for this instance until it terminates.
 	Events() <-chan StatusEvent
 }
