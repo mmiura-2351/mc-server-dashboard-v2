@@ -92,8 +92,8 @@ class WorkingSetView(abc.ABC):
         (issue #2394). Entries are described exactly as :meth:`FileStore.list_dir`
         describes them: one deleted while the listing is taken is omitted (issue
         #2414), and every other one describes itself rather than what it points at
-        (issue #2418). The set of paths that miss is the same too, symlink leaf
-        included (issue #2426).
+        (issue #2418). The set of paths that miss is the same too, and so is the
+        set it refuses — a symlink at any component (issues #2426, #2432).
         """
 
     @abc.abstractmethod
@@ -106,14 +106,14 @@ class WorkingSetView(abc.ABC):
         (issue #2391); because locating the file is part of opening it, that race
         can only be reported on the stream's FIRST iteration. What the view can
         settle without touching the file — an unpinned (unpublished) view, and a
-        path whose leaf is a symlink (issue #2418) — is raised when the stream is
-        constructed instead. Callers therefore have to be ready for the miss at
-        either point; every caller in the tree reaches it through a generator, so
-        both arrive at the same place.
+        path with a symlink at any component (issues #2418, #2432) — is raised when
+        the stream is constructed instead. Callers therefore have to be ready for
+        the outcome at either point; every caller in the tree reaches it through a
+        generator, so both arrive at the same place.
 
         The set of paths that miss is exactly :meth:`FileStore.open_file_stream`'s,
-        symlink leaf included, or the export walk would read bytes the view's own
-        listing did not describe.
+        and so is the set it refuses, or the export walk would read bytes the view's
+        own listing did not describe.
         """
 
     @abc.abstractmethod
@@ -600,6 +600,20 @@ class FileStore(abc.ABC):
     """Port slice: authoritative-copy file read/edit for stopped servers.
 
     See Section 3.4.
+
+    **One resolve rule for every operation here** (Section 6, issue #2432):
+    containment is decided first — a ``rel_path`` that leaves the server root is
+    :class:`~.errors.PathTraversalError` — and then a path that resolves through a
+    SYMLINK at any component is :class:`~.errors.SymlinkRefusedError` rather than
+    followed. Symlinks in a working set are unsupported outright, at rest included:
+    one can only get there out of band (an operator over SSH), the Worker's
+    running-server path already refuses at every component, and hydrate will not
+    start a server whose set contains one. On a backend without symlinks (object
+    storage, Section 7.3) the second rule is vacuous.
+
+    The MUTATIONS apply the rule to their parent chain; what a mutation does with a
+    LEAF that is a link is a separate question (issue #2429), so a leaf link is
+    still resolved there and each mutation keeps its current behaviour on one.
     """
 
     @abc.abstractmethod
@@ -644,17 +658,24 @@ class FileStore(abc.ABC):
         is real. A path that names a file the backend cannot read — no
         permission, an I/O error — is NOT a miss and surfaces as itself.
 
-        It also covers a path whose LEAF is a symlink of any kind, not only one
-        that loops (issue #2418): a read never follows a link, because
-        :meth:`list_dir` describes that entry as the link and a following read
-        would return bytes the listed size does not account for — the size a
-        caller has already put on the wire as a ``Content-Length``, and the size
-        a content search gates its per-file memory cap on. Only the leaf is
-        refused; an intermediate component still resolves, and a link that
-        escapes the server root is still the traversal refusal rather than this
-        miss. A working set has no legitimate symlink in it anyway (uploads
-        refuse symlink members, the Worker's snapshot tar skips them, hydrate
-        rejects them), so this closes a shape that can only arrive out of band.
+        A path with a symlink at ANY component is not part of that miss: it is
+        :class:`~.errors.SymlinkRefusedError` (issues #2418, #2432). A read never
+        follows a link, because :meth:`list_dir` describes that entry as the link
+        and a following read would return bytes the listed size does not account
+        for — the size a caller has already put on the wire as a
+        ``Content-Length``, and the size a content search gates its per-file
+        memory cap on. The rule is per COMPONENT, not per leaf: while an
+        intermediate one resolved, the same ``?path=alias/inner`` answered with the
+        real bytes at rest and 422 ``symlink_refused`` while running, since the
+        Worker refuses at every component. A working set has no legitimate symlink
+        in it anyway (uploads refuse symlink members, the Worker's snapshot tar
+        skips them, hydrate rejects them), so symlinks in a working set are
+        unsupported outright, at rest included.
+
+        A link that escapes the server root is still the traversal refusal, never
+        this one: containment is decided first. A LOOP and an over-long component
+        stay inside the miss above — no resolve can name them, so nothing is
+        followed and there is nothing to refuse.
         """
 
     @abc.abstractmethod
@@ -690,19 +711,20 @@ class FileStore(abc.ABC):
 
         Passing a link's own path back to THIS method is the same question and
         gets the same answer: the leaf is not followed, so listing a link to a
-        directory is the miss above rather than the target's children (issue
-        #2426). It has to be, because both answers are taken inside one request —
-        a download picks its single-file / directory-zip branch by probing
-        exactly this method on the entry's own path, and a probe that followed
-        the link zipped a subtree for an entry the same listing draws as a file.
-        A link to a directory is therefore a visible entry that is not navigable
-        and not downloadable, which is what the running-server browser already
-        does with it.
+        directory raises :class:`~.errors.SymlinkRefusedError` rather than
+        returning the target's children (issues #2426, #2432). It has to be,
+        because both answers are taken inside one request — a download picks its
+        single-file / directory-zip branch by probing exactly this method on the
+        entry's own path, and a probe that followed the link zipped a subtree for
+        an entry the same listing draws as a file. A link to a directory is
+        therefore a visible entry that is not navigable and not downloadable,
+        which is what the running-server browser already does with it.
 
-        Only the LEAF is refused: an intermediate component still resolves
-        (listing ``alias/inner`` still lists the target's subdirectory), and a
-        link that escapes the server root is still the traversal refusal rather
-        than this miss.
+        The refusal is per COMPONENT, not per leaf (issue #2432): listing
+        ``alias/inner`` is refused too, so a browser gets one answer for a
+        link-bearing path whether the server is at rest or running. A link that
+        escapes the server root is still the traversal refusal, never this one:
+        containment is decided first.
         """
 
     @abc.abstractmethod
@@ -720,16 +742,19 @@ class FileStore(abc.ABC):
         occupy their names too.
 
         Composing this out of the read methods is not possible and must not be
-        attempted: reading a symlink dirent is a miss (:meth:`read_file`) and so is
+        attempted: reading a symlink dirent is refused (:meth:`read_file`) and so is
         listing one (:meth:`list_dir`), so a probe built from them reports "free"
         for an occupied name — and the caller then writes through the link onto
         whatever it points at. Answering the parent listing instead only moves the
         blind spot: the parent may itself be a link, whose listing is that same
-        miss, while the path still resolves through it.
+        refusal, while the name is still occupied under it.
 
-        Resolution therefore matches a READ exactly: intermediate components are
-        followed, only the leaf is described as itself. Containment runs first, so
-        a path escaping the server root raises
+        Resolution therefore matches a READ exactly, including its per-component
+        symlink rule: a symlink ABOVE the leaf raises
+        :class:`~.errors.SymlinkRefusedError` (issue #2432), because no read can
+        reach such a path any more and so nothing there needs protecting from a
+        clobber. Only the LEAF is described as itself. Containment runs first, so a
+        path escaping the server root raises
         :class:`~.errors.PathTraversalError` rather than answering. Never raises
         for a path that simply is not there, including one no backend can name
         (over-long, issue #2394): absent is ``False``, not an error.
