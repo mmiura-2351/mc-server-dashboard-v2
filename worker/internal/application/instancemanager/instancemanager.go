@@ -1885,12 +1885,18 @@ func (m *Manager) handleTunnelDial(ctx context.Context, cmd session.Command) ses
 // credential, idempotently confirms) this server's Bedrock relay QUIC tunnel
 // (docs/app/BEDROCK_TUNNEL.md, issue #1546). Like TunnelDial, the server must
 // be running locally, and a failed-stop orphan is refused as INVALID_STATE
-// rather than SERVER_NOT_FOUND (issue #2466) — a live orphan reaches this
-// handler in practice: the API reads the orphan's INVALID_STATE refusal of a
-// StartServer as already-running, converges observed=running, and syncs the
-// Bedrock tunnel off that write (servers/application/lifecycle.py, the
-// INVALID_STATE arms of StartServer / redispatch_start). Like TunnelDial the
-// dispatch is fire-and-forget, so the refusal reaches only the API's WARN log.
+// rather than SERVER_NOT_FOUND (issue #2466) — an orphan reaches this handler
+// because the API dispatches Open off an observed=running WRITE (the sink's hook
+// on an applied StatusChange(running), or a lifecycle convergence;
+// servers/adapters/bedrock_tunnel_sync.py) and that dispatch is fire-and-forget,
+// so a stop whose driver Stop cannot confirm termination in the gap records the
+// orphan before the command lands: the API's cached running state does not move
+// until the Worker's own next report. The refusal therefore reaches only the
+// API's WARN log, which must not say the server is not running about a process
+// that may still be alive. This verb keeps INVALID_STATE where start / hydrate /
+// stopped-id snapshot moved to BUSY (issue #2476): it is refused for what the
+// state IS and is never carried out once the orphan converges, so BUSY would
+// promise a success that never comes.
 //
 // Unlike TunnelDial, Open does not itself dial/handshake
 // synchronously: it registers the tunnel and returns, while the QUIC dial,
