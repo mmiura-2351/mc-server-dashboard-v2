@@ -88,8 +88,15 @@ class _CapturingFleetControlPlane(FleetControlPlane):
 
 
 def _adapter(fleet: FleetControlPlane) -> FleetControlPlaneAdapter:
+    # A real (empty) registry rather than None: since #2481 a snapshot dispatch
+    # records the Worker's declared held generation, so this seam is no longer
+    # unused by snapshot. These tests assert on URLs, timeouts and command shapes
+    # and register no Worker, and recording against an unregistered Worker is
+    # silently ignored — so the wiring is honest without changing what they pin.
     return FleetControlPlaneAdapter(
-        registry=None,  # type: ignore[arg-type]  # unused by hydrate/snapshot
+        registry=InMemoryWorkerRegistry(
+            clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT
+        ),
         control_plane=fleet,
         data_plane_base_url="https://api.example/",
         worker_credential="shhh",

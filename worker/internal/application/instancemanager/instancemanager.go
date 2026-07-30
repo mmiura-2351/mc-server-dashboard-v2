@@ -684,13 +684,18 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	// pin guards the running path's marker stamp; nil (and unused) on the stopped path,
 	// which records no generation. Declared here so the post-upload tail below can see it.
 	var pin *workingDirRef
-	// heldGeneration is what this command DECLARES the Worker still holds when it
+	// declaredGeneration is what this command DECLARES the Worker still holds when it
 	// returns (issue #2481); nil declares nothing. It has exactly one assignment, in
 	// the running branch's tail, and its value comes from recordGenerationIfUnchanged
 	// reporting that the marker write landed — so the declaration cannot disagree with
 	// the marker, and the stopped-id branch (which calls removeScratch instead of that
 	// function, and is the else of the same if) has no statement that can set it.
-	var heldGeneration *uint64
+	//
+	// Deliberately NOT named heldGeneration: that is the package function
+	// (scratchscan.go) computing the register-time advertisement this value mirrors,
+	// and shadowing it here would hide the very identifier a reader needs to follow to
+	// see that the two report the same marker.
+	var declaredGeneration *uint64
 	if running {
 		// Pin the working dir's IDENTITY for the whole window, from before the quiesce
 		// to the post-upload marker stamp (issue #2284). Because this branch takes no
@@ -934,7 +939,7 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// wire instead of on disk — hence the value is taken FROM the write's report, not
 		// from being in this branch.
 		if m.recordGenerationIfUnchanged(pin, workingDir, cmd.ServerID, gen) {
-			heldGeneration = &gen
+			declaredGeneration = &gen
 		}
 		// GC the displaced tree a prior hydrate kept aside (issue #906): a successful
 		// publish proves the store now holds (and supersedes) this server's world, so the
@@ -965,7 +970,7 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		m.removeScratch(cmd.ServerID)
 	}
 	return session.CommandResult{
-		CommandID: cmd.CommandID, Success: true, HeldGeneration: heldGeneration,
+		CommandID: cmd.CommandID, Success: true, HeldGeneration: declaredGeneration,
 	}
 }
 
