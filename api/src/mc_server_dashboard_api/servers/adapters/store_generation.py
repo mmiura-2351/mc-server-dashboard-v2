@@ -2,7 +2,9 @@
 
 Binds the reconciler's skip-hydrate threshold (issue #763) to Storage's
 authoritative ``current_generation`` — the single source of truth that advances
-atomically with the published working set. It maps the servers value objects onto
+atomically with the published working set — and the held-inventory refresh (issue
+#2477) to ``current_publisher``, which tells the caller WHOSE scratch produced that
+generation. It maps the servers value objects onto
 the storage value objects at the bounded-context boundary (the lifecycle layer
 never imports the storage domain).
 """
@@ -37,6 +39,14 @@ class StorageGenerationReader(StoreGenerationReader):
         self, *, community_id: CommunityId, server_id: ServerId
     ) -> int:
         return await self.storage.current_generation(
+            StorageCommunityId(community_id.value),
+            StorageServerId(server_id.value),
+        )
+
+    async def current_publisher(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> str | None:
+        return await self.storage.current_publisher(
             StorageCommunityId(community_id.value),
             StorageServerId(server_id.value),
         )

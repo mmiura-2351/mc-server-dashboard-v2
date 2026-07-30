@@ -720,6 +720,61 @@ async def test_start_hydrates_when_worker_holds_nothing() -> None:
     assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
 
 
+async def test_start_records_the_hydrated_generation_as_held() -> None:
+    # Issue #2477: a server placed after its Worker registered is absent from the
+    # registration advertisement, so the start hydrates. Once that hydrate SUCCEEDS the
+    # Worker's scratch IS the store's working set, so the generation is recorded — the
+    # next restart can then skip the hydrate and take the short reconciler grace.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = FakeControlPlane(place_to=WorkerId(worker))
+
+    await _start_server(uow, cp, store_generation=6)(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
+    assert cp.recorded_held == [(WorkerId(worker), ServerId(server_id), 6)]
+
+
+async def test_start_records_nothing_as_held_when_the_hydrate_fails() -> None:
+    # A failed hydrate leaves a torn/partial tree the Worker's own generation marker
+    # does not claim either. Recording it would make a later start skip the hydrate
+    # that would repair it, so nothing is recorded (issue #2477).
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    failed = CommandOutcome(status=CommandStatus.TRANSFER_FAILED, message="boom")
+    cp = FakeControlPlane(place_to=WorkerId(worker), outcomes={"hydrate": failed})
+
+    with pytest.raises(CommandDispatchError):
+        await _start_server(uow, cp, store_generation=6)(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert cp.recorded_held == []
+
+
+async def test_start_records_nothing_as_held_when_hydrate_is_skipped() -> None:
+    # A skip-hydrate start changes nothing about what the Worker holds — the entry that
+    # authorised the skip already says so (issue #2477).
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = FakeControlPlane(
+        place_to=WorkerId(worker),
+        held={(WorkerId(worker), ServerId(server_id)): 5},
+    )
+
+    await _start_server(uow, cp, store_generation=5)(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert [k for k, _, _ in cp.dispatched] == ["start"]
+    assert cp.recorded_held == []
+
+
 async def test_start_generation_read_failure_compensates_without_dispatching() -> None:
     # The post-commit generation-gate read (#1007) is a PRE-dispatch step: a
     # transient Storage failure there sent no start command, so the committed

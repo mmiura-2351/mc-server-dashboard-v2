@@ -242,12 +242,22 @@ class FleetControlPlaneAdapter(ControlPlane):
             WorkerStatus.DRAINING,
         )
 
+    def record_held_generation(
+        self, *, worker_id: WorkerId, server_id: ServerId, generation: int
+    ) -> None:
+        # Keep the held-working-set inventory current within a session (issue #2477);
+        # same id bridging as held_generation below.
+        self._registry.record_held_generation(
+            _fleet_worker(worker_id), str(server_id.value), generation
+        )
+
     def held_generation(
         self, *, worker_id: WorkerId, server_id: ServerId
     ) -> int | None:
         # Read the held-working-set inventory the Worker advertised on Register
-        # (issue #763). The registry keys it by the fleet worker-id string and the
-        # server-id string (the wire spelling); the seam bridges both.
+        # (issue #763), as refreshed by record_held_generation (issue #2477). The
+        # registry keys it by the fleet worker-id string and the server-id string
+        # (the wire spelling); the seam bridges both.
         return self._registry.held_generation(
             _fleet_worker(worker_id), str(server_id.value)
         )

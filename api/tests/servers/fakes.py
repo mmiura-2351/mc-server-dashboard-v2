@@ -173,16 +173,23 @@ class FakeStoreGenerationReader(StoreGenerationReader):
     Returns a fixed generation for every server (default 0, the "no snapshot
     published" case). Pass ``generation`` to pin a non-zero authoritative store
     generation (issue #763) so a test can drive the reconciler's
-    ``held >= store`` comparison.
+    ``held >= store`` comparison, and ``publisher`` to pin who published it (issue
+    #2477) so a test can drive the held-inventory refresh's same-publisher check.
     """
 
-    def __init__(self, *, generation: int = 0) -> None:
+    def __init__(self, *, generation: int = 0, publisher: str | None = None) -> None:
         self._generation = generation
+        self._publisher = publisher
 
     async def current_generation(
         self, *, community_id: CommunityId, server_id: ServerId
     ) -> int:
         return self._generation
+
+    async def current_publisher(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> str | None:
+        return self._publisher
 
 
 class FakeVersionValidator(VersionValidator):
@@ -1175,6 +1182,9 @@ class FakeControlPlane(ControlPlane):
         # a (worker, server) pair absent here returns None (NOT held), so the default
         # is to hydrate.
         self._held = held or {}
+        # Every record_held_generation call (issue #2477) — (worker, server, generation)
+        # — so a test can pin the value recorded and the paths that record nothing.
+        self.recorded_held: list[tuple[WorkerId, ServerId, int]] = []
         self.dispatched: list[tuple[str, WorkerId, ServerId]] = []
         # Command lines forwarded through command() — (server, line) — so a test
         # can assert the exact broadcast a scheduled warning sends (issue #1839).
@@ -1208,6 +1218,14 @@ class FakeControlPlane(ControlPlane):
 
     def is_worker_connected(self, *, worker_id: WorkerId) -> bool:
         return self._connected.get(worker_id, True)
+
+    def record_held_generation(
+        self, *, worker_id: WorkerId, server_id: ServerId, generation: int
+    ) -> None:
+        # Mirror the real registry: refresh the held entry (issue #2477) and record the
+        # call so a test can assert WHICH generation was recorded, and when it was not.
+        self._held[(worker_id, server_id)] = generation
+        self.recorded_held.append((worker_id, server_id, generation))
 
     def held_generation(
         self, *, worker_id: WorkerId, server_id: ServerId

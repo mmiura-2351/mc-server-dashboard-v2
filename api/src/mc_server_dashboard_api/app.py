@@ -860,6 +860,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     snapshot_timeout_seconds=settings.control.snapshot_timeout_seconds,
                 ),
                 clock=ServersSystemClock(),
+                store_generation=StorageGenerationReader(storage=storage),
                 default_interval_seconds=settings.snapshot.default_interval_seconds,
                 min_interval_seconds=settings.snapshot.min_interval_seconds,
             )

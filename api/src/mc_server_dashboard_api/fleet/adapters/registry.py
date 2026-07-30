@@ -84,12 +84,15 @@ class InMemoryWorkerRegistry(WorkerRegistry):
         # drain intent survives the Go agent's automatic reconnect; only the
         # DELETE drain endpoint clears it (FR-WRK-5).
         self._drained: set[WorkerId] = set()
-        # The working sets each connected Worker reported it already holds in its
-        # persistent scratch at its current registration, mapped to the GENERATION
-        # each is at (issue #763). Replaced on every (re)register, so it tracks only
-        # the live session's reality; the lifecycle layer reads it via
-        # held_generation to skip the destructive hydrate on a same-worker restart
-        # only when the held generation is fresh enough.
+        # The working sets each connected Worker holds in its persistent scratch,
+        # mapped to the GENERATION each is at (issue #763). Seeded from what the
+        # Worker advertised at its current registration and REPLACED on every
+        # (re)register, so it tracks only the live session's reality; kept current
+        # WITHIN a session by record_held_generation (issue #2477), because a server
+        # placed after the Worker registered was not in the advertisement and would
+        # otherwise read back as "nothing held" for the whole session. The lifecycle
+        # layer reads it via held_generation to skip the destructive hydrate on a
+        # same-worker restart only when the held generation is fresh enough.
         self._held: dict[WorkerId, dict[str, int]] = {}
 
     def register(
@@ -120,6 +123,16 @@ class InMemoryWorkerRegistry(WorkerRegistry):
         self._next_session += 1
         self._sessions[worker.id] = session
         return session
+
+    def record_held_generation(
+        self, worker_id: WorkerId, server_id: str, generation: int
+    ) -> None:
+        # Only for a Worker with a live registration: keying an entry off an unknown
+        # id would resurrect a held claim for a Worker whose session (and whose
+        # scratch reality) this registry no longer tracks.
+        held = self._held.get(worker_id)
+        if held is not None:
+            held[server_id] = generation
 
     def held_generation(self, worker_id: WorkerId, server_id: str) -> int | None:
         return self._held.get(worker_id, {}).get(server_id)

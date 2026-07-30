@@ -94,6 +94,19 @@ cannot occur on a re-dispatch to the SAME connected Worker. Every other path
 stop-side actions) keeps the full ``grace_seconds``, preserving the #822
 duplicate-start and #847 stale-snapshot floors.
 
+That held predicate went from almost-never-true to routinely true in #2477 (the held
+inventory used to be frozen at Worker registration, so every server placed since
+reported nothing held). The two gates it rides on are unchanged, and they are what
+the long grace's floors actually rest on: the re-dispatch goes to the SAME connected
+Worker — so the cross-worker duplicate-live-instance race (#822) is structurally
+impossible, its double-start guard rejecting a second live start — and it is
+command-only, so the round trip it must outlast is a start command, not a hydrate.
+``held_start_grace_seconds`` has its own boot-time floor above
+``command_timeout_seconds`` for exactly that budget. The #847 stale-snapshot floor
+belongs to the stop side and to ``place_and_start``, neither of which can take the
+short grace. So a truthful held predicate widens WHERE the short grace applies
+without weakening WHAT it is allowed to assume.
+
 Per-server exponential backoff — a failed action is not retried until a growing
 window (``backoff_base_seconds`` doubled per consecutive failure, capped at
 ``backoff_max_seconds``) has lapsed, so a persistently failing server does not

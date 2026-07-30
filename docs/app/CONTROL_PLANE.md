@@ -160,6 +160,17 @@ snapshot over it and roll the world back, while a *stale* held set (e.g. an
 A→B→A leftover scratch B has advanced past) must still hydrate (issue #763,
 generalizing #696, see Section 5).
 
+`Register` only ever describes the Worker's scratch *at connect time*, so the API
+keeps its record current **within** the session (issue #2477): a successful hydrate
+records the generation the transfer served, and a periodic snapshot the Worker
+published from a working set it keeps records the generation that publish produced.
+Without that refresh every server **placed since** the Worker last registered was
+absent from the advertisement and read back as "nothing held" for the whole
+session — so the skip gate below, and the reconciler's short held-start grace,
+almost never applied. A re-registration replaces the whole record: the Worker's own
+on-disk scan always wins over the API's within-session tracking. The API never
+records a generation it cannot prove the Worker holds — see Section 5.1.
+
 A snapshot advances that persisted generation **only while the working dir is still the
 directory the snapshot pinned when it began** (issue #2284). A running-id snapshot holds
 no per-server reservation (#829 item 4), so a new stream can re-place the server onto
@@ -353,12 +364,33 @@ restart (the reconciler's same-worker re-dispatch, where the assigned Worker is
 unchanged) starts on the Worker's **existing** working set when it is current: the
 persistent scratch is the live, newer copy (snapshots are pushed *from* it), so a
 hydrate there would clobber it with the last snapshot and roll the world back. The
-API skips the hydrate when, and only when, the assigned Worker reported that
-server in its `Register.held_servers` (Section 4.1) at a **generation at least the
-authoritative store generation** — so a fresh/wiped/GC'd scratch (reported as not
+API skips the hydrate when, and only when, the assigned Worker is known to hold that
+server's working set at a **generation at least the authoritative store generation**
+— so a fresh/wiped/GC'd scratch (reported as not
 held, or a Worker too old to report) AND a *stale* held set (a generation older
 than the store) both still hydrate, rather than booting an empty world or starting
-on stale leftover scratch. The store generation is a per-server counter the
+on stale leftover scratch.
+
+That knowledge comes from `Register.held_servers` (Section 4.1) plus the two
+within-session events the API can prove advance the Worker's scratch (issue #2477):
+
+- a **successful hydrate** — recorded at the store generation read immediately
+  *before* the transfer. The data plane serves the generation current at pull time,
+  which the monotonic counter puts at or after that read, so the recorded value can
+  only understate what the Worker ends up holding.
+- a **periodic snapshot** whose publish is still the store's `current` **and** was
+  published by that same Worker (`current_publisher`) — that generation came *from*
+  this Worker's scratch, so the scratch is at least as fresh as the store. Anything
+  else advanced the store past what the Worker holds (an at-rest edit #889, a
+  restore #873, another Worker) and is not recorded.
+
+A **stopped-id** snapshot is deliberately excluded: the Worker GCs its scratch
+straight after publishing one (issue #762/#841) and then holds nothing at all.
+Because that publish also bumps the store past any earlier recorded value, the
+record goes stale on its own and the next start hydrates. The asymmetry is the point
+— understating what a Worker holds only costs an unnecessary hydrate, while
+overstating it would make a start skip a hydrate it needs and boot a stale or absent
+world. The store generation is a per-server counter the
 authoritative Storage bumps on each `commit_snapshot` and stamps onto each hydrate
 / snapshot transfer, so the Worker's reported generation and the store's share one
 number space. A fresh placement always hydrates: a first launch or a relocation
