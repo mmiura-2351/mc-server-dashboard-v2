@@ -1487,6 +1487,46 @@ def test_a_cookie_authenticated_download_does_not_renew_the_cookie() -> None:
     _assert_no_download_cookie(resp)
 
 
+def test_a_cookie_authenticated_download_acts_as_the_cookies_subject() -> None:
+    # The cookie is the identity: the bytes leave attributed to whoever it names,
+    # not to whatever subject some other channel would have resolved.
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True, allow=True, download=_FakeDownload(_ARCHIVE), recorder=recorder
+    )
+    client = next(_client(app))
+
+    resp = client.get(
+        _url(community, server, f"/{backup}/download"),
+        headers=_cookie_header(community, server, backup),
+    )
+
+    assert resp.status_code == 200
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_DOWNLOAD]
+    assert recorder.events[0].actor_id == _user.id.value
+
+
+def test_a_cookie_naming_an_unknown_user_is_rejected() -> None:
+    # Nothing but the signature vouches for the ``sub`` claim, so the row is loaded:
+    # a cookie for a user this deployment does not have opens nothing.
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeUseCase())
+    client = next(_client(app))
+
+    resp = client.get(
+        _url(community, server, f"/{backup}/download"),
+        headers=_cookie_header(
+            community,
+            server,
+            backup,
+            subject=make_user(),  # never seeded
+        ),
+    )
+
+    assert resp.status_code == 401
+
+
 def test_cookie_loses_to_a_permission_revoked_after_the_mint() -> None:
     # Identity, never authority — the same posture the grant has.
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
