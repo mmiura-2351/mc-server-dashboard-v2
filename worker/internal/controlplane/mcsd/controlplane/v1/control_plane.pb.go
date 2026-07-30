@@ -307,9 +307,7 @@ func (CommandErrorCode) EnumDescriptor() ([]byte, []int) {
 // running / stopped / starting / crashed, plus the in-between transitions and a
 // restarting state the lifecycle commands produce). This is the full set of
 // values a Worker can report. The API caches the last-reported value in
-// Server.observed_state (DATABASE.md); that column also allows "unknown", which
-// is an API-side inference (set when the owning Worker disconnects), never
-// reported by a Worker, so it is intentionally not a value here.
+// Server.observed_state (DATABASE.md), whose value set this enum mirrors.
 type ServerState int32
 
 const (
@@ -320,6 +318,12 @@ const (
 	ServerState_SERVER_STATE_STOPPED     ServerState = 4
 	ServerState_SERVER_STATE_RESTARTING  ServerState = 5
 	ServerState_SERVER_STATE_CRASHED     ServerState = 6
+	// SERVER_STATE_UNKNOWN is reported when the Worker cannot currently confirm an
+	// instance's fate: it neither observed a clean exit nor can it see the process
+	// (a failed-stop orphan under an unreachable daemon). Asserting "unknown" is
+	// truthful where "stopped" or "running" would be a guess. The API also infers
+	// this value itself when a Worker's session drops (issue #2474).
+	ServerState_SERVER_STATE_UNKNOWN ServerState = 7
 )
 
 // Enum value maps for ServerState.
@@ -332,6 +336,7 @@ var (
 		4: "SERVER_STATE_STOPPED",
 		5: "SERVER_STATE_RESTARTING",
 		6: "SERVER_STATE_CRASHED",
+		7: "SERVER_STATE_UNKNOWN",
 	}
 	ServerState_value = map[string]int32{
 		"SERVER_STATE_UNSPECIFIED": 0,
@@ -341,6 +346,7 @@ var (
 		"SERVER_STATE_STOPPED":     4,
 		"SERVER_STATE_RESTARTING":  5,
 		"SERVER_STATE_CRASHED":     6,
+		"SERVER_STATE_UNKNOWN":     7,
 	}
 )
 
@@ -2869,7 +2875,7 @@ const file_mcsd_controlplane_v1_control_plane_proto_rawDesc = "" +
 	"\x1bCOMMAND_ERROR_CODE_INTERNAL\x10\x06\x12$\n" +
 	" COMMAND_ERROR_CODE_PORT_CONFLICT\x10\a\x12$\n" +
 	" COMMAND_ERROR_CODE_IMAGE_MISSING\x10\b\x12\x1b\n" +
-	"\x17COMMAND_ERROR_CODE_BUSY\x10\t*\xcc\x01\n" +
+	"\x17COMMAND_ERROR_CODE_BUSY\x10\t*\xe6\x01\n" +
 	"\vServerState\x12\x1c\n" +
 	"\x18SERVER_STATE_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15SERVER_STATE_STARTING\x10\x01\x12\x18\n" +
@@ -2877,7 +2883,8 @@ const file_mcsd_controlplane_v1_control_plane_proto_rawDesc = "" +
 	"\x15SERVER_STATE_STOPPING\x10\x03\x12\x18\n" +
 	"\x14SERVER_STATE_STOPPED\x10\x04\x12\x1b\n" +
 	"\x17SERVER_STATE_RESTARTING\x10\x05\x12\x18\n" +
-	"\x14SERVER_STATE_CRASHED\x10\x06*U\n" +
+	"\x14SERVER_STATE_CRASHED\x10\x06\x12\x18\n" +
+	"\x14SERVER_STATE_UNKNOWN\x10\a*U\n" +
 	"\tLogStream\x12\x1a\n" +
 	"\x16LOG_STREAM_UNSPECIFIED\x10\x00\x12\x15\n" +
 	"\x11LOG_STREAM_STDOUT\x10\x01\x12\x15\n" +

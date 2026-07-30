@@ -27,6 +27,7 @@ from grpc import aio
 from mc_server_dashboard_api.fleet.adapters.control_plane import ControlPlaneState
 from mc_server_dashboard_api.fleet.adapters.grpc_server import (
     _MAX_CONSECUTIVE_HANDLER_FAILURES,
+    _STATE_BY_PROTO,
     WorkerSessionServicer,
     _keepalive_options,
 )
@@ -417,6 +418,38 @@ async def test_status_change_reconciles_observed_state(harness: _Harness) -> Non
 
     assert harness.state_sink.observed == [(server_id, _WORKER_ID, "running")]
     await call.done_writing()
+
+
+async def test_status_change_unknown_is_ingested_not_dropped(
+    harness: _Harness,
+) -> None:
+    # Issue #2474: a Worker that cannot confirm an instance's fate reports
+    # SERVER_STATE_UNKNOWN rather than guessing running or stopped. The ingest must
+    # carry it to the sink as "unknown" -- the value the sink parses into
+    # ObservedState.UNKNOWN -- instead of dropping it as an unmapped state.
+    stub = await harness.start()
+    call = stub.Session(metadata=_auth(_CREDENTIAL))
+    await call.write(_register_message())
+    await call.read()  # ack
+
+    server_id = "11111111-1111-1111-1111-111111111111"
+    await call.write(_status_message(server_id, pb.SERVER_STATE_UNKNOWN))
+    for _ in range(100):
+        if harness.state_sink.observed:
+            break
+        await asyncio.sleep(0.01)
+
+    assert harness.state_sink.observed == [(server_id, _WORKER_ID, "unknown")]
+    await call.done_writing()
+
+
+def test_every_wire_server_state_has_an_ingest_mapping() -> None:
+    # The ingest silently DROPS a StatusChange whose state it cannot map, so a wire
+    # value added without a _STATE_BY_PROTO entry discards a Worker's report --
+    # exactly how SERVER_STATE_UNKNOWN was lost before issue #2474. Only UNSPECIFIED
+    # stays unmapped: it is the proto zero value, not a state a Worker asserts.
+    unmapped = set(pb.ServerState.values()) - set(_STATE_BY_PROTO)
+    assert unmapped == {pb.SERVER_STATE_UNSPECIFIED}
 
 
 async def test_disconnect_marks_worker_servers_unknown(harness: _Harness) -> None:

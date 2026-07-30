@@ -486,6 +486,12 @@ func mapServerState(state string) controlplanev1.ServerState {
 		return controlplanev1.ServerState_SERVER_STATE_RESTARTING
 	case "crashed":
 		return controlplanev1.ServerState_SERVER_STATE_CRASHED
+	case "unknown":
+		// The Worker cannot currently confirm the instance's fate: it neither
+		// observed a clean exit nor can it see the process (issue #2474). Without
+		// this case the name falls through to UNSPECIFIED, which the API ingest
+		// drops — leaving the row asserting a staler state as fact.
+		return controlplanev1.ServerState_SERVER_STATE_UNKNOWN
 	default:
 		return controlplanev1.ServerState_SERVER_STATE_UNSPECIFIED
 	}
