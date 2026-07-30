@@ -239,15 +239,20 @@ class _ServerStateEnumTypeWrapper(_enum_type_wrapper._EnumTypeWrapper[_ServerSta
     SERVER_STATE_STOPPED: _ServerState.ValueType  # 4
     SERVER_STATE_RESTARTING: _ServerState.ValueType  # 5
     SERVER_STATE_CRASHED: _ServerState.ValueType  # 6
+    SERVER_STATE_UNKNOWN: _ServerState.ValueType  # 7
+    """SERVER_STATE_UNKNOWN is reported when the Worker cannot currently confirm an
+    instance's fate: it neither observed a clean exit nor can it see the process
+    (a failed-stop orphan under an unreachable daemon). Asserting "unknown" is
+    truthful where "stopped" or "running" would be a guess. The API also infers
+    this value itself when a Worker's session drops (issue #2474).
+    """
 
 class ServerState(_ServerState, metaclass=_ServerStateEnumTypeWrapper):
     """ServerState is the observed runtime state of a server (FR-SRV-4:
     running / stopped / starting / crashed, plus the in-between transitions and a
     restarting state the lifecycle commands produce). This is the full set of
     values a Worker can report. The API caches the last-reported value in
-    Server.observed_state (DATABASE.md); that column also allows "unknown", which
-    is an API-side inference (set when the owning Worker disconnects), never
-    reported by a Worker, so it is intentionally not a value here.
+    Server.observed_state (DATABASE.md), whose value set this enum mirrors.
     """
 
 SERVER_STATE_UNSPECIFIED: ServerState.ValueType  # 0
@@ -257,6 +262,13 @@ SERVER_STATE_STOPPING: ServerState.ValueType  # 3
 SERVER_STATE_STOPPED: ServerState.ValueType  # 4
 SERVER_STATE_RESTARTING: ServerState.ValueType  # 5
 SERVER_STATE_CRASHED: ServerState.ValueType  # 6
+SERVER_STATE_UNKNOWN: ServerState.ValueType  # 7
+"""SERVER_STATE_UNKNOWN is reported when the Worker cannot currently confirm an
+instance's fate: it neither observed a clean exit nor can it see the process
+(a failed-stop orphan under an unreachable daemon). Asserting "unknown" is
+truthful where "stopped" or "running" would be a guess. The API also infers
+this value itself when a Worker's session drops (issue #2474).
+"""
 Global___ServerState: _TypeAlias = ServerState  # noqa: Y015
 
 class _LogStream:
