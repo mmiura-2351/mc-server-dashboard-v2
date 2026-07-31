@@ -1774,7 +1774,12 @@ def get_stop_server(
     request: Request,
     control_plane: Annotated[ServersControlPlane, Depends(get_servers_control_plane)],
 ) -> StopServer:
-    """Assemble the :class:`StopServer` use case (server:stop)."""
+    """Assemble the :class:`StopServer` use case (server:stop).
+
+    The process-wide stop-refusal journal comes from app state (issue #2478) so a
+    stop the Worker refuses on THIS request is visible to the reconciler's replay,
+    which is what lets it converge on the short grace instead of the full one.
+    """
 
     session_factory = create_session_factory(get_engine(request))
     return StopServer(
@@ -1782,6 +1787,7 @@ def get_stop_server(
         control_plane=control_plane,
         clock=ServersSystemClock(),
         bedrock_tunnel_sync=get_bedrock_tunnel_sync(request),
+        stop_refusals=request.app.state.stop_dispatch_refusals,
     )
 
 

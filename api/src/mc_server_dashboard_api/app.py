@@ -187,6 +187,9 @@ from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
 from mc_server_dashboard_api.servers.application.startup_reset import (
     ResetUnverifiableObservedStates,
 )
+from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
+    StopDispatchRefusals,
+)
 from mc_server_dashboard_api.servers.application.warn_missing_ports import (
     WarnLegacyMissingPorts,
 )
@@ -469,6 +472,20 @@ def _warn_reconciler_grace_floor(settings: Settings) -> None:
     not the hydrate budget: its floor is ``> command_timeout_seconds``. The full
     ``grace_seconds`` floor above is unchanged — every hydrating start and every
     stop-side action still waits it out, so the #822/#847 safety is intact.
+
+    ``refused_stop_grace_seconds`` (issue #2478) is the SHORTER grace for a
+    ``redispatch_stop`` whose previous stop dispatch the Worker REFUSED, and it has
+    no floor here on purpose. Every floor above budgets for a round trip that may
+    still be running; this grace is taken only once the Worker has ANSWERED, which is
+    that round trip ending. Concretely, the only term of the floor that governs
+    ``redispatch_stop`` is ``stop_timeout_seconds`` (#930) — do not replay a stop
+    whose first dispatch may still be in flight — and a returned refusal settles it.
+    ``BUSY`` is excluded from what counts as a refusal precisely because it is the
+    Worker reporting that something else IS in flight for the id. The other two terms
+    are untouched: #822 belongs to the hydrating start paths and #847 to
+    ``clear_stale_assignment``, neither of which can take this grace. A stop
+    divergence with no recorded refusal — including every one that survives a
+    restart — keeps the full ``grace_seconds``.
     """
 
     floor = max(
@@ -676,6 +693,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             clock=FleetSystemClock(), heartbeat_timeout=heartbeat_timeout
         )
         app.state.worker_registry = registry
+        # Process-wide record of which servers' last stop dispatch the Worker refused
+        # (issue #2478). Shared by every StopServer that dispatches a stop — the HTTP
+        # path, the schedule runner, and the reconciler's own replay — because it is
+        # the reconciler that reads it, to tell a stop the Worker ANSWERED apart from
+        # one that may never have been sent and so may still be in flight.
+        app.state.stop_dispatch_refusals = StopDispatchRefusals()
         # Shared control-plane command-routing state: the servicer registers
         # sessions and resolves results on it; the GrpcControlPlane adapter
         # dispatches through it. The lifecycle use cases reach it via the adapter.
@@ -921,6 +944,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         control_plane=schedule_control_plane,
                         clock=ServersSystemClock(),
                         bedrock_tunnel_sync=bedrock_tunnel_syncer,
+                        stop_refusals=app.state.stop_dispatch_refusals,
                     ),
                     restart_server=RestartServer(
                         uow=ServersUnitOfWork(create_session_factory(engine)),
@@ -1035,12 +1059,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     control_plane=reconciler_control_plane,
                     clock=ServersSystemClock(),
                     bedrock_tunnel_sync=bedrock_tunnel_syncer,
+                    stop_refusals=app.state.stop_dispatch_refusals,
                 ),
                 control_plane=reconciler_control_plane,
                 store_generation=StorageGenerationReader(storage=storage),
                 clock=ServersSystemClock(),
+                stop_refusals=app.state.stop_dispatch_refusals,
                 grace_seconds=settings.reconciler.grace_seconds,
                 held_start_grace_seconds=settings.reconciler.held_start_grace_seconds,
+                refused_stop_grace_seconds=(
+                    settings.reconciler.refused_stop_grace_seconds
+                ),
                 backoff_base_seconds=settings.reconciler.backoff_base_seconds,
                 backoff_max_seconds=settings.reconciler.backoff_max_seconds,
             )

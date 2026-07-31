@@ -55,6 +55,9 @@ from mc_server_dashboard_api.servers.application.lifecycle import (
 )
 from mc_server_dashboard_api.servers.application.manage_server import CreateServer
 from mc_server_dashboard_api.servers.application.reconciler import RunReconcilerTick
+from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
+    StopDispatchRefusals,
+)
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandOutcome,
@@ -217,8 +220,10 @@ async def _reconciler_tick(
         control_plane=control_plane,
         store_generation=FakeStoreGenerationReader(),
         clock=clock,
+        stop_refusals=StopDispatchRefusals(),
         grace_seconds=0,
         held_start_grace_seconds=0,
+        refused_stop_grace_seconds=0,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
     ).tick()
