@@ -759,6 +759,70 @@ async def test_operator_stop_refused_by_the_worker_converges_on_the_short_grace(
     assert uow.servers.by_id[server.id].assigned_worker_id is None
 
 
+def _stale_stop_past_the_short_grace() -> tuple[FakeUnitOfWork, Server, dt.datetime]:
+    # A (stopped, running, assigned) divergence aged past the refused-stop grace but
+    # well within the full grace: the window where the recorded verdict is the only
+    # thing that decides whether the reconciler acts.
+    aged = _NOW - dt.timedelta(seconds=_REFUSED_GRACE + 1)
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.RUNNING,
+        worker=_WORKER,
+        observed_at=aged,
+        updated_at=aged,
+    )
+    uow = FakeUnitOfWork()
+    uow.servers.seed(server)
+    return uow, server, aged
+
+
+async def test_re_refused_replay_keeps_the_next_tick_on_the_short_grace() -> None:
+    # The replay's OWN refusal is recorded too (issue #2478), and that is behaviour,
+    # not bookkeeping: the forget() before the replay clears the operator dispatch's
+    # verdict, so without re-recording, a stop the Worker refuses AGAIN falls back to
+    # waiting the full grace — the exact regression this issue exists to prevent.
+    # With it the per-server backoff governs the retry cadence instead.
+    uow, server, aged = _stale_stop_past_the_short_grace()
+    cp = FakeControlPlane(
+        outcomes={"stop": CommandOutcome(status=CommandStatus.INTERNAL, message="boom")}
+    )
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock, stop_refusals=_refused(server, aged))
+
+    await reconciler.tick()
+    assert [k for k, _, _ in cp.dispatched] == ["stop"]  # refused: no final snapshot
+
+    # Past the backoff window (base 30 s) but still well within the full grace, so
+    # only a surviving verdict can let this tick act.
+    clock.set(_NOW + dt.timedelta(seconds=31))
+    assert (clock.now() - aged) < dt.timedelta(seconds=_GRACE)
+    await reconciler.tick()
+    assert [k for k, _, _ in cp.dispatched] == ["stop", "stop"]
+
+
+async def test_timed_out_replay_drops_the_earlier_verdict() -> None:
+    # forget() runs before the replay dispatch, not only before the operator's
+    # (issue #2478). A replay that TIMES OUT is not the Worker answering — it may
+    # still be executing the stop — so the earlier "settled" verdict must not be
+    # inherited, or the next tick would re-send on the short grace against a command
+    # that really may be in flight (the #930 floor's own failure mode). The next tick
+    # is instead back on the full grace and waits.
+    uow, server, aged = _stale_stop_past_the_short_grace()
+    cp = FakeControlPlane(unavailable_kinds={"stop"})
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock, stop_refusals=_refused(server, aged))
+
+    await reconciler.tick()
+    assert [k for k, _, _ in cp.dispatched] == ["stop"]  # attempted, no answer
+
+    # Past the backoff window and still within the full grace: the grace is the only
+    # thing that can hold the retry back now, and it must.
+    clock.set(_NOW + dt.timedelta(seconds=31))
+    assert (clock.now() - aged) < dt.timedelta(seconds=_GRACE)
+    await reconciler.tick()
+    assert [k for k, _, _ in cp.dispatched] == ["stop"]
+
+
 async def test_server_placed_after_registration_gets_the_short_held_grace() -> None:
     # Issue #2477: the held inventory must reflect what the Worker holds NOW, not
     # only what it advertised at registration. Register the Worker with an EMPTY

@@ -26,10 +26,17 @@ grace, which is the conservative answer, and no persisted marker can go stale
 across one. Same rationale as the reconciler's in-memory backoff map and the
 registry's held-working-set inventory.
 
-Size is bounded by the number of servers with an outstanding refused stop: every
-dispatch either clears the entry (:meth:`forget`, called before the attempt) or
-replaces it. A converged server leaves one timestamp behind until its next stop,
-so the map cannot outgrow the fleet.
+Size: one entry per server at most — every stop dispatch either clears the entry
+(:meth:`forget`, before the attempt) or replaces it. It is NOT bounded by the live
+fleet, though. A refusal superseded by a Worker report converges through
+``clear_stale_assignment``, which dispatches no stop and so runs no ``forget``, and
+deleting that server leaves its timestamp behind: nothing evicts here on delete,
+unlike the tunnel table (#1544). The real bound is one timestamp per server that had
+a refused stop during this process's lifetime. Left that way deliberately — a
+leftover entry is unreachable, because the reconciler only ever looks up ids
+``list_reconcilable`` returned and a deleted row is never among them, and server ids
+are never reused. An eviction hook would buy a few dozen bytes for a use-case
+dependency this module does not otherwise need.
 """
 
 from __future__ import annotations
