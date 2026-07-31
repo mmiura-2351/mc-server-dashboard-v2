@@ -38,6 +38,9 @@ from mc_server_dashboard_api.servers.application.lifecycle import (
     StartServer,
     StopServer,
 )
+from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
+    StopDispatchRefusals,
+)
 from mc_server_dashboard_api.servers.domain.committed_resources import (
     CommittedResources,
 )
@@ -68,6 +71,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerType,
     WorkerId,
 )
+from tests.servers.contract_table import worker_status
 from tests.servers.fakes import (
     FakeBedrockTunnelSync,
     FakeClock,
@@ -720,6 +724,153 @@ async def test_start_hydrates_when_worker_holds_nothing() -> None:
     assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
 
 
+async def test_start_records_the_hydrated_generation_as_held() -> None:
+    # Issue #2477: a server placed after its Worker registered is absent from the
+    # registration advertisement, so the start hydrates. Once that hydrate SUCCEEDS the
+    # Worker's scratch IS the store's working set, so the generation is recorded — the
+    # next restart can then skip the hydrate and take the short reconciler grace.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = FakeControlPlane(place_to=WorkerId(worker))
+
+    await _start_server(uow, cp, store_generation=6)(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
+    assert cp.recorded_held == [(WorkerId(worker), ServerId(server_id), 6)]
+
+
+async def test_start_records_nothing_as_held_when_the_hydrate_fails() -> None:
+    # A failed hydrate leaves a torn/partial tree the Worker's own generation marker
+    # does not claim either. Recording it would make a later start skip the hydrate
+    # that would repair it, so nothing is recorded (issue #2477).
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    failed = CommandOutcome(status=CommandStatus.TRANSFER_FAILED, message="boom")
+    cp = FakeControlPlane(place_to=WorkerId(worker), outcomes={"hydrate": failed})
+
+    with pytest.raises(CommandDispatchError):
+        await _start_server(uow, cp, store_generation=6)(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert cp.recorded_held == []
+
+
+async def test_start_records_nothing_as_held_when_hydrate_is_skipped() -> None:
+    # A skip-hydrate start changes nothing about what the Worker holds — the entry that
+    # authorised the skip already says so (issue #2477).
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = FakeControlPlane(
+        place_to=WorkerId(worker),
+        held={(WorkerId(worker), ServerId(server_id)): 5},
+    )
+
+    await _start_server(uow, cp, store_generation=5)(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert [k for k, _, _ in cp.dispatched] == ["start"]
+    assert cp.recorded_held == []
+
+
+async def test_start_survives_a_generation_read_failure_before_the_hydrate() -> None:
+    # The #2477 held-inventory refresh reads the store generation a SECOND time, right
+    # before the hydrate. That read feeds a bookkeeping mirror, not a gate, so a
+    # transient Storage failure there must not fail the launch it rides on: the hydrate
+    # and the start must still be dispatched, the start must still succeed, and the
+    # committed intent must NOT be compensated. Only the refresh is skipped, leaving
+    # the entry as it was so the next start hydrates.
+    #
+    # The FIRST read is the skip-hydrate gate and keeps its own contract — a failure
+    # there compensates and raises (#2001), pinned by the test below.
+    community, server_id, worker = _ids()
+
+    class _FlakySecondRead(FakeStoreGenerationReader):
+        """Succeeds on the gate read, fails on the refresh read."""
+
+        def __init__(self) -> None:
+            super().__init__(generation=6)
+            self.reads = 0
+
+        async def current_generation(
+            self, *, community_id: CommunityId, server_id: ServerId
+        ) -> int:
+            self.reads += 1
+            if self.reads == 2:
+                raise OSError("storage hiccup")
+            return await super().current_generation(
+                community_id=community_id, server_id=server_id
+            )
+
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = FakeControlPlane(place_to=WorkerId(worker))
+    store_generation = _FlakySecondRead()
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=store_generation,
+        file_store=FakeFileStore(seed_eula=True),
+    )
+
+    await use_case(community_id=CommunityId(community), server_id=ServerId(server_id))
+
+    assert store_generation.reads == 2  # the refresh read really did happen and fail
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
+    assert cp.recorded_held == []  # refresh skipped, entry left as it was
+    started = uow.servers.by_id[ServerId(server_id)]
+    assert started.desired_state is DesiredState.RUNNING
+    assert started.assigned_worker_id == WorkerId(worker)
+
+
+async def test_start_generation_read_failure_compensates_without_dispatching() -> None:
+    # The post-commit generation-gate read (#1007) is a PRE-dispatch step: a
+    # transient Storage failure there sent no start command, so the committed
+    # intent must compensate back to desired=stopped and the original error must
+    # reach the caller (issue #2001). Otherwise the caller sees "start failed"
+    # while the reconciler later starts the server from the surviving intent.
+    community, server_id, worker = _ids()
+
+    class _FailingStoreGeneration(FakeStoreGenerationReader):
+        async def current_generation(
+            self, *, community_id: CommunityId, server_id: ServerId
+        ) -> int:
+            raise OSError("storage hiccup")
+
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = FakeControlPlane(place_to=WorkerId(worker))
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=_FailingStoreGeneration(),
+        file_store=FakeFileStore(seed_eula=True),
+    )
+
+    with pytest.raises(OSError, match="storage hiccup"):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    # Nothing was ever sent to the Worker, and the intent is reverted.
+    assert cp.dispatched == []
+    reverted = uow.servers.by_id[ServerId(server_id)]
+    assert reverted.desired_state is DesiredState.STOPPED
+    assert reverted.assigned_worker_id is None
+    assert cp.incremented == [WorkerId(worker)]
+    assert cp.decremented == [WorkerId(worker)]
+
+
 async def test_start_hydrate_failure_compensates_without_dispatching_start() -> None:
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
@@ -980,6 +1131,132 @@ async def test_start_pre_dispatch_busy_compensates() -> None:
     assert reverted.assigned_worker_id is None
     assert cp.incremented == [WorkerId(worker)]
     assert cp.decremented == [WorkerId(worker)]
+
+
+async def test_start_refused_over_failed_stop_orphan_never_converges_running() -> None:
+    # Issue #2476 / #2467. The Worker refused the START because it holds a
+    # failed-stop orphan for this id — an instance whose driver Stop could not
+    # confirm termination. That process may be ALIVE or already DEAD, and the
+    # Worker cannot tell which until its converger (issue #2475) probes it, so the
+    # refusal is NOT evidence the server is running. __call__ must therefore not
+    # manufacture observed=running from it: a dead orphan converged to running
+    # wedges the row at a state no StatusChange will ever repair (#2467's wedge).
+    #
+    # The status comes from the contract row, not a hand-picked constant, so this
+    # asserts what the Worker really answers for that precondition.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = FakeControlPlane(
+        place_to=WorkerId(worker),
+        outcomes={
+            "start": CommandOutcome(
+                status=worker_status("StartServer", "orphan_pending"),
+                message="instancemanager: server has a failed-stop orphan pending "
+                "termination",
+            )
+        },
+    )
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
+    )
+
+    with pytest.raises(CommandDispatchError) as excinfo:
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    # A retryable contention the client can name, not the unclassified catch-all:
+    # the converger is working the orphan, so this exact start succeeds later.
+    assert excinfo.value.reason == "worker_busy"
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.observed_state is not ObservedState.RUNNING
+    # The row sits honestly diverged: the intent and the assignment stand so the
+    # reconciler redispatches to the SAME Worker once the orphan is converged.
+    assert stored.desired_state is DesiredState.RUNNING
+    assert stored.assigned_worker_id == WorkerId(worker)
+    assert cp.decremented == []
+
+
+async def test_redispatch_start_refused_over_orphan_never_converges_running() -> None:
+    # The reconciler's replay hits the same refusal (issue #2476). This is the site
+    # #2467 reported: redispatch_start converged observed=running on it, so a row
+    # whose orphan was already DEAD sat falsely running forever — the reconciler
+    # never re-selects a converged row, and a dead process emits no StatusChange.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.UNKNOWN,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(
+        outcomes={
+            "start": CommandOutcome(
+                status=worker_status("StartServer", "orphan_pending"),
+                message="instancemanager: server has a failed-stop orphan pending "
+                "termination",
+            )
+        }
+    )
+
+    with pytest.raises(CommandDispatchError):
+        await _start_server(uow, cp).redispatch_start(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.observed_state is ObservedState.UNKNOWN
+    assert stored.desired_state is DesiredState.RUNNING
+    assert stored.assigned_worker_id == WorkerId(worker)
+
+
+async def test_redispatch_start_refused_at_hydrate_over_orphan_never_converges() -> (
+    None
+):
+    # The orphan refuses the HYDRATE leg too, and redispatch_start's convergence
+    # arm has no ``dispatch.attempted`` gate — so before issue #2476 a hydrate
+    # refused over an orphan converged observed=running without any start ever
+    # being sent. The reclassified code closes that route as well.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.UNKNOWN,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(
+        outcomes={
+            "hydrate": CommandOutcome(
+                status=worker_status("HydrateTrigger", "orphan_pending"),
+                message="instancemanager: server has a failed-stop orphan pending "
+                "termination",
+            )
+        }
+    )
+
+    with pytest.raises(CommandDispatchError):
+        await _start_server(uow, cp).redispatch_start(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    # The start was never sent, and no observed state was manufactured.
+    assert [kind for kind, _, _ in cp.dispatched] == ["hydrate"]
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.observed_state is ObservedState.UNKNOWN
 
 
 async def test_start_failure_logs_warning_with_server_and_kind(
@@ -1868,6 +2145,38 @@ async def test_late_successful_snapshot_clears_held_assignment() -> None:
     assert uow.servers.by_id[ServerId(server_id)].assigned_worker_id is None
 
 
+async def test_late_snapshot_clears_held_crashed_release() -> None:
+    # Issue #2448: a crashed release whose final snapshot timed out holds the row at
+    # (stopped, crashed, assigned) -- the same hold the stopped shape gets, on the
+    # same worker, for the same reason. The late CommandResult must release it too.
+    # The guard rejected CRASHED, so such a row waited out backoff plus the full
+    # grace and then re-drove a snapshot that only hits the benign working_set_absent
+    # refusal.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.CRASHED,
+            worker_id=worker,
+        )
+    )
+
+    await StopServer(
+        uow=uow, control_plane=FakeControlPlane(), clock=FakeClock(_NOW)
+    ).clear_assignment_after_late_snapshot(
+        server_id=ServerId(server_id), worker_id=WorkerId(worker), succeeded=True
+    )
+
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.assigned_worker_id is None
+    # The release does not rewrite the crash: it is the truth about how the process
+    # ended, and the row is at rest either way.
+    assert stored.observed_state is ObservedState.CRASHED
+
+
 async def test_late_snapshot_from_non_owning_worker_does_not_clear() -> None:
     # Issue #891 / #789: a late result whose reporting worker is NOT the row's
     # assigned worker must not clear the assignment. The guarded clear matches no
@@ -1987,6 +2296,137 @@ async def test_stop_failed_dispatch_keeps_assignment() -> None:
 
     stored = uow.servers.by_id[ServerId(server_id)]
     assert stored.assigned_worker_id == WorkerId(worker)
+
+
+@pytest.mark.parametrize(
+    "status",
+    [CommandStatus.INTERNAL, CommandStatus.BUSY],
+)
+async def test_stop_failed_dispatch_does_not_compensate_desired_stopped(
+    status: CommandStatus,
+) -> None:
+    # NOT compensating a failed stop is deliberate, not an oversight (issue
+    # #2435). No stop failure class establishes that the stop did not and will
+    # not take effect: BUSY leaves the outcome unknown (the in-flight command is
+    # typically a detached stop still confirming termination) and INTERNAL can
+    # leave an orphan that terminates moments later. Reverting to desired=running
+    # would arm the reconciler's start rule as soon as observed became stopped
+    # and resurrect the server the operator asked to stop, so the stop intent
+    # stands and redispatch_stop owns convergence. Do not "fix" this by copying
+    # StartServer's compensation (issue #2001).
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(
+        outcomes={"stop": CommandOutcome(status=status, message="boom")}
+    )
+    use_case = StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+
+    with pytest.raises(CommandDispatchError):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.desired_state is DesiredState.STOPPED
+    assert stored.assigned_worker_id == WorkerId(worker)
+
+
+async def _stop_expecting_failure(
+    use_case: StopServer, community: uuid.UUID, server_id: uuid.UUID
+) -> None:
+    with pytest.raises((CommandDispatchError, WorkerUnavailableError)):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+
+def _seeded_running_uow(
+    community: uuid.UUID, server_id: uuid.UUID, worker: uuid.UUID
+) -> FakeUnitOfWork:
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    return uow
+
+
+async def test_refused_stop_dispatch_is_recorded_for_the_reconciler() -> None:
+    # Issue #2478: the Worker ANSWERED, so this dispatch is settled and nothing is
+    # left in flight. Record it — it is the only thing that tells the reconciler's
+    # replay apart from a stop that may never have been sent, and so the only thing
+    # that lets the replay run on the short grace.
+    community, server_id, worker = _ids()
+    uow = _seeded_running_uow(community, server_id, worker)
+    cp = FakeControlPlane(
+        outcomes={"stop": CommandOutcome(status=CommandStatus.INTERNAL, message="boom")}
+    )
+    refusals = StopDispatchRefusals()
+    use_case = StopServer(
+        uow=uow, control_plane=cp, clock=FakeClock(_NOW), stop_refusals=refusals
+    )
+
+    await _stop_expecting_failure(use_case, community, server_id)
+
+    assert refusals.refused_at(ServerId(server_id)) == _NOW
+
+
+async def test_busy_stop_dispatch_records_no_refusal() -> None:
+    # BUSY is the Worker's reservation guard saying another mutating command IS in
+    # flight for the id (#824) — after #2475/#2476 typically its own converger
+    # resolving a failed-stop orphan. The property the short grace rests on ("nothing
+    # is in flight") does not hold, so the replay keeps the full grace (#2478).
+    community, server_id, worker = _ids()
+    uow = _seeded_running_uow(community, server_id, worker)
+    cp = FakeControlPlane(
+        outcomes={"stop": CommandOutcome(status=CommandStatus.BUSY, message="busy")}
+    )
+    refusals = StopDispatchRefusals()
+    use_case = StopServer(
+        uow=uow, control_plane=cp, clock=FakeClock(_NOW), stop_refusals=refusals
+    )
+
+    await _stop_expecting_failure(use_case, community, server_id)
+
+    assert refusals.refused_at(ServerId(server_id)) is None
+
+
+async def test_timed_out_stop_dispatch_clears_any_earlier_refusal() -> None:
+    # A timeout is NOT the Worker answering: the API only gave up waiting, and the
+    # worker may still be executing the stop. Recording nothing is not enough — an
+    # earlier attempt's "settled" verdict must not be inherited, or the replay would
+    # take the short grace for a command that really may be in flight, which is the
+    # #930 floor's own failure mode (#2478).
+    community, server_id, worker = _ids()
+    uow = _seeded_running_uow(community, server_id, worker)
+    refusals = StopDispatchRefusals()
+    refusals.record_refusal(
+        ServerId(server_id),
+        outcome=CommandOutcome(status=CommandStatus.INTERNAL),
+        at=_NOW - dt.timedelta(seconds=1),
+    )
+    cp = FakeControlPlane(unavailable_kinds={"stop"})
+    use_case = StopServer(
+        uow=uow, control_plane=cp, clock=FakeClock(_NOW), stop_refusals=refusals
+    )
+
+    await _stop_expecting_failure(use_case, community, server_id)
+
+    assert refusals.refused_at(ServerId(server_id)) is None
 
 
 async def test_stop_succeeds_even_when_final_snapshot_fails() -> None:
@@ -2110,12 +2550,17 @@ class _SnapshotServerNotFound(FakeControlPlane):
 async def test_stop_final_snapshot_benign_duplicate_refusal_logs_info_not_error(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # Issue #1790: the Worker's working_set_absent refusal (issue #1713) means a
-    # prior final snapshot already published and its scratch was GC'd — a benign
-    # duplicate dispatch, not data loss. Logging the "progression ... is lost"
-    # ERROR for it is a false alarm that trains operators to ignore the line
-    # that matters, so it is downgraded to INFO. The stop still converges: the
-    # assignment is cleared exactly as on a successful snapshot.
+    # Issue #1790: the Worker's working_set_absent refusal (issue #1713) means it
+    # holds no working set for the id, so this dispatch could not have saved
+    # anything — not data loss. Logging the "progression ... is lost" ERROR for it
+    # is a false alarm that trains operators to ignore the line that matters, so it
+    # is downgraded to INFO. The stop still converges: the assignment is cleared
+    # exactly as on a successful snapshot.
+    #
+    # Issue #2448 narrowed what the INFO may CLAIM: it used to say a prior final
+    # snapshot had captured the set, which overstates the two other causes the
+    # Worker cannot distinguish — a #2480 periodic capture that GC'd the at-rest
+    # scratch, and an id never hydrated on this Worker at all.
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
     uow.servers.seed(
@@ -2146,7 +2591,7 @@ async def test_stop_final_snapshot_benign_duplicate_refusal_logs_info_not_error(
         if r.levelno == logging.INFO and "final snapshot" in r.getMessage()
     )
     assert str(server_id) in record.getMessage()
-    assert "duplicate" in record.getMessage()
+    assert "holds no working set" in record.getMessage()
     # The refusal settles the snapshot (nothing is uploading), so the deferred
     # unassign still runs.
     assert result.assigned_worker_id is None
@@ -2234,6 +2679,58 @@ async def test_stop_lost_race_is_conflict_without_dispatch_or_count() -> None:
     assert uow.commits == 0
 
 
+async def test_stop_server_not_found_on_crashed_snapshots_and_keeps_crashed() -> None:
+    # Issue #2448: the direct-stop release must do what the reconciler's crashed
+    # release does (#2439/#2446), because SERVER_NOT_FOUND is exactly what a Worker
+    # answers for a CRASHED instance -- ``forgetIf`` drops it from the instance map,
+    # so an operator stopping an already-crashed server lands here. The Worker's
+    # retained scratch still holds the crash-window world (it is GC'd only once a
+    # final snapshot publishes), so the release snapshots BEFORE clearing, and
+    # ``crashed`` stands as the truth about why the server is down rather than being
+    # rewritten to a clean-looking ``stopped``.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    # Stamp the crash strictly BEFORE the clock's instant: the row must come out
+    # carrying this exact stamp, and an older stamp is what makes that a real pin --
+    # the #216 guard would ACCEPT a fresh write over it, so a re-record cannot hide
+    # behind the guard.
+    crashed_at = _NOW - dt.timedelta(minutes=5)
+    seeded = _server(
+        community_id=community,
+        server_id=server_id,
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.CRASHED,
+        worker_id=worker,
+    )
+    seeded.observed_at = crashed_at
+    uow.servers.seed(seeded)
+    cp = FakeControlPlane(
+        outcomes={"stop": CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND)}
+    )
+    use_case = StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+
+    result = await use_case(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert result.desired_state is DesiredState.STOPPED
+    assert result.observed_state is ObservedState.CRASHED
+    # No live instance remains, so the assignment is cleared too (issue #206),
+    # letting a later start re-place under require_unassigned.
+    assert result.assigned_worker_id is None
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.desired_state is DesiredState.STOPPED
+    assert stored.observed_state is ObservedState.CRASHED
+    # The crash's OWN timestamp survives: the preserve arm writes nothing, so the
+    # release never restamps the row with the release's instant. Re-recording
+    # ``crashed`` at ``clock.now()`` would keep every assert above green while
+    # telling the operator the server crashed when it was in fact released.
+    assert stored.observed_at == crashed_at
+    assert stored.assigned_worker_id is None
+    assert [kind for kind, _, _ in cp.dispatched] == ["stop", "snapshot"]
+    assert cp.decremented == [WorkerId(worker)]
+
+
 async def test_stop_server_not_found_converges_to_stopped() -> None:
     # Stopping a server the worker no longer runs (e.g. crashed on the EULA,
     # issue #197): the worker holds no live instance and its handleStop answers
@@ -2241,6 +2738,14 @@ async def test_stop_server_not_found_converges_to_stopped() -> None:
     # (worker/internal/application/instancemanager/instancemanager.go:308-312).
     # That is a no-op stop, not a failure -> converge observed to stopped and
     # report success rather than surfacing command_failed.
+    #
+    # The other half of issue #2448's ruling: the crash preservation above is
+    # NARROW on purpose. A lost crash event leaves the row reading ``running`` when
+    # SERVER_NOT_FOUND arrives, and preserving THAT would strand it at
+    # (stopped, running, unassigned) -- not ``is_at_rest()`` and matched by no
+    # reconciler arm, a fourth wedge of the #2439/#2452 kind. Everything that is not
+    # ``crashed`` converges to ``stopped``. The snapshot leg is taken either way:
+    # the retained scratch is worth capturing however the process ended.
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
     uow.servers.seed(
@@ -2248,7 +2753,7 @@ async def test_stop_server_not_found_converges_to_stopped() -> None:
             community_id=community,
             server_id=server_id,
             desired=DesiredState.RUNNING,
-            observed=ObservedState.CRASHED,
+            observed=ObservedState.RUNNING,
             worker_id=worker,
         )
     )
@@ -2263,16 +2768,98 @@ async def test_stop_server_not_found_converges_to_stopped() -> None:
 
     assert result.desired_state is DesiredState.STOPPED
     assert result.observed_state is ObservedState.STOPPED
-    # No live instance remains, so the assignment is cleared too (issue #206),
-    # letting a later start re-place under require_unassigned.
     assert result.assigned_worker_id is None
     stored = uow.servers.by_id[ServerId(server_id)]
     assert stored.desired_state is DesiredState.STOPPED
     assert stored.observed_state is ObservedState.STOPPED
     assert stored.assigned_worker_id is None
-    # No live instance to snapshot: the stop dispatched, the snapshot did not.
-    assert [kind for kind, _, _ in cp.dispatched] == ["stop"]
+    assert [kind for kind, _, _ in cp.dispatched] == ["stop", "snapshot"]
     assert cp.decremented == [WorkerId(worker)]
+
+
+async def test_stop_server_not_found_snapshot_timeout_holds_assignment() -> None:
+    # Issue #2448 + #847: the new release leg HOLDS the assignment on a snapshot
+    # TIMEOUT, exactly as the graceful stop does. A timeout means the worker session
+    # is healthy and the upload is still in flight, so releasing here would let a
+    # racing start re-place on a different worker mid-upload -- the very race the
+    # snapshot-before-clear ordering exists to close. The row is left
+    # (stopped, crashed, assigned) for the late-result sink (#891) or the
+    # stale-stop arm to release.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.CRASHED,
+            worker_id=worker,
+        )
+    )
+
+    class _SnapshotTimesOut(FakeControlPlane):
+        async def snapshot(
+            self,
+            *,
+            worker_id: WorkerId,
+            community_id: CommunityId,
+            server_id: ServerId,
+            final: bool = False,
+        ) -> CommandOutcome:
+            self.dispatched.append(("snapshot", worker_id, server_id))
+            try:
+                raise CommandTimedOutError(str(worker_id.value))
+            except CommandTimedOutError as exc:
+                raise WorkerUnavailableError(
+                    str(worker_id.value), upload_may_be_live=True
+                ) from exc
+
+    cp = _SnapshotTimesOut(
+        outcomes={"stop": CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND)}
+    )
+    result = await StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert result.assigned_worker_id == WorkerId(worker)
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.desired_state is DesiredState.STOPPED
+    assert stored.observed_state is ObservedState.CRASHED
+    assert stored.assigned_worker_id == WorkerId(worker)
+
+
+async def test_stop_server_not_found_releases_even_when_final_snapshot_fails() -> None:
+    # Issue #2448: a FAILED final snapshot must not fail the operator's stop -- the
+    # process is already gone and there is nothing left to command. The release still
+    # happens (the #845/#847 exposure, logged loud by _final_snapshot), so the server
+    # can be started again.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.CRASHED,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(
+        outcomes={
+            "stop": CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND),
+            "snapshot": CommandOutcome(
+                status=CommandStatus.TRANSFER_FAILED, message="boom"
+            ),
+        }
+    )
+
+    result = await StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert result.desired_state is DesiredState.STOPPED
+    assert result.assigned_worker_id is None
+    assert uow.servers.by_id[ServerId(server_id)].assigned_worker_id is None
 
 
 async def test_stop_server_not_found_returned_entity_honest_when_write_dropped() -> (
@@ -2282,6 +2869,16 @@ async def test_stop_server_not_found_returned_entity_honest_when_write_dropped()
     # drops the convergence write (a fresher StatusChange already stamped the row at
     # the same instant). The returned entity must reflect the DROPPED write -- it
     # must not optimistically claim observed=stopped / unassigned that did not land.
+    #
+    # Issue #2448 moved the unassign out of that same UPDATE and behind the final
+    # snapshot, so the row staying ASSIGNED is now a deliberate decision rather than
+    # a side effect of the shared write: a dropped convergence leaves ``observed`` at
+    # whatever won, and releasing then could strand (stopped, running, unassigned) --
+    # not ``is_at_rest()`` and matched by no reconciler arm, the permanent wedge
+    # shape of #2439/#2452. Held instead, the row is reconcilable and the arm it
+    # lands on re-runs the release. (The confirmed-stop path clears unconditionally
+    # and may: the writer that beat it there reported a process the Worker had just
+    # confirmed dead.)
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
     seeded = _server(
@@ -2497,6 +3094,98 @@ async def test_restart_lost_race_is_conflict_without_dispatch() -> None:
 
     assert cp.dispatched == []
     assert uow.commits == 0
+
+
+async def test_restart_of_not_running_server_is_not_running() -> None:
+    # Issue #2441: the Worker answers SERVER_NOT_FOUND when it holds no live
+    # instance for the id (handleRestart's takeNotFound). Surface it as
+    # not-running -- the same treatment SendServerCommand gives the same outcome
+    # -- instead of letting it fall into the unclassified command_failed 409.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(outcome=CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND))
+    use_case = RestartServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+
+    with pytest.raises(ServerNotRunningError):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+
+async def test_restart_over_failed_stop_orphan_names_the_orphan() -> None:
+    # Issue #2466: the Worker answers INVALID_STATE when it holds a failed-stop
+    # orphan for the id -- a process it could not confirm dead, so probably still
+    # alive. That is NOT "not running": it must not raise ServerNotRunningError
+    # (whose client message says the server moved), nor fall into the
+    # unclassified command_failed catch-all.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(
+            status=CommandStatus.INVALID_STATE,
+            message=(
+                "instancemanager: server has a failed-stop orphan pending termination"
+            ),
+        )
+    )
+    use_case = RestartServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+
+    with pytest.raises(CommandDispatchError) as excinfo:
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+    assert excinfo.value.reason == "failed_stop_orphan"
+
+
+async def test_command_over_failed_stop_orphan_names_the_orphan() -> None:
+    # Issue #2466: the console must not report "not running" over a process the
+    # Worker could not confirm dead.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(
+            status=CommandStatus.INVALID_STATE,
+            message=(
+                "instancemanager: server has a failed-stop orphan pending termination"
+            ),
+        )
+    )
+    use_case = SendServerCommand(uow=uow, control_plane=cp)
+
+    with pytest.raises(CommandDispatchError) as excinfo:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            line="list",
+        )
+    assert excinfo.value.reason == "failed_stop_orphan"
 
 
 async def test_restart_when_stopped_is_conflict() -> None:
@@ -3168,6 +3857,11 @@ async def test_redispatch_stop_replays_stop_without_decrement() -> None:
 async def test_redispatch_stop_server_not_found_unassigns() -> None:
     # SERVER_NOT_FOUND on redispatch means no live instance remains: converge by
     # clearing the assignment, same as the success path (issue #206).
+    #
+    # Issue #2448: this release is the SAME sequence the direct stop takes -- the
+    # final snapshot first (the Worker's retained scratch may still hold the world),
+    # then the guarded clear. A row that does not read ``crashed`` converges observed
+    # to ``stopped``, deliberately narrowly (see the __call__ twin).
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
     uow.servers.seed(
@@ -3186,10 +3880,45 @@ async def test_redispatch_stop_server_not_found_unassigns() -> None:
         community_id=CommunityId(community), server_id=ServerId(server_id)
     )
     stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.observed_state is ObservedState.STOPPED
     assert stored.assigned_worker_id is None
-    # No live instance remained, so there is no working set to capture: no snapshot
-    # is dispatched on the SERVER_NOT_FOUND path (issue #846).
-    assert [k for k, _, _ in cp.dispatched] == ["stop"]
+    assert [k for k, _, _ in cp.dispatched] == ["stop", "snapshot"]
+
+
+async def test_redispatch_stop_server_not_found_on_crashed_keeps_crashed() -> None:
+    # Issue #2448: the reconciler's replay reaches SERVER_NOT_FOUND on a crashed row
+    # when the crash lands between list_reconcilable and the dispatch. It must agree
+    # with the direct stop and with clear_stale_assignment: snapshot the retained
+    # crash-window scratch, release, and leave ``crashed`` standing.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    # Same sentinel stamp as the __call__ twin, for the same reason.
+    crashed_at = _NOW - dt.timedelta(minutes=5)
+    seeded = _server(
+        community_id=community,
+        server_id=server_id,
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.CRASHED,
+        worker_id=worker,
+    )
+    seeded.observed_at = crashed_at
+    uow.servers.seed(seeded)
+    cp = FakeControlPlane(
+        outcomes={"stop": CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND)}
+    )
+    result = await StopServer(
+        uow=uow, control_plane=cp, clock=FakeClock(_NOW)
+    ).redispatch_stop(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    assert result.observed_state is ObservedState.CRASHED
+    assert result.assigned_worker_id is None
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.observed_state is ObservedState.CRASHED
+    # The crash's own timestamp survives the release (see the __call__ twin).
+    assert stored.observed_at == crashed_at
+    assert stored.assigned_worker_id is None
+    assert [k for k, _, _ in cp.dispatched] == ["stop", "snapshot"]
 
 
 async def test_redispatch_stop_snf_does_not_unassign_re_placed() -> None:
@@ -3678,9 +4407,245 @@ async def test_clear_stale_assignment_benign_duplicate_clears(
         if r.levelno == logging.ERROR and "final snapshot" in r.getMessage()
     ]
     assert any(
-        r.levelno == logging.INFO and "benign duplicate" in r.getMessage()
+        r.levelno == logging.INFO and "holds no working set" in r.getMessage()
         for r in caplog.records
     )
+
+
+async def test_clear_stale_assignment_crashed_connected_snapshots_then_clears() -> None:
+    # Issue #2439: (stopped, crashed, assigned) + worker connected. The process is
+    # gone but its working set is still in the worker's retained scratch (the
+    # scratch is GC'd only after a final snapshot publishes), and no final snapshot
+    # ever ran — so re-drive it before releasing, exactly as the (stopped, stopped)
+    # arm does for issue #1004.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.CRASHED,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(connected={WorkerId(worker): True})
+    result = await StopServer(
+        uow=uow, control_plane=cp, clock=FakeClock(_NOW)
+    ).clear_stale_assignment(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    assert result.assigned_worker_id is None
+    assert ("snapshot", WorkerId(worker), ServerId(server_id)) in cp.dispatched
+    # No stop is re-dispatched: the process is already gone.
+    assert [kind for kind, _, _ in cp.dispatched] == ["snapshot"]
+
+
+async def test_clear_stale_assignment_stopped_crashed_disconnected_skips_snapshot() -> (
+    None
+):
+    # Issue #2439: the same wedge with the worker GONE — no snapshot to take, but
+    # the assignment must still be released or the server can never start again.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.CRASHED,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(connected={WorkerId(worker): False})
+    result = await StopServer(
+        uow=uow, control_plane=cp, clock=FakeClock(_NOW)
+    ).clear_stale_assignment(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    assert result.assigned_worker_id is None
+    assert cp.dispatched == []
+
+
+async def test_clear_stale_assignment_stopped_crashed_keeps_observed_crashed() -> None:
+    # Issue #2439: the release does not rewrite observed=crashed to stopped. The
+    # crash is the truth about how the process ended and is what the operator sees;
+    # the row is already at rest (entities.is_at_rest) and, once unassigned, no
+    # longer reconcilable.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.CRASHED,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(connected={WorkerId(worker): True})
+    await StopServer(
+        uow=uow, control_plane=cp, clock=FakeClock(_NOW)
+    ).clear_stale_assignment(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.observed_state is ObservedState.CRASHED
+    assert stored.assigned_worker_id is None
+
+
+async def test_clear_stale_assignment_crashed_warn_says_snapshot_was_redriven(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Issue #2448 (the minor item): the crashed-release WARN fired identically for a
+    # connected and a disconnected worker, so it never said whether the final
+    # snapshot was actually re-driven -- the one thing that decides whether the
+    # crash-window world survived. The stopped side already splits on it.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.CRASHED,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(connected={WorkerId(worker): True})
+    with caplog.at_level(logging.WARNING):
+        await StopServer(
+            uow=uow, control_plane=cp, clock=FakeClock(_NOW)
+        ).clear_stale_assignment(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    record = next(
+        r for r in caplog.records if "stopped, crashed, assigned" in r.getMessage()
+    )
+    assert "re-drove the final snapshot" in record.getMessage()
+
+
+async def test_clear_stale_assignment_crashed_warn_names_lost_crash_window(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Issue #2448 (the minor item), the other half: with the worker GONE no snapshot
+    # was taken, so the WARN must say the crash-window world is exposed -- the same
+    # thing the disconnected stopped-side branch already spells out.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.CRASHED,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(connected={WorkerId(worker): False})
+    with caplog.at_level(logging.WARNING):
+        await StopServer(
+            uow=uow, control_plane=cp, clock=FakeClock(_NOW)
+        ).clear_stale_assignment(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    record = next(
+        r for r in caplog.records if "stopped, crashed, assigned" in r.getMessage()
+    )
+    assert "not re-driven" in record.getMessage()
+
+
+async def test_clear_stale_assignment_stopping_disconnected_skips_snapshot() -> None:
+    # Issue #2452: (stopped, stopping, assigned) with the worker GONE. The
+    # reconciler routes this here, and the row must be accepted even though the
+    # disconnect teardown has not yet rewritten stopping to unknown — it clears
+    # the registry entry BEFORE the bulk observed=unknown write, so the reconciler
+    # can read "disconnected" while the row still reads stopping. No snapshot: the
+    # process may still be alive (a stop that failed after the worker emitted
+    # stopping), so there is no settled working set to capture.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.STOPPING,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(connected={WorkerId(worker): False})
+    result = await StopServer(
+        uow=uow, control_plane=cp, clock=FakeClock(_NOW)
+    ).clear_stale_assignment(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    assert result.assigned_worker_id is None
+    assert cp.dispatched == []
+
+
+async def test_clear_stale_assignment_stopping_converges_observed_to_unknown() -> None:
+    # Issue #2452 (PR #2469 review): releasing the assignment while leaving
+    # observed=stopping would land the row at (stopped, stopping, unassigned) —
+    # still not is_at_rest() (file/backup/restore/delete keep 409ing), matching no
+    # list_reconcilable arm (every stopped-intent arm requires an assignment), and
+    # not healed by an API restart (reset_unverifiable_observed_states filters on
+    # assigned IS NOT NULL). That repeats this issue's own wedge shape one step
+    # over. Converge observed to unknown instead: it is what the disconnect's bulk
+    # write would have recorded, the TOCTOU guard has just established the worker
+    # really is gone, and it lands the SAME terminal shape the #1599 unknown leg
+    # produces — at rest, unassigned, startable.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.STOPPING,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(connected={WorkerId(worker): False})
+    result = await StopServer(
+        uow=uow, control_plane=cp, clock=FakeClock(_NOW)
+    ).clear_stale_assignment(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    assert result.observed_state is ObservedState.UNKNOWN
+    assert result.is_at_rest()
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.observed_state is ObservedState.UNKNOWN
+    assert stored.assigned_worker_id is None
+    assert stored.is_at_rest()
+
+
+async def test_clear_stale_assignment_stopping_reconnected_worker_bails() -> None:
+    # Issue #2452: the same TOCTOU guard the unknown case carries (#1599). The
+    # reconciler only routes a stopping row here when the worker is disconnected;
+    # if it reconnected in between, bail so the next tick redispatches the stop
+    # rather than releasing an assignment whose process may still be alive.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.STOPPING,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(connected={WorkerId(worker): True})
+    with pytest.raises(InvalidLifecycleTransitionError):
+        await StopServer(
+            uow=uow, control_plane=cp, clock=FakeClock(_NOW)
+        ).clear_stale_assignment(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+    assert uow.servers.by_id[ServerId(server_id)].assigned_worker_id == WorkerId(worker)
 
 
 # --- bedrock tunnel sync (issue #1602) --------------------------------------

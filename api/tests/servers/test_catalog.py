@@ -586,7 +586,7 @@ async def test_install_from_catalog_geyser_source_stores_provenance() -> None:
     assert plugin.sha256 == hashlib.sha256(content).hexdigest()
     assert plugin.rel_path == "plugins/floodgate-spigot.jar"
     assert plugin.size_bytes == len(content)
-    assert await cache.has(plugin.sha256)
+    assert b"".join([chunk async for chunk in cache.open(plugin.sha256)]) == content
 
 
 async def test_install_from_catalog_geyser_sha256_mismatch() -> None:
@@ -1955,7 +1955,8 @@ async def test_install_from_catalog_stores_sha256_and_caches_blob() -> None:
     expected_sha256 = hashlib.sha256(content).hexdigest()
     assert plugin.sha256 == expected_sha256
     assert plugin.checksum_sha512 == hashlib.sha512(content).hexdigest()
-    assert await cache.has(expected_sha256)
+    cached = b"".join([chunk async for chunk in cache.open(expected_sha256)])
+    assert cached == content
     # The first install downloaded once.
     assert catalog.downloads == [version.files[0].url]
 
@@ -2142,6 +2143,88 @@ async def test_cache_hit_does_not_reupload_blob() -> None:
     assert plugin.sha256 == sha256
     # No put call on the cache-hit path (the blob already exists).
     assert cache.puts == []
+
+
+async def test_cache_blob_deleted_after_lookup_falls_back_to_download() -> None:
+    """A blob the GC deleted under the resolver installs via the download path.
+
+    The download-cache index resolves the version's sha512 to a cached sha256,
+    but the blob is gone by the time it is read. The miss is a cache miss, not a
+    500: the jar is downloaded, verified, and re-ingested (issue #2346).
+    """
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+
+    project = _project()
+    version, content = _version()
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(project, [version])
+    catalog.seed_file(version.files[0].url, content)
+
+    sha256 = hashlib.sha256(content).hexdigest()
+    # Models the GC race: the index resolves the content key, but the cache holds
+    # no blob, so the read raises the modelled miss (issue #2346).
+    cache = FakePluginCacheStore()
+    # Seed the download-cache index: a prior install on another server.
+    prior = _plugin(
+        server_id=ServerId.new(),
+        checksum_sha512=version.files[0].sha512,
+        sha256=sha256,
+    )
+    uow.plugins.seed(prior)
+
+    uc = InstallFromCatalog(
+        uow=uow,
+        catalog=catalog,
+        file_store=FakeFileStore(),
+        cache=cache,
+        clock=FakeClock(_NOW),
+    )
+    plugin = await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        project_id="proj-1",
+        version_id="ver-1",
+    )
+    assert plugin.sha256 == sha256
+    # Recovered by downloading once and re-ingesting the blob once.
+    assert catalog.downloads == [version.files[0].url]
+    assert cache.puts == [sha256]
+
+
+async def test_geyser_cache_blob_deleted_after_lookup_falls_back_to_download() -> None:
+    """The sha256-keyed resolver recovers from the same GC race (issue #2346)."""
+    uow = FakeUnitOfWork()
+    server = _server(server_type=ServerType.PAPER)
+    uow.servers.seed(server)
+
+    project = _geyser_project()
+    version, content = _geyser_version()
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(project, [version])
+    catalog.seed_file(version.files[0].url, content)
+    # Models the GC race: the published sha256 is the content key, but the cache
+    # holds no blob, so the read raises the modelled miss (issue #2346).
+    cache = FakePluginCacheStore()
+
+    uc = InstallFromCatalog(
+        uow=uow,
+        catalog=catalog,
+        file_store=FakeFileStore(),
+        cache=cache,
+        clock=FakeClock(_NOW),
+    )
+    plugin = await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        project_id="geysermc-floodgate",
+        version_id="2.2.5-138",
+    )
+    expected_sha256 = hashlib.sha256(content).hexdigest()
+    assert plugin.sha256 == expected_sha256
+    assert catalog.downloads == [version.files[0].url]
+    assert cache.puts == [expected_sha256]
 
 
 # -- Bedrock port on Geyser detection via catalog install (issue #1541) --

@@ -5,8 +5,9 @@ API knows the (community, server) scope). Two surfaces live here:
 
 - :class:`RunSnapshotCadenceTick` — the periodic scheduler's one tick. The edge
   runs it on a loop as a lifespan task (like the gRPC server). Each tick lists
-  the running, Worker-assigned servers, and dispatches a SnapshotTrigger to those
-  that are due, honouring the per-server interval and a deterministic jitter.
+  the desired-running, Worker-assigned servers, and dispatches a SnapshotTrigger
+  to those that are due, honouring the per-server interval and a deterministic
+  jitter.
 
 - :class:`SnapshotServer` — an on-demand snapshot of one server, an internal use
   case the backup epic (#9) calls (save-all -> snapshot -> archive). No HTTP
@@ -21,9 +22,11 @@ That keeps the RPO bounded (FR-DATA-5) at the cost of one extra, idempotent
 snapshot per server per restart — an acceptable M1 trade.
 
 Failures (a disconnected Worker, a refused trigger, a transport error) are logged
-and left for the next tick: the server's next-due instant is advanced only on a
-successful snapshot, so a failure is naturally retried, bounding the RPO by the
-interval rather than dropping the snapshot.
+and left for the next tick: the server's next-due instant is not advanced, so a
+failure is naturally retried, bounding the RPO by the interval rather than
+dropping the snapshot. The one refusal that is NOT a failure is the Worker's
+working_set_absent answer — it holds nothing for this id, so there is nothing to
+retry and next-due advances as it would on a published snapshot (issue #2480).
 """
 
 from __future__ import annotations
@@ -34,6 +37,9 @@ from dataclasses import dataclass, field
 
 from mc_server_dashboard_api.servers.application.command_dispatch import (
     dispatch_failure,
+)
+from mc_server_dashboard_api.servers.application.lifecycle import (
+    is_working_set_absent_refusal,
 )
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.control_plane import (
@@ -63,6 +69,24 @@ _LOG = logging.getLogger(__name__)
 class RunSnapshotCadenceTick:
     """One pass of the periodic snapshot scheduler (FR-DATA-7).
 
+    The candidate set is DESIRED-running and assigned, with no observed-state
+    predicate, and dispatching to a **crashed** member of it is a decision, not an
+    oversight (issue #2480). The Worker has dropped the crashed instance from its
+    map, so the trigger takes the at-rest branch over the retained working
+    directory: it publishes, then GCs the scratch. Capturing that crash-time world
+    is the point — under ``desired=running`` this tick is the only path that
+    durably captures it. Everything else destroys or refuses it: the reconciler's
+    automatic ``redispatch_start`` hydrates over the crash-window scratch and the
+    displaced copy is swept on the next publish, a manual stop of a crashed server
+    unassigns without a snapshot, and a backup of an unsettled server refuses. So
+    skipping crashed servers here would leave their world captured by nothing.
+
+    The scratch GC that follows is an intended consequence, and it is safe: the
+    Worker removes the scratch only after the transfer reported success, which
+    happens only once the API committed the snapshot (pinned Worker-side by
+    ``TestStoppedSnapshotRemovesScratchAfterPublish`` and
+    ``TestStoppedSnapshotFailureRetainsScratch``).
+
     Not frozen: it owns the in-memory next-due map mutated across ticks. A single
     instance is reused for the lifetime of the lifespan loop.
     """
@@ -78,10 +102,10 @@ class RunSnapshotCadenceTick:
     async def tick(self) -> None:
         now = self.clock.now()
         async with self.uow:
-            servers = await self.uow.servers.list_running_assigned()
+            servers = await self.uow.servers.list_desired_running_assigned()
         live_ids = {server.id for server in servers}
-        # Forget servers that are no longer running/assigned so the map does not
-        # grow without bound; a server that comes back is re-scheduled afresh.
+        # Forget servers that are no longer desired-running/assigned so the map
+        # does not grow without bound; one that comes back is re-scheduled afresh.
         for stale in self._next_due.keys() - live_ids:
             del self._next_due[stale]
         for server in servers:
@@ -101,7 +125,7 @@ class RunSnapshotCadenceTick:
             return
         if now < due_at:
             return
-        assert server.assigned_worker_id is not None  # running-assigned invariant
+        assert server.assigned_worker_id is not None  # desired-running-assigned
         if not self.control_plane.is_worker_connected(
             worker_id=server.assigned_worker_id
         ):
@@ -109,8 +133,9 @@ class RunSnapshotCadenceTick:
             # snapshot is retried once it reconnects (FR-WRK-4, FR-DATA-5).
             return
         if await self._dispatch(server):
-            # Reschedule one interval out (plus jitter) from now only on success;
-            # a failure leaves next-due in the past so the next tick retries.
+            # Reschedule one interval out (plus jitter) from now only once this
+            # server needs nothing more this tick; a failure leaves next-due in
+            # the past so the next tick retries.
             self._next_due[server.id] = now + dt.timedelta(
                 seconds=interval + jitter_seconds(server.id, interval_seconds=interval)
             )
@@ -136,6 +161,18 @@ class RunSnapshotCadenceTick:
         )
 
     async def _dispatch(self, server: Server) -> bool:
+        """Dispatch one snapshot; ``True`` when next-due should advance.
+
+        A crashed server takes the Worker's at-rest branch here — publish, then
+        scratch GC — which is the intended crash-time capture (issue #2480, see the
+        class docstring). Its consequence is that the FIRST such tick captures the
+        world and leaves the Worker holding nothing, so every later dispatch for
+        the same id is refused with working_set_absent. That refusal is not a
+        failure to retry: there is nothing left to capture until the server starts
+        again, so it advances next-due. Retrying it instead would re-dispatch (and
+        re-WARN) on every tick for as long as the server stays crashed.
+        """
+
         assert server.assigned_worker_id is not None
         try:
             outcome = await self.control_plane.snapshot(
@@ -150,6 +187,17 @@ class RunSnapshotCadenceTick:
                 server.id.value,
             )
             return False
+        if is_working_set_absent_refusal(outcome):
+            # Only the pinned working_set_absent phrase may be read this way; the
+            # SERVER_NOT_FOUND code alone must not (issue #1790), so any other
+            # SERVER_NOT_FOUND still takes the retry branch below.
+            _LOG.info(
+                "periodic snapshot for server %s found no working set to capture: "
+                "the Worker holds nothing for this id; not retrying until it runs "
+                "again",
+                server.id.value,
+            )
+            return True
         if not outcome.success:
             _LOG.warning(
                 "periodic snapshot failed for server %s: %s; will retry next tick",

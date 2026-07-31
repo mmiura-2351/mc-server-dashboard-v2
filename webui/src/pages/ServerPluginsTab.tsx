@@ -16,7 +16,7 @@ import {
   isUploadAbortError,
   postFormWithProgress,
 } from "../api/client.ts";
-import { downloadFile } from "../api/download.ts";
+import { DownloadTooLargeError, downloadFile } from "../api/download.ts";
 import { apiPath } from "../api/path.ts";
 import {
   catalogProjectKey,
@@ -364,7 +364,21 @@ export function ServerPluginsTab({
         ),
         "mods.zip",
       ),
-    onError,
+    // The ZIP is built incrementally with no Content-Length, so an oversize mod
+    // set trips the download cap mid-stream. That is not an ApiError, so it
+    // needs its own size-bearing message (#2355).
+    onError: (error) => {
+      if (error instanceof DownloadTooLargeError) {
+        showToast(
+          t("plugins.error.downloadTooLarge", {
+            size: humanizeBytes(error.size),
+          }),
+          "error",
+        );
+        return;
+      }
+      onError(error);
+    },
   });
 
   const uploadMutation = useMutation({

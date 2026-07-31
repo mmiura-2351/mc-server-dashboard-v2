@@ -79,15 +79,43 @@ class WorkerRegistry(abc.ABC):
         hydrate on a same-worker restart ONLY when the held generation is fresh
         enough (see :meth:`held_generation`). A re-registration REPLACES the prior
         map — the control plane keeps no cross-stream session state (CONTROL_PLANE.md
-        Section 4.4).
+        Section 4.4) — discarding anything :meth:`record_held_generation` had
+        recorded on the prior session in favour of the Worker's own on-disk scan.
+        """
+
+    @abc.abstractmethod
+    def record_held_generation(
+        self, worker_id: WorkerId, server_id: str, generation: int
+    ) -> None:
+        """Record that ``worker_id`` now holds ``server_id`` at ``generation`` (#2477).
+
+        The registration map alone says nothing about a server PLACED SINCE the Worker
+        registered, so every such server read back as "nothing held"
+        (:meth:`held_generation` ``None``) for the whole session — the short held-start
+        grace and the skip-hydrate it gates almost never applied. Callers refresh the
+        entry from an event that advances what the Worker's scratch holds: a successful
+        hydrate, and a snapshot publish on which the Worker DECLARED it still holds the
+        tree it published (#2481).
+
+        The caller owns the ONE invariant this map must never break: ``generation``
+        must never be NEWER than the working set the Worker actually holds. An
+        understated entry only costs a hydrate that was not needed (the pre-#2477
+        behaviour); an overstated one makes the lifecycle SKIP a hydrate it needs and
+        boot a stale/absent working set — a #696-class world rollback. So a caller must
+        be able to PROVE retention, not merely expect it. Ignored for an
+        unknown Worker, and superseded wholesale by the next :meth:`register` (the
+        Worker's own on-disk scan always wins over this mirror).
         """
 
     @abc.abstractmethod
     def held_generation(self, worker_id: WorkerId, server_id: str) -> int | None:
         """Return the generation ``worker_id`` reported holding for ``server_id``.
 
-        Answers from the held map the Worker advertised on its current registration
-        (issue #763). ``None`` when the Worker does not report holding the server
+        Answers from the held map, seeded by the Worker's advertisement on its current
+        registration (issue #763) and refreshed by
+        :meth:`record_held_generation` as hydrates advance what the Worker's scratch
+        holds (issue #2477). ``None`` when the Worker does not report
+        holding the server
         (an unknown Worker, or one that re-registered without that id because its
         scratch was wiped or GC'd) — the lifecycle layer then hydrates rather than
         booting a server on an empty/absent working set. A held generation of 0

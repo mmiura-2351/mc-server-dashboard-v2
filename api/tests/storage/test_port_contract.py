@@ -640,6 +640,23 @@ async def test_open_missing_jar_is_not_found(harness: StorageHarness) -> None:
         await drain(harness.storage.open_jar(JarKey("b" * 64)))
 
 
+async def test_jar_deleted_after_open_is_not_found(harness: StorageHarness) -> None:
+    """A delete landing after ``open_jar`` surfaces as NotFoundError (#2341).
+
+    The JAR egress sibling of ``open_backup``: the stream is opened while the
+    JAR is pooled and read after the GC reclaimed it, and the miss must be the
+    Port's own error rather than the backend's native one.
+    """
+
+    key = await harness.storage.put_jar(stream_of(b"jar-bytes"))
+
+    stream = harness.storage.open_jar(key)
+    await harness.storage.delete_jar(key)
+
+    with pytest.raises(NotFoundError):
+        await drain(stream)
+
+
 async def test_jar_pool_stats_empty(harness: StorageHarness) -> None:
     stats = await harness.storage.jar_pool_stats()
     assert stats.count == 0
@@ -1060,6 +1077,72 @@ async def test_open_unknown_backup_is_not_found(harness: StorageHarness) -> None
         await drain(harness.storage.open_backup(community, server, BackupKey("nope")))
 
 
+async def test_backup_deleted_after_open_is_not_found(
+    harness: StorageHarness,
+) -> None:
+    """A delete landing after ``open_backup`` surfaces as NotFoundError (#2341).
+
+    The stream is opened while the archive exists and read after it is gone —
+    the window an unlucky concurrent delete lands in. The Port's own miss error
+    is what the adapter seam translates, so a backend-native miss
+    (``FileNotFoundError``, a store 404) must never escape as itself.
+    """
+
+    community, server = new_scope()
+    await harness.publish(community, server, {"f": b"x"})
+    key = await harness.storage.create_backup_from_current(community, server)
+
+    stream = harness.storage.open_backup(community, server, key)
+    await harness.storage.delete_backup(community, server, key)
+
+    with pytest.raises(NotFoundError):
+        await drain(stream)
+
+
+async def test_ranged_open_backup_matches_a_slice_of_the_full_stream(
+    harness: StorageHarness,
+) -> None:
+    """A ranged read yields exactly the bytes slicing the full stream would.
+
+    The download edge resumes an interrupted transfer with ``Range`` (issue
+    #2372), which must be a real ranged read on the backend — not a prefix
+    discarded off the full stream. Every boundary is pinned: the first byte, the
+    last byte, a single-byte range, and a range ending exactly at EOF.
+    """
+
+    community, server = new_scope()
+    await harness.publish(community, server, {"world/level.dat": b"w" * 4096})
+    key = await harness.storage.create_backup_from_current(community, server)
+
+    full = await drain(harness.storage.open_backup(community, server, key))
+    last = len(full) - 1
+    for start, end in [
+        (0, 0),
+        (0, last),
+        (1, 1),
+        (5, 19),
+        (last, last),
+        (last - 9, last),
+        (len(full) // 2, last),
+    ]:
+        chunk = await drain(
+            harness.storage.open_backup(community, server, key, byte_range=(start, end))
+        )
+        assert chunk == full[start : end + 1], f"range {start}-{end}"
+
+
+async def test_ranged_open_of_an_unknown_backup_is_not_found(
+    harness: StorageHarness,
+) -> None:
+    community, server = new_scope()
+    with pytest.raises(NotFoundError):
+        await drain(
+            harness.storage.open_backup(
+                community, server, BackupKey("nope"), byte_range=(0, 0)
+            )
+        )
+
+
 async def test_backup_size_reports_archive_byte_count(
     harness: StorageHarness,
 ) -> None:
@@ -1122,6 +1205,34 @@ async def test_open_file_stream_missing_is_not_found(
         )
 
 
+async def test_open_file_stream_on_a_directory_is_not_found(
+    harness: StorageHarness,
+) -> None:
+    """A path that names no readable FILE is a miss, directories included."""
+
+    community, server = new_scope()
+    await harness.publish(community, server, {"world/level.dat": b"x"})
+    with pytest.raises(NotFoundError):
+        await drain(
+            harness.storage.open_file_stream(community, server, RelPath("world"))
+        )
+
+
+async def test_open_file_stream_through_a_file_is_not_found(
+    harness: StorageHarness,
+) -> None:
+    """A path whose parent is itself a file is a miss, not a backend-native error."""
+
+    community, server = new_scope()
+    await harness.publish(community, server, {"eula.txt": b"x"})
+    with pytest.raises(NotFoundError):
+        await drain(
+            harness.storage.open_file_stream(
+                community, server, RelPath("eula.txt/nope")
+            )
+        )
+
+
 async def test_open_file_stream_before_any_publish_is_not_found(
     harness: StorageHarness,
 ) -> None:
@@ -1169,6 +1280,76 @@ async def test_list_dir_lists_entries(harness: StorageHarness) -> None:
     assert ("server.properties", False) in names
     props = next(e for e in entries if e.name == "server.properties")
     assert props.size == 3
+
+
+async def test_list_dir_on_a_file_path_is_not_found(harness: StorageHarness) -> None:
+    """Listing a path that names a FILE is the Port's miss, on both backends.
+
+    Pinned because the fs adapter reaches this answer through the failure of the
+    listing itself rather than an ``is_dir`` pre-check (issue #2394), and that must
+    not shift what a non-directory listing reports relative to the object backend.
+    """
+
+    community, server = new_scope()
+    await harness.publish(community, server, {"server.properties": b"k=v"})
+
+    with pytest.raises(NotFoundError):
+        await harness.storage.list_dir(community, server, RelPath("server.properties"))
+
+
+async def test_path_exists_answers_for_a_file_a_dir_and_a_free_name(
+    harness: StorageHarness,
+) -> None:
+    """The occupied-name question, answered the same way by both backends (#2426).
+
+    A rename's never-clobber pre-check asks it, so a free name and a taken one
+    must be told apart identically whatever the store is; what makes a name taken
+    beyond a plain file or directory (a symlink dirent) is per-backend and pinned
+    with the fs specifics.
+    """
+
+    community, server = new_scope()
+    await harness.publish(
+        community, server, {"world/level.dat": b"abc", "server.properties": b"k=v"}
+    )
+
+    assert await harness.storage.path_exists(community, server, RelPath("."))
+    assert await harness.storage.path_exists(
+        community, server, RelPath("server.properties")
+    )
+    assert await harness.storage.path_exists(community, server, RelPath("world"))
+    assert await harness.storage.path_exists(
+        community, server, RelPath("world/level.dat")
+    )
+    assert not await harness.storage.path_exists(community, server, RelPath("free"))
+    assert not await harness.storage.path_exists(
+        community, server, RelPath("world/free")
+    )
+
+
+async def test_path_exists_is_false_rather_than_an_error_for_an_unnameable_path(
+    harness: StorageHarness,
+) -> None:
+    """An over-long component cannot name anything, so it is free, not a failure.
+
+    The same rule the read paths settled on (issue #2394): a client-supplied path
+    the backend cannot even name must not reach the edge as a 500.
+    """
+
+    community, server = new_scope()
+    await harness.publish(community, server, {"server.properties": b"k=v"})
+
+    assert not await harness.storage.path_exists(community, server, RelPath("x" * 300))
+
+
+async def test_path_exists_before_any_publish_is_false(
+    harness: StorageHarness,
+) -> None:
+    """A server with no working set holds nothing, so no name is taken (#205)."""
+
+    community, server = new_scope()
+
+    assert not await harness.storage.path_exists(community, server, RelPath("anything"))
 
 
 async def test_write_file_overwrites_and_retains_prior_version(

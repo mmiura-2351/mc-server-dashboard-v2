@@ -307,9 +307,7 @@ func (CommandErrorCode) EnumDescriptor() ([]byte, []int) {
 // running / stopped / starting / crashed, plus the in-between transitions and a
 // restarting state the lifecycle commands produce). This is the full set of
 // values a Worker can report. The API caches the last-reported value in
-// Server.observed_state (DATABASE.md); that column also allows "unknown", which
-// is an API-side inference (set when the owning Worker disconnects), never
-// reported by a Worker, so it is intentionally not a value here.
+// Server.observed_state (DATABASE.md), whose value set this enum mirrors.
 type ServerState int32
 
 const (
@@ -320,6 +318,12 @@ const (
 	ServerState_SERVER_STATE_STOPPED     ServerState = 4
 	ServerState_SERVER_STATE_RESTARTING  ServerState = 5
 	ServerState_SERVER_STATE_CRASHED     ServerState = 6
+	// SERVER_STATE_UNKNOWN is reported when the Worker cannot currently confirm an
+	// instance's fate: it neither observed a clean exit nor can it see the process
+	// (a failed-stop orphan under an unreachable daemon). Asserting "unknown" is
+	// truthful where "stopped" or "running" would be a guess. The API also infers
+	// this value itself when a Worker's session drops (issue #2474).
+	ServerState_SERVER_STATE_UNKNOWN ServerState = 7
 )
 
 // Enum value maps for ServerState.
@@ -332,6 +336,7 @@ var (
 		4: "SERVER_STATE_STOPPED",
 		5: "SERVER_STATE_RESTARTING",
 		6: "SERVER_STATE_CRASHED",
+		7: "SERVER_STATE_UNKNOWN",
 	}
 	ServerState_value = map[string]int32{
 		"SERVER_STATE_UNSPECIFIED": 0,
@@ -341,6 +346,7 @@ var (
 		"SERVER_STATE_STOPPED":     4,
 		"SERVER_STATE_RESTARTING":  5,
 		"SERVER_STATE_CRASHED":     6,
+		"SERVER_STATE_UNKNOWN":     7,
 	}
 )
 
@@ -2052,9 +2058,28 @@ type CommandResult struct {
 	//	*CommandResult_CommandOutput
 	//	*CommandResult_FileContent
 	//	*CommandResult_FileListing
-	Result        isCommandResult_Result `protobuf_oneof:"result"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Result isCommandResult_Result `protobuf_oneof:"result"`
+	// held_generation is the Worker DECLARING that it still holds this server's
+	// working set in local scratch, at this generation, now the command has
+	// finished (issue #2481). Only a SnapshotTrigger sets it, and only when the
+	// Worker's own generation marker was published at that value — the same
+	// on-disk fact Register.held_servers re-advertises after a reconnect, so the
+	// API mirrors one number rather than reconciling two.
+	//
+	// The field is OPTIONAL rather than a 0 sentinel because generation 0 already
+	// means "held at an unknown generation" in HeldServer: absent means "declared
+	// nothing", which is what a snapshot that DELETED the scratch reports (the
+	// stopped-id branch GCs it, issue #762/#841) and what a snapshot whose marker
+	// stamp was refused reports (the working dir was replaced mid-flight, issue
+	// #2284). The API records a held generation only when this is present, so an
+	// absent field — including from an older Worker that never sets it — leaves
+	// its inventory stale and the next start hydrates, which is the safe
+	// direction: understating what a Worker holds costs one hydrate, while
+	// overstating it makes a start skip a hydrate it needs and boot an empty or
+	// stale world (issue #696).
+	HeldGeneration *uint64 `protobuf:"varint,6,opt,name=held_generation,json=heldGeneration,proto3,oneof" json:"held_generation,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *CommandResult) Reset() {
@@ -2133,6 +2158,13 @@ func (x *CommandResult) GetFileListing() *FileListing {
 		}
 	}
 	return nil
+}
+
+func (x *CommandResult) GetHeldGeneration() uint64 {
+	if x != nil && x.HeldGeneration != nil {
+		return *x.HeldGeneration
+	}
+	return 0
 }
 
 type isCommandResult_Result interface {
@@ -2807,14 +2839,16 @@ const file_mcsd_controlplane_v1_control_plane_proto_rawDesc = "" +
 	"\n" +
 	"tls_ca_pem\x18\x05 \x01(\tR\btlsCaPem\"1\n" +
 	"\x12CloseBedrockTunnel\x12\x1b\n" +
-	"\tserver_id\x18\x01 \x01(\tR\bserverId\"\x83\x02\n" +
+	"\tserver_id\x18\x01 \x01(\tR\bserverId\"\xc5\x02\n" +
 	"\rCommandResult\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x128\n" +
 	"\x05error\x18\x02 \x01(\v2\".mcsd.controlplane.v1.CommandErrorR\x05error\x12'\n" +
 	"\x0ecommand_output\x18\x03 \x01(\tH\x00R\rcommandOutput\x12#\n" +
 	"\ffile_content\x18\x04 \x01(\fH\x00R\vfileContent\x12F\n" +
-	"\ffile_listing\x18\x05 \x01(\v2!.mcsd.controlplane.v1.FileListingH\x00R\vfileListingB\b\n" +
-	"\x06result\"f\n" +
+	"\ffile_listing\x18\x05 \x01(\v2!.mcsd.controlplane.v1.FileListingH\x00R\vfileListing\x12,\n" +
+	"\x0fheld_generation\x18\x06 \x01(\x04H\x01R\x0eheldGeneration\x88\x01\x01B\b\n" +
+	"\x06resultB\x12\n" +
+	"\x10_held_generation\"f\n" +
 	"\vFileListing\x129\n" +
 	"\aentries\x18\x01 \x03(\v2\x1f.mcsd.controlplane.v1.FileEntryR\aentries\x12\x1c\n" +
 	"\ttruncated\x18\x02 \x01(\bR\ttruncated\"J\n" +
@@ -2869,7 +2903,7 @@ const file_mcsd_controlplane_v1_control_plane_proto_rawDesc = "" +
 	"\x1bCOMMAND_ERROR_CODE_INTERNAL\x10\x06\x12$\n" +
 	" COMMAND_ERROR_CODE_PORT_CONFLICT\x10\a\x12$\n" +
 	" COMMAND_ERROR_CODE_IMAGE_MISSING\x10\b\x12\x1b\n" +
-	"\x17COMMAND_ERROR_CODE_BUSY\x10\t*\xcc\x01\n" +
+	"\x17COMMAND_ERROR_CODE_BUSY\x10\t*\xe6\x01\n" +
 	"\vServerState\x12\x1c\n" +
 	"\x18SERVER_STATE_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15SERVER_STATE_STARTING\x10\x01\x12\x18\n" +
@@ -2877,7 +2911,8 @@ const file_mcsd_controlplane_v1_control_plane_proto_rawDesc = "" +
 	"\x15SERVER_STATE_STOPPING\x10\x03\x12\x18\n" +
 	"\x14SERVER_STATE_STOPPED\x10\x04\x12\x1b\n" +
 	"\x17SERVER_STATE_RESTARTING\x10\x05\x12\x18\n" +
-	"\x14SERVER_STATE_CRASHED\x10\x06*U\n" +
+	"\x14SERVER_STATE_CRASHED\x10\x06\x12\x18\n" +
+	"\x14SERVER_STATE_UNKNOWN\x10\a*U\n" +
 	"\tLogStream\x12\x1a\n" +
 	"\x16LOG_STREAM_UNSPECIFIED\x10\x00\x12\x15\n" +
 	"\x11LOG_STREAM_STDOUT\x10\x01\x12\x15\n" +

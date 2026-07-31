@@ -160,6 +160,17 @@ snapshot over it and roll the world back, while a *stale* held set (e.g. an
 A→B→A leftover scratch B has advanced past) must still hydrate (issue #763,
 generalizing #696, see Section 5).
 
+`Register` only ever describes the Worker's scratch *at connect time*, so the API
+also refreshes its record **within** the session: from a successful hydrate, at the
+generation that transfer served (issue #2477), and from a snapshot publish on which
+the Worker **declared** the generation it still holds (`CommandResult.held_generation`,
+issue #2481). Without that refresh every server **placed since** the Worker last
+registered was absent from the advertisement and read back as "nothing held" for the
+whole session — so the skip gate below, and the reconciler's short held-start grace,
+almost never applied. A re-registration replaces the whole record: the Worker's own
+on-disk scan always wins over the API's within-session tracking. The API never records
+a generation it cannot *prove* the Worker holds — see Section 5.1.
+
 A snapshot advances that persisted generation **only while the working dir is still the
 directory the snapshot pinned when it began** (issue #2284). A running-id snapshot holds
 no per-server reservation (#829 item 4), so a new stream can re-place the server onto
@@ -353,12 +364,40 @@ restart (the reconciler's same-worker re-dispatch, where the assigned Worker is
 unchanged) starts on the Worker's **existing** working set when it is current: the
 persistent scratch is the live, newer copy (snapshots are pushed *from* it), so a
 hydrate there would clobber it with the last snapshot and roll the world back. The
-API skips the hydrate when, and only when, the assigned Worker reported that
-server in its `Register.held_servers` (Section 4.1) at a **generation at least the
-authoritative store generation** — so a fresh/wiped/GC'd scratch (reported as not
+API skips the hydrate when, and only when, the assigned Worker is known to hold that
+server's working set at a **generation at least the authoritative store generation**
+— so a fresh/wiped/GC'd scratch (reported as not
 held, or a Worker too old to report) AND a *stale* held set (a generation older
 than the store) both still hydrate, rather than booting an empty world or starting
-on stale leftover scratch. The store generation is a per-server counter the
+on stale leftover scratch.
+
+That knowledge comes from `Register.held_servers` (Section 4.1) plus the two
+within-session events the API can *prove* advance the Worker's scratch:
+
+- A **successful hydrate** (issue #2477), recorded at the store generation read
+  immediately *before* the transfer. The data plane serves the generation current at
+  pull time, which the monotonic counter puts at or after that read, so the recorded
+  value can only understate what the Worker ends up holding.
+- A **snapshot publish the Worker declared it retained** (issue #2481), recorded at
+  the generation the Worker states in `CommandResult.held_generation`.
+
+The asymmetry is the point: understating what a Worker holds only costs an
+unnecessary hydrate, while overstating it would make a start skip a hydrate it needs
+and boot a stale or absent world. The snapshot case is the one where only the Worker
+can supply the proof, so the API does not infer it. Whether the Worker still holds
+what it published depends on which branch it took — a running-id snapshot keeps the
+scratch, a stopped-id one GCs it (issue #762/#841) and then holds nothing at all —
+and that choice is made Worker-side from its own instance map. A server observed
+**crashed** under `desired=running` reaches the stopped-id branch with no race
+involved, since the crash drops the instance from that map. So the Worker states the
+outcome rather than the API guessing it, and states it from the *same fact that
+decides the deletion*: the field is set from the result of writing the Worker's own
+generation marker — the on-disk value `Register.held_servers` re-advertises — and the
+deleting branch never reaches that write. A running-id snapshot whose marker stamp is
+refused because the working dir was replaced mid-flight (issue #2284) likewise
+declares nothing, so the wire signal cannot claim a generation the marker does not
+carry. An absent declaration leaves the record untouched, the publish advances the
+store past it, and the next start hydrates. The store generation is a per-server counter the
 authoritative Storage bumps on each `commit_snapshot` and stamps onto each hydrate
 / snapshot transfer, so the Worker's reported generation and the store's share one
 number space. A fresh placement always hydrates: a first launch or a relocation
@@ -402,10 +441,21 @@ running / stopped / starting / crashed; the contract adds the transient
 `STOPPING` and `RESTARTING` states the lifecycle commands pass through, so a
 client sees an accurate live state during a transition. The `ServerState` enum
 is the full set of values a Worker can report; the API caches the last-reported
-value in `observed_state` ([`DATABASE.md`](DATABASE.md)). The `unknown` value
-that column also allows is an API-side inference (set when the owning Worker
-disconnects), never reported by a Worker, so it is deliberately outside this wire
-contract and the enum has no `UNKNOWN` value.
+value in `observed_state` ([`DATABASE.md`](DATABASE.md)), whose value set this
+enum mirrors exactly.
+
+`SERVER_STATE_UNKNOWN` is part of that set as of issue #2474. It has two
+producers, and the wire value exists for the second:
+
+- the **API** infers it for every server assigned to a Worker whose session drops
+  (Section 4.4) — that path writes the column directly, not over this contract;
+- a **Worker** asserts it when it cannot currently confirm an instance's fate —
+  it neither observed a clean exit nor can it see the process (a failed-stop
+  orphan under an unreachable daemon). Reporting `STOPPED` or `RUNNING` there
+  would be a guess the API would cache as fact.
+
+The ingest maps every value in this enum onto the persisted state; only
+`SERVER_STATE_UNSPECIFIED` (the proto zero value) is dropped.
 
 Real-time delivery is best-effort end to end: if the control plane is down the
 API's REST endpoints still function and clients simply miss live updates
@@ -422,9 +472,9 @@ classes a Worker can hit:
 
 | Code | When |
 |---|---|
-| `SERVER_NOT_FOUND` | The target server is unknown to this Worker (no live instance: stop/restart/command on a not-running server, a missing file target, or a stopped-id snapshot whose working dir is absent — already GC'd after a published final snapshot, or never hydrated; issue #1713). |
-| `INVALID_STATE` | The command is invalid for the current settled state (e.g. start or hydrate a running server, or a server with a failed-stop orphan pending termination). |
-| `BUSY` | Another mutating lifecycle command is already in flight for the server, so this one was refused without being applied (the reservation race, issue #824). Distinct from `INVALID_STATE`: the in-flight command's outcome is not yet known, so the API keeps the assignment/intent and retries on a later tick rather than converging an observed state. |
+| `SERVER_NOT_FOUND` | The target server is unknown to this Worker (no live instance: stop/restart/command on a not-running server, a missing file target, or a stopped-id snapshot whose working dir is absent — already GC'd after a published final snapshot, or never hydrated; issue #1713). Where a command's precondition is "this server is running", the code means the Worker holds neither an instance nor a **failed-stop orphan** for the id: the orphan answers `INVALID_STATE` or `BUSY` instead, per the split below (issue #2466/#2476). |
+| `INVALID_STATE` | The command is invalid for the current **settled** state: start or hydrate a running server, or a restart, console command, relay tunnel dial or Bedrock tunnel open over a server with a failed-stop orphan pending termination (issue #2466). The orphan is a process this Worker could not confirm dead, so it may still be alive holding its port and writing its world; reporting it as not-running would tell the operator a live server is down. Those four verbs are refused for **what the state is** and are never carried out later, so naming the state is the honest answer — unlike start / hydrate / stopped-id snapshot over the same orphan, which will succeed once it converges and therefore answer `BUSY` (issue #2476). Two commands are deliberately exempt from the orphan refusal entirely: `StopServer` *takes* the orphan and re-attempts the driver Stop (the path that resolves it on demand), and `CloseBedrockTunnel` takes no running check at all, so a tunnel that outlived its server can still be torn down. |
+| `BUSY` | The command was refused without being applied because the server's id is not free yet, and the refusal is **not** a statement about a settled state: either another mutating lifecycle command is already in flight (the reservation race, issue #824) or the Worker holds a failed-stop orphan it is still converging (issue #2476). In both cases the outcome is not yet known and **this same command will be accepted once the Worker settles**, so the API keeps the assignment/intent and retries on a later tick rather than converging an observed state. Answering `INVALID_STATE` for the orphan was issue #2467's wedge: the API reads `INVALID_STATE` on a start as "already running", so a refusal over an orphan whose process was already **dead** manufactured a permanent false `observed=running` — a converged row is settled, so the reconciler never re-selected it and no `StatusChange` was ever coming. As of issue #2475 the Worker converges the orphan itself — it probes the instance's real liveness on a backoff, retries the stop while it is alive, retires the record and reports `stopped` once it is confirmed gone, and reports `SERVER_STATE_UNKNOWN` while the backend cannot answer — which is what makes the `BUSY` promise true. The record also still clears on its own if the process exits, via the instance's status pump. |
 | `DRIVER_UNAVAILABLE` | The requested execution driver is not offered by this Worker. |
 | `FILE_ACCESS_DENIED` | A file path was rejected. A refining `file_access_reason` (Section 7.2) splits the distinct conditions so the API maps each to an honest HTTP reason instead of one blanket `invalid_path`. |
 | `TRANSFER_FAILED` | A hydrate/snapshot data-plane transfer failed. |

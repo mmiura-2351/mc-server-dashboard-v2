@@ -59,6 +59,7 @@ export function ActiveCommunityProvider({ children }: { children: ReactNode }) {
   const signedIn = status === "signed-in";
   const {
     data: communities,
+    isSuccess: communitiesLoaded,
     isError: communitiesError,
     isFetching: communitiesFetching,
     refetch: refetchCommunities,
@@ -84,6 +85,25 @@ export function ActiveCommunityProvider({ children }: { children: ReactNode }) {
     communities.some((c) => c.id === selected)
       ? selected
       : (communities?.[0]?.id ?? null);
+
+  // Drop a selection the server has confirmed gone, so it cannot resurrect if
+  // the community reappears in a later list (issue #2164). "Confirmed gone"
+  // means the query settled successfully on a non-empty list that lacks the
+  // selection: a pending or failed fetch says nothing about the selection's
+  // fate, and an empty list is equally uninformative (it already renders as no
+  // active community, and dropping the selection there would discard a valid
+  // choice on a transiently empty response).
+  useEffect(() => {
+    if (
+      communitiesLoaded &&
+      selected !== null &&
+      communities !== undefined &&
+      communities.length > 0 &&
+      !communities.some((c) => c.id === selected)
+    ) {
+      setSelected(null);
+    }
+  }, [communitiesLoaded, communities, selected]);
 
   // Dropping out of the signed-in state clears the selection so a later
   // sign-in re-derives the default rather than reusing a stale id.

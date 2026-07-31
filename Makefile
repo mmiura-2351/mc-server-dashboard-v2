@@ -403,6 +403,7 @@ hooks-test:
 scripts-test:
 	bash scripts/test_deploy_preflight.sh
 	bash scripts/test_pg_major_upgrade.sh
+	bash scripts/test_deploy_stamp.sh
 
 # ---------------------------------------------------------------------------
 # proto/ (buf) -- the shared control-plane contract.

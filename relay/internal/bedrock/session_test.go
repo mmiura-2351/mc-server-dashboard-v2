@@ -74,7 +74,7 @@ func sendAndForward(t *testing.T, src net.PacketConn, dst *net.UDPAddr, conn qui
 	if _, err := src.WriteTo(payload, dst); err != nil {
 		t.Fatalf("WriteTo: %v", err)
 	}
-	rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	rctx, rcancel := context.WithTimeout(context.Background(), starvationBudget)
 	defer rcancel()
 	if _, err := conn.ReceiveDatagram(rctx); err != nil {
 		t.Fatalf("datagram %#x was not forwarded: %v", payload, err)
@@ -140,7 +140,7 @@ func TestBedrockFlowPromotesToSessionAndEndsOnEviction(t *testing.T) {
 		sendGameplay(t, fakeClient, dialAddr, client)
 	}
 
-	starts := waitForStarts(t, rec, 1)
+	starts := waitForStarts(t, rec, 1, starvationBudget)
 	if len(starts) != 1 {
 		t.Fatalf("Start called %d times, want exactly 1", len(starts))
 	}
@@ -171,7 +171,7 @@ func TestBedrockFlowPromotesToSessionAndEndsOnEviction(t *testing.T) {
 	cancel()
 	select {
 	case <-runDone:
-	case <-time.After(5 * time.Second):
+	case <-time.After(starvationBudget):
 		t.Fatal("tun.run did not return after ctx cancel")
 	}
 }
@@ -244,8 +244,10 @@ func TestBedrockPingFloodDoesNotPromote(t *testing.T) {
 	}
 
 	// Give the reader ample time to (not) promote, then assert nothing was
-	// reported -- no Start on ingress.
-	if starts := waitForStarts(t, rec, 1); len(starts) != 0 {
+	// reported -- no Start on ingress. This is a negative assertion, so its
+	// window always elapses in full and stays short: under load it fails safe
+	// (passing spuriously, never red), which is why #2389 left it at 2 s.
+	if starts := waitForStarts(t, rec, 1, 2*time.Second); len(starts) != 0 {
 		t.Errorf("ping flood promoted %d sessions, want 0 (offline datagrams must not count)", len(starts))
 	}
 	// Teardown must not conjure a session or an End either.
@@ -275,7 +277,7 @@ func TestBedrockTeardownEndsOpenSessions(t *testing.T) {
 	for i := 0; i < flowPromoteThreshold; i++ {
 		sendGameplay(t, fakeClient, dialAddr, client)
 	}
-	starts := waitForStarts(t, rec, 1)
+	starts := waitForStarts(t, rec, 1, starvationBudget)
 	if len(starts) != 1 {
 		t.Fatalf("Start called %d times, want exactly 1", len(starts))
 	}
@@ -295,11 +297,15 @@ type quicReceiver interface {
 	ReceiveDatagram(ctx context.Context) ([]byte, error)
 }
 
-// waitForStarts polls the recorder until it has at least want Start calls or a
-// short deadline elapses, then returns the captured starts.
-func waitForStarts(t *testing.T, rec *fakeRecorder, want int) []startCall {
+// waitForStarts polls the recorder until it has at least want Start calls or
+// budget elapses, then returns the captured starts. budget is explicit because
+// the two uses are opposites: a caller expecting the Start passes
+// starvationBudget and returns the moment it lands, while the ping-flood test
+// asserts no Start appears and therefore always burns its whole window -- so
+// that one keeps a short, deliberately unswept settle window (issue #2389).
+func waitForStarts(t *testing.T, rec *fakeRecorder, want int, budget time.Duration) []startCall {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(budget)
 	for {
 		starts, _ := rec.snapshot()
 		if len(starts) >= want || time.Now().After(deadline) {
