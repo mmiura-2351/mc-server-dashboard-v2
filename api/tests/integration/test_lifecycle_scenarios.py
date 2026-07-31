@@ -812,6 +812,65 @@ async def test_failed_stop_then_process_crashes_wedge_recovered_by_reconciler(
     assert restarted.assigned_worker_id == WorkerId(next_worker)
 
 
+async def test_crash_then_operator_stop_snapshots_and_leaves_the_same_shape(
+    engine: AsyncEngine,
+) -> None:
+    """start -> crash -> the OPERATOR stops it -> same release, same terminal row.
+
+    Issue #2448, the operator-stop variant of the chain above. The Worker forgot the
+    crashed instance (``forgetIf``), so its handleStop answers SERVER_NOT_FOUND —
+    the ordinary answer whenever someone stops an already-crashed server. That
+    release must land where the reconciler's arm lands: the crash-window working set
+    captured by a final snapshot BEFORE the assignment is freed, and ``crashed``
+    still standing as why the server is down.
+
+    Before this the two disagreed on both halves — the direct stop discarded the
+    retained scratch and rewrote ``crashed`` to ``stopped`` — so which path reached
+    the row first decided whether the world survived and whether the operator saw a
+    crash or a clean shutdown.
+    """
+
+    clock = _AdvancingClock(_NOW)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    server_id = server.id
+    community = server.community_id
+
+    worker = uuid.uuid4()
+    await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(worker)), clock
+    )(community_id=community, server_id=server_id)
+    # The process dies on its own; the owning worker reports it through the REAL
+    # sink, which keeps the assignment under desired=running.
+    await _sink(engine, clock).record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker), state="crashed"
+    )
+
+    stop_cp = FakeControlPlane(
+        outcomes={"stop": CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND)}
+    )
+    stopped = await _stop_server_use_case(engine, stop_cp, clock)(
+        community_id=community, server_id=server_id
+    )
+
+    # The crash-window working set is captured BEFORE the release, not discarded.
+    assert [kind for kind, _, _ in stop_cp.dispatched] == ["stop", "snapshot"]
+    assert stopped.desired_state is DesiredState.STOPPED
+    assert stopped.assigned_worker_id is None
+    released = await _load(engine, server_id)
+    assert released is not None
+    assert released.assigned_worker_id is None
+    # The identical terminal shape the reconciler's crashed arm leaves (chain above):
+    # (stopped, crashed, unassigned) — at rest, startable, claimed by no arm.
+    assert released.observed_state is ObservedState.CRASHED
+    assert released.is_at_rest()
+
+    next_worker = uuid.uuid4()
+    restarted = await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(next_worker)), clock
+    )(community_id=community, server_id=server_id)
+    assert restarted.assigned_worker_id == WorkerId(next_worker)
+
+
 # --- Chain 7: stopped/stopping/assigned wedge recovery (issue #2452) -------
 
 

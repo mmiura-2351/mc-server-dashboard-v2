@@ -2145,6 +2145,38 @@ async def test_late_successful_snapshot_clears_held_assignment() -> None:
     assert uow.servers.by_id[ServerId(server_id)].assigned_worker_id is None
 
 
+async def test_late_snapshot_clears_held_crashed_release() -> None:
+    # Issue #2448: a crashed release whose final snapshot timed out holds the row at
+    # (stopped, crashed, assigned) -- the same hold the stopped shape gets, on the
+    # same worker, for the same reason. The late CommandResult must release it too.
+    # The guard rejected CRASHED, so such a row waited out backoff plus the full
+    # grace and then re-drove a snapshot that only hits the benign working_set_absent
+    # refusal.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.CRASHED,
+            worker_id=worker,
+        )
+    )
+
+    await StopServer(
+        uow=uow, control_plane=FakeControlPlane(), clock=FakeClock(_NOW)
+    ).clear_assignment_after_late_snapshot(
+        server_id=ServerId(server_id), worker_id=WorkerId(worker), succeeded=True
+    )
+
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.assigned_worker_id is None
+    # The release does not rewrite the crash: it is the truth about how the process
+    # ended, and the row is at rest either way.
+    assert stored.observed_state is ObservedState.CRASHED
+
+
 async def test_late_snapshot_from_non_owning_worker_does_not_clear() -> None:
     # Issue #891 / #789: a late result whose reporting worker is NOT the row's
     # assigned worker must not clear the assignment. The guarded clear matches no
@@ -2518,12 +2550,17 @@ class _SnapshotServerNotFound(FakeControlPlane):
 async def test_stop_final_snapshot_benign_duplicate_refusal_logs_info_not_error(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # Issue #1790: the Worker's working_set_absent refusal (issue #1713) means a
-    # prior final snapshot already published and its scratch was GC'd — a benign
-    # duplicate dispatch, not data loss. Logging the "progression ... is lost"
-    # ERROR for it is a false alarm that trains operators to ignore the line
-    # that matters, so it is downgraded to INFO. The stop still converges: the
-    # assignment is cleared exactly as on a successful snapshot.
+    # Issue #1790: the Worker's working_set_absent refusal (issue #1713) means it
+    # holds no working set for the id, so this dispatch could not have saved
+    # anything — not data loss. Logging the "progression ... is lost" ERROR for it
+    # is a false alarm that trains operators to ignore the line that matters, so it
+    # is downgraded to INFO. The stop still converges: the assignment is cleared
+    # exactly as on a successful snapshot.
+    #
+    # Issue #2448 narrowed what the INFO may CLAIM: it used to say a prior final
+    # snapshot had captured the set, which overstates the two other causes the
+    # Worker cannot distinguish — a #2480 periodic capture that GC'd the at-rest
+    # scratch, and an id never hydrated on this Worker at all.
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
     uow.servers.seed(
@@ -2554,7 +2591,7 @@ async def test_stop_final_snapshot_benign_duplicate_refusal_logs_info_not_error(
         if r.levelno == logging.INFO and "final snapshot" in r.getMessage()
     )
     assert str(server_id) in record.getMessage()
-    assert "duplicate" in record.getMessage()
+    assert "holds no working set" in record.getMessage()
     # The refusal settles the snapshot (nothing is uploading), so the deferred
     # unassign still runs.
     assert result.assigned_worker_id is None
@@ -2642,13 +2679,15 @@ async def test_stop_lost_race_is_conflict_without_dispatch_or_count() -> None:
     assert uow.commits == 0
 
 
-async def test_stop_server_not_found_converges_to_stopped() -> None:
-    # Stopping a server the worker no longer runs (e.g. crashed on the EULA,
-    # issue #197): the worker holds no live instance and its handleStop answers
-    # SERVER_NOT_FOUND -- not INVALID_STATE
-    # (worker/internal/application/instancemanager/instancemanager.go:308-312).
-    # That is a no-op stop, not a failure -> converge observed to stopped and
-    # report success rather than surfacing command_failed.
+async def test_stop_server_not_found_on_crashed_snapshots_and_keeps_crashed() -> None:
+    # Issue #2448: the direct-stop release must do what the reconciler's crashed
+    # release does (#2439/#2446), because SERVER_NOT_FOUND is exactly what a Worker
+    # answers for a CRASHED instance -- ``forgetIf`` drops it from the instance map,
+    # so an operator stopping an already-crashed server lands here. The Worker's
+    # retained scratch still holds the crash-window world (it is GC'd only once a
+    # final snapshot publishes), so the release snapshots BEFORE clearing, and
+    # ``crashed`` stands as the truth about why the server is down rather than being
+    # rewritten to a clean-looking ``stopped``.
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
     uow.servers.seed(
@@ -2670,17 +2709,147 @@ async def test_stop_server_not_found_converges_to_stopped() -> None:
     )
 
     assert result.desired_state is DesiredState.STOPPED
-    assert result.observed_state is ObservedState.STOPPED
+    assert result.observed_state is ObservedState.CRASHED
     # No live instance remains, so the assignment is cleared too (issue #206),
     # letting a later start re-place under require_unassigned.
     assert result.assigned_worker_id is None
     stored = uow.servers.by_id[ServerId(server_id)]
     assert stored.desired_state is DesiredState.STOPPED
+    assert stored.observed_state is ObservedState.CRASHED
+    assert stored.assigned_worker_id is None
+    assert [kind for kind, _, _ in cp.dispatched] == ["stop", "snapshot"]
+    assert cp.decremented == [WorkerId(worker)]
+
+
+async def test_stop_server_not_found_converges_to_stopped() -> None:
+    # Stopping a server the worker no longer runs (e.g. crashed on the EULA,
+    # issue #197): the worker holds no live instance and its handleStop answers
+    # SERVER_NOT_FOUND -- not INVALID_STATE
+    # (worker/internal/application/instancemanager/instancemanager.go:308-312).
+    # That is a no-op stop, not a failure -> converge observed to stopped and
+    # report success rather than surfacing command_failed.
+    #
+    # The other half of issue #2448's ruling: the crash preservation above is
+    # NARROW on purpose. A lost crash event leaves the row reading ``running`` when
+    # SERVER_NOT_FOUND arrives, and preserving THAT would strand it at
+    # (stopped, running, unassigned) -- not ``is_at_rest()`` and matched by no
+    # reconciler arm, a fourth wedge of the #2439/#2452 kind. Everything that is not
+    # ``crashed`` converges to ``stopped``. The snapshot leg is taken either way:
+    # the retained scratch is worth capturing however the process ended.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(
+        outcomes={"stop": CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND)}
+    )
+    use_case = StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+
+    result = await use_case(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert result.desired_state is DesiredState.STOPPED
+    assert result.observed_state is ObservedState.STOPPED
+    assert result.assigned_worker_id is None
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.desired_state is DesiredState.STOPPED
     assert stored.observed_state is ObservedState.STOPPED
     assert stored.assigned_worker_id is None
-    # No live instance to snapshot: the stop dispatched, the snapshot did not.
-    assert [kind for kind, _, _ in cp.dispatched] == ["stop"]
+    assert [kind for kind, _, _ in cp.dispatched] == ["stop", "snapshot"]
     assert cp.decremented == [WorkerId(worker)]
+
+
+async def test_stop_server_not_found_snapshot_timeout_holds_assignment() -> None:
+    # Issue #2448 + #847: the new release leg HOLDS the assignment on a snapshot
+    # TIMEOUT, exactly as the graceful stop does. A timeout means the worker session
+    # is healthy and the upload is still in flight, so releasing here would let a
+    # racing start re-place on a different worker mid-upload -- the very race the
+    # snapshot-before-clear ordering exists to close. The row is left
+    # (stopped, crashed, assigned) for the late-result sink (#891) or the
+    # stale-stop arm to release.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.CRASHED,
+            worker_id=worker,
+        )
+    )
+
+    class _SnapshotTimesOut(FakeControlPlane):
+        async def snapshot(
+            self,
+            *,
+            worker_id: WorkerId,
+            community_id: CommunityId,
+            server_id: ServerId,
+            final: bool = False,
+        ) -> CommandOutcome:
+            self.dispatched.append(("snapshot", worker_id, server_id))
+            try:
+                raise CommandTimedOutError(str(worker_id.value))
+            except CommandTimedOutError as exc:
+                raise WorkerUnavailableError(
+                    str(worker_id.value), upload_may_be_live=True
+                ) from exc
+
+    cp = _SnapshotTimesOut(
+        outcomes={"stop": CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND)}
+    )
+    result = await StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert result.assigned_worker_id == WorkerId(worker)
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.desired_state is DesiredState.STOPPED
+    assert stored.observed_state is ObservedState.CRASHED
+    assert stored.assigned_worker_id == WorkerId(worker)
+
+
+async def test_stop_server_not_found_releases_even_when_final_snapshot_fails() -> None:
+    # Issue #2448: a FAILED final snapshot must not fail the operator's stop -- the
+    # process is already gone and there is nothing left to command. The release still
+    # happens (the #845/#847 exposure, logged loud by _final_snapshot), so the server
+    # can be started again.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.CRASHED,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(
+        outcomes={
+            "stop": CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND),
+            "snapshot": CommandOutcome(
+                status=CommandStatus.TRANSFER_FAILED, message="boom"
+            ),
+        }
+    )
+
+    result = await StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert result.desired_state is DesiredState.STOPPED
+    assert result.assigned_worker_id is None
+    assert uow.servers.by_id[ServerId(server_id)].assigned_worker_id is None
 
 
 async def test_stop_server_not_found_returned_entity_honest_when_write_dropped() -> (
@@ -2690,6 +2859,16 @@ async def test_stop_server_not_found_returned_entity_honest_when_write_dropped()
     # drops the convergence write (a fresher StatusChange already stamped the row at
     # the same instant). The returned entity must reflect the DROPPED write -- it
     # must not optimistically claim observed=stopped / unassigned that did not land.
+    #
+    # Issue #2448 moved the unassign out of that same UPDATE and behind the final
+    # snapshot, so the row staying ASSIGNED is now a deliberate decision rather than
+    # a side effect of the shared write: a dropped convergence leaves ``observed`` at
+    # whatever won, and releasing then could strand (stopped, running, unassigned) --
+    # not ``is_at_rest()`` and matched by no reconciler arm, the permanent wedge
+    # shape of #2439/#2452. Held instead, the row is reconcilable and the arm it
+    # lands on re-runs the release. (The confirmed-stop path clears unconditionally
+    # and may: the writer that beat it there reported a process the Worker had just
+    # confirmed dead.)
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
     seeded = _server(
@@ -3668,6 +3847,11 @@ async def test_redispatch_stop_replays_stop_without_decrement() -> None:
 async def test_redispatch_stop_server_not_found_unassigns() -> None:
     # SERVER_NOT_FOUND on redispatch means no live instance remains: converge by
     # clearing the assignment, same as the success path (issue #206).
+    #
+    # Issue #2448: this release is the SAME sequence the direct stop takes -- the
+    # final snapshot first (the Worker's retained scratch may still hold the world),
+    # then the guarded clear. A row that does not read ``crashed`` converges observed
+    # to ``stopped``, deliberately narrowly (see the __call__ twin).
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
     uow.servers.seed(
@@ -3686,10 +3870,41 @@ async def test_redispatch_stop_server_not_found_unassigns() -> None:
         community_id=CommunityId(community), server_id=ServerId(server_id)
     )
     stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.observed_state is ObservedState.STOPPED
     assert stored.assigned_worker_id is None
-    # No live instance remained, so there is no working set to capture: no snapshot
-    # is dispatched on the SERVER_NOT_FOUND path (issue #846).
-    assert [k for k, _, _ in cp.dispatched] == ["stop"]
+    assert [k for k, _, _ in cp.dispatched] == ["stop", "snapshot"]
+
+
+async def test_redispatch_stop_server_not_found_on_crashed_keeps_crashed() -> None:
+    # Issue #2448: the reconciler's replay reaches SERVER_NOT_FOUND on a crashed row
+    # when the crash lands between list_reconcilable and the dispatch. It must agree
+    # with the direct stop and with clear_stale_assignment: snapshot the retained
+    # crash-window scratch, release, and leave ``crashed`` standing.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.CRASHED,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(
+        outcomes={"stop": CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND)}
+    )
+    result = await StopServer(
+        uow=uow, control_plane=cp, clock=FakeClock(_NOW)
+    ).redispatch_stop(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    assert result.observed_state is ObservedState.CRASHED
+    assert result.assigned_worker_id is None
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.observed_state is ObservedState.CRASHED
+    assert stored.assigned_worker_id is None
+    assert [k for k, _, _ in cp.dispatched] == ["stop", "snapshot"]
 
 
 async def test_redispatch_stop_snf_does_not_unassign_re_placed() -> None:
@@ -4178,7 +4393,7 @@ async def test_clear_stale_assignment_benign_duplicate_clears(
         if r.levelno == logging.ERROR and "final snapshot" in r.getMessage()
     ]
     assert any(
-        r.levelno == logging.INFO and "benign duplicate" in r.getMessage()
+        r.levelno == logging.INFO and "holds no working set" in r.getMessage()
         for r in caplog.records
     )
 
@@ -4263,6 +4478,69 @@ async def test_clear_stale_assignment_stopped_crashed_keeps_observed_crashed() -
     stored = uow.servers.by_id[ServerId(server_id)]
     assert stored.observed_state is ObservedState.CRASHED
     assert stored.assigned_worker_id is None
+
+
+async def test_clear_stale_assignment_crashed_warn_says_snapshot_was_redriven(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Issue #2448 (the minor item): the crashed-release WARN fired identically for a
+    # connected and a disconnected worker, so it never said whether the final
+    # snapshot was actually re-driven -- the one thing that decides whether the
+    # crash-window world survived. The stopped side already splits on it.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.CRASHED,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(connected={WorkerId(worker): True})
+    with caplog.at_level(logging.WARNING):
+        await StopServer(
+            uow=uow, control_plane=cp, clock=FakeClock(_NOW)
+        ).clear_stale_assignment(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    record = next(
+        r for r in caplog.records if "stopped, crashed, assigned" in r.getMessage()
+    )
+    assert "re-drove the final snapshot" in record.getMessage()
+
+
+async def test_clear_stale_assignment_crashed_warn_names_lost_crash_window(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Issue #2448 (the minor item), the other half: with the worker GONE no snapshot
+    # was taken, so the WARN must say the crash-window world is exposed -- the same
+    # thing the disconnected stopped-side branch already spells out.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.CRASHED,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(connected={WorkerId(worker): False})
+    with caplog.at_level(logging.WARNING):
+        await StopServer(
+            uow=uow, control_plane=cp, clock=FakeClock(_NOW)
+        ).clear_stale_assignment(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    record = next(
+        r for r in caplog.records if "stopped, crashed, assigned" in r.getMessage()
+    )
+    assert "not re-driven" in record.getMessage()
 
 
 async def test_clear_stale_assignment_stopping_disconnected_skips_snapshot() -> None:
