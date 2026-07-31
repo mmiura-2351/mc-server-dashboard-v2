@@ -147,10 +147,10 @@ async def test_export_streams_working_set_plus_metadata() -> None:
     store.files["world/level.dat"] = b"\x00\x01"
     use_case = ExportServer(uow=uow, clock=FakeClock(_NOW), file_store=store)
 
-    stream = await use_case(
+    export = await use_case(
         community_id=CommunityId(community), server_id=ServerId(server_id)
     )
-    data = await _drain(stream)
+    data = await _drain(export.stream)
 
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         names = set(zf.namelist())
@@ -198,7 +198,11 @@ async def test_export_then_import_round_trips_files_and_metadata() -> None:
     src_store.files["world/level.dat"] = b"\x00\x01\x02"
     export = ExportServer(uow=src_uow, clock=FakeClock(_NOW), file_store=src_store)
     archive = await _drain(
-        await export(community_id=CommunityId(community), server_id=ServerId(src_id))
+        (
+            await export(
+                community_id=CommunityId(community), server_id=ServerId(src_id)
+            )
+        ).stream
     )
 
     dst_uow = FakeUnitOfWork()
@@ -525,10 +529,10 @@ async def test_export_includes_plugin_metadata() -> None:
     store.files["mods/fabric-api.jar"] = b"\x00jar"
     use_case = ExportServer(uow=uow, clock=FakeClock(_NOW), file_store=store)
 
-    stream = await use_case(
+    export = await use_case(
         community_id=CommunityId(community), server_id=ServerId(server_id)
     )
-    data = await _drain(stream)
+    data = await _drain(export.stream)
 
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         meta = json.loads(zf.read(EXPORT_METADATA_FILENAME))
@@ -552,10 +556,10 @@ async def test_export_no_plugins_has_empty_list() -> None:
     store.files["server.properties"] = b"motd=hi"
     use_case = ExportServer(uow=uow, clock=FakeClock(_NOW), file_store=store)
 
-    stream = await use_case(
+    export = await use_case(
         community_id=CommunityId(community), server_id=ServerId(server_id)
     )
-    data = await _drain(stream)
+    data = await _drain(export.stream)
 
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         meta = json.loads(zf.read(EXPORT_METADATA_FILENAME))
@@ -575,7 +579,11 @@ async def test_import_recreates_plugin_records_from_metadata() -> None:
     src_store.files["mods/fabric-api.jar"] = b"\x00jar"
     export = ExportServer(uow=src_uow, clock=FakeClock(_NOW), file_store=src_store)
     archive = await _drain(
-        await export(community_id=CommunityId(community), server_id=ServerId(src_id))
+        (
+            await export(
+                community_id=CommunityId(community), server_id=ServerId(src_id)
+            )
+        ).stream
     )
 
     # Import the archive.
@@ -649,7 +657,11 @@ async def _export_archive(
         uow=src_uow, clock=FakeClock(_NOW), file_store=FakeFileStore()
     )
     return await _drain(
-        await export(community_id=CommunityId(community), server_id=ServerId(src_id))
+        (
+            await export(
+                community_id=CommunityId(community), server_id=ServerId(src_id)
+            )
+        ).stream
     )
 
 

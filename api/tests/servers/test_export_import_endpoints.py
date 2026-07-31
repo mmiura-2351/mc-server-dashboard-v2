@@ -52,6 +52,7 @@ from mc_server_dashboard_api.dependencies import (
     get_resolve_server_export,
     get_token_service,
 )
+from mc_server_dashboard_api.download_cookie import DOWNLOAD_COOKIE_NAME
 from mc_server_dashboard_api.identity.adapters.token_service import JwtTokenService
 from mc_server_dashboard_api.identity.application.authenticate_download_grant import (
     AuthenticateDownloadGrant,
@@ -61,6 +62,7 @@ from mc_server_dashboard_api.identity.application.authenticate_request import (
 )
 from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.servers.application.export_import import (
+    ServerExport,
     export_download_grant_resource,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
@@ -90,6 +92,7 @@ _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 # A 32-byte HS256 key; the value is irrelevant, only that mint and verify share it.
 _SIGNING_KEY = "0123456789abcdef0123456789abcdef"
 _GRANT_TTL_SECONDS = 30
+_COOKIE_TTL_SECONDS = 900
 
 
 class _FakeVisibility(MembershipVisibility):
@@ -112,12 +115,17 @@ class _FakeChecker(PermissionChecker):
 
 class _FakeExport:
     def __init__(
-        self, *, chunks: list[bytes] | None = None, error: Exception | None = None
+        self,
+        *,
+        chunks: list[bytes] | None = None,
+        error: Exception | None = None,
+        server_name: str = "survival",
     ) -> None:
         self._chunks = chunks or [b"zip-bytes"]
         self._error = error
+        self._server_name = server_name
 
-    async def __call__(self, **kwargs: object) -> AsyncIterator[bytes]:
+    async def __call__(self, **kwargs: object) -> ServerExport:
         if self._error is not None:
             raise self._error
 
@@ -125,7 +133,7 @@ class _FakeExport:
             for chunk in self._chunks:
                 yield chunk
 
-        return _gen()
+        return ServerExport(server_name=self._server_name, stream=_gen())
 
 
 class _FakeResolveExport:
@@ -215,6 +223,7 @@ def _app(
         algorithm="HS256",
         access_ttl=dt.timedelta(minutes=15),
         download_grant_ttl=dt.timedelta(seconds=_GRANT_TTL_SECONDS),
+        download_cookie_ttl=dt.timedelta(seconds=_COOKIE_TTL_SECONDS),
         clock=_clock,
     )
     identity_uow = FakeUnitOfWork()
@@ -296,6 +305,44 @@ def test_export_streams_zip_and_audits() -> None:
     assert [e.operation for e in recorder.events] == [ops.SERVER_EXPORT]
     assert recorder.events[0].outcome is Outcome.SUCCESS
     assert recorder.events[0].target_type == ops.TARGET_SERVER
+
+
+def test_export_names_the_zip_after_the_server() -> None:
+    # A client that navigates the URL rather than being told the filename (a pasted
+    # grant link, a CLI fetch) would otherwise save the last path segment, "export".
+    app = _app(member=True, allow=True, export=_FakeExport(server_name="survival"))
+    client = next(_client(app))
+    resp = client.get(_export_url(uuid.uuid4(), uuid.uuid4()), headers=_bearer())
+    assert resp.status_code == 200
+    assert (
+        resp.headers["content-disposition"]
+        == "attachment; filename=\"survival.zip\"; filename*=UTF-8''survival.zip"
+    )
+
+
+def test_export_non_ascii_server_name_uses_the_rfc5987_form() -> None:
+    # A server name is free-form, so it can be non-ASCII; the raw name would 500 on
+    # the latin-1 header encode, so it rides percent-encoded in filename*.
+    app = _app(member=True, allow=True, export=_FakeExport(server_name="サバイバル"))
+    client = next(_client(app))
+    resp = client.get(_export_url(uuid.uuid4(), uuid.uuid4()), headers=_bearer())
+    assert resp.status_code == 200
+    cd = resp.headers["content-disposition"]
+    assert 'filename="_____.zip"' in cd  # 5 non-ASCII kana -> 5 underscores
+    assert "filename*=UTF-8''%E3%82%B5%E3%83%90%E3%82%A4%E3%83%90%E3%83%AB.zip" in cd
+
+
+def test_export_server_name_with_path_separators_cannot_traverse() -> None:
+    # Only whitespace is trimmed off a server name, so it can hold separators; the
+    # saved file must not escape the client's download directory.
+    app = _app(member=True, allow=True, export=_FakeExport(server_name="../../etc/pw"))
+    client = next(_client(app))
+    resp = client.get(_export_url(uuid.uuid4(), uuid.uuid4()), headers=_bearer())
+    assert resp.status_code == 200
+    assert (
+        resp.headers["content-disposition"]
+        == "attachment; filename=\"pw.zip\"; filename*=UTF-8''pw.zip"
+    )
 
 
 def test_export_running_is_409_and_audits_denied() -> None:
@@ -531,6 +578,90 @@ def test_export_grant_for_a_deactivated_subject_is_rejected() -> None:
     resp = client.get(_export_grant_url(community, server, subject=_user))
 
     assert resp.status_code == 401
+
+
+# --- the export download cookie (issue #2373) -------------------------------
+#
+# The export shares one mechanism with the backup and file downloads
+# (``require_download_access`` + ``download_cookie``), which is where the property
+# matrix is pinned (test_backup_endpoints.py). What is per-route here is the Path
+# scope and that the retry of *this* URL resumes.
+
+
+def _export_cookie_header(community: uuid.UUID, server: uuid.UUID) -> dict[str, str]:
+    value = _tokens.issue_download_cookie(
+        _user.id, export_download_grant_resource(community, server)
+    )
+    return {"Cookie": f"{DOWNLOAD_COOKIE_NAME}={value}"}
+
+
+def test_export_grant_redemption_sets_a_path_scoped_cookie() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, export=_FakeExport(chunks=[b"zip-bytes"]))
+    client = next(_client(app))
+
+    resp = client.get(_export_grant_url(community, server, subject=_user))
+
+    assert resp.status_code == 200
+    cookie = next(
+        h
+        for h in resp.headers.get_list("set-cookie")
+        if h.startswith(f"{DOWNLOAD_COOKIE_NAME}=")
+    )
+    assert "HttpOnly" in cookie
+    assert "Secure" in cookie
+    assert "SameSite=strict" in cookie
+    assert f"Path={_export_url(community, server)}" in cookie
+    # The export declared no freshness of its own, so a shared cache could have
+    # replayed this Set-Cookie to a second client (RFC 6265 Section 8.6).
+    assert resp.headers["cache-control"] == "no-store"
+
+
+def test_expired_export_grant_is_retried_with_the_cookie() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, export=_FakeExport(chunks=[b"zip-bytes"]))
+    client = next(_client(app))
+    url = _export_grant_url(community, server, subject=_user)
+
+    _clock.set(_NOW + dt.timedelta(seconds=_GRANT_TTL_SECONDS))
+
+    assert client.get(url).status_code == 401
+    resumed = client.get(url, headers=_export_cookie_header(community, server))
+    assert resumed.status_code == 200
+    assert resumed.content == b"zip-bytes"
+
+
+def test_export_cookie_is_rejected_under_another_server_or_community() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, export=_FakeExport())
+    client = next(_client(app))
+    headers = _export_cookie_header(community, server)
+
+    other_server = client.get(_export_url(community, uuid.uuid4()), headers=headers)
+    other_community = client.get(_export_url(uuid.uuid4(), server), headers=headers)
+
+    assert other_server.status_code == 401
+    assert other_community.status_code == 401
+
+
+def test_an_unsettled_export_mints_no_cookie() -> None:
+    # The 409 the export's precondition raises: no credential for a ZIP that was
+    # never served.
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(
+        member=True,
+        allow=True,
+        export=_FakeExport(error=ServerFilesUnsettledError("x")),
+    )
+    client = next(_client(app))
+
+    resp = client.get(_export_grant_url(community, server, subject=_user))
+
+    assert resp.status_code == 409
+    assert not any(
+        h.startswith(f"{DOWNLOAD_COOKIE_NAME}=")
+        for h in resp.headers.get_list("set-cookie")
+    )
 
 
 # --- import ----------------------------------------------------------------

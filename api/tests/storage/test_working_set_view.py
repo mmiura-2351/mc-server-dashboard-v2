@@ -98,6 +98,19 @@ async def test_view_walks_subdirectory(harness: StorageHarness) -> None:
         assert content == b"SUB"
 
 
+async def test_view_file_stream_on_a_directory_is_not_found(
+    harness: StorageHarness,
+) -> None:
+    """Through the view too, a path naming no readable FILE is a miss."""
+    community, server = new_scope()
+    await harness.publish(community, server, {"world/level.dat": b"x"})
+
+    async with harness.storage.open_working_set_view(community, server) as view:
+        with pytest.raises(NotFoundError):
+            async for _ in view.open_file_stream(RelPath("world")):
+                pass
+
+
 async def test_view_unpublished_server_returns_empty(
     harness: StorageHarness,
 ) -> None:

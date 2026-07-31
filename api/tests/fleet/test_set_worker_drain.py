@@ -22,6 +22,9 @@ from mc_server_dashboard_api.servers.application.lifecycle import (
     StopServer,
 )
 from mc_server_dashboard_api.servers.application.reconciler import RunReconcilerTick
+from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
+    StopDispatchRefusals,
+)
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -161,7 +164,7 @@ async def test_drain_skips_already_stopped_server() -> None:
         worker_id=WorkerId(str(_WORKER_UUID)), draining=True
     )
 
-    # list_running_assigned excludes desired=stopped, so nothing is flipped.
+    # list_desired_running_assigned excludes desired=stopped, so nothing is flipped.
     assert count == 0
 
 
@@ -309,8 +312,10 @@ async def test_drain_converges_through_reconciler_with_final_snapshot() -> None:
         control_plane=cp,
         store_generation=FakeStoreGenerationReader(),
         clock=clock,
+        stop_refusals=StopDispatchRefusals(),
         grace_seconds=60,
         held_start_grace_seconds=90,
+        refused_stop_grace_seconds=30,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
     )

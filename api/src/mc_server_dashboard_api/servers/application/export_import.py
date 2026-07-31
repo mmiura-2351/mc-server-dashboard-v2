@@ -161,6 +161,20 @@ class ResolveServerExport:
 
 
 @dataclass(frozen=True)
+class ServerExport:
+    """A started export: the zip byte stream plus the name to save it under.
+
+    The edge needs the server's name for the ``Content-Disposition`` filename
+    (issue #2357), and the use case has already loaded the row to build the
+    metadata descriptor -- so it hands the name back rather than making the edge
+    re-read it.
+    """
+
+    server_name: str
+    stream: AsyncIterator[bytes]
+
+
+@dataclass(frozen=True)
 class ExportServer:
     """Stream a whole server as a ZIP (working set + metadata) at rest (file:read).
 
@@ -179,7 +193,7 @@ class ExportServer:
 
     async def __call__(
         self, *, community_id: CommunityId, server_id: ServerId
-    ) -> AsyncIterator[bytes]:
+    ) -> ServerExport:
         async with self.uow:
             server = await _load(self.uow, community_id, server_id)
             plugins = await self.uow.plugins.list_for_server(server_id)
@@ -196,11 +210,14 @@ class ExportServer:
             "plugins": [_serialize_plugin(p) for p in plugins],
         }
         metadata_bytes = json.dumps(metadata, indent=2).encode("utf-8")
-        return self.file_store.export_dir(
-            community_id=community_id,
-            server_id=server_id,
-            rel_path=".",
-            extra=[(EXPORT_METADATA_FILENAME, metadata_bytes)],
+        return ServerExport(
+            server_name=server.name.value,
+            stream=self.file_store.export_dir(
+                community_id=community_id,
+                server_id=server_id,
+                rel_path=".",
+                extra=[(EXPORT_METADATA_FILENAME, metadata_bytes)],
+            ),
         )
 
 

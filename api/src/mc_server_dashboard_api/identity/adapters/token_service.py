@@ -18,6 +18,12 @@ edge from ``auth.token.*`` (CONFIGURATION.md Section 5.3):
   ``verify_access_token`` rejects any token carrying a ``purpose`` claim at all.
   Without that second half, a grant that leaks into an access log would be a
   full session credential.
+- **Download cookies** are the same shape with ``purpose="download-cookie"`` and
+  the longer ``download_cookie_ttl`` (issue #2373). The third kind is separated
+  from the other two the same way: a cookie presented as ``?grant=`` or as a
+  Bearer token is rejected, and a grant presented as the cookie is rejected. The
+  first half is what keeps the longer-lived credential out of URLs, where the
+  grant's short TTL is the whole exposure bound.
 
 The signing key is held in memory only and never logged.
 """
@@ -34,6 +40,7 @@ import jwt
 from mc_server_dashboard_api.identity.domain.clock import Clock
 from mc_server_dashboard_api.identity.domain.errors import (
     InvalidAccessTokenError,
+    InvalidDownloadCookieError,
     InvalidDownloadGrantError,
 )
 from mc_server_dashboard_api.identity.domain.token_service import (
@@ -50,6 +57,10 @@ _REFRESH_SECRET_BYTES = 32
 # access token. Its presence is what each verifier keys off (see module docstring).
 _DOWNLOAD_PURPOSE = "download"
 
+# The ``purpose`` claim marking a JWT as a download cookie — the same authority as
+# a grant on a longer TTL, admissible only from the cookie header (issue #2373).
+_DOWNLOAD_COOKIE_PURPOSE = "download-cookie"
+
 
 class JwtTokenService(TokenService):
     """:class:`TokenService` adapter: PyJWT access tokens + opaque refresh secrets."""
@@ -61,12 +72,14 @@ class JwtTokenService(TokenService):
         algorithm: str,
         access_ttl: dt.timedelta,
         download_grant_ttl: dt.timedelta,
+        download_cookie_ttl: dt.timedelta,
         clock: Clock,
     ) -> None:
         self._signing_key = signing_key
         self._algorithm = algorithm
         self._access_ttl = access_ttl
         self._download_grant_ttl = download_grant_ttl
+        self._download_cookie_ttl = download_cookie_ttl
         self._clock = clock
 
     def issue_access_token(self, user_id: UserId) -> str:
@@ -112,25 +125,76 @@ class JwtTokenService(TokenService):
     def issue_download_grant(
         self, user_id: UserId, resource: str
     ) -> IssuedDownloadGrant:
-        now = self._clock.now()
-        # ``exp`` is whole seconds, so the advertised deadline is derived from the
-        # truncated claim rather than from ``now + ttl``: otherwise a grant minted
-        # mid-second stops verifying up to a second before the instant the caller
-        # was told (issue #2324).
-        exp = int((now + self._download_grant_ttl).timestamp())
-        claims = {
-            "sub": str(user_id.value),
-            "iat": int(now.timestamp()),
-            "exp": exp,
-            "purpose": _DOWNLOAD_PURPOSE,
-            "res": resource,
-        }
-        token = jwt.encode(claims, self._signing_key, algorithm=self._algorithm)
+        token, exp = self._issue_resource_scoped(
+            user_id=user_id,
+            resource=resource,
+            purpose=_DOWNLOAD_PURPOSE,
+            ttl=self._download_grant_ttl,
+        )
         return IssuedDownloadGrant(
             token=token, expires_at=dt.datetime.fromtimestamp(exp, tz=dt.timezone.utc)
         )
 
     def verify_download_grant(self, token: str, resource: str) -> UserId:
+        return self._verify_resource_scoped(
+            token,
+            resource,
+            purpose=_DOWNLOAD_PURPOSE,
+            error=InvalidDownloadGrantError,
+        )
+
+    def issue_download_cookie(self, user_id: UserId, resource: str) -> str:
+        token, _exp = self._issue_resource_scoped(
+            user_id=user_id,
+            resource=resource,
+            purpose=_DOWNLOAD_COOKIE_PURPOSE,
+            ttl=self._download_cookie_ttl,
+        )
+        return token
+
+    def verify_download_cookie(self, token: str, resource: str) -> UserId:
+        return self._verify_resource_scoped(
+            token,
+            resource,
+            purpose=_DOWNLOAD_COOKIE_PURPOSE,
+            error=InvalidDownloadCookieError,
+        )
+
+    def _issue_resource_scoped(
+        self, *, user_id: UserId, resource: str, purpose: str, ttl: dt.timedelta
+    ) -> tuple[str, int]:
+        """Mint a resource-scoped JWT; return it with its whole-second ``exp``.
+
+        ``exp`` is returned rather than recomputed because it is whole seconds: a
+        deadline derived from ``now + ttl`` would be up to a second later than the
+        instant the token actually stops verifying (issue #2324).
+        """
+
+        now = self._clock.now()
+        exp = int((now + ttl).timestamp())
+        claims = {
+            "sub": str(user_id.value),
+            "iat": int(now.timestamp()),
+            "exp": exp,
+            "purpose": purpose,
+            "res": resource,
+        }
+        return jwt.encode(claims, self._signing_key, algorithm=self._algorithm), exp
+
+    def _verify_resource_scoped(
+        self,
+        token: str,
+        resource: str,
+        *,
+        purpose: str,
+        error: type[Exception],
+    ) -> UserId:
+        """Return the subject of a JWT bound to ``purpose`` and ``resource``.
+
+        Raises ``error`` on any failure, so each credential kind keeps its own
+        error type and neither verifier accepts the other's token.
+        """
+
         try:
             # Same posture as verify_access_token: PyJWT checks the signature,
             # the injected Clock checks the expiry.
@@ -141,13 +205,13 @@ class JwtTokenService(TokenService):
                 options={"verify_exp": False},
             )
             if int(self._clock.now().timestamp()) >= int(claims["exp"]):
-                raise InvalidDownloadGrantError
-            if claims.get("purpose") != _DOWNLOAD_PURPOSE:
-                raise InvalidDownloadGrantError
-            # KeyError on a missing ``res`` is caught below: a grant bound to
+                raise error
+            if claims.get("purpose") != purpose:
+                raise error
+            # KeyError on a missing ``res`` is caught below: a credential bound to
             # nothing must never open an arbitrary resource.
             if claims["res"] != resource:
-                raise InvalidDownloadGrantError
+                raise error
             return UserId(uuid.UUID(claims["sub"]))
         except (jwt.InvalidTokenError, KeyError, ValueError) as exc:
-            raise InvalidDownloadGrantError from exc
+            raise error from exc

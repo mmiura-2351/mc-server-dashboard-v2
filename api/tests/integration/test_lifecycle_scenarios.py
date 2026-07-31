@@ -49,11 +49,15 @@ from mc_server_dashboard_api.servers.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as ServersUnitOfWork,
 )
 from mc_server_dashboard_api.servers.application.lifecycle import (
+    RestartServer,
     StartServer,
     StopServer,
 )
 from mc_server_dashboard_api.servers.application.manage_server import CreateServer
 from mc_server_dashboard_api.servers.application.reconciler import RunReconcilerTick
+from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
+    StopDispatchRefusals,
+)
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandOutcome,
@@ -61,6 +65,10 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
     WorkerUnavailableError,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
+from mc_server_dashboard_api.servers.domain.errors import (
+    CommandDispatchError,
+    LifecycleTransitionConflictError,
+)
 from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -77,6 +85,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     ServerId as StorageServerId,
 )
 from tests.integration.migrate import downgrade_base, upgrade_head
+from tests.servers.contract_table import worker_status
 from tests.servers.fakes import (
     FakeControlPlane,
     FakeFileStore,
@@ -173,6 +182,16 @@ def _start_server_use_case(
     )
 
 
+def _restart_server_use_case(
+    engine: AsyncEngine, control_plane: FakeControlPlane, clock: Clock
+) -> RestartServer:
+    return RestartServer(
+        uow=ServersUnitOfWork(create_session_factory(engine)),
+        control_plane=control_plane,
+        clock=clock,
+    )
+
+
 def _stop_server_use_case(
     engine: AsyncEngine, control_plane: FakeControlPlane, clock: Clock
 ) -> StopServer:
@@ -201,8 +220,10 @@ async def _reconciler_tick(
         control_plane=control_plane,
         store_generation=FakeStoreGenerationReader(),
         clock=clock,
+        stop_refusals=StopDispatchRefusals(),
         grace_seconds=0,
         held_start_grace_seconds=0,
+        refused_stop_grace_seconds=0,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
     ).tick()
@@ -703,6 +724,472 @@ async def test_worker_disconnect_mid_stop_wedge_recovered_by_reconciler(
     assert recovered.assigned_worker_id is None
 
     # The next start re-places against the now-unassigned row.
+    next_worker = uuid.uuid4()
+    restarted = await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(next_worker)), clock
+    )(community_id=community, server_id=server_id)
+    assert restarted.desired_state is DesiredState.RUNNING
+    assert restarted.assigned_worker_id == WorkerId(next_worker)
+
+
+# --- Chain 6: stopped/crashed/assigned wedge recovery (issue #2439) --------
+
+
+async def test_failed_stop_then_process_crashes_wedge_recovered_by_reconciler(
+    engine: AsyncEngine,
+) -> None:
+    """start -> stop whose dispatch FAILS (desired=stopped stands, still assigned)
+    -> the process then dies on its own and the worker reports crashed via the REAL
+    sink -> reconciler tick releases the assignment -> start succeeds.
+
+    Issue #2439. The failed stop leaves (stopped, running, assigned), which IS
+    reconcilable — but the process dies before the reconciler's grace window
+    elapses, so the row moves to (stopped, crashed, assigned) instead. Before the
+    fix that triple matched no arm of ``list_reconcilable``: the reconciler never
+    touched it, the assignment was never released, and every subsequent start 409'd
+    on ``require_unassigned`` forever. ``is_at_rest()`` is true for the row, so
+    nothing else flagged it either. The recovery is the release half of the stop
+    path: the final snapshot the crash never got, then the unassign.
+    """
+
+    clock = _AdvancingClock(_NOW)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    server_id = server.id
+    community = server.community_id
+
+    worker = uuid.uuid4()
+    await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(worker)), clock
+    )(community_id=community, server_id=server_id)
+    await _sink(engine, clock).record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker), state="running"
+    )
+
+    # The operator stops; the dispatch fails. StopServer deliberately does NOT
+    # compensate (issue #2435), so desired=stopped stands and the row is left
+    # (stopped, running, assigned) for the reconciler.
+    failing_cp = FakeControlPlane(place_to=WorkerId(worker), unavailable_kinds={"stop"})
+    with pytest.raises(WorkerUnavailableError):
+        await _stop_server_use_case(engine, failing_cp, clock)(
+            community_id=community, server_id=server_id
+        )
+
+    # Before the grace window elapses the process dies on its own; the owning
+    # worker's StatusChange(crashed) lands through the real sink.
+    await _sink(engine, clock).record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker), state="crashed"
+    )
+    wedged = await _load(engine, server_id)
+    assert wedged is not None
+    assert wedged.desired_state is DesiredState.STOPPED
+    assert wedged.observed_state is ObservedState.CRASHED
+    assert wedged.assigned_worker_id == WorkerId(worker)
+    # The row looks healthy to every gated operation, yet a start cannot proceed:
+    # require_unassigned 409s against the stale assignment.
+    assert wedged.is_at_rest()
+    with pytest.raises(LifecycleTransitionConflictError):
+        await _start_server_use_case(
+            engine, FakeControlPlane(place_to=WorkerId(worker)), clock
+        )(community_id=community, server_id=server_id)
+
+    # The reconciler recovers it: final snapshot (the worker is connected and still
+    # holds the crash-window working set in its retained scratch), then unassign.
+    recovery_cp = FakeControlPlane()
+    await _reconciler_tick(engine, recovery_cp, clock)
+    assert [kind for kind, _, _ in recovery_cp.dispatched] == ["snapshot"]
+    recovered = await _load(engine, server_id)
+    assert recovered is not None
+    assert recovered.assigned_worker_id is None
+    # The crash is left standing as the truth about how the process ended.
+    assert recovered.observed_state is ObservedState.CRASHED
+
+    # The next start re-places against the now-unassigned row.
+    next_worker = uuid.uuid4()
+    restarted = await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(next_worker)), clock
+    )(community_id=community, server_id=server_id)
+    assert restarted.desired_state is DesiredState.RUNNING
+    assert restarted.assigned_worker_id == WorkerId(next_worker)
+
+
+async def test_crash_then_operator_stop_snapshots_and_leaves_the_same_shape(
+    engine: AsyncEngine,
+) -> None:
+    """start -> crash -> the OPERATOR stops it -> same release, same terminal row.
+
+    Issue #2448, the operator-stop variant of the chain above. The Worker forgot the
+    crashed instance (``forgetIf``), so its handleStop answers SERVER_NOT_FOUND —
+    the ordinary answer whenever someone stops an already-crashed server. That
+    release must land where the reconciler's arm lands: the crash-window working set
+    captured by a final snapshot BEFORE the assignment is freed, and ``crashed``
+    still standing as why the server is down.
+
+    Before this the two disagreed on both halves — the direct stop discarded the
+    retained scratch and rewrote ``crashed`` to ``stopped`` — so which path reached
+    the row first decided whether the world survived and whether the operator saw a
+    crash or a clean shutdown.
+    """
+
+    clock = _AdvancingClock(_NOW)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    server_id = server.id
+    community = server.community_id
+
+    worker = uuid.uuid4()
+    await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(worker)), clock
+    )(community_id=community, server_id=server_id)
+    # The process dies on its own; the owning worker reports it through the REAL
+    # sink, which keeps the assignment under desired=running.
+    await _sink(engine, clock).record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker), state="crashed"
+    )
+
+    stop_cp = FakeControlPlane(
+        outcomes={"stop": CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND)}
+    )
+    stopped = await _stop_server_use_case(engine, stop_cp, clock)(
+        community_id=community, server_id=server_id
+    )
+
+    # The crash-window working set is captured BEFORE the release, not discarded.
+    assert [kind for kind, _, _ in stop_cp.dispatched] == ["stop", "snapshot"]
+    assert stopped.desired_state is DesiredState.STOPPED
+    assert stopped.assigned_worker_id is None
+    released = await _load(engine, server_id)
+    assert released is not None
+    assert released.assigned_worker_id is None
+    # The identical terminal shape the reconciler's crashed arm leaves (chain above):
+    # (stopped, crashed, unassigned) — at rest, startable, claimed by no arm.
+    assert released.observed_state is ObservedState.CRASHED
+    assert released.is_at_rest()
+
+    next_worker = uuid.uuid4()
+    restarted = await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(next_worker)), clock
+    )(community_id=community, server_id=server_id)
+    assert restarted.assigned_worker_id == WorkerId(next_worker)
+
+
+# --- Chain 7: stopped/stopping/assigned wedge recovery (issue #2452) -------
+
+
+async def test_failed_stop_left_at_stopping_recovered_by_reconciler(
+    engine: AsyncEngine,
+) -> None:
+    """start -> stop whose dispatch FAILS -> the worker's StatusChange(stopping),
+    emitted on entry to its Stop, is the LAST report -> reconciler tick redispatches
+    the stop -> start succeeds.
+
+    Issue #2452. The worker emits ``stopping`` when its ``Stop`` begins, and both
+    of its failure paths restore the pre-stop state WITHOUT emitting, so no terminal
+    report ever follows a stop that failed after that emission. The row is left at
+    (stopped, stopping, assigned), which before the fix matched no arm of
+    ``list_reconcilable``. Nor could an operator escape it: ``StopServer`` and
+    ``RestartServer`` refuse (desired is already stopped), ``StartServer`` 409s on
+    ``require_unassigned``, and ``is_at_rest()`` is false so every file/backup
+    operation 409s "unsettled". The recovery is a real retry of the stop.
+    """
+
+    clock = _AdvancingClock(_NOW)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    server_id = server.id
+    community = server.community_id
+
+    worker = uuid.uuid4()
+    await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(worker)), clock
+    )(community_id=community, server_id=server_id)
+    await _sink(engine, clock).record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker), state="running"
+    )
+
+    # The operator stops; the dispatch fails. StopServer deliberately does NOT
+    # compensate (issue #2435), so desired=stopped stands and the row keeps its
+    # assignment.
+    failing_cp = FakeControlPlane(place_to=WorkerId(worker), unavailable_kinds={"stop"})
+    with pytest.raises(WorkerUnavailableError):
+        await _stop_server_use_case(engine, failing_cp, clock)(
+            community_id=community, server_id=server_id
+        )
+
+    # The worker had already emitted stopping on entry to its Stop; its failure
+    # paths restore the prior state without emitting, so this report is the last
+    # one the API will ever see for that stop.
+    await _sink(engine, clock).record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker), state="stopping"
+    )
+    wedged = await _load(engine, server_id)
+    assert wedged is not None
+    assert wedged.desired_state is DesiredState.STOPPED
+    assert wedged.observed_state is ObservedState.STOPPING
+    assert wedged.assigned_worker_id == WorkerId(worker)
+    # No operator action escapes: the row is not at rest, so every gated operation
+    # 409s "unsettled", and a start cannot re-place against the stale assignment.
+    assert not wedged.is_at_rest()
+    with pytest.raises(LifecycleTransitionConflictError):
+        await _start_server_use_case(
+            engine, FakeControlPlane(place_to=WorkerId(worker)), clock
+        )(community_id=community, server_id=server_id)
+
+    # The row IS a reconciler candidate (the arm this issue adds).
+    async with ServersUnitOfWork(create_session_factory(engine)) as uow:
+        candidates = await uow.servers.list_reconcilable()
+    assert [candidate.id for candidate in candidates] == [server_id]
+
+    # The reconciler retries the stop for real against the connected worker, then
+    # takes the final snapshot and releases the assignment.
+    recovery_cp = FakeControlPlane()
+    await _reconciler_tick(engine, recovery_cp, clock)
+    assert [kind for kind, _, _ in recovery_cp.dispatched] == ["stop", "snapshot"]
+    recovered = await _load(engine, server_id)
+    assert recovered is not None
+    assert recovered.observed_state is ObservedState.STOPPED
+    assert recovered.assigned_worker_id is None
+
+    # The next start re-places against the now-unassigned row.
+    next_worker = uuid.uuid4()
+    restarted = await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(next_worker)), clock
+    )(community_id=community, server_id=server_id)
+    assert restarted.desired_state is DesiredState.RUNNING
+    assert restarted.assigned_worker_id == WorkerId(next_worker)
+
+
+# --- Chain 8: the failed-stop-orphan window (issues #2467 / #2471 / #2476) --
+
+# The message the Worker attaches to every refusal over a recorded failed-stop
+# orphan (instancemanager's ``orphanPendingMsg``). Carried verbatim so the chain
+# reads like the wire traffic it models; the API discriminates on the CODE.
+_ORPHAN_MSG = "instancemanager: server has a failed-stop orphan pending termination"
+
+
+def _orphan_holding_worker(
+    worker: uuid.UUID, server_id: ServerId, *, holds_working_set: bool = False
+) -> FakeControlPlane:
+    """A Worker that has recorded a failed-stop orphan for the server.
+
+    Every verb the API can aim at it during the window is answered the way the
+    real instancemanager answers it: the start replay's two legs and a snapshot
+    are refused over the orphan with the code the SHARED CONTRACT TABLE says the
+    Worker emits for the ``orphan_pending`` precondition, while a stop or restart
+    fails with the unclassified ``INTERNAL`` its driver Stop produces when it
+    cannot confirm termination.
+
+    Reading those codes from the table rather than hardcoding them is what makes
+    this chain a test of the API's *handling* of the refusal: flip the row and the
+    invariant below — the row is never converged to observed=running — must still
+    hold. It did not before issue #2476.
+
+    ``holds_working_set`` reports a held generation so ``redispatch_start`` skips
+    the hydrate and the refusal lands on the START leg instead of the hydrate one;
+    both legs reach the API's convergence sites, so the chain drives each once.
+    """
+
+    return FakeControlPlane(
+        place_to=WorkerId(worker),
+        held={(WorkerId(worker), server_id): 0} if holds_working_set else {},
+        outcomes={
+            "hydrate": CommandOutcome(
+                status=worker_status("HydrateTrigger", "orphan_pending"),
+                message=_ORPHAN_MSG,
+            ),
+            "start": CommandOutcome(
+                status=worker_status("StartServer", "orphan_pending"),
+                message=_ORPHAN_MSG,
+            ),
+            "snapshot": CommandOutcome(
+                status=worker_status("SnapshotTrigger", "orphan_pending"),
+                message=_ORPHAN_MSG,
+            ),
+            "stop": CommandOutcome(
+                status=CommandStatus.INTERNAL,
+                message="instancemanager: stop: could not confirm termination",
+            ),
+            "restart": CommandOutcome(
+                status=CommandStatus.INTERNAL,
+                message="instancemanager: restart stop: could not confirm termination",
+            ),
+        },
+    )
+
+
+async def _reconcilable_ids(engine: AsyncEngine) -> list[ServerId]:
+    async with ServersUnitOfWork(create_session_factory(engine)) as uow:
+        return [candidate.id for candidate in await uow.servers.list_reconcilable()]
+
+
+async def test_failed_restart_stop_orphan_window_never_converges_running(
+    engine: AsyncEngine,
+) -> None:
+    """start -> restart whose STOP leg cannot confirm termination (the Worker
+    records a failed-stop orphan) -> every start replay is refused over that orphan
+    -> assert observed NEVER becomes running while the window lasts -> the Worker's
+    converger terminates the LIVE orphan and reports stopped -> the reconciler
+    relaunches against the same Worker.
+
+    Issue #2467's wedge, discharged per #2471. ``reserve()`` answers one code for
+    "already running" and "orphan pending", and both API convergence sites
+    (``StartServer.__call__`` and ``redispatch_start``) read that code as positive
+    evidence the instance is live — so a refusal that means "I am still trying to
+    kill this" manufactured ``observed=running``. A converged row is settled, so
+    the reconciler stops selecting it: the divergence the converger is working
+    disappears from the API's view, and for an orphan whose process is already dead
+    nothing ever repairs it.
+
+    Under issue #2476 the orphan refusal is BUSY instead, which both sites already
+    handle correctly — keep the assignment and the intent, write no row, retry
+    later. The row therefore sits honestly diverged for the whole window, which is
+    what this chain asserts tick by tick.
+    """
+
+    clock = _AdvancingClock(_NOW)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    server_id = server.id
+    community = server.community_id
+
+    worker = uuid.uuid4()
+    await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(worker)), clock
+    )(community_id=community, server_id=server_id)
+    await _sink(engine, clock).record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker), state="running"
+    )
+
+    # The operator restarts. The Worker's stop leg cannot confirm the process
+    # terminated, so it records a failed-stop orphan and answers with the
+    # unclassified INTERNAL its driver Stop produced. RestartServer commits no
+    # state change, so desired stays running.
+    with pytest.raises(CommandDispatchError):
+        await _restart_server_use_case(
+            engine, _orphan_holding_worker(worker, server_id), clock
+        )(community_id=community, server_id=server_id)
+
+    # The Worker emitted stopping on entry to that Stop (issue #2452), and then —
+    # holding the orphan and unable to say whether its process is alive — reports
+    # the id as unknown (issues #2474/#2475).
+    for state in ("stopping", "unknown"):
+        await _sink(engine, clock).record_observed_state(
+            server_id=str(server_id.value), worker_id=str(worker), state=state
+        )
+
+    # The window. Each tick replays the start to the SAME Worker, which refuses it
+    # over the orphan — once on the hydrate leg, once on the start leg (a held
+    # working set skips the hydrate). Neither may converge the row.
+    for holds in (False, True):
+        refusing = _orphan_holding_worker(worker, server_id, holds_working_set=holds)
+        await _reconciler_tick(engine, refusing, clock)
+        assert [kind for kind, _, _ in refusing.dispatched] == (
+            ["start"] if holds else ["hydrate"]
+        )
+        during = await _load(engine, server_id)
+        assert during is not None
+        assert during.observed_state is not ObservedState.RUNNING
+        # The intent and the assignment stand: this Worker owns the id until the
+        # orphan resolves, and no other may be given the server (stickiness).
+        assert during.desired_state is DesiredState.RUNNING
+        assert during.assigned_worker_id == WorkerId(worker)
+        # And the divergence SURVIVES the refusal, so the next tick selects it
+        # again. A converged observed=running would have removed it from this list
+        # permanently — the shape of #2467's wedge.
+        assert await _reconcilable_ids(engine) == [server_id]
+
+    # The orphan was LIVE: the converger's retry stop reaches the process, the
+    # record is retired, and the Worker reports the terminal state.
+    await _sink(engine, clock).record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker), state="stopped"
+    )
+
+    # With the orphan gone the very next tick relaunches for real, honouring the
+    # running intent the operator never withdrew.
+    healthy = FakeControlPlane(place_to=WorkerId(worker))
+    await _reconciler_tick(engine, healthy, clock)
+    assert [kind for kind, _, _ in healthy.dispatched] == ["hydrate", "start"]
+    relaunched = await _load(engine, server_id)
+    assert relaunched is not None
+    assert relaunched.desired_state is DesiredState.RUNNING
+    assert relaunched.assigned_worker_id == WorkerId(worker)
+
+
+async def test_dead_failed_stop_orphan_window_ends_in_snapshot_and_release(
+    engine: AsyncEngine,
+) -> None:
+    """The same window over a DEAD orphan — the process was already gone and the
+    Worker merely could not confirm it — with the operator withdrawing the running
+    intent partway through: start -> restart whose stop leg fails -> refused start
+    replays that never converge running -> operator stops (the stop fails the same
+    way, desired=stopped stands) -> the converger confirms the process dead, retires
+    the record and reports stopped -> the reconciler takes the final snapshot and
+    releases the assignment -> the server is startable again.
+
+    The dead orphan is #2467's own criterion and the harder half: for a live orphan
+    the manufactured ``observed=running`` was at least accidentally true, so the
+    row healed when the process later died. For a dead one it is simply false and
+    permanent — no process remains to emit a StatusChange, and a converged row is
+    never re-selected. The API cannot tell the two apart from the refusal (the
+    Worker cannot either, which is why it now answers BUSY for both), so the
+    invariant has to hold without knowing which it is.
+    """
+
+    clock = _AdvancingClock(_NOW)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    server_id = server.id
+    community = server.community_id
+
+    worker = uuid.uuid4()
+    await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(worker)), clock
+    )(community_id=community, server_id=server_id)
+    await _sink(engine, clock).record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker), state="running"
+    )
+
+    with pytest.raises(CommandDispatchError):
+        await _restart_server_use_case(
+            engine, _orphan_holding_worker(worker, server_id), clock
+        )(community_id=community, server_id=server_id)
+    for state in ("stopping", "unknown"):
+        await _sink(engine, clock).record_observed_state(
+            server_id=str(server_id.value), worker_id=str(worker), state=state
+        )
+
+    refusing = _orphan_holding_worker(worker, server_id)
+    await _reconciler_tick(engine, refusing, clock)
+    during = await _load(engine, server_id)
+    assert during is not None
+    assert during.observed_state is not ObservedState.RUNNING
+    assert await _reconcilable_ids(engine) == [server_id]
+
+    # The operator gives up on the restart and stops the server. The stop reaches
+    # the Worker, whose retry of the driver Stop still cannot confirm termination,
+    # so the dispatch fails — StopServer deliberately does not compensate (issue
+    # #2435), leaving desired=stopped over the unresolved orphan.
+    with pytest.raises(CommandDispatchError):
+        await _stop_server_use_case(
+            engine, _orphan_holding_worker(worker, server_id), clock
+        )(community_id=community, server_id=server_id)
+    after_stop = await _load(engine, server_id)
+    assert after_stop is not None
+    assert after_stop.desired_state is DesiredState.STOPPED
+    assert after_stop.observed_state is not ObservedState.RUNNING
+    assert after_stop.assigned_worker_id == WorkerId(worker)
+
+    # The converger's probes confirm the process dead, so it retires the record and
+    # reports the terminal state it could never observe from the driver Stop.
+    await _sink(engine, clock).record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker), state="stopped"
+    )
+
+    # (stopped, stopped, assigned): the reconciler takes the final snapshot the
+    # failed stop never got, then releases the assignment.
+    releasing = FakeControlPlane()
+    await _reconciler_tick(engine, releasing, clock)
+    assert [kind for kind, _, _ in releasing.dispatched] == ["snapshot"]
+    released = await _load(engine, server_id)
+    assert released is not None
+    assert released.assigned_worker_id is None
+
+    # The row is startable again, on any Worker.
     next_worker = uuid.uuid4()
     restarted = await _start_server_use_case(
         engine, FakeControlPlane(place_to=WorkerId(next_worker)), clock

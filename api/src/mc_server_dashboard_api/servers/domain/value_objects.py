@@ -113,10 +113,12 @@ class ObservedState(enum.Enum):
     """Last state reported by the Worker (DATABASE.md Section 7 CHECK enum).
 
     A cache of reality written only by the control-plane event handler from
-    Worker reports (FR-SRV-4). The reportable values mirror the control-plane
-    ``ServerState`` enum (CONTROL_PLANE.md Section 6); ``UNKNOWN`` is
-    API-inferred (set when the owning Worker disconnects) and never reported by a
-    Worker.
+    Worker reports (FR-SRV-4). Every value mirrors the control-plane
+    ``ServerState`` enum (CONTROL_PLANE.md Section 6), ``UNKNOWN`` included as of
+    issue #2474: it has two producers. The API infers it when the owning Worker's
+    session drops, and a Worker asserts it when it cannot currently confirm an
+    instance's fate (a failed-stop orphan under an unreachable daemon) — reporting
+    ``STOPPED`` or ``RUNNING`` there would be a guess recorded as fact.
     """
 
     STARTING = "starting"

@@ -88,8 +88,15 @@ class _CapturingFleetControlPlane(FleetControlPlane):
 
 
 def _adapter(fleet: FleetControlPlane) -> FleetControlPlaneAdapter:
+    # A real (empty) registry rather than None: since #2481 a snapshot dispatch
+    # records the Worker's declared held generation, so this seam is no longer
+    # unused by snapshot. These tests assert on URLs, timeouts and command shapes
+    # and register no Worker, and recording against an unregistered Worker is
+    # silently ignored — so the wiring is honest without changing what they pin.
     return FleetControlPlaneAdapter(
-        registry=None,  # type: ignore[arg-type]  # unused by hydrate/snapshot
+        registry=InMemoryWorkerRegistry(
+            clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT
+        ),
         control_plane=fleet,
         data_plane_base_url="https://api.example/",
         worker_credential="shhh",
@@ -604,6 +611,32 @@ def test_held_generation_reflects_reported_servers() -> None:
     )
 
 
+def test_record_held_generation_is_read_back_by_held_generation() -> None:
+    # Issue #2477: a server placed AFTER the Worker registered is absent from the
+    # registration advertisement, so it reads back as None. Recording the generation a
+    # hydrate/snapshot established makes it visible through the SAME seam the
+    # skip-hydrate and short-grace decisions read, with the UUID -> wire-string
+    # bridging applied on both sides.
+    worker_uuid = uuid.uuid4()
+    server_uuid = uuid.uuid4()
+    clock = FakeClock(_T0)
+    registry = InMemoryWorkerRegistry(clock=clock, heartbeat_timeout=_TIMEOUT)
+    registry.register(make_worker(worker_id=str(worker_uuid), at=_T0))
+    adapter = _registry_adapter(registry)
+    worker_id = WorkerId(worker_uuid)
+    server_id = ServerId(server_uuid)
+    assert adapter.held_generation(worker_id=worker_id, server_id=server_id) is None
+
+    adapter.record_held_generation(
+        worker_id=worker_id, server_id=server_id, generation=4
+    )
+
+    assert adapter.held_generation(worker_id=worker_id, server_id=server_id) == 4
+    assert adapter.holds_fresh_working_set(
+        worker_id=worker_id, server_id=server_id, store_generation=4
+    )
+
+
 def test_holds_fresh_working_set_mirrors_held_store_comparison() -> None:
     # holds_fresh_working_set is True exactly when held >= store (the #763
     # skip-hydrate predicate the reconciler reuses for its short grace, #999).
@@ -813,3 +846,91 @@ async def test_place_memory_gate_survives_confirm_between_snapshot_and_place() -
     )
 
     assert chosen_b is None
+
+
+# --- a publish records a held generation only when the Worker declared it (#2481) ---
+#
+# The Worker decides retention branch-side and states the result on the
+# CommandResult: a running-id snapshot that stamped its generation marker
+# declares that generation, while a stopped-id snapshot (which GCs the scratch,
+# #762/#841) and a running-id snapshot whose stamp was refused (#2284) declare
+# nothing. The adapter is the single funnel every snapshot dispatch passes
+# through — periodic tick, on-demand backup, and post-stop final — so the record
+# happens here, synchronously with the outcome and with no await between reading
+# the declaration and writing the inventory.
+
+
+def _snapshot_adapter(
+    registry: InMemoryWorkerRegistry, *, held_generation: int | None
+) -> FleetControlPlaneAdapter:
+    return FleetControlPlaneAdapter(
+        registry=registry,
+        control_plane=_CapturingFleetControlPlane(
+            result=CommandResult(
+                code=CommandResultCode.OK, held_generation=held_generation
+            )
+        ),
+        data_plane_base_url="https://api.example/",
+        worker_credential="shhh",
+    )
+
+
+async def test_snapshot_records_the_generation_the_worker_declared() -> None:
+    worker_uuid, server_uuid = uuid.uuid4(), uuid.uuid4()
+    registry = InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT)
+    registry.register(make_worker(worker_id=str(worker_uuid), at=_T0))
+    adapter = _snapshot_adapter(registry, held_generation=9)
+    worker_id, server_id = WorkerId(worker_uuid), ServerId(server_uuid)
+
+    outcome = await adapter.snapshot(
+        worker_id=worker_id,
+        community_id=CommunityId(uuid.uuid4()),
+        server_id=server_id,
+    )
+
+    assert outcome.held_generation == 9
+    # Read back through the SAME seam the skip-hydrate gate and the reconciler's
+    # short held-start grace consult.
+    assert adapter.held_generation(worker_id=worker_id, server_id=server_id) == 9
+
+
+async def test_snapshot_records_nothing_when_the_worker_declared_nothing() -> None:
+    # The stopped-id publish: the Worker deleted the scratch right after publishing,
+    # so it declares nothing. Recording the published generation here would let a
+    # later start read held >= store, skip the hydrate, and boot into a freshly
+    # created empty directory — the #696-class rollback the gate exists to prevent.
+    worker_uuid, server_uuid = uuid.uuid4(), uuid.uuid4()
+    registry = InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT)
+    registry.register(make_worker(worker_id=str(worker_uuid), at=_T0))
+    adapter = _snapshot_adapter(registry, held_generation=None)
+    worker_id, server_id = WorkerId(worker_uuid), ServerId(server_uuid)
+
+    outcome = await adapter.snapshot(
+        worker_id=worker_id,
+        community_id=CommunityId(uuid.uuid4()),
+        server_id=server_id,
+        final=True,
+    )
+
+    assert outcome.held_generation is None
+    assert adapter.held_generation(worker_id=worker_id, server_id=server_id) is None
+
+
+async def test_a_declaration_on_a_non_snapshot_command_is_not_recorded() -> None:
+    # Only a snapshot outcome may refresh the inventory. Every other dispatch
+    # shares the same _to_outcome plumbing, so the record must be attached to the
+    # snapshot call rather than to the generic dispatch path — otherwise a future
+    # command that happens to carry the field would silently widen the gate.
+    worker_uuid, server_uuid = uuid.uuid4(), uuid.uuid4()
+    registry = InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT)
+    registry.register(make_worker(worker_id=str(worker_uuid), at=_T0))
+    adapter = _snapshot_adapter(registry, held_generation=9)
+    worker_id, server_id = WorkerId(worker_uuid), ServerId(server_uuid)
+
+    await adapter.hydrate(
+        worker_id=worker_id,
+        community_id=CommunityId(uuid.uuid4()),
+        server_id=server_id,
+    )
+
+    assert adapter.held_generation(worker_id=worker_id, server_id=server_id) is None

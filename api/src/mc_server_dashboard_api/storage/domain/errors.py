@@ -31,6 +31,28 @@ class PathTraversalError(StorageError):
     """
 
 
+class SymlinkRefusedError(StorageError):
+    """A ``rel_path`` resolves through a symlink at some component (issue #2432).
+
+    A symlink in a working set is unsupported, full stop, including at rest: it can
+    only get there out of band (an operator over SSH), because uploads refuse
+    symlink members, hydrate rejects them and the Worker's snapshot tar skips them.
+    Every Port operation therefore refuses a path with a symlink at ANY component
+    rather than following it — the rule the Worker's running-server path already
+    enforces per component, so one browser click gets the same answer at rest and
+    while running.
+
+    Deliberately DISTINCT from :class:`PathTraversalError`, not a subclass of it.
+    The two verdicts are ordered — containment is decided first, so a link out of
+    the root reports the escape rather than this refusal — and an ordering that a
+    subclass relation could satisfy either way is an ordering no test can pin.
+
+    The seam maps it to the ``symlink_refused`` 422 the Worker's
+    ``FileAccessReasonSymlinkRefused`` already produces, so the reason (and the
+    sentence the browser shows) is shared rather than duplicated.
+    """
+
+
 class NotFoundError(StorageError):
     """The targeted blob does not exist.
 
@@ -49,10 +71,33 @@ class ObjectStoreUnavailableError(StorageError):
     ``UploadPart`` (the 2026-07-23 incident), or a connection/timeout transport error
     (``EndpointConnectionError``, ``ConnectTimeoutError``, ``ReadTimeoutError``, ...).
 
+    Raised on the READ operations too — ``get_object`` at request initiation,
+    ``head_object``, ``list_objects``, ``copy_object`` (issue #2376) — not only on the
+    writes. Those paths apply a narrower rule than the writes: only a backend 5xx or a
+    transport failure, so a 403 ``AccessDenied`` keeps its own semantics instead of
+    reading as a retryable outage.
+
     Translating it here keeps the raw third-party ``botocore`` type from crossing the
     Storage Port boundary, so callers receive a typed, categorizable storage error
     rather than an untranslated exception; the originating error is preserved as the
     ``__cause__`` for the traceback logged at the edge.
+    """
+
+
+class ArchiveUnreadableError(StorageError):
+    """A stored backup archive's bytes could not be read back in full (issue #2371).
+
+    Raised by the object backend's ``check_backup_health`` readability probe when
+    streaming the stored object end to end does not reproduce a complete archive:
+    the delivered byte count disagrees with the length ``HEAD`` declares, the gzip
+    stream never reaches its trailer, or the trailer's CRC32/ISIZE no longer
+    describes the payload (silent bit-rot). Such a backup is unrestorable — the
+    same read path backs restore — so the sweep quarantines it.
+
+    Deliberately distinct from :class:`IntegrityCheckError` ("the archived world is
+    structurally corrupt") and from :class:`ObjectStoreUnavailableError` ("the store
+    could not serve the request"): the bytes are gone, which is neither a verdict
+    about the world's contents nor a transient backend condition.
     """
 
 

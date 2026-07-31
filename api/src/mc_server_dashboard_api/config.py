@@ -366,6 +366,13 @@ class ReconcilerSettings(_Section):
     cross-worker duplicate-live-instance race the long grace guards cannot occur on
     a re-dispatch to the same already-connected Worker (its double-start guard
     rejects a second live start). All other paths keep the full ``grace_seconds``.
+    ``refused_stop_grace_seconds`` is the SHORTER grace applied only to a
+    ``redispatch_stop`` whose previous stop dispatch the Worker REFUSED (issue
+    #2478): the only thing the full grace protects on that path is
+    ``> stop_timeout_seconds`` (#930, never replay a stop whose first dispatch may
+    still be running), and a returned refusal is the end of that round trip. Every
+    other path — including a stop divergence with no recorded refusal, which may
+    never have been dispatched at all — keeps the full ``grace_seconds``.
     ``backoff_base_seconds`` / ``backoff_max_seconds`` bound the per-server
     exponential backoff that prevents a persistently failing server from being
     retried every tick.
@@ -374,6 +381,14 @@ class ReconcilerSettings(_Section):
     interval_seconds: int = Field(default=60, gt=0)
     grace_seconds: int = Field(default=660, gt=0)
     held_start_grace_seconds: int = Field(default=90, gt=0)
+    # No timeout-derived floor, unlike the two graces above, and that is the point
+    # (issue #2478): they budget for a round trip that may still be running, while
+    # this one is taken only once the Worker has ANSWERED — there is nothing left to
+    # outlast. The stock 30 matches ``backoff_base_seconds``, which is the same
+    # question already answered once ("how soon may the reconciler retry an action it
+    # knows failed?"), and sits below ``interval_seconds`` so the first tick after a
+    # refusal acts on it.
+    refused_stop_grace_seconds: int = Field(default=30, gt=0)
     backoff_base_seconds: int = Field(default=30, gt=0)
     backoff_max_seconds: int = Field(default=3600, gt=0)
 
@@ -655,6 +670,18 @@ class TokenSettings(_Section):
     # access log; it only has to cover the round trip from mint to the browser
     # starting the download.
     download_grant_ttl_seconds: int = Field(default=30, gt=0)
+    # Lifetime of the download cookie a redeemed grant is exchanged for (issue
+    # #2373) — the credential that survives an interrupted transfer, so a browser's
+    # retry authenticates after the 30 s query-string window has closed. It never
+    # reaches an access log, a browser history or a Referer (httpOnly, and no URL
+    # carries it), so it can be longer than the grant; it is still the window in
+    # which a leftover cookie in a shared browser re-reads its one resource, so it
+    # defaults to ``access_ttl_seconds`` — no longer than an access token the same
+    # user already holds. Its Path/SameSite/httpOnly are fixed in
+    # ``download_cookie.py``; ``download_cookie_secure`` defaults to True (HTTPS
+    # only), turn it off for plain-HTTP localhost dev so the browser stores it.
+    download_cookie_ttl_seconds: int = Field(default=900, gt=0)
+    download_cookie_secure: bool = True
 
     @model_validator(mode="after")
     def _enforce_hs256_key_length(self) -> TokenSettings:

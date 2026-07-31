@@ -1049,6 +1049,74 @@ func TestSuperviseReAttachThrottledAfterTransportError(t *testing.T) {
 	drainTo(t, inst.Events(), execution.StateCrashed)
 }
 
+// ProbeAlive answers "is this container alive right now?" from a single live
+// Inspect, sharing the classification the re-inspect probe uses (issue #2473).
+// A container the daemon does not know (404) is definitively not alive; only an
+// unreachable daemon makes the answer unavailable, and that is an error return
+// rather than a guessed false.
+func TestProbeAlive(t *testing.T) {
+	daemonUnreachable := errors.New("containerdriver: GET inspect: connection refused")
+	tests := []struct {
+		name       string
+		info       ContainerInfo
+		inspectErr error
+		wantAlive  bool
+		wantErr    error
+	}{
+		{
+			name:      "running container",
+			info:      ContainerInfo{ID: "container-1", Running: true},
+			wantAlive: true,
+		},
+		{
+			name: "container present but exited",
+			info: ContainerInfo{ID: "container-1", Running: false},
+		},
+		{
+			name:       "container gone (404)",
+			inspectErr: errNotFound,
+		},
+		{
+			name:       "daemon unreachable",
+			inspectErr: daemonUnreachable,
+			wantErr:    daemonUnreachable,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			docker := newFakeDocker()
+			docker.inspectInfo = tc.info
+			docker.inspectErr = tc.inspectErr
+			inst := &instance{docker: docker, containerID: "container-1"}
+
+			alive, err := inst.ProbeAlive(context.Background())
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("err = %v, want %v", err, tc.wantErr)
+			}
+			if alive != tc.wantAlive {
+				t.Fatalf("alive = %v, want %v", alive, tc.wantAlive)
+			}
+		})
+	}
+}
+
+// ProbeAlive must never answer from the cached state: both Stop failure paths
+// deliberately reset i.state to the pre-stop value, so a cached read cannot say
+// whether the container is alive now (issue #2473).
+func TestProbeAliveIgnoresCachedState(t *testing.T) {
+	docker := newFakeDocker()
+	docker.inspectInfo = ContainerInfo{ID: "container-1", Running: true}
+	inst := &instance{docker: docker, containerID: "container-1", state: execution.StateStopped}
+
+	alive, err := inst.ProbeAlive(context.Background())
+	if err != nil {
+		t.Fatalf("ProbeAlive: %v", err)
+	}
+	if !alive {
+		t.Fatal("alive = false, want true: ProbeAlive answered from the cached stopped state")
+	}
+}
+
 // Start wires the working-dir bind mount, the deterministic name/labels, and the
 // resolved base image onto the create spec.
 func TestStartCreateSpec(t *testing.T) {

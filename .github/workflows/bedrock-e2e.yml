@@ -54,7 +54,7 @@ jobs:
       # Action versions are pinned to a commit SHA per docs/dev/DEPENDENCIES.md
       # (pinning + 7-day cooldown), reusing the relay-e2e.yml/e2e.yml-vetted pins.
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Both relay/go.mod and worker/go.mod declare `go 1.26`; one toolchain
       # install covers the two `go test` invocations the orchestrator runs.

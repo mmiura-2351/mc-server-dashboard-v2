@@ -222,7 +222,7 @@ export const en = {
   "dashboard.state.unknown": "unknown",
   // Lifecycle action feedback.
   "dashboard.actionFailed": "Could not complete that action. Please try again.",
-  // Conflict-flavoured (server_unsettled-style) lifecycle races (SPEC 7.4).
+  // Conflict-flavoured lifecycle races (SPEC 7.4).
   "dashboard.stateChanged": "State changed — refreshed.",
   // Sanitized 409 start-failure reasons (issue #225); specific, actionable
   // causes rather than the generic state-changed toast.
@@ -230,6 +230,38 @@ export const en = {
     "Could not start: a port is already in use.",
   "dashboard.lifecycle.imageMissing":
     "Could not start: the server's files are not ready. Try again shortly.",
+  // 409 worker_busy / server_busy (issue #2400): another operation holds the
+  // server, so this one was refused without being applied. It clears on its own
+  // once that operation finishes, so the only remedy is to retry.
+  "dashboard.lifecycle.busy":
+    "Another operation on this server is in progress. Please wait a moment and try again.",
+  // 409 command_failed (issue #2420): the host took the command and could not
+  // apply it, for a cause it did not classify. Whether the server moved depends
+  // on the verb (a failed restart can leave it down), and a retry is not known
+  // to help, so the toast points at the server's state rather than promising
+  // one.
+  "dashboard.lifecycle.commandFailed":
+    "The server host could not carry out that action. Check the server's current state before trying again.",
+  // 409 command_failed / worker_busy on stop, and command_failed or
+  // server_not_running on restart (issues #2435/#2441): the API committed the
+  // intent before dispatching, so the failure leaves it pending rather than
+  // undone. These name what is still going to happen instead of asking the
+  // operator to work it out. The restart string covers both of its reasons: a
+  // restart the Worker could not carry out and one it refused because it was
+  // running nothing leave the same thing behind — desired_state=running.
+  "dashboard.lifecycle.stopPending":
+    "Could not stop the server: it is still running. The system will keep trying to stop it.",
+  "dashboard.lifecycle.restartPending":
+    "Could not restart the server: it may be stopped for now. The system will bring it back automatically.",
+  // 409 failed_stop_orphan (issue #2466): the host could not confirm an earlier
+  // stop, so the server's process may still be running — it never went down, and
+  // repeating the same action is refused identically. Asking the operator to stop
+  // it again stopped being the honest remedy at issue #2475: the host now
+  // converges the orphan itself (probing the process, retrying the stop while it
+  // is alive, retiring the record once it is confirmed gone), so the message names
+  // the condition and says the work is already under way (issue #2476).
+  "dashboard.lifecycle.failedStopOrphan":
+    "The server's previous stop did not finish, so its process may still be running. The system is shutting it down automatically; wait a moment and try again.",
   // 503 service-unavailable reasons (issue #1092): post-restart scenarios where
   // a host or the server files are not yet ready.
   "dashboard.lifecycle.noEligibleWorker":
@@ -238,6 +270,20 @@ export const en = {
     "Could not reach the server host. Please wait a moment and try again.",
   "dashboard.lifecycle.jarUnavailable":
     "Could not prepare the server files. Please wait a moment and try again.",
+  // 503 worker_unavailable on stop / restart (issue #2440): the dispatch timed
+  // out or its session dropped AFTER the intent was committed, so nothing was
+  // undone and the outcome is simply unknown — a graceful stop outliving the
+  // dispatch deadline is the commonest case. Distinct from the *Pending pair
+  // above, which can say the server did not move; these can only say the
+  // result is unconfirmed. What still stands differs by verb: the stop intent
+  // is re-driven (the reconciler keeps retrying it), while restart keeps only
+  // desired=running — an undelivered restart is never re-sent, and the
+  // reconciler starts the server only if it does end up down, which is why that
+  // string is conditional rather than a promise to bring it back.
+  "dashboard.lifecycle.stopUnconfirmed":
+    "Could not reach the server host to confirm the stop. The server may already be shutting down; the stop still stands and the system will keep trying.",
+  "dashboard.lifecycle.restartUnconfirmed":
+    "Could not reach the server host to confirm the restart. The server may already be coming back; if it stays down the system will start it again automatically.",
   // Live-status degraded indicator: WS down, polling fallback (SPEC 6.2 / 7.2).
   "dashboard.liveDegraded": "Reconnecting — updates may lag",
   // Clickable join-hostname copy feedback.
@@ -392,8 +438,10 @@ export const en = {
   "serverDetail.exportStarted": "Export download started.",
   "serverDetail.deleted": "Server deleted.",
   "serverDetail.error.notStopped": "Stop the server before making this change.",
-  "serverDetail.error.unsettled":
-    "The server must be stopped before exporting.",
+  // The at-rest precondition (409 server_unsettled). Shared by the danger-zone
+  // and actions-bar surfaces via the lifecycle mapping, so it names no single
+  // action (issue #2360).
+  "serverDetail.error.unsettled": "The server must be stopped for this action.",
   "serverDetail.error.portTaken": "That game port is already in use.",
   "serverDetail.error.portOutOfRange":
     "That game port is outside the allowed range.",
@@ -523,6 +571,8 @@ export const en = {
   "backups.error.invalidArchive": "That file is not a valid backup archive.",
   "backups.error.workerUnavailable":
     "No server host is available to take the backup right now.",
+  "backups.error.storageUnavailable":
+    "Backup storage is unavailable right now. Please try again shortly.",
   "backups.error.serverMustBeStopped":
     "The server must be stopped for this operation.",
   "backups.error.serverBusy": "Another operation is in progress. Please wait.",
@@ -1627,6 +1677,8 @@ export const en = {
   "plugins.error.notFound": "{Noun} not found. It may have been removed.",
   "plugins.error.workerUnavailable":
     "The server agent is disconnected. Please try again later.",
+  "plugins.error.downloadTooLarge":
+    "The client modpack is too large to download in the browser ({size}). The limit is 512 MiB.",
   "plugins.error.generic": "Something went wrong. Please try again.",
   // Dependency / compatibility validation checklist (issue #1307).
   "plugins.validation.heading": "Dependencies & compatibility",

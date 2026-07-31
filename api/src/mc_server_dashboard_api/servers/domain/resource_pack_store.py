@@ -29,7 +29,10 @@ class ResourcePackStore(abc.ABC):
         """Open a read stream over a stored resource pack.
 
         Performs no I/O itself: a missing blob raises ``ResourcePackNotFoundError``
-        on the first iteration, not from this call.
+        on the first iteration, not from this call, and a store outage raises
+        ``ResourcePackStorageUnavailableError`` there (issue #2455). The download
+        routes take that first iteration before they write their headers, so both
+        still decide the status.
         """
 
     @abc.abstractmethod
@@ -40,5 +43,8 @@ class ResourcePackStore(abc.ABC):
     async def size(self, pack_id: ResourcePackId, filename: str) -> int:
         """Return the size in bytes of a stored resource pack.
 
-        Raises ``ResourcePackNotFoundError`` when no blob is stored (issue #2321).
+        Raises ``ResourcePackNotFoundError`` when no blob is stored (issue #2321),
+        and ``ResourcePackStorageUnavailableError`` when the store could not answer
+        (issue #2455) — the same two outcomes :meth:`open` reports, so one outage
+        yields one status whichever of the two a download strikes.
         """

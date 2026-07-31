@@ -51,6 +51,23 @@ func TestResyncStatusReEmitsHeldInstances(t *testing.T) {
 	}
 }
 
+// A control-plane reconnect must not hide a failed-stop orphan (issue #2468
+// item 3): ResyncStatus reports every recorded orphan as `unknown`, the honest
+// answer for a process this Worker could not confirm dead. Before this it
+// snapshotted only m.instances, from which orphans have already been evicted, so
+// a reconnect left the API's row asserting a staler state as fact.
+func TestResyncStatusReportsOrphanUnknown(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	m.orphans["srv-orphan"] = orphanEntry{inst: newFakeInstance("srv-orphan"), driver: "container"}
+
+	m.ResyncStatus()
+
+	got := drainStatuses(t, m, 1)
+	if got[0].ServerID != "srv-orphan" || got[0].State != "unknown" {
+		t.Fatalf("resync event = %+v, want srv-orphan reported unknown", got[0])
+	}
+}
+
 // On a fresh process the instances map is empty, so ResyncStatus emits nothing.
 func TestResyncStatusEmptyEmitsNothing(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)

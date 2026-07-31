@@ -12,10 +12,20 @@ import {
 } from "@testing-library/react";
 import { unzipSync } from "fflate";
 import { MemoryRouter, Route, Routes } from "react-router";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  type MockInstance,
+  vi,
+} from "vitest";
 import { ApiError } from "../api/client.ts";
+import { DownloadTooLargeError } from "../api/download.ts";
 import { setAccessToken } from "../auth/tokenStore.ts";
 import { ToastProvider } from "../components/Toast.tsx";
+import { humanizeBytes } from "../format.ts";
 import { t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { installMockWebSocket } from "../test/mockWebSocket.ts";
@@ -532,33 +542,9 @@ describe("ServerFilesTab operations", () => {
     );
   });
 
-  it("downloads a directory as a .zip-named file via context menu (#2018)", async () => {
-    routeGet({
-      detail: server(),
-      list: listing([{ name: "world", is_dir: true }]),
-    });
-    renderPage();
-    await openFiles();
-    await screen.findByText(/world/);
-
-    const row = screen.getByText(/world/).closest("li") as HTMLElement;
-    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
-
-    fireEvent.click(
-      screen.getByRole("menuitem", {
-        name: t("files.contextMenu.downloadZip"),
-      }),
-    );
-    // The API streams the directory as a ZIP, so the saved file must be named
-    // `world.zip` — not the bare entry name.
-    await waitFor(() =>
-      expect(mockDownload.downloadFile).toHaveBeenCalledWith(
-        `${FILES_BASE}/download?path=world`,
-        "world.zip",
-        expect.any(AbortSignal),
-      ),
-    );
-  });
+  // A directory download no longer goes through `downloadFile` at all — it is
+  // saved from a minted grant URL (#2354). See the "Directory downloads"
+  // describe below for the `.zip` naming this test used to pin (#2018).
 
   it("runs concurrent row downloads independently, aborting only on unmount (#1728)", async () => {
     routeGet({
@@ -2332,31 +2318,8 @@ describe("ServerFilesTab bulk operations", () => {
     expect(mockDownload.fetchFileBlob).not.toHaveBeenCalled();
   });
 
-  it("bulk downloads a single selected directory as a .zip-named file (#2018)", async () => {
-    routeGet({
-      detail: server(),
-      list: listing([
-        { name: "world", is_dir: true },
-        { name: "a.txt", is_dir: false },
-      ]),
-    });
-    renderPage();
-    await openFiles();
-    await screen.findByText(/world/);
-
-    fireEvent.click(screen.getByRole("checkbox", { name: "world" }));
-    fireEvent.click(
-      screen.getByRole("button", { name: t("files.bulk.download") }),
-    );
-
-    await waitFor(() =>
-      expect(mockDownload.downloadFile).toHaveBeenCalledWith(
-        `${FILES_BASE}/download?path=world`,
-        "world.zip",
-        expect.any(AbortSignal),
-      ),
-    );
-  });
+  // A single selected directory no longer goes through `downloadFile` either
+  // (#2354) — see the "Directory downloads" describe below.
 
   it("names a bulk-selected directory's nested ZIP entry with .zip (#2018)", async () => {
     routeGet({
@@ -4786,5 +4749,204 @@ describe("ServerFilesTab refetch failure (#1805)", () => {
     // The cached listing stays on screen instead of the error.
     expect(screen.getByText(/server\.properties/)).toBeInTheDocument();
     expect(screen.queryByText(t("files.listError"))).not.toBeInTheDocument();
+  });
+});
+
+// ── Directory downloads via a minted grant (#2354) ────────────────────────────
+
+describe("ServerFilesTab directory downloads (minted grant, #2354)", () => {
+  const GRANT_PATH = `${FILES_BASE}/download-grant?path=world`;
+  const GRANT_URL = `${FILES_BASE}/download?path=world&grant=jwt-1`;
+  const clicks: HTMLAnchorElement[] = [];
+  let fetchSpy: MockInstance<typeof fetch>;
+
+  /** URLs the tab requested itself, rather than handing to the browser. */
+  const fetchedUrls = () => fetchSpy.mock.calls.map(([input]) => String(input));
+
+  beforeEach(() => {
+    clicks.length = 0;
+    // Capture the synthesised anchor click instead of navigating.
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      clicks.push(this);
+    });
+    fetchSpy = vi.spyOn(globalThis, "fetch");
+    mockApi.post.mockResolvedValue({
+      download_url: GRANT_URL,
+      expires_at: "2026-07-27T04:00:30Z",
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function downloadDirFromContextMenu() {
+    const row = screen.getByText(/world/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+    fireEvent.click(
+      screen.getByRole("menuitem", {
+        name: t("files.contextMenu.downloadZip"),
+      }),
+    );
+  }
+
+  it("mints a grant for a row download and saves it as {name}.zip", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "world", is_dir: true }]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/world/);
+
+    downloadDirFromContextMenu();
+
+    await waitFor(() => expect(mockApi.post).toHaveBeenCalledWith(GRANT_PATH));
+    await waitFor(() => expect(clicks).toHaveLength(1));
+    expect(clicks[0].getAttribute("href")).toBe(GRANT_URL);
+    // The API streams the directory as a ZIP, so the saved file must be named
+    // `world.zip` — not the bare entry name (#2018).
+    expect(clicks[0].download).toBe("world.zip");
+    // The zip is never buffered into the tab: no capped fetch+Blob path, and no
+    // request to the grant URL at all — only the browser fetches it.
+    expect(mockDownload.downloadFile).not.toHaveBeenCalled();
+    expect(fetchedUrls().filter((url) => url.includes("grant="))).toEqual([]);
+  });
+
+  it("mints a grant for a single selected directory in a bulk download", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "world", is_dir: true },
+        { name: "a.txt", is_dir: false },
+      ]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/world/);
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "world" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.bulk.download") }),
+    );
+
+    await waitFor(() => expect(mockApi.post).toHaveBeenCalledWith(GRANT_PATH));
+    await waitFor(() => expect(clicks).toHaveLength(1));
+    expect(clicks[0].getAttribute("href")).toBe(GRANT_URL);
+    expect(clicks[0].download).toBe("world.zip");
+    expect(mockDownload.downloadFile).not.toHaveBeenCalled();
+    expect(mockDownload.fetchFileBlob).not.toHaveBeenCalled();
+  });
+
+  it("keeps a row file download on the capped fetch, minting nothing", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "log.txt", is_dir: false }]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/log\.txt/);
+
+    const row = screen.getByText(/log\.txt/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.download") }),
+    );
+
+    await waitFor(() =>
+      expect(mockDownload.downloadFile).toHaveBeenCalledWith(
+        `${FILES_BASE}/download?path=log.txt`,
+        "log.txt",
+        expect.any(AbortSignal),
+      ),
+    );
+    expect(mockApi.post).not.toHaveBeenCalled();
+    expect(clicks).toHaveLength(0);
+  });
+
+  it("still rejects an oversize file up front with the too-large toast", async () => {
+    const size = 600 * 1024 * 1024;
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "big.bin", is_dir: false, size }]),
+    });
+    mockDownload.downloadFile.mockRejectedValue(
+      new DownloadTooLargeError(size),
+    );
+    renderPage();
+    await openFiles();
+    await screen.findByText(/big\.bin/);
+
+    const row = screen.getByText(/big\.bin/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.download") }),
+    );
+
+    expect(
+      await screen.findByText(
+        t("files.error.downloadTooLarge", { size: humanizeBytes(size) }),
+      ),
+    ).toBeInTheDocument();
+    expect(clicks).toHaveLength(0);
+  });
+
+  it("shows the must-be-stopped toast when the mint 409s, and saves nothing", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "world", is_dir: true }]),
+    });
+    mockApi.post.mockRejectedValue(
+      new ApiError(409, { reason: "server_unsettled" }),
+    );
+    renderPage();
+    await openFiles();
+    await screen.findByText(/world/);
+
+    downloadDirFromContextMenu();
+
+    expect(
+      await screen.findByText(t("files.error.serverMustBeStopped")),
+    ).toBeInTheDocument();
+    expect(clicks).toHaveLength(0);
+  });
+
+  it("routes a mint 403 through the permission glue, and saves nothing", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "world", is_dir: true }]),
+    });
+    mockApi.post.mockRejectedValue(
+      new ApiError(403, { reason: "forbidden", permission: "file:read" }),
+    );
+    renderPage();
+    await openFiles();
+    await screen.findByText(/world/);
+
+    downloadDirFromContextMenu();
+
+    expect(
+      await screen.findByText(
+        t("permissions.deniedNamed", { permission: "file:read" }),
+      ),
+    ).toBeInTheDocument();
+    expect(clicks).toHaveLength(0);
+  });
+
+  it("mints nothing on render or on selection — only on the download click", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "world", is_dir: true }]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/world/);
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "world" }));
+
+    expect(mockApi.post).not.toHaveBeenCalled();
+    expect(clicks).toHaveLength(0);
   });
 });

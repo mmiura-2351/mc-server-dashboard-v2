@@ -90,7 +90,7 @@ func newTestListenerWithCaps(t *testing.T, validator Validator, preAuthCaps *ipc
 		cancel()
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(starvationBudget):
 			t.Fatal("Serve did not return after ctx cancel")
 		}
 	}
@@ -101,7 +101,7 @@ func newTestListenerWithCaps(t *testing.T, validator Validator, preAuthCaps *ipc
 // returns the connection plus the decoded ack.
 func doHandshake(t *testing.T, ln *Listener, hello *bedrocktunnelv1.TunnelHello) (conn *quic.Conn, ack *bedrocktunnelv1.TunnelHelloAck) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), starvationBudget)
 	defer cancel()
 
 	c := dialQUIC(ctx, t, ln.Addr().String())
@@ -171,7 +171,7 @@ func TestListenerHandshakeRejectInvalidToken(t *testing.T) {
 
 	select {
 	case <-conn.Context().Done():
-	case <-time.After(5 * time.Second):
+	case <-time.After(starvationBudget):
 		t.Fatal("expected the QUIC connection to be closed after rejection")
 	}
 }
@@ -190,7 +190,7 @@ func TestListenerHandshakeRejectValidatorError(t *testing.T) {
 
 	select {
 	case <-conn.Context().Done():
-	case <-time.After(5 * time.Second):
+	case <-time.After(starvationBudget):
 		t.Fatal("expected the QUIC connection to be closed after a validation error")
 	}
 }
@@ -203,7 +203,7 @@ func TestListenerAcceptStreamTimeout(t *testing.T) {
 	ln, stop := newTestListener(t, validator, deadline)
 	defer stop()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), starvationBudget)
 	defer cancel()
 	conn := dialQUIC(ctx, t, ln.Addr().String())
 
@@ -212,7 +212,7 @@ func TestListenerAcceptStreamTimeout(t *testing.T) {
 	// quic-go's much longer idle timeout.
 	select {
 	case <-conn.Context().Done():
-	case <-time.After(deadline + 3*time.Second):
+	case <-time.After(deadline + starvationBudget):
 		t.Fatal("expected the relay to close a connection that never opens a handshake stream")
 	}
 }
@@ -306,7 +306,7 @@ func TestListenerTakeoverDisplacesStaleConnection(t *testing.T) {
 
 	// Confirm the old connection is actually serving traffic before it is
 	// displaced.
-	sendAndExpectDatagram(t, udpAddr, oldConn, []byte("pre-takeover"), 5*time.Second)
+	sendAndExpectDatagram(t, udpAddr, oldConn, []byte("pre-takeover"), starvationBudget)
 
 	// A second validated hello for the same port -- the redial -- must be
 	// accepted (takeover), not rejected as a bind conflict.
@@ -319,7 +319,7 @@ func TestListenerTakeoverDisplacesStaleConnection(t *testing.T) {
 	// alongside the new one.
 	select {
 	case <-oldConn.Context().Done():
-	case <-time.After(5 * time.Second):
+	case <-time.After(starvationBudget):
 		t.Fatal("expected the displaced connection to be closed")
 	}
 
@@ -331,7 +331,7 @@ func TestListenerTakeoverDisplacesStaleConnection(t *testing.T) {
 	}
 
 	// The port now serves traffic through the new connection.
-	sendAndExpectDatagram(t, udpAddr, newConn, []byte("post-takeover"), 5*time.Second)
+	sendAndExpectDatagram(t, udpAddr, newConn, []byte("post-takeover"), starvationBudget)
 }
 
 // TestListenerInvalidHelloDoesNotDisplace covers #1565's non-hijack
@@ -367,7 +367,7 @@ func TestListenerInvalidHelloDoesNotDisplace(t *testing.T) {
 		t.Fatal("the original connection was closed by a rejected hello")
 	default:
 	}
-	sendAndExpectDatagram(t, udpAddr, oldConn, []byte("still-alive"), 5*time.Second)
+	sendAndExpectDatagram(t, udpAddr, oldConn, []byte("still-alive"), starvationBudget)
 }
 
 // gatedValidator blocks each ValidateBedrockTunnel call until gate is closed,
@@ -398,7 +398,7 @@ func TestListenerPreAuthCapEnforcedAndReleased(t *testing.T) {
 	ln, stop := newTestListenerWithCaps(t, validator, preAuthCaps)
 	defer stop()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), starvationBudget)
 	defer cancel()
 
 	// First dial-out: occupies the single slot, held open by the blocked
@@ -419,7 +419,7 @@ func TestListenerPreAuthCapEnforcedAndReleased(t *testing.T) {
 	// held before the second dial.
 	select {
 	case <-validator.started:
-	case <-time.After(5 * time.Second):
+	case <-time.After(starvationBudget):
 		t.Fatal("validator was never entered")
 	}
 
@@ -428,7 +428,7 @@ func TestListenerPreAuthCapEnforcedAndReleased(t *testing.T) {
 	conn2 := dialQUIC(ctx, t, ln.Addr().String())
 	select {
 	case <-conn2.Context().Done():
-	case <-time.After(4 * time.Second):
+	case <-time.After(starvationBudget):
 		t.Fatal("expected the over-cap connection to be closed")
 	}
 

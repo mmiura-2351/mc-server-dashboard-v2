@@ -80,13 +80,22 @@ class BackupArchiveStore(abc.ABC):
     async def check_backup_health(
         self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
     ) -> int:
-        """Extract an archive and structurally fsck it (the sweep probe, issue #744).
+        """Check a stored archive (the sweep probe, issue #744).
 
-        Read-only: extracts the archive into throwaway staging, walks it for corrupt
-        ``.mca`` region files (issue #738), and discards the staging — ``current`` is
-        never touched. Returns the corrupt region-file count (``0`` when healthy) so
-        the sweep persists ``HEALTHY`` / ``QUARANTINED`` on the backup row. Raises
-        :class:`BackupNotFoundError` for an unknown ref.
+        Read-only — ``current`` is never touched. Returns the corrupt region-file
+        count (``0`` when healthy) so the sweep persists ``HEALTHY`` /
+        ``QUARANTINED`` on the backup row.
+
+        On the fs backend the probe extracts the archive into throwaway staging and
+        walks it for corrupt ``.mca`` region files (issue #738). On the object
+        backend it instead streams the stored archive end to end to prove the store
+        can still produce it (issue #2371), returning ``0`` when it can and raising
+        :class:`BackupUnreadableError` when it cannot.
+
+        Raises :class:`BackupNotFoundError` for an unknown ref, and
+        :class:`BackupStorageUnavailableError` when the backend could not serve the
+        read at all — an availability failure, NOT a verdict about the archive, so
+        the sweep must not classify the row from it.
         """
 
     @abc.abstractmethod
@@ -124,12 +133,23 @@ class BackupArchiveStore(abc.ABC):
 
     @abc.abstractmethod
     def open(
-        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        storage_ref: str,
+        byte_range: tuple[int, int] | None = None,
     ) -> AsyncIterator[bytes]:
         """Open a read stream over an archive in its native format (issue #281).
 
         Streams the stored bytes verbatim (no recompression) for download. Raises
         :class:`BackupNotFoundError` for an unknown ref.
+
+        ``byte_range`` is an INCLUSIVE ``(first, last)`` byte-position pair,
+        already resolved against :meth:`size`: the stream then yields exactly
+        ``last - first + 1`` bytes, which is what a download resumed with
+        ``Range`` needs (issue #2372). The storage side reads only those bytes —
+        the tail of a multi-GB archive never pulls the head.
         """
 
     @abc.abstractmethod

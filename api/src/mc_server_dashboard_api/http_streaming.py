@@ -25,6 +25,26 @@ underneath: it tallies the bytes that pass through and fails at exhaustion when
 the total falls below the declared length, naming both numbers. That also makes
 the invariant hold on its own terms rather than depending on the ASGI server and
 protocol version to notice.
+
+:func:`started` guards the same invariant from the other end, before the header
+is written (issues #2415, #2455). A store's read stream locates what it reads on
+its FIRST iteration — the open lives inside the generator so a stream that is
+never consumed holds no descriptor (issues #2341, #2390) — and Starlette sends
+``http.response.start`` before it touches the body iterator. A delete landing
+between the size probe and the body therefore surfaced as a ``200`` carrying a
+``Content-Length`` the body could never deliver. Beginning the stream while the
+status is still choosable turns that into the miss it is. Both downloads named
+above now do so, so neither delete case reaches the wire as a short body any
+more: it is a clean ``404`` instead. It also takes the backup download's
+filesystem body out of the delete case entirely — past that first read the bytes
+come from an open descriptor, which an unlink cannot shorten.
+
+The object backend is not covered by that descriptor argument, and is what
+:func:`counted` still earns its place for: its length comes from a ``HEAD`` and
+its bytes from a separate ``GET``, so a store serving fewer bytes than it
+reported ends the body cleanly short, with no exception to notice it by. The
+resource pack blob store is object storage only, so on those two routes that is
+the whole of what remains to guard.
 """
 
 from __future__ import annotations
@@ -34,6 +54,50 @@ from collections.abc import AsyncIterator
 
 class ShortResponseBodyError(Exception):
     """A streamed body ended without delivering its declared ``Content-Length``."""
+
+
+async def started(source: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+    """Begin ``source`` now, returning an equivalent stream over the same bytes.
+
+    Pulls the first chunk, so everything the source does to locate what it reads
+    happens here — while the caller can still choose a status — rather than after
+    the response has started. The returned stream replays that chunk and then
+    yields the rest, so the body is unchanged and the declared length still
+    matches it.
+
+    Nothing is resolved twice: this is the source's own single resolution, moved
+    ahead of the headers. What it buys beyond the status is that the resolution
+    now outlives them — a filesystem source is holding an open descriptor a later
+    unlink cannot shorten, and an object source has its ``GET`` in flight — so the
+    length declared from the probe and the body served after it can no longer be
+    separated by a delete.
+
+    The started source is handed straight to the returned generator, which closes
+    it exactly as before. Nothing is held by a stream that was never begun: the
+    only stream that now holds a descriptor is one that has, by definition,
+    started — and asyncio finalizes an abandoned started async generator, which is
+    not true of one that never ran.
+    """
+
+    try:
+        first: bytes | None = await anext(source)
+    except StopAsyncIteration:
+        # An empty source is already exhausted and has closed itself; the stream
+        # below then yields nothing, which is the body a zero-length declaration
+        # asks for.
+        first = None
+    return _replaying(first, source)
+
+
+async def _replaying(
+    first: bytes | None, rest: AsyncIterator[bytes]
+) -> AsyncIterator[bytes]:
+    """Yield the already-pulled ``first`` chunk, then the remainder of the source."""
+
+    if first is not None:
+        yield first
+    async for chunk in rest:
+        yield chunk
 
 
 async def counted(source: AsyncIterator[bytes], declared: int) -> AsyncIterator[bytes]:

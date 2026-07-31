@@ -371,6 +371,20 @@ def test_stop_force_true_forwards_to_use_case() -> None:
     assert stop.kwargs["force"] is True
 
 
+def test_restart_not_running_is_409_with_reason() -> None:
+    # Issue #2441: a restart the Worker refused because it holds no live instance
+    # names server_not_running, not the unclassified command_failed catch-all.
+    app = _app(
+        member=True,
+        allow=True,
+        restart=_FakeUseCase(error=ServerNotRunningError("x")),
+    )
+    client = next(_client(app))
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "restart"))
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "server_not_running"
+
+
 def test_command_not_running_is_409() -> None:
     app = _app(
         member=True,
