@@ -87,13 +87,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from mc_server_dashboard_api.servers.application.command_dispatch import (
     FAILED_STOP_ORPHAN_REASON,
 )
 from mc_server_dashboard_api.servers.application.command_dispatch import (
     dispatch_failure as _dispatch_failure,
+)
+from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
+    StopDispatchRefusals,
 )
 from mc_server_dashboard_api.servers.domain.bedrock_tunnel import (
     BedrockTunnelSync,
@@ -1010,6 +1013,13 @@ class StopServer:
     control_plane: ControlPlane
     clock: Clock
     bedrock_tunnel_sync: BedrockTunnelSync = NullBedrockTunnelSync()
+    # Where a settled stop refusal is recorded for the reconciler to read (issue
+    # #2478): it is the only thing that tells a stop the Worker REFUSED apart from
+    # one that may never have been sent, which decides whether the replay waits the
+    # full grace or a short one. Defaulted to a private instance so the many call
+    # sites that never reach the reconciler need not wire it; an unwired site simply
+    # records into a journal nobody reads, and the replay keeps the full grace.
+    stop_refusals: StopDispatchRefusals = field(default_factory=StopDispatchRefusals)
 
     async def __call__(
         self, *, community_id: CommunityId, server_id: ServerId, force: bool = False
@@ -1046,6 +1056,7 @@ class StopServer:
         self.control_plane.decrement_assignment(
             worker_id=worker_id, server_id=server_id
         )
+        self.stop_refusals.forget(server_id)
         outcome = await self.control_plane.stop(
             worker_id=worker_id, server_id=server_id, force=force
         )
@@ -1088,6 +1099,15 @@ class StopServer:
                 )
             return server
         if not outcome.success:
+            # The Worker answered, so this dispatch is settled: nothing is left in
+            # flight for the reconciler's replay to race, and it may run on the short
+            # refused-stop grace instead of the 660s the possibly-unsent case needs
+            # (issue #2478). Without this the server the operator asked to stop keeps
+            # running — and accepting players — for 11-12 minutes after a refusal the
+            # system already knows about (issue #2442).
+            self.stop_refusals.record_refusal(
+                server_id, outcome=outcome, at=self.clock.now()
+            )
             raise _dispatch_failure(
                 server_id=server_id, kind="StopServer", outcome=outcome
             )
@@ -1354,10 +1374,18 @@ class StopServer:
                 raise InvalidLifecycleTransitionError(str(server_id.value))
             worker_id = server.assigned_worker_id
 
+        self.stop_refusals.forget(server_id)
         outcome = await self.control_plane.stop(
             worker_id=worker_id, server_id=server_id
         )
         if not outcome.success and outcome.status is not CommandStatus.SERVER_NOT_FOUND:
+            # Keep the verdict current across the reconciler's own retries (issue
+            # #2478): a replay the Worker refuses again is still settled, so the next
+            # tick stays on the short grace and the per-server backoff — not the full
+            # grace — governs the cadence.
+            self.stop_refusals.record_refusal(
+                server_id, outcome=outcome, at=self.clock.now()
+            )
             raise _dispatch_failure(
                 server_id=server_id, kind="StopServer", outcome=outcome
             )

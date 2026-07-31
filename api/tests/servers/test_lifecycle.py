@@ -38,6 +38,9 @@ from mc_server_dashboard_api.servers.application.lifecycle import (
     StartServer,
     StopServer,
 )
+from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
+    StopDispatchRefusals,
+)
 from mc_server_dashboard_api.servers.domain.committed_resources import (
     CommittedResources,
 )
@@ -2303,6 +2306,95 @@ async def test_stop_failed_dispatch_does_not_compensate_desired_stopped(
     stored = uow.servers.by_id[ServerId(server_id)]
     assert stored.desired_state is DesiredState.STOPPED
     assert stored.assigned_worker_id == WorkerId(worker)
+
+
+async def _stop_expecting_failure(
+    use_case: StopServer, community: uuid.UUID, server_id: uuid.UUID
+) -> None:
+    with pytest.raises((CommandDispatchError, WorkerUnavailableError)):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+
+def _seeded_running_uow(
+    community: uuid.UUID, server_id: uuid.UUID, worker: uuid.UUID
+) -> FakeUnitOfWork:
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    return uow
+
+
+async def test_refused_stop_dispatch_is_recorded_for_the_reconciler() -> None:
+    # Issue #2478: the Worker ANSWERED, so this dispatch is settled and nothing is
+    # left in flight. Record it — it is the only thing that tells the reconciler's
+    # replay apart from a stop that may never have been sent, and so the only thing
+    # that lets the replay run on the short grace.
+    community, server_id, worker = _ids()
+    uow = _seeded_running_uow(community, server_id, worker)
+    cp = FakeControlPlane(
+        outcomes={"stop": CommandOutcome(status=CommandStatus.INTERNAL, message="boom")}
+    )
+    refusals = StopDispatchRefusals()
+    use_case = StopServer(
+        uow=uow, control_plane=cp, clock=FakeClock(_NOW), stop_refusals=refusals
+    )
+
+    await _stop_expecting_failure(use_case, community, server_id)
+
+    assert refusals.refused_at(ServerId(server_id)) == _NOW
+
+
+async def test_busy_stop_dispatch_records_no_refusal() -> None:
+    # BUSY is the Worker's reservation guard saying another mutating command IS in
+    # flight for the id (#824) — after #2475/#2476 typically its own converger
+    # resolving a failed-stop orphan. The property the short grace rests on ("nothing
+    # is in flight") does not hold, so the replay keeps the full grace (#2478).
+    community, server_id, worker = _ids()
+    uow = _seeded_running_uow(community, server_id, worker)
+    cp = FakeControlPlane(
+        outcomes={"stop": CommandOutcome(status=CommandStatus.BUSY, message="busy")}
+    )
+    refusals = StopDispatchRefusals()
+    use_case = StopServer(
+        uow=uow, control_plane=cp, clock=FakeClock(_NOW), stop_refusals=refusals
+    )
+
+    await _stop_expecting_failure(use_case, community, server_id)
+
+    assert refusals.refused_at(ServerId(server_id)) is None
+
+
+async def test_timed_out_stop_dispatch_clears_any_earlier_refusal() -> None:
+    # A timeout is NOT the Worker answering: the API only gave up waiting, and the
+    # worker may still be executing the stop. Recording nothing is not enough — an
+    # earlier attempt's "settled" verdict must not be inherited, or the replay would
+    # take the short grace for a command that really may be in flight, which is the
+    # #930 floor's own failure mode (#2478).
+    community, server_id, worker = _ids()
+    uow = _seeded_running_uow(community, server_id, worker)
+    refusals = StopDispatchRefusals()
+    refusals.record_refusal(
+        ServerId(server_id),
+        outcome=CommandOutcome(status=CommandStatus.INTERNAL),
+        at=_NOW - dt.timedelta(seconds=1),
+    )
+    cp = FakeControlPlane(unavailable_kinds={"stop"})
+    use_case = StopServer(
+        uow=uow, control_plane=cp, clock=FakeClock(_NOW), stop_refusals=refusals
+    )
+
+    await _stop_expecting_failure(use_case, community, server_id)
+
+    assert refusals.refused_at(ServerId(server_id)) is None
 
 
 async def test_stop_succeeds_even_when_final_snapshot_fails() -> None:
