@@ -47,6 +47,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Callable
 
 COOLDOWN_DAYS = 7
@@ -220,6 +221,42 @@ def _github_tag_candidates(version: str) -> list[str]:
     return [f"v{version}", version] if not version.startswith("v") else [version]
 
 
+def qualify_docker_image(image: str, sources: Callable[[], list[str]]) -> str:
+    """Restore the registry host Dependabot's commit trailer drops (issue #2506).
+
+    ``updated-dependencies`` names an image without its registry, so
+    ``ghcr.io/astral-sh/uv`` arrives as ``astral-sh/uv`` and parse_docker_ref
+    below would fall through to Docker Hub -- where uv does not exist -- and
+    block a release that is in fact months old (PR #2365). The host is therefore
+    recovered from the image's own pin in ``sources()`` (the ``FROM`` / ``image:``
+    lines of the checked-out tree): a version bump rewrites only the tag, so the
+    host pinned there is exactly the one the PR adopts. ``sources`` is a callable
+    so an already-qualified name costs no tree read at all.
+
+    Matching is a name-anchored search rather than Dockerfile/compose parsing --
+    both file kinds write ``[host/]name[:tag|@digest]`` the same way, and the
+    leading boundary keeps a longer name that merely ends in ``name`` from
+    matching. A name pinned under two different hosts is ambiguous and raises
+    (fail closed); no match at all leaves the name alone, i.e. Docker Hub, which
+    is both the correct answer for a genuine Docker Hub image and a blocking one
+    for anything else.
+    """
+    first = image.split("/", 1)[0]
+    if "." in first or ":" in first:
+        return image  # Already host-qualified; the tree has nothing to add.
+    pattern = re.compile(
+        r"(?m)(?:^|[\s\"'=])"
+        r"(?:([a-z0-9-]+(?:\.[a-z0-9-]+)+(?::\d+)?)/)?"
+        + re.escape(image)
+        + r"(?=[:@\s\"']|$)"
+    )
+    hosts = {m.group(1) or "" for text in sources() for m in pattern.finditer(text)}
+    if len(hosts) > 1:
+        raise CooldownError(f"ambiguous registry for {image}: {sorted(hosts)}")
+    host = hosts.pop() if hosts else ""
+    return f"{host}/{image}" if host else image
+
+
 def parse_docker_ref(image: str) -> tuple[str, str, str]:
     """Resolve a Docker image reference to (registry, owner_or_ns, repo).
 
@@ -235,6 +272,10 @@ def parse_docker_ref(image: str) -> tuple[str, str, str]:
     A host token is the first path segment when it contains a ``.`` or ``:``
     (e.g. ``ghcr.io``, ``registry:5000``). An unsupported registry raises
     ``CooldownError`` (fail closed) rather than fabricating a Docker Hub URL.
+
+    A name taken from a Dependabot trailer must go through qualify_docker_image
+    first: the trailer strips the host, and an unqualified name silently means
+    Docker Hub here.
     """
     first = image.split("/", 1)[0]
     if "." in first or ":" in first:
@@ -274,6 +315,28 @@ def _gh_json(path: str) -> dict:
     return json.loads(out)
 
 
+def _repo_image_sources() -> list[str]:
+    """Text of every file that could pin a container image, for the host lookup.
+
+    The workflow's ``actions/checkout`` step is a load-bearing dependency of this
+    gate, not a convenience: it is what puts these files on disk. Under
+    ``pull_request_target`` that checkout is the BASE branch, never the PR head,
+    so the content read here is trusted -- and a version bump does not move an
+    image between registries, so the base branch's host is still the right one.
+    """
+    root = Path(__file__).resolve().parent.parent
+    texts: list[str] = []
+    for pattern in ("Dockerfile*", "*compose*.yaml", "*compose*.yml"):
+        for path in sorted(root.rglob(pattern)):
+            if {".git", "node_modules", ".venv"} & set(path.parts):
+                continue
+            try:
+                texts.append(path.read_text(encoding="utf-8"))
+            except OSError:
+                continue  # Unreadable file -- a missing host blocks, so this is safe.
+    return texts
+
+
 def _github_release_date(gh_get: Transport, repo: str, version: str) -> datetime:
     """``published_at`` of ``repo``'s release for ``version`` (tries v-prefix)."""
     for tag in _github_tag_candidates(version):
@@ -293,11 +356,13 @@ def release_date(
     *,
     http_get: Transport = _http_json,
     gh_get: Transport = _gh_json,
+    image_sources: Callable[[], list[str]] = _repo_image_sources,
 ) -> datetime:
     """Upstream publish date for name@version, per docs/dev/DEPENDENCIES.md.
 
-    ``http_get`` / ``gh_get`` are injected so the per-ecosystem field extraction
-    (the part that historically hid a bug) is exercised offline in --self-test.
+    ``http_get`` / ``gh_get`` / ``image_sources`` are injected so the
+    per-ecosystem field extraction (the part that historically hid a bug) and the
+    docker registry-host recovery are exercised offline in --self-test.
     """
     try:
         if ecosystem == "pip":
@@ -321,7 +386,9 @@ def release_date(
         if ecosystem == "github-actions":
             return _github_release_date(gh_get, name, version)
         if ecosystem == "docker":
-            registry, owner, repo = parse_docker_ref(name)
+            registry, owner, repo = parse_docker_ref(
+                qualify_docker_image(name, image_sources)
+            )
             if registry == "ghcr":
                 return _github_release_date(gh_get, f"{owner}/{repo}", version)
             data = http_get(
@@ -637,6 +704,30 @@ def _self_test() -> int:  # noqa: C901 -- a flat table of independent assertions
     def boom_gh(path: str) -> dict:
         raise AssertionError(f"unexpected gh call: {path}")
 
+    def boom_sources() -> list[str]:
+        raise AssertionError("unexpected image-source read")
+
+    # Registry-host recovery from the pins in the checked-out tree. Fixtures, not
+    # the real tree, so --self-test stays offline and independent of it.
+    dockerfile = (
+        "FROM ghcr.io/astral-sh/uv:0.11.30 AS uv\n"
+        "FROM node:24-slim AS webui\n"
+        "FROM python:3.13-slim AS builder\n"
+    )
+    compose = "services:\n  seaweedfs:\n    image: chrislusf/seaweedfs:4.40\n"
+    check("qualify ghcr", qualify_docker_image("astral-sh/uv", lambda: [dockerfile]), "ghcr.io/astral-sh/uv")
+    check("qualify official", qualify_docker_image("python", lambda: [dockerfile]), "python")
+    check("qualify compose", qualify_docker_image("chrislusf/seaweedfs", lambda: [compose]), "chrislusf/seaweedfs")
+    check("qualify absent", qualify_docker_image("cloudflare/cloudflared", lambda: [dockerfile]), "cloudflare/cloudflared")
+    check("qualify already-hosted", qualify_docker_image("ghcr.io/astral-sh/uv", boom_sources), "ghcr.io/astral-sh/uv")
+
+    # Two hosts for one name is unresolvable -- block rather than guess.
+    try:
+        qualify_docker_image("astral-sh/uv", lambda: [dockerfile, "FROM docker.io/astral-sh/uv:1\n"])
+        failures.append("qualify ambiguous: expected CooldownError, got none")
+    except CooldownError:
+        pass
+
     def http_stub(payload: dict, expect: str) -> Transport:
         def transport(url: str) -> dict:
             assert expect in url, f"expected {expect!r} in {url!r}"
@@ -689,15 +780,22 @@ def _self_test() -> int:  # noqa: C901 -- a flat table of independent assertions
         rd("docker", "python", "3.13-slim",
            http_get=http_stub({"tag_last_pushed": "2026-07-01T00:00:00Z"},
                               "hub.docker.com/v2/repositories/library/python/tags/3.13-slim"),
-           gh_get=boom_gh),
+           gh_get=boom_gh, image_sources=lambda: [dockerfile]),
         datetime(2026, 7, 1, tzinfo=timezone.utc),
     )
     check(
         "rd docker ghcr",  # ghcr.io -> GitHub Releases, never Docker Hub
         rd("docker", "ghcr.io/astral-sh/uv", "0.11.28",
-           http_get=boom_http,
+           http_get=boom_http, image_sources=boom_sources,  # already qualified -> no tree read
            gh_get=gh_stub({"repos/astral-sh/uv/releases/tags/0.11.28": {"published_at": "2026-07-07T23:14:13Z"}})),
         datetime(2026, 7, 7, 23, 14, 13, tzinfo=timezone.utc),
+    )
+    check(
+        "rd docker ghcr bare",  # issue #2506: the trailer's host-less name must still reach ghcr
+        rd("docker", "astral-sh/uv", "0.11.30",
+           http_get=boom_http, image_sources=lambda: [dockerfile],
+           gh_get=gh_stub({"repos/astral-sh/uv/releases/tags/0.11.30": {"published_at": "2026-07-20T20:48:06Z"}})),
+        datetime(2026, 7, 20, 20, 48, 6, tzinfo=timezone.utc),
     )
 
     # An unsupported registry fails closed rather than fabricating a URL.
