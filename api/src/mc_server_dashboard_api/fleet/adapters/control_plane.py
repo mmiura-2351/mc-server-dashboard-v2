@@ -484,11 +484,19 @@ def _to_result(message: pb.CommandResult) -> CommandResult:
         listing = None
         if message.WhichOneof("result") == "file_listing":
             listing = _to_listing(message.file_listing)
+        # held_generation is read by PRESENCE, not value (issue #2481): the field
+        # is proto3-optional precisely because generation 0 already means "held at
+        # an unknown generation", so reading the scalar default would turn "the
+        # Worker declared nothing" into "the Worker holds generation 0".
+        held_generation = (
+            message.held_generation if message.HasField("held_generation") else None
+        )
         return CommandResult(
             code=CommandResultCode.OK,
             output=message.command_output,
             file_content=message.file_content,
             file_listing=listing,
+            held_generation=held_generation,
         )
     code = _CODE_FROM_PROTO.get(message.error.code, CommandResultCode.INTERNAL)
     reason = _FILE_ACCESS_REASON_FROM_PROTO.get(

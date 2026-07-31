@@ -26,8 +26,10 @@ every denial into ``invalid_path``. The file-API problem-reason catalog is:
   an unrefined denial / an older Worker). This is also the at-rest reason.
 - ``is_a_directory`` (422) — a read or write whose path is a directory.
 - ``not_a_directory`` (422) — a directory listing whose path is a regular file.
-- ``symlink_refused`` (422) — the Worker refused to follow a path-component
-  symlink (the FR-FILE-4 escape-vector defence).
+- ``symlink_refused`` (422) — a path-component symlink was refused rather than
+  followed (the FR-FILE-4 escape-vector defence). Both branches produce it: the
+  Worker for a running server, and Storage for one at rest (issue #2432), so the
+  same request gets the same reason in either state.
 - ``invalid_version_id`` (422) — a malformed ``version_id`` (outside the
   ``VersionId`` charset) on the rollback / version-preview routes.
 - ``file_too_large`` (413) — a read result or an edit payload past the
@@ -85,6 +87,7 @@ from mc_server_dashboard_api.dependencies import (
     require_download_access,
     require_permission,
 )
+from mc_server_dashboard_api.http_content_disposition import content_disposition
 from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.identity.domain.token_service import TokenService
@@ -252,9 +255,10 @@ async def read_or_list_files(
         except ServerFileNotFoundError as exc:
             raise _not_found() from exc
         except InvalidFilePathError as exc:
-            # exc.reason refines a running-server file denial (issue #548): a
-            # non-path condition (not_a_directory / symlink_refused) surfaces
-            # honestly instead of a blanket invalid_path.
+            # exc.reason refines a file denial (issue #548): a non-path condition
+            # (not_a_directory / symlink_refused) surfaces honestly instead of a
+            # blanket invalid_path. Running or at rest — Storage refuses a
+            # path-component symlink with the same reason (issue #2432).
             raise _unprocessable(exc.reason) from exc
         except ServerFilesUnsettledError as exc:
             raise _conflict("server_unsettled") from exc
@@ -284,9 +288,10 @@ async def read_or_list_files(
     except ServerFileNotFoundError as exc:
         raise _not_found() from exc
     except InvalidFilePathError as exc:
-        # exc.reason refines a running-server file denial (issue #548): a
-        # non-path condition (is_a_directory / symlink_refused) surfaces honestly
-        # instead of a blanket invalid_path.
+        # exc.reason refines a file denial (issue #548): a non-path condition
+        # (is_a_directory / symlink_refused) surfaces honestly instead of a blanket
+        # invalid_path. Running or at rest — Storage refuses a path-component
+        # symlink with the same reason (issue #2432).
         raise _unprocessable(exc.reason) from exc
     except FileTooLargeError as exc:
         # A running-server read of a file past the control-plane cap (issue #548):
@@ -345,9 +350,10 @@ async def write_file(
     except ServerFileNotFoundError as exc:
         raise _not_found() from exc
     except InvalidFilePathError as exc:
-        # exc.reason refines a running-server file denial (issue #548): a non-path
-        # condition (is_a_directory / symlink_refused) surfaces honestly instead
-        # of a blanket invalid_path. An at-rest write keeps the default invalid_path.
+        # exc.reason refines a file denial (issue #548): a non-path condition
+        # (is_a_directory / symlink_refused) surfaces honestly instead of a blanket
+        # invalid_path. An at-rest write keeps invalid_path except under a symlink
+        # parent, which Storage refuses with symlink_refused (issue #2432).
         raise _unprocessable(exc.reason) from exc
     except FileTooLargeError as exc:
         # The edge cap (MAX_EDIT_BYTES) and the Worker's payload_too_large reason
@@ -601,8 +607,10 @@ async def download_file(
     and a browser cannot cap it up front; a multi-GB ``world`` is therefore fetched
     as a plain navigation to a URL carrying a short-lived ``?grant=`` minted by
     ``POST .../files/download-grant`` instead of being buffered into a Blob to
-    attach a Bearer header (issue #2352). Either credential runs the same
-    ``file:read`` gate, and the response is identical.
+    attach a Bearer header (issue #2352). Redeeming a grant also sets an httpOnly
+    download cookie, which authenticates the browser's retry of an interrupted
+    transfer once the grant's own window has closed (issue #2373). Every
+    credential runs the same ``file:read`` gate, and the response is identical.
     """
 
     try:
@@ -621,7 +629,7 @@ async def download_file(
             response: Response = StreamingResponse(
                 stream,
                 media_type="application/zip",
-                headers={"Content-Disposition": _content_disposition(f"{name}.zip")},
+                headers={"Content-Disposition": content_disposition(f"{name}.zip")},
             )
         else:
             # Stream the file's bytes (issue #265) so a large single-file download
@@ -640,7 +648,7 @@ async def download_file(
                 rel_path=path,
             )
             name = posixpath.basename(path) or "download"
-            headers = {"Content-Disposition": _content_disposition(name)}
+            headers = {"Content-Disposition": content_disposition(name)}
             if size is not None:
                 headers["Content-Length"] = str(size)
             response = StreamingResponse(
@@ -653,7 +661,11 @@ async def download_file(
     except ServerFileNotFoundError as exc:
         raise _not_found() from exc
     except InvalidFilePathError as exc:
-        raise _unprocessable("invalid_path") from exc
+        # exc.reason, not a hardcoded invalid_path: a download is a READ, so it owes
+        # the same answer the ``?path=`` read gives for the same path (issue #2432).
+        # This route is at-rest only, so the reachable reasons are the escape's
+        # invalid_path and Storage's symlink_refused.
+        raise _unprocessable(exc.reason) from exc
     except ServerFilesUnsettledError as exc:
         await _record_file_failure(
             recorder, ops.FILE_DOWNLOAD, authorized, community_id, server_id
@@ -713,7 +725,8 @@ async def issue_file_download_grant(
     boundary — is the right bar here.
 
     The pre-flight reuses ``DownloadFile.is_dir``, so a missing path is 404, a
-    traversal-unsafe one 422 ``invalid_path``, and a running server 409
+    traversal-unsafe one 422 ``invalid_path``, one with a path-component symlink 422
+    ``symlink_refused`` (issue #2432), and a running server 409
     ``server_unsettled`` — exactly what the download returns. The 409 records the
     DENIED ``file:download`` row the download would have recorded; once the Web UI
     mints first the download is never reached, and the denial would otherwise
@@ -734,7 +747,12 @@ async def issue_file_download_grant(
     except ServerFileNotFoundError as exc:
         raise _not_found() from exc
     except InvalidFilePathError as exc:
-        raise _unprocessable("invalid_path") from exc
+        # The mint is where the Web UI meets a refused download path: since issue
+        # #2352 it mints BEFORE downloading, so the download is never reached and
+        # this is the operator-visible answer. It therefore forwards exc.reason for
+        # the same reason the download does (issue #2432) — otherwise the browser
+        # says "Invalid path" for a symlink the read route calls a symlink.
+        raise _unprocessable(exc.reason) from exc
     except ServerFilesUnsettledError as exc:
         await _record_file_failure(
             recorder, ops.FILE_DOWNLOAD, authorized, community_id, server_id
@@ -999,25 +1017,6 @@ async def _read_capped_upload(file: UploadFile) -> bytes:
             raise _too_large()
         chunks.append(chunk)
     return b"".join(chunks)
-
-
-def _content_disposition(filename: str) -> str:
-    """Build an attachment Content-Disposition header (RFC 6266 / RFC 5987).
-
-    A filename can contain ``"`` (which would break out of the quoted-string and
-    let a crafted name inject extra header parameters) or non-latin-1 characters
-    (which raise ``UnicodeEncodeError`` when Starlette latin-1-encodes the header,
-    500-ing a legitimate Unicode upload). So emit two parameters: an ASCII-only
-    ``filename`` fallback (non-ASCII/quote/backslash/control chars replaced) for
-    legacy clients, plus an RFC 5987 ``filename*`` carrying the UTF-8 percent-
-    encoded original for modern clients, which prefer it.
-    """
-
-    ascii_fallback = "".join(
-        c if (0x20 <= ord(c) < 0x7F and c not in '"\\') else "_" for c in filename
-    )
-    encoded = quote(filename, safe="")
-    return f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{encoded}"
 
 
 async def _record_file(

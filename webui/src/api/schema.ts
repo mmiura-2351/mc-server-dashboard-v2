@@ -777,10 +777,19 @@ export interface paths {
          *     The response declares the archive's exact size as ``Content-Length``, so a
          *     client can show download progress and refuse an over-cap archive up front.
          *
+         *     **Resumable** (issue #2372): the response declares ``Accept-Ranges: bytes``
+         *     and an ``ETag``, and a single ``Range`` request is served as ``206`` over a
+         *     ranged read of the stored bytes — a multi-GB archive is never re-read from
+         *     the start to serve its tail. An interrupted transfer therefore resumes
+         *     instead of restarting.
+         *
          *     The caller authenticates with the usual Bearer access token, or — for a
          *     browser that cannot set a header on a plain navigation — with a short-lived
-         *     ``?grant=`` minted by ``POST .../download-grant`` (issue #2313). Either way
-         *     the same ``backup:read`` gate decides, and the response is identical.
+         *     ``?grant=`` minted by ``POST .../download-grant`` (issue #2313). Redeeming a
+         *     grant also sets an httpOnly download cookie, which is what authenticates the
+         *     browser's retry once the grant's own short window has closed (issue #2373).
+         *     Whichever credential arrives, the same ``backup:read`` gate decides and the
+         *     response body is identical.
          */
         get: operations["download_backup_api_communities__community_id__servers__server_id__backups__backup_id__download_get"];
         put?: never;
@@ -990,8 +999,16 @@ export interface paths {
          *     browser cannot cap it up front; a multi-GB export is therefore fetched as a
          *     plain navigation to a URL carrying a short-lived ``?grant=`` minted by
          *     ``POST .../export/download-grant`` instead of being buffered into a Blob to
-         *     attach a Bearer header (issue #2352). Either credential runs the same
-         *     ``file:read`` gate, and the response is identical.
+         *     attach a Bearer header (issue #2352). Redeeming a grant also sets an httpOnly
+         *     download cookie, which authenticates the browser's retry of an interrupted
+         *     transfer once the grant's own window has closed (issue #2373). Every
+         *     credential runs the same ``file:read`` gate, and the response is identical.
+         *
+         *     The response names itself ``{server name}.zip`` via ``Content-Disposition``
+         *     (issue #2357), so a client that navigates the URL without supplying a filename
+         *     -- a pasted grant link, a CLI fetch -- does not save the last path segment,
+         *     ``export``. A server name is free-form, so the header is built by the shared
+         *     hardened helper (RFC 5987 ``filename*``, no traversal, no injection).
          */
         get: operations["export_server_api_communities__community_id__servers__server_id__export_get"];
         put?: never;
@@ -1125,8 +1142,10 @@ export interface paths {
          *     and a browser cannot cap it up front; a multi-GB ``world`` is therefore fetched
          *     as a plain navigation to a URL carrying a short-lived ``?grant=`` minted by
          *     ``POST .../files/download-grant`` instead of being buffered into a Blob to
-         *     attach a Bearer header (issue #2352). Either credential runs the same
-         *     ``file:read`` gate, and the response is identical.
+         *     attach a Bearer header (issue #2352). Redeeming a grant also sets an httpOnly
+         *     download cookie, which authenticates the browser's retry of an interrupted
+         *     transfer once the grant's own window has closed (issue #2373). Every
+         *     credential runs the same ``file:read`` gate, and the response is identical.
          */
         get: operations["download_file_api_communities__community_id__servers__server_id__files_download_get"];
         put?: never;
@@ -1164,7 +1183,8 @@ export interface paths {
          *     boundary — is the right bar here.
          *
          *     The pre-flight reuses ``DownloadFile.is_dir``, so a missing path is 404, a
-         *     traversal-unsafe one 422 ``invalid_path``, and a running server 409
+         *     traversal-unsafe one 422 ``invalid_path``, one with a path-component symlink 422
+         *     ``symlink_refused`` (issue #2432), and a running server 409
          *     ``server_unsettled`` — exactly what the download returns. The 409 records the
          *     DENIED ``file:download`` row the download would have recorded; once the Web UI
          *     mints first the download is never reached, and the denial would otherwise

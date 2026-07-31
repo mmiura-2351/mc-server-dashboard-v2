@@ -256,13 +256,30 @@ class ServerRepository(abc.ABC):
         """
 
     @abc.abstractmethod
-    async def list_running_assigned(self) -> list[Server]:
+    async def list_desired_running_assigned(self) -> list[Server]:
         """Return every server with desired=running and an assigned Worker.
 
-        The candidate set the periodic snapshot scheduler iterates (FR-DATA-7):
-        servers the operator wants running that have a Worker to snapshot. It
-        spans all communities — the scheduler is a process-wide background task,
-        not a request scoped to one community.
+        DESIRED state only — there is deliberately no observed-state predicate, so
+        a crashed (or otherwise not-yet-running) server is in the result as long as
+        the operator wants it running and a Worker holds it. The name says
+        ``desired`` for exactly that reason (issue #2480): the former
+        ``list_running_assigned`` claimed an observed state it never filtered on.
+        It spans all communities — every caller is a process-wide background task
+        or a fleet-wide tally, not a request scoped to one community.
+
+        All three callers REQUIRE the desired-only semantics:
+
+        - The periodic snapshot scheduler's candidate set (FR-DATA-7). Dispatching
+          to a crashed member is the decision, not an accident: under a running
+          intent it is the only path that durably captures the crash-time world
+          (see :class:`RunSnapshotCadenceTick`).
+        - Worker drain (FR-WRK-5), which flips ``desired=stopped`` on everything
+          assigned to the draining Worker. Skipping crashed rows would leave them
+          ``desired=running`` on that Worker, and the reconciler would then restart
+          them on the very host being drained.
+        - Placement's committed-resource tally (#710), the declared CPU each host
+          has promised. Dropping a crashed-but-assigned server would understate the
+          host right before the reconciler restarts that server there.
         """
 
     @abc.abstractmethod
@@ -270,9 +287,9 @@ class ServerRepository(abc.ABC):
         """Return every server, spanning all communities (FR-BAK-3).
 
         The candidate set the periodic scheduled-backup scheduler iterates: unlike
-        the snapshot scheduler (running-only), a scheduled backup applies to an
-        at-rest server too (archived directly from Storage, no Worker), so the
-        scheduler must see every server and branch on each one's state. The
+        the snapshot scheduler (desired-running only), a scheduled backup applies
+        to an at-rest server too (archived directly from Storage, no Worker), so
+        the scheduler must see every server and branch on each one's state. The
         scheduler filters to those carrying a per-server schedule in config. A
         process-wide background task, not scoped to one community.
         """
@@ -283,7 +300,7 @@ class ServerRepository(abc.ABC):
 
         The candidate set the periodic divergence reconciler iterates: servers
         where the operator's intent and the last Worker-reported reality could be
-        out of step and an intent re-dispatch may be owed. Five shapes qualify:
+        out of step and an intent re-dispatch may be owed. Seven shapes qualify:
 
         - ``desired=running`` with an observed state that is neither ``starting``
           nor ``running`` (a start that was never delivered, or a crash that the
@@ -295,7 +312,46 @@ class ServerRepository(abc.ABC):
         - ``desired=stopped``, ``observed=stopped``, still assigned (issue #847
           bug 2: a stop wedged because its deferred unassign never ran);
         - ``desired=stopped``, ``observed=unknown``, still assigned (issue #1599:
-          a stop interrupted mid-flight by an API restart or worker disconnect).
+          a stop interrupted mid-flight by an API restart or worker disconnect —
+          and, since issue #2475, also a Worker actively reporting ``unknown``
+          because it holds a failed-stop orphan whose backend daemon it cannot
+          reach. Both mean the same thing for this arm: nobody can say whether
+          the process is alive, so the stop is re-dispatched);
+        - ``desired=stopped``, ``observed=crashed``, still assigned (issue #2439:
+          the process died on its own under a stop intent);
+        - ``desired=stopped``, ``observed=stopping``, still assigned (issue #2452:
+          a stop whose dispatch failed after the Worker emitted ``stopping``).
+
+        The remaining observed states under a stopped intent (``starting`` and
+        ``restarting``) are deliberately NOT candidates, and the reasons are
+        specific to each rather than the blanket "a transitional state cannot
+        persist" this docstring used to assert. That premise was FALSE (issue
+        #2452) and is what let the ``stopping`` wedge ship unnoticed when #2439 was
+        fixed: the Worker's ``Stop`` emits ``stopping`` on entry, and BOTH of its
+        failure paths (the kill call erroring, and the container surviving the
+        kill) restore the pre-stop state WITHOUT emitting. That is still true of
+        the driver; what changed with issue #2475 is that the Worker's instance
+        manager now converges the failed stop above it — probing, retrying, and
+        reporting ``stopped`` on confirmed death or ``unknown`` while it cannot
+        tell — so a failed stop is no longer followed by silence. These arms
+        remain the backstop for the cases no Worker can report at all (it is
+        gone, or the stream is down). The actual reasons:
+
+        - ``starting`` is a genuine transient here: the Worker's in-flight launch
+          proceeds independently of the stop intent and settles into ``running``
+          (or ``crashed``), whose report moves the row onto one of the arms above.
+          Acting on it would race that launch.
+        - ``restarting`` is never emitted at all — no Worker driver produces it
+          (the ``SERVER_STATE_RESTARTING`` contract value has zero producers in
+          ``worker/internal/``), so no row can reach it.
+
+        ``reset_unverifiable_observed_states`` also rewrites every ASSIGNED row's
+        non-terminal observed state to ``unknown`` on API startup, but that is an
+        accidental escape, not a design: it needs an API restart, which is
+        precisely why it did not save the ``stopping`` wedge. ``crashed`` has no
+        escape — it is
+        terminal, so no further report follows, and the startup reset leaves it
+        alone as still-truthful — which is why it wedged until #2439.
 
         Aligned servers (``running``/``starting`` under a running intent, settled
         ``stopped`` under a stopped intent) are excluded so the reconciler's tick

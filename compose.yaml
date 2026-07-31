@@ -79,7 +79,7 @@ services:
     # CopyObject-heavy and small-object-heavy (thousands of region/.mca per world).
     # Pinned to an explicit version tag (never `latest`) so a rebuild is
     # reproducible.
-    image: chrislusf/seaweedfs:4.39
+    image: chrislusf/seaweedfs:4.40
     restart: unless-stopped
     # Gated behind the `object` compose profile so an fs-backend operator can drop
     # the service entirely (issue #940). `.env.example` ships COMPOSE_PROFILES=object
@@ -242,6 +242,7 @@ services:
       MCD_API_RECONCILER__INTERVAL_SECONDS: "${MCD_API_RECONCILER__INTERVAL_SECONDS:-60}"
       MCD_API_RECONCILER__GRACE_SECONDS: "${MCD_API_RECONCILER__GRACE_SECONDS:-660}"
       MCD_API_RECONCILER__HELD_START_GRACE_SECONDS: "${MCD_API_RECONCILER__HELD_START_GRACE_SECONDS:-90}"
+      MCD_API_RECONCILER__REFUSED_STOP_GRACE_SECONDS: "${MCD_API_RECONCILER__REFUSED_STOP_GRACE_SECONDS:-30}"
       MCD_API_RECONCILER__BACKOFF_BASE_SECONDS: "${MCD_API_RECONCILER__BACKOFF_BASE_SECONDS:-30}"
       MCD_API_RECONCILER__BACKOFF_MAX_SECONDS: "${MCD_API_RECONCILER__BACKOFF_MAX_SECONDS:-3600}"
       # Game-port auto-assignment range (issue #1002). Defaults match the api's
@@ -393,7 +394,7 @@ services:
         condition: service_healthy
 
   cloudflared:
-    image: cloudflare/cloudflared:2026.7.1
+    image: cloudflare/cloudflared:2026.7.3
     restart: unless-stopped
     # Gated behind the `tunnel` compose profile so default bring-up is unchanged
     # (issue #1090). Add `tunnel` to COMPOSE_PROFILES in .env to enable it, then

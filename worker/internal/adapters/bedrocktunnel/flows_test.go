@@ -30,9 +30,12 @@ func (f *fakeSender) SendDatagram(p []byte) error {
 	return nil
 }
 
+// waitSent polls until at least n datagrams have been recorded or
+// starvationBudget elapses. Every caller expects the datagrams to arrive, so
+// the poll returns as soon as they do and the budget only bounds a starved run.
 func (f *fakeSender) waitSent(t *testing.T, n int) [][]byte {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(starvationBudget)
 	for time.Now().Before(deadline) {
 		f.mu.Lock()
 		if len(f.sent) >= n {

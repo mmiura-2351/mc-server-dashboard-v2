@@ -17,17 +17,40 @@ import uuid
 
 import pytest
 
+from mc_server_dashboard_api.fleet.adapters.grpc_server import _STATE_BY_PROTO
+from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
+from mc_server_dashboard_api.fleet.domain.control_plane import (
+    Command as FleetCommand,
+)
+from mc_server_dashboard_api.fleet.domain.control_plane import (
+    CommandResult,
+    CommandResultCode,
+    HydrateCommand,
+    StartServerCommand,
+)
+from mc_server_dashboard_api.fleet.domain.control_plane import (
+    ControlPlane as FleetControlPlane,
+)
+from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId as FleetWorkerId
+from mc_server_dashboard_api.servers.adapters.control_plane import (
+    FleetControlPlaneAdapter,
+)
 from mc_server_dashboard_api.servers.application.lifecycle import (
     StartServer,
     StopServer,
 )
 from mc_server_dashboard_api.servers.application.reconciler import RunReconcilerTick
+from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
+    StopDispatchRefusals,
+)
 from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandOutcome,
     CommandStatus,
+    ControlPlane,
     WorkerUnavailableError,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
+from mc_server_dashboard_api.servers.domain.errors import CommandDispatchError
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     DesiredState,
@@ -37,6 +60,9 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerType,
     WorkerId,
 )
+from mcsd.controlplane.v1 import control_plane_pb2 as pb
+from tests.fleet.fakes import FakeClock as FleetFakeClock
+from tests.fleet.fakes import make_worker
 from tests.servers.fakes import (
     FakeClock,
     FakeControlPlane,
@@ -53,6 +79,9 @@ _GRACE = 60
 # The short held-start grace (issue #999): well below the full grace so a test can
 # pin a divergence age BETWEEN them and prove which grace was applied.
 _HELD_GRACE = 10
+# The short refused-stop grace (issue #2478): below both of the above so a test can
+# pin a divergence age between it and the full grace and prove it was applied.
+_REFUSED_GRACE = 5
 _PAST_GRACE = _NOW - dt.timedelta(seconds=_GRACE + 1)
 
 
@@ -81,13 +110,42 @@ def _server(
     )
 
 
+class _CapturingFleet(FleetControlPlane):
+    """A fleet control plane that answers every dispatch OK and records the kinds.
+
+    Lets the #2477 test drive the REAL :class:`FleetControlPlaneAdapter` over a real
+    registry — so the held-working-set inventory is the production one — while the
+    hydrate/start round trips succeed without a live Worker.
+    """
+
+    def __init__(self) -> None:
+        self.kinds: list[str] = []
+
+    async def dispatch(
+        self,
+        *,
+        worker_id: FleetWorkerId,
+        server_id: str,
+        command: FleetCommand,
+        timeout_override: float | None = None,
+        snapshot_is_final: bool = False,
+    ) -> CommandResult:
+        if isinstance(command, HydrateCommand):
+            self.kinds.append("hydrate")
+        elif isinstance(command, StartServerCommand):
+            self.kinds.append("start")
+        return CommandResult(code=CommandResultCode.OK)
+
+
 def _reconciler(
     uow: FakeUnitOfWork,
-    cp: FakeControlPlane,
+    cp: ControlPlane,
     clock: FakeClock,
     *,
     store_generation: int = 0,
+    stop_refusals: StopDispatchRefusals | None = None,
 ) -> RunReconcilerTick:
+    stop_refusals = stop_refusals or StopDispatchRefusals()
     return RunReconcilerTick(
         uow=uow,
         make_start_server=lambda: StartServer(
@@ -98,12 +156,16 @@ def _reconciler(
             store_generation=FakeStoreGenerationReader(generation=store_generation),
             file_store=FakeFileStore(seed_eula=True),
         ),
-        make_stop_server=lambda: StopServer(uow=uow, control_plane=cp, clock=clock),
+        make_stop_server=lambda: StopServer(
+            uow=uow, control_plane=cp, clock=clock, stop_refusals=stop_refusals
+        ),
         control_plane=cp,
         store_generation=FakeStoreGenerationReader(generation=store_generation),
         clock=clock,
+        stop_refusals=stop_refusals,
         grace_seconds=_GRACE,
         held_start_grace_seconds=_HELD_GRACE,
+        refused_stop_grace_seconds=_REFUSED_GRACE,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
     )
@@ -508,6 +570,311 @@ async def test_clear_stale_assignment_uses_full_grace_despite_held() -> None:
     assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
 
 
+# --- short grace for a known-failed stop dispatch (issue #2478) -------------
+
+
+def _refused(server: Server, at: dt.datetime) -> StopDispatchRefusals:
+    refusals = StopDispatchRefusals()
+    refusals.record_refusal(
+        server.id, outcome=CommandOutcome(status=CommandStatus.INTERNAL), at=at
+    )
+    return refusals
+
+
+async def test_refused_stop_dispatch_is_redispatched_on_the_short_grace() -> None:
+    # The Worker RETURNED a refusal for the previous stop dispatch, so the round trip
+    # the full grace budgets (stop_timeout_seconds, #930) has already ended and there
+    # is nothing in flight for the retry to race. A divergence aged past the
+    # refused-stop grace but well within the full grace is acted on now.
+    uow = FakeUnitOfWork()
+    aged = _NOW - dt.timedelta(seconds=_REFUSED_GRACE + 1)
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.RUNNING,
+        worker=_WORKER,
+        observed_at=aged,
+        updated_at=aged,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    # Sanity: the divergence is still WITHIN the full grace, so only the short
+    # refused-stop grace can act here.
+    assert (_NOW - aged) < dt.timedelta(seconds=_GRACE)
+    await _reconciler(uow, cp, clock, stop_refusals=_refused(server, aged)).tick()
+    assert [k for k, _, _ in cp.dispatched] == ["stop", "snapshot"]
+
+
+async def test_possibly_unsent_stop_still_waits_the_full_grace() -> None:
+    # The distinction this issue turns on (#2478/#2442): with NO recorded refusal the
+    # row is indistinguishable from a stop committed by a process that died before it
+    # could dispatch — the command may never have been sent, or may still be in
+    # flight — so the #930 floor stands and the full grace applies. Identical row and
+    # age to the test above; only the recorded verdict differs.
+    uow = FakeUnitOfWork()
+    aged = _NOW - dt.timedelta(seconds=_REFUSED_GRACE + 1)
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.RUNNING,
+        worker=_WORKER,
+        observed_at=aged,
+        updated_at=aged,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock).tick()
+    assert cp.dispatched == []
+
+
+async def test_refusal_older_than_the_last_worker_report_waits_the_full_grace() -> None:
+    # The short grace rides on the refusal being the MOST RECENT thing known about
+    # the row. A Worker report (or a fresh intent commit) landing after it supersedes
+    # the verdict: what happened to the row since is unknown again, so the full grace
+    # returns.
+    uow = FakeUnitOfWork()
+    aged = _NOW - dt.timedelta(seconds=_REFUSED_GRACE + 1)
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.RUNNING,
+        worker=_WORKER,
+        observed_at=aged,
+        updated_at=aged,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    stale = aged - dt.timedelta(seconds=1)
+    await _reconciler(uow, cp, clock, stop_refusals=_refused(server, stale)).tick()
+    assert cp.dispatched == []
+
+
+async def test_busy_stop_refusal_does_not_shorten_the_grace() -> None:
+    # BUSY is the Worker's reservation guard saying another mutating command is
+    # already in flight for this id (issue #824), and after #2475/#2476 that is
+    # typically its own converger working a failed-stop orphan. The dispatch settled,
+    # but something else has NOT, so "nothing is in flight" — the property the short
+    # grace rests on — does not hold. Keep the full grace; the converger owns that
+    # cadence, not the reconciler (#2478).
+    uow = FakeUnitOfWork()
+    aged = _NOW - dt.timedelta(seconds=_REFUSED_GRACE + 1)
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.RUNNING,
+        worker=_WORKER,
+        observed_at=aged,
+        updated_at=aged,
+    )
+    uow.servers.seed(server)
+    refusals = StopDispatchRefusals()
+    refusals.record_refusal(
+        server.id, outcome=CommandOutcome(status=CommandStatus.BUSY), at=aged
+    )
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock, stop_refusals=refusals).tick()
+    assert cp.dispatched == []
+
+
+async def test_refused_stop_does_not_shorten_a_start_redispatch() -> None:
+    # The recorded verdict is about a STOP dispatch only. A running-intent divergence
+    # is re-dispatched hydrate-then-start and carries the #822 duplicate-start floor,
+    # which no stop refusal speaks to: it keeps the full grace.
+    uow = FakeUnitOfWork()
+    aged = _NOW - dt.timedelta(seconds=_REFUSED_GRACE + 1)
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.CRASHED,
+        worker=_WORKER,
+        observed_at=aged,
+        updated_at=aged,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock, stop_refusals=_refused(server, aged)).tick()
+    assert cp.dispatched == []
+
+
+async def test_refused_stop_does_not_shorten_a_stale_assignment_clear() -> None:
+    # clear_stale_assignment carries the #847 stale-snapshot floor — it must not yank
+    # an assignment out from under a final snapshot still uploading — which a refused
+    # stop dispatch says nothing about. It keeps the full grace.
+    uow = FakeUnitOfWork()
+    aged = _NOW - dt.timedelta(seconds=_REFUSED_GRACE + 1)
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.STOPPED,
+        worker=_WORKER,
+        observed_at=aged,
+        updated_at=aged,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock, stop_refusals=_refused(server, aged)).tick()
+    assert cp.dispatched == []
+    assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
+
+
+async def test_operator_stop_refused_by_the_worker_converges_on_the_short_grace() -> (
+    None
+):
+    # End to end over the SHARED journal (#2478, the user-visible half of #2442):
+    # nothing is hand-seeded here — the verdict travels from the operator's failing
+    # StopServer call to the reconciler's grace choice, which is what the wiring has
+    # to get right. A server the operator asked to stop must not keep running, and
+    # accepting players, for the full ~11-12 min after a refusal the API already has.
+    uow = FakeUnitOfWork()
+    long_running = _NOW - dt.timedelta(seconds=3600)
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.RUNNING,
+        worker=_WORKER,
+        observed_at=long_running,
+        updated_at=long_running,
+    )
+    uow.servers.seed(server)
+    refusals = StopDispatchRefusals()
+    clock = FakeClock(_NOW)
+    refusing = FakeControlPlane(
+        outcomes={"stop": CommandOutcome(status=CommandStatus.INTERNAL, message="boom")}
+    )
+    with pytest.raises(CommandDispatchError):
+        await StopServer(
+            uow=uow, control_plane=refusing, clock=clock, stop_refusals=refusals
+        )(community_id=server.community_id, server_id=server.id)
+    # The stop intent stands and is not compensated (#2435): the row is now the
+    # ambiguous (stopped, running, assigned) shape the reconciler owns.
+    stored = uow.servers.by_id[server.id]
+    assert stored.desired_state is DesiredState.STOPPED
+    assert stored.observed_state is ObservedState.RUNNING
+    assert stored.assigned_worker_id == _WORKER
+
+    cp = FakeControlPlane()
+    clock.set(_NOW + dt.timedelta(seconds=_REFUSED_GRACE + 1))
+    await _reconciler(uow, cp, clock, stop_refusals=refusals).tick()
+
+    assert [k for k, _, _ in cp.dispatched] == ["stop", "snapshot"]
+    assert uow.servers.by_id[server.id].assigned_worker_id is None
+
+
+def _stale_stop_past_the_short_grace() -> tuple[FakeUnitOfWork, Server, dt.datetime]:
+    # A (stopped, running, assigned) divergence aged past the refused-stop grace but
+    # well within the full grace: the window where the recorded verdict is the only
+    # thing that decides whether the reconciler acts.
+    aged = _NOW - dt.timedelta(seconds=_REFUSED_GRACE + 1)
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.RUNNING,
+        worker=_WORKER,
+        observed_at=aged,
+        updated_at=aged,
+    )
+    uow = FakeUnitOfWork()
+    uow.servers.seed(server)
+    return uow, server, aged
+
+
+async def test_re_refused_replay_keeps_the_next_tick_on_the_short_grace() -> None:
+    # The replay's OWN refusal is recorded too (issue #2478), and that is behaviour,
+    # not bookkeeping: the forget() before the replay clears the operator dispatch's
+    # verdict, so without re-recording, a stop the Worker refuses AGAIN falls back to
+    # waiting the full grace — the exact regression this issue exists to prevent.
+    # With it the per-server backoff governs the retry cadence instead.
+    uow, server, aged = _stale_stop_past_the_short_grace()
+    cp = FakeControlPlane(
+        outcomes={"stop": CommandOutcome(status=CommandStatus.INTERNAL, message="boom")}
+    )
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock, stop_refusals=_refused(server, aged))
+
+    await reconciler.tick()
+    assert [k for k, _, _ in cp.dispatched] == ["stop"]  # refused: no final snapshot
+
+    # Past the backoff window (base 30 s) but still well within the full grace, so
+    # only a surviving verdict can let this tick act.
+    clock.set(_NOW + dt.timedelta(seconds=31))
+    assert (clock.now() - aged) < dt.timedelta(seconds=_GRACE)
+    await reconciler.tick()
+    assert [k for k, _, _ in cp.dispatched] == ["stop", "stop"]
+
+
+async def test_timed_out_replay_drops_the_earlier_verdict() -> None:
+    # forget() runs before the replay dispatch, not only before the operator's
+    # (issue #2478). A replay that TIMES OUT is not the Worker answering — it may
+    # still be executing the stop — so the earlier "settled" verdict must not be
+    # inherited, or the next tick would re-send on the short grace against a command
+    # that really may be in flight (the #930 floor's own failure mode). The next tick
+    # is instead back on the full grace and waits.
+    uow, server, aged = _stale_stop_past_the_short_grace()
+    cp = FakeControlPlane(unavailable_kinds={"stop"})
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock, stop_refusals=_refused(server, aged))
+
+    await reconciler.tick()
+    assert [k for k, _, _ in cp.dispatched] == ["stop"]  # attempted, no answer
+
+    # Past the backoff window and still within the full grace: the grace is the only
+    # thing that can hold the retry back now, and it must.
+    clock.set(_NOW + dt.timedelta(seconds=31))
+    assert (clock.now() - aged) < dt.timedelta(seconds=_GRACE)
+    await reconciler.tick()
+    assert [k for k, _, _ in cp.dispatched] == ["stop"]
+
+
+async def test_server_placed_after_registration_gets_the_short_held_grace() -> None:
+    # Issue #2477: the held inventory must reflect what the Worker holds NOW, not
+    # only what it advertised at registration. Register the Worker with an EMPTY
+    # held inventory -- the state of every server placed SINCE that registration --
+    # then let a real start hydrate the working set onto it. The Worker now
+    # demonstrably holds the hydrated generation, so a later divergence aged between
+    # the short and the full grace must be acted on under held_start_grace_seconds
+    # (command-only re-dispatch), not left waiting the full hydrate-based grace.
+    fleet = _CapturingFleet()
+    registry = InMemoryWorkerRegistry(
+        clock=FleetFakeClock(_NOW), heartbeat_timeout=dt.timedelta(seconds=30)
+    )
+    registry.register(make_worker(worker_id=str(_WORKER.value), at=_NOW))
+    cp = FleetControlPlaneAdapter(
+        registry=registry,
+        control_plane=fleet,
+        data_plane_base_url="http://data-plane.test",
+        worker_credential="test-credential",
+    )
+    uow = FakeUnitOfWork()
+    aged = _NOW - dt.timedelta(seconds=_HELD_GRACE + 1)
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.UNKNOWN,
+        worker=_WORKER,
+        observed_at=aged,
+        updated_at=aged,
+    )
+    uow.servers.seed(server)
+    clock = FakeClock(_NOW)
+    # The start that placed this server on the Worker: it hydrates, because nothing
+    # was held for an id that did not exist at registration time.
+    await StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=clock,
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(generation=2),
+        file_store=FakeFileStore(seed_eula=True),
+    ).redispatch_start(community_id=server.community_id, server_id=server.id)
+    assert fleet.kinds == ["hydrate", "start"]
+    # Sanity: the divergence is still WITHIN the full grace, so only the short
+    # held-start grace can act here.
+    assert (_NOW - aged) < dt.timedelta(seconds=_GRACE)
+
+    await _reconciler(uow, cp, clock, store_generation=2).tick()
+
+    # A second, command-only start: the short grace applied AND the re-dispatch
+    # skipped the destructive hydrate, the same held >= store predicate (#763).
+    assert fleet.kinds == ["hydrate", "start", "start"]
+
+
 # --- backoff ---------------------------------------------------------------
 
 
@@ -585,7 +952,12 @@ async def test_crash_loop_start_backs_off_despite_successful_dispatch() -> None:
     # dispatch SUCCEEDS (the Worker launches the container) but the MC process dies
     # again, so the row stays reconcilable across ticks. The successful dispatch
     # must NOT clear the backoff; consecutive crash restarts must space out
-    # exponentially instead of re-hydrating + re-starting at full cadence forever.
+    # exponentially instead of re-starting at full cadence forever.
+    #
+    # The dispatch shape changed deliberately in #2442/#2477: the FIRST attempt's
+    # hydrate refreshes the held-working-set inventory, so every later retry sees the
+    # Worker holding a fresh working set and is command-only. Only the first attempt
+    # hydrates now. The subject here is the backoff, and it is unchanged.
     uow = FakeUnitOfWork()
     server = _server(
         desired=DesiredState.RUNNING,
@@ -607,14 +979,14 @@ async def test_crash_loop_start_backs_off_despite_successful_dispatch() -> None:
 
     clock.set(_NOW + dt.timedelta(seconds=40))
     await reconciler.tick()  # past 30s backoff -> retried, crash counted -> 60s
-    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start", "hydrate", "start"]
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start", "start"]
     assert reconciler._attempts[server.id].failures == 2
 
     # The grown window now spaces the next retry out: 31s after the second attempt
     # is still inside the 60s window.
     clock.set(_NOW + dt.timedelta(seconds=40 + 31))
     await reconciler.tick()
-    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start", "hydrate", "start"]
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start", "start"]
 
 
 async def test_crash_loop_flapping_through_starting_keeps_backoff_growing() -> None:
@@ -861,8 +1233,10 @@ def _concurrent_reconciler(
         control_plane=cp,
         store_generation=FakeStoreGenerationReader(),
         clock=clock,
+        stop_refusals=StopDispatchRefusals(),
         grace_seconds=_GRACE,
         held_start_grace_seconds=_HELD_GRACE,
+        refused_stop_grace_seconds=_REFUSED_GRACE,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
     )
@@ -976,8 +1350,10 @@ async def test_failure_in_one_action_does_not_poison_others() -> None:
         control_plane=cp,
         store_generation=FakeStoreGenerationReader(),
         clock=clock,
+        stop_refusals=StopDispatchRefusals(),
         grace_seconds=_GRACE,
         held_start_grace_seconds=_HELD_GRACE,
+        refused_stop_grace_seconds=_REFUSED_GRACE,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
     )
@@ -1092,7 +1468,10 @@ async def test_stopped_unknown_assigned_connected_redispatches_stop() -> None:
 
 async def test_stopped_unknown_assigned_connected_server_not_found() -> None:
     # Issue #1599: worker connected + SERVER_NOT_FOUND (the process already exited)
-    # -> converges to stopped and unassigns.
+    # -> converges to stopped and unassigns. Since issue #2448 that release takes the
+    # final snapshot first, exactly as the confirmed-stop and crashed-release legs
+    # do: the process is gone but the Worker's retained scratch still holds whatever
+    # the interrupted stop never captured.
     uow = FakeUnitOfWork()
     server = _server(
         desired=DesiredState.STOPPED,
@@ -1105,7 +1484,7 @@ async def test_stopped_unknown_assigned_connected_server_not_found() -> None:
     )
     clock = FakeClock(_NOW)
     await _reconciler(uow, cp, clock).tick()
-    assert [k for k, _, _ in cp.dispatched] == ["stop"]
+    assert [k for k, _, _ in cp.dispatched] == ["stop", "snapshot"]
     stored = uow.servers.by_id[server.id]
     assert stored.assigned_worker_id is None
     assert stored.observed_state is ObservedState.STOPPED
@@ -1152,3 +1531,233 @@ async def test_stopped_unknown_assigned_within_grace_is_skipped() -> None:
     await _reconciler(uow, cp, clock).tick()
     assert cp.dispatched == []
     assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
+
+
+# --- stopped/crashed/assigned wedge recovery (issue #2439) -----------------
+
+
+async def test_stopped_crashed_assigned_connected_snapshots_then_clears(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Issue #2439: a stop whose dispatch failed left (stopped, running, assigned)
+    # and the process then died on its own, so the worker reported crashed. The
+    # process is gone, so the owed work is the release half of the stop path: take
+    # the final snapshot the crash never got (the worker retains the scratch), then
+    # release the assignment. No second stop dispatch — the worker has already
+    # forgotten the crashed instance, so a stop would answer SERVER_NOT_FOUND and
+    # skip the snapshot, losing the crash-window world.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.CRASHED,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    with caplog.at_level(logging.INFO):
+        await _reconciler(uow, cp, clock).tick()
+    assert [k for k, _, _ in cp.dispatched] == ["snapshot"]
+    assert uow.servers.by_id[server.id].assigned_worker_id is None
+    assert any("recovered" in record.message.lower() for record in caplog.records)
+
+
+async def test_stopped_crashed_assigned_disconnected_clears_without_snapshot() -> None:
+    # Issue #2439: the same wedge with the worker GONE — the snapshot cannot run,
+    # but the assignment must still be released (DB-only), exactly as the
+    # (stopped, stopped, assigned) arm does.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.CRASHED,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(connected={_WORKER: False})
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock).tick()
+    assert cp.dispatched == []
+    assert uow.servers.by_id[server.id].assigned_worker_id is None
+
+
+async def test_stopped_crashed_assigned_within_grace_is_skipped() -> None:
+    # Issue #2439: the recovery only fires past grace, like every other stop-side
+    # arm — a crash report arriving while a stop is still settling must not have
+    # its assignment yanked out from under the in-flight path.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.CRASHED,
+        worker=_WORKER,
+        observed_at=_NOW - dt.timedelta(seconds=_GRACE - 1),
+        updated_at=_NOW - dt.timedelta(seconds=_GRACE - 1),
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock).tick()
+    assert cp.dispatched == []
+    assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
+
+
+async def test_stopped_crashed_clear_is_not_counted_as_a_crash_loop(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Issue #2439: the post-dispatch crash check exists to damp a boot-crash LOOP
+    # under a start intent (#343). The stop-side release leaves observed=crashed
+    # standing (it is the truth: the process died), so that check must not fire
+    # here — it would log a false "crash-looping" WARN and arm a backoff for an
+    # action that fully succeeded.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.CRASHED,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock)
+    with caplog.at_level(logging.WARNING):
+        await reconciler.tick()
+    assert uow.servers.by_id[server.id].assigned_worker_id is None
+    assert server.id not in reconciler._attempts
+    assert not [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "crash-looping" in r.getMessage()
+    ]
+
+
+# --- stopped/stopping/assigned wedge recovery (issue #2452) ----------------
+
+
+async def test_stopped_stopping_assigned_connected_redispatches_stop() -> None:
+    # Issue #2452: a stop whose dispatch failed after the worker emitted stopping
+    # leaves (stopped, stopping, assigned) and NO terminal report ever follows —
+    # both of the worker's Stop failure paths restore the pre-stop state without
+    # emitting. With the worker connected the owed work is a real retry of the
+    # stop, which is also what retires the worker-side orphan record.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.STOPPING,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock).tick()
+    assert [k for k, _, _ in cp.dispatched] == ["stop", "snapshot"]
+    stored = uow.servers.by_id[server.id]
+    assert stored.observed_state is ObservedState.STOPPED
+    assert stored.assigned_worker_id is None
+
+
+async def test_stopped_stopping_assigned_disconnected_clears_assignment() -> None:
+    # Issue #2452: the same wedge with the worker GONE — there is nobody to retry
+    # the stop against, so release the assignment (DB-only) exactly as the
+    # observed=unknown arm does, converging observed to unknown so the released
+    # row is at rest rather than stranded at (stopped, stopping, unassigned).
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.STOPPING,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(connected={_WORKER: False})
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock).tick()
+    assert cp.dispatched == []
+    stored = uow.servers.by_id[server.id]
+    assert stored.assigned_worker_id is None
+    assert stored.observed_state is ObservedState.UNKNOWN
+    assert stored.is_at_rest()
+    # The released row is settled: no arm claims it again on a later tick.
+    assert await uow.servers.list_reconcilable() == []
+
+
+async def test_stopped_starting_assigned_is_not_reconcilable() -> None:
+    # Issue #2452: starting stays excluded from the stopped-intent arms. Unlike
+    # stopping, it is a genuine transient — the worker's launch settles into a
+    # terminal state whose report moves the row onto the (stopped, running) or
+    # (stopped, crashed) arm — so acting on it would race the in-flight launch.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.STARTING,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock).tick()
+    assert cp.dispatched == []
+    assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
+
+
+# --- Worker-reported unknown lands on existing arms (issue #2474) -----------
+#
+# SERVER_STATE_UNKNOWN joined the wire enum, so ``unknown`` now reaches a row from a
+# Worker's StatusChange and not only from the API's own disconnect inference. Three
+# wedges of the "no arm matches this shape" kind were fixed in this cycle (#1599,
+# #2439, #2452), so the landing is pinned rather than assumed. These tests derive the
+# observed state from the INGEST MAPPING itself, so they fail if that mapping ever
+# routes the wire value onto a different state.
+
+_WORKER_REPORTED_UNKNOWN = ObservedState(_STATE_BY_PROTO[pb.SERVER_STATE_UNKNOWN])
+
+
+async def test_worker_reported_unknown_under_running_intent_redispatches_start() -> (
+    None
+):
+    # desired=running, assigned, worker connected -> UNKNOWN is in _NOT_RUNNING, so
+    # the stale-start arm claims it and re-dispatches (hydrate + start).
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=_WORKER_REPORTED_UNKNOWN,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock).tick()
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
+
+
+async def test_worker_reported_unknown_under_stopped_intent_redispatches_stop() -> None:
+    # desired=stopped, assigned, worker connected -> the #1599 arm claims it and
+    # retries the stop (then the post-stop final snapshot).
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=_WORKER_REPORTED_UNKNOWN,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock).tick()
+    assert [k for k, _, _ in cp.dispatched] == ["stop", "snapshot"]
+    assert uow.servers.by_id[server.id].assigned_worker_id is None
+
+
+async def test_worker_reported_unknown_unassigned_is_at_rest_not_wedged() -> None:
+    # The terminal shape: nothing left to release and no intent to replay, so every
+    # stopped-intent arm (each requires an assignment) correctly passes. It must be
+    # SETTLED rather than inert — at rest, so a later start can re-place it.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=_WORKER_REPORTED_UNKNOWN,
+        worker=None,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock).tick()
+    assert cp.dispatched == []
+    assert await uow.servers.list_reconcilable() == []
+    assert uow.servers.by_id[server.id].is_at_rest()

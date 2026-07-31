@@ -1297,6 +1297,15 @@ func (i *instance) Status() execution.ServerState {
 	return i.state
 }
 
+// ProbeAlive reports whether the container is running right now, from a live
+// Inspect and never from i.state (execution.Instance, issue #2473). It is
+// single-shot by contract: the classification is inspectAlive's decision table
+// and the caller owns the retry cadence, so an unreachable daemon returns an
+// error here rather than being polled out as exitedAfterTransportError does.
+func (i *instance) ProbeAlive(ctx context.Context) (bool, error) {
+	return i.inspectAlive(ctx, i.currentContainerID())
+}
+
 func (i *instance) Events() <-chan execution.StatusEvent { return i.events }
 
 // Logs streams the container's captured console output (execution.LogSource).
@@ -1758,29 +1767,42 @@ func isTransportError(err error) bool {
 	return !errors.As(err, &status)
 }
 
+// inspectAlive classifies ONE Inspect of container id into the driver's liveness
+// decision table, shared by the single-shot ProbeAlive and the bounded re-inspect
+// loop (exitedAfterTransportError) so the two cannot drift. errNotFound (a 404)
+// is not an error: a container the daemon does not know is definitively not
+// alive. Any other Inspect error means the daemon is unreachable and the answer
+// is genuinely unavailable — never a guessed false.
+func (i *instance) inspectAlive(ctx context.Context, id string) (bool, error) {
+	info, err := i.docker.Inspect(ctx, id)
+	switch {
+	case errors.Is(err, errNotFound):
+		return false, nil
+	case err != nil:
+		return false, err
+	default:
+		return info.Running, nil
+	}
+}
+
 // exitedAfterTransportError re-inspects the container after a Wait transport
 // error to learn its real state, bounding the daemon-unreachable case with a
 // poll deadline (issue #865). It returns true when the container is confirmed
 // gone or exited (supervise should emit the terminal), and false when it is
 // still running or the daemon stays unreachable past the deadline (supervise
-// should re-attach a waiter and keep supervising, emitting nothing). errNotFound
-// (a 404) means the container is gone; any other inspect error is treated as the
-// daemon still being unreachable and is retried until the deadline. Each Inspect
-// call carries a context derived from the probe deadline so a wedged-but-
-// connected daemon cannot hold a single Inspect call past the bound (issue #881).
+// should re-attach a waiter and keep supervising, emitting nothing). The
+// gone/exited/alive classification is inspectAlive's; a daemon-unreachable error
+// from it is retried until the deadline. Each Inspect call carries a context
+// derived from the probe deadline so a wedged-but-connected daemon cannot hold a
+// single Inspect call past the bound (issue #881).
 func (i *instance) exitedAfterTransportError(id string) bool {
 	deadline := time.Now().Add(waitTransportProbeDeadline)
 	for {
 		ctx, cancel := context.WithDeadline(context.Background(), deadline)
-		info, err := i.docker.Inspect(ctx, id)
+		alive, err := i.inspectAlive(ctx, id)
 		cancel()
-		switch {
-		case errors.Is(err, errNotFound):
-			return true
-		case err == nil && !info.Running:
-			return true
-		case err == nil && info.Running:
-			return false
+		if err == nil {
+			return !alive
 		}
 		// Daemon still unreachable: retry until the deadline, then re-attach a
 		// waiter rather than guess a terminal.

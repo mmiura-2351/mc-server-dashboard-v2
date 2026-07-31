@@ -124,6 +124,7 @@ def _to_outcome(result: CommandResult) -> CommandOutcome:
         file_content=result.file_content,
         listing=listing,
         file_access_reason=_REASON_BY_FLEET_REASON[result.file_access_reason],
+        held_generation=result.held_generation,
     )
 
 
@@ -242,12 +243,22 @@ class FleetControlPlaneAdapter(ControlPlane):
             WorkerStatus.DRAINING,
         )
 
+    def record_held_generation(
+        self, *, worker_id: WorkerId, server_id: ServerId, generation: int
+    ) -> None:
+        # Keep the held-working-set inventory current within a session (issue #2477);
+        # same id bridging as held_generation below.
+        self._registry.record_held_generation(
+            _fleet_worker(worker_id), str(server_id.value), generation
+        )
+
     def held_generation(
         self, *, worker_id: WorkerId, server_id: ServerId
     ) -> int | None:
         # Read the held-working-set inventory the Worker advertised on Register
-        # (issue #763). The registry keys it by the fleet worker-id string and the
-        # server-id string (the wire spelling); the seam bridges both.
+        # (issue #763), as refreshed by record_held_generation (issue #2477). The
+        # registry keys it by the fleet worker-id string and the server-id string
+        # (the wire spelling); the seam bridges both.
         return self._registry.held_generation(
             _fleet_worker(worker_id), str(server_id.value)
         )
@@ -343,13 +354,32 @@ class FleetControlPlaneAdapter(ControlPlane):
         final: bool = False,
     ) -> CommandOutcome:
         url = self._snapshot_url(community_id, server_id)
-        return await self._dispatch(
+        outcome = await self._dispatch(
             worker_id,
             server_id,
             SnapshotCommand(transfer_url=url, transfer_token=self._token()),
             timeout_override=self._snapshot_timeout_seconds,
             snapshot_is_final=final,
         )
+        # Mirror the Worker's retention declaration into the held inventory (issue
+        # #2481). Every snapshot dispatch — the periodic cadence tick, the on-demand
+        # backup, and the post-stop final — funnels through here, so this one site
+        # covers them all, and it runs with no await between reading the declaration
+        # and writing the inventory.
+        #
+        # ``None`` records nothing, which is what a stopped-id publish reports: that
+        # branch DELETES the scratch (``removeScratch``, #762/#841) right after
+        # publishing, and recording a generation for a working set the Worker no
+        # longer has would make a later start skip the hydrate it needs. A lost
+        # declaration (dropped stream, dispatch timeout — both raise before this line)
+        # is likewise safe: the inventory stays stale and the next start hydrates.
+        if outcome.held_generation is not None:
+            self.record_held_generation(
+                worker_id=worker_id,
+                server_id=server_id,
+                generation=outcome.held_generation,
+            )
+        return outcome
 
     async def read_file(
         self, *, worker_id: WorkerId, server_id: ServerId, rel_path: str

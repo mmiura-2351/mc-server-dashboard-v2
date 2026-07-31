@@ -104,7 +104,7 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 |---|---|---|
 | GET / POST | `/communities/{cid}/servers` | List / create (`name`, `mc_edition`, `mc_version`, `server_type`, `config`, `accept_eula`, optional `game_port`). |
 | POST | `/communities/{cid}/servers/import` | ZIP import (multipart). |
-| GET | `…/{sid}/export` | ZIP export (download). Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB export straight to disk (#2352). |
+| GET | `…/{sid}/export` | ZIP export (download). Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB export straight to disk (#2352), or the `HttpOnly` download cookie a redemption sets so an interrupted transfer can be retried (#2373). |
 | POST | `…/{sid}/export/download-grant` | Mint that grant: `{download_url, expires_at}`, `Cache-Control: no-store`. Same `file:read` gate as the export, and the same pre-flight — a running server is 409 `server_unsettled` and no grant is issued; 30 s TTL (AUTH_API.md Section 3). |
 | GET / PATCH / DELETE | `…/{sid}` | Read / update (name, config, game_port) / delete. Every PATCH edit needs `server:update`. The retired `backup_interval_hours` key is a `422` (`retired_config_key`, #1840) — backup cadence is a `backup` schedule now. |
 | POST | `…/{sid}/start` · `/stop?force=` · `/restart` | Lifecycle. Stop supports force. |
@@ -112,7 +112,7 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 | GET | `…/{sid}/files?path=&list=` | Read file (base64) or list directory (entries + `truncated`). |
 | PUT / DELETE | `…/{sid}/files?path=` | Write (base64, versioned) / delete. |
 | POST | `…/{sid}/files/directories?path=` | mkdir. |
-| GET | `…/{sid}/files/download?path=` | Raw download (file bytes, or a streamed ZIP for a directory). Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB directory straight to disk (#2352). |
+| GET | `…/{sid}/files/download?path=` | Raw download (file bytes, or a streamed ZIP for a directory). Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB directory straight to disk (#2352), or the `HttpOnly` download cookie a redemption sets so an interrupted transfer can be retried (#2373). |
 | POST | `…/{sid}/files/download-grant?path=` | Mint that grant: `{download_url, expires_at}`, `Cache-Control: no-store`. Same `file:read` gate as the download, and the same pre-flight — missing path 404, traversal 422 `invalid_path`, running server 409 `server_unsettled`. `path` is a **query** parameter so mint and redemption bind the identical string; 30 s TTL (AUTH_API.md Section 3). |
 | POST | `…/{sid}/files/upload?path=&extract=` | Multipart upload, optional ZIP extract. |
 | POST | `…/{sid}/files/rename` | `{from, to}`. |
@@ -122,7 +122,7 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 | GET / POST | `…/{sid}/backups` | List / create on-demand backup. |
 | GET | `…/{sid}/backups/statistics` | count / total bytes / newest / oldest. |
 | POST | `…/{sid}/backups/upload` | Upload an off-host backup archive. |
-| GET | `…/{sid}/backups/{bid}/download` | Download archive. Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB archive straight to disk (#2313). |
+| GET | `…/{sid}/backups/{bid}/download` | Download archive. Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB archive straight to disk (#2313), or the `HttpOnly` download cookie a redemption sets so an interrupted transfer can be retried (#2373). **Resumable** (#2372): the response declares `Accept-Ranges: bytes` and a strong `ETag`, and a single `Range` request is served `206` with `Content-Range` over a ranged read (`416` + `Content-Range: bytes */<size>` when unsatisfiable; a malformed or multi-range `Range` is ignored and the whole archive served). `If-Range` is honoured, so a resumed request that names a stale representation gets the current archive whole. The browser's own retry of an interrupted transfer authenticates with the `HttpOnly` download cookie a grant redemption sets, since the `?grant=` in the retried URL has expired by then (#2373, AUTH_API.md Section 3). |
 | POST | `…/{sid}/backups/{bid}/download-grant` | Mint that grant: `{download_url, expires_at}`, `Cache-Control: no-store`. Same `backup:read` gate as the download; 30 s TTL (AUTH_API.md Section 3). |
 | POST | `…/{sid}/backups/{bid}/restore[?force=true]` | **Server must be stopped.** `?force=true` overrides the quarantine gate (#703). |
 | DELETE | `…/{sid}/backups/{bid}` | Delete. |
@@ -550,21 +550,38 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   subprotocol header (`["access_token", "<jwt>"]`, issue #1596); on token
   rotation, sockets are reconnected (reconnect-on-rotate chosen).
 - **Authenticated downloads.** An in-memory access token cannot ride a plain
-  `<a href>`, so file / resource-pack / plugin downloads fetch the URL with the
-  Authorization header and buffer the response as a Blob, capped at 512 MiB to
-  bound memory (issues #438, #1593, #2027). **Backup archives and server
-  exports are the exception**: they run to multiple GB, so the tab mints a
-  short-lived self-authenticating URL (`POST …/backups/{bid}/download-grant`,
-  #2313; `POST …/{sid}/export/download-grant`, #2352 — both 30 s TTL) and
-  clicks an `<a download>` at it — same-origin (7.7), so the browser saves the
+  `<a href>`, so single-file / resource-pack / plugin downloads fetch the URL
+  with the Authorization header and buffer the response as a Blob, capped at
+  512 MiB to bound memory (issues #438, #1593, #2027). **Backup archives,
+  server exports and directory ZIPs are the exception**: they run to multiple
+  GB, so the tab mints a short-lived self-authenticating URL
+  (`POST …/backups/{bid}/download-grant`, #2313;
+  `POST …/{sid}/export/download-grant` and
+  `POST …/{sid}/files/download-grant?path=…`, #2352 — all 30 s TTL) and clicks
+  an `<a download>` at it — same-origin (7.7), so the browser saves the
   response natively with no size ceiling and no bytes read by the application
-  (#2314, #2353). The grant is minted on click, never on render, and the
-  `download` attribute names the file: neither response carries a
-  `Content-Disposition` the browser could use. Mint-time failures (403 / 404,
-  and 409 `server_unsettled` for an export off its at-rest precondition)
-  surface as toasts; once the click is handed off, the browser's download
-  manager owns progress and errors — for an incrementally built zip that means
-  bytes-so-far with no total, since there is no `Content-Length`.
+  (#2314, #2353, #2354). The grant is minted on click, never on render or on
+  selection, and the `download` attribute names the file — redundant but
+  harmless, since every download response now sends a `Content-Disposition`:
+  backups, directory ZIPs, resource packs and plugins always did, and the server
+  export joined them in #2357 (until then the attribute was load-bearing on that
+  one surface, and anything navigating the URL without it saved `export`). A
+  **single file deliberately stays on the capped fetch** even though it shares
+  the download route with a directory: the API declares its `Content-Length`
+  whenever the size resolves from the parent listing, so an oversize one is
+  rejected up front with the too-large toast (and when it does not resolve, the
+  response falls back to chunked and the byte counter still caps it), whereas
+  the anchor path would save the error document under the intended filename.
+  Mint-time failures (403 / 404, and 409 `server_unsettled` off the at-rest
+  precondition) surface as toasts; once the click is handed off, the browser's
+  download manager owns progress and errors — for an incrementally built zip
+  that means bytes-so-far with no total, since there is no `Content-Length`.
+  The tab does nothing further to keep such a download alive: redeeming the grant
+  sets an `HttpOnly` download cookie the tab cannot see, and the browser's own
+  retry of an interrupted transfer authenticates with that (#2373, AUTH_API.md
+  Section 3). It is scoped to the one download's URL path, so it is never
+  attached to an API call the SPA makes, and JS never reads it — the SPA's session
+  model (in-memory access token, refresh cookie on `/api/auth`) is untouched.
 
 ### 7.2 Real-time strategy
 - One WS per open server-detail page + one community WS for the dashboard.
@@ -595,8 +612,75 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   `permission` member are enumerated in [`AUTH_API.md`](../app/AUTH_API.md)
   Section 2.
 - API error surfaced via toast + inline field errors (422 `errors` list).
-- Conflict-flavored errors (e.g. lifecycle races, `server_unsettled`-style
-  responses) get a "state changed — refresh" treatment, not a raw error dump.
+- Conflict-flavored errors get a "state changed — refresh" treatment, not a raw
+  error dump: the lifecycle races `invalid_transition`, `transition_conflict`
+  and `server_not_running` (the last only away from **restart**, which offers
+  the action for a crashed server on purpose and so gets a verb-specific message
+  below, #2441). A 409 that reports something other than a race is
+  named instead, since refreshing is not the remedy: `server_unsettled` says the
+  server must be stopped, on every surface that can receive it (#2360);
+  `worker_busy` / `server_busy` say another operation on the server is still
+  running and the request was refused without being applied, so the operator
+  retries in a moment (#2400); the sanitized start/restart-failure categories
+  `port_conflict` / `image_missing` name the cause the Worker classified (#225);
+  `command_failed`, the catch-all for a dispatch failure the Worker did not
+  classify, says the action did not go through and sends the operator to check
+  the server's state — a failed start is compensated back, but a failed stop or
+  restart can leave the server moved, and a retry is not known to help (#2420);
+  `failed_stop_orphan` says an earlier stop never finished, so the server's
+  process may still be running — it never went down, and repeating the action is
+  refused identically, so the message names that condition and says the host is
+  already converging it automatically, which it is since #2475; asking the
+  operator to stop the server again was the older, now-redundant remedy (#2466,
+  reworded in #2476). It stays verb-agnostic for that reason: the sentence
+  is about the server's state, not about what the refused verb would have done.
+  The refetch is unconditional on every lifecycle mutation regardless of the
+  toast, so a moved server still shows up.
+- On **stop** and **restart** those messages are replaced by verb-specific ones —
+  `command_failed` and `worker_busy` on stop, `command_failed` and
+  `server_not_running` on restart (`worker_busy` on restart applied nothing, and
+  `server_busy` cannot occur on either). The API dispatches after committing the
+  intent and compensates only on start, so these failures leave something
+  *pending* rather than undone (#2435).
+  A failed stop keeps `desired_state=stopped` over a still-running process — no
+  stop failure class proves the stop will not take effect — so the message says
+  the server is still running and that the system will keep trying to stop it,
+  rather than asking for a retry that is already happening. `worker_busy` on stop
+  gets the same message for the same reason: the stop intent is committed before
+  the Worker refuses. A failed restart keeps `desired_state=running`, so a server
+  the Worker took down comes back on its own, and the message says so.
+  `server_not_running` on restart — the Worker holding no live instance for the
+  id (#2441) — shares that message: the lifecycle controls offer restart for a
+  server observed crashed or unknown under a running intent, so this refusal is
+  not the race it is on the command surface, and what it leaves behind is the
+  same `desired_state=running` the reconciler acts on.
+- The same verb-specific treatment extends to the **503 `worker_unavailable`** —
+  the API's rendering of a dispatch that timed out or lost the Worker session
+  (#2440), where the generic "wait a moment and try again" invites a retry of an
+  intent that already stands. On stop it is unambiguous: `StopServer` can only
+  raise it from the dispatch itself, which runs *after* `desired_state=stopped`
+  is committed and the placement load decremented, and nothing is compensated. On
+  restart `desired_state=running` stands, exactly as for `command_failed`. The
+  wording is deliberately *not* the pending pair above: a refusal was reported by
+  a host that answered, so those messages can say what the server did, while a
+  timeout answers nothing — a graceful stop merely outliving the API's dispatch
+  deadline is the commonest case, and it usually succeeds — so the 503 messages
+  say the outcome is **unconfirmed** and the intent stands. `no_eligible_worker`
+  and `jar_unavailable` stay verb-agnostic: both are raised before any intent is
+  committed.
+- **Start keeps the verb-agnostic messages**, but not because nothing is ever
+  pending there. A start that demonstrably did not happen is compensated back to
+  stopped, which covers `command_failed`; a **post-dispatch** `worker_busy` is
+  not — the API keeps `desired_state=running` and the assignment so
+  `redispatch_start` can converge once the raced command settles (#824), while a
+  pre-dispatch one does compensate. A **post-dispatch** `worker_unavailable` is
+  the same carve-out for the same reason (the start may have been applied), while
+  its pre-dispatch twin — a failed hydrate, or a call that never reached the
+  Worker — compensates. The client sees one `worker_busy` and one
+  `worker_unavailable` for both halves of each pair, so start stays on the
+  generic "another operation is in progress" / "could not reach the server host"
+  messages; #2435 and #2440 scoped that case out rather than resolving it, and it
+  is tracked separately (#2445).
 - Destructive operations (delete server/community/user/backup-restore) use
   typed-confirm dialogs.
 

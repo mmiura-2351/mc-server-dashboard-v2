@@ -340,8 +340,10 @@ async def test_sweep_reread_skips_prefix_made_live_after_pointer_read() -> None:
     reads = {"n": 0}
 
     class _FlipAfterFirstReadClient(FakeS3Client):
-        async def get_object(self, key: str) -> AsyncIterator[bytes]:
-            result = await super().get_object(key)
+        async def get_object(
+            self, key: str, byte_range: tuple[int, int] | None = None
+        ) -> AsyncIterator[bytes]:
+            result = await super().get_object(key, byte_range)
             if key == pointer_key:
                 reads["n"] += 1
                 if reads["n"] == 1:
@@ -954,7 +956,9 @@ async def test_spool_object_unlinks_on_stream_error() -> None:
         def __init__(self, inner: S3Client) -> None:
             self._inner = inner
 
-        async def get_object(self, key: str) -> AsyncIterator[bytes]:
+        async def get_object(
+            self, key: str, byte_range: tuple[int, int] | None = None
+        ) -> AsyncIterator[bytes]:
             return _failing_stream(store.objects[key], fail_after=30)
 
         def __getattr__(self, name: str):  # type: ignore[no-untyped-def]
