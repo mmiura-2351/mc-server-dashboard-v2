@@ -47,6 +47,11 @@ class _Registry(WorkerRegistry):
     def register(self, worker, held_servers=None):  # type: ignore[no-untyped-def]
         raise NotImplementedError
 
+    def record_held_generation(  # type: ignore[no-untyped-def]
+        self, worker_id, server_id, generation
+    ):
+        raise NotImplementedError
+
     def held_generation(self, worker_id, server_id):  # type: ignore[no-untyped-def]
         raise NotImplementedError
 

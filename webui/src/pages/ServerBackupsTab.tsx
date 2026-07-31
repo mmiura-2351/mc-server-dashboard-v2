@@ -66,11 +66,23 @@ function createErrorMessage(error: unknown): TranslationKey {
     case "server_not_stopped":
       return "backups.error.serverMustBeStopped";
     case "server_busy":
+    case "worker_busy":
+      // Two layers, one remedy (issue #2436). `server_busy` is API-side
+      // lifecycle-lock contention; `worker_busy` is the Worker refusing a
+      // SnapshotTrigger because another mutating command for this server is
+      // already in flight — the create was refused without being applied and
+      // clears on its own, so the operator's only move for either is to wait.
+      // Naming which layer was busy would be internals they cannot act on, the
+      // same call the lifecycle surfaces made (lifecycleErrors.ts).
       return "backups.error.serverBusy";
     case "invalid_archive":
       return "backups.error.invalidArchive";
     case "worker_unavailable":
       return "backups.error.workerUnavailable";
+    case "storage_unavailable":
+      // The object store, not the server host, is down (issue #2378). Without
+      // this case the 503 below would blame the host for a storage outage.
+      return "backups.error.storageUnavailable";
   }
 
   // Check status (less specific).

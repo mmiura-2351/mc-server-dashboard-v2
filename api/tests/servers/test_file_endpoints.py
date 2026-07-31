@@ -66,6 +66,7 @@ from mc_server_dashboard_api.dependencies import (
     get_upload_file,
     get_write_file,
 )
+from mc_server_dashboard_api.download_cookie import DOWNLOAD_COOKIE_NAME
 from mc_server_dashboard_api.identity.adapters.token_service import JwtTokenService
 from mc_server_dashboard_api.identity.application.authenticate_download_grant import (
     AuthenticateDownloadGrant,
@@ -122,6 +123,7 @@ _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 # A 32-byte HS256 key; the value is irrelevant, only that mint and verify share it.
 _SIGNING_KEY = "0123456789abcdef0123456789abcdef"
 _GRANT_TTL_SECONDS = 30
+_COOKIE_TTL_SECONDS = 900
 
 
 class _FakeVisibility(MembershipVisibility):
@@ -282,6 +284,7 @@ def _app(
         algorithm="HS256",
         access_ttl=dt.timedelta(minutes=15),
         download_grant_ttl=dt.timedelta(seconds=_GRANT_TTL_SECONDS),
+        download_cookie_ttl=dt.timedelta(seconds=_COOKIE_TTL_SECONDS),
         clock=_clock,
     )
     identity_uow = IdentityFakeUnitOfWork()
@@ -522,6 +525,25 @@ def test_read_is_a_directory_surfaces_reason() -> None:
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4()), params={"path": "config"})
     assert resp.status_code == 422
     assert resp.json()["reason"] == "is_a_directory"
+
+
+def test_read_symlink_refused_surfaces_reason() -> None:
+    # The reason both branches now produce for a path-component symlink: the Worker
+    # for a running server, Storage for one at rest (issue #2432). It must ride
+    # through to the 422 body, because that reason is what selects the browser's
+    # "Symbolic links are not allowed." sentence -- the one answer the operator gets
+    # for the same click in either state.
+    app = _app(
+        member=True,
+        allow=True,
+        read=_FakeUseCase(error=InvalidFilePathError("x", reason="symlink_refused")),
+    )
+    client = next(_client(app))
+    resp = client.get(
+        _url(uuid.uuid4(), uuid.uuid4()), params={"path": "alias/inner.txt"}
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "symlink_refused"
 
 
 def test_read_payload_too_large_is_413() -> None:
@@ -1650,6 +1672,47 @@ def test_file_download_grant_for_a_traversal_path_is_422() -> None:
     assert resp.json()["reason"] == "invalid_path"
 
 
+def test_file_download_grant_for_a_symlink_path_surfaces_the_symlink_reason() -> None:
+    # The mint is the operator-visible failure point on the download surface: since
+    # issue #2352 the Web UI mints a grant BEFORE any download, so a symlink path is
+    # refused here and the download is never reached. Collapsing the reason to
+    # invalid_path made the browser say "Invalid path" for a path the read route
+    # already answers "Symbolic links are not allowed." for -- the parity issue
+    # #2432 exists to reach, on the one at-rest read surface it had missed.
+    app = _app(
+        member=True,
+        allow=True,
+        download=_FakeDownload(
+            error=InvalidFilePathError("x", reason="symlink_refused")
+        ),
+    )
+    client = next(_client(app))
+    resp = _mint(client, uuid.uuid4(), uuid.uuid4(), "alias/inner.txt")
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "symlink_refused"
+
+
+def test_download_of_a_symlink_path_surfaces_the_symlink_reason() -> None:
+    # The redemption side of the same surface: a grant minted before the link was
+    # planted, or a direct Bearer download, still has to answer with the reason the
+    # read route gives rather than a blanket invalid_path (issue #2432).
+    app = _app(
+        member=True,
+        allow=True,
+        download=_FakeDownload(
+            error=InvalidFilePathError("x", reason="symlink_refused")
+        ),
+    )
+    client = next(_client(app))
+    resp = client.get(
+        _url(uuid.uuid4(), uuid.uuid4(), "/download"),
+        params={"path": "alias/inner.txt"},
+        headers=_bearer(),
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "symlink_refused"
+
+
 def test_file_download_grant_for_a_running_server_is_409_and_audits_denied() -> None:
     recorder = RecordingAuditRecorder()
     app = _app(
@@ -1923,3 +1986,95 @@ def test_file_download_without_any_credential_is_401() -> None:
     resp = client.get(_url(community, server, "/download"), params={"path": "world"})
 
     assert resp.status_code == 401
+
+
+# --- the file download cookie (issue #2373) ---------------------------------
+#
+# The file download shares one mechanism with the backup and export downloads
+# (``require_download_access`` + ``download_cookie``), and the property matrix is
+# pinned once in test_backup_endpoints.py. What is per-route here is the Path
+# scope — which cannot name the ``?path=`` this route is keyed by, so two paths on
+# one server share a cookie slot — and that the retry of *this* URL resumes.
+
+
+def _file_cookie_header(
+    community: uuid.UUID, server: uuid.UUID, path: str
+) -> dict[str, str]:
+    value = _tokens.issue_download_cookie(
+        _user.id, file_download_grant_resource(community, server, path)
+    )
+    return {"Cookie": f"{DOWNLOAD_COOKIE_NAME}={value}"}
+
+
+def test_file_grant_redemption_sets_a_path_scoped_cookie() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeDownload(is_dir=True))
+    client = next(_client(app))
+
+    resp = client.get(_file_grant_url(community, server, "world", subject=_user))
+
+    assert resp.status_code == 200
+    cookie = next(
+        h
+        for h in resp.headers.get_list("set-cookie")
+        if h.startswith(f"{DOWNLOAD_COOKIE_NAME}=")
+    )
+    assert "HttpOnly" in cookie
+    assert "Secure" in cookie
+    assert "SameSite=strict" in cookie
+    # The query string is not part of a cookie's Path, so the scope is the route.
+    assert f"Path={_url(community, server, '/download')}" in cookie
+    # The download declared no freshness of its own, so a shared cache could have
+    # replayed this Set-Cookie to a second client (RFC 6265 Section 8.6).
+    assert resp.headers["cache-control"] == "no-store"
+
+
+def test_expired_file_grant_is_retried_with_the_cookie() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeDownload(is_dir=True))
+    client = next(_client(app))
+    url = _file_grant_url(community, server, "world", subject=_user)
+
+    _clock.set(_NOW + dt.timedelta(seconds=_GRANT_TTL_SECONDS))
+
+    assert client.get(url).status_code == 401
+    resumed = client.get(url, headers=_file_cookie_header(community, server, "world"))
+    assert resumed.status_code == 200
+
+
+def test_file_cookie_is_rejected_on_another_path() -> None:
+    # The Path attribute cannot separate two downloads on one server, so the
+    # signed resource claim is the whole boundary here: a cookie minted for
+    # ``world`` opens nothing else, even at the identical URL path.
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeDownload(is_dir=True))
+    client = next(_client(app))
+
+    resp = client.get(
+        _url(community, server, "/download"),
+        params={"path": "plugins"},
+        headers=_file_cookie_header(community, server, "world"),
+    )
+
+    assert resp.status_code == 401
+
+
+def test_file_cookie_is_rejected_under_another_server_or_community() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeDownload(is_dir=True))
+    client = next(_client(app))
+    headers = _file_cookie_header(community, server, "world")
+
+    other_server = client.get(
+        _url(community, uuid.uuid4(), "/download"),
+        params={"path": "world"},
+        headers=headers,
+    )
+    other_community = client.get(
+        _url(uuid.uuid4(), server, "/download"),
+        params={"path": "world"},
+        headers=headers,
+    )
+
+    assert other_server.status_code == 401
+    assert other_community.status_code == 401

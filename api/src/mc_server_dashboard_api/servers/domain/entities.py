@@ -73,12 +73,28 @@ class Server:
         """Return whether the server is fully stopped for edits/deletion.
 
         At rest means the operator wants it stopped *and* the last observed state
-        is one with no live working set to diverge from: ``stopped``, the
-        API-inferred ``unknown`` (the owning Worker is gone), or ``crashed`` (the
-        process died, so there is no live working set — strictly safer than
-        ``unknown``, where the Worker may still hold a live instance we cannot
-        see). Config/name edits and deletion are gated on this (Section 6.9
-        spirit).
+        is one with no live working set to diverge from: ``stopped``,
+        ``unknown``, or ``crashed`` (the process died, so there is no live
+        working set — strictly safer than ``unknown``, where the Worker may still
+        hold a live instance we cannot see). Config/name edits and deletion are
+        gated on this (Section 6.9 spirit).
+
+        ``unknown`` has two provenances and the caveat above covers both.
+        API-inferred: the owning Worker is gone, so nobody can speak for the
+        instance. Worker-asserted (issue #2475): the Worker holds a failed-stop
+        orphan and its backend daemon cannot answer whether the container is
+        alive. The second is the same claim made from closer up — the Worker
+        knows it holds an instance and cannot confirm it dead — so it is if
+        anything a stronger reason to read ``unknown`` as "possibly still live".
+
+        It stays in the at-rest set anyway, because this predicate is not what
+        protects the world. The owning Worker's own reservation guard is: while
+        it has a failed-stop orphan recorded for the id, that Worker refuses
+        start, hydrate, stopped-id snapshot and scratch reclamation for it, so
+        nothing can overwrite or capture a possibly-live working set whatever
+        this returns. What this gates is API-side editing and deletion of the
+        row, and excluding ``unknown`` would wedge those forever for a server
+        whose Worker is gone — nothing will ever report a terminal state for it.
         """
 
         return self.desired_state is DesiredState.STOPPED and self.observed_state in (

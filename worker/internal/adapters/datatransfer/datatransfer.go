@@ -628,11 +628,18 @@ func fsyncDir(dir string) error {
 	return d.Sync()
 }
 
+// hydratePrefix is the dot-prefixed literal every per-hydrate name in the scratch
+// root starts with. The creation site (hydrateTmpPrefix) and the leftover sweep
+// both build their name from it, so neither can drift from the other under a
+// rename (issue #2409); instancemanager duplicates it for its held-set scans and
+// its own sweep, pinned by the twin tests in hydrate_prefix_name_test.go.
+const hydratePrefix = ".hydrate-"
+
 // hydrateTmpPrefix is the dot-prefixed name prefix for the per-hydrate temp dir,
 // derived from destDir's basename so a crash leftover is recognizable and the
 // leftover sweep can match it.
 func hydrateTmpPrefix(destDir string) string {
-	return ".hydrate-" + filepath.Base(destDir) + "-"
+	return hydratePrefix + filepath.Base(destDir) + "-"
 }
 
 // sweepHydrateLeftovers removes temp/trash dirs a previous crashed hydrate for the
@@ -643,7 +650,7 @@ func sweepHydrateLeftovers(parent, serverID string) {
 	if err != nil {
 		return
 	}
-	prefix := ".hydrate-" + serverID + "-"
+	prefix := hydratePrefix + serverID + "-"
 	for _, e := range entries {
 		if strings.HasPrefix(e.Name(), prefix) {
 			_ = os.RemoveAll(filepath.Join(parent, e.Name()))

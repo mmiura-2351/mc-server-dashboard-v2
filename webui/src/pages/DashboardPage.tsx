@@ -21,7 +21,11 @@ import { useActiveCommunity } from "../permissions/ActiveCommunityProvider.tsx";
 import { type Can, useCan } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
 import { dashboardPath } from "../routes.ts";
-import { isEulaNotAccepted, lifecycleErrorMessage } from "./lifecycleErrors.ts";
+import {
+  isEulaNotAccepted,
+  type LifecycleAction,
+  lifecycleErrorMessage,
+} from "./lifecycleErrors.ts";
 import {
   actionApplies,
   KNOWN,
@@ -33,7 +37,6 @@ import { useFilterParams } from "./urlState.ts";
 import { serversKey, useCommunityEvents } from "./useCommunityEvents.ts";
 
 type ServerResponse = components["schemas"]["ServerResponse"];
-type LifecycleAction = "start" | "stop" | "restart";
 
 // Dashboard server-list layout. Cards remain the default (#541); the table view
 // is the compact alternative for many servers / narrow screens.
@@ -590,7 +593,7 @@ function useLifecycle(server: ServerResponse, communityId: string) {
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: serversKey(communityId) });
     },
-    onError: (error, _action, context) => {
+    onError: (error, action, context) => {
       // Surgically roll back only the mutated server's observed_state, and
       // only if the cache still holds the optimistic value we wrote. A WS
       // status frame that arrived mid-flight takes precedence (#1727).
@@ -608,8 +611,11 @@ function useLifecycle(server: ServerResponse, communityId: string) {
       // 403 → the permission glue (toast + capability refetch). Everything
       // else → the shared lifecycle mapping: known non-race 409 reasons get a
       // specific toast, other 409s the "state changed — refresh" treatment
-      // (SPEC 7.4; the refetch already runs in onSettled), the rest a generic
-      // toast.
+      // (SPEC 7.4; the refetch already runs in onSettled), recognized 503
+      // reasons their own message, the rest a generic toast. The verb goes with
+      // it on both the 409 and the 503 path: for a few reasons what the failure
+      // left pending, or left unconfirmed, depends on it (issues #2435/#2440/
+      // #2441).
       if (onForbidden(error)) {
         return;
       }
@@ -617,7 +623,7 @@ function useLifecycle(server: ServerResponse, communityId: string) {
         setEulaOpen(true);
         return;
       }
-      showToast(t(lifecycleErrorMessage(error)), "error");
+      showToast(t(lifecycleErrorMessage(error, action)), "error");
     },
   });
 
@@ -634,7 +640,7 @@ function useLifecycle(server: ServerResponse, communityId: string) {
       if (onForbidden(error)) {
         return;
       }
-      showToast(t(lifecycleErrorMessage(error)), "error");
+      showToast(t(lifecycleErrorMessage(error, "start")), "error");
     }
   }, [communityId, server.id, queryClient, onForbidden, showToast]);
 

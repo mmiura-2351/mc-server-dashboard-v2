@@ -154,6 +154,22 @@ type CommandResult struct {
 	// when ErrorCode is CommandErrorFileAccessDenied; the zero value
 	// (FileAccessReasonUnspecified) is the generic path denial.
 	FileAccessReason FileAccessReason
+	// HeldGeneration is the Worker's DECLARATION that it still holds this
+	// server's working set locally, at this generation, now that the command has
+	// finished (issue #2481). Set only by a SnapshotTrigger, and only when the
+	// Worker's own generation marker was published at that value — the same
+	// on-disk fact ScanHeldServers re-advertises in Register.held_servers, so the
+	// declaration and the advertisement are one number, not two.
+	//
+	// nil means "declared nothing", which is what a snapshot that DELETED the
+	// scratch (the stopped-id branch's removeScratch, #762/#841) and a snapshot
+	// whose marker stamp was skipped (#2284) both report. The API records a held
+	// generation only from a non-nil value, so nil leaves its inventory stale and
+	// the next start hydrates — the safe direction. A pointer, not a 0 sentinel:
+	// generation 0 already means "held at an unknown generation" in
+	// Register.held_servers, so "held at 0" and "nothing declared" must stay
+	// distinguishable.
+	HeldGeneration *uint64
 }
 
 // FileListing is a directory listing returned by a ListFiles command. Truncated

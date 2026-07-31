@@ -843,7 +843,7 @@ describe("ServerDetailPage lifecycle controls", () => {
   it("gives a lifecycle 409 the state-changed treatment", async () => {
     mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
     mockApi.post.mockRejectedValue(
-      new ApiError(409, { reason: "server_unsettled" }),
+      new ApiError(409, { reason: "transition_conflict" }),
     );
     renderPage();
 
@@ -1068,7 +1068,7 @@ describe("ServerDetailPage export (minted grant, #2353)", () => {
     expect(clicks).toHaveLength(1);
   });
 
-  it("shows the state-changed toast when the mint 409s, and saves nothing", async () => {
+  it("shows the unsettled toast when the actions-bar mint 409s, and saves nothing", async () => {
     mockApi.get.mockResolvedValue(
       server({ observed_state: "stopped", desired_state: "stopped" }),
     );
@@ -1083,7 +1083,7 @@ describe("ServerDetailPage export (minted grant, #2353)", () => {
     );
 
     expect(
-      await screen.findByText(t("dashboard.stateChanged")),
+      await screen.findByText(t("serverDetail.error.unsettled")),
     ).toBeInTheDocument();
     expect(clicks).toHaveLength(0);
   });

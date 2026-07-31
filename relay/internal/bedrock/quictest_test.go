@@ -46,12 +46,33 @@ func clientTLS() *tls.Config {
 	return &tls.Config{NextProtos: []string{ALPN}, InsecureSkipVerify: true, MinVersion: tls.VersionTLS13} //nolint:gosec
 }
 
+// starvationBudget is the single ceiling every positive-path wait in this
+// package puts on work that completes in milliseconds when the process is
+// scheduled normally: the loopback QUIC handshake (dial context, accept
+// context, and quic-go's own HandshakeIdleTimeout, whose 5 s default is
+// otherwise a hidden third window on the same handshake), datagram round
+// trips, goroutine joins, and the convergence polls. Nothing here measures
+// elapsed time, so the ceiling costs nothing on the happy path and only bounds
+// a pathologically CPU-starved run -- which a short fixed budget merely turns
+// into a flake (issue #2050).
+//
+// 30 s is ~2.5x the worst stall #2050's starvation rig actually measured
+// (starved handshakes finished in 1-12 s), and leaves room for 20 budget-
+// expiring failures inside `go test`'s 10 m default package timeout, so a
+// genuinely broken package still reports readable per-test failures rather
+// than a timeout panic (issue #2389).
+//
+// Negative assertions ("nothing arrived within X") deliberately keep their own
+// short windows: they always run to their deadline and fail safe under load,
+// so stretching them would only cost suite time.
+const starvationBudget = 30 * time.Second
+
 // newQUICListener binds a bare quic.Listener for tests that drive the
 // handshake themselves (bypassing bedrock.Listener), returning it plus a
 // teardown func.
 func newQUICListener(t *testing.T) *quic.Listener {
 	t.Helper()
-	ln, err := quic.ListenAddr("127.0.0.1:0", selfSignedTLS(t), &quic.Config{EnableDatagrams: true})
+	ln, err := quic.ListenAddr("127.0.0.1:0", selfSignedTLS(t), &quic.Config{EnableDatagrams: true, HandshakeIdleTimeout: starvationBudget})
 	if err != nil {
 		t.Fatalf("quic.ListenAddr: %v", err)
 	}
@@ -62,7 +83,7 @@ func newQUICListener(t *testing.T) *quic.Listener {
 // dialQUIC dials addr as a Worker would, returning the client-side connection.
 func dialQUIC(ctx context.Context, t *testing.T, addr string) *quic.Conn {
 	t.Helper()
-	conn, err := quic.DialAddr(ctx, addr, clientTLS(), &quic.Config{EnableDatagrams: true})
+	conn, err := quic.DialAddr(ctx, addr, clientTLS(), &quic.Config{EnableDatagrams: true, HandshakeIdleTimeout: starvationBudget})
 	if err != nil {
 		t.Fatalf("quic.DialAddr(%q): %v", addr, err)
 	}
@@ -77,12 +98,12 @@ func quicConnPair(t *testing.T) (server, client *quic.Conn) {
 	t.Helper()
 	ln := newQUICListener(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), starvationBudget)
 	defer cancel()
 
 	client = dialQUIC(ctx, t, ln.Addr().String())
 
-	acceptCtx, acceptCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	acceptCtx, acceptCancel := context.WithTimeout(context.Background(), starvationBudget)
 	defer acceptCancel()
 	server, err := ln.Accept(acceptCtx)
 	if err != nil {

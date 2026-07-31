@@ -201,7 +201,7 @@ adapter on the other side of the wire may fulfil it (e.g. the API's
 |---|---|---|
 | `Storage` | Authoritative world/JAR/backup store; hydrate/snapshot source of truth (FR-DATA-1, FR-DATA-2) | fs / remote-fs / object, config-selected. Contract in STORAGE.md (#17) |
 | `PermissionChecker` | `can(user, operation, resource)` decision (FR-AUTHZ-1, NFR-SEC-2) | role + resource-grant evaluator |
-| `TokenService` | Issue/verify short-lived access & long-lived refresh tokens (FR-AUTH-2), plus resource-scoped download grants for URLs a browser must authenticate without a header (AUTH_API.md Section 3, #2313) | JWT-or-equivalent adapter |
+| `TokenService` | Issue/verify short-lived access & long-lived refresh tokens (FR-AUTH-2), plus resource-scoped download grants for URLs a browser must authenticate without a header and the longer-lived download cookies a redemption exchanges them for (AUTH_API.md Section 3, #2313, #2373) | JWT-or-equivalent adapter |
 | `PasswordHasher` | Hash/verify passwords with per-user salt (FR-AUTH-3) | bcrypt/argon2 adapter |
 | `LoginAttemptStore` | Brute-force/lockout runtime state: record attempts, count per-username/per-IP failures over sliding windows, hold the per-account lockout + back-off (FR-AUTH-4). Decision in SECURITY.md Section 3 | DB-backed adapter (`login_attempt` + `account_lockout` tables) |
 | `LoginFailureDelay` | Artificial per-failure delay so the failure-timing signal is flat (FR-AUTH-4, SECURITY.md Section 2 step 5) | fixed-delay adapter over `Sleeper` |

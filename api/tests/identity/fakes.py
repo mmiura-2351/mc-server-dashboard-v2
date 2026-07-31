@@ -281,8 +281,9 @@ _GRANT_EXPIRY = dt.datetime(2026, 6, 4, 12, 0, 30, tzinfo=dt.timezone.utc)
 class FakeTokenService(TokenService):
     """Deterministic token service: access token == ``access::<uuid>``.
 
-    Download grants are ``grant::<resource>::<uuid>``, so a grant minted for one
-    resource cannot verify against another.
+    Download grants are ``grant::<resource>::<uuid>`` and download cookies
+    ``cookie::<resource>::<uuid>``, so neither verifies against another resource
+    nor against the other kind.
     """
 
     def __init__(self) -> None:
@@ -325,19 +326,36 @@ class FakeTokenService(TokenService):
         )
 
     def verify_download_grant(self, token: str, resource: str) -> UserId:
-        import uuid
-
         from mc_server_dashboard_api.identity.domain.errors import (
             InvalidDownloadGrantError,
         )
 
-        prefix = f"grant::{resource}::"
-        if not token.startswith(prefix):
-            raise InvalidDownloadGrantError
-        try:
-            return UserId(uuid.UUID(token[len(prefix) :]))
-        except ValueError as exc:
-            raise InvalidDownloadGrantError from exc
+        return _verify_prefixed(
+            token, f"grant::{resource}::", error=InvalidDownloadGrantError
+        )
+
+    def issue_download_cookie(self, user_id: UserId, resource: str) -> str:
+        return f"cookie::{resource}::{user_id.value}"
+
+    def verify_download_cookie(self, token: str, resource: str) -> UserId:
+        from mc_server_dashboard_api.identity.domain.errors import (
+            InvalidDownloadCookieError,
+        )
+
+        return _verify_prefixed(
+            token, f"cookie::{resource}::", error=InvalidDownloadCookieError
+        )
+
+
+def _verify_prefixed(token: str, prefix: str, *, error: type[Exception]) -> UserId:
+    import uuid
+
+    if not token.startswith(prefix):
+        raise error
+    try:
+        return UserId(uuid.UUID(token[len(prefix) :]))
+    except ValueError as exc:
+        raise error from exc
 
 
 class RecordingFailureDelay(LoginFailureDelay):

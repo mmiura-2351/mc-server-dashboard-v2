@@ -381,7 +381,7 @@ describe("CommunityGrantsTab", () => {
     // must still surface the tab error rather than degrade silently.
     mockApi.get.mockImplementation((path: string) => {
       if (path === `/api/communities/${CID}/members`) {
-        return Promise.reject(new ApiError(500, { reason: "server_error" }));
+        return Promise.reject(new ApiError(500, { reason: "internal_error" }));
       }
       if (path === `/api/communities/${CID}/servers`) {
         return Promise.resolve([server()]);

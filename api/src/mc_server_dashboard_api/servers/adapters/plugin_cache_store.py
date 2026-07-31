@@ -36,10 +36,6 @@ class ObjectPluginCacheStore(PluginCacheStore):
     def __init__(self, client_factory: S3ClientFactory) -> None:
         self._client_factory = client_factory
 
-    async def has(self, sha256: str) -> bool:
-        async with self._client_factory() as client:
-            return await client.head_object(_key(sha256)) is not None
-
     async def put(self, sha256: str, stream: AsyncIterator[bytes]) -> None:
         key = _key(sha256)
         async with self._client_factory() as client:
@@ -61,10 +57,10 @@ class ObjectPluginCacheStore(PluginCacheStore):
                     yield chunk
         except NotFoundError as exc:
             # ``open`` does no I/O itself, so this fires on the first iteration.
-            # Every caller either gates on ``has`` first or opens a blob a plugin
-            # row still references, so a miss is a storage-consistency fault, not
-            # a control-flow branch; translating keeps the storage type from
-            # crossing the seam.
+            # The catalog resolver catches it and downloads instead (the cache is
+            # an optimisation there, issue #2346); for the callers that open a
+            # blob a plugin row still references it is a storage-consistency
+            # fault. Translating keeps the storage type from crossing the seam.
             raise PluginCacheBlobNotFoundError(key) from exc
 
     async def list_entries(self) -> list[CacheEntry]:

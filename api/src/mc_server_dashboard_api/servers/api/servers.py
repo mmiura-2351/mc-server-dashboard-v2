@@ -65,6 +65,7 @@ from mc_server_dashboard_api.dependencies import (
     require_download_access,
     require_permission,
 )
+from mc_server_dashboard_api.http_content_disposition import content_disposition
 from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.identity.domain.token_service import TokenService
@@ -107,6 +108,7 @@ from mc_server_dashboard_api.servers.domain.cpu_allocation import (
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
+    BackupStorageUnavailableError,
     CommandDispatchError,
     EulaNotAcceptedError,
     FileTooLargeError,
@@ -721,12 +723,20 @@ async def export_server(
     browser cannot cap it up front; a multi-GB export is therefore fetched as a
     plain navigation to a URL carrying a short-lived ``?grant=`` minted by
     ``POST .../export/download-grant`` instead of being buffered into a Blob to
-    attach a Bearer header (issue #2352). Either credential runs the same
-    ``file:read`` gate, and the response is identical.
+    attach a Bearer header (issue #2352). Redeeming a grant also sets an httpOnly
+    download cookie, which authenticates the browser's retry of an interrupted
+    transfer once the grant's own window has closed (issue #2373). Every
+    credential runs the same ``file:read`` gate, and the response is identical.
+
+    The response names itself ``{server name}.zip`` via ``Content-Disposition``
+    (issue #2357), so a client that navigates the URL without supplying a filename
+    -- a pasted grant link, a CLI fetch -- does not save the last path segment,
+    ``export``. A server name is free-form, so the header is built by the shared
+    hardened helper (RFC 5987 ``filename*``, no traversal, no injection).
     """
 
     try:
-        stream = await use_case(
+        export = await use_case(
             community_id=CommunityId(community_id),
             server_id=ServerId(server_id),
         )
@@ -738,7 +748,13 @@ async def export_server(
         )
         raise _conflict("server_unsettled") from exc
     await _record(recorder, ops.SERVER_EXPORT, authorized, community_id, server_id)
-    return StreamingResponse(stream, media_type="application/zip")
+    return StreamingResponse(
+        export.stream,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": content_disposition(f"{export.server_name}.zip")
+        },
+    )
 
 
 class ServerExportDownloadGrantResponse(BaseModel):
@@ -981,6 +997,12 @@ async def delete_server(
         # A concurrent lifecycle op held the per-server lock past the acquire
         # budget (issue #876): a transient 409 the caller retries.
         raise _conflict("server_busy") from exc
+    except BackupStorageUnavailableError as exc:
+        # The mandatory final-snapshot pack (#777) and the archive enumeration that
+        # follows both drive the object store. The delete is fail-closed — the row is
+        # untouched — so a store outage is a transient 503 the caller retries once the
+        # store is back, not a generic 500 (issue #2378).
+        raise _service_unavailable("storage_unavailable") from exc
     await _record(recorder, ops.SERVER_DELETE, authorized, community_id, server_id)
 
 

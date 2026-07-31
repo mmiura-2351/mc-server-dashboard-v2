@@ -9,8 +9,11 @@ layer's :class:`ControlPlane` seam).
 
 The Port speaks the servers domain's own ids and raises the servers file errors
 (:class:`ServerFileNotFoundError`, :class:`InvalidFilePathError`); the adapter
-translates the storage ``NotFoundError`` / ``PathTraversalError`` at the seam, so
-no storage type crosses into the application layer.
+translates the storage ``NotFoundError`` / ``PathTraversalError`` /
+``SymlinkRefusedError`` at the seam, so no storage type crosses into the
+application layer. The last two both become :class:`InvalidFilePathError`, with the
+``symlink_refused`` reason distinguishing a refused path-component symlink from a
+traversal escape (issue #2432).
 """
 
 from __future__ import annotations
@@ -79,6 +82,23 @@ class FileStore(abc.ABC):
 
         ``rel_path == "."`` lists the working-set root. Raises the same errors as
         :meth:`read_file`.
+        """
+
+    @abc.abstractmethod
+    async def path_exists(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> bool:
+        """True if anything already occupies ``rel_path`` at rest (issue #2426).
+
+        The never-clobber pre-check a rename runs on its destination: is this NAME
+        taken? Not "is it readable" and not "is it listable" — on a backend with
+        symlinks a link occupies its name whatever it points at, and neither a
+        read nor a listing of that name returns anything (issue #2418). A probe
+        composed from those would report a link's name as free, and the rename
+        would then land on the link's target.
+
+        Absent is ``False``, never an error, including for a path no backend can
+        name. A traversal-unsafe path is still :class:`InvalidFilePathError`.
         """
 
     @abc.abstractmethod

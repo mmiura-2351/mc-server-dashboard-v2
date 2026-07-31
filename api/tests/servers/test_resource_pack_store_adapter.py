@@ -22,18 +22,25 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 import pytest
 
 from mc_server_dashboard_api.servers.adapters.resource_pack_store import (
     ObjectResourcePackStore,
 )
-from mc_server_dashboard_api.servers.domain.errors import ResourcePackNotFoundError
+from mc_server_dashboard_api.servers.domain.errors import (
+    ResourcePackNotFoundError,
+    ResourcePackStorageUnavailableError,
+)
 from mc_server_dashboard_api.servers.domain.resource_pack import ResourcePackId
 from mc_server_dashboard_api.storage.adapters.object_client import (
     make_s3_client_factory,
 )
+from mc_server_dashboard_api.storage.adapters.object_store import S3ClientFactory
+from mc_server_dashboard_api.storage.domain.errors import ObjectStoreUnavailableError
 from tests.storage.fake_s3 import (
+    FakeS3Client,
     FakeS3Store,
     close_tracking_factory,
     fake_s3_factory,
@@ -140,3 +147,59 @@ async def test_delete_removes_the_stored_blob(
     await store.delete(pack)
     with pytest.raises(ResourcePackNotFoundError):
         await store.size(pack, _FILENAME)
+
+
+# --- the seam under a store outage (issue #2455) ---------------------------
+#
+# Only the in-memory backend: a live endpoint cannot be made to fail on demand,
+# which is why these sit outside the ``store`` fixture's parametrization.
+
+
+class _HeadUnavailableClient(FakeS3Client):
+    """A client whose ``head_object`` fails the way a 5xx / transport fault does.
+
+    The real client translates a backend 5xx or a transport failure on ``head``
+    into ``ObjectStoreUnavailableError`` (issue #2376); the stub has no injection
+    hook for that, so this raises it directly.
+    """
+
+    async def head_object(self, key: str) -> int | None:
+        raise ObjectStoreUnavailableError(f"object store head failed for {key}")
+
+
+def _head_unavailable_factory(store: FakeS3Store) -> S3ClientFactory:
+    @asynccontextmanager
+    async def _factory() -> AsyncIterator[_HeadUnavailableClient]:
+        yield _HeadUnavailableClient(store)
+
+    return _factory
+
+
+async def test_open_backend_failure_translates_to_storage_unavailable() -> None:
+    """The seam (issue #2455): the download routes begin the stream before they
+    write the headers, so an outage on the locating half of the read still has a
+    status to choose — it must arrive as the servers type the edge maps to 503,
+    not as a raw storage type crossing back into the servers layer."""
+
+    backing = FakeS3Store()
+    store = ObjectResourcePackStore(close_tracking_factory(fake_s3_factory(backing)))
+    pack_id = ResourcePackId(uuid.uuid4())
+    await _put(store, pack_id)
+    # Fail the body at offset 0: the store answers the GET with a fault before a
+    # single byte, which is the shape an outage takes at the open.
+    backing.read_aborts[f"resource-packs/{pack_id.value}/{_FILENAME}"] = [0]
+
+    with pytest.raises(ResourcePackStorageUnavailableError):
+        await _read(store, pack_id)
+
+
+async def test_size_backend_failure_translates_to_storage_unavailable() -> None:
+    """The probe sits in the same window as the open and answers the same route,
+    so one outage must not yield 503 from one call and 500 from the other."""
+
+    store = ObjectResourcePackStore(
+        close_tracking_factory(_head_unavailable_factory(FakeS3Store()))
+    )
+
+    with pytest.raises(ResourcePackStorageUnavailableError):
+        await store.size(ResourcePackId(uuid.uuid4()), _FILENAME)
