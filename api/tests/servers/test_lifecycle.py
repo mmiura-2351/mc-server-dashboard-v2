@@ -2690,15 +2690,20 @@ async def test_stop_server_not_found_on_crashed_snapshots_and_keeps_crashed() ->
     # rewritten to a clean-looking ``stopped``.
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
-    uow.servers.seed(
-        _server(
-            community_id=community,
-            server_id=server_id,
-            desired=DesiredState.RUNNING,
-            observed=ObservedState.CRASHED,
-            worker_id=worker,
-        )
+    # Stamp the crash strictly BEFORE the clock's instant: the row must come out
+    # carrying this exact stamp, and an older stamp is what makes that a real pin --
+    # the #216 guard would ACCEPT a fresh write over it, so a re-record cannot hide
+    # behind the guard.
+    crashed_at = _NOW - dt.timedelta(minutes=5)
+    seeded = _server(
+        community_id=community,
+        server_id=server_id,
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.CRASHED,
+        worker_id=worker,
     )
+    seeded.observed_at = crashed_at
+    uow.servers.seed(seeded)
     cp = FakeControlPlane(
         outcomes={"stop": CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND)}
     )
@@ -2716,6 +2721,11 @@ async def test_stop_server_not_found_on_crashed_snapshots_and_keeps_crashed() ->
     stored = uow.servers.by_id[ServerId(server_id)]
     assert stored.desired_state is DesiredState.STOPPED
     assert stored.observed_state is ObservedState.CRASHED
+    # The crash's OWN timestamp survives: the preserve arm writes nothing, so the
+    # release never restamps the row with the release's instant. Re-recording
+    # ``crashed`` at ``clock.now()`` would keep every assert above green while
+    # telling the operator the server crashed when it was in fact released.
+    assert stored.observed_at == crashed_at
     assert stored.assigned_worker_id is None
     assert [kind for kind, _, _ in cp.dispatched] == ["stop", "snapshot"]
     assert cp.decremented == [WorkerId(worker)]
@@ -3882,15 +3892,17 @@ async def test_redispatch_stop_server_not_found_on_crashed_keeps_crashed() -> No
     # crash-window scratch, release, and leave ``crashed`` standing.
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
-    uow.servers.seed(
-        _server(
-            community_id=community,
-            server_id=server_id,
-            desired=DesiredState.STOPPED,
-            observed=ObservedState.CRASHED,
-            worker_id=worker,
-        )
+    # Same sentinel stamp as the __call__ twin, for the same reason.
+    crashed_at = _NOW - dt.timedelta(minutes=5)
+    seeded = _server(
+        community_id=community,
+        server_id=server_id,
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.CRASHED,
+        worker_id=worker,
     )
+    seeded.observed_at = crashed_at
+    uow.servers.seed(seeded)
     cp = FakeControlPlane(
         outcomes={"stop": CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND)}
     )
@@ -3903,6 +3915,8 @@ async def test_redispatch_stop_server_not_found_on_crashed_keeps_crashed() -> No
     assert result.assigned_worker_id is None
     stored = uow.servers.by_id[ServerId(server_id)]
     assert stored.observed_state is ObservedState.CRASHED
+    # The crash's own timestamp survives the release (see the __call__ twin).
+    assert stored.observed_at == crashed_at
     assert stored.assigned_worker_id is None
     assert [k for k, _, _ in cp.dispatched] == ["stop", "snapshot"]
 
