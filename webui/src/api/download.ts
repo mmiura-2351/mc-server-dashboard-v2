@@ -3,7 +3,7 @@
  *
  * These endpoints authenticate with a Bearer access token that lives in memory,
  * never in storage, so a plain `<a href>` / `window.location` to a
- * streamed-download endpoint (e.g. the server export ZIP) cannot carry the
+ * streamed-download endpoint (e.g. a single working-set file) cannot carry the
  * credential — the request would arrive unauthenticated. The honest path is to
  * fetch the URL with the Authorization header set, read the response as a Blob,
  * and click a synthesised anchor at an object URL so the browser saves the file.
@@ -14,12 +14,17 @@
  * sets these endpoints serve that is acceptable, and it is the only way to
  * attach the in-memory token (issue #438).
  *
- * Backup archives are the exception, and no longer take this path: they run to
- * multiple GB, so buffering them hit {@link MAX_DOWNLOAD_BYTES} and failed
- * (#2314). That surface mints a short-lived self-authenticating URL
- * (`POST …/backups/{id}/download-grant`, #2313) and hands it to
+ * The multi-GB archives are the exceptions, and no longer take this path:
+ * buffering them hit {@link MAX_DOWNLOAD_BYTES} and failed. Backup archives
+ * (#2314), the server export ZIP (#2353) and a directory's streamed ZIP (#2354)
+ * each mint a short-lived self-authenticating URL instead
+ * (`POST …/backups/{id}/download-grant`, #2313; `POST …/export/download-grant`
+ * and `POST …/files/download-grant?path=…`, #2352) and hand it to
  * {@link saveUrlAs}, so the browser streams the bytes to disk without the tab
- * reading them.
+ * reading them. A single file stays here: the API declares its `Content-Length`
+ * whenever the size resolves, so an oversize one is normally rejected before a
+ * byte is read — and when it does not resolve the response is chunked and
+ * {@link readCappedBlob}'s byte counter caps it instead.
  */
 
 import { getAccessToken } from "../auth/tokenStore.ts";

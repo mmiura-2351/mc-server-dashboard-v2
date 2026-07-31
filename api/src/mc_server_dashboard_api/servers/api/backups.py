@@ -48,9 +48,15 @@ from mc_server_dashboard_api.dependencies import (
     require_permission,
     require_platform_admin,
 )
+from mc_server_dashboard_api.http_content_disposition import content_disposition
 from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_problem import ProblemException, problem
-from mc_server_dashboard_api.http_streaming import counted
+from mc_server_dashboard_api.http_range import (
+    ByteRange,
+    RangeNotSatisfiableError,
+    parse_byte_range,
+)
+from mc_server_dashboard_api.http_streaming import counted, started
 from mc_server_dashboard_api.identity.domain.token_service import TokenService
 from mc_server_dashboard_api.identity.domain.value_objects import (
     UserId as IdentityUserId,
@@ -84,6 +90,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
     BackupNotFoundError,
+    BackupStorageUnavailableError,
     BackupUnsettledError,
     CommandDispatchError,
     FileTooLargeError,
@@ -271,6 +278,19 @@ async def create_backup(
             server_id,
         )
         raise _service_unavailable("worker_unavailable") from exc
+    except BackupStorageUnavailableError as exc:
+        # The object store could not serve the archive write (issue #2378): a
+        # transient backend fault, not a bug in the request, so it joins the
+        # worker-down path as a 503 the client retries rather than a generic 500.
+        await _record_failure(
+            recorder,
+            ops.BACKUP_CREATE,
+            Outcome.ERROR,
+            authorized,
+            community_id,
+            server_id,
+        )
+        raise _service_unavailable("storage_unavailable") from exc
     except CommandDispatchError as exc:
         await _record_failure(
             recorder,
@@ -280,7 +300,17 @@ async def create_backup(
             community_id,
             server_id,
         )
-        raise _conflict("command_failed") from exc
+        # Honour the sanitized reason the way the lifecycle routes do (issue
+        # #2436): the running-server create dispatches a SnapshotTrigger, and the
+        # Worker refuses it with BUSY -> ``worker_busy`` when another mutating
+        # command for this id is already in flight. That is a retryable
+        # contention, and flattening it to the catch-all threw the retryable-ness
+        # away at the edge. Only ``worker_busy`` can arrive here — the other
+        # sanitized categories (port_conflict / image_missing) are start-only —
+        # and the raw Worker message is never the reason (log-only), so nothing
+        # leaks. ``command_failed`` stays the catch-all for a dispatch failure the
+        # Worker did not classify.
+        raise _conflict(exc.reason or "command_failed") from exc
     except BackupCorruptError as exc:
         # The working set is structurally corrupt (a crash-during-save truncation,
         # #703): the integrity gate refused to archive it (#739). This is a
@@ -549,6 +579,20 @@ async def restore_backup(
             target_type=ops.TARGET_BACKUP,
         )
         raise _integrity_error("working_set_corrupt") from exc
+    except BackupStorageUnavailableError as exc:
+        # The store could not serve the archive read back (issue #2378). No verdict
+        # about the backup — unlike BackupCorruptError above, nothing is quarantined
+        # — so it is a transient 503 the caller retries, not a generic 500.
+        await _record_failure(
+            recorder,
+            ops.BACKUP_RESTORE,
+            Outcome.ERROR,
+            authorized,
+            community_id,
+            backup_id,
+            target_type=ops.TARGET_BACKUP,
+        )
+        raise _service_unavailable("storage_unavailable") from exc
     if result.forced_corrupt:
         # An operator forced the restore of a known-corrupt backup over the gate
         # (#703): it published. Log and audit the deliberate corrupt restore under a
@@ -605,6 +649,10 @@ async def delete_backup(
         # A concurrent lifecycle op held the per-server lock past the acquire
         # budget (issue #876): a transient 409 the caller retries.
         raise _conflict("server_busy") from exc
+    except BackupStorageUnavailableError as exc:
+        # The store could not take the archive delete (issue #2378). The row is left
+        # in place, so the delete is safe to retry once the store is back.
+        raise _service_unavailable("storage_unavailable") from exc
     await _record(recorder, ops.BACKUP_DELETE, authorized, community_id, backup_id)
 
 
@@ -612,6 +660,7 @@ async def delete_backup(
     "/communities/{community_id}/servers/{server_id}/backups/{backup_id}/download",
 )
 async def download_backup(
+    request: Request,
     community_id: uuid.UUID,
     server_id: uuid.UUID,
     backup_id: uuid.UUID,
@@ -630,18 +679,23 @@ async def download_backup(
     The response declares the archive's exact size as ``Content-Length``, so a
     client can show download progress and refuse an over-cap archive up front.
 
+    **Resumable** (issue #2372): the response declares ``Accept-Ranges: bytes``
+    and an ``ETag``, and a single ``Range`` request is served as ``206`` over a
+    ranged read of the stored bytes — a multi-GB archive is never re-read from
+    the start to serve its tail. An interrupted transfer therefore resumes
+    instead of restarting.
+
     The caller authenticates with the usual Bearer access token, or — for a
     browser that cannot set a header on a plain navigation — with a short-lived
-    ``?grant=`` minted by ``POST .../download-grant`` (issue #2313). Either way
-    the same ``backup:read`` gate decides, and the response is identical.
+    ``?grant=`` minted by ``POST .../download-grant`` (issue #2313). Redeeming a
+    grant also sets an httpOnly download cookie, which is what authenticates the
+    browser's retry once the grant's own short window has closed (issue #2373).
+    Whichever credential arrives, the same ``backup:read`` gate decides and the
+    response body is identical.
     """
 
-    # Starlette populates no Content-Length for a streaming body, so without an
-    # explicit header the response is chunked (issue #2312). The declared value
-    # comes from the archive store, so it equals the streamed byte count — a
-    # length that disagrees corrupts or hangs the response over HTTP/2.
     try:
-        stream, size_bytes = await use_case(
+        size_bytes = await use_case.archive_size(
             community_id=CommunityId(community_id),
             server_id=ServerId(server_id),
             backup_id=BackupId(backup_id),
@@ -650,19 +704,75 @@ async def download_backup(
         raise _not_found() from exc
     except BackupNotFoundError as exc:
         raise _not_found() from exc
+    except BackupStorageUnavailableError as exc:
+        # The size probe runs before any byte is on the wire, so a store outage here
+        # can still choose the status: 503 the client retries (issue #2378). An
+        # outage that only strikes mid-stream cannot — the status is already
+        # committed — and stays the short body the route's byte count already fails.
+        raise _service_unavailable("storage_unavailable") from exc
+    etag = _archive_etag(backup_id, size_bytes)
+    served = _served_range(request, size_bytes, etag)
+    try:
+        stream = await use_case.archive_stream(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+            backup_id=BackupId(backup_id),
+            byte_range=served,
+        )
+        # Begin the stream here, so the archive is located while the status can
+        # still be chosen (issue #2415). The size probe and the stream resolve the
+        # archive independently, and the stream resolves it on its FIRST iteration
+        # — the open stays inside the generator so a stream that is never consumed
+        # holds no descriptor (issues #2341, #2390) — while Starlette writes the
+        # status and Content-Length before it touches the body iterator. A delete
+        # landing after the probe was therefore answered as a 200 declaring a
+        # length the body could never deliver. Beginning the stream makes it the
+        # plain 404 the comment below always claimed it was. Past that first read
+        # the filesystem backend is serving an open descriptor, which a later
+        # unlink cannot shorten, so the declared length and the body agree.
+        stream = await started(stream)
+    except (ServerNotFoundError, BackupNotFoundError) as exc:
+        # Deleted between the size read and the open: still nothing on the wire.
+        raise _not_found() from exc
+    except BackupStorageUnavailableError as exc:
+        # The open reaches the store too, and now runs before any byte is on the
+        # wire, so an outage that begins after the size probe can still choose the
+        # same retryable 503 that probe answers with (issue #2378).
+        raise _service_unavailable("storage_unavailable") from exc
     await _record(recorder, ops.BACKUP_DOWNLOAD, authorized, community_id, backup_id)
-    # A concurrent DeleteBackup (or the retention prune) can remove the archive
-    # underneath the open stream (issue #2318). The resulting short body already
-    # fails at the wire; counting the streamed bytes fails it here instead, with
-    # both numbers named, and without depending on the HTTP layer to catch it.
+    # Starlette populates no Content-Length for a streaming body, so without an
+    # explicit header the response is chunked (issue #2312). The declared value is
+    # the archive size from the store, or — for a 206 — the requested range's
+    # length; either way it equals the streamed byte count, and a length that
+    # disagrees corrupts or hangs the response over HTTP/2.
+    declared = size_bytes if served is None else served.length
+    headers = {
+        "Content-Disposition": content_disposition(f"{backup_id}.tar.gz"),
+        "Content-Length": str(declared),
+        "Cache-Control": "no-store",
+        "Accept-Ranges": "bytes",
+        "ETag": etag,
+    }
+    if served is not None:
+        headers["Content-Range"] = f"bytes {served.start}-{served.end}/{size_bytes}"
+    # Fail the response if the body ends below the declared length (issue #2318).
+    # That guard is now earned by the OBJECT backend: its length comes from a HEAD
+    # and its bytes from a separate GET, so a store serving fewer bytes than it
+    # reported ends the body cleanly short, with no exception to notice it by (a
+    # body torn mid-read does raise, and aborts). The filesystem case #2318 named —
+    # a concurrent DeleteBackup or the retention prune removing the archive under
+    # the open stream — no longer reaches here: started() opened the descriptor
+    # above, and unlinking the path cannot shorten what that descriptor serves
+    # (issue #2415). Counting names any remaining mismatch with both numbers,
+    # rather than leaving it to whichever HTTP layer is underneath. A partial
+    # response is guarded the same way, against the range's length.
     return StreamingResponse(
-        counted(stream, size_bytes),
+        counted(stream, declared),
+        status_code=(
+            status.HTTP_200_OK if served is None else status.HTTP_206_PARTIAL_CONTENT
+        ),
         media_type=_BACKUP_MEDIA_TYPE,
-        headers={
-            "Content-Disposition": _content_disposition(f"{backup_id}.tar.gz"),
-            "Content-Length": str(size_bytes),
-            "Cache-Control": "no-store",
-        },
+        headers=headers,
     )
 
 
@@ -774,6 +884,12 @@ async def upload_backup(
         raise _too_large() from exc
     except InvalidBackupArchiveError as exc:
         raise _unprocessable("invalid_archive") from exc
+    except BackupStorageUnavailableError as exc:
+        # The archive validated but the store could not take the write (issue
+        # #2378): a transient backend fault, so 503 tells the client the upload is
+        # worth retrying unchanged. The other upload failures here are verdicts
+        # about the submitted body and stay 4xx.
+        raise _service_unavailable("storage_unavailable") from exc
     await _record(
         recorder, ops.BACKUP_UPLOAD, authorized, community_id, backup.id.value
     )
@@ -847,21 +963,52 @@ async def _read_capped_upload(file: UploadFile) -> bytes:
     return b"".join(chunks)
 
 
-def _content_disposition(filename: str) -> str:
-    """Build an attachment Content-Disposition header (RFC 6266 / RFC 5987).
+def _archive_etag(backup_id: uuid.UUID, size_bytes: int) -> str:
+    """A strong entity-tag for one backup archive (issue #2372).
 
-    Emits an ASCII-only ``filename`` fallback plus an RFC 5987 ``filename*`` with
-    the UTF-8 percent-encoded original, the #262 hardening (a crafted name cannot
-    inject extra header params or 500 on a non-latin-1 char). Backup names are
-    UUIDs, so this is straightforward here, but the helper keeps the same posture
-    as the files download edge.
+    ``If-Range`` is compared with the strong function (RFC 9110 Section 13.1.5),
+    so a weak validator would make every resume fall back to a full transfer —
+    the tag has to be strong to be worth sending. Neither backend can supply one
+    for free: an S3 multipart object's ETag is not the content's MD5 (it is a
+    digest of the part digests, so it changes with the part layout and says
+    nothing about the bytes), and the filesystem has no ETag at all. Hashing a
+    multi-GB archive on every request is out of the question.
+
+    So the tag is derived from what already identifies the bytes: the backup id
+    and the archive's byte count. A backup's archive is written once under a
+    ref generated for that row and is never rewritten — create, upload, and
+    restore all leave it immutable (STORAGE.md Section 3.3) — so a given id
+    denotes exactly one sequence of bytes for its lifetime, and the length is a
+    second, independent term. This is at least as strong as the mtime-size tag
+    nginx serves static files with, and it is identical on both backends.
     """
 
-    ascii_fallback = "".join(
-        c if (0x20 <= ord(c) < 0x7F and c not in '"\\') else "_" for c in filename
-    )
-    encoded = quote(filename, safe="")
-    return f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{encoded}"
+    return f'"{backup_id.hex}-{size_bytes:x}"'
+
+
+def _served_range(request: Request, size_bytes: int, etag: str) -> ByteRange | None:
+    """Resolve the request's ``Range`` against the archive, honouring ``If-Range``.
+
+    Returns ``None`` to serve the whole archive (no usable range, or an
+    ``If-Range`` naming a different representation) and raises a 416 carrying
+    ``Content-Range: bytes */<size>`` when the range cannot be satisfied.
+
+    ``If-Range`` is compared verbatim: our tag is strong, so a weak tag or an
+    HTTP-date (we publish no ``Last-Modified``) never matches and the client
+    gets the current archive whole rather than two spliced representations.
+    """
+
+    if_range = request.headers.get("if-range")
+    if if_range is not None and if_range != etag:
+        return None
+    try:
+        return parse_byte_range(request.headers.get("range"), size=size_bytes)
+    except RangeNotSatisfiableError as exc:
+        raise problem(
+            status.HTTP_416_RANGE_NOT_SATISFIABLE,
+            "range_not_satisfiable",
+            headers={"Content-Range": f"bytes */{size_bytes}"},
+        ) from exc
 
 
 async def _record(

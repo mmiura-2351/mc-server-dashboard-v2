@@ -72,8 +72,11 @@ from mcsd.controlplane.v1.control_plane_pb2_grpc import (
 _LOG = logging.getLogger(__name__)
 
 # Map the wire observed-state enum onto the sink's state string (CONTROL_PLANE.md
-# Section 6). An unspecified/unknown value has no mapping and is dropped — a
-# well-behaved Worker only reports the documented states.
+# Section 6). Every documented state has an entry, including SERVER_STATE_UNKNOWN
+# (issue #2474) — a Worker that cannot confirm an instance's fate asserts unknown
+# rather than guessing, and dropping that report would leave the row asserting a
+# staler state as fact. UNSPECIFIED alone has no mapping and is dropped: it is the
+# proto zero value, never something a well-behaved Worker sends deliberately.
 _STATE_BY_PROTO: dict[int, str] = {
     pb.SERVER_STATE_STARTING: "starting",
     pb.SERVER_STATE_RUNNING: "running",
@@ -81,6 +84,7 @@ _STATE_BY_PROTO: dict[int, str] = {
     pb.SERVER_STATE_STOPPED: "stopped",
     pb.SERVER_STATE_RESTARTING: "restarting",
     pb.SERVER_STATE_CRASHED: "crashed",
+    pb.SERVER_STATE_UNKNOWN: "unknown",
 }
 
 # Metadata key carrying the shared Worker credential (NFR-SEC-1). gRPC lowercases

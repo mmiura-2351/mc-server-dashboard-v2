@@ -695,3 +695,52 @@ def test_register_without_held_servers_holds_nothing() -> None:
     registry.register(make_worker(at=_T0))
 
     assert registry.held_generation(WorkerId("worker-1"), "server-a") is None
+
+
+def test_record_held_generation_adds_a_server_placed_after_registration() -> None:
+    # A server placed AFTER the Worker registered was not in its advertisement, so it
+    # read back as "nothing held" for the whole session (issue #2477). Recording the
+    # generation a hydrate/snapshot established makes it visible.
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    registry.register(make_worker(at=_T0))
+
+    registry.record_held_generation(WorkerId("worker-1"), "server-a", 3)
+
+    assert registry.held_generation(WorkerId("worker-1"), "server-a") == 3
+
+
+def test_record_held_generation_overwrites_the_advertised_generation() -> None:
+    # A later snapshot/hydrate supersedes what the Worker advertised at Register.
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    registry.register(make_worker(at=_T0), held_servers={"server-a": 5})
+
+    registry.record_held_generation(WorkerId("worker-1"), "server-a", 6)
+
+    assert registry.held_generation(WorkerId("worker-1"), "server-a") == 6
+
+
+def test_record_held_generation_ignored_for_unknown_worker() -> None:
+    # No live registration, no held claim: a recorded entry for an untracked Worker
+    # would outlive the session whose scratch reality it describes.
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+
+    registry.record_held_generation(WorkerId("ghost"), "server-a", 3)
+
+    assert registry.held_generation(WorkerId("ghost"), "server-a") is None
+
+
+def test_register_replaces_recorded_held_generations() -> None:
+    # The Worker's own on-disk scan always wins over the recorded mirror: a reconnect
+    # whose scratch was wiped reports fewer ids, and anything recorded on the prior
+    # session is discarded with it (issue #2477 keeps #763's replace semantics).
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    registry.register(make_worker(at=_T0))
+    registry.record_held_generation(WorkerId("worker-1"), "server-a", 3)
+
+    registry.register(make_worker(at=_T0))
+
+    assert registry.held_generation(WorkerId("worker-1"), "server-a") is None

@@ -28,13 +28,17 @@ from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
     BackupNotFoundError,
     BackupStorageUnavailableError,
+    BackupUnreadableError,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     ServerId,
 )
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
-from mc_server_dashboard_api.storage.domain.errors import ObjectStoreUnavailableError
+from mc_server_dashboard_api.storage.domain.errors import (
+    ArchiveUnreadableError,
+    ObjectStoreUnavailableError,
+)
 from mc_server_dashboard_api.storage.domain.port import ByteStream
 from mc_server_dashboard_api.storage.domain.value_objects import (
     BackupKey,
@@ -297,6 +301,85 @@ async def test_prune_storage_backend_failure_translates_to_unavailable(
         await adapter.prune_to_final_snapshot(community_id=community, server_id=server)
 
 
+class _SizeUnavailableStorage(FsStorage):
+    """An ``FsStorage`` whose backup_size fails with a storage-backend error (#2378)."""
+
+    async def backup_size(
+        self,
+        community_id: StorageCommunityId,
+        server_id: StorageServerId,
+        key: BackupKey,
+    ) -> int:
+        raise ObjectStoreUnavailableError("object store head failed")
+
+
+async def test_size_storage_backend_failure_translates_to_unavailable(
+    tmp_path: Path,
+) -> None:
+    """The seam (issue #2378): the size probe backs the download route's declared
+    ``Content-Length``, so an outage there must reach the edge as the typed servers
+    error the edge maps to 503 — not as a raw storage type routed to a generic 500."""
+
+    storage = _SizeUnavailableStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+
+    with pytest.raises(BackupStorageUnavailableError):
+        await adapter.size(community_id=community, server_id=server, storage_ref=_ref())
+
+
+class _DeleteUnavailableStorage(FsStorage):
+    """An ``FsStorage`` whose delete_backup fails with a storage-backend error."""
+
+    async def delete_backup(
+        self,
+        community_id: StorageCommunityId,
+        server_id: StorageServerId,
+        key: BackupKey,
+    ) -> None:
+        raise ObjectStoreUnavailableError("object store delete failed")
+
+
+async def test_delete_storage_backend_failure_translates_to_unavailable(
+    tmp_path: Path,
+) -> None:
+    """The seam (issue #2378): delete_backup drives an object-store delete, so an
+    outage there is translated like every other backup write."""
+
+    storage = _DeleteUnavailableStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+
+    with pytest.raises(BackupStorageUnavailableError):
+        await adapter.delete(
+            community_id=community, server_id=server, storage_ref=_ref()
+        )
+
+
+class _ListUnavailableStorage(FsStorage):
+    """An ``FsStorage`` whose list_backups fails with a storage-backend error."""
+
+    async def list_backups(
+        self, community_id: StorageCommunityId, server_id: StorageServerId
+    ) -> list[BackupKey]:
+        raise ObjectStoreUnavailableError("object store list failed")
+
+
+async def test_list_archive_refs_storage_backend_failure_translates_to_unavailable(
+    tmp_path: Path,
+) -> None:
+    """The seam (issue #2378): the delete-server reclaim enumerates archive refs from
+    the store between the pack and the row delete, so an outage there must surface as
+    the same typed error the pack already raises — one status for one outage."""
+
+    storage = _ListUnavailableStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+
+    with pytest.raises(BackupStorageUnavailableError):
+        await adapter.list_archive_refs(community_id=community, server_id=server)
+
+
 async def _put_backup(
     storage: FsStorage,
     community: CommunityId,
@@ -495,6 +578,90 @@ async def test_open_unknown_ref_translates_to_backup_not_found(
         )
 
 
+async def test_ranged_open_yields_that_slice_of_the_archive(tmp_path: Path) -> None:
+    """The seam passes a byte range through to Storage (issue #2372)."""
+
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    await _publish(storage, community, server, {"server.properties": b"motd=original"})
+    ref = _ref()
+    await adapter.create_from_current(
+        community_id=community, server_id=server, storage_ref=ref
+    )
+
+    archive = await drain(
+        adapter.open(community_id=community, server_id=server, storage_ref=ref)
+    )
+    tail = await drain(
+        adapter.open(
+            community_id=community,
+            server_id=server,
+            storage_ref=ref,
+            byte_range=(len(archive) - 10, len(archive) - 1),
+        )
+    )
+    assert tail == archive[-10:]
+
+
+class _OpenUnavailableStorage(FsStorage):
+    """An ``FsStorage`` whose open_backup stream fails with a backend error (#2415).
+
+    Models the object adapter locating the archive: its stream HEADs and GETs the
+    object on the first iteration, and the object client translates a backend 5xx
+    or a transport failure there into ``ObjectStoreUnavailableError`` (#2376).
+    """
+
+    def open_backup(
+        self,
+        community_id: StorageCommunityId,
+        server_id: StorageServerId,
+        key: BackupKey,
+        *,
+        byte_range: tuple[int, int] | None = None,
+    ) -> ByteStream:
+        async def _gen() -> AsyncIterator[bytes]:
+            raise ObjectStoreUnavailableError("object store get failed")
+            yield b""  # pragma: no cover - unreachable, keeps this a generator
+
+        return _gen()
+
+
+async def test_open_storage_backend_failure_translates_to_unavailable(
+    tmp_path: Path,
+) -> None:
+    """The seam (issue #2415): the download route begins the stream before it writes
+    the headers, so an outage on the locating half of the read still has a status to
+    choose — it must arrive as the servers type the edge maps to 503, not as a raw
+    storage type crossing back into the servers layer."""
+
+    storage = _OpenUnavailableStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+
+    with pytest.raises(BackupStorageUnavailableError):
+        await drain(
+            adapter.open(community_id=community, server_id=server, storage_ref=_ref())
+        )
+
+
+async def test_ranged_open_unknown_ref_translates_to_backup_not_found(
+    tmp_path: Path,
+) -> None:
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    with pytest.raises(BackupNotFoundError):
+        await drain(
+            adapter.open(
+                community_id=community,
+                server_id=server,
+                storage_ref="nope",
+                byte_range=(0, 9),
+            )
+        )
+
+
 async def test_size_reports_archive_byte_count(tmp_path: Path) -> None:
     storage = FsStorage(tmp_path, version_retention=10)
     adapter = StorageBackupStoreAdapter(storage=storage)
@@ -543,6 +710,67 @@ async def test_check_backup_health_returns_corrupt_count(tmp_path: Path) -> None
         )
         == 1
     )
+
+
+class _UnreadableArchiveStorage(FsStorage):
+    """A ``Storage`` whose backup readability probe reports the bytes are gone (#2371).
+
+    Models the object adapter's verdict when the stored archive cannot be streamed
+    back in full — a *storage* type the servers seam must translate rather than let
+    cross back into the servers layer.
+    """
+
+    async def check_backup_health(
+        self,
+        community_id: StorageCommunityId,
+        server_id: StorageServerId,
+        key: BackupKey,
+    ) -> WorkingSetReport:
+        raise ArchiveUnreadableError("backup archive unreadable")
+
+
+async def test_check_backup_health_unreadable_archive_translates_to_unreadable(
+    tmp_path: Path,
+) -> None:
+    """The seam (issue #2371): a storage ``ArchiveUnreadableError`` becomes
+    :class:`BackupUnreadableError`, distinct from the corrupt-contents verdict."""
+
+    storage = _UnreadableArchiveStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+
+    with pytest.raises(BackupUnreadableError):
+        await adapter.check_backup_health(
+            community_id=community, server_id=server, storage_ref=_ref()
+        )
+
+
+class _HealthProbeUnavailableStorage(FsStorage):
+    """A ``Storage`` whose backup readability probe hits a store outage (#2371)."""
+
+    async def check_backup_health(
+        self,
+        community_id: StorageCommunityId,
+        server_id: StorageServerId,
+        key: BackupKey,
+    ) -> WorkingSetReport:
+        raise ObjectStoreUnavailableError("object store read failed")
+
+
+async def test_check_backup_health_store_outage_translates_to_unavailable(
+    tmp_path: Path,
+) -> None:
+    """The seam (issue #2371): an outage during the probe is an availability failure,
+    NOT a verdict about the archive — it must not reach the sweep as corruption."""
+
+    storage = _HealthProbeUnavailableStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+
+    with pytest.raises(BackupStorageUnavailableError):
+        await adapter.check_backup_health(
+            community_id=community, server_id=server, storage_ref=_ref()
+        )
 
 
 async def test_check_backup_health_unknown_ref_translates_to_backup_not_found(

@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import logging
 import tarfile
 import uuid
 import zipfile
@@ -80,6 +81,8 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerId,
     ServerType,
 )
+
+_LOG = logging.getLogger(__name__)
 
 # The edit-size cap. File access rides the control plane for small, interactive
 # edits (server.properties, ops.json, a datapack file), not bulk world data —
@@ -916,6 +919,11 @@ async def _path_is_dir(
     otherwise a successful ``list_dir`` means a directory, and a
     :class:`ServerFileNotFoundError` from it falls back to a file read (re-raising
     if that is missing too). Validates the path first.
+
+    Only the MISS falls back: a path the listing REFUSES — one with a symlink at
+    any component (#2432), or one escaping the working set — is neither a directory
+    nor a file, so the refusal propagates rather than being re-asked as a read that
+    would refuse it identically.
     """
 
     if rel_path in ("", "."):
@@ -939,13 +947,25 @@ async def _path_exists(
     server_id: ServerId,
     rel_path: str,
 ) -> bool:
-    """True if ``rel_path`` names an existing file or directory at rest."""
+    """True if anything already occupies ``rel_path`` at rest (issue #2426).
 
-    try:
-        await _path_is_dir(file_store, community_id, server_id, rel_path)
-        return True
-    except ServerFileNotFoundError:
-        return False
+    The never-clobber pre-check for a rename destination. It asks about the NAME,
+    not about what the name leads to, so it cannot be composed out of the read
+    methods: reading a symlink dirent is refused and so is listing one (#2418,
+    #2426), which would report an occupied name as free and let the rename land on
+    the link's target. Answering from the destination's PARENT listing has the
+    same hole one level up — the parent may itself be a link, whose listing is
+    that same refusal, while the name is still occupied under it.
+
+    The seam therefore answers it directly, resolving exactly as a read does:
+    containment first, then a symlink ABOVE the leaf is the refusal rather than
+    followed (#2432), and the leaf itself is described as itself. What a mutation
+    should then ACT on when the entry is a link is a separate question (#2429).
+    """
+
+    return await file_store.path_exists(
+        community_id=community_id, server_id=server_id, rel_path=rel_path
+    )
 
 
 @dataclass(frozen=True)
@@ -1124,6 +1144,16 @@ class SearchFiles:
     :data:`MAX_SEARCH_RESULTS`) and the whole walk is bounded to
     :data:`MAX_SEARCH_SCANNED` files; hitting either bound sets ``truncated``
     rather than erroring (a partial result is still useful).
+
+    A name hit is a dirent the listing shows too (#2418), including one that
+    names nothing fetchable: it is returned rather than filtered out, so the
+    search and the file browser describe the same tree, and fetching the hit
+    gets what fetching that entry from the browser gets — the read seam's
+    refusal. Containment is decided first, on the resolved target: a link
+    resolving outside the working set is refused as an escape (422
+    ``invalid_path``) whether or not its target exists, and one resolving inside is
+    refused as a symlink (422 ``symlink_refused``, #2432) whether it dangles or
+    names a real file (#2438).
     """
 
     uow: UnitOfWork
@@ -1158,6 +1188,21 @@ class SearchFiles:
                 break
             scanned += 1
             if by == "name":
+                # A name hit is a dirent and nothing more: the listing describes
+                # every child it found (#2418), and this branch reports exactly
+                # what the listing reports. So a symlink is a hit like any other
+                # entry, and a fetch of that hit is refused by the read seam,
+                # which decides containment first, on the resolved target: a
+                # link resolving outside the working set is an escape (422
+                # invalid_path) even when its target does not exist, and one
+                # resolving inside is the symlink refusal (422 symlink_refused,
+                # #2432) whether it dangles or names a real file. Recorded
+                # decision (#2438):
+                # return it anyway. Fetching a search hit then answers exactly
+                # what fetching the same entry from the file browser answers;
+                # filtering here would leave the two surfaces disagreeing about
+                # the same tree, and filtering the listing instead is the #2418
+                # decision, not this one.
                 matched = name_needle in name.lower()
             else:
                 matched = await self._content_matches(
@@ -1179,9 +1224,36 @@ class SearchFiles:
         stack = ["."]
         while stack:
             current = stack.pop()
-            entries = await self.file_store.list_dir(
-                community_id=community_id, server_id=server_id, rel_path=current
-            )
+            # A directory listed by its parent can be deleted before the walk
+            # descends into it: a search is a read-only pass over a live working
+            # set, so that is ordinary rather than exceptional. Skip the vanished
+            # directory and keep walking — aborting would cost the operator every
+            # other match. Only the modelled miss is skipped; a traversal refusal
+            # or an I/O failure still surfaces. The skip is silent: a search
+            # result is already a point-in-time snapshot (it can come back
+            # ``truncated``), and one log line per vanished directory would be
+            # unbounded noise during exactly the bulk delete that provokes it.
+            #
+            # A listed directory the listing then REFUSES rather than misses — a
+            # link out of the working set (issue #2427) or, since issue #2432, one
+            # that has become a symlink at all — 500'd the whole search. Skip it
+            # too — the same trade — but log it with its reason: unlike the delete
+            # race it is a standing misconfiguration an operator has to go remove,
+            # and it cannot arrive through any supported write.
+            try:
+                entries = await self.file_store.list_dir(
+                    community_id=community_id, server_id=server_id, rel_path=current
+                )
+            except ServerFileNotFoundError:
+                continue
+            except InvalidFilePathError as exc:
+                _LOG.warning(
+                    "file search: server %s: directory %r is refused (%s); skipping",
+                    server_id.value,
+                    current,
+                    exc.reason,
+                )
+                continue
             base = "" if current == "." else current
             for entry in entries:
                 child = f"{base}/{entry.name}" if base else entry.name
@@ -1202,9 +1274,31 @@ class SearchFiles:
         # huge file without ever pulling it into memory (the per-file cap's point).
         if size > self.max_file_bytes:
             return False
-        data = await self.file_store.read_file(
-            community_id=community_id, server_id=server_id, rel_path=rel_path
-        )
+        # A listing describes every dirent, including ones that name no readable
+        # file: a file deleted between the listing and its read is a miss. Such an
+        # entry simply matches nothing — failing the whole search over it would
+        # cost the operator every other match.
+        #
+        # A dirent the read REFUSES rather than misses — a link out of the working
+        # set (issue #2427) or, since issue #2432, any symlink dirent, dangling ones
+        # included — 500'd the whole search. It matches nothing either: it is
+        # unreadable through the seam under any design. It is logged with its
+        # reason, unlike the miss, because it is a standing misconfiguration an
+        # operator has to go remove rather than an ordinary race.
+        try:
+            data = await self.file_store.read_file(
+                community_id=community_id, server_id=server_id, rel_path=rel_path
+            )
+        except ServerFileNotFoundError:
+            return False
+        except InvalidFilePathError as exc:
+            _LOG.warning(
+                "file search: server %s: %r is refused (%s); skipping",
+                server_id.value,
+                rel_path,
+                exc.reason,
+            )
+            return False
         return needle in data
 
     async def _require_at_rest(

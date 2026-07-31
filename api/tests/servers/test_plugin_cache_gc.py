@@ -39,9 +39,6 @@ class _FakeCache(PluginCacheStore):
         self._entries = {e.sha256: e for e in entries}
         self.deleted: list[str] = []
 
-    async def has(self, sha256: str) -> bool:
-        return sha256 in self._entries
-
     async def put(self, sha256: str, stream: ByteStream) -> None:  # pragma: no cover
         raise NotImplementedError
 

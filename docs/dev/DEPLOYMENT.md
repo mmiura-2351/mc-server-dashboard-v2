@@ -130,9 +130,10 @@ is dirty, then build:
 
 **Automated path:** `make deploy` (`scripts/deploy.sh`) wraps the above with
 interactive `.env` generation (first run), a `git pull --ff-only origin main` to
-fetch the latest revision, image builds, a post-deploy `/api/healthz` check, and
-a `.last-deploy-sha` stamp for selective rebuilds. Prefer it over the manual
-commands; use `make update` for subsequent upgrades (Section 9).
+fetch the latest revision, image builds, a `.last-deploy-sha` stamp for
+selective rebuilds, and a post-deploy `/api/healthz` check whose verdict lands
+in `.last-deploy-health` (Section 9, "The two deploy records"). Prefer it over
+the manual commands; use `make update` for subsequent upgrades (Section 9).
 
 This builds the `api` and `worker` images, starts `db`, runs `migrate` to apply
 the schema, then starts `api` and `worker`. Check status and logs:
@@ -331,11 +332,12 @@ real endpoint. `api/tests/servers/test_resource_pack_store_adapter.py` runs its
 green without an S3 instance. CI runs them in the api workflow's separate
 `live-s3` job, which starts a SeaweedFS container and supplies the endpoint
 (#2331); that job fails if either module skips. To run them locally against a
-throwaway SeaweedFS:
+throwaway SeaweedFS — the image tag below must track `compose.yaml`'s
+`seaweedfs` pin, so a local run exercises the deployed version:
 
 ```sh
 docker run -d --name swfs-test -p 8333:8333 \
-  -e AK=testak -e SK=testsk --entrypoint sh chrislusf/seaweedfs:4.33 -c \
+  -e AK=testak -e SK=testsk --entrypoint sh chrislusf/seaweedfs:4.39 -c \
   'mkdir -p /etc/seaweedfs && printf "{\"identities\":[{\"name\":\"t\",\"credentials\":[{\"accessKey\":\"%s\",\"secretKey\":\"%s\"}],\"actions\":[\"Admin\",\"Read\",\"Write\",\"List\",\"Tagging\"]}]}" "$AK" "$SK" > /etc/seaweedfs/s3.json && exec weed server -dir=/data -s3 -s3.config=/etc/seaweedfs/s3.json'
 
 cd api && MCD_TEST_S3_ENDPOINT=http://localhost:8333 \
@@ -791,8 +793,48 @@ is in place before the worker starts emitting it.
 **Automated path:** `make update` (`scripts/update.sh`) runs the preflight, pulls,
 detects which components changed since the last deploy (via `.last-deploy-sha`),
 rebuilds only what changed (api before worker — worker restart bounces running MC
-servers), runs a post-deploy `/api/healthz` check, and stamps the new SHA. Use
-`FORCE=1` to rebuild all components unconditionally.
+servers), starts the stack, stamps the started revision, and runs a post-deploy
+`/api/healthz` check. Use `FORCE=1` to rebuild all components unconditionally.
+
+### The two deploy records
+
+`make deploy` and `make update` write two gitignored files in the repo root.
+They record **different facts**, and conflating them is what made change
+detection diff from a revision that had stopped running (issue #2311):
+
+| File | Means | Written |
+|---|---|---|
+| `.last-deploy-sha` | the revision the running stack was **built and started from** | as soon as `docker compose up -d` succeeds — *before* the healthcheck |
+| `.last-deploy-health` | whether that revision then passed `/api/healthz` — `ok` or `failed` | after the healthcheck resolves |
+
+The stamp is written before the healthcheck deliberately: once compose has
+recreated the containers they are running the new revision whether or not the
+API answers in time, and that is the base the next run has to compute "what
+changed" from. Writing it only on the verified path left the previous stamp
+behind while the containers ran something newer — measured 24 commits stale on
+the canonical host — so the next `make update` diffed from the wrong base and
+could skip rebuilding a component that had genuinely changed.
+
+What the records drive on the next `make update`:
+
+- **Stamp at `HEAD`, health `ok`** — nothing to do; exits without touching the
+  stack.
+- **Stamp at `HEAD`, health `failed` or absent** — the stack was started from
+  `HEAD` but never confirmed healthy. Nothing is rebuilt (the tree has not
+  moved, so no MC servers bounce); the stack is re-started and re-checked. Fix
+  whatever the API was failing on, then just re-run `make update`.
+- **Stamp behind `HEAD`** — normal selective rebuild of everything that changed
+  between the two.
+- **Stamp absent, empty, or naming a commit this checkout does not have** —
+  the running revision is **unknown**. There is no base to diff from, so the
+  run prints a warning to stderr and rebuilds **all** components. A deployment
+  ever brought up with the plain `docker compose up -d --build` of Section 4
+  has no stamp and lands here; so does one whose `docker compose up -d` failed
+  part-way, because a stack that is half-recreated is not honestly described by
+  either revision and both records are cleared rather than left claiming one.
+
+A failed build (before `docker compose up`) changes neither record: no
+container was replaced, so the existing stamp still describes what is running.
 
 > **Breaking change — the default storage backend is now `object` (SeaweedFS).**
 > Before this revision the shipped default was the local-volume `fs` backend. The
@@ -959,8 +1001,10 @@ servers), runs a post-deploy `/api/healthz` check, and stamps the new SHA. Use
 > old data back means bringing back a `compose.yaml` that pins the old major.
 > Your checkout is on the new revision by then, and nothing on the host reliably
 > records which revision the running stack was built from (`.last-deploy-sha` is
-> written only by `make update`, and only on its success path — on the canonical
-> host it was 24 commits stale). So the script derives it from this repo's own
+> written only by `make deploy` / `make update`, so a deployment ever brought up
+> with the plain `docker compose up -d --build` of Section 4 has none, and
+> nothing about the file distinguishes that from a current value — on the
+> canonical host it was 24 commits stale). So the script derives it from this repo's own
 > history: the newest revision whose `compose.yaml` deploys the major the volume
 > holds, **verified** by reading that revision's image the same way it read
 > `HEAD`'s. If history contains no such revision, it says so up front, before
@@ -1093,7 +1137,7 @@ Back up the database with a logical dump and archive the storage volume. For the
 default object backend:
 
 ```sh
-docker compose exec db pg_dump -U mcsd -d mcsd > backup-db.sql
+docker compose exec -T db pg_dump -U mcsd -d mcsd > backup-db.sql
 docker run --rm -v mc-server-dashboard-v2_seaweedfs-data:/data \
   -v "$PWD":/backup debian:bookworm-slim \
   tar czf /backup/backup-storage.tar.gz -C /data .

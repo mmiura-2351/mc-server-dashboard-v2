@@ -356,7 +356,7 @@ class SqlAlchemyServerRepository(ServerRepository):
             str(row.id): memory_limit_from_config(dict(row.config)) or 0 for row in rows
         }
 
-    async def list_running_assigned(self) -> list[Server]:
+    async def list_desired_running_assigned(self) -> list[Server]:
         stmt = select(ServerModel).where(
             ServerModel.desired_state == DesiredState.RUNNING.value,
             ServerModel.assigned_worker_id.is_not(None),
@@ -413,6 +413,41 @@ class SqlAlchemyServerRepository(ServerRepository):
                 and_(
                     ServerModel.desired_state == stopped,
                     ServerModel.observed_state == ObservedState.UNKNOWN.value,
+                    ServerModel.assigned_worker_id.is_not(None),
+                ),
+                # desired=stopped, observed=crashed, still assigned (issue #2439):
+                # the process died on its own under a stop intent (typically a stop
+                # whose dispatch failed, leaving (stopped, running, assigned), with
+                # the process then exiting before the reconciler's grace lapsed).
+                # This one WEDGES without this arm: crashed is terminal, so the
+                # worker sends no further StatusChange and
+                # reset_unverifiable_observed_states (API restart) deliberately
+                # leaves it alone as still-truthful. Nothing else flags the row
+                # either — is_at_rest() reads true — so the assignment stands and
+                # every later start 409s on require_unassigned, for as long as the
+                # owning worker stays connected. (A disconnect does rewrite it to
+                # unknown, but only by accident of that invalidation being
+                # unfiltered; an operator cannot be told to unplug a worker.)
+                and_(
+                    ServerModel.desired_state == stopped,
+                    ServerModel.observed_state == ObservedState.CRASHED.value,
+                    ServerModel.assigned_worker_id.is_not(None),
+                ),
+                # desired=stopped, observed=stopping, still assigned (issue #2452):
+                # a stop whose dispatch failed AFTER the worker emitted stopping on
+                # entry to its Stop. Both of the worker's Stop failure paths (the
+                # kill call erroring, and the container surviving the kill) restore
+                # the pre-stop state WITHOUT emitting, so no terminal report ever
+                # follows and observed sticks at stopping. This WEDGES the row
+                # completely: is_at_rest() is false so file/backup/restore/delete all
+                # 409 "unsettled", StopServer and RestartServer raise
+                # InvalidLifecycleTransitionError (desired is already stopped) and
+                # StartServer 409s on require_unassigned. The reconciler routes this
+                # to redispatch_stop (connected worker) or clear_stale_assignment
+                # (disconnected worker).
+                and_(
+                    ServerModel.desired_state == stopped,
+                    ServerModel.observed_state == ObservedState.STOPPING.value,
                     ServerModel.assigned_worker_id.is_not(None),
                 ),
             )

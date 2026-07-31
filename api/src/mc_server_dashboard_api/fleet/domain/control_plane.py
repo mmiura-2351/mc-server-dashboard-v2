@@ -129,6 +129,13 @@ class CommandResult:
     # Refines a FILE_ACCESS_DENIED failure (issue #548); UNSPECIFIED for any
     # other code.
     file_access_reason: FileAccessReason = FileAccessReason.UNSPECIFIED
+    # The Worker DECLARING it still holds this server's working set locally, at
+    # this generation, now the command has finished (issue #2481). Only a
+    # snapshot sets it, and only when the Worker's own generation marker was
+    # published at that value. ``None`` is "declared nothing" — a snapshot that
+    # GC'd the scratch, one whose marker stamp was refused, or a Worker too old
+    # to send the field — and the held inventory is then left untouched.
+    held_generation: int | None = None
 
     @property
     def success(self) -> bool:

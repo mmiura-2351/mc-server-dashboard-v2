@@ -14,9 +14,15 @@ with different shapes (ARCHITECTURE.md Section 5.1):
   *one* resource, so a browser can stream a large archive straight to disk from
   a plain URL (issue #2313). ``resource`` is an opaque caller-composed string:
   the identity Port binds the grant to it without knowing what it names.
+- **Download cookie** — the same resource-scoped authority as a grant, on a
+  longer TTL, minted when a grant is redeemed so an interrupted transfer can be
+  retried after the grant's query-string window has closed (issue #2373). It is
+  a separate kind because its transport is different: it rides an ``HttpOnly``
+  cookie and must never be accepted in a URL, where the grant's short TTL is the
+  whole exposure bound.
 
-The grant kind lives on this Port rather than on one of its own so the system
-keeps a single JWT adapter and a single signing key.
+The grant and cookie kinds live on this Port rather than on ones of their own so
+the system keeps a single JWT adapter and a single signing key.
 """
 
 from __future__ import annotations
@@ -91,4 +97,23 @@ class TokenService(abc.ABC):
         expiry check fails, if the token is not a download grant, or if it is
         bound to a different resource. A grant proves identity, never authority:
         the caller still runs its own authorization.
+        """
+
+    @abc.abstractmethod
+    def issue_download_cookie(self, user_id: UserId, resource: str) -> str:
+        """Mint a download cookie authenticating ``user_id`` for ``resource`` only.
+
+        No deadline is returned: unlike a grant, whose ``expires_at`` a client is
+        told so it can re-mint, the cookie's lifetime is the browser's ``Max-Age``
+        (the configured TTL) and the JWT's own ``exp`` is what is enforced.
+        """
+
+    @abc.abstractmethod
+    def verify_download_cookie(self, token: str, resource: str) -> UserId:
+        """Return the subject of a download cookie valid for ``resource``.
+
+        Raises :class:`InvalidDownloadCookieError` under the same conditions
+        :meth:`verify_download_grant` raises its own error, and additionally when
+        the token is a grant rather than a cookie. Identity only, exactly like a
+        grant: the caller still runs its own authorization.
         """

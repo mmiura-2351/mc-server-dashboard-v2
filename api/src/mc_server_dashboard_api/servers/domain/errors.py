@@ -199,8 +199,9 @@ class EulaNotAcceptedError(ServerError):
 class NoEligibleWorkerError(ServerError):
     """Placement found no Worker that can host the server (FR-WRK-3).
 
-    No connected, non-draining Worker has free capacity. The edge maps this to
-    a typed 409.
+    No connected, non-draining Worker has free capacity. A transient fleet-capacity
+    condition rather than a client-state conflict, so the edge maps this to 503
+    ``no_eligible_worker``.
     """
 
 
@@ -253,7 +254,10 @@ class InvalidFilePathError(ServerError):
     path refines it from the Worker's :class:`FileAccessReason` so a non-path
     denial surfaces honestly: ``"is_a_directory"`` (read/edit of a directory),
     ``"not_a_directory"`` (list of a file), or ``"symlink_refused"`` (a refused
-    symlink). The oversized case is not carried here — it is raised as
+    symlink). The at-rest path shares that last one: Storage refuses a path with a
+    symlink at any component (issue #2432), so one browser click gets the same
+    reason — and the same sentence — whether the server is at rest or running. The
+    oversized case is not carried here — it is raised as
     :class:`FileTooLargeError` (413) instead.
     """
 
@@ -360,6 +364,22 @@ class BackupCorruptError(ServerError):
         self.corrupt_count = corrupt_count
 
 
+class BackupUnreadableError(ServerError):
+    """A backup's stored archive could not be read back in full (issue #2371).
+
+    The seam translation of the storage ``ArchiveUnreadableError``: the sweep's
+    readability probe streamed the stored archive end to end and the store could not
+    reproduce it — the body stopped short of its declared length, or the gzip stream
+    never reached a trailer that matches its payload. The same read path backs
+    restore, so such a backup is unrestorable; the sweep quarantines it.
+
+    Distinct from :class:`BackupCorruptError` (the archived *world* is structurally
+    corrupt — the bytes are all there, the contents are bad) and from
+    :class:`BackupStorageUnavailableError` (the store could not serve the request at
+    all, which is a transient condition and no verdict about the archive).
+    """
+
+
 class BackupStorageUnavailableError(ServerError):
     """A backup operation failed because the storage backend was unavailable (#2270).
 
@@ -369,8 +389,12 @@ class BackupStorageUnavailableError(ServerError):
     one of the modelled outcomes. Translating it at the servers/storage seam keeps the
     raw storage type from crossing back into the servers layer (the seam's documented
     contract). The condition is a transient backend fault, distinct from a corrupt
-    working set (:class:`BackupCorruptError`); an unmapped ``ServerError`` surfaces as
-    a generic 500 at the edge, which a future dedicated handler may refine to a 503.
+    working set (:class:`BackupCorruptError`), so the edge maps it to 503
+    ``storage_unavailable`` (issue #2378) — the same treatment
+    :class:`~.control_plane.WorkerUnavailableError` gets. That tells a client the
+    request is worth retrying unchanged and keeps a genuine 500 meaningful in
+    monitoring. No ``Retry-After`` rides along: nothing in the request path knows when
+    the store recovers, and an invented number would be worse than none.
     """
 
 
@@ -513,10 +537,12 @@ class PluginCacheBlobNotFoundError(ServerError):
 
     Raised at the ``PluginCacheStore`` seam when ``open`` hits a missing content
     key, so the storage ``NotFoundError`` never crosses into the servers layer
-    (mirroring ``backup_store.py`` and ``resource_pack_store.py``). Every caller
-    either gates on ``has`` first or opens a blob a plugin row still references,
-    so this is a storage-consistency fault (a GC race or an external deletion),
-    not a client error: no route maps it, and the edge reports it as a 500.
+    (mirroring ``backup_store.py`` and ``resource_pack_store.py``). The catalog
+    resolver catches it and falls back to downloading the jar -- the cache is an
+    optimisation there (issue #2346). Every other caller opens a blob a plugin
+    row still references, where a miss is a storage-consistency fault (a GC race
+    or an external deletion) with no local recovery, not a client error: no route
+    maps it, and the edge reports it as a 500.
     """
 
 
@@ -573,6 +599,20 @@ class ResourcePackNotFoundError(ServerError):
     """A resource pack operation targeted a pack that does not exist.
 
     Raised by get/delete when the pack id is unknown. The edge maps this to 404.
+    """
+
+
+class ResourcePackStorageUnavailableError(ServerError):
+    """A resource pack blob could not be served because the store was down (#2455).
+
+    The seam translation of the storage ``ObjectStoreUnavailableError`` for the
+    resource pack blob store, mirroring :class:`BackupStorageUnavailableError`: the
+    object store surfaced a transport failure or a backend 5xx on the size probe or
+    on the read the download routes stream from. Translating it at the seam keeps
+    the raw storage type from crossing back into the servers layer, and lets the
+    edge answer 503 ``storage_unavailable`` — a transient condition worth retrying
+    unchanged, and distinct from :class:`ResourcePackNotFoundError`, which says the
+    pack is gone and asking again is pointless.
     """
 
 

@@ -211,6 +211,13 @@ type Manager struct {
 	// the real filesystem.
 	scanRegion func(root string) (regionState, error)
 
+	// orphanProbeInterval / orphanProbeMaxInterval are the failed-stop-orphan
+	// converger's probe cadence and its exponential-backoff cap (issue #2475).
+	// They are fields (not consts) so tests can shrink them to milliseconds,
+	// mirroring fsckRetryDelay. Defaulted in New; the waits go through m.clock.
+	orphanProbeInterval    time.Duration
+	orphanProbeMaxInterval time.Duration
+
 	// transferDeadlineNanos bounds a single data-plane transfer (snapshot upload /
 	// hydrate download) Worker-side (issue #874). The session pushes it from the
 	// RegisterAck after registration (SetTransferDeadline); the hydrate/snapshot
@@ -232,11 +239,27 @@ type Manager struct {
 	// and unassigns — over a process/container that may still be lingering (issue
 	// #251). Keeping the Instance and its driver name here lets a retry re-attempt
 	// the driver Stop against the same handle and resolve RCON identically (issue
-	// #1712), reporting success only on confirmed termination; until then
-	// start/hydrate over the id are rejected as they are for a running server. The
-	// instance's status pump clears the record if the orphan finally exits on its
-	// own.
+	// #1712), reporting success only on confirmed termination; until then every
+	// other command over the id is refused naming the orphan, so no path claims
+	// the server is not running about a process that is probably alive (issue
+	// #2466). The refusal CODE splits by whether the refused command will succeed
+	// once the orphan converges (issue #2476): BUSY for start / hydrate /
+	// stopped-id snapshot through reserve, which the API retries until it is let
+	// through; INVALID_STATE for restart through takeRunningReserve and console /
+	// relay tunnel dial / Bedrock tunnel open through notRunningRefusal, which are
+	// refused for what the state IS and are never executed later. CloseBedrockTunnel is
+	// the deliberate exception: it takes no running check and stays a success, so
+	// a tunnel that outlived its server can still be torn down. The instance's
+	// status pump clears the record if the orphan finally exits on its own, and
+	// the per-id converger (issue #2475) drives it to a settled outcome meanwhile
+	// instead of leaving the id guarded until an operator intervenes.
 	orphans map[string]orphanEntry
+	// converging marks server ids that already have a convergeOrphan goroutine
+	// running, so the orphan its own retry stop re-records does not spawn a second
+	// one (issue #2475). It is claimed with the record in recordOrphan and cleared
+	// in currentOrphan, in the same critical section that observes the record gone,
+	// so the flag can never outlive its goroutine or block its successor.
+	converging map[string]bool
 	// reserved marks a server id as having a mutating lifecycle command in flight so
 	// a duplicate re-issued after a stream reconnect cannot overlap the original
 	// (issue #780). It is claimed under mu and held across the long operation, then
@@ -313,6 +336,10 @@ func New(drivers map[string]execution.ExecutionDriver, scratchDir string, openCo
 		pendingStatus:      map[string]session.StatusEvent{},
 		coalescing:         map[string]bool{},
 		statusNotify:       make(chan struct{}, 1),
+
+		orphanProbeInterval:    defaultOrphanProbeInterval,
+		orphanProbeMaxInterval: defaultOrphanProbeMaxInterval,
+		converging:             map[string]bool{},
 	}
 	go m.statusDispatcher()
 	return m
@@ -520,7 +547,14 @@ func (m *Manager) recordGeneration(workingDir, serverID string, gen uint64) {
 // last sliver, while rewriting the shared, fsync-ordered writeGeneration the hydrate path
 // also uses and writing a marker into the displaced tree that STORAGE.md Section 4.6's
 // manual recovery reads. See writeGenerationGuarded for the case analysis.
-func (m *Manager) recordGenerationIfUnchanged(ref *workingDirRef, workingDir, serverID string, gen uint64) {
+//
+// It REPORTS whether the marker was published, and that return value is the sole source
+// of the Worker-declared held generation on the snapshot's CommandResult (issue #2481).
+// The API mirrors that declaration into the inventory its skip-hydrate gate reads, so the
+// declaration has to be the marker write's own outcome rather than a second opinion about
+// it: every skip above returns false through the same statement that suppresses the write,
+// so no code path can report a generation this function did not stamp.
+func (m *Manager) recordGenerationIfUnchanged(ref *workingDirRef, workingDir, serverID string, gen uint64) bool {
 	reason := ""
 	guard := func() bool {
 		ok, why := ref.current()
@@ -535,16 +569,18 @@ func (m *Manager) recordGenerationIfUnchanged(ref *workingDirRef, workingDir, se
 	}
 	if !guard() {
 		warnSkipped()
-		return
+		return false
 	}
 	if err := writeGenerationGuarded(workingDir, gen, guard); err != nil {
 		if errors.Is(err, errWorkingDirReplaced) {
 			warnSkipped()
-			return
+			return false
 		}
 		m.logger.Warn("could not record working-set generation",
 			"server_id", serverID, "generation", gen, "error", err)
+		return false
 	}
+	return true
 }
 
 // restoreSaveTimeout bounds the re-enable-auto-save RCON call on the snapshot
@@ -648,6 +684,18 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	// pin guards the running path's marker stamp; nil (and unused) on the stopped path,
 	// which records no generation. Declared here so the post-upload tail below can see it.
 	var pin *workingDirRef
+	// declaredGeneration is what this command DECLARES the Worker still holds when it
+	// returns (issue #2481); nil declares nothing. It has exactly one assignment, in
+	// the running branch's tail, and its value comes from recordGenerationIfUnchanged
+	// reporting that the marker write landed — so the declaration cannot disagree with
+	// the marker, and the stopped-id branch (which calls removeScratch instead of that
+	// function, and is the else of the same if) has no statement that can set it.
+	//
+	// Deliberately NOT named heldGeneration: that is the package function
+	// (scratchscan.go) computing the register-time advertisement this value mirrors,
+	// and shadowing it here would hide the very identifier a reader needs to follow to
+	// see that the two report the same marker.
+	var declaredGeneration *uint64
 	if running {
 		// Pin the working dir's IDENTITY for the whole window, from before the quiesce
 		// to the post-upload marker stamp (issue #2284). Because this branch takes no
@@ -884,7 +932,15 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// outcome that must not happen — it is what the skip-hydrate gate reads, so a
 		// marker newer than its tree makes the API skip the hydrate that would correct
 		// it. Skipped instead: see recordGenerationIfUnchanged.
-		m.recordGenerationIfUnchanged(pin, workingDir, cmd.ServerID, gen)
+		//
+		// Declare the generation to the API only when that stamp actually landed (issue
+		// #2481). The API mirrors the declaration into the same inventory the gate reads,
+		// so a declaration the marker does not back would defeat the guard above over the
+		// wire instead of on disk — hence the value is taken FROM the write's report, not
+		// from being in this branch.
+		if m.recordGenerationIfUnchanged(pin, workingDir, cmd.ServerID, gen) {
+			declaredGeneration = &gen
+		}
 		// GC the displaced tree a prior hydrate kept aside (issue #906): a successful
 		// publish proves the store now holds (and supersedes) this server's world, so the
 		// recovery copy is no longer needed. Mirrors the #845 GC-on-success pattern.
@@ -907,10 +963,15 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// intact, so nothing is lost. The reservation taken in the stopped branch is
 		// still held (released by the deferred release on return), so no racing hydrate
 		// or start can recreate the dir between the publish and this removal. Recording
-		// the new generation would be pointless work on a dir we are about to delete.
+		// the new generation would be pointless work on a dir we are about to delete —
+		// and declaring one to the API (issue #2481) would be a world-loss path: the API
+		// would record held == store for a scratch that no longer exists, take the short
+		// held-start grace, and start with skip_hydrate into an empty directory.
 		m.removeScratch(cmd.ServerID)
 	}
-	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
+	return session.CommandResult{
+		CommandID: cmd.CommandID, Success: true, HeldGeneration: declaredGeneration,
+	}
 }
 
 // checkWorkingSet runs the pre-pack region fsck (issue #927: ONE rule set — a
@@ -1450,7 +1511,8 @@ func (m *Manager) sweepDisplaced(serverID string) {
 // hydrate for serverID left in the scratch root. The next start's leftover sweep
 // (datatransfer.sweepHydrateLeftovers) clears them too, but only if the server is
 // re-placed onto this Worker; a deleted/re-placed-elsewhere id would otherwise leak
-// the world-sized orphan permanently. The prefix matches datatransfer.hydrateTmpPrefix
+// the world-sized orphan permanently. The prefix is built from hydratePrefix — the
+// same constant the held-set scans skip on — and matches datatransfer.hydrateTmpPrefix
 // exactly (".hydrate-<id>-"), so only this id's leftovers are touched — not another
 // server's dir or a similarly named one. Best-effort: a removal failure is ignored
 // (a leftover is wasted disk, never a correctness problem).
@@ -1459,7 +1521,7 @@ func (m *Manager) sweepHydrateLeftovers(serverID string) {
 	if err != nil {
 		return
 	}
-	prefix := ".hydrate-" + serverID + "-"
+	prefix := hydratePrefix + serverID + "-"
 	for _, e := range entries {
 		if strings.HasPrefix(e.Name(), prefix) {
 			_ = os.RemoveAll(filepath.Join(m.scratchDir, e.Name()))
@@ -1524,17 +1586,33 @@ type orphanEntry struct {
 	driver string
 }
 
-// takeOutcome is the result of takeStoppableReserve: an instance to stop was
-// taken and reserved, no live instance exists (genuinely unknown -> SERVER_NOT_FOUND),
-// or a lifecycle command is already reserved in flight for the id (a detached stop
-// still confirming, or a start/hydrate mid-operation -> BUSY, issue #780/#824).
+// takeOutcome is the result of takeStoppableReserve / takeRunningReserve: an
+// instance was taken and reserved, no live instance exists (genuinely unknown ->
+// SERVER_NOT_FOUND), a lifecycle command is already reserved in flight for the id
+// (a detached stop still confirming, or a start/hydrate mid-operation -> BUSY,
+// issue #780/#824), or a failed-stop orphan is recorded for the id (a process
+// this Worker could not confirm dead -> INVALID_STATE, issue #2466).
+// takeOrphaned is reachable only from takeRunningReserve: takeStoppableReserve
+// TAKES the orphan (that is the retry path that terminates it).
 type takeOutcome int
 
 const (
 	takeFound takeOutcome = iota
 	takeNotFound
 	takeInFlight
+	takeOrphaned
 )
+
+// orphanPendingMsg is the precondition message every command refused over a
+// recorded failed-stop orphan carries. One constant so the reserve()-gated
+// commands (start/hydrate/stopped-id snapshot) and the ones that check the
+// orphan directly (restart/console/tunnel dial) say the same thing about the
+// same state — the point of issue #2466 is that the refusal reads honestly
+// wherever it surfaces. The API discriminates on the CODE, not this text, and
+// the code deliberately differs between those two groups (issue #2476): the
+// message describes the STATE, which is identical; the code answers whether THIS
+// command will succeed once the converger resolves it, which is not.
+const orphanPendingMsg = "instancemanager: server has a failed-stop orphan pending termination"
 
 // takeStoppableReserve atomically (under mu) selects the instance to stop for
 // serverID and claims an in-flight reservation across the eviction -> stop-confirmed
@@ -1612,9 +1690,28 @@ func (m *Manager) attemptStop(ctx context.Context, serverID string, inst executi
 		}
 	}
 	if err := inst.Stop(ctx, graceful, preFallback); err != nil {
-		m.mu.Lock()
-		m.orphans[serverID] = orphanEntry{inst: inst, driver: driverName}
-		m.mu.Unlock()
+		// Record the orphan and hand it to a converger, so the Worker keeps working
+		// the stop on its own instead of waiting for an operator to notice (issue
+		// #2475). recordOrphan is idempotent on the converger: the retries the
+		// converger itself issues land back here and re-record without spawning a
+		// second one.
+		m.recordOrphan(serverID, inst, driverName)
+		// The orphan record is otherwise invisible: nothing enumerates m.orphans, so
+		// "why is every command for this server refused?" was a code-reading exercise
+		// (issue #2466). Say it once, at the moment the state is entered — the id is
+		// now guarded against start / hydrate / restart / console / relay tunnel
+		// dial / Bedrock tunnel open until a retry stop confirms termination or the
+		// process exits on its own.
+		m.logger.Warn("recorded failed-stop orphan; the process may still be running",
+			"server_id", serverID, "driver", driverName, "graceful", graceful, "error", err)
+		// Close the Bedrock relay tunnel here too, not only on a confirmed stop
+		// (issue #2468 item 2): the stop intent is the operator's, and an instance
+		// this Worker is still trying to terminate must not keep taking joins for
+		// however long convergence takes. Close is idempotent and takes no running
+		// check, so the operator can still tear it down by hand either way.
+		if m.bedrock != nil {
+			m.bedrock.Close(serverID)
+		}
 		// The graceful path issued save-off before the flush; because the stop
 		// failed, the server may still be alive with auto-save disabled. Re-enable
 		// it so player progress is not silently lost (issue #2021).
@@ -1639,7 +1736,14 @@ func (m *Manager) attemptStop(ctx context.Context, serverID string, inst executi
 // tracked but the id is already reserved (a detached stop or another lifecycle
 // command still in flight) and takeNotFound for a genuinely unknown id. A restart
 // applies only to a tracked running instance, so a recorded orphan is NOT taken
-// here (it is left for the stop-retry path, issue #251) and reports takeNotFound.
+// here (it is left for the stop-retry path, issue #251) — it reports takeOrphaned,
+// so the restart is refused as a settled INVALID_STATE naming the orphan rather
+// than as SERVER_NOT_FOUND, which would tell the operator the server is not
+// running about a process that is probably still alive (issue #2466). The
+// reservation is checked BEFORE the orphan for the same reason as in
+// takeStoppableReserve: while an orphan-retry stop is in flight the id carries
+// both, and the in-flight command's outcome is not yet known, so BUSY (retry
+// later) is the honest answer rather than a settled state.
 func (m *Manager) takeRunningReserve(serverID string) (execution.Instance, session.Command, takeOutcome) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1647,6 +1751,9 @@ func (m *Manager) takeRunningReserve(serverID string) (execution.Instance, sessi
 	if !ok {
 		if m.reserved[serverID] {
 			return nil, session.Command{}, takeInFlight
+		}
+		if _, orphaned := m.orphans[serverID]; orphaned {
+			return nil, session.Command{}, takeOrphaned
 		}
 		return nil, session.Command{}, takeNotFound
 	}
@@ -1665,6 +1772,13 @@ func (m *Manager) handleRestart(ctx context.Context, cmd session.Command) sessio
 	case takeNotFound:
 		return fail(cmd.CommandID, session.CommandErrorServerNotFound,
 			"instancemanager: server not running")
+	case takeOrphaned:
+		// A prior stop for this id could not confirm termination, so the process is
+		// probably still alive — restarting it is refused, but as the settled state
+		// it is, not as "not running" (issue #2466). The retry stop (StopServer) is
+		// the path that terminates the orphan; only once it confirms does the id
+		// become genuinely unknown.
+		return fail(cmd.CommandID, session.CommandErrorInvalidState, orphanPendingMsg)
 	case takeInFlight:
 		// A lifecycle command (e.g. a detached stop from a dropped stream, or a start/
 		// hydrate mid-operation) is already reserved in flight for this id (issue #780).
@@ -1718,13 +1832,32 @@ func (m *Manager) handleRestart(ctx context.Context, cmd session.Command) sessio
 	return res
 }
 
-func (m *Manager) handleServerCommand(ctx context.Context, cmd session.Command) session.CommandResult {
+// notRunningRefusal reports whether serverID has no tracked running instance and,
+// when it has none, the coded refusal the command must fail with. Both facts are
+// read in one critical section so the classification cannot straddle a concurrent
+// orphan record.
+//
+// A recorded failed-stop orphan is refused as INVALID_STATE naming the orphan,
+// not SERVER_NOT_FOUND: this Worker could not confirm the process dead, so it is
+// probably still alive, holding its port and writing its world, and "server not
+// running" is a false statement about it (issue #2466). Every other untracked id
+// keeps SERVER_NOT_FOUND — the code stays reserved for ids this Worker genuinely
+// knows nothing about.
+func (m *Manager) notRunningRefusal(serverID string) (session.CommandErrorCode, string, bool) {
 	m.mu.Lock()
-	_, running := m.instances[cmd.ServerID]
-	m.mu.Unlock()
-	if !running {
-		return fail(cmd.CommandID, session.CommandErrorServerNotFound,
-			"instancemanager: server not running")
+	defer m.mu.Unlock()
+	if _, running := m.instances[serverID]; running {
+		return 0, "", false
+	}
+	if _, orphaned := m.orphans[serverID]; orphaned {
+		return session.CommandErrorInvalidState, orphanPendingMsg, true
+	}
+	return session.CommandErrorServerNotFound, "instancemanager: server not running", true
+}
+
+func (m *Manager) handleServerCommand(ctx context.Context, cmd session.Command) session.CommandResult {
+	if code, msg, refused := m.notRunningRefusal(cmd.ServerID); refused {
+		return fail(cmd.CommandID, code, msg)
 	}
 
 	ctrl, err := m.openControl(ctx, cmd.ServerID, m.driverFor(cmd.ServerID))
@@ -1744,19 +1877,25 @@ func (m *Manager) handleServerCommand(ctx context.Context, cmd session.Command) 
 
 // handleTunnelDial opens a relay dial-back tunnel for one player session (RELAY.md
 // Section 5). The server must be running locally — a not-running server returns
-// SERVER_NOT_FOUND — and the dialer resolves its published loopback game port from
-// the working dir, dials the relay endpoint, presents the token, and splices the
+// SERVER_NOT_FOUND, a failed-stop orphan INVALID_STATE (issue #2466) — and the
+// dialer resolves its published loopback game port from the working dir, dials
+// the relay endpoint, presents the token, and splices the
 // two. It returns once the splice is established; the splice itself runs on the
 // dialer's own long-lived context, off this command, so it outlives the result. A
 // TunnelDial is a quick command: it bypasses the slow-lane cap (session layer) so
 // a join never queues behind a hydrate.
+//
+// The dial is dispatched fire-and-forget (RELAY.md Section 4): the API awaits no
+// result and the relay's real answer is the dial-back arriving, so this refusal
+// reaches nobody but the API's diagnostic log
+// (fleet/adapters/control_plane.py _log_fire_and_forget_result, which logs the
+// message at WARN). The joining player's experience is unchanged either way —
+// the join stalls until the relay times it out, because the route still says
+// running. Only the log line differs, and that is exactly the line an operator
+// reads when a "running" server refuses joins.
 func (m *Manager) handleTunnelDial(ctx context.Context, cmd session.Command) session.CommandResult {
-	m.mu.Lock()
-	_, running := m.instances[cmd.ServerID]
-	m.mu.Unlock()
-	if !running {
-		return fail(cmd.CommandID, session.CommandErrorServerNotFound,
-			"instancemanager: server not running")
+	if code, msg, refused := m.notRunningRefusal(cmd.ServerID); refused {
+		return fail(cmd.CommandID, code, msg)
 	}
 	if m.tunnel == nil {
 		return fail(cmd.CommandID, session.CommandErrorInternal,
@@ -1779,18 +1918,28 @@ func (m *Manager) handleTunnelDial(ctx context.Context, cmd session.Command) ses
 // handleOpenBedrockTunnel starts (or, for a repeated command with the same
 // credential, idempotently confirms) this server's Bedrock relay QUIC tunnel
 // (docs/app/BEDROCK_TUNNEL.md, issue #1546). Like TunnelDial, the server must
-// be running locally. Unlike TunnelDial, Open does not itself dial/handshake
+// be running locally, and a failed-stop orphan is refused as INVALID_STATE
+// rather than SERVER_NOT_FOUND (issue #2466) — an orphan reaches this handler
+// because the API dispatches Open off an observed=running WRITE (the sink's hook
+// on an applied StatusChange(running), or a lifecycle convergence;
+// servers/adapters/bedrock_tunnel_sync.py) and that dispatch is fire-and-forget,
+// so a stop whose driver Stop cannot confirm termination in the gap records the
+// orphan before the command lands: the API's cached running state does not move
+// until the Worker's own next report. The refusal therefore reaches only the
+// API's WARN log, which must not say the server is not running about a process
+// that may still be alive. This verb keeps INVALID_STATE where start / hydrate /
+// stopped-id snapshot moved to BUSY (issue #2476): it is refused for what the
+// state IS and is never carried out once the orphan converges, so BUSY would
+// promise a success that never comes.
+//
+// Unlike TunnelDial, Open does not itself dial/handshake
 // synchronously: it registers the tunnel and returns, while the QUIC dial,
 // handshake, datagram pump, and any reconnect-with-backoff run off this
 // command on the tunneler's own long-lived context — a slow or rejected relay
 // dial must not hold up the command result.
 func (m *Manager) handleOpenBedrockTunnel(cmd session.Command) session.CommandResult {
-	m.mu.Lock()
-	_, running := m.instances[cmd.ServerID]
-	m.mu.Unlock()
-	if !running {
-		return fail(cmd.CommandID, session.CommandErrorServerNotFound,
-			"instancemanager: server not running")
+	if code, msg, refused := m.notRunningRefusal(cmd.ServerID); refused {
+		return fail(cmd.CommandID, code, msg)
 	}
 	if m.bedrock == nil {
 		return fail(cmd.CommandID, session.CommandErrorInternal,
@@ -1817,6 +1966,13 @@ func (m *Manager) handleOpenBedrockTunnel(cmd session.Command) session.CommandRe
 // (attemptStop), so a Close arriving after the instance is already evicted —
 // or for a server this Worker never opened a tunnel for — must still succeed,
 // not SERVER_NOT_FOUND.
+//
+// That makes it the one running-server command with nothing for the failed-stop
+// orphan refusal to fix (issue #2466): it takes no running check at all, so it
+// never reported an orphan as not-running, and over an orphan it does the useful
+// thing — a failed stop leaves the tunnel open (issue #2468) and this closes it.
+// Refusing it for an orphan would remove the only way to take that tunnel down
+// without terminating the process.
 func (m *Manager) handleCloseBedrockTunnel(cmd session.Command) session.CommandResult {
 	if m.bedrock != nil {
 		m.bedrock.Close(cmd.ServerID)
@@ -2225,10 +2381,11 @@ func (m *Manager) driverFor(serverID string) string {
 // checks, so there is no check-then-act gap — when the id is already running, has
 // a failed-stop orphan pending, or already carries a reservation, and otherwise
 // marks it reserved. ok reports whether the claim was taken; on a rejection, code
-// classifies the failure (CommandErrorInvalidState for the settled running/orphan
-// states, CommandErrorBusy for the unsettled reservation race, issue #824) and
-// msg is the precondition message the caller fails with. It must be paired with
-// release on every exit path.
+// classifies the failure (CommandErrorInvalidState for the one SETTLED state this
+// gate sees, "already running"; CommandErrorBusy for the two unsettled ones, the
+// reservation race of issue #824 and the pending orphan of issue #2476) and msg is
+// the precondition message the caller fails with. It must be paired with release
+// on every exit path.
 func (m *Manager) reserve(serverID string) (ok bool, code session.CommandErrorCode, msg string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -2237,9 +2394,23 @@ func (m *Manager) reserve(serverID string) (ok bool, code session.CommandErrorCo
 	}
 	if _, orphaned := m.orphans[serverID]; orphaned {
 		// A prior stop could not confirm termination: the process/container may
-		// still be lingering. Starting/hydrating now would double-instance over it;
-		// the reconciler must retry the stop first (issue #251).
-		return false, session.CommandErrorInvalidState, "instancemanager: server has a failed-stop orphan pending termination"
+		// still be lingering. Starting/hydrating now would double-instance over it,
+		// so the command is refused (issue #251) — but as BUSY, not INVALID_STATE
+		// (issue #2476). Since issue #2475 the orphan is never a settled state: a
+		// converger is probing the process, retrying the stop while it is alive and
+		// retiring the record once it is confirmed gone, so THIS command succeeds on
+		// a later retry. That is exactly the BUSY contract (issue #824) — outcome not
+		// yet known, retry rather than converge.
+		//
+		// INVALID_STATE here was the #2467 wedge: reserve() cannot tell an orphan
+		// whose process is alive from one already dead, yet it answered the same code
+		// the API reads as "already running" on a start, so a dead orphan's refusal
+		// manufactured observed=running on a server that was down. The verbs that
+		// check m.orphans directly — restart / console / tunnel dial / Bedrock tunnel
+		// open — keep INVALID_STATE on purpose: they are refused for what the state
+		// IS and will never be executed later, so BUSY would promise a success that
+		// never comes.
+		return false, session.CommandErrorBusy, orphanPendingMsg
 	}
 	if m.reserved[serverID] {
 		// A re-issued duplicate arriving while the original is still in flight after
@@ -2292,13 +2463,18 @@ func (m *Manager) pump(serverID string, inst execution.Instance, done chan struc
 
 // forgetOrphanIf removes serverID's failed-stop orphan record only if it is still
 // the given inst, so it does not clear a record belonging to a different instance
-// (issue #251).
-func (m *Manager) forgetOrphanIf(serverID string, inst execution.Instance) {
+// (issue #251). It reports whether it removed anything: the pump ignores that (it
+// is retiring a record that may not exist), while the converger emits the terminal
+// `stopped` only when this call is the one that actually retired the record
+// (issue #2475).
+func (m *Manager) forgetOrphanIf(serverID string, inst execution.Instance) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if e, ok := m.orphans[serverID]; ok && e.inst == inst {
 		delete(m.orphans, serverID)
+		return true
 	}
+	return false
 }
 
 // ResyncStatus re-emits a StatusChange for every instance the manager still
@@ -2307,26 +2483,37 @@ func (m *Manager) forgetOrphanIf(serverID string, inst execution.Instance) {
 // reconciler grace window (issue #985). The instance manager persists across
 // control-plane reconnects, so its instances map still names the live servers;
 // re-emitting their current Status() reflects reality (running/starting/etc.).
-// On a fresh process the map is empty (the orphan sweep removed leftovers and no
-// instances are re-created), so this is a harmless no-op.
+// On a fresh process both maps are empty (the orphan sweep removed leftovers and
+// no instances are re-created), so this is a harmless no-op.
 //
-// The instances are snapshotted under the lock, which is then RELEASED before any
+// Failed-stop orphans are reported too, as `unknown` (issue #2468 item 3): they
+// have been evicted from instances, so a resync that snapshotted only that map
+// left the reconnected API's row asserting a staler state as fact about a process
+// this Worker could not confirm dead. `unknown` is the honest answer and the one
+// the API's #1599 arm already redispatches a stop for. The two maps are disjoint —
+// an instance is evicted before its orphan record is written — so no id is
+// reported twice.
+//
+// Both maps are snapshotted under the lock, which is then RELEASED before any
 // emit: sendStatus can coalesce and wake the dispatcher, so it must never run
 // while m.mu is held.
 func (m *Manager) ResyncStatus() {
 	m.mu.Lock()
 	type snap struct {
 		serverID string
-		state    execution.ServerState
+		state    string
 	}
-	snaps := make([]snap, 0, len(m.instances))
+	snaps := make([]snap, 0, len(m.instances)+len(m.orphans))
 	for serverID, inst := range m.instances {
-		snaps = append(snaps, snap{serverID: serverID, state: inst.Status()})
+		snaps = append(snaps, snap{serverID: serverID, state: inst.Status().String()})
+	}
+	for serverID := range m.orphans {
+		snaps = append(snaps, snap{serverID: serverID, state: orphanUnknownState})
 	}
 	m.mu.Unlock()
 
 	for _, s := range snaps {
-		m.sendStatus(session.StatusEvent{ServerID: s.serverID, State: s.state.String()})
+		m.sendStatus(session.StatusEvent{ServerID: s.serverID, State: s.state})
 	}
 }
 

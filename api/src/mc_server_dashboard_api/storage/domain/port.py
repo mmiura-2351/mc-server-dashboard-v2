@@ -86,14 +86,34 @@ class WorkingSetView(abc.ABC):
         """List a directory in the pinned snapshot.
 
         Returns ``[]`` for the root of an unpublished server. Raises
-        :class:`~.errors.NotFoundError` for a missing subdirectory.
+        :class:`~.errors.NotFoundError` for a missing subdirectory. The pin holds
+        the snapshot as a whole, not the subtrees in it, so a ``delete_dir`` of a
+        pinned directory races the listing and must surface as that same miss
+        (issue #2394). Entries are described exactly as :meth:`FileStore.list_dir`
+        describes them: one deleted while the listing is taken is omitted (issue
+        #2414), and every other one describes itself rather than what it points at
+        (issue #2418). The set of paths that miss is the same too, and so is the
+        set it refuses — a symlink at any component (issues #2426, #2432).
         """
 
     @abc.abstractmethod
     def open_file_stream(self, rel_path: RelPath) -> ByteStream:
         """Open a chunked read stream over one file in the pinned snapshot.
 
-        Raises :class:`~.errors.NotFoundError` if the file is absent.
+        Raises :class:`~.errors.NotFoundError` if the file is absent. The pin
+        holds the snapshot as a whole, not the individual files in it, so a delete
+        of one pinned file races the read and must surface as that same miss
+        (issue #2391); because locating the file is part of opening it, that race
+        can only be reported on the stream's FIRST iteration. What the view can
+        settle without touching the file — an unpinned (unpublished) view, and a
+        path with a symlink at any component (issues #2418, #2432) — is raised when
+        the stream is constructed instead. Callers therefore have to be ready for
+        the outcome at either point; every caller in the tree reaches it through a
+        generator, so both arrive at the same place.
+
+        The set of paths that miss is exactly :meth:`FileStore.open_file_stream`'s,
+        and so is the set it refuses, or the export walk would read bytes the view's
+        own listing did not describe.
         """
 
     @abc.abstractmethod
@@ -396,7 +416,12 @@ class JarStore(abc.ABC):
 
     @abc.abstractmethod
     def open_jar(self, key: JarKey) -> ByteStream:
-        """Read a stored JAR. Raises :class:`~.errors.NotFoundError` if absent."""
+        """Read a stored JAR. Raises :class:`~.errors.NotFoundError` if absent.
+
+        The miss surfaces on the stream's FIRST iteration: locating the JAR is
+        part of opening it, so a delete racing the open is the same miss as an
+        unknown key and never a backend-native error (issue #2341).
+        """
 
     @abc.abstractmethod
     async def jar_pool_stats(self) -> JarPoolStats:
@@ -485,14 +510,27 @@ class BackupStore(abc.ABC):
     async def check_backup_health(
         self, community_id: CommunityId, server_id: ServerId, key: BackupKey
     ) -> WorkingSetReport:
-        """Extract a backup archive and structurally fsck it (issue #744).
+        """Check a stored backup archive (the one-shot sweep's per-backup probe, #744).
 
-        The one-shot sweep's per-backup probe: extract the archive into throwaway
-        staging under the decompressed-byte cap (the restore extractor), walk it for
-        corrupt ``.mca`` region files (issue #738), then discard the staging.
         Read-only — it never publishes and never touches ``current`` — so the caller
         persists the verdict (HEALTHY/QUARANTINED) in the DB. Re-running yields the
         same report. Raises :class:`~.errors.NotFoundError` for an unknown key.
+
+        What is checked is backend-specific, because the two backends can answer
+        different questions cheaply:
+
+        - The **fs** adapter extracts the archive into throwaway staging under the
+          decompressed-byte cap (the restore extractor), walks it for corrupt
+          ``.mca`` region files (issue #738), discards the staging, and reports the
+          findings in the returned :class:`~...integrity.region.WorkingSetReport`.
+        - The **object** adapter streams the stored object end to end and proves the
+          store can still *produce* the archive (issue #2371) — the precondition
+          restore depends on, which a ``HEAD`` alone never tested. It does not
+          extract, so its report is always empty; an archive the store cannot
+          reproduce raises :class:`~.errors.ArchiveUnreadableError`, and a backend
+          outage during the read raises
+          :class:`~.errors.ObjectStoreUnavailableError` (no verdict about the
+          archive).
         """
 
     @abc.abstractmethod
@@ -503,14 +541,29 @@ class BackupStore(abc.ABC):
 
     @abc.abstractmethod
     def open_backup(
-        self, community_id: CommunityId, server_id: ServerId, key: BackupKey
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        key: BackupKey,
+        *,
+        byte_range: tuple[int, int] | None = None,
     ) -> ByteStream:
         """Open a read stream over a stored backup archive in its native format.
 
         Streams the archive bytes verbatim (the adapter-internal ``tar.gz`` codec,
         Section 2) with **no** recompression so a download is the exact stored
         bytes; the edge sets the content-type/disposition (issue #281). Raises
-        :class:`~.errors.NotFoundError` for an unknown key.
+        :class:`~.errors.NotFoundError` for an unknown key, on the stream's FIRST
+        iteration: locating the archive is part of opening it, so a delete racing
+        the open is the same miss and never a backend-native error (issue #2341).
+
+        ``byte_range`` is an INCLUSIVE ``(first, last)`` byte-position pair,
+        already resolved against :meth:`backup_size` by the caller: the stream
+        then yields exactly ``last - first + 1`` bytes, which is what an
+        interrupted download resumes with (issue #2372). It is a real ranged
+        read on the backend (an object-store ranged GET, a filesystem seek), not
+        a prefix discarded off the full stream — a multi-GB archive must not be
+        re-read to serve its tail.
         """
 
     @abc.abstractmethod
@@ -537,7 +590,9 @@ class BackupStore(abc.ABC):
         """Return a stored backup archive's size in bytes (issue #281).
 
         The on-disk archive byte count, recorded as ``size_bytes`` at create/upload.
-        Raises :class:`~.errors.NotFoundError` for an unknown key.
+        Raises :class:`~.errors.NotFoundError` for an unknown key — and for a key
+        deleted while the size was being taken, since locating the archive is part
+        of measuring it (issue #2394).
         """
 
 
@@ -545,6 +600,20 @@ class FileStore(abc.ABC):
     """Port slice: authoritative-copy file read/edit for stopped servers.
 
     See Section 3.4.
+
+    **One resolve rule for every operation here** (Section 6, issue #2432):
+    containment is decided first — a ``rel_path`` that leaves the server root is
+    :class:`~.errors.PathTraversalError` — and then a path that resolves through a
+    SYMLINK at any component is :class:`~.errors.SymlinkRefusedError` rather than
+    followed. Symlinks in a working set are unsupported outright, at rest included:
+    one can only get there out of band (an operator over SSH), the Worker's
+    running-server path already refuses at every component, and hydrate will not
+    start a server whose set contains one. On a backend without symlinks (object
+    storage, Section 7.3) the second rule is vacuous.
+
+    The MUTATIONS apply the rule to their parent chain; what a mutation does with a
+    LEAF that is a link is a separate question (issue #2429), so a leaf link is
+    still resolved there and each mutation keeps its current behaviour on one.
     """
 
     @abc.abstractmethod
@@ -558,6 +627,10 @@ class FileStore(abc.ABC):
         payload). A large single-file *download* must use
         :meth:`open_file_stream` instead so it does not buffer the whole file in
         RAM (issue #265).
+
+        The miss is exactly :meth:`open_file_stream`'s, including a delete racing
+        the read (issue #2394): the two must answer the same path the same way or
+        the ``?path=`` read and the download of the same file disagree.
         """
 
     @abc.abstractmethod
@@ -574,7 +647,35 @@ class FileStore(abc.ABC):
         lease is released exactly once when the stream finishes, is closed early,
         or raises (Section 4.2 reader safety). Raises
         :class:`~.errors.NotFoundError` if the file (or any published snapshot) is
-        absent.
+        absent, on the stream's FIRST iteration.
+
+        The miss covers every path that names no readable file — gone, a
+        directory, reached through one, a symlink that loops (issue #2393), or a
+        component longer than the backend can name (issue #2394) — and locating
+        the file is part of opening it, so a delete racing the open is the same
+        miss as an unknown path and never a backend-native error (issue #2391).
+        The lease holds the snapshot DIRECTORY, not the files in it, so that race
+        is real. A path that names a file the backend cannot read — no
+        permission, an I/O error — is NOT a miss and surfaces as itself.
+
+        A path with a symlink at ANY component is not part of that miss: it is
+        :class:`~.errors.SymlinkRefusedError` (issues #2418, #2432). A read never
+        follows a link, because :meth:`list_dir` describes that entry as the link
+        and a following read would return bytes the listed size does not account
+        for — the size a caller has already put on the wire as a
+        ``Content-Length``, and the size a content search gates its per-file
+        memory cap on. The rule is per COMPONENT, not per leaf: while an
+        intermediate one resolved, the same ``?path=alias/inner`` answered with the
+        real bytes at rest and 422 ``symlink_refused`` while running, since the
+        Worker refuses at every component. A working set has no legitimate symlink
+        in it anyway (uploads refuse symlink members, the Worker's snapshot tar
+        skips them, hydrate rejects them), so symlinks in a working set are
+        unsupported outright, at rest included.
+
+        A link that escapes the server root is still the traversal refusal, never
+        this one: containment is decided first. A LOOP and an over-long component
+        stay inside the miss above — no resolve can name them, so nothing is
+        followed and there is nothing to refuse.
         """
 
     @abc.abstractmethod
@@ -584,6 +685,85 @@ class FileStore(abc.ABC):
         """Browse a directory in ``current/``. Raises :class:`~.errors.NotFoundError`.
 
         Pass ``RelPath(".")`` to list the working-set root itself.
+
+        One miss covers every path that lists nothing: gone, a plain file, reached
+        through one, or over-long (issue #2394). Listing the directory is what
+        locates it, so a ``delete_dir`` racing the listing is that same miss rather
+        than a backend-native error — the lease holds the snapshot directory, not
+        the subtrees inside it.
+
+        A listing describes the directory as of a moment, so an ENTRY that is GONE
+        when the backend describes it is simply OMITTED — never an error, and never
+        a row with a made-up size (issue #2414). An entry that is still there and
+        that the backend then fails to describe — no permission, an I/O error — is
+        not omitted and surfaces as itself. The directory going away is still the
+        miss above, not an empty listing.
+
+        Every entry describes ITSELF, never what it points at (issue #2418). On a
+        backend with symlinks that means the link, not its target: a link is always
+        ``is_dir=False`` and carries the link's own size, and READING that entry is
+        a miss (see :meth:`read_file`) — so the size a listing publishes is never
+        contradicted by what reading it yields. A dangling link and a link loop are
+        therefore ordinary entries, not failures and not omissions: neither
+        vanished, so neither is the case above. This is the contract the Worker's
+        running-server listing already ships, so a running and an at-rest listing
+        describe the same entry the same way.
+
+        Passing a link's own path back to THIS method is the same question and
+        gets the same answer: the leaf is not followed, so listing a link to a
+        directory raises :class:`~.errors.SymlinkRefusedError` rather than
+        returning the target's children (issues #2426, #2432). It has to be,
+        because both answers are taken inside one request — a download picks its
+        single-file / directory-zip branch by probing exactly this method on the
+        entry's own path, and a probe that followed the link zipped a subtree for
+        an entry the same listing draws as a file. A link to a directory is
+        therefore a visible entry that is not navigable and not downloadable,
+        which is what the running-server browser already does with it.
+
+        The refusal is per COMPONENT, not per leaf (issue #2432): listing
+        ``alias/inner`` is refused too, so a browser gets one answer for a
+        link-bearing path whether the server is at rest or running. A link that
+        escapes the server root is still the traversal refusal, never this one:
+        containment is decided first.
+        """
+
+    @abc.abstractmethod
+    async def path_exists(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
+    ) -> bool:
+        """True if anything already occupies ``rel_path`` in ``current/`` (#2426).
+
+        The question a never-clobber pre-check asks before a rename/move: is this
+        NAME taken? Not "can I read it", not "can I list it" — a name is taken by
+        whatever sits at it, including something no read will return. On a backend
+        with symlinks that means the link itself counts and is NOT followed: it is
+        the entry :meth:`list_dir` shows in the parent, so a name the user can see
+        is a name a caller can refuse to overwrite. A dangling link and a link loop
+        occupy their names too.
+
+        Composing this out of the read methods is not possible and must not be
+        attempted: reading a symlink dirent is refused (:meth:`read_file`) and so is
+        listing one (:meth:`list_dir`), so a probe built from them reports "free"
+        for an occupied name — and the caller then writes through the link onto
+        whatever it points at. Answering the parent listing instead only moves the
+        blind spot: the parent may itself be a link, whose listing is that same
+        refusal, while the name is still occupied under it.
+
+        Resolution therefore matches a READ exactly, including its per-component
+        symlink rule: a symlink ABOVE the leaf raises
+        :class:`~.errors.SymlinkRefusedError` (issue #2432), because no read can
+        reach such a path any more and so nothing there needs protecting from a
+        clobber. Only the LEAF is described as itself. Containment runs first, so a
+        path escaping the server root raises
+        :class:`~.errors.PathTraversalError` rather than answering. Never raises
+        for a path that simply is not there, including one no backend can name
+        (over-long, issue #2394): absent is ``False``, not an error.
+
+        A server with no published working set holds nothing, so every path but
+        the (empty) root answers ``False``.
+
+        What a mutation should then ACT on when the entry is a link is a separate
+        question this does not answer (issue #2429).
         """
 
     @abc.abstractmethod

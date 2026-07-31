@@ -18,6 +18,27 @@ import (
 // duplicated rather than imported to keep this application package off the adapter.
 const displacedPrefix = ".displaced-"
 
+// hydratePrefix is the dot-prefixed name prefix datatransfer builds its per-hydrate
+// temp tree and superseded-set aside from (hydrateTmpPrefix, ".hydrate-<id>-*"). A
+// crash between a hydrate's aside/unpack and its swap-in leaves such a sibling of the
+// server-id scratch dirs behind, and it is a FULL working set carrying a generation
+// marker — so the held-set scans must skip it for the same reasons they skip
+// .displaced- (issue #2290): it is not a held server, and enumerating it advertises a
+// server id the API never assigned, pays a per-boot header fsck of a world-sized tree
+// that is about to be swept anyway, and names a directory rather than a server id in
+// exactly the incident diagnostics someone reads after a crashed hydrate. The constant
+// is duplicated rather than imported to keep this application package off the adapter,
+// and pinned to its creation site by the twin tests in hydrate_prefix_name_test.go.
+const hydratePrefix = ".hydrate-"
+
+// isReservedScratchName reports whether a scratch-root entry name is one of the
+// dot-prefixed siblings datatransfer keeps next to the server-id scratch dirs rather
+// than a working set the Worker holds for an assigned server. Both held-set scans
+// share it so they can never drift apart on what they enumerate.
+func isReservedScratchName(name string) bool {
+	return strings.HasPrefix(name, displacedPrefix) || strings.HasPrefix(name, hydratePrefix)
+}
+
 // ScanHeldServers returns the working sets this Worker already holds in its
 // persistent local scratch (issue #763): the immediate subdirectories of
 // scratchDir that hold a NON-EMPTY working set, each tagged with the generation
@@ -69,9 +90,10 @@ func ScanHeldServers(scratchDir string, log *slog.Logger) []session.HeldServer {
 			continue
 		}
 		// A .displaced-<id> sibling is a recovery copy a hydrate kept aside (issue
-		// #906/#910), not a held server: skip it so it is never reported (and never
+		// #906/#910) and a .hydrate-<id>-* one is a crashed hydrate's leftover (issue
+		// #2290), not held servers: skip them so they are never reported (and never
 		// header-fsck'd per boot under a server_id=.displaced-<id> warning).
-		if strings.HasPrefix(entry.Name(), displacedPrefix) {
+		if isReservedScratchName(entry.Name()) {
 			continue
 		}
 		workingDir := filepath.Join(scratchDir, entry.Name())
@@ -132,7 +154,7 @@ func (m *Manager) HeldServers() []session.HeldServer {
 		if !entry.IsDir() {
 			continue
 		}
-		if strings.HasPrefix(entry.Name(), displacedPrefix) {
+		if isReservedScratchName(entry.Name()) {
 			continue
 		}
 		workingDir := filepath.Join(m.scratchDir, entry.Name())

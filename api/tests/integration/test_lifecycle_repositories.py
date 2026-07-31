@@ -869,7 +869,7 @@ async def test_repository_running_assignment_ids_for_worker(
         )
 
 
-async def test_repository_list_running_assigned(engine: AsyncEngine) -> None:
+async def test_repository_list_desired_running_assigned(engine: AsyncEngine) -> None:
     community_id = await _seed_community(engine)
     factory = create_session_factory(engine)
     running = await _create_server(engine, community_id, "running")
@@ -887,8 +887,8 @@ async def test_repository_list_running_assigned(engine: AsyncEngine) -> None:
 
     async with factory() as session:
         repo = SqlAlchemyServerRepository(session)
-        candidates = await repo.list_running_assigned()
-    # Only the running, Worker-assigned server is a snapshot candidate.
+        candidates = await repo.list_desired_running_assigned()
+    # Only the desired-running, Worker-assigned server is a snapshot candidate.
     assert [s.id for s in candidates] == [running]
 
 

@@ -40,6 +40,42 @@ Divergence matrix (per candidate, after a grace window has lapsed):
   interrupted mid-flight (API restart maps STOPPING->unknown, or worker disconnect
   sets unknown without unassigning). Connected Worker -> redispatch the stop.
   Disconnected Worker -> clear the assignment (DB-only; same as the stopped wedge).
+- ``desired=stopped``, observed ``crashed``, still assigned (issue #2439): the
+  process died on its own under a stop intent — the usual route is a stop whose
+  dispatch failed (leaving the reconcilable ``(stopped, running, assigned)``) with
+  the process then exiting before grace lapsed. Same action as the stopped wedge:
+  final snapshot on a connected Worker, THEN clear the assignment. Deliberately not
+  ``redispatch_stop`` — the process is gone and the Worker has forgotten the crashed
+  instance, so a stop would answer SERVER_NOT_FOUND and reach the same release leg
+  the long way round (issue #2448 made that answer snapshot-then-clear too, so the
+  paths agree rather than one of them losing the crash-window working set).
+  ``observed`` stays ``crashed`` on either: it is the
+  truth about how the process ended, and once unassigned the row is settled.
+  This arm is the one whose absence WEDGED a server: ``crashed`` is terminal, so
+  no further Worker report follows and the API-restart reset leaves it alone as
+  still-truthful, while ``is_at_rest()`` reads true so nothing else flagged it —
+  the row sat unstartable (every start 409'd on ``require_unassigned``) for as
+  long as the owning Worker stayed connected.
+- ``desired=stopped``, observed ``stopping``, still assigned (issue #2452): a stop
+  whose DISPATCH failed after the Worker emitted ``stopping`` on entry to its
+  ``Stop``. Same action split as the ``unknown`` arm: connected Worker ->
+  redispatch the stop (which retries the stop for real, reaching the orphan branch
+  of the Worker's ``takeStoppableReserve`` — also what retires the Worker-side
+  orphan record); disconnected Worker -> clear the assignment AND converge
+  ``observed`` to ``unknown``, so the released row is at rest rather than stranded
+  at ``(stopped, stopping, unassigned)`` — the same terminal shape the ``unknown``
+  leg reaches. This arm wedged the
+  row TOTALLY: unlike the ``crashed`` wedge the row is not even ``is_at_rest()``,
+  so file, backup, restore and delete all 409 "unsettled" on top of every
+  lifecycle action being refused. Its absence was masked by a docstring premise
+  that turned out to be false — that a transitional observed state under a stopped
+  intent "cannot persist" because the Worker's in-flight operation always settles
+  into a terminal state whose report moves the row onto another arm. Both of the
+  Worker's ``Stop`` failure paths restore the pre-stop state WITHOUT emitting, so
+  no terminal report follows a failed stop. ``starting`` and ``restarting`` stay
+  excluded for reasons of their own: a launch under a stop intent really does
+  settle (to ``running``/``crashed``, landing on an arm above), and ``restarting``
+  is never emitted by any Worker driver.
 - Disconnected Worker -> skip (``desired=running`` side only):
   ``observed=unknown`` is expected while the Worker is gone, and the reconnect
   assignment rebuild owns that case (FR-WRK-4). The orphan path has no assigned
@@ -59,6 +95,47 @@ cannot occur on a re-dispatch to the SAME connected Worker. Every other path
 (``place_and_start``, a non-held ``redispatch_start`` that will hydrate, and both
 stop-side actions) keeps the full ``grace_seconds``, preserving the #822
 duplicate-start and #847 stale-snapshot floors.
+
+That held predicate used to be near-dead: the held inventory was frozen at Worker
+registration, so every server placed since reported nothing held and took the full
+grace unconditionally. #2477 made it answer for those servers too (a successful
+hydrate now refreshes the inventory), so the short grace is genuinely reachable
+between a start and the next published snapshot — after which the entry ages back to
+stale and the full grace returns until the next hydrate.
+
+A second short grace is per-action in the same way (issue #2478): a
+``redispatch_stop`` whose PREVIOUS stop dispatch the Worker REFUSED gets
+``refused_stop_grace_seconds``. State the safety property rather than the number.
+The only thing the full grace protects on THIS path is the #930 floor
+``grace_seconds > stop_timeout_seconds`` — while a stop's first dispatch is in
+flight the row stays diverged, so without the wait the reconciler would re-send
+the same stop before the first round trip settles. A returned refusal IS that
+round trip ending, so the floor's premise is void and the remaining wait is dead
+time; the protection is not weakened, it is satisfied by the answer instead of by
+waiting. The refusal must also not be ``BUSY``, which is the Worker's reservation
+guard reporting that another mutating command IS in flight for the id (#824) —
+after #2475/#2476 typically its own converger resolving a failed-stop orphan,
+whose cadence is the converger's, not the reconciler's. And it must still be the
+most recent thing known about the row: any newer intent commit or Worker report
+supersedes it and the full grace returns. The other two terms of the boot-time
+floor are untouched, because neither belongs to this path — #822 (duplicate start)
+to ``place_and_start`` / ``redispatch_start``, #847 (stale snapshot) to
+``clear_stale_assignment``. A stop divergence with NO recorded refusal is the case
+the full grace was chosen for and keeps it: the command may never have been sent
+(the crash between commit and dispatch above), or its response may have been lost,
+and the row alone cannot tell those from a refusal — see
+``stop_dispatch_refusals.py``.
+
+Widening WHERE the predicate is true does not widen WHAT the short grace assumes.
+The two gates it rides on are unchanged, and they are what the long grace's floors
+actually rest on: the re-dispatch goes to the SAME connected
+Worker — so the cross-worker duplicate-live-instance race (#822) is structurally
+impossible, its double-start guard rejecting a second live start — and it is
+command-only, so the round trip it must outlast is a start command, not a hydrate.
+``held_start_grace_seconds`` has its own boot-time floor above
+``command_timeout_seconds`` for exactly that budget. The #847 stale-snapshot floor
+belongs to the stop side and to ``place_and_start``, neither of which can take the
+short grace.
 
 Per-server exponential backoff — a failed action is not retried until a growing
 window (``backoff_base_seconds`` doubled per consecutive failure, capped at
@@ -109,6 +186,9 @@ from dataclasses import dataclass, field
 from mc_server_dashboard_api.servers.application.lifecycle import (
     StartServer,
     StopServer,
+)
+from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
+    StopDispatchRefusals,
 )
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.control_plane import ControlPlane
@@ -166,8 +246,10 @@ class RunReconcilerTick:
     control_plane: ControlPlane
     store_generation: StoreGenerationReader
     clock: Clock
+    stop_refusals: StopDispatchRefusals
     grace_seconds: int
     held_start_grace_seconds: int
+    refused_stop_grace_seconds: int
     backoff_base_seconds: int
     backoff_max_seconds: int
     _attempts: dict[ServerId, _Backoff] = field(default_factory=dict)
@@ -240,7 +322,17 @@ class RunReconcilerTick:
         await self._run(server, action, now)
 
     async def _grace_for(self, server: Server, action: str) -> int:
-        # Select the grace per action and held state (issue #999). A
+        # A ``redispatch_stop`` whose previous stop dispatch the Worker RETURNED a
+        # refusal for, with nothing learned about the row since (issue #2478). The
+        # only thing the full grace protects on this path is the #930 floor — never
+        # re-send a stop whose first dispatch may still be running — and a returned
+        # result is the end of that round trip, so the floor is satisfied by the
+        # answer instead of by waiting. The other two terms of the boot-time floor
+        # belong elsewhere: #822 to the hydrating start paths, #847 to
+        # ``clear_stale_assignment``. Neither reaches here.
+        if action == "redispatch_stop" and self._previous_stop_refused(server):
+            return self.refused_stop_grace_seconds
+        # Otherwise select the grace per action and held state (issue #999). A
         # ``redispatch_start`` whose assigned Worker is connected (already true here —
         # ``_action_for`` only returns it for a connected Worker) AND already holds a
         # fresh-enough working set will SKIP hydrate, so the start is command-only:
@@ -264,13 +356,29 @@ class RunReconcilerTick:
             return self.held_start_grace_seconds
         return self.grace_seconds
 
+    def _previous_stop_refused(self, server: Server) -> bool:
+        # True when the last stop dispatch was refused by the Worker AND that
+        # refusal is still the most recent thing known about the row (issue #2478).
+        # Anything newer — a fresh intent commit or a Worker report — supersedes the
+        # verdict: what has happened to the server since is unknown again, so the
+        # full grace returns. This is also what keeps a stale entry from ever
+        # licensing a short grace on a divergence it says nothing about. A tie counts
+        # as newer: the refusal is recorded strictly after the intent commit it
+        # answers, and the two read the same clock, so equal instants are that same
+        # stop — never a later event the refusal predates.
+        refused_at = self.stop_refusals.refused_at(server.id)
+        return refused_at is not None and refused_at >= self._since(server)
+
+    def _since(self, server: Server) -> dt.datetime:
+        # The instant the divergence is measured from: the most recent of
+        # observed_at (last Worker report) and updated_at (last intent commit).
+        # update_lifecycle refreshes updated_at but NOT observed_at, so a fresh
+        # start on a long-stale server would otherwise get zero grace and race the
+        # in-flight start (#774).
+        return max(server.updated_at, server.observed_at or server.updated_at)
+
     def _within_grace(self, server: Server, now: dt.datetime, grace: int) -> bool:
-        # Measure from the most recent of observed_at (last Worker report) and
-        # updated_at (last intent commit). update_lifecycle refreshes updated_at
-        # but NOT observed_at, so a fresh start on a long-stale server would
-        # otherwise get zero grace and race the in-flight start (#774).
-        since = max(server.updated_at, server.observed_at or server.updated_at)
-        return (now - since) < dt.timedelta(seconds=grace)
+        return (now - self._since(server)) < dt.timedelta(seconds=grace)
 
     def _action_for(self, server: Server) -> str | None:
         """Map a candidate to its reconciling action, or ``None`` to skip."""
@@ -287,21 +395,39 @@ class RunReconcilerTick:
             return "redispatch_start"
         # desired=stopped: list_reconcilable returns observed=running (stop never
         # delivered), observed=stopped+assigned (a stop wedged mid final-snapshot,
-        # issue #847 bug 2), and observed=unknown+assigned (a stop interrupted
-        # mid-flight, issue #1599).
+        # issue #847 bug 2), observed=unknown+assigned (a stop interrupted
+        # mid-flight, issue #1599), observed=crashed+assigned (the process died
+        # on its own under a stop intent, issue #2439), and
+        # observed=stopping+assigned (a stop whose dispatch failed after the worker
+        # emitted stopping, issue #2452).
         if server.assigned_worker_id is None:
             return None
-        if server.observed_state is ObservedState.STOPPED:
-            # The wedge recovery re-drives the final snapshot (if the Worker is
-            # connected, issue #1004) then clears the assignment. It runs even
-            # when the Worker is gone — the snapshot is skipped but the clear
-            # proceeds, exactly the crash case it recovers.
+        if server.observed_state in (ObservedState.STOPPED, ObservedState.CRASHED):
+            # The process is gone either way, so the owed work is the RELEASE half
+            # of the stop path, not another stop dispatch: re-drive the final
+            # snapshot (if the Worker is connected, issues #1004/#2439) then clear
+            # the assignment. It runs even when the Worker is gone — the snapshot is
+            # skipped but the clear proceeds, exactly the crash case it recovers.
+            # A stop dispatch would only take the long way round for
+            # observed=crashed: the Worker forgot the crashed instance, so it
+            # answers SERVER_NOT_FOUND — which since issue #2448 runs this same
+            # snapshot-then-release leg rather than dropping the crash-window world.
             return "clear_stale_assignment"
-        if server.observed_state is ObservedState.UNKNOWN:
-            # Issue #1599: API restart or worker disconnect interrupted a stop
-            # mid-flight, leaving (stopped, unknown, assigned). If the worker is
-            # gone, clear the assignment (DB-only, same as the stopped wedge); if
-            # connected, redispatch the stop to converge.
+        if server.observed_state in (ObservedState.UNKNOWN, ObservedState.STOPPING):
+            # Issue #1599 (unknown): an API restart or worker disconnect interrupted
+            # a stop mid-flight. Issue #2452 (stopping): the stop's DISPATCH failed
+            # after the worker emitted stopping on entry to its Stop, and neither of
+            # the worker's Stop failure paths emits again, so no terminal report
+            # follows. Both leave a wedge whose owed work is the same: if the worker
+            # is connected, redispatch the stop — for #2452 that retries the stop for
+            # real (reaching the orphan branch of the worker's takeStoppableReserve,
+            # which is also what retires the worker-side orphan record). If the
+            # worker is gone there is nobody to command, so clear the assignment
+            # (DB-only, same as the stopped wedge) — for #2452 that also converges
+            # observed to unknown, so the released row is at rest instead of
+            # stranded at (stopped, stopping, unassigned). No final snapshot on
+            # either: the process may still be alive, so there is no settled
+            # working set.
             if not self.control_plane.is_worker_connected(
                 worker_id=server.assigned_worker_id
             ):
@@ -338,7 +464,10 @@ class RunReconcilerTick:
         # copy and returns it (lifecycle.py); the snapshot predates the dispatch and
         # still reads CRASHED. Reading the returned entity is what keeps a server that
         # genuinely converged to running from being miscounted as a crash here.
-        if dispatched.observed_state is ObservedState.CRASHED:
+        if (
+            action in ("place_and_start", "redispatch_start")
+            and dispatched.observed_state is ObservedState.CRASHED
+        ):
             # A start re-dispatched at a server still observed CRASHED is a RETRY of
             # a launch that evidently died: the dispatch succeeds (the Worker
             # launches the container) but the process crashes again, so the row stays
@@ -349,6 +478,12 @@ class RunReconcilerTick:
             # through starting (when the row drops out of list_reconcilable): the
             # entry is not membership-cleaned, only time-expired (_expire_stale), and
             # a flapping server re-arrives long before its expiry instant.
+            #
+            # Scoped to the START actions (issue #2439): the stop-side release for a
+            # (stopped, crashed, assigned) wedge leaves observed=crashed standing —
+            # it is the truth about how the process ended, not a failed relaunch —
+            # and the action fully succeeded. Counting it here would log a false
+            # "crash-looping" WARN and arm a backoff for a completed recovery.
             self._record_failure(server.id, now)
             _LOG.warning(
                 "reconcile action %s dispatched for crash-looping server %s; "

@@ -48,6 +48,8 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
     BackupNotFoundError,
+    BackupStorageUnavailableError,
+    BackupUnreadableError,
     PluginCacheBlobNotFoundError,
     ResourcePackNotFoundError,
     ServerFileNotFoundError,
@@ -268,6 +270,18 @@ class FakeFileStore(FileStore):
                 seen.add(rest)
                 entries.append(FileEntry(name=rest, is_dir=False, size=len(content)))
         return entries
+
+    async def path_exists(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> bool:
+        # A name is occupied by a seeded file or by a directory some seeded file
+        # sits under; the root is always there.
+        if rel_path in ("", "."):
+            return True
+        prefix = rel_path.rstrip("/") + "/"
+        return rel_path in self.files or any(
+            path.startswith(prefix) for path in self.files
+        )
 
     async def write_file(
         self,
@@ -550,7 +564,7 @@ class FakeServerRepository(ServerRepository):
             and server.desired_state is DesiredState.RUNNING
         }
 
-    async def list_running_assigned(self) -> list[Server]:
+    async def list_desired_running_assigned(self) -> list[Server]:
         return [
             replace(server)
             for server in self.by_id.values()
@@ -588,12 +602,29 @@ class FakeServerRepository(ServerRepository):
                 and server.observed_state is ObservedState.UNKNOWN
                 and server.assigned_worker_id is not None
             )
+            # Issue #2439: the process died on its own under a stop intent, leaving
+            # (stopped, crashed, assigned) — a PERMANENT wedge without this arm.
+            stop_crashed_wedged = (
+                stopped
+                and server.observed_state is ObservedState.CRASHED
+                and server.assigned_worker_id is not None
+            )
+            # Issue #2452: a stop whose dispatch failed after the worker emitted
+            # stopping leaves (stopped, stopping, assigned) with no terminal report
+            # to follow — a TOTAL wedge (not even is_at_rest) without this arm.
+            stop_stopping_wedged = (
+                stopped
+                and server.observed_state is ObservedState.STOPPING
+                and server.assigned_worker_id is not None
+            )
             if (
                 stale_running
                 or orphan
                 or stop_undelivered
                 or stop_wedged
                 or stop_unknown_wedged
+                or stop_crashed_wedged
+                or stop_stopping_wedged
             ):
                 out.append(replace(server))
         return out
@@ -1144,6 +1175,9 @@ class FakeControlPlane(ControlPlane):
         # a (worker, server) pair absent here returns None (NOT held), so the default
         # is to hydrate.
         self._held = held or {}
+        # Every record_held_generation call (issue #2477) — (worker, server, generation)
+        # — so a test can pin the value recorded and the paths that record nothing.
+        self.recorded_held: list[tuple[WorkerId, ServerId, int]] = []
         self.dispatched: list[tuple[str, WorkerId, ServerId]] = []
         # Command lines forwarded through command() — (server, line) — so a test
         # can assert the exact broadcast a scheduled warning sends (issue #1839).
@@ -1177,6 +1211,14 @@ class FakeControlPlane(ControlPlane):
 
     def is_worker_connected(self, *, worker_id: WorkerId) -> bool:
         return self._connected.get(worker_id, True)
+
+    def record_held_generation(
+        self, *, worker_id: WorkerId, server_id: ServerId, generation: int
+    ) -> None:
+        # Mirror the real registry: refresh the held entry (issue #2477) and record the
+        # call so a test can assert WHICH generation was recorded, and when it was not.
+        self._held[(worker_id, server_id)] = generation
+        self.recorded_held.append((worker_id, server_id, generation))
 
     def held_generation(
         self, *, worker_id: WorkerId, server_id: ServerId
@@ -1316,6 +1358,14 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         # reports corruption. ``corrupt_count`` is the count carried on the error.
         self.corrupt_refs: set[str] = set()
         self.corrupt_count = 1
+        # refs whose stored archive cannot be streamed back in full (#2371): the
+        # sweep probe raises BackupUnreadableError for them. Distinct from
+        # ``corrupt_refs`` — the bytes are gone, not the world.
+        self.unreadable_refs: set[str] = set()
+        # refs whose probe hits a backend outage (#2371): the probe raises
+        # BackupStorageUnavailableError, which is a verdict about the STORE, not
+        # about the archive, so the sweep must not classify the row from it.
+        self.unavailable_refs: set[str] = set()
         # The sweep (#744) snapshot fsck: corrupt-region count of each server's
         # published ``current``; a server absent here has no published snapshot, so
         # ``check_current_health`` returns None (nothing to fsck).
@@ -1367,6 +1417,10 @@ class FakeBackupArchiveStore(BackupArchiveStore):
     ) -> int:
         if storage_ref not in self.archives:
             raise BackupNotFoundError(storage_ref)
+        if storage_ref in self.unreadable_refs:
+            raise BackupUnreadableError(storage_ref)
+        if storage_ref in self.unavailable_refs:
+            raise BackupStorageUnavailableError(storage_ref)
         return self.corrupt_count if storage_ref in self.corrupt_refs else 0
 
     async def check_current_health(
@@ -1393,11 +1447,21 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         self.pruned.append(server_id)
 
     async def open(
-        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        storage_ref: str,
+        byte_range: tuple[int, int] | None = None,
     ) -> AsyncIterator[bytes]:
         if storage_ref not in self.archives:
             raise BackupNotFoundError(storage_ref)
-        yield self.bytes_by_ref[storage_ref]
+        data = self.bytes_by_ref[storage_ref]
+        if byte_range is not None:
+            # The inclusive (first, last) pair the real adapters read (#2372).
+            first, last = byte_range
+            data = data[first : last + 1]
+        yield data
 
     async def store(
         self,
@@ -1599,17 +1663,14 @@ class FakePluginCacheStore(PluginCacheStore):
     """In-memory content-addressed plugin cache for use-case tests (issue #1306).
 
     Keyed by SHA-256 content address. ``puts`` records each ``put`` call (even the
-    deduped ones) and ``stored`` holds the keys actually persisted, so a test can
-    assert dedup (a second put of identical bytes does not grow ``stored``) and the
-    download cache (a cached ``has`` short-circuits the HTTP download).
+    deduped ones) and ``blobs`` holds the keys actually persisted, so a test can
+    assert dedup (a second put of identical bytes does not grow ``blobs``) and the
+    download cache (a cached blob short-circuits the HTTP download).
     """
 
     def __init__(self) -> None:
         self.blobs: dict[str, bytes] = {}
         self.puts: list[str] = []
-
-    async def has(self, sha256: str) -> bool:
-        return sha256 in self.blobs
 
     async def put(self, sha256: str, stream: AsyncIterator[bytes]) -> None:
         self.puts.append(sha256)
