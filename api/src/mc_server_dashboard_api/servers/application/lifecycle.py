@@ -1066,37 +1066,16 @@ class StopServer:
             # failure. The Worker's handleStop returns SERVER_NOT_FOUND (no live
             # instance on this Worker), never INVALID_STATE, for this case
             # (worker/internal/application/instancemanager/instancemanager.go:308-312).
-            # The stop intent already landed (desired=stopped committed above);
-            # converge the observed cache to stopped and report success. No final
-            # snapshot: there is no live working set to capture. No live instance
-            # remains, so clear the assignment too (issue #206) — otherwise a
-            # later start's require_unassigned compare-and-set 409s forever.
-            observed_at = self.clock.now()
-            async with self.uow:
-                applied = await self.uow.servers.record_observed_state(
-                    server_id,
-                    observed_state=ObservedState.STOPPED,
-                    observed_at=observed_at,
-                    unassign=True,
-                    expected_worker=worker_id,
-                )
-                await self.uow.commit()
-            # Keep the return honest (issue #292): mutate the entity only when the
-            # write landed. The guard and the unassign share one UPDATE, so a
-            # dropped write also dropped the unassign — leave both observed fields
-            # and the assignment as-read rather than claim a write that did not
-            # happen.
-            if applied:
-                server.observed_state = ObservedState.STOPPED
-                server.observed_at = observed_at
-                server.assigned_worker_id = None
-                # Close the Bedrock tunnel (issue #1602).
-                await self.bedrock_tunnel_sync.sync_observed(
-                    server_id=server_id,
-                    worker_id=worker_id,
-                    bedrock_port=server.bedrock_port,
-                    running=False,
-                )
+            # The stop intent already landed (desired=stopped committed above), so
+            # this is the RELEASE half of the stop path — identical to the one the
+            # reconciler's crashed arm runs (issue #2448); see
+            # ``_release_after_final_snapshot``.
+            await self._release_after_final_snapshot(
+                server=server,
+                worker_id=worker_id,
+                community_id=community_id,
+                server_id=server_id,
+            )
             return server
         if not outcome.success:
             # The Worker answered, so this dispatch is settled: nothing is left in
@@ -1234,6 +1213,129 @@ class StopServer:
                 self._clear_held_assignment(server, worker_id, server_id)
             )
 
+    async def _release_after_final_snapshot(
+        self,
+        *,
+        server: Server,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+    ) -> None:
+        """Release a stop the Worker answered ``SERVER_NOT_FOUND`` (issue #2448).
+
+        Shared by ``__call__`` and ``redispatch_stop`` so the two paths that release
+        a server the Worker holds no instance for cannot drift apart again: before
+        this they disagreed with each other AND with ``clear_stale_assignment`` on
+        both halves — whether a final snapshot is owed, and what ``observed`` is left
+        at. ``SERVER_NOT_FOUND`` is precisely what a Worker answers for a CRASHED
+        instance (``pump`` drops it from the instance map via ``forgetIf``), so this
+        is the ordinary answer when an operator stops an already-crashed server, and
+        the reconciler's crashed arm was already snapshotting that same world.
+
+        **The snapshot is owed.** The Worker's retained scratch still holds the
+        crash-window working set — it is GC'd only after a final snapshot PUBLISHES
+        (#845) — and a crashed id takes the Worker's at-rest snapshot branch, which
+        needs no RCON quiesce and no settle budget. Releasing without it discarded
+        everything since the last periodic snapshot. The in-request cost is the one
+        this route already pays: a successful graceful stop runs the very same
+        pack-and-upload inline (``_record_stopped_then_final_snapshot``), which is
+        what ``snapshot_timeout_seconds`` (600 s) exists to span.
+
+        **``observed`` is preserved only for ``crashed``.** The crash is the truth
+        about why the server is down and what the operator sees (the shape
+        ``(stopped, crashed, unassigned)`` is at rest, startable, and claimed by no
+        reconciler arm). Everything else converges to ``stopped``, as before, and
+        that narrowness is load-bearing: a lost crash event leaves the row reading
+        ``running`` when this answer arrives, and preserving THAT would leave
+        ``(stopped, running, unassigned)`` — not ``is_at_rest()`` and matched by no
+        reconciler arm, i.e. a permanent wedge of the #2439/#2452 kind. The decision
+        is taken from a read INSIDE the write transaction (the crash may have landed
+        while the stop was in flight) and carries the same ownership assertion the
+        convergence write does (issue #1779), so a row a racing start re-placed is
+        left alone by both arms.
+
+        Ordering is the graceful path's (issue #847): snapshot BEFORE the guarded
+        clear, so a start racing the in-flight upload finds the assignment still set
+        and its ``require_unassigned`` compare-and-set 409s instead of re-placing on
+        a different Worker mid-upload. A snapshot TIMEOUT therefore HOLDS the
+        assignment (``upload_may_be_live``), released early by the worker's late
+        ``CommandResult`` (``clear_assignment_after_late_snapshot``, #891) or by the
+        stale-stop arm once grace lapses. A snapshot FAILURE still releases: the
+        server is down and the operator's stop succeeded; the loss is logged loud by
+        ``_final_snapshot``.
+
+        The release is additionally gated on this call having established the row is
+        at rest — see ``at_rest_under_us`` below. That is the one place this path
+        deliberately does NOT copy the confirmed-stop path, which runs its clear
+        unconditionally: there the dropped-write case can only have been beaten by a
+        report of a process the Worker just confirmed dead, while here it can be a
+        lost-crash-event ``running``.
+        """
+
+        # ``at_rest_under_us``: whether this call established that the row reads an
+        # at-rest observed state under OUR worker — it converged observed=stopped, or
+        # it deliberately left an already-at-rest ``crashed``. It gates the release,
+        # which is where this path deliberately differs from the confirmed-stop one
+        # (see the docstring): a dropped convergence write (the #216 guard — a
+        # same-instant or fresher report won) leaves ``observed`` at whatever that
+        # report said, and releasing then could strand (stopped, running,
+        # unassigned) — not ``is_at_rest()`` and matched by no reconciler arm, the
+        # permanent wedge shape of #2439/#2452. Holding costs a grace window and
+        # nothing else: every held triple IS reconcilable, and the arm it lands on
+        # re-runs this release.
+        observed_at = self.clock.now()
+        async with self.uow:
+            current = await self.uow.servers.get_by_id(server_id)
+            if (
+                current is not None
+                and current.assigned_worker_id == worker_id
+                and current.observed_state is ObservedState.CRASHED
+            ):
+                # Leave the crash standing; the guarded clear below releases the row
+                # without touching ``observed`` at all. Reflect the row we just read
+                # onto the returned entity so the response is honest about a crash
+                # that landed after this stop loaded the server (issue #292).
+                applied = False
+                at_rest_under_us = True
+                server.observed_state = current.observed_state
+                server.observed_at = current.observed_at
+            else:
+                applied = await self.uow.servers.record_observed_state(
+                    server_id,
+                    observed_state=ObservedState.STOPPED,
+                    observed_at=observed_at,
+                    # The unassign is DEFERRED to after the snapshot (#847), unlike
+                    # the pre-#2448 arm which cleared in this same write.
+                    unassign=False,
+                    expected_worker=worker_id,
+                )
+                at_rest_under_us = applied
+            await self.uow.commit()
+        # Keep the return honest (issue #292): mutate the entity only when the write
+        # landed; if the #216 guard or the ownership assertion dropped it, leave the
+        # observed fields as-read.
+        if applied:
+            server.observed_state = ObservedState.STOPPED
+            server.observed_at = observed_at
+        if at_rest_under_us:
+            # Close the Bedrock tunnel (issue #1602) on both arms — the process is
+            # gone either way, and the call is idempotent. The gate also carries the
+            # ownership condition both arms take, so a row a racing start re-placed
+            # (issue #1779) does not have the NEW placement's tunnel torn down.
+            await self.bedrock_tunnel_sync.sync_observed(
+                server_id=server_id,
+                worker_id=worker_id,
+                bedrock_port=server.bedrock_port,
+                running=False,
+            )
+        upload_may_be_live = await self._final_snapshot(
+            worker_id=worker_id, community_id=community_id, server_id=server_id
+        )
+        if at_rest_under_us and not upload_may_be_live:
+            await asyncio.shield(
+                self._clear_held_assignment(server, worker_id, server_id)
+            )
+
     async def _clear_held_assignment(
         self, server: Server, worker_id: WorkerId, server_id: ServerId
     ) -> None:
@@ -1260,13 +1362,17 @@ class StopServer:
         community_id: CommunityId,
         server_id: ServerId,
     ) -> bool:
-        """Capture the quiescent working set after a confirmed graceful stop.
+        """Capture the working set of a server whose process is gone.
 
         Shared by ``__call__`` and ``redispatch_stop`` (issue #846) so reconciler-
         and drain-driven stops take the same final snapshot as a direct
         ``server:stop`` — otherwise post-#845 the Worker retains the stop scratch
         waiting on a snapshot that never comes, and progression since the last
-        periodic snapshot is lost (FR-DATA-7).
+        periodic snapshot is lost (FR-DATA-7). Since #2439/#2446 it also serves the
+        release of a CRASHED server (``clear_stale_assignment``), and since #2448
+        every ``SERVER_NOT_FOUND`` release too (``_release_after_final_snapshot``),
+        so the log lines below deliberately do not say "graceful stop": the set is at
+        rest on all of them, whether the process exited on command or died.
 
         A snapshot failure is logged, not raised: the stop itself already succeeded
         and the server is down. But the failure is logged at ERROR, not warning
@@ -1276,9 +1382,9 @@ class StopServer:
         the world progressed since the last periodic snapshot is permanently lost.
         A silent warning is exactly what hid the #841 regression (a worker-side
         empty_snapshot 400 swallowed here), so it must be loud. The ONE exception
-        is the Worker's working_set_absent refusal (issue #1713): the scratch is
-        GC'd only after a final snapshot PUBLISHED, so that refusal means a benign
-        duplicate dispatch, not loss — it logs at INFO instead (issue #1790). (The
+        is the Worker's working_set_absent refusal (issue #1713): it means the Worker
+        holds no working set for the id at all, which is never data this dispatch
+        could have saved — it logs at INFO instead (issue #1790). (The
         Worker self-addresses no Storage; the API drives the snapshot because only
         it knows the (community, server) scope.)
 
@@ -1298,26 +1404,29 @@ class StopServer:
             )
             if not snapshot.success:
                 if is_working_set_absent_refusal(snapshot):
-                    # The Worker's working_set_absent refusal (issue #1713): the
-                    # scratch was already GC'd — which only happens AFTER a final
-                    # snapshot published — so this dispatch is a benign duplicate
-                    # (the earlier result was lost in flight) and the generation is
-                    # already captured. Logging the data-loss ERROR here is a false
+                    # The Worker's working_set_absent refusal (issue #1713): it holds
+                    # no working dir for this id, so there is nothing this dispatch
+                    # could have captured and the data-loss ERROR would be a false
                     # alarm that trains operators to ignore the line that matters
-                    # (issue #1790). Any OTHER failure, including a SERVER_NOT_FOUND
-                    # without the pinned refusal message, still takes the ERROR
-                    # branch below.
+                    # (issue #1790). The Worker keeps no tombstone, so it cannot say
+                    # WHICH of the benign causes applies, and neither can this line —
+                    # claiming "a prior final snapshot captured it" overstates two of
+                    # them. Any OTHER failure, including a SERVER_NOT_FOUND without
+                    # the pinned refusal message, still takes the ERROR branch below.
                     _LOG.info(
-                        "final snapshot on graceful stop for server %s was refused "
-                        "by the Worker as a benign duplicate: the working set was "
-                        "already captured by a prior final snapshot and its scratch "
-                        "GC'd — no progression was lost",
+                        "final snapshot for server %s was refused by the Worker: it "
+                        "holds no working set for this id. Either the set was "
+                        "captured and its scratch GC'd already (a final snapshot "
+                        "whose result was lost in flight, or a periodic capture of "
+                        "the at-rest set, #2480), or the id was never hydrated on "
+                        "this Worker — all benign, so this is not reported as loss "
+                        "(#1713/#1790)",
                         server_id.value,
                     )
                 else:
                     _LOG.error(
-                        "final snapshot on graceful stop FAILED for server %s: %s; "
-                        "the working set was NOT captured and progression since the "
+                        "final snapshot FAILED for server %s: %s; the working set "
+                        "was NOT captured and progression since the "
                         "last periodic snapshot is lost (no retry exists for a "
                         "stopped server)",
                         server_id.value,
@@ -1330,15 +1439,15 @@ class StopServer:
                 # assignment (issue #847) — an upload finishing within the grace
                 # margin still publishes successfully while the row is held.
                 _LOG.warning(
-                    "final snapshot dispatch on graceful stop TIMED OUT for "
-                    "server %s; the worker may still be uploading — holding the "
+                    "final snapshot dispatch TIMED OUT for server %s; the worker may "
+                    "still be uploading — holding the "
                     "assignment for the stale-stop arm to clear once grace lapses",
                     server_id.value,
                 )
                 return True
             _LOG.error(
-                "final snapshot on graceful stop could not reach the Worker for "
-                "server %s; the stop succeeded but the working set was NOT captured "
+                "final snapshot could not reach the Worker for server %s; the "
+                "process is gone but the working set was NOT captured "
                 "and progression since the last periodic snapshot is lost",
                 server_id.value,
             )
@@ -1360,9 +1469,10 @@ class StopServer:
         failed dispatch raises so the caller retries on a later tick.
 
         On a CONFIRMED stop (success, or SERVER_NOT_FOUND meaning no live instance
-        remains) the assignment is cleared so a later start can re-place under
-        require_unassigned (issue #206). A failed dispatch keeps the assignment for
-        a same-Worker retry.
+        remains) the final snapshot is taken and THEN the assignment is cleared, so
+        a later start can re-place under require_unassigned (issue #206) without
+        racing an in-flight upload (issue #847). A failed dispatch keeps the
+        assignment for a same-Worker retry.
         """
 
         async with self.uow:
@@ -1390,36 +1500,16 @@ class StopServer:
                 server_id=server_id, kind="StopServer", outcome=outcome
             )
         if outcome.status is CommandStatus.SERVER_NOT_FOUND:
-            # No live instance remained on the Worker, so there is no working set to
-            # capture — skip the snapshot and unassign immediately (no stop→re-place
-            # generation race to guard: nothing is uploading). This is the
-            # documented crash-window exposure — a retained scratch never snapshotted
-            # loses crash-window progression on a cross-worker re-placement (#847
-            # comment, same-worker is preserved by #767).
-            observed_at = self.clock.now()
-            async with self.uow:
-                applied = await self.uow.servers.record_observed_state(
-                    server_id,
-                    observed_state=ObservedState.STOPPED,
-                    observed_at=observed_at,
-                    unassign=True,
-                    expected_worker=worker_id,
-                )
-                await self.uow.commit()
-            # Keep the return honest (issue #292): mutate the entity only when the
-            # write landed; if the #216 guard dropped it, leave the observed fields
-            # and assignment as-read rather than claim a write that did not happen.
-            if applied:
-                server.observed_state = ObservedState.STOPPED
-                server.observed_at = observed_at
-                server.assigned_worker_id = None
-                # Close the Bedrock tunnel (issue #1602).
-                await self.bedrock_tunnel_sync.sync_observed(
-                    server_id=server_id,
-                    worker_id=worker_id,
-                    bedrock_port=server.bedrock_port,
-                    running=False,
-                )
+            # No live instance remained on the Worker: the same release the direct
+            # stop takes for the same answer (issue #2448). The retained scratch may
+            # still hold the crash-window working set, so the final snapshot runs
+            # BEFORE the guarded clear; see ``_release_after_final_snapshot``.
+            await self._release_after_final_snapshot(
+                server=server,
+                worker_id=worker_id,
+                community_id=community_id,
+                server_id=server_id,
+            )
             return server
         # A confirmed live stop: converge observed=stopped, take the final snapshot,
         # THEN unassign — the same deferred-unassign sequence StopServer.__call__
@@ -1491,12 +1581,14 @@ class StopServer:
         the worker still holds the crash-window working set — its scratch is GC'd
         only after a final snapshot publishes, and the crashed instance has been
         dropped from its instance map, so the trigger takes the at-rest snapshot
-        path over the retained dir. Re-dispatching the STOP instead would be
-        strictly worse: the worker answers SERVER_NOT_FOUND, which unassigns
-        WITHOUT snapshotting and loses everything since the last periodic snapshot.
-        ``observed_state`` is deliberately left at crashed — the crash is the truth
-        about how the process ended and what the operator sees; the row is already
-        ``is_at_rest`` and, once unassigned, no longer reconcilable.
+        path over the retained dir. Re-dispatching the STOP instead is simply a
+        wasted round trip: the worker answers SERVER_NOT_FOUND for the forgotten
+        instance, and since issue #2448 that answer runs this very leg
+        (``_release_after_final_snapshot``) — which is what makes the two release
+        paths agree instead of the stop losing the crash-window world.
+        ``observed_state`` is deliberately left at crashed on both — the crash is
+        the truth about how the process ended and what the operator sees; the row is
+        already ``is_at_rest`` and, once unassigned, no longer reconcilable.
 
         The clear uses the same guard the deferred clear uses
         (``clear_assignment_after_final_snapshot``): a still desired=stopped row
@@ -1613,14 +1705,33 @@ class StopServer:
                     worker_id.value,
                 )
             elif wedged_at is ObservedState.CRASHED:
-                _LOG.warning(
-                    "recovered a stop wedged at (stopped, crashed, assigned) for "
-                    "server %s: released worker %s (issue #2439). The process died "
-                    "on its own under a stop intent; without this the row was at "
-                    "rest yet permanently unstartable",
-                    server_id.value,
-                    worker_id.value,
-                )
+                # Split on whether the final snapshot actually ran (issue #2448):
+                # the recovery is the same either way, but whether the crash-window
+                # world survived is not, and the stopped side already says so.
+                if self.control_plane.is_worker_connected(worker_id=worker_id):
+                    _LOG.warning(
+                        "recovered a stop wedged at (stopped, crashed, assigned) for "
+                        "server %s: re-drove the final snapshot and released worker "
+                        "%s (issue #2439). The process died on its own under a stop "
+                        "intent; without this the row was at rest yet permanently "
+                        "unstartable",
+                        server_id.value,
+                        worker_id.value,
+                    )
+                else:
+                    _LOG.warning(
+                        "recovered a stop wedged at (stopped, crashed, assigned) for "
+                        "server %s: released worker %s (issue #2439). The process "
+                        "died on its own under a stop intent; without this the row "
+                        "was at rest yet permanently unstartable. The worker was "
+                        "disconnected so the final snapshot was not re-driven; the "
+                        "crash-window working set survives only in that worker's "
+                        "retained scratch, so a cross-worker re-placement loses "
+                        "everything since the last periodic snapshot (#845/#847); a "
+                        "same-worker start reuses it (#767)",
+                        server_id.value,
+                        worker_id.value,
+                    )
             elif self.control_plane.is_worker_connected(worker_id=worker_id):
                 _LOG.info(
                     "recovered a stop wedged at (stopped, stopped, assigned) for "
@@ -1657,9 +1768,18 @@ class StopServer:
         grace: this releases the assignment minutes earlier, exactly what #874's
         issue text anticipated.
 
+        The held row reads ``(stopped, stopped, assigned)`` OR
+        ``(stopped, crashed, assigned)``: since issue #2448 both release paths for a
+        crashed server hold on the same snapshot timeout, for the same reason, and
+        deliberately leave ``observed=crashed`` standing. Rejecting the crashed shape
+        made exactly those rows wait out the per-server backoff plus the full grace
+        before the stale-stop arm re-drove a snapshot that only meets the benign
+        ``working_set_absent`` refusal.
+
         Reuses the same guarded clear as the deferred unassign and the stale-stop
         arm (``clear_assignment_after_final_snapshot``): it matches only a still
-        desired=stopped row still assigned to ``worker_id``. Passing the REPORTING
+        desired=stopped row still assigned to ``worker_id`` (it ignores ``observed``,
+        so it releases either shape unchanged). Passing the REPORTING
         worker enforces the #789 ownership guard at the UPDATE — a forged late result
         from a non-owning worker matches no row — and a row a racing start re-placed
         is likewise left untouched. The load is by id only: the control-plane seam
@@ -1677,11 +1797,12 @@ class StopServer:
             if (
                 server is None
                 or server.desired_state is not DesiredState.STOPPED
-                or server.observed_state is not ObservedState.STOPPED
+                or server.observed_state
+                not in (ObservedState.STOPPED, ObservedState.CRASHED)
                 or server.assigned_worker_id != worker_id
             ):
                 # The row moved since the snapshot was dispatched (a racing start
-                # re-placed it, or it is no longer the held triple): nothing to do.
+                # re-placed it, or it is no longer a held triple): nothing to do.
                 return
             cleared = await self.uow.servers.clear_assignment_after_final_snapshot(
                 server_id, worker_id

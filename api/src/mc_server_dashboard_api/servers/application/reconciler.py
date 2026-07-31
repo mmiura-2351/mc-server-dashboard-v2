@@ -45,9 +45,11 @@ Divergence matrix (per candidate, after a grace window has lapsed):
   dispatch failed (leaving the reconcilable ``(stopped, running, assigned)``) with
   the process then exiting before grace lapsed. Same action as the stopped wedge:
   final snapshot on a connected Worker, THEN clear the assignment. Deliberately not
-  ``redispatch_stop`` — the process is gone, the Worker has forgotten the crashed
-  instance, so a stop answers SERVER_NOT_FOUND and unassigns WITHOUT snapshotting,
-  losing the crash-window working set. ``observed`` stays ``crashed``: it is the
+  ``redispatch_stop`` — the process is gone and the Worker has forgotten the crashed
+  instance, so a stop would answer SERVER_NOT_FOUND and reach the same release leg
+  the long way round (issue #2448 made that answer snapshot-then-clear too, so the
+  paths agree rather than one of them losing the crash-window working set).
+  ``observed`` stays ``crashed`` on either: it is the
   truth about how the process ended, and once unassigned the row is settled.
   This arm is the one whose absence WEDGED a server: ``crashed`` is terminal, so
   no further Worker report follows and the API-restart reset leaves it alone as
@@ -406,9 +408,10 @@ class RunReconcilerTick:
             # snapshot (if the Worker is connected, issues #1004/#2439) then clear
             # the assignment. It runs even when the Worker is gone — the snapshot is
             # skipped but the clear proceeds, exactly the crash case it recovers.
-            # A stop dispatch would be strictly worse for observed=crashed: the
-            # Worker forgot the crashed instance, so it answers SERVER_NOT_FOUND,
-            # which unassigns WITHOUT snapshotting and loses the crash-window world.
+            # A stop dispatch would only take the long way round for
+            # observed=crashed: the Worker forgot the crashed instance, so it
+            # answers SERVER_NOT_FOUND — which since issue #2448 runs this same
+            # snapshot-then-release leg rather than dropping the crash-window world.
             return "clear_stale_assignment"
         if server.observed_state in (ObservedState.UNKNOWN, ObservedState.STOPPING):
             # Issue #1599 (unknown): an API restart or worker disconnect interrupted

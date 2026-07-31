@@ -1468,7 +1468,10 @@ async def test_stopped_unknown_assigned_connected_redispatches_stop() -> None:
 
 async def test_stopped_unknown_assigned_connected_server_not_found() -> None:
     # Issue #1599: worker connected + SERVER_NOT_FOUND (the process already exited)
-    # -> converges to stopped and unassigns.
+    # -> converges to stopped and unassigns. Since issue #2448 that release takes the
+    # final snapshot first, exactly as the confirmed-stop and crashed-release legs
+    # do: the process is gone but the Worker's retained scratch still holds whatever
+    # the interrupted stop never captured.
     uow = FakeUnitOfWork()
     server = _server(
         desired=DesiredState.STOPPED,
@@ -1481,7 +1484,7 @@ async def test_stopped_unknown_assigned_connected_server_not_found() -> None:
     )
     clock = FakeClock(_NOW)
     await _reconciler(uow, cp, clock).tick()
-    assert [k for k, _, _ in cp.dispatched] == ["stop"]
+    assert [k for k, _, _ in cp.dispatched] == ["stop", "snapshot"]
     stored = uow.servers.by_id[server.id]
     assert stored.assigned_worker_id is None
     assert stored.observed_state is ObservedState.STOPPED
