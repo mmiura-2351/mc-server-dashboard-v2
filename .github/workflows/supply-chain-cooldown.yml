@@ -48,7 +48,10 @@ jobs:
       # Action versions are pinned to a commit SHA per
       # docs/dev/DEPENDENCIES.md (pinning + 7-day cooldown). Checks out the base
       # branch (the default for pull_request_target) -- trusted workflow code,
-      # never the PR head.
+      # never the PR head. The tree is also where the script recovers a container
+      # image's registry host from its pinned FROM / image: reference, so this
+      # must stay a FULL checkout: a sparse one scoped to scripts/ would
+      # reintroduce issue #2506 (a false block -- fail-closed, but confusing).
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

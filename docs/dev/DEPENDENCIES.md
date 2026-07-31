@@ -61,7 +61,10 @@ most public-incident timelines.
   registry (PyPI, npm, `proxy.golang.org`, GitHub Releases for actions and
   `ghcr.io` images, Docker Hub for Docker Hub images), and posts a
   `supply-chain-cooldown` commit status: `failure` (plus a `supply-chain-cooldown`
-  label) while any release is younger than 7 days, `success` once it ages out. A
+  label) while any release is younger than 7 days, `success` once it ages out.
+  The trailer names a container image without its registry host, so the gate
+  recovers the host from that image's pinned `FROM` / `image:` reference in the
+  checked-out tree — which is why the workflow's checkout step is load-bearing. A
   daily schedule re-runs it so blocked PRs unblock themselves with no new commit.
   Add `supply-chain-cooldown` as a required status check in `main` branch
   protection to make it enforceable.
