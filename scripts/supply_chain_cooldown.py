@@ -325,10 +325,15 @@ def _repo_image_sources() -> list[str]:
     image between registries, so the base branch's host is still the right one.
     """
     root = Path(__file__).resolve().parent.parent
+    # ``.claude`` holds agent worktrees -- whole extra copies of the repo, whose
+    # pins would read as a second host for the same image. Tested relative to
+    # root, never on the absolute path: a checkout can itself sit under one of
+    # these names, and matching absolutely would then skip the entire tree.
+    skip = {".git", ".claude", "node_modules", ".venv"}
     texts: list[str] = []
     for pattern in ("Dockerfile*", "*compose*.yaml", "*compose*.yml"):
         for path in sorted(root.rglob(pattern)):
-            if {".git", "node_modules", ".venv"} & set(path.parts):
+            if skip & set(path.relative_to(root).parts):
                 continue
             try:
                 texts.append(path.read_text(encoding="utf-8"))
