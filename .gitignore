@@ -6,8 +6,13 @@
 scripts/__pycache__/
 scripts/*.py[cod]
 
-# Deployed commit stamp written by scripts/update.sh.
+# Written by scripts/deploy.sh and scripts/update.sh: the revision the running
+# stack was built and started from, and whether that revision passed the
+# post-deploy healthcheck. Separate files because they are separate facts -- a
+# stack that started but never answered /api/healthz is still running the new
+# revision, which is what change detection diffs against (#2311).
 .last-deploy-sha
+.last-deploy-health
 
 # Written by scripts/pg_major_upgrade.sh while the db-data volume has been
 # released and the new cluster is not yet restored; removed once it is. Its

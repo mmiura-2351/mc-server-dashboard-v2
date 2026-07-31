@@ -6,8 +6,8 @@
  * Worker clipped the live listing) with path breadcrumbs. Right pane: a viewer.
  * A text file opens in an editor whose Save issues a versioned base64 `PUT`; a
  * binary file offers download only. Operations: upload, mkdir, rename, delete
- * (typed confirm), download (reuses
- * the authenticated helper in api/download.ts).
+ * (typed confirm), download (a file reuses the authenticated helper in
+ * api/download.ts; a directory is saved from a minted grant URL — #2354).
  *
  * Permission gating mirrors the API route gates (servers/api/files.py):
  * `file:read` browses/views/downloads/searches, `file:edit` writes/uploads/
@@ -42,6 +42,7 @@ import {
   fetchFileBlob,
   isAbortError,
   MAX_DOWNLOAD_BYTES,
+  saveUrlAs,
 } from "../api/download.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
@@ -76,6 +77,7 @@ type DirEntry = components["schemas"]["DirEntryResponse"];
 type ServerResponse = components["schemas"]["ServerResponse"];
 type SearchResult = components["schemas"]["SearchResponse"];
 type FileVersions = components["schemas"]["FileVersionsResponse"];
+type FileDownloadGrant = components["schemas"]["FileDownloadGrantResponse"];
 
 /**
  * Map a file-operation error to its toast message.
@@ -152,6 +154,33 @@ function joinPath(dir: string, name: string): string {
  */
 function downloadName(name: string, isDir: boolean): string {
   return isDir ? `${name}.zip` : name;
+}
+
+/**
+ * Save the directory at `path` as `filename` by minting a self-authenticating
+ * URL and handing it to the browser (issue #2354).
+ *
+ * The API builds a directory's zip incrementally, so the response declares no
+ * `Content-Length` and buffering it into a Blob just to attach the Bearer header
+ * aborts past {@link MAX_DOWNLOAD_BYTES} — precisely what a multi-GB `world`
+ * hit (#2027). A grant lives ~30 s, so minting and clicking are one step: never
+ * minted on render, on selection, or cached.
+ *
+ * Single files deliberately stay on {@link downloadFile}: the API declares their
+ * `Content-Length` whenever the size resolves, so an oversize one is rejected
+ * before a byte is read and toasts the size. The anchor path has no such
+ * pre-flight — it would save the error document under the intended filename.
+ */
+async function saveDirViaGrant(
+  communityId: string,
+  serverId: string,
+  path: string,
+  filename: string,
+): Promise<void> {
+  const grant = (await api.post(
+    `${filesBase(communityId, serverId)}/download-grant?path=${encodeURIComponent(path)}` as never,
+  )) as FileDownloadGrant;
+  saveUrlAs(grant.download_url, filename);
 }
 
 /** The directory portion of a rel-path ("" for a top-level file). */
@@ -1703,15 +1732,22 @@ function Listing({
 
   const nextDownloadSignal = useDownloadSignals();
   const download = useMutation({
-    mutationFn: (entry: DirEntry) =>
-      downloadFile(
-        `${apiPath(
-          "/api/communities/{community_id}/servers/{server_id}/files/download",
-          { community_id: communityId, server_id: serverId },
-        )}?path=${encodeURIComponent(joinPath(dir, entry.name))}`,
-        downloadName(entry.name, entry.is_dir),
-        nextDownloadSignal(),
-      ),
+    mutationFn: (entry: DirEntry) => {
+      const path = joinPath(dir, entry.name);
+      const filename = downloadName(entry.name, entry.is_dir);
+      // A directory streams as an uncappable zip, so the browser saves it from
+      // a minted URL instead of the tab buffering it (#2354).
+      return entry.is_dir
+        ? saveDirViaGrant(communityId, serverId, path, filename)
+        : downloadFile(
+            `${apiPath(
+              "/api/communities/{community_id}/servers/{server_id}/files/download",
+              { community_id: communityId, server_id: serverId },
+            )}?path=${encodeURIComponent(path)}`,
+            filename,
+            nextDownloadSignal(),
+          );
+    },
     onError: (error) => {
       if (isAbortError(error)) {
         return;
@@ -2641,17 +2677,24 @@ function Toolbar({
     if (total === 1) {
       const path = paths[0];
       const base = path.split("/").at(-1) ?? path;
-      const filename = downloadName(base, dirPaths.has(path));
+      const isDir = dirPaths.has(path);
+      const filename = downloadName(base, isDir);
       setBulkBusy(true);
       try {
-        await downloadFile(
-          `${apiPath(
-            "/api/communities/{community_id}/servers/{server_id}/files/download",
-            { community_id: communityId, server_id: serverId },
-          )}?path=${encodeURIComponent(path)}`,
-          filename,
-          nextDownloadSignal(),
-        );
+        // A directory streams as an uncappable zip, so the browser saves it
+        // from a minted URL instead of the tab buffering it (#2354).
+        if (isDir) {
+          await saveDirViaGrant(communityId, serverId, path, filename);
+        } else {
+          await downloadFile(
+            `${apiPath(
+              "/api/communities/{community_id}/servers/{server_id}/files/download",
+              { community_id: communityId, server_id: serverId },
+            )}?path=${encodeURIComponent(path)}`,
+            filename,
+            nextDownloadSignal(),
+          );
+        }
         showToast(t("files.bulk.download.done", { done: 1 }), "success");
       } catch (error) {
         if (isAbortError(error)) {

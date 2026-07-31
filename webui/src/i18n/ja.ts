@@ -231,13 +231,34 @@ export const ja: Record<TranslationKey, string> = {
   // Lifecycle action feedback.
   "dashboard.actionFailed":
     "操作を完了できませんでした。もう一度お試しください。",
-  // Conflict-flavoured (server_unsettled-style) lifecycle races (SPEC 7.4).
+  // Conflict-flavoured lifecycle races (SPEC 7.4).
   "dashboard.stateChanged": "状態が変化しました — 更新しました。",
   // Sanitized 409 start-failure reasons (issue #225).
   "dashboard.lifecycle.portConflict":
     "起動できませんでした: ポートがすでに使用されています。",
   "dashboard.lifecycle.imageMissing":
     "起動できませんでした: サーバーのファイルが準備できていません。しばらくしてから再試行してください。",
+  // 409 worker_busy / server_busy (issue #2400); retry is the only remedy.
+  "dashboard.lifecycle.busy":
+    "このサーバーで別の操作が進行中です。しばらく待ってから再試行してください。",
+  // 409 command_failed (issue #2420); the server may or may not have moved, and
+  // a retry is not known to help.
+  "dashboard.lifecycle.commandFailed":
+    "サーバーホストがこの操作を実行できませんでした。サーバーの現在の状態を確認してから再試行してください。",
+  // 409 command_failed / worker_busy on stop, and command_failed or
+  // server_not_running on restart (issues #2435/#2441); the committed intent is
+  // still pending, not undone.
+  "dashboard.lifecycle.stopPending":
+    "サーバーを停止できませんでした: まだ稼働中です。システムが停止を試行し続けます。",
+  "dashboard.lifecycle.restartPending":
+    "サーバーを再起動できませんでした: 一時的に停止している可能性があります。システムが自動的に復帰させます。",
+  // 409 failed_stop_orphan (issue #2466): the host could not confirm an earlier
+  // stop, so the process may still be running. A retry of the same action is
+  // refused identically, and since issue #2475 the host converges the orphan on
+  // its own, so the message says the work is already under way rather than asking
+  // the operator to stop it again (issue #2476).
+  "dashboard.lifecycle.failedStopOrphan":
+    "前回の停止が完了していないため、このサーバーのプロセスがまだ稼働している可能性があります。システムが自動的に停止処理を進めているため、しばらく待ってから再試行してください。",
   // 503 service-unavailable reasons (issue #1092).
   "dashboard.lifecycle.noEligibleWorker":
     "現在利用可能なサーバーホストがありません。システムが起動中の場合は、しばらく待ってから再試行してください。",
@@ -245,6 +266,12 @@ export const ja: Record<TranslationKey, string> = {
     "サーバーホストとの通信に失敗しました。しばらく待ってから再試行してください。",
   "dashboard.lifecycle.jarUnavailable":
     "サーバーファイルを準備できませんでした。しばらく待ってから再試行してください。",
+  // 503 worker_unavailable on stop / restart (issue #2440); the intent was
+  // already committed and the outcome is unknown, not undone.
+  "dashboard.lifecycle.stopUnconfirmed":
+    "サーバーホストと通信できず、停止を確認できませんでした。すでに停止処理が進んでいる可能性があります。停止の指示は有効なままで、システムが試行を続けます。",
+  "dashboard.lifecycle.restartUnconfirmed":
+    "サーバーホストと通信できず、再起動を確認できませんでした。すでに復帰している可能性があります。停止したままの場合は、システムが自動的に起動します。",
   // Live-status degraded indicator: WS down, polling fallback (SPEC 6.2 / 7.2).
   "dashboard.liveDegraded": "再接続中 — 表示の更新が遅れることがあります",
   // Clickable join-hostname copy feedback.
@@ -391,8 +418,8 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.deleted": "サーバーを削除しました。",
   "serverDetail.error.notStopped":
     "この変更を行う前にサーバーを停止してください。",
-  "serverDetail.error.unsettled":
-    "エクスポートの前にサーバーを停止する必要があります。",
+  // The at-rest precondition (409 server_unsettled); action-agnostic (#2360).
+  "serverDetail.error.unsettled": "この操作にはサーバーの停止が必要です。",
   "serverDetail.error.portTaken": "そのゲームポートはすでに使用されています。",
   "serverDetail.error.portOutOfRange":
     "そのゲームポートは許可された範囲外です。",
@@ -524,6 +551,8 @@ export const ja: Record<TranslationKey, string> = {
     "そのファイルは有効なバックアップアーカイブではありません。",
   "backups.error.workerUnavailable":
     "現在、バックアップを取得できるサーバーホストがありません。",
+  "backups.error.storageUnavailable":
+    "現在、バックアップストレージを利用できません。しばらくしてから再度お試しください。",
   "backups.error.serverMustBeStopped": "この操作にはサーバーの停止が必要です。",
   "backups.error.serverBusy":
     "別の操作が進行中です。完了するまでお待ちください。",
@@ -1616,6 +1645,8 @@ export const ja: Record<TranslationKey, string> = {
     "{Noun}が見つかりません。削除された可能性があります。",
   "plugins.error.workerUnavailable":
     "サーバーエージェントが切断されています。しばらくしてから再度お試しください。",
+  "plugins.error.downloadTooLarge":
+    "クライアント用Modのサイズ ({size}) がブラウザでのダウンロード上限 (512 MiB) を超えています。",
   "plugins.error.generic": "エラーが発生しました。もう一度お試しください。",
   // Dependency / compatibility validation checklist (issue #1307).
   "plugins.validation.heading": "依存関係と互換性",

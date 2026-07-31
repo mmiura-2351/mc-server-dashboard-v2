@@ -14,6 +14,7 @@ package controlplane
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -142,6 +143,15 @@ func (t *transport) RecvRegisterAck(_ context.Context) (session.RegisterAck, err
 	// Bound the wait: an API that opens the stream but never acks must not wedge
 	// the run loop forever (issue #786). The timer cancels the stream context,
 	// which unblocks the pending stream.Recv with a context error.
+	//
+	// settled decides which of the two paths owns the outcome when the ack lands
+	// exactly at the deadline (issue #2020): a tick already buffered in the timer
+	// channel cannot be retracted by Stop, and closing done does not stop the
+	// watcher from taking the deadline arm. Whichever path wins this single CAS
+	// wins the race — the watcher cancels only if it wins, and an ack that loses
+	// is reported as a timeout rather than returned on a context this call no
+	// longer owns.
+	var settled atomic.Bool
 	deadline := t.clock.NewTimer(registerAckTimeout)
 	defer deadline.Stop()
 	done := make(chan struct{})
@@ -149,7 +159,9 @@ func (t *transport) RecvRegisterAck(_ context.Context) (session.RegisterAck, err
 	go func() {
 		select {
 		case <-deadline.C():
-			t.cancel()
+			if settled.CompareAndSwap(false, true) {
+				t.cancel()
+			}
 		case <-done:
 		}
 	}()
@@ -157,6 +169,9 @@ func (t *transport) RecvRegisterAck(_ context.Context) (session.RegisterAck, err
 	msg, err := t.recvClassified()
 	if err != nil {
 		return session.RegisterAck{}, fmt.Errorf("controlplane: recv register ack: %w", err)
+	}
+	if !settled.CompareAndSwap(false, true) {
+		return session.RegisterAck{}, fmt.Errorf("controlplane: recv register ack: no ack within %s", registerAckTimeout)
 	}
 	ack := msg.GetRegisterAck()
 	if ack == nil {
@@ -186,7 +201,12 @@ func (t *transport) SendHeartbeat(_ context.Context) error {
 }
 
 func (t *transport) SendCommandResult(_ context.Context, result session.CommandResult) error {
-	cr := &controlplanev1.CommandResult{Success: result.Success}
+	// held_generation rides alongside the result oneof rather than in it: it is not
+	// a command's OUTPUT but the Worker's declaration about its own local scratch
+	// (issue #2481), and it is carried through verbatim — nil stays absent, so a
+	// snapshot that GC'd the scratch or skipped its marker stamp declares nothing
+	// and the API keeps hydrating.
+	cr := &controlplanev1.CommandResult{Success: result.Success, HeldGeneration: result.HeldGeneration}
 	if result.Success {
 		// A successful ServerCommand carries its console output, a ReadFile its
 		// bytes, and a ListFiles its directory listing (mutually exclusive); other
@@ -341,7 +361,17 @@ func classify(err error) error {
 // complete within sendStallTimeout, the stream context is cancelled so the
 // blocked Send returns with a context error. This prevents a single backpressured
 // send from starving the heartbeat goroutine (issue #1714).
+//
+// settled decides which of the two paths owns the outcome when the send
+// completes exactly at the deadline (issue #2397): a tick already buffered in
+// the timer channel cannot be retracted by Stop, and closing done does not stop
+// the watchdog from taking the deadline arm. Whichever path wins this single CAS
+// wins the race — the watchdog cancels only if it wins, and a send that loses is
+// reported as a stall rather than as a success on a stream this call no longer
+// owns. The stall error carries no ErrTerminal, so the run loop classifies it
+// transient and reconnects (session.Run), exactly as it does for a genuine stall.
 func (t *transport) sendBounded(msg *controlplanev1.WorkerMessage) error {
+	var settled atomic.Bool
 	deadline := t.clock.NewTimer(sendStallTimeout)
 	defer deadline.Stop()
 	done := make(chan struct{})
@@ -349,11 +379,19 @@ func (t *transport) sendBounded(msg *controlplanev1.WorkerMessage) error {
 	go func() {
 		select {
 		case <-deadline.C():
-			t.cancel()
+			if settled.CompareAndSwap(false, true) {
+				t.cancel()
+			}
 		case <-done:
 		}
 	}()
-	return t.stream.Send(msg)
+	if err := t.stream.Send(msg); err != nil {
+		return err
+	}
+	if !settled.CompareAndSwap(false, true) {
+		return fmt.Errorf("send stalled: not completed within %s", sendStallTimeout)
+	}
+	return nil
 }
 
 // recvClassified reads the next stream message, classifying any error so the run
@@ -453,6 +491,12 @@ func mapServerState(state string) controlplanev1.ServerState {
 		return controlplanev1.ServerState_SERVER_STATE_RESTARTING
 	case "crashed":
 		return controlplanev1.ServerState_SERVER_STATE_CRASHED
+	case "unknown":
+		// The Worker cannot currently confirm the instance's fate: it neither
+		// observed a clean exit nor can it see the process (issue #2474). Without
+		// this case the name falls through to UNSPECIFIED, which the API ingest
+		// drops — leaving the row asserting a staler state as fact.
+		return controlplanev1.ServerState_SERVER_STATE_UNKNOWN
 	default:
 		return controlplanev1.ServerState_SERVER_STATE_UNSPECIFIED
 	}

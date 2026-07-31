@@ -30,9 +30,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import datetime as dt
+import errno
 import hashlib
+import io
 import os
 import shutil
+import stat
 import tarfile
 import tempfile
 import threading
@@ -54,6 +57,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     PathTraversalError,
     SnapshotHandleError,
     StaleGenerationError,
+    SymlinkRefusedError,
 )
 from mc_server_dashboard_api.storage.domain.port import (
     API_EDIT_PUBLISHER,
@@ -277,25 +281,104 @@ class FsStorage(Storage):
         with self._lease_lock:
             return staging in self._active_staging
 
-    # --- path-traversal containment (Section 6) ----------------------------
+    # --- the resolve rule: containment + symlink refusal (Section 6) --------
 
-    def _safe_target(self, base: Path, rel_path: RelPath) -> Path:
-        """Join ``rel_path`` under ``base`` and verify the result stays inside it.
+    def _contained(self, base: Path, rel_path: RelPath) -> tuple[str, str]:
+        """Contain ``rel_path`` under ``base``; return (literal join, realpath).
 
         ``RelPath`` already rejected absolute paths and ``..`` at the string level;
         this catches the filesystem vector — a symlink component that resolves out
-        of ``base``. The realpath of the candidate (and of each existing parent) is
-        checked against the realpath of ``base``.
+        of ``base``. Containment is decided on the fully resolved candidate and is
+        decided FIRST, so a link out of the root keeps reporting the escape rather
+        than being downgraded to the symlink refusal the callers below apply.
+
+        The literal join is built under the ALREADY-REAL base, so comparing it
+        against the realpath asks precisely "did resolving this path cross a
+        symlink?" — the whole per-component rule, out of the realpath every resolve
+        already paid for and a string compare (issue #2432). The comparison
+        classifies every shape: a plain path matches; a symlink at any position does
+        not; a loop, an over-long component and a missing path all match (a
+        non-strict realpath leaves them literal) and so fall through to the caller's
+        open, which answers them exactly as it did before.
         """
 
         base_real = os.path.realpath(base)
-        candidate = base.joinpath(*rel_path.parts)
-        resolved = os.path.realpath(candidate)
+        literal = os.path.join(base_real, *rel_path.parts)
+        resolved = os.path.realpath(base.joinpath(*rel_path.parts))
         if resolved != base_real and not resolved.startswith(base_real + os.sep):
             raise PathTraversalError(
                 f"rel_path {rel_path.value!r} escapes the server root"
             )
+        return literal, resolved
+
+    def _safe_target(self, base: Path, rel_path: RelPath) -> Path:
+        """The MUTATION / ``path_exists`` resolve: containment, then no link PARENT.
+
+        A mutation that followed an intermediate link would edit, move or destroy
+        something no read can reach and no listing describes, through a name the
+        browser draws under a different parent — so the parent chain refuses here
+        exactly as it does for a read (issue #2432). ``path_exists`` resolves the
+        same way for the same reason: its old justification for following an
+        intermediate link was that the reads followed one.
+
+        The LEAF is deliberately still resolved, so this returns the realpath. That
+        is what leaves a mutation's leaf semantics (issue #2429) and
+        ``path_exists``'s "a link occupies its name" (issue #2426) exactly as they
+        are: a leaf link keeps whatever each caller does with it today.
+        """
+
+        literal, resolved = self._contained(base, rel_path)
+        if resolved != literal and _crosses_a_symlink_parent(literal):
+            raise SymlinkRefusedError(
+                f"rel_path {rel_path.value!r} resolves through a symlink"
+            )
         return Path(resolved)
+
+    def _safe_read_target(self, base: Path, rel_path: RelPath) -> Path:
+        """A READ's resolve: containment, then refuse a symlink at ANY component.
+
+        A listing describes each entry as the dirent it is rather than as its
+        target, so a read that still followed the link would contradict the very
+        listing that offered it: the entry's listed size is the link's, and
+        ``DownloadFile`` hands that size straight to a ``Content-Length`` header
+        whose body then comes from this read -- a protocol abort, not a cosmetic
+        mismatch -- while the content search's per-file memory cap gates on that
+        same listed size and would let a link to a huge file through (issue #2418).
+        A LISTING resolves through here too (#2426): reaching a directory by
+        following a link the listing just described as a file is the same
+        contradiction one level up, and the download endpoint picks its single-file
+        or directory-zip branch by probing ``list_dir`` on the entry's own path, so
+        a probe that followed the link zipped a subtree for an entry the file
+        browser draws as a file.
+
+        EVERY component is refused, not only the leaf (issue #2432). While an
+        intermediate one still resolved, the same ``?path=alias/inner`` returned the
+        real bytes at rest and 422 ``symlink_refused`` while running -- the Worker
+        refuses at every component -- and every probe in the tree had to know which
+        of the two rules applied to it. A working set cannot legitimately carry a
+        symlink at all (uploads refuse symlink members, the Worker's snapshot tar
+        skips them, hydrate rejects them), so one rule forecloses a shape that only
+        arrives out of band.
+
+        The resolution of the working-set root is never in question: ``current`` IS
+        a symlink, but ``_current_dir`` readlinks it and passes the resolved
+        snapshot DIRECTORY as ``base``, so no component seen here is the root's own
+        link.
+
+        Returns the LITERAL join for the caller to open. It equals the realpath by
+        construction once the comparison has passed, so this only makes explicit
+        that nothing was followed. Residue (stated, not fixed): the window between
+        this comparison and the caller's open is the same one the ``os.path.islink``
+        probe it replaces had, and at rest only operator SSH can race it. Closing it
+        wants an ``O_NOFOLLOW`` open, out of scope here (issue #2432).
+        """
+
+        literal, resolved = self._contained(base, rel_path)
+        if resolved != literal:
+            raise SymlinkRefusedError(
+                f"rel_path {rel_path.value!r} resolves through a symlink"
+            )
+        return Path(literal)
 
     # --- crash-recovery sweep (Section 4.3) --------------------------------
 
@@ -772,10 +855,9 @@ class FsStorage(Storage):
         return await asyncio.to_thread(self._jar_path(key).is_file)
 
     def open_jar(self, key: JarKey) -> ByteStream:
-        path = self._jar_path(key)
-        if not path.is_file():
-            raise NotFoundError(f"jar not found: {key.sha256}")
-        return _file_stream(path)
+        return _file_stream(
+            self._jar_path(key), not_found=f"jar not found: {key.sha256}"
+        )
 
     async def jar_pool_stats(self) -> JarPoolStats:
         return await asyncio.to_thread(self._jar_pool_stats)
@@ -1139,14 +1221,23 @@ class FsStorage(Storage):
         )
 
     def open_backup(
-        self, community_id: CommunityId, server_id: ServerId, key: BackupKey
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        key: BackupKey,
+        *,
+        byte_range: tuple[int, int] | None = None,
     ) -> ByteStream:
         # Stream the stored archive bytes verbatim (no recompression): the file is
-        # already a self-contained tar.gz (issue #281).
+        # already a self-contained tar.gz (issue #281). A byte_range seeks to its
+        # first position rather than discarding a prefix (issue #2372). The stream
+        # opens the archive on its first iteration and reports the miss itself, so
+        # an unknown key and a delete racing the open take the same NotFoundError
+        # path (issue #2341).
         archive = self._backup_path(community_id, server_id, key)
-        if not archive.is_file():
-            raise NotFoundError(f"backup not found: {key.value}")
-        return _file_stream(archive)
+        return _file_stream(
+            archive, byte_range, not_found=f"backup not found: {key.value}"
+        )
 
     async def put_backup(
         self,
@@ -1187,10 +1278,18 @@ class FsStorage(Storage):
     async def backup_size(
         self, community_id: CommunityId, server_id: ServerId, key: BackupKey
     ) -> int:
+        # The open IS the existence check (issue #2394): an ``is_file()`` pre-check
+        # plus a separate ``stat`` left a window in which a concurrent
+        # ``delete_backup`` made the stat raise a bare ``FileNotFoundError``, which
+        # the servers-side seam does not translate (it translates
+        # :class:`NotFoundError` only) and which therefore reached the edge as a
+        # 500. This is also what ``open_backup`` resolves the archive with, so a
+        # ranged download and the size it resolves its range against cannot
+        # disagree about whether the archive exists.
         archive = self._backup_path(community_id, server_id, key)
-        if not await asyncio.to_thread(archive.is_file):
-            raise NotFoundError(f"backup not found: {key.value}")
-        return await asyncio.to_thread(lambda: archive.stat().st_size)
+        return await asyncio.to_thread(
+            _size_of_readable, archive, f"backup not found: {key.value}"
+        )
 
     # --- file read / edit on the authoritative copy (Section 3.4) ----------
 
@@ -1206,13 +1305,18 @@ class FsStorage(Storage):
     ) -> bytes:
         # Resolve and lease the live snapshot so a concurrent publish's post-flip
         # GC cannot delete the snapshot between resolve and read (issue #1953),
-        # mirroring open_file_stream's lease discipline.
+        # mirroring open_file_stream's lease discipline. The lease protects the
+        # snapshot DIRECTORY, not the files in it, so locating the file is left to
+        # the open rather than pre-checked here (issue #2394) -- exactly as
+        # open_file_stream does it, which is what keeps the two paths' answers
+        # identical.
         current, release = self._lease_current(community_id, server_id)
         try:
-            target = self._safe_target(current, rel_path)
-            if not target.is_file():
-                raise NotFoundError(f"file not found: {rel_path.value}")
-            return target.read_bytes()
+            target = self._safe_read_target(current, rel_path)
+            with _open_readable_sync(
+                target, f"file not found: {rel_path.value}"
+            ) as handle:
+                return handle.read()
         finally:
             release()
 
@@ -1224,19 +1328,19 @@ class FsStorage(Storage):
         # time, so a stream opened but never consumed never pins a snapshot, and
         # the leased snapshot is exactly the one the file is read out of (Section
         # 4.2 reader safety). The lease protects the snapshot dir from a
-        # concurrent publish/sweep for the whole duration of a large read.
+        # concurrent publish/sweep for the whole duration of a large read -- but
+        # not the file itself (delete_file unlinks in place), so locating the
+        # file is left to the open rather than pre-checked here (issue #2391).
         def _open() -> tuple[Path, Callable[[], None]]:
             current, release = self._lease_current(community_id, server_id)
             try:
-                target = self._safe_target(current, rel_path)
-                if not target.is_file():
-                    raise NotFoundError(f"file not found: {rel_path.value}")
+                target = self._safe_read_target(current, rel_path)
             except BaseException:
                 release()
                 raise
             return target, release
 
-        return _leased_file_stream(_open)
+        return _leased_file_stream(_open, not_found=f"file not found: {rel_path.value}")
 
     async def list_dir(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
@@ -1255,23 +1359,49 @@ class FsStorage(Storage):
             return []
         # Lease the live snapshot so a concurrent publish's post-flip GC cannot
         # delete the snapshot between resolve and iterdir/stat (issue #1953),
-        # mirroring open_file_stream's lease discipline.
+        # mirroring open_file_stream's lease discipline. The lease does not hold
+        # the subtrees inside the snapshot, so the listing itself is the existence
+        # check rather than an ``is_dir()`` pre-check (issue #2394).
         current, release = self._lease_current(community_id, server_id)
         try:
-            target = self._safe_target(current, rel_path)
-            if not target.is_dir():
-                raise NotFoundError(f"directory not found: {rel_path.value}")
-            entries = []
-            for child in sorted(target.iterdir(), key=lambda p: p.name):
-                is_dir = child.is_dir()
-                entries.append(
-                    DirEntry(
-                        name=child.name,
-                        is_dir=is_dir,
-                        size=0 if is_dir else child.stat().st_size,
-                    )
-                )
-            return entries
+            target = self._safe_read_target(current, rel_path)
+            return _list_entries(target, f"directory not found: {rel_path.value}")
+        finally:
+            release()
+
+    async def path_exists(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
+    ) -> bool:
+        return await asyncio.to_thread(
+            self._path_exists, community_id, server_id, rel_path
+        )
+
+    def _path_exists(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
+    ) -> bool:
+        # Nothing is published, so nothing occupies any name but the root itself.
+        if not self._current_link(community_id, server_id).is_symlink():
+            return not rel_path.parts
+        # Lease the live snapshot for the same reason every other read does: a
+        # concurrent publish's post-flip GC must not delete the snapshot between
+        # resolve and probe (issue #1953).
+        current, release = self._lease_current(community_id, server_id)
+        try:
+            # Containment FIRST (the established ordering): a path escaping the
+            # root is refused rather than answered, exactly as a read refuses it.
+            # The same resolve then refuses an intermediate symlink (issue #2432):
+            # the probe's old justification for following one was that the reads
+            # followed it, and that rationale dissolved with them. Never-clobber is
+            # preserved by the rename's own resolve refusing the same path rather
+            # than by an answer here.
+            self._safe_target(current, rel_path)
+            # ``lexists`` on the UNRESOLVED join, which is what makes this the
+            # question a rename destination asks: the LEAF is described as ITSELF --
+            # a symlink occupies its name whatever it points at, and a dangling one
+            # does too (issue #2426, unchanged by #2432). It ANSWERS for every path
+            # a client can ask for: a component past NAME_MAX is False, not an
+            # ENAMETOOLONG (issue #2394).
+            return os.path.lexists(current.joinpath(*rel_path.parts))
         finally:
             release()
 
@@ -1787,6 +1917,24 @@ def _dir_has_entries(path: Path) -> bool:
     return any(path.iterdir())
 
 
+def _crosses_a_symlink_parent(literal: str) -> bool:
+    """True when a component ABOVE ``literal``'s leaf is a symlink (issue #2432).
+
+    ``literal`` is joined under an already-real base, so its parent chain is clean
+    exactly when its realpath is itself — one resolve, no per-component walk. Only
+    reached when the full resolve already disagreed with the literal join, so a
+    plain path never pays for it; the paths that do are the ones that carry a
+    symlink, which only operator SSH can create.
+
+    Splitting leaf from parent is what keeps a mutation's leaf semantics (issue
+    #2429) and ``path_exists``'s "a link occupies its name" (issue #2426) intact
+    while the parent chain stops being followed.
+    """
+
+    parent = os.path.dirname(literal)
+    return os.path.realpath(parent) != parent
+
+
 def _rmtree(path: Path) -> None:
     """Remove a file/dir/symlink if present; idempotent (no error if absent)."""
 
@@ -1925,16 +2073,200 @@ def _tar_into_fd(
         holder.append(exc)
 
 
-def _file_stream(path: Path) -> AsyncIterator[bytes]:
-    """Yield a stored file's bytes in chunks (JAR egress)."""
+# The ``open`` errnos that all mean "no readable file at this path" -- very nearly
+# the set the ``is_file()`` pre-check these per-file reads used to do answered
+# False for: the path is gone (ENOENT -- a delete racing the open, or a dangling
+# symlink), it names a directory (EISDIR), it is reached through a non-directory
+# (ENOTDIR), or it is a symlink that loops (ELOOP). The open that replaced the
+# pre-check (issues #2341, #2391) matched on exception TYPE, which silently
+# dropped ELOOP: it has no dedicated ``OSError`` subclass, so it escaped the
+# helper backend-native and the servers-side seam -- which translates
+# :class:`NotFoundError` only -- reported it as a 500 on a path ``read_file``
+# still answered as a clean miss (issue #2393).
+#
+# ENAMETOOLONG is the one errno the pre-check did NOT answer False for: ``is_file``
+# / ``is_dir`` RAISE on it, so an over-long component was a 500 out of every read
+# path alike. It is folded in as a miss (issue #2394) rather than kept as an error:
+# a component longer than the filesystem allows cannot name an existing file, so
+# "no such file" is the honest answer; ``RelPath`` bounds no component length, so
+# the input arrives from an ordinary client ``?path=`` query; and answering a
+# user-supplied bad path with a 500 misattributes a client error to the server.
+#
+# It stays a filter rather than a bare ``except OSError``: EACCES and EIO name a
+# path that does exist, and reporting them as a missing file would hide a real
+# failure behind a 404.
+_NOT_A_READABLE_FILE = frozenset(
+    {errno.ENOENT, errno.EISDIR, errno.ENOTDIR, errno.ELOOP, errno.ENAMETOOLONG}
+)
+
+# The same set for a directory LISTING, derived rather than restated so the two can
+# never drift: ``opendir`` has no EISDIR case (a directory is what it wants), and
+# every remaining errno means the same "nothing listable here" -- including ENOTDIR,
+# which is how a path naming a plain file reports, the miss the ``is_dir()``
+# pre-check folded together with a vanished directory (issue #2394).
+_NOT_A_LISTABLE_DIR = _NOT_A_READABLE_FILE - {errno.EISDIR}
+
+
+def _open_readable_sync(path: Path, not_found: str) -> io.BufferedReader:
+    """Open ``path`` for reading, reporting "names no readable file" as a miss.
+
+    The single translation point shared by every fs read of one file -- the three
+    stream helpers, ``_read_file`` and ``backup_size``: for each of them the open
+    IS the existence check, so every failure meaning the path names no readable
+    file has to arrive as the Port's own :class:`NotFoundError` (message
+    ``not_found``). Every other ``OSError`` propagates unchanged.
+    """
+
+    try:
+        return open(path, "rb")
+    except OSError as exc:
+        if exc.errno in _NOT_A_READABLE_FILE:
+            raise NotFoundError(not_found) from exc
+        raise
+
+
+async def _open_readable(path: Path, not_found: str) -> io.BufferedReader:
+    """:func:`_open_readable_sync` off the event loop, for the async stream helpers."""
+
+    return await asyncio.to_thread(_open_readable_sync, path, not_found)
+
+
+def _list_children(target: Path, not_found: str) -> list[Path]:
+    """List ``target``'s children sorted by name, reporting a miss as ``NotFoundError``.
+
+    The listing IS the existence check, for the reason the open is one in
+    :func:`_open_readable_sync` (issue #2394): the reader lease pins the snapshot
+    directory, not the subtrees inside it, so a ``delete_dir`` lands between an
+    ``is_dir()`` pre-check and this ``iterdir`` and makes it raise a bare
+    ``FileNotFoundError`` -- untranslated by the servers seam, hence a 500.
+    """
+
+    try:
+        return sorted(target.iterdir(), key=lambda p: p.name)
+    except OSError as exc:
+        if exc.errno in _NOT_A_LISTABLE_DIR:
+            raise NotFoundError(not_found) from exc
+        raise
+
+
+def _list_entries(target: Path, not_found: str) -> list[DirEntry]:
+    """Describe one directory level: the shared body of both fs listings (#2414).
+
+    ``_list_children`` closed the window on the listing TARGET (issue #2394); a
+    second one sat on each listed CHILD. ``iterdir`` drains an ``os.scandir`` into
+    a list before it yields anything, so what it returns is an atomic snapshot of
+    the directory, and every name in it is then described by a separate ``stat``.
+    A child unlinked in between made that stat raise a bare ``FileNotFoundError``
+    -- untranslated by the servers seam, so one unlucky delete anywhere in the
+    directory 500'd the whole listing (measured on
+    ``GET .../files?path=d&list=true``).
+
+    Such an entry is OMITTED: the listing then describes the directory as of a
+    moment just after the snapshot, which is both what a user expects (the file is
+    gone, so it is not listed) and what the object backend already does -- its
+    listing is one ``list_objects`` response, which a concurrently deleted key
+    simply is not in, and which never fails per entry.
+
+    ENOENT alone, and one ``stat`` rather than ``is_dir()`` + ``stat()`` so the
+    entry is described from a single observation. Every other errno means
+    something other than "this entry is gone" and still surfaces: EACCES/EIO name
+    a child that exists, and ENOTDIR means the PARENT stopped being a directory
+    under the listing -- silently dropping entries for those would hide a real
+    failure behind a short listing.
+
+    The describing call is an ``lstat``: an entry is described as what the
+    DIRENT is, never as what it points at (issue #2418). A target-following
+    ``stat`` cannot describe two children that have not vanished at all — a
+    dangling symlink raises ENOENT and was therefore swallowed by the rule
+    above, and a symlink loop raises ELOOP and escaped untranslated, 500'ing the
+    whole listing. Both are real dirents ``ls`` shows; ``lstat`` succeeds on both,
+    so they need no special case and neither can fail a listing any more. It also
+    makes an unbounded walk of a cyclic directory symlink structurally impossible.
+    The cost is that a symlink to a DIRECTORY is reported as a file carrying the
+    link's own size (the target string's length) rather than as a navigable
+    directory. That is accepted: it is exactly what the Worker's running-server
+    listing already does for the same entry (``unix.Fstatat`` with
+    ``AT_SYMLINK_NOFOLLOW``), so the at-rest and running file browsers now agree,
+    as the control-plane ``FileEntry`` contract already claims they do.
+    """
+
+    children = _list_children(target, not_found)
+    entries = []
+    for child in children:
+        try:
+            info = child.lstat()
+        except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                continue
+            raise
+        is_dir = stat.S_ISDIR(info.st_mode)
+        entries.append(
+            DirEntry(
+                name=child.name,
+                is_dir=is_dir,
+                size=0 if is_dir else info.st_size,
+            )
+        )
+    # Every entry vanishing is how a ``delete_dir`` of this very directory looks
+    # from here, and answering ``[]`` would report a directory that is GONE as one
+    # that exists and is empty -- a worse lie than the 500 above, and a
+    # contradiction of the miss #2394 pins. Confirming the directory afterwards is
+    # not the pre-check that issue removed: it acts on the LATER observation, and
+    # only in the one case the omission above created (a genuinely empty directory
+    # has no children to omit and never reaches it).
+    if children and not entries and not target.is_dir():
+        raise NotFoundError(not_found)
+    return entries
+
+
+def _size_of_readable(path: Path, not_found: str) -> int:
+    """Size of a stored file, with the open as the existence check (issue #2394).
+
+    ``fstat`` on the handle rather than ``stat`` on the path, so the size reported
+    is the file that was actually opened and the miss is the same
+    :class:`NotFoundError` :func:`_open_readable_sync` raises everywhere else --
+    including for a path that names a directory, which a bare ``stat`` would
+    happily size.
+    """
+
+    with _open_readable_sync(path, not_found) as handle:
+        return os.fstat(handle.fileno()).st_size
+
+
+def _file_stream(
+    path: Path, byte_range: tuple[int, int] | None = None, *, not_found: str
+) -> AsyncIterator[bytes]:
+    """Yield a stored file's bytes in chunks (JAR / backup egress).
+
+    The open IS the existence check (issue #2341): a caller-side ``is_file()``
+    pre-check plus this lazy open left a window in which a concurrent delete made
+    the stream raise a bare ``FileNotFoundError``, which the servers-side adapter
+    seams do not translate (they translate :class:`NotFoundError` only). Opening
+    once and reporting the miss as ``NotFoundError`` (message ``not_found``)
+    removes the window rather than translating inside it. The open stays on the
+    first iteration, so a stream that is opened but never consumed holds no
+    descriptor.
+
+    ``byte_range`` is an inclusive ``(first, last)`` pair: the handle seeks to
+    ``first`` and yields exactly ``last - first + 1`` bytes, so serving the tail
+    of a multi-GB archive never reads the head (issue #2372).
+    """
 
     async def _gen() -> AsyncIterator[bytes]:
-        handle = await asyncio.to_thread(open, path, "rb")
+        handle = await _open_readable(path, not_found)
         try:
-            while True:
-                chunk = await asyncio.to_thread(handle.read, _CHUNK)
+            remaining = None
+            if byte_range is not None:
+                first, last = byte_range
+                await asyncio.to_thread(handle.seek, first)
+                remaining = last - first + 1
+            while remaining is None or remaining > 0:
+                want = _CHUNK if remaining is None else min(_CHUNK, remaining)
+                chunk = await asyncio.to_thread(handle.read, want)
                 if not chunk:
                     return
+                if remaining is not None:
+                    remaining -= len(chunk)
                 yield chunk
         finally:
             await asyncio.to_thread(handle.close)
@@ -1944,21 +2276,34 @@ def _file_stream(path: Path) -> AsyncIterator[bytes]:
 
 def _leased_file_stream(
     open_source: Callable[[], tuple[Path, Callable[[], None]]],
+    *,
+    not_found: str,
 ) -> AsyncIterator[bytes]:
     """Stream one file's bytes in chunks under an active-reader lease (issue #265).
 
     ``open_source`` is called on the first iteration: it resolves the live
-    snapshot, takes the active-reader lease, locates the target file, and returns
-    the file path plus the matching lease-release callback. Deferring it to first
-    iteration means a stream opened but never consumed never pins a snapshot
-    (mirroring :func:`_tar_stream`). The lease is released exactly once when the
-    stream finishes, is closed early, or raises.
+    snapshot, takes the active-reader lease, resolves the target path, and returns
+    it plus the matching lease-release callback. Deferring it to first iteration
+    means a stream opened but never consumed never pins a snapshot (mirroring
+    :func:`_tar_stream`). The lease is released exactly once when the stream
+    finishes, is closed early, or raises.
+
+    The open IS the existence check (issue #2391, the shape :func:`_file_stream`
+    took in #2341): the lease protects the snapshot DIRECTORY, not the files in
+    it, so a ``delete_file`` unlinking in place lands between a pre-check and this
+    open and makes the stream raise a bare ``FileNotFoundError`` -- which the
+    servers-side seam does not translate (it translates :class:`NotFoundError`
+    only), so it reaches the edge as a 500. Opening through
+    :func:`_open_readable`, which reports every "names no readable file" errno as
+    ``NotFoundError`` (message ``not_found``), removes the window. The open stays
+    on the first iteration, so a stream that is opened but never consumed holds no
+    descriptor.
     """
 
     async def _gen() -> AsyncIterator[bytes]:
         path, on_close = await asyncio.to_thread(open_source)
         try:
-            handle = await asyncio.to_thread(open, path, "rb")
+            handle = await _open_readable(path, not_found)
             try:
                 while True:
                     chunk = await asyncio.to_thread(handle.read, _CHUNK)
@@ -2058,12 +2403,17 @@ def _extract_member_capped(
 
 
 def _pinned_file_stream(target: Path, rel_path: RelPath) -> AsyncIterator[bytes]:
-    """Stream one file's bytes without taking a lease (caller already holds one)."""
+    """Stream one file's bytes without taking a lease (caller already holds one).
+
+    The open IS the existence check, for the same reason it is in
+    :func:`_leased_file_stream` (issue #2391): the view's lease pins the snapshot
+    DIRECTORY, and ``delete_file`` unlinks a file inside that very directory, so a
+    pre-check here would leave the same window and the same bare
+    ``FileNotFoundError`` escaping the servers seam as a 500.
+    """
 
     async def _gen() -> AsyncIterator[bytes]:
-        if not target.is_file():
-            raise NotFoundError(f"file not found: {rel_path.value}")
-        handle = await asyncio.to_thread(open, target, "rb")
+        handle = await _open_readable(target, f"file not found: {rel_path.value}")
         try:
             while True:
                 chunk = await asyncio.to_thread(handle.read, _CHUNK)
@@ -2128,26 +2478,23 @@ class _FsWorkingSetView(WorkingSetView):
 
     def _list_dir_sync(self, rel_path: RelPath) -> list[DirEntry]:
         assert self._pinned is not None
-        target = self._storage._safe_target(self._pinned, rel_path)
-        if not target.is_dir():
-            raise NotFoundError(f"directory not found: {rel_path.value}")
-        entries = []
-        for child in sorted(target.iterdir(), key=lambda p: p.name):
-            is_dir = child.is_dir()
-            entries.append(
-                DirEntry(
-                    name=child.name,
-                    is_dir=is_dir,
-                    size=0 if is_dir else child.stat().st_size,
-                )
-            )
-        return entries
+        target = self._storage._safe_read_target(self._pinned, rel_path)
+        # The listing IS the existence check, for the same reason it is in
+        # ``FsStorage._list_dir`` (issue #2394): the view's lease pins the snapshot
+        # DIRECTORY, and ``delete_dir`` removes a subtree inside that very
+        # directory, so a pre-check here would leave the same window. The body is
+        # shared so the view cannot drift from ``_list_dir`` on any of it --
+        # including how a vanished child is reported (issue #2414) and how a
+        # symlink child is described (issue #2418).
+        return _list_entries(target, f"directory not found: {rel_path.value}")
 
     def open_file_stream(self, rel_path: RelPath) -> ByteStream:
         if self._pinned is None:
             raise NotFoundError(f"file not found: {rel_path.value}")
-        # Resolve the target synchronously (the pinned path is stable).
-        target = self._storage._safe_target(self._pinned, rel_path)
+        # Resolve the target synchronously (the pinned path is stable). Reads go
+        # through the read-side resolve so the view refuses a symlink component
+        # exactly as the unpinned read paths do (issues #2418, #2432).
+        target = self._storage._safe_read_target(self._pinned, rel_path)
         # The lease is already held by the view; stream the file without an
         # additional per-file lease.
         return _pinned_file_stream(target, rel_path)

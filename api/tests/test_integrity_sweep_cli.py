@@ -14,12 +14,16 @@ import pytest
 
 from mc_server_dashboard_api import integrity_sweep_cli
 from mc_server_dashboard_api.servers.application.integrity_sweep import SweepSummary
+from mc_server_dashboard_api.servers.domain.errors import (
+    BackupStorageUnavailableError,
+)
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 
 _EMPTY = SweepSummary(
     servers_scanned=0,
     backups_healthy=0,
     backups_quarantined=0,
+    backups_unreadable=0,
     backups_dangling=0,
     snapshots_scanned=0,
     snapshots_flagged=0,
@@ -49,6 +53,26 @@ def test_main_scopes_to_a_single_server(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(integrity_sweep_cli, "run", _fake_run)
     assert integrity_sweep_cli.main(["--server", str(sid)]) == 0
     assert seen == [ServerId(sid)]
+
+
+def test_main_reports_a_store_outage_cleanly(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A store outage stops the pass (issue #2371) — an outage is no verdict about a
+    backup. That is an expected operator-facing outcome, so it must exit non-zero
+    with a message naming the backup, not with a bare traceback."""
+
+    async def _fake_run(*, server_id: ServerId | None) -> SweepSummary:
+        raise BackupStorageUnavailableError("abc123ref")
+
+    monkeypatch.setattr(integrity_sweep_cli, "run", _fake_run)
+
+    assert integrity_sweep_cli.main([]) == 1
+
+    err = capsys.readouterr().err
+    assert "integrity sweep aborted" in err
+    assert "abc123ref" in err  # names which backup the pass died on
+    assert "Traceback" not in err
 
 
 def test_main_rejects_an_invalid_server_uuid(monkeypatch: pytest.MonkeyPatch) -> None:

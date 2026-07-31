@@ -869,12 +869,37 @@ async def test_download_streams_archive_for_known_backup() -> None:
     backup = _seed_backup(backups, archive, server.id, storage_ref="ref", size_bytes=5)
     uow = FakeUnitOfWork(servers=repo, backups=backups)
 
-    stream, size_bytes = await DownloadBackup(uow=uow, backup_store=archive)(
+    use_case = DownloadBackup(uow=uow, backup_store=archive)
+    size_bytes = await use_case.archive_size(
+        community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id
+    )
+    stream = await use_case.archive_stream(
         community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id
     )
     blob = b"".join([chunk async for chunk in stream])
     assert blob == b"x" * 5
     assert size_bytes == 5
+
+
+async def test_download_streams_only_the_requested_byte_range() -> None:
+    # A resumed download asks for the archive's tail (issue #2372): the range
+    # reaches the store, which reads only those bytes.
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    backups = FakeBackupRepository()
+    archive = FakeBackupArchiveStore()
+    backup = _seed_backup(backups, archive, server.id, storage_ref="ref", size_bytes=10)
+    archive.bytes_by_ref["ref"] = b"0123456789"
+    uow = FakeUnitOfWork(servers=repo, backups=backups)
+
+    stream = await DownloadBackup(uow=uow, backup_store=archive).archive_stream(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        backup_id=backup.id,
+        byte_range=(4, 6),
+    )
+    assert b"".join([chunk async for chunk in stream]) == b"456"
 
 
 async def test_download_size_comes_from_the_archive_store_not_the_row() -> None:
@@ -890,7 +915,11 @@ async def test_download_size_comes_from_the_archive_store_not_the_row() -> None:
     )
     uow = FakeUnitOfWork(servers=repo, backups=backups)
 
-    stream, size_bytes = await DownloadBackup(uow=uow, backup_store=archive)(
+    use_case = DownloadBackup(uow=uow, backup_store=archive)
+    size_bytes = await use_case.archive_size(
+        community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id
+    )
+    stream = await use_case.archive_stream(
         community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id
     )
     assert backup.size_bytes is None
@@ -904,7 +933,9 @@ async def test_download_unknown_backup_is_not_found() -> None:
     repo.seed(server)
     uow = FakeUnitOfWork(servers=repo)
     with pytest.raises(BackupNotFoundError):
-        await DownloadBackup(uow=uow, backup_store=FakeBackupArchiveStore())(
+        await DownloadBackup(
+            uow=uow, backup_store=FakeBackupArchiveStore()
+        ).archive_size(
             community_id=_COMMUNITY, server_id=server.id, backup_id=BackupId.new()
         )
 
@@ -920,7 +951,7 @@ async def test_download_cross_server_backup_is_not_found() -> None:
     foreign = _seed_backup(backups, archive, other.id, storage_ref="ref", size_bytes=3)
     uow = FakeUnitOfWork(servers=repo, backups=backups)
     with pytest.raises(BackupNotFoundError):
-        await DownloadBackup(uow=uow, backup_store=archive)(
+        await DownloadBackup(uow=uow, backup_store=archive).archive_size(
             community_id=_COMMUNITY, server_id=server.id, backup_id=foreign.id
         )
 

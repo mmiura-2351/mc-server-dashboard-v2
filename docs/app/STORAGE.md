@@ -311,7 +311,7 @@ depend on a Worker.
 | `list_backups(community_id, server_id) -> [BackupKey]` | Enumerate a server's backups | Metadata (label, timestamp, size) lives in the DB (#15); this returns the keys. |
 | `restore_backup(community_id, server_id, BackupKey, force=False)` | Atomically republish a backup into `current/` | Atomic publish (Section 4). Caller must ensure the server is **stopped** (FR-BAK-4); `Storage` enforces atomicity, the application enforces the stop precondition. A restore replaces `current/`, so it **bumps the working-set generation** like a `commit_snapshot` (issue #873) — otherwise a same-Worker scratch with `held == store` would skip the post-restore hydrate (#767) on the next start and boot the PRE-restore world. The publisher is stamped with the `api-restore` sentinel (no producing Worker), so the publish-time guard (Section 8) treats an in-flight stale snapshot from a real Worker as a different-publisher publish and refuses it, closing the restore-clobber window. The extracted backup is validated through the integrity gate (issue #743): a corrupt backup is refused with `IntegrityCheckError` (carrying the `WorkingSetReport`); `current/` is left untouched. Quarantining the backup is an application-layer concern — the caller receives the report and decides what to do. `force=True` (the `?force=true` API override, operator-only) publishes despite corruption and returns the `WorkingSetReport` so the caller can quarantine and audit. A restore **bypasses the missing-region gate (#854) by design**: that gate diffs a staged set against the prior `current/` to catch a Worker accidentally dropping live regions, but a backup is a **complete, self-consistent set captured as a whole** — it is the authoritative replacement, not an incremental delta over `current/`, so a backup that legitimately holds fewer regions than the current world (an older/smaller world being restored) is exactly the intended operation and must not be refused. The structural `.mca` integrity gate (#743) still applies (a backup cannot be *internally* corrupt); only the prior-set partial-loss comparison is skipped. **Restore flip↔marker crash window:** like `commit_snapshot`, the generation/publisher marker is a separate write after the `current` flip (Section 2 generation marker), so a crash in that window leaves `current` = the restored world but the marker stale (old generation/publisher); the restore call itself then fails so the caller knows it did not complete, a retry republishes and bumps the marker into agreement (self-healing), and the #827 restore lock serializes the window so no concurrent publish can interleave. |
 | `delete_backup(community_id, server_id, BackupKey)` | Remove a backup archive | Idempotent. |
-| `open_backup(community_id, server_id, BackupKey) -> ReadStream` | Stream a stored archive in its native format | Download (issue #281): yields the archive bytes **verbatim** — the adapter-internal `tar.gz` (Section 2), no recompression. `NotFoundError` for an unknown key. |
+| `open_backup(community_id, server_id, BackupKey, byte_range=None) -> ReadStream` | Stream a stored archive (or one byte range of it) in its native format | Download (issue #281): yields the archive bytes **verbatim** — the adapter-internal `tar.gz` (Section 2), no recompression. `NotFoundError` for an unknown key. `byte_range` is an **inclusive** `(first, last)` pair the caller has already resolved against `backup_size`, and the stream then yields exactly `last - first + 1` bytes — how a download interrupted mid-transfer resumes (issue #2372). It is a real ranged read (an object-store ranged GET; a filesystem seek), never a prefix discarded off the full stream: serving the tail of a multi-GB archive must not re-read its head. |
 | `put_backup(community_id, server_id, WriteStream) -> BackupKey` | Store an uploaded archive verbatim under a fresh key | Upload (issue #281): the **application** has already validated the archive (opens + traversal-safe entries) before this is called; `Storage` only stores the bytes, so the new backup is restorable through `restore_backup` like a created one. |
 | `backup_size(community_id, server_id, BackupKey) -> int` | Report a stored archive's byte count | The size recorded as `size_bytes` at create/upload (issue #281). `NotFoundError` for an unknown key. |
 
@@ -865,8 +865,8 @@ enforces, inside the adapter, before any I/O:
 - The path is **canonicalized** and must resolve to a location **inside** the
   server's namespace root. Any result escaping the root (via `..`, symlinks, or
   encoding tricks) is rejected with a domain error, not silently clamped.
-- **Symlinks** within `current/` are not followed out of the root; a symlink that
-  points outside the server root is rejected.
+- **Symlinks** are refused at **every** path component, not followed — see the
+  per-component rule below.
 - The `(community_id, server_id)` scope is applied by the adapter from
   trusted, API-minted ids (Section 2), never from the `rel_path`, so cross-server
   or cross-Community access is structurally impossible.
@@ -874,6 +874,48 @@ enforces, inside the adapter, before any I/O:
 This is enforced in the adapter (not the use case) so that **every** backend gets
 the protection and a future backend cannot forget it; the rejection is a typed
 domain error so the API surface can map it to a uniform response.
+
+### 6.1 The per-component symlink rule (#2432)
+
+**Symlinks in a working set are unsupported, full stop — at rest included.** A
+working set cannot acquire one through any supported write: uploads refuse symlink
+members, hydrate rejects them, and the Worker's snapshot tar skips them. One can
+therefore only arrive out of band, from an operator over SSH.
+
+Every operation that takes a `rel_path` resolves it the same way, in this order:
+
+1. **Containment** — the resolved candidate must stay inside the server root.
+   Failing it is `PathTraversalError`, and it is decided **first**, so a link out
+   of the root always reports the escape rather than the refusal below.
+2. **The symlink refusal** — if resolving the path crossed a symlink at any
+   component, it is `SymlinkRefusedError`, distinct from `PathTraversalError`. The
+   edge renders it as `422 symlink_refused`, which is the reason the Worker's
+   running-server path already returns (`FileAccessReasonSymlinkRefused`), so one
+   browser click gets the same sentence whether the server is at rest or running.
+3. **The literal join is opened** — nothing has been followed, so the open answers
+   what is really at the path.
+
+Consequences worth stating:
+
+- Read-through of an operator-created **intermediate** symlink is deliberately
+  foreclosed on the fs backend (browsing a subfolder SSH-symlinked onto another
+  disk, say). That workflow is already broken system-wide — the running path
+  refuses it and hydrate will not start such a server at all.
+- A symlink **loop** and an over-long component stay the modelled **miss**: a
+  non-strict canonicalization leaves both literal, so step 2 sees nothing crossed
+  and the open reports `ELOOP` / `ENAMETOOLONG`, which the read paths already fold
+  into the miss (#2393/#2394).
+- **Mutations** apply the rule to their parent chain only; what a mutation does
+  with a **leaf** that is a link is a separate question (#2429), so a leaf link is
+  still resolved there.
+- `path_exists` likewise applies it to the parent chain only: its leaf is described
+  as itself, because a link occupies its name whatever it points at (#2426).
+- The fs realization compares the already-computed canonical path against the
+  literal join, so the rule costs no syscall beyond the one every resolve already
+  paid; it replaces the `lstat` the leaf-only rule needed. It leaves a
+  resolve-then-open window (only operator SSH can race it at rest); closing that
+  wants an `O_NOFOLLOW` open and is not done.
+- On a backend without symlinks (object storage, Section 7.3) step 2 is vacuous.
 
 ---
 
@@ -965,24 +1007,89 @@ socket read, not a whole transfer, so a multi-GB stream (chunked at 8 MiB) is
 unaffected while a genuinely stalled read is still capped; retries use botocore's
 `standard` mode (capped exponential backoff, broader retryable-error set).
 
-**At-rest integrity sweep limitation (issue #926).** The at-rest integrity sweep
-(`check_current_health`, Section 3.1; `check_backup_health`) returns a healthy
-`WorkingSetReport` unconditionally on the object backend — it does not inspect
-the stored objects. The reason is structural: the object backend has no local
-working-set directory to walk; the fsck implementation walks a local filesystem
-tree (the `current/` symlink target on fs), and no equivalent materialisation
-exists on the object side. The **publish-time** fsck (`_check_staged_regions`,
-wired on `commit_snapshot`, `restore_backup`, and `create_backup_from_current`)
-**is** implemented on the
+**At-rest integrity sweep limitation (issue #926).** The at-rest **structural**
+fsck (`check_current_health`, Section 3.1; the `.mca` walk behind
+`check_backup_health`) returns a healthy `WorkingSetReport` unconditionally on the
+object backend — it does not inspect the stored regions. The reason is structural:
+the object backend has no local working-set directory to walk; the fsck
+implementation walks a local filesystem tree (the `current/` symlink target on
+fs), and no equivalent materialisation exists on the object side. The
+**publish-time** fsck (`_check_staged_regions`, wired on `commit_snapshot`,
+`restore_backup`, and `create_backup_from_current`) **is** implemented on the
 object adapter and remains the authoritative gate — it downloads and validates
 each `.mca` member during staging, so a corrupt region is refused before it
 becomes authoritative. The gap is limited to the **read-only sweep** that
-re-checks already-published snapshots and backups at rest: on the object backend
-that sweep sees every server and backup as healthy regardless of actual content.
-A future enhancement could fetch and structurally check the `.mca` objects from
-the store (downloading headers only, mirroring the fs walker), but it is not
-implemented — the publish-time gate is the correctness guarantee today, and the
-sweep is defense-in-depth.
+re-checks already-published snapshots at rest: on the object backend that sweep
+sees every server's `current` as healthy regardless of actual content. A future
+enhancement could fetch and structurally check the `.mca` objects from the store
+(downloading headers only, mirroring the fs walker), but it is not implemented —
+the publish-time gate is the correctness guarantee today, and the sweep is
+defense-in-depth.
+
+**Backup readability probe (issue #2371).** `check_backup_health` on the object
+backend is *not* limited that way: it answers the question a `HEAD` never could —
+can the store still **produce** this archive? A deployment was found serving
+backups whose body ended deterministically short of the `Content-Length` its
+`HEAD` declared (the connection aborting after a ~12s stall at the same offset on
+every attempt, days apart). Those backups are unrestorable, and every one of them
+listed as `health: healthy`, because the probe read no bytes.
+
+The probe therefore streams the stored object end to end — the same object the
+download and restore paths read — and requires both that the delivered byte count
+equals the declared length **and** that the bytes decompress as a gzip stream
+terminating at a well-formed CRC32 + ISIZE trailer, so silent bit-rot is caught
+and not only truncation. Decompressed output is discarded as it is produced
+(`GzipReadProbe`): nothing is staged to disk, nothing is buffered whole. It does
+not extract or region-fsck — that stays fs-only, above. An archive the store
+cannot reproduce raises `ArchiveUnreadableError`, which the servers seam
+translates to `BackupUnreadableError` and the sweep records as `QUARANTINED`,
+counted and logged apart from a structural quarantine so an operator can tell "the
+bytes are gone" from "the world is corrupt".
+
+A false *unhealthy* is as harmful as the false *healthy* being fixed — it
+quarantines a restorable backup and emits a spurious audit entry — so the probe's
+leniency is pinned to what restore accepts. Restore reads the archive with
+`tarfile.open(mode="r:gz")`, which stops at the tar end-of-archive marker inside
+the first gzip member. Anything after a **complete** member therefore cannot make
+the archive unreadable: a concatenated second member (legal gzip, and what the
+shell tools produce) is walked as well, and anything that does not carry the gzip
+magic is trailing padding that ends the walk. The one place the probe is
+deliberately **stricter** than restore is the trailer: because tarfile stops early
+it never verifies the CRC32/ISIZE at all and will open an archive whose trailer has
+rotted, but a stored object whose bytes have changed is damaged regardless — the
+next flipped bit lands in the payload, which restore *does* reject.
+
+Reading every archive is deliberate cost: the sweep is operator-invoked only
+(`integrity_sweep_cli`, never run on boot), so there is no sampling, cap, or
+config knob.
+
+**Damage vs. outage.** A body that ends early looks identical whether the object's
+bytes are damaged or the store is merely having a bad minute — and quarantining on
+the latter would condemn every backup in the deployment over one outage. The
+observed defect is *deterministic*: the transfer stops at one fixed point on every
+attempt. So the probe re-reads (after a short backoff, so a momentary fault has a
+chance to clear) and calls the archive unreadable only when the body reproducibly
+ends at the **same non-zero point**. A different point, no byte delivered at all
+(the store refusing outright), or a complete read the second time all stay
+`ObjectStoreUnavailableError` → `BackupStorageUnavailableError`, which the sweep
+does not catch: the pass stops, logging which backup it died on, and the CLI exits
+non-zero with an operator-facing message rather than a traceback. The extra read is
+paid only on the failure path. A clean early EOF takes the same re-read path as a
+transport teardown — it is the same observation and equally unable to tell damage
+from an outage on one attempt. The comparison is at the 8 MiB read-chunk
+granularity, not byte-exact, which is ample to separate a fixed cut point from an
+outage's scattered ones.
+
+Supporting this, `_iter_body` translates **any** exception raised while reading a
+response body to `ObjectStoreUnavailableError`, so a teardown is a typed storage
+outcome rather than a raw third-party type crossing the Port. The breadth is
+deliberate: the shapes a short body produces are spread across three libraries and
+none is in the upload-failure tuple — aiohttp's `ClientPayloadError` (what the
+reported defect raises) is a *sibling* of `ClientConnectionError`, which is all
+aiobotocore's `StreamingBody.read` maps, and botocore's `IncompleteReadError` is a
+bare `BotoCoreError`. A name-based enumeration there is a standing bug, because a
+miss does not degrade the probe, it disables it. `BaseException` is not caught, so
+`GeneratorExit` and `CancelledError` still pass through.
 
 ### 7.4 Why backend switching stays a configuration change
 

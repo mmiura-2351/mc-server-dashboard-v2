@@ -31,11 +31,12 @@ func newTestManager(ctx context.Context, t *testing.T) *Manager {
 	return m
 }
 
-// waitFor polls cond until it is true or 5s elapse, failing the test on
-// timeout.
+// waitFor polls cond until it is true or starvationBudget elapses, failing the
+// test on timeout. Every caller expects cond to become true, so the poll
+// returns the moment it does and the budget only bounds a starved run.
 func waitFor(t *testing.T, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(starvationBudget)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return
@@ -43,7 +44,7 @@ func waitFor(t *testing.T, cond func() bool) {
 		time.Sleep(2 * time.Millisecond)
 	}
 	if !cond() {
-		t.Fatal("condition not met within 5s")
+		t.Fatal("condition not met")
 	}
 }
 
@@ -112,7 +113,7 @@ func waitPumpRunning(t *testing.T, conn *quic.Conn) {
 	t.Helper()
 	sendFlowDatagram(t, conn, 1, "ping")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), starvationBudget)
 	defer cancel()
 	data, err := conn.ReceiveDatagram(ctx)
 	if err != nil {
@@ -175,8 +176,8 @@ func TestDialUsesPinnedKeepAliveAndDatagrams(t *testing.T) {
 		if !cfg.EnableDatagrams {
 			t.Fatal("EnableDatagrams = false, want true")
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("dialQUIC was not called within 2s")
+	case <-time.After(starvationBudget):
+		t.Fatal("dialQUIC was not called")
 	}
 }
 
@@ -201,7 +202,7 @@ func TestDatagramRoundTripMultipleFlows(t *testing.T) {
 	sendFlowDatagram(t, got.conn, 1, "hello-from-1")
 	sendFlowDatagram(t, got.conn, 2, "hello-from-2")
 
-	recvCtx, recvCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	recvCtx, recvCancel := context.WithTimeout(context.Background(), starvationBudget)
 	defer recvCancel()
 	replies := map[uint32]string{}
 	for range 2 {
@@ -254,8 +255,8 @@ func TestPumpDialsContainerHostOverNetwork(t *testing.T) {
 		if want := "mcsd-s1:19132"; gotAddr != want {
 			t.Fatalf("dialUDP addr = %q, want %q", gotAddr, want)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("dialUDP was not called within 5s")
+	case <-time.After(starvationBudget):
+		t.Fatal("dialUDP was not called")
 	}
 }
 
@@ -289,8 +290,8 @@ func TestPumpDialsLoopbackWithoutNetwork(t *testing.T) {
 		if want := "127.0.0.1:19132"; gotAddr != want {
 			t.Fatalf("dialUDP addr = %q, want %q", gotAddr, want)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("dialUDP was not called within 5s")
+	case <-time.After(starvationBudget):
+		t.Fatal("dialUDP was not called")
 	}
 }
 
@@ -535,7 +536,7 @@ func TestRedialAfterPumpDropAppliesBackoff(t *testing.T) {
 		if got != want {
 			t.Fatalf("backoff delay after pump drop = %v, want %v", got, want)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(starvationBudget):
 		t.Fatal("afterFunc was not called after pump drop (issue #1988)")
 	}
 
@@ -587,8 +588,8 @@ func TestInstantDisplacementEscalatesBackoff(t *testing.T) {
 			if got != want {
 				t.Fatalf("drop %d: backoff delay = %v, want %v (attempt %d)", i, got, want, i)
 			}
-		case <-time.After(5 * time.Second):
-			t.Fatalf("drop %d: afterFunc not called within 5s", i)
+		case <-time.After(starvationBudget):
+			t.Fatalf("drop %d: afterFunc not called", i)
 		}
 	}
 }
@@ -629,7 +630,7 @@ func TestStableConnectionResetsBackoff(t *testing.T) {
 		if want := m.backoff.Delay(0, 0.5); got != want {
 			t.Fatalf("first drop: backoff = %v, want %v", got, want)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(starvationBudget):
 		t.Fatal("first drop: afterFunc not called")
 	}
 
@@ -648,7 +649,7 @@ func TestStableConnectionResetsBackoff(t *testing.T) {
 		if want := m.backoff.Delay(0, 0.5); got != want {
 			t.Fatalf("stable drop: backoff = %v, want %v (should have reset)", got, want)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(starvationBudget):
 		t.Fatal("stable drop: afterFunc not called")
 	}
 }

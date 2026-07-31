@@ -502,6 +502,42 @@ async def test_backup_pack_survives_concurrent_publish_reclaim(
         assert handle.read() == b"OLD"
 
 
+async def test_backup_stream_that_has_begun_survives_a_delete(tmp_path: Path) -> None:
+    """A delete after the first chunk cannot shorten the archive stream (#2415).
+
+    ``backup_size`` and ``open_backup`` locate the archive independently, so the
+    download route begins the stream before it declares the probed size as
+    ``Content-Length``. That is only worth doing if beginning the stream pins what
+    it serves, which on a filesystem it does: the generator holds an open
+    descriptor, and unlinking the path leaves the inode readable to it. The rest
+    of the bytes therefore still arrive, and the declared length still matches
+    them. A ranged read declares a length derived from the same probe (issue
+    #2382) and is pinned the same way.
+
+    The other side of the window — a delete landing BEFORE the first chunk — is
+    the Port's own miss, pinned by ``test_backup_deleted_after_open_is_not_found``;
+    beginning the stream early is what puts it back where a status can be chosen.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    # Incompressible, and larger than the stream's chunk size, so the archive
+    # really does take more than one read — otherwise the first chunk is the whole
+    # body and the delete lands after the last byte, proving nothing.
+    await publish(storage, community, server, {"world/level.dat": os.urandom(2 << 20)})
+
+    for ranged in (False, True):
+        key = await storage.create_backup_from_current(community, server)
+        size = await storage.backup_size(community, server, key)
+        served = (0, size - 1) if ranged else None
+        stream = storage.open_backup(community, server, key, byte_range=served)
+
+        first = await anext(stream)
+        await storage.delete_backup(community, server, key)
+
+        assert len(first) + len(await drain(stream)) == size, f"range {served}"
+
+
 async def test_check_current_health_survives_concurrent_publish_reclaim(
     tmp_path: Path,
 ) -> None:

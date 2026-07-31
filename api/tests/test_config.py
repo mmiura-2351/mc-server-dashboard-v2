@@ -276,6 +276,7 @@ def test_token_ttl_must_be_positive(
         ("reconciler", "interval_seconds", 0),
         ("reconciler", "grace_seconds", 0),
         ("reconciler", "held_start_grace_seconds", 0),
+        ("reconciler", "refused_stop_grace_seconds", 0),
         ("reconciler", "backoff_base_seconds", 0),
         ("reconciler", "backoff_max_seconds", 0),
         ("jar_gc", "interval_seconds", 0),
@@ -355,6 +356,7 @@ def test_reconciler_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.reconciler.interval_seconds == 60
     assert settings.reconciler.grace_seconds == 660
     assert settings.reconciler.held_start_grace_seconds == 90
+    assert settings.reconciler.refused_stop_grace_seconds == 30
     assert settings.reconciler.backoff_base_seconds == 30
     assert settings.reconciler.backoff_max_seconds == 3600
 
@@ -367,6 +369,7 @@ def test_reconciler_from_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
         "interval_seconds = 30\n"
         "grace_seconds = 90\n"
         "held_start_grace_seconds = 45\n"
+        "refused_stop_grace_seconds = 20\n"
         "backoff_base_seconds = 15\n"
         "backoff_max_seconds = 1800\n",
     )
@@ -374,6 +377,7 @@ def test_reconciler_from_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     assert settings.reconciler.interval_seconds == 30
     assert settings.reconciler.grace_seconds == 90
     assert settings.reconciler.held_start_grace_seconds == 45
+    assert settings.reconciler.refused_stop_grace_seconds == 20
     assert settings.reconciler.backoff_base_seconds == 15
     assert settings.reconciler.backoff_max_seconds == 1800
 

@@ -5,16 +5,19 @@ The create/restore integrity gates (#749/#743) only check *new* artifacts; the
 This sweep is the explicitly-invoked maintenance pass that re-checks the existing
 artifacts of every server (or a single server) and persists/surfaces the result:
 
-- **Backups** (DB-tracked): for each backup row, extract-and-fsck the archive
-  under the decompressed-byte cap (the ``check_backup_health`` Storage probe,
-  read-only) and write the verdict to the ``health`` column via ``update_health``
-  (#743) — ``HEALTHY`` for a sound archive, ``QUARANTINED`` for a corrupt one.
+- **Backups** (DB-tracked): for each backup row, run the read-only
+  ``check_backup_health`` Storage probe and write the verdict to the ``health``
+  column via ``update_health`` (#743) — ``HEALTHY`` for a sound archive,
+  ``QUARANTINED`` for a corrupt one. What the probe does is backend-specific: the
+  fs adapter extracts the archive under the decompressed-byte cap and fscks the
+  region files; the object adapter streams the stored archive end to end and
+  proves the store can still produce it (#2371), quarantining one it cannot.
 - **Snapshots** (filesystem-only, no DB row): fsck the published ``current`` world
   in place and **log/audit** its health — there is no snapshot model to update, so
   surfacing is report/audit-only.
 
 A quarantined backup and a flagged snapshot each emit an audit entry. The pass is
-heavy (an extract per archive), so it logs per-backup progress. It is idempotent:
+heavy (a full read per archive), so it logs per-backup progress. It is idempotent:
 re-running re-checks the same bytes and yields the same classification, with no
 on-disk or summary state that drifts.
 
@@ -40,7 +43,11 @@ from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
 from mc_server_dashboard_api.servers.domain.backup import Backup, BackupHealth
 from mc_server_dashboard_api.servers.domain.backup_store import BackupArchiveStore
 from mc_server_dashboard_api.servers.domain.entities import Server
-from mc_server_dashboard_api.servers.domain.errors import BackupNotFoundError
+from mc_server_dashboard_api.servers.domain.errors import (
+    BackupNotFoundError,
+    BackupStorageUnavailableError,
+    BackupUnreadableError,
+)
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -57,11 +64,19 @@ class SweepSummary:
     ``snapshots_scanned`` counts only servers whose ``current`` was published (an
     unpublished server has nothing to fsck and is skipped); ``snapshots_flagged``
     is how many of those were structurally corrupt.
+
+    The three backup-quarantine counts are kept apart because an operator acts on
+    them differently: ``backups_quarantined`` is a structurally corrupt world,
+    ``backups_dangling`` is a row with no archive at all, and
+    ``backups_unreadable`` is an archive the store can no longer produce (#2371) —
+    "the bytes are gone" rather than "the world is corrupt". Every one of the three
+    writes ``QUARANTINED`` to the row and emits the quarantine audit.
     """
 
     servers_scanned: int
     backups_healthy: int
     backups_quarantined: int
+    backups_unreadable: int
     backups_dangling: int
     snapshots_scanned: int
     snapshots_flagged: int
@@ -87,14 +102,21 @@ class IntegritySweep:
         servers = await self._servers_to_scan(server_id)
         backups_healthy = 0
         backups_quarantined = 0
+        backups_unreadable = 0
         backups_dangling = 0
         snapshots_scanned = 0
         snapshots_flagged = 0
         for server in servers:
             _LOG.info("integrity sweep: scanning server %s", server.id.value)
-            healthy, quarantined, dangling = await self._sweep_backups(server, actor_id)
+            (
+                healthy,
+                quarantined,
+                unreadable,
+                dangling,
+            ) = await self._sweep_backups(server, actor_id)
             backups_healthy += healthy
             backups_quarantined += quarantined
+            backups_unreadable += unreadable
             backups_dangling += dangling
             scanned, flagged = await self._sweep_snapshot(server, actor_id)
             snapshots_scanned += scanned
@@ -103,16 +125,19 @@ class IntegritySweep:
             servers_scanned=len(servers),
             backups_healthy=backups_healthy,
             backups_quarantined=backups_quarantined,
+            backups_unreadable=backups_unreadable,
             backups_dangling=backups_dangling,
             snapshots_scanned=snapshots_scanned,
             snapshots_flagged=snapshots_flagged,
         )
         _LOG.info(
-            "integrity sweep done: %d servers, %d backups healthy, %d quarantined, "
+            "integrity sweep done: %d servers, %d backups healthy, %d quarantined "
+            "(corrupt world), %d unreadable (archive bytes unproducible), "
             "%d dangling, %d snapshots scanned, %d flagged",
             summary.servers_scanned,
             summary.backups_healthy,
             summary.backups_quarantined,
+            summary.backups_unreadable,
             summary.backups_dangling,
             summary.snapshots_scanned,
             summary.snapshots_flagged,
@@ -128,11 +153,12 @@ class IntegritySweep:
 
     async def _sweep_backups(
         self, server: Server, actor_id: uuid.UUID | None
-    ) -> tuple[int, int, int]:
+    ) -> tuple[int, int, int, int]:
         async with self.uow:
             backups = await self.uow.backups.list_for_server(server.id)
         healthy = 0
         quarantined = 0
+        unreadable = 0
         dangling = 0
         for backup in backups:
             try:
@@ -147,16 +173,43 @@ class IntegritySweep:
                     "quarantining",
                     backup.id.value,
                 )
-                async with self.uow:
-                    await self.uow.backups.update_health(
-                        backup.id, BackupHealth.QUARANTINED
-                    )
-                    await self.uow.commit()
+                await self._quarantine(server, backup, actor_id)
                 dangling += 1
-                await self._audit_backup_quarantine(
-                    server.community_id, backup, actor_id
-                )
                 continue
+            except BackupUnreadableError:
+                # The archive exists but the store cannot produce its bytes (#2371):
+                # unrestorable, so it is quarantined like a corrupt one — with its
+                # own log line, because "the bytes are gone" and "the world is
+                # corrupt" call for different operator responses.
+                _LOG.warning(
+                    "integrity sweep: backup %s archive could not be read back "
+                    "(the store cannot produce its bytes); quarantining",
+                    backup.id.value,
+                )
+                await self._quarantine(server, backup, actor_id)
+                unreadable += 1
+                continue
+            except BackupStorageUnavailableError:
+                # An outage is no verdict about THIS archive (#2371), and re-running
+                # the pass against a down store would quarantine nothing correctly.
+                # Stop instead of misclassifying, naming the row the pass died on so
+                # the operator can resume from a known point; the CLI turns this into
+                # a clean failure rather than a traceback.
+                # ``exc_info`` is load-bearing, not decoration: the object client
+                # translates ANY body-read failure to a storage error, so the
+                # aiohttp/botocore error naming the actual fault survives only in the
+                # ``__cause__`` chain. Without the traceback here an operator sees
+                # "the store could not serve the read" at every surface and never
+                # why — which is what would make that broad catch a black hole.
+                _LOG.error(
+                    "integrity sweep: aborting at backup %s on server %s — the "
+                    "object store could not serve the archive read. No verdict was "
+                    "written for it; re-run the sweep once the store is healthy.",
+                    backup.id.value,
+                    server.id.value,
+                    exc_info=True,
+                )
+                raise
             health = BackupHealth.QUARANTINED if corrupt_count else BackupHealth.HEALTHY
             _LOG.info(
                 "integrity sweep: backup %s -> %s (%d corrupt region files)",
@@ -164,17 +217,31 @@ class IntegritySweep:
                 health.value,
                 corrupt_count,
             )
-            async with self.uow:
-                await self.uow.backups.update_health(backup.id, health)
-                await self.uow.commit()
             if health is BackupHealth.QUARANTINED:
+                await self._quarantine(server, backup, actor_id)
                 quarantined += 1
-                await self._audit_backup_quarantine(
-                    server.community_id, backup, actor_id
-                )
             else:
+                async with self.uow:
+                    await self.uow.backups.update_health(backup.id, health)
+                    await self.uow.commit()
                 healthy += 1
-        return healthy, quarantined, dangling
+        return healthy, quarantined, unreadable, dangling
+
+    async def _quarantine(
+        self, server: Server, backup: Backup, actor_id: uuid.UUID | None
+    ) -> None:
+        """Persist QUARANTINED on a backup row and audit it.
+
+        Every reason a backup is condemned — a corrupt world, a missing archive, an
+        archive the store cannot produce — records the same verdict and the same
+        audit entry; only the count and the log line differ. Sharing the write keeps
+        the three from drifting apart.
+        """
+
+        async with self.uow:
+            await self.uow.backups.update_health(backup.id, BackupHealth.QUARANTINED)
+            await self.uow.commit()
+        await self._audit_backup_quarantine(server.community_id, backup, actor_id)
 
     async def _sweep_snapshot(
         self, server: Server, actor_id: uuid.UUID | None

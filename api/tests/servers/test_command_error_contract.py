@@ -57,12 +57,21 @@ _FILE_READ_KINDS = ("ReadFile", "ListFiles")
 API_MATCH_SITES: tuple[tuple[str, CommandStatus], ...] = (
     # lifecycle.py: redispatch_start AND __call__ (#773/#774) -- INVALID_STATE on a
     # start means the Worker already runs the server (its start guard rejected a
-    # live instance), so both treat it as convergence rather than a failure.
+    # live instance), so both treat it as convergence rather than a failure. Since
+    # issue #2476 that is the code's ONLY meaning on a start or a hydrate: the
+    # pending failed-stop orphan, the other state ``reserve()`` refuses, moved to
+    # BUSY below. It is what makes the convergence sound -- while both meanings
+    # shared one code, a dead orphan's refusal converged a false observed=running
+    # (issue #2467). The table row backing this entry is now
+    # {StartServer, instance_running} alone.
     ("StartServer", CommandStatus.INVALID_STATE),
-    # lifecycle.py: redispatch_start AND __call__ (#824) -- BUSY on a start means
-    # another lifecycle command is in flight on the Worker (outcome unknown), so
-    # both keep the assignment/intent and raise for a retry WITHOUT converging
-    # observed=running (the distinct-from-INVALID_STATE branch).
+    # lifecycle.py: redispatch_start AND __call__ (#824/#2476) -- BUSY on a start
+    # means the Worker's id is not free yet: another lifecycle command is in flight
+    # OR a failed-stop orphan is still being converged. Both leave the outcome
+    # unknown and both will accept this same start later, so both API sites keep the
+    # assignment/intent and raise for a retry WITHOUT converging observed=running
+    # (the distinct-from-INVALID_STATE branch). Two table rows now back this entry:
+    # {StartServer, command_in_flight} and {StartServer, orphan_pending}.
     ("StartServer", CommandStatus.BUSY),
     # lifecycle.py: stop convergence -- SERVER_NOT_FOUND means no live instance;
     # converge observed=stopped instead of failing. The graceful-stop path also
@@ -72,6 +81,21 @@ API_MATCH_SITES: tuple[tuple[str, CommandStatus], ...] = (
     # lifecycle.py: SendServerCommand -- the server stopped between the
     # observed-running check and dispatch; the Worker emits SERVER_NOT_FOUND.
     ("ServerCommand", CommandStatus.SERVER_NOT_FOUND),
+    # lifecycle.py: RestartServer (#2441) -- the Worker holds no live instance to
+    # restart (handleRestart's takeNotFound); surfaced as server_not_running
+    # instead of the unclassified command_failed.
+    ("RestartServer", CommandStatus.SERVER_NOT_FOUND),
+    # lifecycle.py: RestartServer and SendServerCommand (#2466) -- INVALID_STATE
+    # on either kind is the Worker's failed-stop orphan refusal (its running check
+    # found an instance it could not confirm dead), the one settled state those
+    # kinds can report. Surfaced as the failed_stop_orphan 409 reason so neither
+    # says "not running" about a process that may still be alive. These two keep
+    # INVALID_STATE where the start path moved to BUSY (#2476): a restart or a
+    # console command over an orphan is refused for what the state IS and is never
+    # executed once the orphan converges, so BUSY -- a promise of eventual success
+    # -- would be a lie. The asymmetry is deliberate.
+    ("RestartServer", CommandStatus.INVALID_STATE),
+    ("ServerCommand", CommandStatus.INVALID_STATE),
     # lifecycle.py: _is_working_set_absent_refusal (#1790) -- SERVER_NOT_FOUND on
     # a final SnapshotTrigger is the Worker's working_set_absent refusal (#1713),
     # a benign duplicate after a published final snapshot; _final_snapshot logs
@@ -87,6 +111,16 @@ API_MATCH_SITES: tuple[tuple[str, CommandStatus], ...] = (
     ("StartServer", CommandStatus.PORT_CONFLICT),
     ("StartServer", CommandStatus.IMAGE_MISSING),
     ("StartServer", CommandStatus.BUSY),
+    # command_dispatch.py again, reached by a different kind: the backup-create
+    # route now renders the sanitized reason instead of the catch-all (#2436),
+    # and its only dispatch is the running-path SnapshotTrigger. BUSY is the one
+    # sanitized status that kind can produce (handleSnapshot's stopped-id
+    # reserve), so it is the one reason the backup 409 can now carry. Two table
+    # rows back it since #2476 -- {SnapshotTrigger, command_in_flight} and the newly
+    # pinned {SnapshotTrigger, orphan_pending}, which is the backup taken during the
+    # failed-stop-orphan window (#2471): the row still reads observed=running, so
+    # the create takes the running path and lands on the Worker's orphan refusal.
+    ("SnapshotTrigger", CommandStatus.BUSY),
 )
 
 
@@ -122,11 +156,13 @@ def test_no_undeclared_match_sites() -> None:
         len(pattern.findall(path.read_text()))
         for path in (_LIFECYCLE, _FILES, _COMMAND_DISPATCH)
     )
-    # lifecycle.py has 9 CommandStatus.<NAME> references (redispatch_start and
+    # lifecycle.py has 12 CommandStatus.<NAME> references (redispatch_start and
     # __call__ both read an INVALID_STATE start as already-running (#773/#774) and
     # both special-case a BUSY start as retry-no-converge (#824), stop convergence,
     # graceful-stop "not SERVER_NOT_FOUND", redispatch_stop's snapshot-skip
-    # "not SERVER_NOT_FOUND" (#846), SendServerCommand, and
+    # "not SERVER_NOT_FOUND" (#846), RestartServer's not-running refusal (#2441),
+    # SendServerCommand, the failed-stop-orphan INVALID_STATE refusal on
+    # RestartServer and SendServerCommand (#2466), and
     # _is_working_set_absent_refusal's benign final-snapshot refusal (#1790));
     # files.py has 2 (_map_file_status); command_dispatch.py has 3 (the sanitized
     # start-failure reason map: port_conflict, image_missing, worker_busy; issues
@@ -134,9 +170,18 @@ def test_no_undeclared_match_sites() -> None:
     # Bump this with intent when a genuinely new convergence/special-case match is
     # added -- and add it to API_MATCH_SITES so it is checked against the contract
     # table.
-    assert found == 14, (
+    #
+    # Issue #2476 deliberately did NOT move it. Reclassifying the orphan refusal
+    # from INVALID_STATE to BUSY changed which Worker preconditions feed the codes
+    # the API already matches on; it added no match site and retired none, because
+    # every arm the reclassified outcome now lands in (the BUSY arms of
+    # ``StartServer.__call__`` and ``redispatch_start``, and the ``worker_busy``
+    # entry of ``_SANITIZED_REASONS``) was already there and already correct. A
+    # count that had moved would have meant the API needed a behavioural change,
+    # which it did not.
+    assert found == 17, (
         f"found {found} CommandStatus references in lifecycle.py/files.py/"
-        "command_dispatch.py, expected 14. A convergence/special-case match was "
+        "command_dispatch.py, expected 17. A convergence/special-case match was "
         "added or removed: update API_MATCH_SITES (so it is checked against the "
         "contract table) and this count."
     )

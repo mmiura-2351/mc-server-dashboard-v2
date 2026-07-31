@@ -331,11 +331,22 @@ async def test_start_when_already_running_is_skipped() -> None:
     assert env.notifier.notifications == []
 
 
-async def test_backup_on_transitional_server_is_skipped() -> None:
+@pytest.mark.parametrize(
+    "observed",
+    [ObservedState.STARTING, ObservedState.STOPPING, ObservedState.UNKNOWN],
+)
+async def test_backup_on_transitional_server_is_skipped(
+    observed: ObservedState,
+) -> None:
+    # ``stopping`` and ``unknown`` under a running intent are the shapes a row
+    # takes during the failed-stop-orphan window (issues #2471/#2475): the Worker
+    # emitted ``stopping`` on entry to the Stop that failed, then reports the
+    # orphan as ``unknown`` while its converger works it. The row is honestly
+    # diverged for as long as that takes, so a scheduled backup must record a
+    # per-run SKIP each tick rather than dispatch into the Worker's refusal and
+    # bank a failure — and a skip fires no notification.
     env = _env()
-    server = _server(
-        desired=DesiredState.RUNNING, observed=ObservedState.STARTING, worker=_WORKER
-    )
+    server = _server(desired=DesiredState.RUNNING, observed=observed, worker=_WORKER)
     schedule = _schedule(
         server,
         action=ScheduleAction.BACKUP,
@@ -346,6 +357,7 @@ async def test_backup_on_transitional_server_is_skipped() -> None:
 
     await env.runner.tick()
 
+    assert env.control_plane.dispatched == []
     assert _runs(env, schedule) == [ScheduleRunOutcome.SKIPPED]
     assert env.notifier.notifications == []
     assert await env.uow.backups.list_for_server(server.id) == []

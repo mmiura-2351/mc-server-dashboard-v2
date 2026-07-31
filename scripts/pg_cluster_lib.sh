@@ -219,7 +219,12 @@ pg_probe_cluster_major() {
 		pg_reason="could not ask Docker whether volume '${volume}' exists."
 		return 1
 	fi
-	if ! printf '%s\n' "$volumes" | grep -qxF -- "$volume"; then
+	# A here-string rather than a pipe, so the membership test has no writer to
+	# kill: a quiet grep stops at its first match, and on a host whose volume
+	# list does not end there `printf` takes SIGPIPE and `pipefail` turns the
+	# hit into a 141 -- read below as "no such volume", which is the one answer
+	# #2301 exists to keep distinct (#2447). The match stays exact.
+	if ! grep -qxF -- "$volume" <<< "$volumes"; then
 		return 2
 	fi
 

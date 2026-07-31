@@ -123,6 +123,17 @@ class InvalidDownloadGrantError(IdentityError):
     """
 
 
+class InvalidDownloadCookieError(IdentityError):
+    """A download cookie failed verification (issue #2373).
+
+    Bad signature, malformed, expired, not a download cookie at all, or bound to a
+    different resource than the one being fetched. Distinct from
+    :class:`InvalidDownloadGrantError` for the same reason that one is distinct
+    from :class:`InvalidAccessTokenError`: the cookie outlives the grant's
+    query-string window, so neither verifier may accept the other's token.
+    """
+
+
 class InvalidRefreshTokenError(IdentityError):
     """A presented refresh token is unknown, revoked, or expired (FR-AUTH-2)."""
 

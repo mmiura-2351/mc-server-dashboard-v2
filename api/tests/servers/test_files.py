@@ -156,6 +156,17 @@ class FakeFileStore(FileStore):
             raise ServerFileNotFoundError(str(server_id.value))
         return self.dirs.get(rel_path, [])
 
+    async def path_exists(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> bool:
+        # A name is occupied by a seeded file or a seeded directory; the root is
+        # always there. Deliberately NOT derived from ``list_dir``: the real seam
+        # answers this one without a listing (issue #2426), because a listing
+        # refuses a symlink the name is nonetheless occupied by.
+        if self.bad_path:
+            raise InvalidFilePathError(rel_path)
+        return rel_path in ("", ".") or rel_path in self.files or rel_path in self.dirs
+
     async def write_file(
         self,
         *,
@@ -2477,6 +2488,209 @@ async def test_search_content_skips_oversized_file_without_reading_it() -> None:
     )
     assert set(result.paths) == {"server.properties"}
     assert "config/motd.txt" not in store.read_paths
+
+
+async def test_search_content_skips_a_listed_file_it_cannot_read() -> None:
+    """One unreadable entry is skipped, not allowed to abort the whole search.
+
+    A listing describes every dirent, including ones no read will serve: a file
+    deleted between the listing and its read is the miss this pins (a dangling
+    symlink is listed too, but its read is the refusal — issue #2432 — which the
+    fs-backed tests cover). Failing the search over one such entry would cost the
+    operator every other match.
+    """
+
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = _search_store()
+    store.dirs["config"] = [
+        *store.dirs["config"],
+        FileEntry(name="broken", is_dir=False, size=7),
+    ]
+    use_case = SearchFiles(uow=_stopped_uow(community, server_id), file_store=store)
+
+    result = await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        query="hello",
+        by="content",
+        max_results=100,
+    )
+    assert set(result.paths) == {"server.properties", "config/motd.txt"}
+
+
+class _VanishingDirFileStore(FakeFileStore):
+    """Deletes ``victim`` from the tree as soon as any directory is listed.
+
+    Reproduces the real race: the walk sees the subdirectory in its parent's
+    listing, and by the time it pops that subdirectory off the stack the
+    directory is gone, so its own ``list_dir`` is the modelled miss.
+    """
+
+    def __init__(self, victim: str) -> None:
+        super().__init__(strict_dirs=True)
+        self._victim = victim
+
+    async def list_dir(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> list[FileEntry]:
+        entries = await super().list_dir(
+            community_id=community_id, server_id=server_id, rel_path=rel_path
+        )
+        self.dirs.pop(self._victim, None)
+        return entries
+
+
+async def test_search_skips_a_subdirectory_that_vanishes_mid_walk() -> None:
+    """A subdirectory deleted mid-walk is skipped, not allowed to abort the search.
+
+    A search is a read-only pass over a live working set, so a directory going
+    away while it runs is ordinary. Losing every other match because one
+    subdirectory was deleted between its parent's listing and the descent into
+    it would be a bad trade.
+    """
+
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = _VanishingDirFileStore(victim="plugins")
+    store.dirs["."] = [
+        FileEntry(name="config", is_dir=True, size=0),
+        FileEntry(name="plugins", is_dir=True, size=0),
+    ]
+    store.dirs["config"] = [FileEntry(name="motd.txt", is_dir=False, size=11)]
+    store.dirs["plugins"] = [FileEntry(name="greeting.txt", is_dir=False, size=5)]
+    store.files["config/motd.txt"] = b"hello world"
+    store.files["plugins/greeting.txt"] = b"hello"
+    use_case = SearchFiles(uow=_stopped_uow(community, server_id), file_store=store)
+
+    result = await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        query="txt",
+        by="name",
+        max_results=100,
+    )
+    # The walk descends into the vanished directory FIRST (depth-first pops it
+    # off the stack before its sibling), so the surviving match can only be
+    # reported if the miss did not abort the walk.
+    assert set(result.paths) == {"config/motd.txt"}
+    assert result.truncated is False
+
+
+async def test_search_surfaces_a_subdirectory_it_cannot_list() -> None:
+    """Only the vanished-directory miss is skipped; every other failure surfaces.
+
+    A permission failure or an I/O error is not the delete race — reporting a
+    silently short result set for one would hide a real fault.
+    """
+
+    class _UnreadableDirFileStore(FakeFileStore):
+        async def list_dir(
+            self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+        ) -> list[FileEntry]:
+            if rel_path == "config":
+                raise PermissionError(rel_path)
+            return await super().list_dir(
+                community_id=community_id, server_id=server_id, rel_path=rel_path
+            )
+
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = _UnreadableDirFileStore(strict_dirs=True)
+    store.dirs["."] = [FileEntry(name="config", is_dir=True, size=0)]
+    use_case = SearchFiles(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(PermissionError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            query="txt",
+            by="name",
+            max_results=100,
+        )
+
+
+async def test_search_skips_a_subdirectory_whose_listing_is_refused() -> None:
+    """A listing refused as a traversal is skipped like the vanished one (#2427).
+
+    A listed directory that has become a link out of the working set is refused
+    rather than missed, and losing every other match over one such entry is the
+    same bad trade. The zip walk treats it identically.
+    """
+
+    class _EscapingDirFileStore(FakeFileStore):
+        async def list_dir(
+            self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+        ) -> list[FileEntry]:
+            if rel_path == "plugins":
+                raise InvalidFilePathError(rel_path)
+            return await super().list_dir(
+                community_id=community_id, server_id=server_id, rel_path=rel_path
+            )
+
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = _EscapingDirFileStore(strict_dirs=True)
+    store.dirs["."] = [
+        FileEntry(name="config", is_dir=True, size=0),
+        FileEntry(name="plugins", is_dir=True, size=0),
+    ]
+    store.dirs["config"] = [FileEntry(name="motd.txt", is_dir=False, size=11)]
+    use_case = SearchFiles(uow=_stopped_uow(community, server_id), file_store=store)
+
+    result = await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        query="txt",
+        by="name",
+        max_results=100,
+    )
+
+    assert set(result.paths) == {"config/motd.txt"}
+
+
+async def test_search_by_name_returns_a_dirent_no_download_can_fetch() -> None:
+    """A name hit is a dirent, including one that names nothing fetchable (#2438).
+
+    A directory listing describes every child it found (#2418) and the name
+    branch reports what the listing reports, so the file browser shows these
+    entries too. Fetching such a hit gets what fetching it from the browser
+    gets — the read seam's refusal, which decides containment first, on the
+    resolved target: a link resolving outside the working set is an escape
+    (422) even when its target does not exist, and one resolving inside is the
+    modelled miss (404) whether it dangles or names a real file. Dropping them
+    here would leave the search and the listing disagreeing about the same
+    tree, so they are returned.
+    """
+
+    class _RefusingLeafFileStore(FakeFileStore):
+        async def read_file(
+            self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+        ) -> bytes:
+            if rel_path == "config/outside.txt":
+                raise InvalidFilePathError(rel_path)
+            return await super().read_file(
+                community_id=community_id, server_id=server_id, rel_path=rel_path
+            )
+
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = _RefusingLeafFileStore(strict_dirs=True)
+    store.dirs["."] = [FileEntry(name="config", is_dir=True, size=0)]
+    store.dirs["config"] = [
+        # A link resolving outside the working set: listed, but its read is
+        # refused as an escape.
+        FileEntry(name="outside.txt", is_dir=False, size=9),
+        # A link resolving inside it: listed, but nothing readable is behind
+        # the dirent, so its read is the modelled miss.
+        FileEntry(name="dangling.txt", is_dir=False, size=7),
+    ]
+    use_case = SearchFiles(uow=_stopped_uow(community, server_id), file_store=store)
+
+    result = await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        query="txt",
+        by="name",
+        max_results=100,
+    )
+
+    assert set(result.paths) == {"config/outside.txt", "config/dangling.txt"}
 
 
 async def test_search_content_aggregate_scan_cap_sets_truncated() -> None:

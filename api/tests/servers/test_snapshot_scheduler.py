@@ -36,6 +36,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerType,
     WorkerId,
 )
+from tests.servers.contract_table import worker_status
 from tests.servers.fakes import FakeClock, FakeControlPlane, FakeUnitOfWork
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
@@ -47,6 +48,7 @@ def _running_server(
     server_id: ServerId | None = None,
     worker: WorkerId | None = _WORKER,
     config: dict[str, object] | None = None,
+    observed: ObservedState = ObservedState.RUNNING,
 ) -> Server:
     return Server(
         id=server_id or ServerId.new(),
@@ -57,7 +59,7 @@ def _running_server(
         server_type=ServerType.VANILLA,
         config=config or {},
         desired_state=DesiredState.RUNNING,
-        observed_state=ObservedState.RUNNING,
+        observed_state=observed,
         observed_at=None,
         assigned_worker_id=worker,
         created_at=_NOW,
@@ -171,6 +173,85 @@ async def test_override_below_default_snapshots_sooner() -> None:
     assert len(cp.dispatched) == 1
 
 
+# The Worker's working_set_absent refusal message, verbatim (issue #1713,
+# worker/internal/application/instancemanager/instancemanager.go handleSnapshot).
+# The API discriminator matches the "working dir absent" phrase inside it.
+_WORKING_SET_ABSENT_MESSAGE = (
+    "instancemanager: snapshot refused: working dir absent (no working set held "
+    "for this id: scratch already GC'd after a published final snapshot, or "
+    "never hydrated)"
+)
+
+
+async def test_crashed_server_is_still_snapshotted() -> None:
+    # Issue #2480: the candidate set is desired-only, and dispatching to a crashed
+    # member of it is the DECISION, not an accident. The Worker dropped the crashed
+    # instance from its map, so the trigger takes the at-rest path over the retained
+    # directory and publishes the crash-time world — the only path that durably
+    # captures it under desired=running (the reconciler's automatic redispatch_start
+    # otherwise hydrates over the crash-window scratch and it is swept).
+    uow = FakeUnitOfWork()
+    server = _running_server(observed=ObservedState.CRASHED)
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    scheduler = _scheduler(uow, cp, clock)
+    await scheduler.tick()
+    clock.set(_NOW + dt.timedelta(seconds=3600))
+    await scheduler.tick()
+    assert [sid for _, _, sid in cp.dispatched] == [server.id]
+
+
+async def test_working_set_absent_refusal_advances_next_due() -> None:
+    # Issue #2480: the at-rest capture GC's the scratch after publishing, so every
+    # later dispatch for the same id answers the working_set_absent refusal. There
+    # is nothing left to capture, so that answer advances next-due like a success
+    # instead of leaving it in the past and re-dispatching on every single tick
+    # until the server starts again.
+    uow = FakeUnitOfWork()
+    server = _running_server(observed=ObservedState.CRASHED)
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(
+            status=worker_status("SnapshotTrigger", "working_set_absent"),
+            message=_WORKING_SET_ABSENT_MESSAGE,
+        )
+    )
+    clock = FakeClock(_NOW)
+    scheduler = _scheduler(uow, cp, clock)
+    await scheduler.tick()
+    clock.set(_NOW + dt.timedelta(seconds=3600))
+    await scheduler.tick()  # due, dispatched, refused: nothing to capture
+    assert len(cp.dispatched) == 1
+    clock.set(_NOW + dt.timedelta(seconds=3700))  # well under one interval later
+    await scheduler.tick()
+    assert len(cp.dispatched) == 1
+
+
+async def test_other_server_not_found_is_retried_next_tick() -> None:
+    # Guard for issue #1790's rule at this call site: the SERVER_NOT_FOUND code
+    # alone must not be read as "nothing to capture" — only the pinned
+    # working_set_absent phrase may be. Any other SERVER_NOT_FOUND is a genuine
+    # failure and keeps the retry.
+    uow = FakeUnitOfWork()
+    server = _running_server()
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(
+            status=CommandStatus.SERVER_NOT_FOUND, message="instancemanager: nope"
+        )
+    )
+    clock = FakeClock(_NOW)
+    scheduler = _scheduler(uow, cp, clock)
+    await scheduler.tick()
+    clock.set(_NOW + dt.timedelta(seconds=3600))
+    await scheduler.tick()
+    assert len(cp.dispatched) == 1
+    clock.set(_NOW + dt.timedelta(seconds=3700))
+    await scheduler.tick()
+    assert len(cp.dispatched) == 2
+
+
 async def test_only_running_assigned_servers_are_considered() -> None:
     # A stopped server and a running-but-unassigned server are not snapshotted.
     uow = FakeUnitOfWork()
@@ -220,6 +301,33 @@ async def test_on_demand_snapshot_failed_dispatch_raises() -> None:
         await SnapshotServer(uow=uow, control_plane=cp)(
             community_id=server.community_id, server_id=server.id
         )
+
+
+async def test_on_demand_snapshot_over_failed_stop_orphan_is_worker_busy() -> None:
+    # A manual backup taken during the failed-stop-orphan window (issue #2471):
+    # the row still reads observed=running, so CreateBackup takes the running path
+    # and dispatches this SnapshotTrigger, which the Worker refuses because it
+    # holds the orphan. Under issue #2476 that refusal is BUSY — the converger is
+    # working the orphan, so the snapshot succeeds once it settles — and the
+    # sanitized reason carries the retryable-ness to the client instead of the
+    # unclassified ``command_failed`` catch-all.
+    uow = FakeUnitOfWork()
+    server = _running_server()
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(
+            status=worker_status("SnapshotTrigger", "orphan_pending"),
+            message="instancemanager: server has a failed-stop orphan pending "
+            "termination",
+        )
+    )
+
+    with pytest.raises(CommandDispatchError) as excinfo:
+        await SnapshotServer(uow=uow, control_plane=cp)(
+            community_id=server.community_id, server_id=server.id
+        )
+
+    assert excinfo.value.reason == "worker_busy"
 
 
 async def test_on_demand_snapshot_failure_logs_warning_with_server_and_kind(

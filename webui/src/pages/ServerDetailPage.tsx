@@ -23,7 +23,11 @@ import { type TranslationKey, t } from "../i18n/index.ts";
 import { type Can, useCan } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
 import { dashboardPath } from "../routes.ts";
-import { isEulaNotAccepted, lifecycleErrorMessage } from "./lifecycleErrors.ts";
+import {
+  isEulaNotAccepted,
+  type LifecycleAction,
+  lifecycleErrorMessage,
+} from "./lifecycleErrors.ts";
 import { stripMinecraftCodes } from "./mcFormat.ts";
 import { ServerBackupsTab } from "./ServerBackupsTab.tsx";
 import { ServerFilesTab } from "./ServerFilesTab.tsx";
@@ -101,8 +105,10 @@ function pluginTabLabelKey(serverType: string): TranslationKey {
  * into a Blob just to attach the Bearer header (#2353): mint a short-lived
  * self-authenticating URL and hand it to the browser, which streams it to disk.
  * The grant lives ~30 s, so minting and clicking are one step — never minted on
- * render or cached. The export response carries no `Content-Disposition`
- * (#2357), so the anchor's `download` attribute is what names the saved file.
+ * render or cached. The export response names itself via `Content-Disposition`
+ * since #2357, so the anchor's `download` attribute is now redundant rather
+ * than load-bearing; it is kept because it names the file without waiting for
+ * the response headers, and same-origin it wins anyway.
  */
 function exportViaGrant(communityId: string, server: ServerResponse) {
   return async () => {
@@ -487,6 +493,15 @@ function Header({
   );
 }
 
+// The lifecycle verb is the request path's last segment, query string aside.
+// Both the optimistic pill and the failure message key off it (issue #2435).
+function lifecycleActionOf(path: string): LifecycleAction | undefined {
+  const verb = path.split("/").pop()?.replace(/\?.*/, "");
+  return verb === "start" || verb === "stop" || verb === "restart"
+    ? verb
+    : undefined;
+}
+
 function Controls({
   server,
   communityId,
@@ -521,7 +536,7 @@ function Controls({
     onMutate: (path: string) => {
       // Optimistically set the observed_state to the transitional state so
       // the pill transitions instantly, before the API responds (#1071).
-      const action = path.split("/").pop()?.replace(/\?.*/, "") ?? "";
+      const action = lifecycleActionOf(path);
       const transitional =
         action === "stop"
           ? "stopping"
@@ -537,7 +552,7 @@ function Controls({
       return { previousState, transitional };
     },
     onSettled: invalidate,
-    onError: (error, _path, context) => {
+    onError: (error, path, context) => {
       // Surgically roll back only observed_state, and only if the cache still
       // holds the transitional value we wrote. A WS status frame that arrived
       // mid-flight takes precedence (#1727).
@@ -557,7 +572,10 @@ function Controls({
         setEulaOpen(true);
         return;
       }
-      showToast(t(lifecycleErrorMessage(error)), "error");
+      showToast(
+        t(lifecycleErrorMessage(error, lifecycleActionOf(path))),
+        "error",
+      );
     },
   });
 
