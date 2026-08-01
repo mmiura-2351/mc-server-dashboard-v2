@@ -64,13 +64,10 @@ const mockDownload = vi.hoisted(() => ({
 }));
 // Keep the real module (isAbortError, DownloadTooLargeError, the size cap)
 // and stub only the two network entry points.
-vi.mock("../api/download.ts", async () => {
-  const actual =
-    await vi.importActual<typeof import("../api/download.ts")>(
-      "../api/download.ts",
-    );
-  return { ...actual, ...mockDownload };
-});
+vi.mock("../api/download.ts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../api/download.ts")>()),
+  ...mockDownload,
+}));
 
 let mockCan: Can = () => true;
 vi.mock("../permissions/ActiveCommunityProvider.tsx", () => ({
