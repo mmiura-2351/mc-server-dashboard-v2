@@ -682,6 +682,9 @@ class FakeResourceGrantSweeper(ResourceGrantSweeper):
 class FakeBackupRepository(BackupRepository):
     def __init__(self) -> None:
         self.by_id: dict[BackupId, Backup] = {}
+        # Ordered log of the metadata-row deletions, in the same shape
+        # FakeLifecycleLock records; see FakeBackupArchiveStore.events.
+        self.events: list[tuple[ServerId, str]] = []
 
     def seed(self, backup: Backup) -> None:
         self.by_id[backup.id] = backup
@@ -698,7 +701,9 @@ class FakeBackupRepository(BackupRepository):
         return sorted(rows, key=lambda b: b.created_at, reverse=True)
 
     async def delete(self, backup_id: BackupId) -> None:
-        self.by_id.pop(backup_id, None)
+        row = self.by_id.pop(backup_id, None)
+        if row is not None:
+            self.events.append((row.server_id, "delete-row"))
 
     async def update_health(self, backup_id: BackupId, health: BackupHealth) -> None:
         backup = self.by_id.get(backup_id)
@@ -1156,8 +1161,12 @@ class FakeLifecycleLock(LifecycleLock):
 
     Records ``(server_id, "acquire"|"release")`` events in order so a test can
     assert a gated use case (and StartServer's flip) takes the lock around its
-    work. The actual cross-connection blocking is pinned against a real
-    PostgreSQL advisory lock in the integration suite.
+    work. On its own that only shows the lock was taken and dropped, not that
+    anything happened in between; a test that needs the *around* pins its
+    collaborators' ``events`` list onto this one (issue #2515), which puts
+    every recorded call on a single timeline. The actual cross-connection
+    blocking is pinned against a real PostgreSQL advisory lock in the
+    integration suite.
     """
 
     def __init__(self) -> None:
@@ -1404,6 +1413,11 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         # ``check_current_health`` returns None (nothing to fsck).
         self.current_corrupt: dict[ServerId, int] = {}
         self.deleted: list[tuple[ServerId, str]] = []
+        # Ordered log of the archive deletions, in the same shape
+        # FakeLifecycleLock records: aliasing this onto a lock's ``events``
+        # puts both fakes on one timeline, so a test can assert a deletion
+        # happened strictly between acquire and release (issue #2515).
+        self.events: list[tuple[ServerId, str]] = []
         self.stored: list[ServerId] = []
         # storage_refs that ``size`` was called for, so a test can assert the
         # lazy size backfill (#661) only calls per NULL row and not again once
@@ -1464,6 +1478,7 @@ class FakeBackupArchiveStore(BackupArchiveStore):
     async def delete(
         self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
     ) -> None:
+        self.events.append((server_id, "delete-archive"))
         self.archives.discard(storage_ref)
         self.bytes_by_ref.pop(storage_ref, None)
         self.deleted.append((server_id, storage_ref))

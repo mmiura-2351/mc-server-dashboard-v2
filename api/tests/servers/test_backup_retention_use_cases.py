@@ -112,6 +112,16 @@ class _Env:
         self.clear_retention = ClearBackupRetention(uow=self.uow)
         self.server = _server()
         self.uow.servers.seed(self.server)
+        # One ordered log for the lock, the archive store and the backup
+        # repository (issue #2515). Two separate logs can only say *that* the
+        # lock was taken and *that* a deletion happened; a single timeline is
+        # what makes "the deletions fall between acquire and release"
+        # assertable. Aliasing (rather than injecting) covers a caller-supplied
+        # store too, so no collaborator can silently drop off the timeline.
+        self.events: list[tuple[ServerId, str]] = []
+        self.lock.events = self.events
+        self.store.events = self.events
+        self.uow.backups.events = self.events
 
     async def seed_retention(self, retention: dict[str, Any]) -> None:
         # Arrange the PERSISTED policy through the repository's own narrow write
@@ -300,10 +310,15 @@ async def test_prune_keep_n_deletes_archive_then_row_and_audits() -> None:
     pruned = await env.prune(community_id=_COMMUNITY, server_id=env.server.id)
 
     assert [b.id.value for b in pruned] == [oldest.id.value]
-    # Archive removed and row gone.
+    # Archive removed and row gone, in that order — both gone is the end state
+    # a swapped implementation also reaches, so the name's ordering claim needs
+    # the shared timeline to be visible (issue #2515).
     assert (env.server.id, oldest.storage_ref) in env.store.deleted
     assert oldest.storage_ref not in env.store.archives
     assert oldest.id not in env.uow.backups.by_id
+    assert env.events.index((env.server.id, "delete-archive")) < env.events.index(
+        (env.server.id, "delete-row")
+    )
     # Each deletion is audited: backup:delete, SUCCESS, actor None (retention
     # prune has no operator behind it), scoped to the community, targeting the
     # pruned backup.
@@ -354,4 +369,12 @@ async def test_prune_holds_the_lifecycle_lock_around_its_work() -> None:
 
     await env.prune(community_id=_COMMUNITY, server_id=env.server.id)
 
-    assert env.lock.events == [(env.server.id, "acquire"), (env.server.id, "release")]
+    # The whole sequence, not the two endpoints: a prune that deleted outside
+    # the lock would still acquire and release, so only the deletions' position
+    # in the shared timeline pins "around its work" (issue #2515).
+    assert env.events == [
+        (env.server.id, "acquire"),
+        (env.server.id, "delete-archive"),
+        (env.server.id, "delete-row"),
+        (env.server.id, "release"),
+    ]
