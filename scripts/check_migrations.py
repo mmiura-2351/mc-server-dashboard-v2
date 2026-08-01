@@ -15,11 +15,20 @@ violation:
    ``down_revision``). Two heads means two migrations chained off the same
    parent -- the parallel-PR collision. A merge migration names every head it
    reconciles in a ``down_revision`` tuple, so it consumes all of them and the
-   tree is back to one head; this agrees with ``alembic heads
-   --resolve-dependencies``, which CI runs alongside this script.
+   tree is back to one head.
 2. **Unique revision ids.** No two files may declare the same ``revision``.
 3. **Unique filename prefixes.** No two files may share the same numeric
    ``NNNN_`` prefix (the human-facing ordering that collided three times in M2).
+
+The head count agrees with ``alembic heads --resolve-dependencies``, which CI
+runs alongside this script, on any tree whose edges are ``down_revision`` --
+including merges. It is **not** a general reimplementation of alembic's head
+resolution: it ignores ``depends_on``, which alembic also resolves into head
+edges, and it matches parents by exact revision id where alembic also accepts
+partial ids and branch-label references. A tree using any of those can report
+more heads here than alembic reports -- fail-safe (a false alarm, never a
+missed collision), and unreachable while no version file uses them, but a real
+divergence rather than a hypothetical one (#2534).
 
 The DB-gated metadata-sync test covers chain validity, but only on the merge
 ref and only when CI actually runs; this fast non-DB step makes the head/number
@@ -149,6 +158,8 @@ def check_migrations(migrations: list[Migration], label_root: Path) -> list[str]
     # 1. Single head: every revision that is nobody's down_revision is a head. A
     # merge migration names every head it reconciles, so all of them are
     # consumed -- counting only the first would leave a phantom extra head.
+    # ``depends_on`` edges are deliberately not tracked; see the module
+    # docstring for where that diverges from alembic (#2534).
     parents = {parent for m in migrations for parent in m.down_revisions}
     heads = sorted(m.revision for m in migrations if m.revision not in parents)
     if migrations and len(heads) != 1:
@@ -173,7 +184,16 @@ def main() -> int:
         migrations = [
             parse_migration(path) for path in sorted(versions_dir.glob("*.py"))
         ]
-    except (ValueError, SyntaxError) as exc:
+    except SyntaxError as exc:
+        # SyntaxError's own str() abbreviates the filename to its basename;
+        # rebuild the message so it names the file the way the ValueError paths
+        # (and every other message here) do.
+        print(
+            f"check-migrations failed to parse: {exc.filename}:{exc.lineno}: {exc.msg}",
+            file=sys.stderr,
+        )
+        return 2
+    except ValueError as exc:
         print(f"check-migrations failed to parse: {exc}", file=sys.stderr)
         return 2
 
@@ -264,18 +284,26 @@ def _self_test() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         version_file = Path(tmp) / "0004_m.py"
 
-        def parsed(body: str) -> Migration:
+        def parsed(name: str, body: str) -> Migration | None:
+            """Parse ``body``; a parse failure is collected like any other."""
             version_file.write_text(body, encoding="utf-8")
-            return parse_migration(version_file)
+            try:
+                return parse_migration(version_file)
+            except (ValueError, SyntaxError) as exc:
+                failures.append(f"{name}: parse failed: {exc}")
+                return None
 
         def annotated(down: str) -> str:
             """The assignment pair ``migrations/script.py.mako`` generates."""
             return f'revision: str = "0004_m"\ndown_revision: str | None = {down}\n'
 
         def expect_parents(name: str, body: str, want: tuple[str, ...]) -> None:
-            got = parsed(body).down_revisions
-            if got != want:
-                failures.append(f"{name}: expected parents {want!r}, got {got!r}")
+            migration = parsed(name, body)
+            if migration is not None and migration.down_revisions != want:
+                failures.append(
+                    f"{name}: expected parents {want!r}, "
+                    f"got {migration.down_revisions!r}"
+                )
 
         expect_parents("parse baseline", annotated("None"), ())
         expect_parents("parse linear", annotated('"0003_c"'), ("0003_c",))
@@ -307,10 +335,11 @@ def _self_test() -> int:
             ("annotated", annotated("None")),
             ("unannotated", 'revision = "0004_m"\ndown_revision = None\n'),
         ):
-            got_revision = parsed(body).revision
-            if got_revision != "0004_m":
+            name = f"parse revision ({form})"
+            migration = parsed(name, body)
+            if migration is not None and migration.revision != "0004_m":
                 failures.append(
-                    f"parse revision ({form}): expected '0004_m', got {got_revision!r}"
+                    f"{name}: expected '0004_m', got {migration.revision!r}"
                 )
 
     if failures:
