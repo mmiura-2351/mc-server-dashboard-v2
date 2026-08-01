@@ -107,9 +107,10 @@ runs `npm ci` (webui) and `uv sync` (api).
 - A PR that adds an Alembic migration renumbers it to `main`'s current head at
   the final rebase before merge: parallel PRs each chain off the same head, so
   whichever merges second collides until renumbered. Expect this whenever more
-  than one open PR touches `api/migrations/`. CI's migration guard (the api
-  workflow) fails on duplicate heads or numbers against the merge ref, but only
-  re-runs on the next push, so the rebase-time renumber is the discipline that
+  than one open PR touches `api/migrations/`. The migration guard fails on
+  duplicate heads or numbers locally (`make check`) and in CI; CI checks the
+  merge ref, so it sees the collision the moment `main` moves, but only
+  re-runs on the next push. The rebase-time renumber is the discipline that
   prevents the collision.
 - PR descriptions and issues are written in English.
 

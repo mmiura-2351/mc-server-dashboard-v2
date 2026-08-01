@@ -65,7 +65,7 @@ covered here.
 | Format all modules | `make format` | ruff format + `ruff check --fix` (api), `gofmt -w` (worker, relay), biome (webui) |
 | Lint + typecheck | `make lint` | ruff, mypy, import-linter (api); gofmt-check, `go vet`, golangci-lint (worker, relay); `buf lint` (proto); biome + tsc (webui) |
 | Test | `make test` | `pytest` (api), `go test ./...` + `worker-e2e-compile` (worker), `go test ./...` + `relay-e2e-compile` (relay), vitest (webui) |
-| Full gate | `make check` | `hooks-check` + `lint` + `test` + `webui-build` + `openapi-check` + `proto-check` + `docs-check` — what pre-push and CI run |
+| Full gate | `make check` | `hooks-check` + `lint` + `test` + `webui-build` + `openapi-check` + `proto-check` + `docs-check` + `migrations-check` — what pre-push and CI run |
 | Regenerate proto stubs | `make proto-gen` | regenerate the Go + Python control-plane stubs (Section 6) |
 | Check proto stubs are current | `make proto-check` | regenerate and fail if the committed stubs drift |
 | Regenerate webui OpenAPI client | `make openapi-gen` | regenerate `webui/openapi.json` + `webui/src/api/schema.ts` from the api routes |
