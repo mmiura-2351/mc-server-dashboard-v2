@@ -61,8 +61,13 @@ async def test_open_of_absent_blob_reports_the_full_object_key() -> None:
     # The adapter raises with the key it missed, ``plugin-cache/<sha256>``.
     store = FakePluginCacheStore()
 
+    # Opened outside the ``raises`` block for the same reason as above: taken
+    # inside it, this test would pass on an eager raise too, and the laziness
+    # pin would rest entirely on its neighbour.
+    stream = store.open(_ABSENT_SHA)
+
     with pytest.raises(PluginCacheBlobNotFoundError) as excinfo:
-        assert [chunk async for chunk in store.open(_ABSENT_SHA)]
+        assert [chunk async for chunk in stream]
 
     assert f"plugin-cache/{_ABSENT_SHA}" in str(excinfo.value)
 
@@ -81,8 +86,17 @@ async def test_put_records_the_store_time() -> None:
 
 
 async def test_dedup_put_preserves_the_original_store_time() -> None:
-    # The adapter head-checks the content key and skips the upload when the blob
-    # is already cached, so a re-put leaves ``last_modified`` where it was.
+    """The fake keeps the first stamp, matching the adapter's dedup skip.
+
+    Two things ride on this. The adapter head-checks the content key and skips
+    the upload when the blob is already cached, so a re-put leaves
+    ``last_modified`` where it was -- and separately, the double has to be
+    deterministic about it: a GC test that seeds a store time and then re-puts
+    the same bytes has to keep reading the time it seeded, otherwise the blob
+    silently becomes young and the test stops asserting what it says it asserts.
+    (The sibling ``FakeJarPool`` has only the second reason -- its two backends
+    disagree -- so its version of this test claims only the convention.)
+    """
     store = FakePluginCacheStore()
     await store.put(_SHA, _stream(_CONTENT))
     stored_at = dt.datetime(2026, 6, 20, 12, 0, tzinfo=dt.UTC)

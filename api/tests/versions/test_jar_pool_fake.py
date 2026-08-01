@@ -13,18 +13,22 @@ Pinned here:
   file into place (``st_mtime``), the object adapter uploads it
   (``last_modified``).
 - ``delete`` absorbs a key that is not there, as both backends do.
+- A re-put keeps the first stamp. This one is a *convention of the double*, not
+  a backend contract -- see below.
 - A JAR seeded straight into ``stored`` -- the GC tests' idiom -- reports a
   store time no clock can age past, so forgetting the stamp reddens a
   delete-expecting test instead of passing by accident. That fail-loud property
   used to be a wall-clock read, i.e. an unstated environmental assumption
   underneath a safety property (#2529).
 
-Deliberately *not* pinned: what a re-put of already-pooled bytes does to the
-store time. The two backends disagree -- ``FsStorage.put_jar`` always
-``os.replace``s the staged file, refreshing ``st_mtime``, while
-``ObjectStorage.put_jar`` head-checks the content key and skips the upload,
-leaving ``last_modified`` alone. Neither Port docstring picks a side, so a test
-either way would pin one backend's behaviour as if it were the contract.
+The re-put case is the one place this double cannot mirror the adapters,
+because they disagree: ``FsStorage.put_jar`` always ``os.replace``s the staged
+file, refreshing ``st_mtime``, while ``ObjectStorage.put_jar`` head-checks the
+content key and skips the upload, leaving ``last_modified`` alone. Neither
+``JarPool.put`` nor ``JarStore.put_jar`` picks a side, so nothing here asserts
+what the *backends* do. What is asserted is that the fake picks one and holds
+it: a test that seeds a store time and then re-puts must keep reading the time
+it seeded, or every ``put``-seeded GC test quietly changes meaning.
 """
 
 from __future__ import annotations
@@ -46,6 +50,27 @@ async def test_put_records_the_store_time() -> None:
     (entry,) = await pool.list_entries()
     assert entry.sha256 == key
     assert before <= entry.modified_at <= after
+
+
+async def test_re_put_keeps_the_first_store_time() -> None:
+    """The double keeps the first stamp; this is its convention, not a contract.
+
+    The backends disagree on what a re-put does to the store time (see the
+    module docstring), so nothing here claims either answer is *the* Port
+    behaviour. What must hold is that the fake is deterministic about it: a GC
+    test that seeds a store time and then re-puts the same bytes has to keep
+    reading the time it seeded, otherwise the JAR silently becomes young and the
+    test stops asserting what it says it asserts.
+    """
+    pool = FakeJarPool()
+    key = await pool.put(_JAR)
+    stored_at = dt.datetime(2026, 6, 5, 12, 0, tzinfo=dt.UTC)
+    pool.modified_at[key] = stored_at
+
+    await pool.put(_JAR)
+
+    (entry,) = await pool.list_entries()
+    assert entry.modified_at == stored_at
 
 
 async def test_put_after_delete_records_a_fresh_store_time() -> None:
