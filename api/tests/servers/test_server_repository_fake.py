@@ -1,4 +1,4 @@
-"""Fidelity of :class:`FakeServerRepository`'s writers against the adapter (#2505).
+"""Fidelity of :class:`FakeServerRepository` against the adapter (#2505, #2516).
 
 Every writer on the real ``SqlAlchemyServerRepository`` turns an entity into an
 INSERT/UPDATE, and once that statement has been serialized no in-memory mutation
@@ -15,6 +15,13 @@ matches them exactly. ``add`` is the one writer where the fake snapshots
 *earlier* than the adapter, which stages the model and serializes at flush; that
 is the harmless direction (more isolating, so an extra red at worst) and is
 asserted as such below.
+
+Readers are the same street travelled outward (#2516): a SELECT materializes a
+fresh entity per call, so mutating a loaded one can never reach the row until a
+writer is called. A reader that hands back the stored object lets a use case's
+in-place edit rewrite the row it has not written yet — again the forgiving
+direction, and the one the reconciler path (``list_all`` /
+``list_desired_running_assigned`` / ``list_reconcilable``) travels most.
 
 That is not hypothetical: re-recording ``crashed`` with a fresh stamp inside
 ``StopServer``'s crash-preserve arm was absorbed by the aliasing and left
@@ -39,6 +46,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerId,
     ServerName,
     ServerType,
+    WorkerId,
 )
 from tests.servers.fakes import FakeServerRepository
 
@@ -62,7 +70,12 @@ def _rewrite_jsonb(server: Server) -> None:
     server.backup_retention["nested"]["k"] = 99
 
 
-def _server(*, desired: DesiredState = DesiredState.RUNNING) -> Server:
+def _server(
+    *,
+    desired: DesiredState = DesiredState.RUNNING,
+    observed: ObservedState = ObservedState.RUNNING,
+    assigned_worker_id: WorkerId | None = None,
+) -> Server:
     return Server(
         id=ServerId(uuid.uuid4()),
         community_id=CommunityId(uuid.uuid4()),
@@ -72,16 +85,35 @@ def _server(*, desired: DesiredState = DesiredState.RUNNING) -> Server:
         server_type=ServerType.VANILLA,
         config=deepcopy(_CONFIG),
         desired_state=desired,
-        observed_state=ObservedState.RUNNING,
+        observed_state=observed,
         observed_at=_NOW,
-        assigned_worker_id=None,
+        assigned_worker_id=assigned_worker_id,
         created_at=_NOW,
         updated_at=_NOW,
+        slug="srv",
         # ``backup_retention`` is held RAW on the entity, like ``config``, "so a
         # malformed persisted value cannot fail every entity load" -- the copy may
         # therefore not assume it flat, hence the nested key.
         backup_retention=deepcopy(_RETENTION),
     )
+
+
+def _assert_reader_detached(handed_out: Server, *, repo: FakeServerRepository) -> None:
+    """A reader's return value must share nothing with the row it came from.
+
+    The real adapter materializes a fresh entity per SELECT, so an edit to a
+    loaded server reaches the database only through a writer. A reader that
+    returns the stored object -- or one sharing its jsonb blobs -- lets the edit
+    land with no write at all, which is the forgiving direction #2505 is about.
+    """
+
+    stored = repo.by_id[handed_out.id]
+    assert handed_out is not stored
+    handed_out.name = ServerName("rewritten")
+    _rewrite_jsonb(handed_out)
+    assert stored.name == ServerName("srv")
+    assert stored.config == _CONFIG
+    assert stored.backup_retention == _RETENTION
 
 
 async def test_update_lifecycle_stores_a_copy_the_caller_cannot_rewrite() -> None:
@@ -157,3 +189,100 @@ async def test_seed_stores_a_copy_the_caller_cannot_rewrite() -> None:
     assert stored.observed_state is ObservedState.RUNNING
     assert stored.config == _CONFIG
     assert stored.backup_retention == _RETENTION
+
+
+async def test_update_backup_retention_stores_a_copy_of_the_policy() -> None:
+    # The narrow single-column writer (issue #1841) takes a raw dict rather than
+    # an entity, so it does not run through ``_copy`` -- but the adapter
+    # serializes the jsonb value whole and immediately, so the caller's dict must
+    # not stay reachable from the row either.
+    repo = FakeServerRepository()
+    server = _server()
+    repo.seed(server)
+    # Deliberately NOT ``_RETENTION``: a distinct value means the assertion
+    # below fails if the narrow write were skipped, not only if it aliased.
+    policy: dict[str, Any] = {"keep_last": 5, "nested": {"k": 7}}
+
+    await repo.update_backup_retention(server.id, policy)
+
+    stored = repo.by_id[server.id]
+    policy["keep_last"] = 99
+    policy["nested"]["k"] = 99
+    assert stored.backup_retention == {"keep_last": 5, "nested": {"k": 7}}
+
+
+async def test_get_by_id_hands_out_a_copy_the_caller_cannot_write_through() -> None:
+    repo = FakeServerRepository()
+    server = _server()
+    repo.seed(server)
+
+    loaded = await repo.get_by_id(server.id)
+
+    assert loaded is not None
+    _assert_reader_detached(loaded, repo=repo)
+
+
+async def test_get_by_community_and_name_hands_out_a_copy() -> None:
+    repo = FakeServerRepository()
+    server = _server()
+    repo.seed(server)
+
+    loaded = await repo.get_by_community_and_name(server.community_id, server.name)
+
+    assert loaded is not None
+    _assert_reader_detached(loaded, repo=repo)
+
+
+async def test_get_by_slug_hands_out_a_copy() -> None:
+    repo = FakeServerRepository()
+    server = _server()
+    repo.seed(server)
+
+    loaded = await repo.get_by_slug(server.slug)
+
+    assert loaded is not None
+    _assert_reader_detached(loaded, repo=repo)
+
+
+async def test_list_for_community_hands_out_copies() -> None:
+    repo = FakeServerRepository()
+    server = _server()
+    repo.seed(server)
+
+    (loaded,) = await repo.list_for_community(server.community_id)
+
+    _assert_reader_detached(loaded, repo=repo)
+
+
+async def test_list_all_hands_out_copies() -> None:
+    repo = FakeServerRepository()
+    server = _server()
+    repo.seed(server)
+
+    (loaded,) = await repo.list_all()
+
+    _assert_reader_detached(loaded, repo=repo)
+
+
+async def test_list_desired_running_assigned_hands_out_copies() -> None:
+    repo = FakeServerRepository()
+    server = _server(assigned_worker_id=WorkerId(uuid.uuid4()))
+    repo.seed(server)
+
+    (loaded,) = await repo.list_desired_running_assigned()
+
+    _assert_reader_detached(loaded, repo=repo)
+
+
+async def test_list_reconcilable_hands_out_copies() -> None:
+    # The reconciler path: desired=running with no assignment is an orphan, so
+    # this row is reconcilable. These three readers feed the loop that decides
+    # what to place and dispatch, which is the least directly covered code path
+    # in the repository -- a leak here is the hardest to see.
+    repo = FakeServerRepository()
+    server = _server()
+    repo.seed(server)
+
+    (loaded,) = await repo.list_reconcilable()
+
+    _assert_reader_detached(loaded, repo=repo)

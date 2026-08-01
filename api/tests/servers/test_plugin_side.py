@@ -561,6 +561,12 @@ async def test_disabled_client_to_both_then_enable_materializes_from_cache() -> 
     uow.plugins.seed(plugin)
     fs = FakeFileStore()  # client plugin has no working-set file
 
+    def stored() -> ServerPlugin:
+        # The PERSISTED row, not the seeded object: the repository keeps a
+        # detached copy (#2505/#2516), as the adapter's INSERT does, so the
+        # local ``plugin`` stops moving the moment it is seeded.
+        return uow.plugins.by_id[plugin.id]
+
     toggle = TogglePlugin(uow=uow, file_store=fs, cache=cache, clock=FakeClock(_NOW))
     set_side = SetPluginSide(uow=uow, file_store=fs, cache=cache, clock=FakeClock(_NOW))
 
@@ -568,7 +574,7 @@ async def test_disabled_client_to_both_then_enable_materializes_from_cache() -> 
     await toggle(
         community_id=_COMMUNITY, server_id=server.id, plugin_id=plugin.id, enable=False
     )
-    assert plugin.rel_path == "mods/c.jar"
+    assert stored().rel_path == "mods/c.jar"
     assert "mods/c.jar" not in fs.files
     assert "mods/c.jar.disabled" not in fs.files
 
@@ -577,9 +583,9 @@ async def test_disabled_client_to_both_then_enable_materializes_from_cache() -> 
     await set_side(
         community_id=_COMMUNITY, server_id=server.id, plugin_id=plugin.id, side="both"
     )
-    assert plugin.side == "both"
-    assert plugin.enabled is False
-    assert plugin.rel_path == "mods/c.jar.disabled"
+    assert stored().side == "both"
+    assert stored().enabled is False
+    assert stored().rel_path == "mods/c.jar.disabled"
     assert fs.files["mods/c.jar.disabled"] == content
     assert "mods/c.jar" not in fs.files
 
@@ -597,14 +603,14 @@ async def test_disabled_client_to_both_then_enable_materializes_from_cache() -> 
     await toggle(
         community_id=_COMMUNITY, server_id=server.id, plugin_id=plugin.id, enable=False
     )
-    assert plugin.rel_path == "mods/c.jar.disabled"
+    assert stored().rel_path == "mods/c.jar.disabled"
     assert fs.files["mods/c.jar.disabled"] == content
     assert "mods/c.jar" not in fs.files
 
     await toggle(
         community_id=_COMMUNITY, server_id=server.id, plugin_id=plugin.id, enable=True
     )
-    assert plugin.rel_path == "mods/c.jar"
+    assert stored().rel_path == "mods/c.jar"
     assert fs.files["mods/c.jar"] == content
     assert "mods/c.jar.disabled" not in fs.files
 
@@ -632,6 +638,10 @@ async def test_disabled_both_to_client_removes_file_then_back_then_enable() -> N
     fs = FakeFileStore()
     fs.files["mods/b.jar"] = content  # deployed
 
+    def stored() -> ServerPlugin:
+        # The PERSISTED row, not the seeded object (#2505/#2516).
+        return uow.plugins.by_id[plugin.id]
+
     toggle = TogglePlugin(uow=uow, file_store=fs, cache=cache, clock=FakeClock(_NOW))
     set_side = SetPluginSide(uow=uow, file_store=fs, cache=cache, clock=FakeClock(_NOW))
 
@@ -639,7 +649,7 @@ async def test_disabled_both_to_client_removes_file_then_back_then_enable() -> N
     await toggle(
         community_id=_COMMUNITY, server_id=server.id, plugin_id=plugin.id, enable=False
     )
-    assert plugin.rel_path == "mods/b.jar.disabled"
+    assert stored().rel_path == "mods/b.jar.disabled"
     assert fs.files["mods/b.jar.disabled"] == content
     assert "mods/b.jar" not in fs.files
 
@@ -666,8 +676,8 @@ async def test_disabled_both_to_client_removes_file_then_back_then_enable() -> N
     await toggle(
         community_id=_COMMUNITY, server_id=server.id, plugin_id=plugin.id, enable=True
     )
-    assert plugin.enabled is True
-    assert plugin.rel_path == "mods/b.jar"
+    assert stored().enabled is True
+    assert stored().rel_path == "mods/b.jar"
     assert fs.files["mods/b.jar"] == content
     assert "mods/b.jar.disabled" not in fs.files
 
