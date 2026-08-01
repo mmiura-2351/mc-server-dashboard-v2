@@ -3,7 +3,7 @@
 The HTTP boundary is exercised in-process via FastAPI's TestClient with the use
 cases and authorization Ports faked (NFR-TEST-1, no database). Verifies the
 two-layer gate per route, the plan/apply 200s, and the domain-error -> HTTP-code
-mapping (server_unsettled 409, catalog_unavailable 502).
+mapping (server_unsettled 409, catalog_upstream_failed 502).
 """
 
 from __future__ import annotations
@@ -197,7 +197,7 @@ def test_plan_returns_200() -> None:
     assert "validation" in body
 
 
-def test_plan_catalog_unavailable_is_502() -> None:
+def test_plan_catalog_upstream_failure_is_502() -> None:
     app = _app(
         member=True,
         allow=True,
@@ -206,7 +206,7 @@ def test_plan_catalog_unavailable_is_502() -> None:
     client = next(_client(app))
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/resolve"))
     assert resp.status_code == 502
-    assert resp.json()["reason"] == "catalog_unavailable"
+    assert resp.json()["reason"] == "catalog_upstream_failed"
 
 
 # --- apply -----------------------------------------------------------------

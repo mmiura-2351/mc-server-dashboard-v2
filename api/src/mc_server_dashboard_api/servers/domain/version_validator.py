@@ -37,8 +37,13 @@ class CatalogUnavailableError(ServerError):
 
     A transient source outage with no usable cache: validation cannot confirm the
     requested ``(server_type, version)`` is offered, so create fails loudly rather
-    than admitting an unvalidated version. The edge maps this to a 503 so the
-    client retries once the source recovers.
+    than admitting an unvalidated version. The edge maps this to a 503
+    ``catalog_unavailable`` so the client retries once the source recovers.
+
+    Not to be confused with the *content* catalog's
+    :class:`mc_server_dashboard_api.servers.domain.errors.CatalogUnavailableError`,
+    which is the gateway case (502 ``catalog_upstream_failed``) and carries the
+    rationale for the split (issue #2406).
     """
 
 

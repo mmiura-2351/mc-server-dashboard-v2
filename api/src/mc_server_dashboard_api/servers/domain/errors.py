@@ -547,9 +547,26 @@ class PluginCacheBlobNotFoundError(ServerError):
 
 
 class CatalogUnavailableError(ServerError):
-    """External catalog API unreachable or errored.
+    """The content catalog's upstream leg failed: unreachable, or answered badly.
 
-    The edge maps this to 502 ``catalog_unavailable``.
+    Covers every way a Modrinth/GeyserMC request can fail -- transport error,
+    non-2xx status, redirect loop, oversized or unparseable body, unexpected
+    payload shape (see :func:`wrap_shape_errors`).
+
+    The edge maps this to **502** ``catalog_upstream_failed``. Both halves of that
+    mapping are deliberate (issue #2406):
+
+    - The 502 stays. On this path we are the gateway and an inbound server
+      answered us invalidly, which is what 502 is for (RFC 9110 15.6.3).
+    - The reason is *not* ``catalog_unavailable``. That one belongs to the version
+      catalog going dark -- our **own** dependency exhausting its retry budget
+      with no last-good cache to fall back on -- which maps to 503
+      (:class:`mc_server_dashboard_api.versions.domain.errors.CatalogUnavailableError`,
+      :class:`mc_server_dashboard_api.servers.domain.version_validator.CatalogUnavailableError`).
+
+    The two conditions are genuinely different, so they carry different reasons: a
+    client tells them apart from the payload alone instead of having to switch on
+    (status, reason) together.
     """
 
 
