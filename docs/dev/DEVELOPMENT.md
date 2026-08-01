@@ -73,12 +73,9 @@ covered here.
 | Install pinned local tooling | `make bootstrap` | golangci-lint into `worker/.bin`, `uv sync` for api, `npm ci` for webui |
 | Install git hooks | `make hooks-install` | one-time, sets `core.hooksPath` |
 
-No need to run the full `make check` by hand before pushing: the pre-push hook
-runs it, and a manual run repeats the whole gate on an unchanged tree. Iterate
-with the targeted subset (the module's `make <module>-lint` /
-`make <module>-test`, or `make docs-check` for a docs change) and let the hook
-be the single full-gate run. It is the same gate CI enforces, so a green hook
-run means a green CI run.
+With the hooks installed (Section 2) there is no need to run the full
+`make check` by hand before pushing — pre-push runs it. Iterate with the
+targeted subset instead ([`AGENTS.md`](AGENTS.md) Section 5).
 
 ### Per-module commands
 
