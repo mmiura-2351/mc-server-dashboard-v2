@@ -175,5 +175,10 @@ class BackupArchiveStore(abc.ABC):
     ) -> int:
         """Return an archive's size in bytes (issue #281).
 
-        Raises :class:`BackupNotFoundError` for an unknown ref.
+        Raises :class:`BackupNotFoundError` for an unknown ref, and
+        :class:`BackupStorageUnavailableError` when the backend could not answer at
+        all (issue #2378). Both the download route's declared ``Content-Length`` and
+        the lazy size backfill behind the backup listing/statistics rest on that
+        distinction: a missing archive is a fact about one row, an unavailable store
+        is a transient condition the caller reports as 503 (issue #2405).
         """
