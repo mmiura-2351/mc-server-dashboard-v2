@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from typing import Any
 
 import pytest
 
@@ -111,6 +112,12 @@ class _Env:
         self.clear_retention = ClearBackupRetention(uow=self.uow)
         self.server = _server()
         self.uow.servers.seed(self.server)
+
+    async def seed_retention(self, retention: dict[str, Any]) -> None:
+        # Arrange the PERSISTED policy through the repository's own narrow write
+        # (issue #2505): the fake stores a detached copy of the seeded entity, as
+        # the adapter does, so assigning to ``self.server`` reaches no row.
+        await self.uow.servers.update_backup_retention(self.server.id, retention)
 
     def seed_backup(self, backup: Backup) -> None:
         self.uow.backups.seed(backup)
@@ -229,7 +236,7 @@ async def test_set_retention_survives_a_prune_failure() -> None:
 
 async def test_clear_retention_nulls_the_policy() -> None:
     env = _Env()
-    env.server.backup_retention = {"keep_last": 3}
+    await env.seed_retention({"keep_last": 3})
 
     await env.clear_retention(community_id=_COMMUNITY, server_id=env.server.id)
 
@@ -263,7 +270,7 @@ async def test_prune_with_malformed_persisted_policy_is_a_noop() -> None:
     # A persisted policy that fails validation should be impossible (writes
     # validate), but if one slips in the prune skips rather than guesses.
     env = _Env()
-    env.server.backup_retention = {"bogus": 1}
+    await env.seed_retention({"bogus": 1})
     env.seed_backup(_backup(env.server.id, _NOW - dt.timedelta(days=1)))
 
     pruned = await env.prune(community_id=_COMMUNITY, server_id=env.server.id)
@@ -281,7 +288,7 @@ async def test_prune_unknown_server_is_not_found() -> None:
 
 async def test_prune_keep_n_deletes_archive_then_row_and_audits() -> None:
     env = _Env()
-    env.server.backup_retention = {"keep_last": 2}
+    await env.seed_retention({"keep_last": 2})
     oldest = _backup(env.server.id, _NOW - dt.timedelta(days=3))
     kept = [
         _backup(env.server.id, _NOW - dt.timedelta(days=1)),
@@ -312,7 +319,7 @@ async def test_prune_keep_n_deletes_archive_then_row_and_audits() -> None:
 
 async def test_prune_tiered_policy_applies_bucket_selection() -> None:
     env = _Env()
-    env.server.backup_retention = {"daily": 1, "weekly": 0, "monthly": 0}
+    await env.seed_retention({"daily": 1, "weekly": 0, "monthly": 0})
     today_new = _backup(env.server.id, _NOW)
     today_old = _backup(env.server.id, _NOW - dt.timedelta(hours=3))
     for backup in (today_new, today_old):
@@ -326,7 +333,7 @@ async def test_prune_tiered_policy_applies_bucket_selection() -> None:
 
 async def test_prune_statistics_reflect_the_pruned_state() -> None:
     env = _Env()
-    env.server.backup_retention = {"keep_last": 1}
+    await env.seed_retention({"keep_last": 1})
     for i in range(3):
         env.seed_backup(_backup(env.server.id, _NOW - dt.timedelta(days=i)))
 
@@ -341,7 +348,7 @@ async def test_prune_statistics_reflect_the_pruned_state() -> None:
 
 async def test_prune_holds_the_lifecycle_lock_around_its_work() -> None:
     env = _Env()
-    env.server.backup_retention = {"keep_last": 1}
+    await env.seed_retention({"keep_last": 1})
     env.seed_backup(_backup(env.server.id, _NOW - dt.timedelta(days=1)))
     env.seed_backup(_backup(env.server.id, _NOW))
 
