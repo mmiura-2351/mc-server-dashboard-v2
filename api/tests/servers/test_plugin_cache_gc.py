@@ -4,12 +4,15 @@ Unit tests over in-memory fakes for the PluginCacheStore (list/delete), the
 live reference set, and a fixed clock -- no storage, no DB, no network. Cover
 the reference-set math (live kept, orphan deleted), the freed-bytes accounting,
 and the safety window (a too-young orphan is spared even when unreferenced).
+
+The cache double is the shared :class:`FakePluginCacheStore` every other
+plugin-cache test uses, so this file cannot drift away from the adapter's
+behaviour on its own (issue #2347).
 """
 
 from __future__ import annotations
 
 import datetime as dt
-from collections.abc import AsyncIterator
 
 from mc_server_dashboard_api.servers.application.plugin_cache_gc import (
     GC_SAFETY_WINDOW,
@@ -17,11 +20,7 @@ from mc_server_dashboard_api.servers.application.plugin_cache_gc import (
     RunPluginCacheGc,
 )
 from mc_server_dashboard_api.servers.domain.clock import Clock
-from mc_server_dashboard_api.servers.domain.plugin_cache_store import (
-    ByteStream,
-    CacheEntry,
-    PluginCacheStore,
-)
+from tests.servers.fakes import FakePluginCacheStore
 
 _NOW = dt.datetime(2026, 6, 20, 12, 0, 0, tzinfo=dt.UTC)
 
@@ -32,25 +31,6 @@ class _FixedClock(Clock):
 
     def now(self) -> dt.datetime:
         return self._now
-
-
-class _FakeCache(PluginCacheStore):
-    def __init__(self, entries: list[CacheEntry]) -> None:
-        self._entries = {e.sha256: e for e in entries}
-        self.deleted: list[str] = []
-
-    async def put(self, sha256: str, stream: ByteStream) -> None:  # pragma: no cover
-        raise NotImplementedError
-
-    def open(self, sha256: str) -> AsyncIterator[bytes]:  # pragma: no cover
-        raise NotImplementedError
-
-    async def list_entries(self) -> list[CacheEntry]:
-        return list(self._entries.values())
-
-    async def delete(self, sha256: str) -> None:
-        self.deleted.append(sha256)
-        self._entries.pop(sha256, None)
 
 
 class _FakeReferences(LivePluginCacheReferences):
@@ -77,16 +57,25 @@ def _old() -> dt.datetime:
     return _NOW - GC_SAFETY_WINDOW - dt.timedelta(hours=1)
 
 
-def _entry(sha: str, *, size: int = 10, age: dt.datetime | None = None) -> CacheEntry:
-    return CacheEntry(sha256=sha, size_bytes=size, modified_at=age or _old())
+def _seed(
+    cache: FakePluginCacheStore,
+    sha: str,
+    *,
+    size: int = 10,
+    age: dt.datetime | None = None,
+) -> None:
+    """Cache a blob of *size* bytes under *sha*, stored at *age* (default: old)."""
+    cache.blobs[sha] = b"x" * size
+    cache.modified_at[sha] = age or _old()
 
 
-def _gc(cache: _FakeCache, refs: _FakeReferences) -> RunPluginCacheGc:
+def _gc(cache: FakePluginCacheStore, refs: _FakeReferences) -> RunPluginCacheGc:
     return RunPluginCacheGc(cache=cache, references=refs, clock=_FixedClock(_NOW))
 
 
 async def test_deletes_unreferenced_old_blob() -> None:
-    cache = _FakeCache([_entry("a" * 64, size=100)])
+    cache = FakePluginCacheStore()
+    _seed(cache, "a" * 64, size=100)
     refs = _FakeReferences(set())
     result = await _gc(cache, refs)()
     assert cache.deleted == ["a" * 64]
@@ -96,7 +85,8 @@ async def test_deletes_unreferenced_old_blob() -> None:
 
 
 async def test_keeps_referenced_blob() -> None:
-    cache = _FakeCache([_entry("a" * 64, size=100)])
+    cache = FakePluginCacheStore()
+    _seed(cache, "a" * 64, size=100)
     refs = _FakeReferences({"a" * 64})
     result = await _gc(cache, refs)()
     assert cache.deleted == []
@@ -106,9 +96,9 @@ async def test_keeps_referenced_blob() -> None:
 
 
 async def test_keeps_live_deletes_orphan_in_mixed_cache() -> None:
-    live = _entry("a" * 64, size=10)
-    orphan = _entry("b" * 64, size=20)
-    cache = _FakeCache([live, orphan])
+    cache = FakePluginCacheStore()
+    _seed(cache, "a" * 64, size=10)  # live
+    _seed(cache, "b" * 64, size=20)  # orphan
     refs = _FakeReferences({"a" * 64})
     result = await _gc(cache, refs)()
     assert cache.deleted == ["b" * 64]
@@ -120,10 +110,13 @@ async def test_keeps_live_deletes_orphan_in_mixed_cache() -> None:
 async def test_safety_window_spares_a_too_young_orphan() -> None:
     # Younger than the window: an in-flight install may have cached it before
     # the plugin row committed.
-    young = _entry(
-        "c" * 64, size=30, age=_NOW - GC_SAFETY_WINDOW + dt.timedelta(minutes=1)
+    cache = FakePluginCacheStore()
+    _seed(
+        cache,
+        "c" * 64,
+        size=30,
+        age=_NOW - GC_SAFETY_WINDOW + dt.timedelta(minutes=1),
     )
-    cache = _FakeCache([young])
     refs = _FakeReferences(set())
     result = await _gc(cache, refs)()
     assert cache.deleted == []
@@ -134,8 +127,8 @@ async def test_safety_window_spares_a_too_young_orphan() -> None:
 
 async def test_safety_window_boundary_is_inclusive_delete() -> None:
     # Exactly at the window edge counts as old enough to delete (>= window).
-    at_edge = _entry("d" * 64, size=40, age=_NOW - GC_SAFETY_WINDOW)
-    cache = _FakeCache([at_edge])
+    cache = FakePluginCacheStore()
+    _seed(cache, "d" * 64, size=40, age=_NOW - GC_SAFETY_WINDOW)
     refs = _FakeReferences(set())
     result = await _gc(cache, refs)()
     assert cache.deleted == ["d" * 64]
@@ -144,7 +137,7 @@ async def test_safety_window_boundary_is_inclusive_delete() -> None:
 
 
 async def test_empty_cache_is_a_noop() -> None:
-    cache = _FakeCache([])
+    cache = FakePluginCacheStore()
     refs = _FakeReferences(set())
     result = await _gc(cache, refs)()
     assert cache.deleted == []
@@ -164,7 +157,8 @@ async def test_recheck_before_delete_spares_newly_referenced_blob() -> None:
     this race.
     """
     sha = "e" * 64
-    cache = _FakeCache([_entry(sha, size=50)])
+    cache = FakePluginCacheStore()
+    _seed(cache, sha, size=50)
     refs = _FakeReferences(set())  # unreferenced at initial snapshot
     # The new plugin row commits after the first live() call (the initial
     # snapshot) but before the GC attempts the delete (the re-check).
