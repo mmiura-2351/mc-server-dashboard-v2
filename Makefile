@@ -88,8 +88,8 @@ all: check
 
 # Full verification gate. Matches the pre-push hook and CI.
 # Parallelized via scripts/check_parallel.sh: independent module chains
-# (api, webui, worker, relay, proto, hooks, docs, scripts) run concurrently in
-# Phase 1,
+# (api, webui, worker, relay, proto, hooks, docs, scripts, migrations) run
+# concurrently in Phase 1,
 # then the drift checks (proto-check, openapi-check) that run generators
 # follow in Phase 2 after all readers have finished. See the script header
 # for the phasing rationale and bounded-parallelism notes.
@@ -409,8 +409,8 @@ hooks-test:
 	bash .githooks/test-post-checkout.sh
 	bash .githooks/test-hooks-check.sh
 
-# Unit-test everything under scripts/: the `--self-test` suites of the
-# checked-in python tools first, then the deploy shell helpers. Same shape as
+# Unit-test everything under scripts/: the `--self-test` suite of
+# supply_chain_cooldown.py first, then the deploy shell helpers. Same shape as
 # hooks-test -- stdlib python3 and pure bash, temp dirs, and stubbed
 # `sg`/`docker`/HTTP transports: offline, and never touches a real daemon or
 # volume.

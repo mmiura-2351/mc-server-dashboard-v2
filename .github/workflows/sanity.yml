@@ -32,14 +32,17 @@ jobs:
       # The checkers are pure stdlib python3 (ubuntu-latest ships it); no setup
       # action or dependency install is needed, mirroring docs.yml.
       #
-      # Every step below also runs locally: the migration guard (self-test +
-      # real run) via `make migrations-check`, the docs checker via
-      # `make docs-check`, supply_chain_cooldown.py's self-test via
-      # `make scripts-test`. They stay spelled out here rather than invoking
-      # those Make targets, because scripts-test additionally runs the deploy
-      # shell suites that this deliberately cheap always-on gate does not want
-      # (see the header). So a new `--self-test` under scripts/ has to be wired
-      # into both lists (#2508, #2511).
+      # Every step below except the workflow YAML parse also runs locally: the
+      # migration guard (self-test + real run) via `make migrations-check`, the
+      # docs checker (self-test + real run) via `make docs-check`,
+      # supply_chain_cooldown.py's self-test via `make scripts-test`, the two
+      # hook suites via `make hooks-test`. The YAML parse is CI-only -- it
+      # guards this directory, which has no local gate. The commands stay
+      # spelled out here rather than invoking those Make targets, because
+      # scripts-test additionally runs the deploy shell suites that this
+      # deliberately cheap always-on gate does not want (see the header). So a
+      # new `--self-test` under scripts/ has to be wired into both lists
+      # (#2508, #2511).
       - name: Migration guard self-test
         run: python3 scripts/check_migrations.py --self-test
 
