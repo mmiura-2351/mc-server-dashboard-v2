@@ -17,6 +17,7 @@ Pinned here:
   skips the upload, leaving ``last_modified`` untouched. The GC relies on
   exactly that (``plugin_cache_gc.py`` re-checks live references before
   deleting *because* a dedup put does not refresh the store time).
+- ``delete`` absorbs a key that is not there, as ``delete_object`` does.
 - A blob seeded straight into ``blobs`` -- the GC tests' idiom -- reports a
   store time no clock can age past, so forgetting the stamp reddens a
   delete-expecting test instead of passing by accident. That fail-loud property
@@ -106,6 +107,16 @@ async def test_put_after_delete_records_a_fresh_store_time() -> None:
 
     (entry,) = await store.list_entries()
     assert entry.modified_at >= before
+
+
+async def test_delete_of_absent_blob_is_idempotent() -> None:
+    # ``delete_object`` does not fault on a missing key, and the Port promises
+    # the same ("no error if absent"), so the GC may re-delete a swept blob.
+    store = FakePluginCacheStore()
+
+    await store.delete(_ABSENT_SHA)
+
+    assert store.deleted == [_ABSENT_SHA]
 
 
 async def test_unstamped_blob_reports_a_store_time_no_clock_can_age() -> None:

@@ -12,6 +12,7 @@ Pinned here:
   backends give a freshly pooled JAR one: the fs adapter renames the staged
   file into place (``st_mtime``), the object adapter uploads it
   (``last_modified``).
+- ``delete`` absorbs a key that is not there, as both backends do.
 - A JAR seeded straight into ``stored`` -- the GC tests' idiom -- reports a
   store time no clock can age past, so forgetting the stamp reddens a
   delete-expecting test instead of passing by accident. That fail-loud property
@@ -60,6 +61,16 @@ async def test_put_after_delete_records_a_fresh_store_time() -> None:
 
     (entry,) = await pool.list_entries()
     assert entry.modified_at >= before
+
+
+async def test_delete_of_absent_jar_is_idempotent() -> None:
+    # Both backends absorb a missing key (``unlink(missing_ok=True)`` /
+    # ``delete_object``), and the Port promises the same ("no error if absent").
+    pool = FakeJarPool()
+
+    await pool.delete("a" * 64)
+
+    assert pool.deleted == ["a" * 64]
 
 
 async def test_unstamped_jar_reports_a_store_time_no_clock_can_age() -> None:
