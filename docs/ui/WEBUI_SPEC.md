@@ -105,7 +105,7 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 | GET / POST | `/communities/{cid}/servers` | List / create (`name`, `mc_edition`, `mc_version`, `server_type`, `config`, `accept_eula`, optional `game_port`). |
 | POST | `/communities/{cid}/servers/import` | ZIP import (multipart). |
 | GET | `…/{sid}/export` | ZIP export (download). Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB export straight to disk (#2352), or the `HttpOnly` download cookie a redemption sets so an interrupted transfer can be retried (#2373). The response declares `Cache-Control: no-store` under every credential (#2491). |
-| POST | `…/{sid}/export/download-grant` | Mint that grant: `{download_url, expires_at}`, `Cache-Control: no-store`. Same `file:read` gate as the export, and the same pre-flight — a running server is 409 `server_unsettled` and no grant is issued; 30 s TTL (AUTH_API.md Section 3). |
+| POST | `…/{sid}/export/download-grant` | Mint that grant: `{download_url, expires_at}`, `Cache-Control: no-store`. Same `file:read` gate as the export, and the same pre-flight — a running server is 409 `server_unsettled` and no grant is issued; TTL per `auth.token.download_grant_ttl_seconds` (AUTH_API.md Section 3). |
 | GET / PATCH / DELETE | `…/{sid}` | Read / update (name, config, game_port) / delete. Every PATCH edit needs `server:update`. The retired `backup_interval_hours` key is a `422` (`retired_config_key`, #1840) — backup cadence is a `backup` schedule now. |
 | POST | `…/{sid}/start` · `/stop?force=` · `/restart` | Lifecycle. Stop supports force. |
 | POST | `…/{sid}/command` | RCON line → `{output}`. |
@@ -113,7 +113,7 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 | PUT / DELETE | `…/{sid}/files?path=` | Write (base64, versioned) / delete. |
 | POST | `…/{sid}/files/directories?path=` | mkdir. |
 | GET | `…/{sid}/files/download?path=` | Raw download (file bytes, or a streamed ZIP for a directory). Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB directory straight to disk (#2352), or the `HttpOnly` download cookie a redemption sets so an interrupted transfer can be retried (#2373). The response declares `Cache-Control: no-store` under every credential (#2491). |
-| POST | `…/{sid}/files/download-grant?path=` | Mint that grant: `{download_url, expires_at}`, `Cache-Control: no-store`. Same `file:read` gate as the download, and the same pre-flight — missing path 404, traversal 422 `invalid_path`, running server 409 `server_unsettled`. `path` is a **query** parameter so mint and redemption bind the identical string; 30 s TTL (AUTH_API.md Section 3). |
+| POST | `…/{sid}/files/download-grant?path=` | Mint that grant: `{download_url, expires_at}`, `Cache-Control: no-store`. Same `file:read` gate as the download, and the same pre-flight — missing path 404, traversal 422 `invalid_path`, running server 409 `server_unsettled`. `path` is a **query** parameter so mint and redemption bind the identical string; TTL per `auth.token.download_grant_ttl_seconds` (AUTH_API.md Section 3). |
 | POST | `…/{sid}/files/upload?path=&extract=` | Multipart upload, optional ZIP extract. |
 | POST | `…/{sid}/files/rename` | `{from, to}`. |
 | POST | `…/{sid}/files/search` | `{query, by, max_results}` → matching paths. |
@@ -123,7 +123,7 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 | GET | `…/{sid}/backups/statistics` | count / total bytes / newest / oldest. |
 | POST | `…/{sid}/backups/upload` | Upload an off-host backup archive. |
 | GET | `…/{sid}/backups/{bid}/download` | Download archive. Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB archive straight to disk (#2313), or the `HttpOnly` download cookie a redemption sets so an interrupted transfer can be retried (#2373). **Resumable** (#2372): the response declares `Accept-Ranges: bytes` and a strong `ETag`, and a single `Range` request is served `206` with `Content-Range` over a ranged read (`416` + `Content-Range: bytes */<size>` when unsatisfiable; a malformed or multi-range `Range` is ignored and the whole archive served). `If-Range` is honoured, so a resumed request that names a stale representation gets the current archive whole. The browser's own retry of an interrupted transfer authenticates with the `HttpOnly` download cookie a grant redemption sets, since the `?grant=` in the retried URL has expired by then (#2373, AUTH_API.md Section 3). The response declares `Cache-Control: no-store` on both the `200` and the `206`, under every credential (#2491). |
-| POST | `…/{sid}/backups/{bid}/download-grant` | Mint that grant: `{download_url, expires_at}`, `Cache-Control: no-store`. Same `backup:read` gate as the download; 30 s TTL (AUTH_API.md Section 3). |
+| POST | `…/{sid}/backups/{bid}/download-grant` | Mint that grant: `{download_url, expires_at}`, `Cache-Control: no-store`. Same `backup:read` gate as the download; TTL per `auth.token.download_grant_ttl_seconds` (AUTH_API.md Section 3). |
 | POST | `…/{sid}/backups/{bid}/restore[?force=true]` | **Server must be stopped.** `?force=true` overrides the quarantine gate (#703). |
 | DELETE | `…/{sid}/backups/{bid}` | Delete. |
 | PUT / DELETE | `…/{sid}/backups/retention` | Set / clear the scheduled-backup retention policy (issue #1841): `{keep_last}` (≥ 1) XOR `{daily, weekly, monthly}` (each ≥ 0, one > 0); an invalid shape is 422 `invalid_retention_policy`. Gated by `backup:schedule`. Applies only to `source=scheduled` backups — manual/uploaded rows are never auto-deleted. Setting prunes immediately; thereafter each successful scheduled backup run prunes (each deletion audited as `backup:delete`, no actor). Policy readable as `backup_retention` on the server read; null while unconfigured. |
@@ -557,8 +557,9 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   GB, so the tab mints a short-lived self-authenticating URL
   (`POST …/backups/{bid}/download-grant`, #2313;
   `POST …/{sid}/export/download-grant` and
-  `POST …/{sid}/files/download-grant?path=…`, #2352 — all 30 s TTL) and clicks
-  an `<a download>` at it — same-origin (7.7), so the browser saves the
+  `POST …/{sid}/files/download-grant?path=…`, #2352 — all live for
+  `auth.token.download_grant_ttl_seconds`) and clicks an `<a download>` at
+  it — same-origin (7.7), so the browser saves the
   response natively with no size ceiling and no bytes read by the application
   (#2314, #2353, #2354). The grant is minted on click, never on render or on
   selection, and the `download` attribute names the file — redundant but
