@@ -108,7 +108,12 @@ class FakeUserRepository(UserRepository):
         return {uid: user.username for uid, user in self.by_id.items() if uid in wanted}
 
     async def update(self, user: User) -> None:
-        self.by_id[user.id] = self._copy(user)
+        # Mirror the adapter's ``UPDATE user ... WHERE id = :id``: a missing id
+        # matches no row, so nothing is written and no row appears -- keying the
+        # entity in regardless made this an insert the adapter cannot perform
+        # (#2557).
+        if user.id in self.by_id:
+            self.by_id[user.id] = self._copy(user)
 
     async def delete(self, user_id: UserId) -> None:
         self.by_id.pop(user_id, None)
