@@ -14,6 +14,7 @@ import uuid
 import zipfile
 from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from dataclasses import replace
 from typing import Any
 
@@ -411,11 +412,43 @@ class FakeServerRepository(ServerRepository):
     def __init__(self) -> None:
         self.by_id: dict[ServerId, Server] = {}
 
+    @staticmethod
+    def _copy(server: Server) -> Server:
+        # Detach the row from the caller's entity (issue #2505). Every writer
+        # stores this. Aliasing let a use case's post-transaction write-back onto
+        # its own entity retroactively rewrite what a test believed was persisted
+        # -- the direction that makes a persisted-state assert look like a pin
+        # when the adapter would have stored something else.
+        #
+        # For ``update``/``update_lifecycle`` this mirrors the adapter exactly:
+        # the UPDATE executes there and then, so nothing the caller does to its
+        # object afterwards can reach the row. ``add`` snapshots EARLIER than the
+        # adapter, which stages a ServerModel holding the caller's ``config`` by
+        # reference and serializes it only at flush (SqlAlchemyServerRepository.add).
+        # That divergence is deliberate and harmless: it is strictly MORE
+        # isolating, so it can produce an extra red but can never absorb a mutant,
+        # which is the failure mode #2505 is about.
+        #
+        # Copy depth: a new entity, plus the two jsonb column values (``config``,
+        # ``backup_retention``) copied all the way down. Those are the entity's only
+        # mutable fields -- everything else is a scalar, an enum, or a frozen value
+        # object, and a Server references no other entity, so this deep-copies no
+        # graph. They go down rather than one level because the adapter serializes
+        # each blob whole: a nested edit (``config["properties"][k] = v`` is the
+        # shape use cases actually write) cannot reach an already-written row
+        # either, and a one-level copy would claim a detachment it does not have.
+        # Both are held raw here, so neither may be assumed flat.
+        return replace(
+            server,
+            config=deepcopy(server.config),
+            backup_retention=deepcopy(server.backup_retention),
+        )
+
     def seed(self, server: Server) -> None:
-        self.by_id[server.id] = server
+        self.by_id[server.id] = self._copy(server)
 
     async def add(self, server: Server) -> None:
-        self.by_id[server.id] = server
+        self.by_id[server.id] = self._copy(server)
 
     async def get_by_id(self, server_id: ServerId) -> Server | None:
         # Return a detached copy so a use case that mutates the loaded entity
@@ -423,7 +456,7 @@ class FakeServerRepository(ServerRepository):
         # update_lifecycle compare against the actual stored desired state (the
         # compare-and-set the real adapter does in SQL).
         server = self.by_id.get(server_id)
-        return None if server is None else replace(server)
+        return None if server is None else self._copy(server)
 
     async def get_by_community_and_name(
         self, community_id: CommunityId, name: ServerName
@@ -457,7 +490,7 @@ class FakeServerRepository(ServerRepository):
         return [s.id for s in self.by_id.values() if s.game_port is None]
 
     async def update(self, server: Server) -> None:
-        self.by_id[server.id] = server
+        self.by_id[server.id] = self._copy(server)
 
     async def update_backup_retention(
         self, server_id: ServerId, retention: dict[str, Any] | None
@@ -480,7 +513,7 @@ class FakeServerRepository(ServerRepository):
             return False
         if require_unassigned and current.assigned_worker_id is not None:
             return False
-        self.by_id[server.id] = server
+        self.by_id[server.id] = self._copy(server)
         return True
 
     async def record_observed_state(
