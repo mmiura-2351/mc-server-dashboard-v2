@@ -278,10 +278,9 @@ class ListBackups:
     store and persisted, so it becomes a one-time per-row cost and the total
     becomes a full sum.
 
-    That probe makes this a storage-touching route: an object-store outage raises
-    :class:`BackupStorageUnavailableError` (edge: 503 ``storage_unavailable``)
-    rather than degrading the listing to null sizes, matching the five sibling
-    backup routes — see :func:`_backfill_null_sizes` for the decision (#2405).
+    That probe makes this a storage-touching route: a store fault fails the listing
+    rather than degrading it to null sizes (issue #2405). The decision, and which
+    faults reach the edge as 503 rather than 500, are in :func:`_backfill_null_sizes`.
     """
 
     uow: UnitOfWork
@@ -1030,11 +1029,10 @@ class ServerBackupStatistics:
 
     Lazily backfills legacy NULL ``size_bytes`` rows whose archive still exists
     (issue #661), so once backfilled they join the total rather than staying an
-    honest-but-partial unknown. Sharing that probe with the listing means sharing
-    its outage answer: an object-store outage raises
-    :class:`BackupStorageUnavailableError` (edge: 503 ``storage_unavailable``)
-    instead of returning a total silently missing the rows the store could not
-    size — see :func:`_backfill_null_sizes` for the decision (#2405).
+    honest-but-partial unknown. Sharing that probe with the listing means sharing its
+    failure behaviour (issue #2405): a store fault fails the read rather than
+    returning a total silently missing the rows the store could not size. See
+    :func:`_backfill_null_sizes`.
     """
 
     uow: UnitOfWork
@@ -1083,26 +1081,27 @@ async def _backfill_null_sizes(
     caller's open unit of work; the returned ``rows`` carry any computed size so
     the listing/total reflect it immediately.
 
-    **Exactly one failure is tolerated: a missing archive** (``BackupNotFoundError``
-    — the dangling-row case create is designed to leave behind). That row keeps its
-    NULL size, an honest "unknown", and the remaining rows are still backfilled.
+    **Only a missing archive is tolerated** (``BackupNotFoundError``, the
+    dangling-row case create is designed to leave behind): that row keeps its NULL
+    size and the remaining rows are still backfilled. **Everything else propagates
+    and fails the read** (issue #2405), where a bare ``except Exception`` used to
+    degrade it to a success with null sizes. A null size is indistinguishable from a
+    genuinely unrecorded one, so nothing in a degraded response identified it as
+    degraded; and once #2378 made an object-store outage a 503 ``storage_unavailable``
+    on backup create / restore / upload / delete / download, one outage could not have
+    five routes say "the store is down, retry" and the read say "here are your
+    backups, some have no size". The cost is accepted knowingly: during an outage the
+    read fails entirely, including the rows whose sizes were already recorded.
+    Narrowing also stops the handler swallowing a programming error in the backfill
+    itself, which is how a real bug here would have stayed invisible behind a 200.
 
-    **Every other failure propagates**, which fails the read (issue #2405). Until
-    then a bare ``except Exception`` degraded the read to a success with null sizes,
-    and that was a deliberate choice while every other storage failure on the path
-    was an opaque 500 anyway. It stopped being one when #2378 made an object-store
-    outage a loud 503 ``storage_unavailable`` on backup create / restore / upload /
-    delete / download: one outage cannot have five routes say "the store is down,
-    retry" and the read say "here are your backups, some have no size". The decider
-    against keeping the degrade is that a null size is indistinguishable from a
-    genuinely unrecorded one, so nothing in a degraded response identifies it as
-    degraded and the operator never learns the truth. The cost is accepted
-    knowingly: during an outage the read fails entirely, including the rows whose
-    sizes were already recorded.
-
-    Narrowing the handler is the other half. ``except Exception`` also swallowed a
-    programming error in the backfill itself, which is how a real bug here would
-    have stayed invisible behind a 200.
+    **Propagating is not the same as answering 503**, and only the object backend's
+    outage is translated into one (``ObjectStoreUnavailableError`` at the seam). A
+    non-miss ``OSError`` on the fs backend — the M1 default — and a non-5xx
+    ``ClientError`` (a 403 ``InvalidAccessKeyId``, left untranslated on purpose as a
+    permanent fault rather than a transient one) both reach the edge as a generic
+    500, which is already what the five sibling routes do with them. Issue #2555
+    covers closing that gap for all of them at once.
     """
 
     changed = False

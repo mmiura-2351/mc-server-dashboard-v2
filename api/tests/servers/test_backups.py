@@ -505,10 +505,8 @@ async def test_server_statistics_backfills_null_size_into_total() -> None:
 
 
 async def test_list_fails_when_the_store_is_unavailable() -> None:
-    # The decision of issue #2405: an object-store outage during the backfill fails
-    # the listing with the same BackupStorageUnavailableError the five sibling
-    # backup routes already raise (#2378), instead of degrading to a 200 with null
-    # sizes that nothing in the response identifies as degraded.
+    # The decision of issue #2405 (stated in _backfill_null_sizes' docstring): an
+    # object-store outage fails the listing instead of degrading it to null sizes.
     server = _at_rest()
     repo = FakeServerRepository()
     repo.seed(server)
@@ -554,9 +552,9 @@ async def test_list_does_not_swallow_a_programming_error_in_the_backfill() -> No
 
 
 async def test_server_statistics_fails_when_the_store_is_unavailable() -> None:
-    # The statistics endpoint shares the backfill, so it shares the decision
-    # (issue #2405): a partial total computed during an outage is indistinguishable
-    # from an honest one, so the outage is reported instead of averaged away.
+    # The statistics endpoint shares the backfill, so it shares the decision: a
+    # partial total computed during an outage is indistinguishable from an honest
+    # one, so the outage is reported instead of averaged away (issue #2405).
     server = _at_rest()
     repo = FakeServerRepository()
     repo.seed(server)
