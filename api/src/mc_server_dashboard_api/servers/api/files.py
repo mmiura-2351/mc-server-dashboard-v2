@@ -89,6 +89,7 @@ from mc_server_dashboard_api.dependencies import (
 )
 from mc_server_dashboard_api.http_content_disposition import content_disposition
 from mc_server_dashboard_api.http_datetime import UtcDatetime
+from mc_server_dashboard_api.http_head import head_response
 from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.identity.domain.token_service import TokenService
 from mc_server_dashboard_api.identity.domain.value_objects import (
@@ -143,6 +144,17 @@ _UPLOAD_CHUNK_BYTES = 1024 * 1024
 # read the same value for an absent parameter, or a grant minted without a path
 # would not redeem the URL it names.
 _DEFAULT_DOWNLOAD_PATH = "."
+
+# The download's two branches: a directory streams as a zip, a file as opaque
+# bytes. The HEAD probe declares the same type as the body it stands for.
+_ZIP_MEDIA_TYPE = "application/zip"
+_FILE_MEDIA_TYPE = "application/octet-stream"
+
+# Named once because two decorators register it: Starlette does not synthesize
+# HEAD from a GET route, so the probe has to be declared (issue #2383). Both
+# registrations point at the same endpoint function, so the gate, the headers and
+# the error mapping cannot drift apart between the two methods.
+_DOWNLOAD_PATH = "/communities/{community_id}/servers/{server_id}/files/download"
 
 
 def _download_grant_resource(request: Request) -> str:
@@ -583,8 +595,10 @@ async def upload_file(
     await _record_file(recorder, ops.FILE_UPLOAD, authorized, community_id, server_id)
 
 
-@router.get("/communities/{community_id}/servers/{server_id}/files/download")
+@router.get(_DOWNLOAD_PATH)
+@router.head(_DOWNLOAD_PATH)
 async def download_file(
+    request: Request,
     community_id: uuid.UUID,
     server_id: uuid.UUID,
     authorized: Annotated[
@@ -611,8 +625,15 @@ async def download_file(
     download cookie, which authenticates the browser's retry of an interrupted
     transfer once the grant's own window has closed (issue #2373). Every
     credential runs the same ``file:read`` gate, and the response is identical.
+
+    **Probe** (issue #2383): a ``HEAD`` answers with the ``GET``'s status and
+    headers and no body — a single file's ``Content-Length`` when it is known, and
+    none at all for the incrementally built directory zip, exactly as the ``GET``
+    declares them. It is the same endpoint behind the same gate; only the bytes
+    and the audit record are skipped.
     """
 
+    probing = request.method == "HEAD"
     try:
         is_dir = await use_case.is_dir(
             community_id=CommunityId(community_id),
@@ -620,24 +641,32 @@ async def download_file(
             rel_path=path,
         )
         if is_dir:
-            stream = await use_case.dir_zip(
-                community_id=CommunityId(community_id),
-                server_id=ServerId(server_id),
-                rel_path=path,
-            )
             name = posixpath.basename(path.rstrip("/")) or "root"
-            response: Response = StreamingResponse(
-                stream,
-                media_type="application/zip",
-                headers={
-                    "Content-Disposition": content_disposition(f"{name}.zip"),
-                    # A per-user body is never stored, whichever credential fetched
-                    # it (issue #2491): a cookie-authenticated request carries no
-                    # ``Authorization``, so RFC 9111 Section 3.5's default
-                    # protection from shared caches does not cover it.
-                    "Cache-Control": "no-store",
-                },
-            )
+            zip_headers = {
+                "Content-Disposition": content_disposition(f"{name}.zip"),
+                # A per-user body is never stored, whichever credential fetched
+                # it (issue #2491): a cookie-authenticated request carries no
+                # ``Authorization``, so RFC 9111 Section 3.5's default
+                # protection from shared caches does not cover it.
+                "Cache-Control": "no-store",
+            }
+            if probing:
+                # The zip is built inside the stream ``dir_zip`` returns, so not
+                # asking for it is the probe doing none of the download's work.
+                response: Response = head_response(
+                    media_type=_ZIP_MEDIA_TYPE, headers=zip_headers
+                )
+            else:
+                stream = await use_case.dir_zip(
+                    community_id=CommunityId(community_id),
+                    server_id=ServerId(server_id),
+                    rel_path=path,
+                )
+                response = StreamingResponse(
+                    stream,
+                    media_type=_ZIP_MEDIA_TYPE,
+                    headers=zip_headers,
+                )
         else:
             # Stream the file's bytes (issue #265) so a large single-file download
             # never buffers the whole file in RAM. The size is resolved from the
@@ -645,11 +674,6 @@ async def download_file(
             # (e.g. the path has no listable parent), the response falls back to
             # chunked transfer.
             size = await use_case.file_size(
-                community_id=CommunityId(community_id),
-                server_id=ServerId(server_id),
-                rel_path=path,
-            )
-            file_stream = await use_case.file_stream(
                 community_id=CommunityId(community_id),
                 server_id=ServerId(server_id),
                 rel_path=path,
@@ -662,11 +686,24 @@ async def download_file(
             }
             if size is not None:
                 headers["Content-Length"] = str(size)
-            response = StreamingResponse(
-                file_stream,
-                media_type="application/octet-stream",
-                headers=headers,
-            )
+            if probing:
+                # The size came from the cheap parent listing, so the probe
+                # answers the length question without opening the download
+                # stream. (``is_dir`` above still resolves the branch the way the
+                # GET does, which for a file confirms readability by pulling one
+                # chunk; the probe skips the download, not the dispatch.)
+                response = head_response(media_type=_FILE_MEDIA_TYPE, headers=headers)
+            else:
+                file_stream = await use_case.file_stream(
+                    community_id=CommunityId(community_id),
+                    server_id=ServerId(server_id),
+                    rel_path=path,
+                )
+                response = StreamingResponse(
+                    file_stream,
+                    media_type=_FILE_MEDIA_TYPE,
+                    headers=headers,
+                )
     except ServerNotFoundError as exc:
         raise _not_found() from exc
     except ServerFileNotFoundError as exc:
@@ -678,11 +715,18 @@ async def download_file(
         # invalid_path and Storage's symlink_refused.
         raise _unprocessable(exc.reason) from exc
     except ServerFilesUnsettledError as exc:
-        await _record_file_failure(
+        if not probing:
+            await _record_file_failure(
+                recorder, ops.FILE_DOWNLOAD, authorized, community_id, server_id
+            )
+        raise _conflict("server_unsettled") from exc
+    if not probing:
+        # Deliberately unrecorded for a HEAD (issue #2383), here and in the
+        # refusal above: a metadata probe is not a download, and recording one
+        # identically would inflate the file:download counts.
+        await _record_file(
             recorder, ops.FILE_DOWNLOAD, authorized, community_id, server_id
         )
-        raise _conflict("server_unsettled") from exc
-    await _record_file(recorder, ops.FILE_DOWNLOAD, authorized, community_id, server_id)
     return response
 
 

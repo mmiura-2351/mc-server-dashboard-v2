@@ -124,12 +124,16 @@ class _FakeExport:
         self._chunks = chunks or [b"zip-bytes"]
         self._error = error
         self._server_name = server_name
+        # The real zip is built inside the returned generator (the adapter's
+        # export_dir is lazy), so "the stream was opened" is that body running.
+        self.stream_started = False
 
     async def __call__(self, **kwargs: object) -> ServerExport:
         if self._error is not None:
             raise self._error
 
         async def _gen() -> AsyncIterator[bytes]:
+            self.stream_started = True
             for chunk in self._chunks:
                 yield chunk
 
@@ -687,6 +691,124 @@ def test_export_download_declares_no_store_under_every_credential() -> None:
     for resp in (with_bearer, with_cookie, with_grant):
         assert resp.status_code == 200
         assert resp.headers["cache-control"] == "no-store"
+
+
+# --- the HEAD probe (issue #2383) ------------------------------------------
+#
+# A download client asks HEAD first, to learn what the transfer would be before
+# starting it. Per credential, like the Cache-Control section above: the gate is
+# what a future auth change could silently drop a route from.
+
+
+def test_export_head_answers_the_gets_headers_under_every_credential() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, export=_FakeExport(chunks=[b"zip-bytes"]))
+    client = next(_client(app))
+    url = _export_url(community, server)
+    cookie = _export_cookie_header(community, server)
+    # Last, because redeeming a grant mints the cookie into the client's jar.
+    grant_url = _export_grant_url(community, server, subject=_user)
+
+    probes = [
+        client.head(url, headers=_bearer()),
+        client.head(url, headers=cookie),
+        client.head(grant_url),
+    ]
+    served = client.get(url, headers=_bearer())
+
+    for resp in probes:
+        assert resp.status_code == served.status_code == 200
+        # A HEAD carries the GET's headers and none of its bytes.
+        assert resp.content == b""
+        for name in ("content-type", "content-disposition", "cache-control"):
+            assert resp.headers[name] == served.headers[name], name
+        # The zip is built incrementally, so the GET declares no length; a probe
+        # that answered "0" would tell the client the export is empty.
+        assert "content-length" not in resp.headers
+
+
+def test_export_head_neither_builds_the_zip_nor_records_an_export() -> None:
+    # Returning the right headers is easy; doing it without walking the working
+    # set is the point of the probe (issue #2383). And a probe is not an export,
+    # so it records nothing: an audited HEAD would inflate the server:export count.
+    community, server = uuid.uuid4(), uuid.uuid4()
+    export = _FakeExport(chunks=[b"zip-bytes"])
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, export=export, recorder=recorder)
+    client = next(_client(app))
+
+    resp = client.head(_export_url(community, server), headers=_bearer())
+
+    assert resp.status_code == 200
+    assert export.stream_started is False
+    assert recorder.events == []
+
+
+def test_export_head_of_a_running_server_is_409_and_records_nothing() -> None:
+    # The GET records server:export DENIED here; the probe does not, for the same
+    # reason it does not record a success — it is not an export attempt.
+    community, server = uuid.uuid4(), uuid.uuid4()
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        export=_FakeExport(error=ServerFilesUnsettledError("x")),
+        recorder=recorder,
+    )
+    client = next(_client(app))
+
+    resp = client.head(_export_url(community, server), headers=_bearer())
+
+    assert resp.status_code == 409
+    assert recorder.events == []
+
+
+def _export_credential(
+    kind: str, community: uuid.UUID, server: uuid.UUID
+) -> tuple[str, dict[str, str]]:
+    """The export URL and headers for one of the three credential transports."""
+
+    if kind == "bearer":
+        return _export_url(community, server), _bearer()
+    if kind == "cookie":
+        return _export_url(community, server), _export_cookie_header(community, server)
+    return _export_grant_url(community, server, subject=_user), {}
+
+
+@pytest.mark.parametrize("kind", ["bearer", "cookie", "grant"])
+@pytest.mark.parametrize(
+    ("member", "allow", "error", "expected"),
+    [
+        (True, True, None, 200),
+        (False, True, None, 404),
+        (True, False, None, 403),
+        (True, True, ServerNotFoundError("x"), 404),
+        (True, True, ServerFilesUnsettledError("x"), 409),
+    ],
+)
+def test_export_head_is_answered_exactly_like_the_get(
+    kind: str, member: bool, allow: bool, error: Exception | None, expected: int
+) -> None:
+    # A HEAD that skipped or weakened a check would be a security defect, not a
+    # convenience gap. Every credential must be refused on the probe exactly
+    # where it is refused on the export.
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=member, allow=allow, export=_FakeExport(error=error))
+    url, headers = _export_credential(kind, community, server)
+
+    probed = next(_client(app)).head(url, headers=headers)
+    served = next(_client(app)).get(url, headers=headers)
+
+    assert probed.status_code == served.status_code == expected
+
+
+def test_export_head_without_credentials_is_401() -> None:
+    app = _app(member=True, allow=True, export=_FakeExport())
+    client = next(_client(app))
+
+    resp = client.head(_export_url(uuid.uuid4(), uuid.uuid4()))
+
+    assert resp.status_code == 401
 
 
 # --- import ----------------------------------------------------------------

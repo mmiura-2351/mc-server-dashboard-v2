@@ -7138,8 +7138,86 @@
     },
     "/api/communities/{community_id}/servers/{server_id}/backups/{backup_id}/download": {
       "get": {
-        "description": "Stream a backup archive in its native ``tar.gz`` format (backup:read, #281).\n\nNo recompression: the exact stored bytes stream out with a ``.tar.gz``\nattachment. An unknown / cross-community backup is 404 (no existence signal).\n\nThe response declares the archive's exact size as ``Content-Length``, so a\nclient can show download progress and refuse an over-cap archive up front.\n\n**Resumable** (issue #2372): the response declares ``Accept-Ranges: bytes``\nand an ``ETag``, and a single ``Range`` request is served as ``206`` over a\nranged read of the stored bytes \u2014 a multi-GB archive is never re-read from\nthe start to serve its tail. An interrupted transfer therefore resumes\ninstead of restarting.\n\nThe caller authenticates with the usual Bearer access token, or \u2014 for a\nbrowser that cannot set a header on a plain navigation \u2014 with a short-lived\n``?grant=`` minted by ``POST .../download-grant`` (issue #2313). Redeeming a\ngrant also sets an httpOnly download cookie, which is what authenticates the\nbrowser's retry once the grant's own short window has closed (issue #2373).\nWhichever credential arrives, the same ``backup:read`` gate decides and the\nresponse body is identical.",
+        "description": "Stream a backup archive in its native ``tar.gz`` format (backup:read, #281).\n\nNo recompression: the exact stored bytes stream out with a ``.tar.gz``\nattachment. An unknown / cross-community backup is 404 (no existence signal).\n\nThe response declares the archive's exact size as ``Content-Length``, so a\nclient can show download progress and refuse an over-cap archive up front.\n\n**Resumable** (issue #2372): the response declares ``Accept-Ranges: bytes``\nand an ``ETag``, and a single ``Range`` request is served as ``206`` over a\nranged read of the stored bytes \u2014 a multi-GB archive is never re-read from\nthe start to serve its tail. An interrupted transfer therefore resumes\ninstead of restarting.\n\nThe caller authenticates with the usual Bearer access token, or \u2014 for a\nbrowser that cannot set a header on a plain navigation \u2014 with a short-lived\n``?grant=`` minted by ``POST .../download-grant`` (issue #2313). Redeeming a\ngrant also sets an httpOnly download cookie, which is what authenticates the\nbrowser's retry once the grant's own short window has closed (issue #2373).\nWhichever credential arrives, the same ``backup:read`` gate decides and the\nresponse body is identical.\n\n**Probe** (issue #2383): a ``HEAD`` answers with the ``GET``'s status and\nheaders and no body, so a client learns the size and that resumption is\noffered without starting a transfer. It is the same endpoint behind the same\ngate; only the archive stream and the audit record are skipped.",
         "operationId": "download_backup_api_communities__community_id__servers__server_id__backups__backup_id__download_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "backup_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Backup Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "grant",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Grant"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Download Backup"
+      },
+      "head": {
+        "description": "Stream a backup archive in its native ``tar.gz`` format (backup:read, #281).\n\nNo recompression: the exact stored bytes stream out with a ``.tar.gz``\nattachment. An unknown / cross-community backup is 404 (no existence signal).\n\nThe response declares the archive's exact size as ``Content-Length``, so a\nclient can show download progress and refuse an over-cap archive up front.\n\n**Resumable** (issue #2372): the response declares ``Accept-Ranges: bytes``\nand an ``ETag``, and a single ``Range`` request is served as ``206`` over a\nranged read of the stored bytes \u2014 a multi-GB archive is never re-read from\nthe start to serve its tail. An interrupted transfer therefore resumes\ninstead of restarting.\n\nThe caller authenticates with the usual Bearer access token, or \u2014 for a\nbrowser that cannot set a header on a plain navigation \u2014 with a short-lived\n``?grant=`` minted by ``POST .../download-grant`` (issue #2313). Redeeming a\ngrant also sets an httpOnly download cookie, which is what authenticates the\nbrowser's retry once the grant's own short window has closed (issue #2373).\nWhichever credential arrives, the same ``backup:read`` gate decides and the\nresponse body is identical.\n\n**Probe** (issue #2383): a ``HEAD`` answers with the ``GET``'s status and\nheaders and no body, so a client learns the size and that resumption is\noffered without starting a transfer. It is the same endpoint behind the same\ngate; only the archive stream and the audit record are skipped.",
+        "operationId": "download_backup_api_communities__community_id__servers__server_id__backups__backup_id__download_head",
         "parameters": [
           {
             "in": "path",
@@ -7748,8 +7826,76 @@
     },
     "/api/communities/{community_id}/servers/{server_id}/export": {
       "get": {
-        "description": "Export a whole server as a streamed ZIP at rest (issue #274).\n\nGated by ``file:read``: an export is a bulk read of the whole working set, so\nit reuses the file-read permission (and the per-resource grant) rather than a\ndedicated code -- the same permission the directory download uses. At rest only\n(Section 6.9): a running server is 409 ``server_unsettled`` (the authoritative\ncopy is only well-defined at rest). The zip carries the working set plus an\n``export_metadata.json`` descriptor. Recorded under ``server:export``.\n\nThe zip is built incrementally, so it carries no ``Content-Length`` and a\nbrowser cannot cap it up front; a multi-GB export is therefore fetched as a\nplain navigation to a URL carrying a short-lived ``?grant=`` minted by\n``POST .../export/download-grant`` instead of being buffered into a Blob to\nattach a Bearer header (issue #2352). Redeeming a grant also sets an httpOnly\ndownload cookie, which authenticates the browser's retry of an interrupted\ntransfer once the grant's own window has closed (issue #2373). Every\ncredential runs the same ``file:read`` gate, and the response is identical.\n\nThe response names itself ``{server name}.zip`` via ``Content-Disposition``\n(issue #2357), so a client that navigates the URL without supplying a filename\n-- a pasted grant link, a CLI fetch -- does not save the last path segment,\n``export``. A server name is free-form, so the header is built by the shared\nhardened helper (RFC 5987 ``filename*``, no traversal, no injection).",
+        "description": "Export a whole server as a streamed ZIP at rest (issue #274).\n\nGated by ``file:read``: an export is a bulk read of the whole working set, so\nit reuses the file-read permission (and the per-resource grant) rather than a\ndedicated code -- the same permission the directory download uses. At rest only\n(Section 6.9): a running server is 409 ``server_unsettled`` (the authoritative\ncopy is only well-defined at rest). The zip carries the working set plus an\n``export_metadata.json`` descriptor. Recorded under ``server:export``.\n\nThe zip is built incrementally, so it carries no ``Content-Length`` and a\nbrowser cannot cap it up front; a multi-GB export is therefore fetched as a\nplain navigation to a URL carrying a short-lived ``?grant=`` minted by\n``POST .../export/download-grant`` instead of being buffered into a Blob to\nattach a Bearer header (issue #2352). Redeeming a grant also sets an httpOnly\ndownload cookie, which authenticates the browser's retry of an interrupted\ntransfer once the grant's own window has closed (issue #2373). Every\ncredential runs the same ``file:read`` gate, and the response is identical.\n\nThe response names itself ``{server name}.zip`` via ``Content-Disposition``\n(issue #2357), so a client that navigates the URL without supplying a filename\n-- a pasted grant link, a CLI fetch -- does not save the last path segment,\n``export``. A server name is free-form, so the header is built by the shared\nhardened helper (RFC 5987 ``filename*``, no traversal, no injection).\n\n**Probe** (issue #2383): a ``HEAD`` answers with the ``GET``'s status and\nheaders and no body -- notably *no* ``Content-Length``, since the ``GET``\ndeclares none either. It is the same endpoint behind the same gate; only the\nzip stream and the audit record are skipped.",
         "operationId": "export_server_api_communities__community_id__servers__server_id__export_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "grant",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Grant"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Export Server"
+      },
+      "head": {
+        "description": "Export a whole server as a streamed ZIP at rest (issue #274).\n\nGated by ``file:read``: an export is a bulk read of the whole working set, so\nit reuses the file-read permission (and the per-resource grant) rather than a\ndedicated code -- the same permission the directory download uses. At rest only\n(Section 6.9): a running server is 409 ``server_unsettled`` (the authoritative\ncopy is only well-defined at rest). The zip carries the working set plus an\n``export_metadata.json`` descriptor. Recorded under ``server:export``.\n\nThe zip is built incrementally, so it carries no ``Content-Length`` and a\nbrowser cannot cap it up front; a multi-GB export is therefore fetched as a\nplain navigation to a URL carrying a short-lived ``?grant=`` minted by\n``POST .../export/download-grant`` instead of being buffered into a Blob to\nattach a Bearer header (issue #2352). Redeeming a grant also sets an httpOnly\ndownload cookie, which authenticates the browser's retry of an interrupted\ntransfer once the grant's own window has closed (issue #2373). Every\ncredential runs the same ``file:read`` gate, and the response is identical.\n\nThe response names itself ``{server name}.zip`` via ``Content-Disposition``\n(issue #2357), so a client that navigates the URL without supplying a filename\n-- a pasted grant link, a CLI fetch -- does not save the last path segment,\n``export``. A server name is free-form, so the header is built by the shared\nhardened helper (RFC 5987 ``filename*``, no traversal, no injection).\n\n**Probe** (issue #2383): a ``HEAD`` answers with the ``GET``'s status and\nheaders and no body -- notably *no* ``Content-Length``, since the ``GET``\ndeclares none either. It is the same endpoint behind the same gate; only the\nzip stream and the audit record are skipped.",
+        "operationId": "export_server_api_communities__community_id__servers__server_id__export_head",
         "parameters": [
           {
             "in": "path",
@@ -8139,8 +8285,86 @@
     },
     "/api/communities/{community_id}/servers/{server_id}/files/download": {
       "get": {
-        "description": "Download a file (bytes) or a directory (streamed zip) at rest (file:read).\n\nAt rest only (Section 6.9): a running server is 409 ``server_unsettled``. A\ndirectory streams as a zip built incrementally over the Storage read stream\n(bounded memory); a file streams its bytes with an attachment disposition.\n\nThe directory zip is built incrementally, so it carries no ``Content-Length``\nand a browser cannot cap it up front; a multi-GB ``world`` is therefore fetched\nas a plain navigation to a URL carrying a short-lived ``?grant=`` minted by\n``POST .../files/download-grant`` instead of being buffered into a Blob to\nattach a Bearer header (issue #2352). Redeeming a grant also sets an httpOnly\ndownload cookie, which authenticates the browser's retry of an interrupted\ntransfer once the grant's own window has closed (issue #2373). Every\ncredential runs the same ``file:read`` gate, and the response is identical.",
+        "description": "Download a file (bytes) or a directory (streamed zip) at rest (file:read).\n\nAt rest only (Section 6.9): a running server is 409 ``server_unsettled``. A\ndirectory streams as a zip built incrementally over the Storage read stream\n(bounded memory); a file streams its bytes with an attachment disposition.\n\nThe directory zip is built incrementally, so it carries no ``Content-Length``\nand a browser cannot cap it up front; a multi-GB ``world`` is therefore fetched\nas a plain navigation to a URL carrying a short-lived ``?grant=`` minted by\n``POST .../files/download-grant`` instead of being buffered into a Blob to\nattach a Bearer header (issue #2352). Redeeming a grant also sets an httpOnly\ndownload cookie, which authenticates the browser's retry of an interrupted\ntransfer once the grant's own window has closed (issue #2373). Every\ncredential runs the same ``file:read`` gate, and the response is identical.\n\n**Probe** (issue #2383): a ``HEAD`` answers with the ``GET``'s status and\nheaders and no body \u2014 a single file's ``Content-Length`` when it is known, and\nnone at all for the incrementally built directory zip, exactly as the ``GET``\ndeclares them. It is the same endpoint behind the same gate; only the bytes\nand the audit record are skipped.",
         "operationId": "download_file_api_communities__community_id__servers__server_id__files_download_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "path",
+            "required": false,
+            "schema": {
+              "default": ".",
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "grant",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Grant"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Download File"
+      },
+      "head": {
+        "description": "Download a file (bytes) or a directory (streamed zip) at rest (file:read).\n\nAt rest only (Section 6.9): a running server is 409 ``server_unsettled``. A\ndirectory streams as a zip built incrementally over the Storage read stream\n(bounded memory); a file streams its bytes with an attachment disposition.\n\nThe directory zip is built incrementally, so it carries no ``Content-Length``\nand a browser cannot cap it up front; a multi-GB ``world`` is therefore fetched\nas a plain navigation to a URL carrying a short-lived ``?grant=`` minted by\n``POST .../files/download-grant`` instead of being buffered into a Blob to\nattach a Bearer header (issue #2352). Redeeming a grant also sets an httpOnly\ndownload cookie, which authenticates the browser's retry of an interrupted\ntransfer once the grant's own window has closed (issue #2373). Every\ncredential runs the same ``file:read`` gate, and the response is identical.\n\n**Probe** (issue #2383): a ``HEAD`` answers with the ``GET``'s status and\nheaders and no body \u2014 a single file's ``Content-Length`` when it is known, and\nnone at all for the incrementally built directory zip, exactly as the ``GET``\ndeclares them. It is the same endpoint behind the same gate; only the bytes\nand the audit record are skipped.",
+        "operationId": "download_file_api_communities__community_id__servers__server_id__files_download_head",
         "parameters": [
           {
             "in": "path",

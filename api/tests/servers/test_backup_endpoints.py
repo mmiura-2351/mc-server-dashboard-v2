@@ -1741,6 +1741,143 @@ def test_backup_download_declares_no_store_under_every_credential() -> None:
         assert resp.headers["cache-control"] == "no-store"
 
 
+# --- the HEAD probe (issue #2383) ------------------------------------------
+#
+# A resumable-download client asks HEAD first, to learn the size and whether
+# Accept-Ranges is offered, before deciding to issue a ranged GET. Per route and
+# per credential, like the Cache-Control section above: the gate is what a future
+# auth change could silently drop a route from, and it is shared by all three
+# transports.
+
+# The headers a probe exists to learn, all of which the GET declares.
+_PROBE_HEADERS = (
+    "content-type",
+    "content-length",
+    "content-disposition",
+    "cache-control",
+    "accept-ranges",
+    "etag",
+)
+
+
+def test_backup_head_answers_the_gets_headers_under_every_credential() -> None:
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeDownload(b"archive-bytes"))
+    client = next(_client(app))
+    url = _url(community, server, f"/{backup}/download")
+    cookie = _cookie_header(community, server, backup)
+    # Last, because redeeming a grant mints the cookie into the client's jar.
+    grant_url = _grant_url(community, server, backup, subject=_user)
+
+    probes = [
+        client.head(url, headers=_bearer()),
+        client.head(url, headers=cookie),
+        client.head(grant_url),
+    ]
+    served = client.get(url, headers=_bearer())
+
+    for resp in probes:
+        assert resp.status_code == served.status_code == 200
+        # A HEAD carries the GET's headers and none of its bytes.
+        assert resp.content == b""
+        for name in _PROBE_HEADERS:
+            assert resp.headers[name] == served.headers[name], name
+
+
+def test_backup_head_neither_opens_the_archive_nor_records_a_download() -> None:
+    # The load-bearing half of the probe (issue #2383): returning the right
+    # headers is easy, doing it without the work is the point. Opening the stream
+    # is what makes the store locate the archive — and, on the filesystem
+    # backend, hold a descriptor to it — for a caller that asked for no bytes.
+    #
+    # A probe is not a download either, so it records nothing: an audited HEAD
+    # would inflate the backup:download count.
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    download = _FakeDownload(b"archive-bytes")
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, download=download, recorder=recorder)
+    client = next(_client(app))
+
+    resp = client.head(
+        _url(community, server, f"/{backup}/download"), headers=_bearer()
+    )
+
+    assert resp.status_code == 200
+    # ``ranges`` is appended to by archive_stream, so an empty list is the stream
+    # never having been opened.
+    assert download.ranges == []
+    assert recorder.events == []
+
+
+def test_backup_head_ignores_range_and_reports_the_whole_archive() -> None:
+    # RFC 9110 Section 14.2: a server MUST ignore Range on a method for which
+    # range handling is not defined, and GET is the only such method. So a probe
+    # that carries a Range still learns the size of the whole archive — including
+    # a range the GET would answer 416 for.
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeDownload(b"archive-bytes"))
+    client = next(_client(app))
+    url = _url(community, server, f"/{backup}/download")
+
+    partial = client.head(url, headers={**_bearer(), "Range": "bytes=0-3"})
+    unsatisfiable = client.head(url, headers={**_bearer(), "Range": "bytes=9999-"})
+
+    for resp in (partial, unsatisfiable):
+        assert resp.status_code == 200
+        assert "content-range" not in resp.headers
+        assert int(resp.headers["content-length"]) == len(b"archive-bytes")
+
+
+def _credential(
+    kind: str, community: uuid.UUID, server: uuid.UUID, backup: uuid.UUID
+) -> tuple[str, dict[str, str]]:
+    """The download URL and headers for one of the three credential transports."""
+
+    url = _url(community, server, f"/{backup}/download")
+    if kind == "bearer":
+        return url, _bearer()
+    if kind == "cookie":
+        return url, _cookie_header(community, server, backup)
+    return _grant_url(community, server, backup, subject=_user), {}
+
+
+@pytest.mark.parametrize("kind", ["bearer", "cookie", "grant"])
+@pytest.mark.parametrize(
+    ("member", "allow", "error", "expected"),
+    [
+        (True, True, None, 200),
+        (False, True, None, 404),
+        (True, False, None, 403),
+        (True, True, BackupNotFoundError("x"), 404),
+        (True, True, BackupStorageUnavailableError("x"), 503),
+    ],
+)
+def test_backup_head_is_answered_exactly_like_the_get(
+    kind: str, member: bool, allow: bool, error: Exception | None, expected: int
+) -> None:
+    # A HEAD that skipped or weakened a check would be a security defect, not a
+    # convenience gap. Every credential must be refused on the probe exactly
+    # where it is refused on the download.
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    app = _app(member=member, allow=allow, download=_FakeDownload(error=error))
+    url, headers = _credential(kind, community, server, backup)
+
+    probed = next(_client(app)).head(url, headers=headers)
+    served = next(_client(app)).get(url, headers=headers)
+
+    assert probed.status_code == served.status_code == expected
+
+
+def test_backup_head_without_credentials_is_401() -> None:
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeDownload())
+    client = next(_client(app))
+
+    resp = client.head(_url(community, server, f"/{backup}/download"))
+
+    assert resp.status_code == 401
+
+
 # --- upload (issue #281) ---------------------------------------------------
 
 
