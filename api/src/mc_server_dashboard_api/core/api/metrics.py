@@ -2,9 +2,14 @@
 
 Refreshes the scrape-time gauges (servers by observed state, workers by state)
 from the database and the in-memory worker registry, then renders the process-wide
-metric registry in the Prometheus text exposition format. Unauthenticated but
-safe-by-content (aggregates only). Operators should firewall it on an
-internet-facing deployment (CONFIGURATION.md / SECURITY.md).
+metric registry in the Prometheus text exposition format.
+
+Unauthenticated, and mounted **only** on the observability app
+(:mod:`mc_server_dashboard_api.observability`), which serves it from its own
+listener — never on the public HTTP port, which the bundled Cloudflare tunnel
+publishes wholesale (issue #2565). The content is aggregates only, but it is
+operational signal (server/worker counts, per-route request and auth-outcome
+counters, process start times) that an external party has no need to see.
 """
 
 from __future__ import annotations

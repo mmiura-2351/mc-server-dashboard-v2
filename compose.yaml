@@ -251,6 +251,13 @@ services:
       # excludes the relay game/tunnel ports from this range automatically.
       MCD_API_PORTS__RANGE_START: "${MCD_API_PORTS__RANGE_START:-25565}"
       MCD_API_PORTS__RANGE_END: "${MCD_API_PORTS__RANGE_END:-25664}"
+      # Prometheus exposition on its own listener (issue #2565), off by default.
+      # It is NOT served on 8000: cloudflared forwards the whole public hostname
+      # to api:8000, so a route there is a route on the internet. Set
+      # MCD_API_METRICS__ENABLED=true in .env to bind it, then scrape it from a
+      # service on this compose network at http://api:9090/metrics -- the port is
+      # deliberately absent from `ports:` below, which is what keeps it private.
+      MCD_API_METRICS__ENABLED: "${MCD_API_METRICS__ENABLED:-false}"
     volumes:
       - api-storage:/data/storage
     ports:
@@ -259,6 +266,9 @@ services:
       # host: the in-compose worker dials api:50051 over the internal network,
       # and the plaintext control listener must never be reachable off-host.
       # A cross-host worker requires control-plane TLS (see docs/dev/DEPLOYMENT.md).
+      # The metrics listener (9090, when MCD_API_METRICS__ENABLED=true) is NOT
+      # published either: it is scraped from inside this network, and publishing
+      # it would undo the fix for issue #2565.
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/healthz')"]
       interval: 5s

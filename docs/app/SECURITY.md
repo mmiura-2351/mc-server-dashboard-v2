@@ -269,26 +269,72 @@ thereby evade or poison the per-IP brute-force counter.
 
 ## 5. Observability endpoints
 
-The API exposes three unauthenticated operational endpoints for orchestrators
-and monitoring (issue #282). Like the rest of the HTTP API they are namespaced
-under `/api` (issue #498) — the probes share the `/api` prefix rather than
-carving a root-level exception out of the SPA fallback (WEBUI_SPEC 7.7):
+The API exposes two unauthenticated probes on its HTTP port, for orchestrators
+(issue #282). Like the rest of the HTTP API they are namespaced under `/api`
+(issue #498) — the probes share the `/api` prefix rather than carving a
+root-level exception out of the SPA fallback (WEBUI_SPEC 7.7):
 
 - `GET /api/healthz` — liveness; reports the database-connectivity readiness inline.
 - `GET /api/readyz` — readiness; 200 with per-component booleans when every critical
   component is ready, 503 with the same shape otherwise.
-- `GET /api/metrics` — Prometheus exposition of aggregate metrics.
 
-These endpoints are **deliberately unauthenticated** so a probe or scraper need
-no credential, and they are **safe-by-content**: `/api/healthz` and `/api/readyz`
-return only component booleans, and `/api/metrics` returns only aggregates (counts,
-latencies, gauges) — never per-user or per-server identifying data. `/api/metrics`
-should nonetheless be **firewalled on an internet-facing deployment**: the
-aggregate counts (server/worker totals, request rates) are operational signal an
-external party has no need to see. The bundled Compose deployment publishes only
-the API port and does not expose `/api/metrics` to any separate listener, so no
-additional change is needed there; an operator fronting the API with a reverse
-proxy should block `/api/metrics` (and may also restrict `/api/readyz`) at the proxy.
+They are **deliberately unauthenticated** so a probe needs no credential, and
+**safe-by-content**: both return only component booleans — never per-user or
+per-server identifying data.
+
+The Prometheus exposition is **not** one of them. It is served on a separate
+listener, described below.
+
+### The port-publishing argument does not cover the HTTP port
+
+Anything mounted on the API's HTTP port is on the internet in this repo's
+recommended topology. The `cloudflared` service (`compose.yaml`, issue #1090)
+forwards the whole public hostname to `api:8000`, path-scoped by nothing, so the
+loopback publish (`127.0.0.1:${API_HTTP_PORT}:8000`) constrains only *host*
+reachability — not the tunnel, which reaches the API over the compose-internal
+network. Any statement of the form "Compose publishes only the API port, so X is
+not exposed" is therefore false for X on that port. (This document made exactly
+that claim about `/api/metrics` from #285 until #2565; the tunnel landed after it
+and invalidated the premise. The claim was confirmed false by probe on both the
+dev and production deployments, which returned the full exposition to an
+unauthenticated request.)
+
+`/api/healthz` and `/api/readyz` are reachable that way today, and are accepted
+as such on their content. Tightening `/api/readyz` (and the OpenAPI schema/docs
+routes, which are exposed the same way) is tracked separately in issue #2568.
+
+### The Prometheus exposition (`metrics.*`)
+
+`GET /metrics` is served on its **own listener**, off by default
+(`metrics.enabled`, CONFIGURATION.md Section 5.10). It is not mounted on the
+HTTP API app at all, so the tunnel cannot reach it by construction: `cloudflared`
+targets `:8000`, and the exposition is not on `:8000`. This is the posture the
+relay already takes for its own metrics endpoint (RELAY.md Section 17).
+
+The content is aggregates only — no names, ids, emails or IPs, and the label
+sets are structurally bounded (route *templates*, a fixed observed-state tuple,
+the `WorkerStatus` enum). But it is operational signal an external party has no
+need to see: server and worker counts, per-route request volume **including
+auth outcomes** (login success/failure rates, a live oracle for anyone probing
+the FR-AUTH-4 brute-force behaviour), scanning activity as `<unmatched>` 404s,
+process start timestamps, control-plane liveness, and latency histograms.
+
+**The bind address is not the control, and the operator obligation is real.**
+The listener binds `0.0.0.0` by default, because the API's canonical deployment
+is a container where loopback would put the endpoint out of reach of any
+scraper. What keeps it private is the deployment:
+
+- **Compose (tunnel or same-host reverse proxy).** The metrics port is not in
+  the `api` service's `ports:` list, so it exists only on the compose network;
+  scrape it from a service on that network (`http://api:9090/metrics`). Do not
+  publish it, and do not add a Cloudflare public hostname for it.
+- **Any topology that reaches the API over the network** — `API_HTTP_BIND_IP=0.0.0.0`
+  behind an off-host reverse proxy, or a bare-metal install (DEPLOYMENT.md
+  Section 8). Enabling the listener adds a **second port** on a
+  network-reachable interface. Set `metrics.host` to a private address (or
+  `127.0.0.1` when the scraper is same-host), or firewall the port. A reverse
+  proxy in front of the HTTP port does not cover it: it is a different port and
+  the proxy never sees it.
 
 ---
 

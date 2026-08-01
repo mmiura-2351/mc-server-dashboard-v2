@@ -369,6 +369,39 @@ clients via `GET /api/meta` so the create wizard can pre-fill and cap the value.
 | `log.level` | `info` | | Log verbosity. |
 | `log.format` | `json` | | Structured-log format; `json` keeps logs machine-parseable (REQUIREMENTS.md NFR-OBS-1). |
 
+The Prometheus exposition is served on a **separate HTTP listener**, never on
+`server.http_port` (issue #2565): the bundled `cloudflared` service forwards the
+whole public hostname to `api:8000` and path-scopes nothing, so a route on the
+API's HTTP port is a route on the internet. Off by default, like the relay's
+metrics endpoint (RELAY.md Section 17) — a deployment that does not scrape binds
+no second port at all. When enabled, the listener serves `GET /metrics` and
+nothing else.
+
+| Key | Default | Secret | Meaning |
+|---|---|---|---|
+| `metrics.enabled` | `false` | | Whether to bind the Prometheus exposition listener. `false` binds nothing and the exposition is unavailable in this process. |
+| `metrics.host` | `0.0.0.0` | | Bind address for the exposition listener. See the bind-address note below before changing it — and before assuming the default is safe on your topology. |
+| `metrics.port` | `9090` | | Port for the exposition listener. Must be 0..65535; `0` binds an OS-assigned ephemeral port. Matches the relay's `metrics.listen` port so one scrape config can address both. |
+
+**The bind address is not the control.** `metrics.host` defaults to `0.0.0.0`
+rather than the relay's `127.0.0.1` because the API's canonical deployment is a
+container: loopback there means "reachable only from inside the API container",
+so no sibling service on the compose network — which is where a scraper runs —
+could ever scrape it. What keeps the endpoint private is that `compose.yaml`
+never publishes the port and that `cloudflared` targets `:8000` only. This
+mirrors `server.host`, which binds `0.0.0.0` in the container for the same
+reason. The relay differs because it *is* an edge process with published host
+ports, so loopback genuinely is its boundary.
+
+**The obligation this puts on the operator.** A deployment that reaches the API
+over the network rather than through the tunnel or a same-host proxy — one
+running `API_HTTP_BIND_IP=0.0.0.0` behind an off-host reverse proxy, or a bare
+metal install (`docs/dev/DEPLOYMENT.md` Section 8) — gains a **second port** on
+a network-reachable interface the moment it sets `metrics.enabled=true`. A
+reverse proxy in front of the HTTP port does not cover it. Set `metrics.host` to
+`127.0.0.1` (same-host scraper) or to a private interface, or firewall the port
+(SECURITY.md Section 5).
+
 ### 5.11 Web UI serving
 
 The API can serve the built browser UI (`webui/dist`) from its own origin with an
