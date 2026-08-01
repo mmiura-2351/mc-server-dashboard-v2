@@ -1652,6 +1652,37 @@ def test_cookie_omits_secure_when_configured_for_plain_http() -> None:
     assert "HttpOnly" in cookie
 
 
+# --- Cache-Control on the served archive (issue #2491) ---------------------
+
+
+def test_backup_download_declares_no_store_under_every_credential() -> None:
+    # The header belongs to the response being a per-user body, not to the
+    # credential that fetched it, and a partial response carries the same bytes
+    # as the whole one. A cookie-authenticated request in particular carries no
+    # Authorization, so RFC 9111 Section 3.5's default protection from shared
+    # caches does not cover it.
+    community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeDownload())
+    client = next(_client(app))
+    url = _url(community, server, f"/{backup}/download")
+    cookie = _cookie_header(community, server, backup)
+    # Last, because redeeming a grant mints the cookie into the client's jar.
+    grant_url = _grant_url(community, server, backup, subject=_user)
+
+    responses = [
+        client.get(url, headers=_bearer()),
+        client.get(url, headers={**_bearer(), "Range": "bytes=0-3"}),
+        client.get(url, headers=cookie),
+        client.get(url, headers={**cookie, "Range": "bytes=0-3"}),
+        client.get(grant_url),
+        client.get(grant_url, headers={"Range": "bytes=0-3"}),
+    ]
+
+    assert [r.status_code for r in responses] == [200, 206, 200, 206, 200, 206]
+    for resp in responses:
+        assert resp.headers["cache-control"] == "no-store"
+
+
 # --- upload (issue #281) ---------------------------------------------------
 
 

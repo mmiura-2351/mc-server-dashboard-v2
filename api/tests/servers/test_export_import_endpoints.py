@@ -664,6 +664,31 @@ def test_an_unsettled_export_mints_no_cookie() -> None:
     )
 
 
+# --- Cache-Control on the served export (issue #2491) ----------------------
+
+
+def test_export_download_declares_no_store_under_every_credential() -> None:
+    # The header belongs to the response being a per-user body, not to the
+    # credential that fetched it. A cookie-authenticated request in particular
+    # carries no Authorization, so RFC 9111 Section 3.5's default protection from
+    # shared caches does not cover it.
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, export=_FakeExport(chunks=[b"zip-bytes"]))
+    client = next(_client(app))
+
+    with_bearer = client.get(_export_url(community, server), headers=_bearer())
+    with_cookie = client.get(
+        _export_url(community, server),
+        headers=_export_cookie_header(community, server),
+    )
+    # Last, because redeeming a grant mints the cookie into the client's jar.
+    with_grant = client.get(_export_grant_url(community, server, subject=_user))
+
+    for resp in (with_bearer, with_cookie, with_grant):
+        assert resp.status_code == 200
+        assert resp.headers["cache-control"] == "no-store"
+
+
 # --- import ----------------------------------------------------------------
 
 
