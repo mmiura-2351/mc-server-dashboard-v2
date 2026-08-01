@@ -1692,6 +1692,15 @@ class FakeResourcePackStore(ResourcePackStore):
         return data
 
 
+# Store time reported for a blob seeded straight into ``blobs`` without a stamp.
+# Fixed and far future so the GC's safety window spares it under *any* clock: a
+# test that seeds a blob and forgets the stamp then reddens on the delete it was
+# not asserting, instead of passing by accident. Reading the host clock here made
+# that fail-loud property depend on the host clock running later than the test's
+# fixed ``now`` minus the window — an unstated environmental assumption (#2529).
+_UNSTAMPED_STORE_TIME = dt.datetime(9999, 1, 1, tzinfo=dt.UTC)
+
+
 class FakePluginCacheStore(PluginCacheStore):
     """In-memory content-addressed plugin cache for use-case tests (issue #1306).
 
@@ -1710,16 +1719,22 @@ class FakePluginCacheStore(PluginCacheStore):
         self.puts: list[str] = []
         self.deleted: list[str] = []
         self.opens: list[str] = []
-        # Store time per content key, as ``list_entries`` reports it. A blob
-        # seeded straight into ``blobs`` has none and is reported as stored just
-        # now; the GC tests set it to age a blob past the safety window.
+        # Store time per content key, as ``list_entries`` reports it. ``put``
+        # stamps it, like the adapter's upload does; the GC tests set it to age
+        # a blob past the safety window. A blob seeded straight into ``blobs``
+        # has none — see :data:`_UNSTAMPED_STORE_TIME` (issue #2529).
         self.modified_at: dict[str, dt.datetime] = {}
 
     async def put(self, sha256: str, stream: AsyncIterator[bytes]) -> None:
         self.puts.append(sha256)
         data = b"".join([chunk async for chunk in stream])
-        # Dedup-on-ingest: identical content addresses the same key.
+        # Dedup-on-ingest: identical content addresses the same key. The adapter
+        # head-checks that key and skips the upload when it is already there, so
+        # a re-put leaves the object's ``last_modified`` alone — stamp the first
+        # put only (issue #2529). The plugin-cache GC re-checks live references
+        # before deleting precisely because of that.
         self.blobs.setdefault(sha256, data)
+        self.modified_at.setdefault(sha256, dt.datetime.now(dt.UTC))
 
     def open(self, sha256: str) -> AsyncIterator[bytes]:
         self.opens.append(sha256)
@@ -1737,12 +1752,11 @@ class FakePluginCacheStore(PluginCacheStore):
         return _gen()
 
     async def list_entries(self) -> list[CacheEntry]:
-        now = dt.datetime.now(dt.UTC)
         return [
             CacheEntry(
                 sha256=sha,
                 size_bytes=len(data),
-                modified_at=self.modified_at.get(sha, now),
+                modified_at=self.modified_at.get(sha, _UNSTAMPED_STORE_TIME),
             )
             for sha, data in self.blobs.items()
         ]
