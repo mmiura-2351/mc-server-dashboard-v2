@@ -414,9 +414,12 @@ class FakeServerRepository(ServerRepository):
 
     @staticmethod
     def _copy(server: Server) -> Server:
-        # Detach the row from the caller's entity (issue #2505). Every writer
-        # stores this and every reader returns it (issue #2516) -- nothing
-        # crosses the fake boundary in either direction uncopied. Aliasing let a
+        # Detach the row from the caller's entity (issue #2505). Every
+        # whole-row writer stores this and every reader returns it (issue
+        # #2516) -- no entity crosses the fake boundary in either direction
+        # uncopied. (``update``/``update_lifecycle`` write a narrow column set
+        # rather than a row, so they copy their one mutable column themselves
+        # instead of going through here; issue #2520.) Aliasing let a
         # use case's post-transaction write-back onto its own entity
         # retroactively rewrite what a test believed was persisted -- the
         # direction that makes a persisted-state assert look like a pin when the
@@ -427,14 +430,14 @@ class FakeServerRepository(ServerRepository):
         # through a writer, so a reader that hands back the row (or shares its
         # jsonb blobs) lets the edit land with no write at all.
         #
-        # For ``update``/``update_lifecycle`` this mirrors the adapter exactly:
-        # the UPDATE executes there and then, so nothing the caller does to its
-        # object afterwards can reach the row. ``add`` snapshots EARLIER than the
-        # adapter, which stages a ServerModel holding the caller's ``config`` by
-        # reference and serializes it only at flush (SqlAlchemyServerRepository.add).
-        # That divergence is deliberate and harmless: it is strictly MORE
-        # isolating, so it can produce an extra red but can never absorb a mutant,
-        # which is the failure mode #2505 is about.
+        # The detachment TIMING matches the adapter exactly for every writer but
+        # ``add``: the statement executes there and then, so nothing the caller
+        # does to its object afterwards can reach the row. ``add`` snapshots
+        # EARLIER than the adapter, which stages a ServerModel holding the
+        # caller's ``config`` by reference and serializes it only at flush
+        # (SqlAlchemyServerRepository.add). That divergence is deliberate and
+        # harmless: it is strictly MORE isolating, so it can produce an extra red
+        # but can never absorb a mutant, which is the failure mode #2505 is about.
         #
         # Copy depth: a new entity, plus the two jsonb column values (``config``,
         # ``backup_retention``) copied all the way down. Those are the entity's only
@@ -499,7 +502,26 @@ class FakeServerRepository(ServerRepository):
         return [s.id for s in self.by_id.values() if s.game_port is None]
 
     async def update(self, server: Server) -> None:
-        self.by_id[server.id] = self._copy(server)
+        # Mirror the real adapter's narrow column set (issue #2520): the UPDATE
+        # names ``name``, ``config``, both ports, ``slug`` and ``updated_at``,
+        # and leaves every other column exactly as the row holds it. Storing the
+        # entity wholesale let a caller's STALE ``observed_state`` /
+        # ``observed_at`` -- every lifecycle entity carries one, having been
+        # loaded before the edit -- clobber a fresher row, which is the very
+        # thing the #216 freshest-wins guard exists to prevent. A missing id
+        # matches no row: a no-op, not an insert.
+        current = self.by_id.get(server.id)
+        if current is None:
+            return
+        current.name = server.name
+        # The jsonb blob is copied all the way down for the reason ``_copy``
+        # copies it (issue #2505): the UPDATE serializes it there and then, so
+        # nothing the caller does to its dict afterwards can reach the row.
+        current.config = deepcopy(server.config)
+        current.game_port = server.game_port
+        current.bedrock_port = server.bedrock_port
+        current.slug = server.slug
+        current.updated_at = server.updated_at
 
     async def update_backup_retention(
         self, server_id: ServerId, retention: dict[str, Any] | None
@@ -528,7 +550,15 @@ class FakeServerRepository(ServerRepository):
             return False
         if require_unassigned and current.assigned_worker_id is not None:
             return False
-        self.by_id[server.id] = self._copy(server)
+        # Mirror the real adapter's narrow column set (issue #2520): the UPDATE
+        # names ``desired_state``, ``assigned_worker_id``, ``config`` and
+        # ``updated_at`` only. This is where the wholesale write bit hardest --
+        # the convergence paths call it holding an entity whose ``observed_*``
+        # they loaded a transaction ago.
+        current.desired_state = server.desired_state
+        current.assigned_worker_id = server.assigned_worker_id
+        current.config = deepcopy(server.config)
+        current.updated_at = server.updated_at
         return True
 
     async def record_observed_state(
