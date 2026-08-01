@@ -10,12 +10,14 @@ from collections.abc import Iterator
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.routing import Route
 
 from mc_server_dashboard_api.dependencies import get_login, get_refresh_session
 from mc_server_dashboard_api.identity.domain.errors import (
     InvalidCredentialsError,
     InvalidRefreshTokenError,
 )
+from mc_server_dashboard_api.middleware import _NO_STORE_PATHS
 
 
 class _RejectLogin:
@@ -108,6 +110,26 @@ def test_cache_control_no_store_on_users_me_sessions(client: TestClient) -> None
 def test_cache_control_absent_on_generic_endpoint(client: TestClient) -> None:
     resp = client.get("/api/healthz")
     assert "cache-control" not in resp.headers
+
+
+@pytest.mark.parametrize("path", sorted(_NO_STORE_PATHS))
+def test_no_store_path_names_a_live_route(shared_app: FastAPI, path: str) -> None:
+    """Every entry in the set is a path the app still routes (issue #2563).
+
+    The middleware compares ``request.url.path`` against the frozenset, so it
+    stamps the header on a 404 exactly as readily as on the endpoint the entry
+    was written for. That makes the five per-path tests above blind to the
+    failure they look like they cover: rename ``/api/auth/login`` and its test
+    stays green on the 404 while the real endpoint silently loses ``no-store``.
+    Checking the entry against the route table is what reddens on a rename, a
+    new path prefix, or a route that moved to a different path.
+    """
+
+    declared = {route.path for route in shared_app.routes if isinstance(route, Route)}
+    assert path in declared, (
+        f"{path} is in _NO_STORE_PATHS but no route declares it -- a renamed or "
+        "re-prefixed endpoint is no longer getting Cache-Control: no-store"
+    )
 
 
 # -- (c) HSTS appears only when forwarded proto is HTTPS --
