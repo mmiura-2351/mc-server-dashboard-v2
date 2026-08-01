@@ -778,6 +778,29 @@ async def test_fake_abort_multipart_upload_is_idempotent() -> None:
     assert "upload-1" not in store.multipart_uploads
 
 
+async def test_fake_list_objects_reports_a_store_time_no_clock_can_age() -> None:
+    """An object seeded without an mtime lists as stored beyond any clock (#2542).
+
+    Seeding ``objects`` directly — every crash-leftover test's idiom — leaves no
+    ``mtimes`` entry, and the two GCs that read this listing (the JAR pool's,
+    #293, and the plugin cache's, #1332) spare an entry inside their safety
+    window. Reporting the host clock there made "an unstamped object is spared"
+    hold only while the host clock ran later than the caller's ``now`` minus the
+    window: an environmental assumption underneath a safety property (#2529).
+    The store time is now a fixed sentinel — stable across calls, so it is not
+    the moment ``list_objects`` ran, and past any clock a test would use.
+    """
+    store = FakeS3Store()
+    store.objects["jars/seeded.jar"] = b"jar-bytes"
+
+    async with fake_s3_factory(store)() as client:
+        (first,) = await client.list_objects("jars/")
+        (second,) = await client.list_objects("jars/")
+
+    assert first.last_modified == second.last_modified
+    assert first.last_modified > dt.datetime(3000, 1, 1, tzinfo=dt.UTC)
+
+
 async def test_check_reachable_raises_on_unreachable_backend() -> None:
     """Boot-time reachability probe (issue #945): an unreachable object store
     must surface a RuntimeError naming the endpoint and bucket, so a
