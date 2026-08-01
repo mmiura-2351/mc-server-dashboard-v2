@@ -146,14 +146,11 @@ API_URL="http://127.0.0.1:${API_PORT}"
 echo "==> waiting for the API to be ready ($API_URL)"
 ready=
 for _ in $(seq 1 90); do
-  # Captured and then matched, not piped into a quiet grep: `grep -q` exits at
-  # its first match, so `curl` can still be mid-write and take SIGPIPE, and
-  # `pipefail` turns that 141 into the pipeline's status -- a ready API read as
-  # not ready, burning two of the 180 seconds this wait has (#2465). The `||
-  # health=""` restores what the pipeline gave for free: before the API is up
-  # `curl -fsS` exits non-zero, which under `set -e` would now end the script
-  # instead of polling again. An empty body matches nothing, so the loop
-  # behaves exactly as it did.
+  # Captured, then matched. Piping into `grep -q` lets it exit at the match with
+  # `curl` still writing, and pipefail reads the resulting SIGPIPE as "not
+  # ready" -- mechanism in scripts/test_shell_pipefail.sh (#2465). The
+  # `|| health=""` keeps a pre-ready `curl -fsS` failure non-fatal under
+  # `set -e`, which the pipeline did for free; an empty body matches nothing.
   health="$(curl -fsS "$API_URL/api/healthz" 2>/dev/null)" || health=""
   if grep -q '"ok":true' <<< "$health"; then
     ready=1
@@ -174,12 +171,10 @@ echo "==> waiting for the relay to register (it learns base_domain from the API)
 # registration unless we wait for this exact line.
 relay_ready=
 for _ in $(seq 1 30); do
-  # This wait is polled, not one-shot, so a lost SIGPIPE race costs a second
-  # rather than the run -- but it is the most exposed of the sites #2465 lists:
-  # the registration line lands early and up to 200 lines follow it, so `grep
-  # -q` exits with most of the log still unwritten and `compose logs` takes the
-  # signal. Capturing first removes the writer; `|| relay_log=""` keeps a
-  # `compose logs` failure non-fatal under `set -e`, as the pipeline did.
+  # Polled, not one-shot, so a lost SIGPIPE race costs a second rather than the
+  # run -- but this is the most exposed of the sites #2465 lists: the
+  # registration line lands early and up to 200 lines follow it, so `grep -q`
+  # exits with most of the log still unwritten.
   relay_log="$("${COMPOSE[@]}" --env-file "$ENV_FILE" logs --tail=200 relay 2>/dev/null)" || relay_log=""
   if grep -q "relay registered with API" <<< "$relay_log"; then
     relay_ready=1

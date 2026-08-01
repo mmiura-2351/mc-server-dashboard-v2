@@ -1297,12 +1297,11 @@ ADVANCEEOF
 	rm -rf "$base"
 }
 
-# --- 14. No branch is decided by a pipeline the reader can leave early -------
-# Moved to scripts/test_shell_pipefail.sh (#2465). The same shape was found in
-# the git hooks tests and the e2e scripts, so the guard now scans every file in
-# the repo that turns pipefail on rather than the three Postgres ones named
-# here -- and a hit on .githooks/ has to be reported by something other than the
-# Postgres upgrade suite.
+# The "no branch is decided by a pipeline the reader can leave early" guard used
+# to be section 14 here. It is scripts/test_shell_pipefail.sh now (#2465): the
+# same shape turned up in the git hooks tests and the e2e scripts, so the guard
+# scans every file that runs under pipefail rather than the three Postgres ones
+# it named -- and a hit in .githooks/ should not be reported by this suite.
 
 # ---------------------------------------------------------------------------
 echo

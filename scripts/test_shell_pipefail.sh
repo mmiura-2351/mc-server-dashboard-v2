@@ -61,21 +61,86 @@ echo "=== pipefail pipeline-shape tests ==="
 # Hence awk over a line regex: `cont` carries "the previous line ended in a
 # pipe" so the two-line form is one state, and `quiet_grep` matches a grep whose
 # options contain a quiet flag however it is spelled.
+quiet_grep='grep([[:space:]]+-[^[:space:]]+)*[[:space:]]+(-[[:alpha:]]*q[[:alpha:]]*|--quiet|--silent)'
+
+# `set -o pipefail` as a COMMAND, not the word appearing in prose. Selecting on
+# the bare word would make coverage depend on comment wording: pg_cluster_lib.sh
+# would be scanned only because a comment in it happens to say "pipefail", and
+# rewording that comment would drop it out silently.
+pipefail_set='^[[:space:]]*set[[:space:]][^#]*pipefail'
+
+# Candidates: every shell script and workflow in the repo. Both workflow
+# extensions -- GitHub accepts .yaml as readily as .yml, and a guard that globs
+# one of them is a guard the next workflow can walk past.
+declare -a candidates=()
+for f in "$ROOT"/.githooks/* "$ROOT"/scripts/*.sh \
+	"$ROOT"/.github/workflows/*.yml "$ROOT"/.github/workflows/*.yaml; do
+	[ -f "$f" ] && candidates+=("$f")
+done
+
+# The scan set: candidates that run `set -o pipefail` themselves, then the
+# libraries those source, transitively. pg_cluster_lib.sh sets no shell options
+# of its own -- it runs under pipefail because pg_major_upgrade.sh and
+# deploy_preflight.sh source it, and being sourced is the reason it has to be
+# scanned. Workflows are in because GitHub's default `bash -e {0}` has no
+# pipefail, so a `run:` block is exposed exactly when it opts in.
+declare -A in_scan=()
+declare -a scan=()
+for f in "${candidates[@]}"; do
+	# grep reads the file directly: no pipe, so no writer to kill. This guard
+	# must not contain the shape it bans.
+	grep -qE "$pipefail_set" "$f" || continue
+	in_scan[$f]=1
+	scan+=("$f")
+done
+i=0
+while [ "$i" -lt "${#scan[@]}" ]; do
+	f="${scan[$i]}"
+	i=$((i + 1))
+	while IFS= read -r line; do
+		# `. "$script_dir/lib.sh"` -> lib.sh. The directory part is a variable
+		# that cannot be expanded statically, so the basename is what gets
+		# matched against the candidates. `read` from a here-string, not a
+		# pipe: it stops at the first line, which is exactly the early exit
+		# this file exists to ban.
+		line="${line%%#*}"
+		read -r _ path _ <<< "$line"
+		path="${path//\"/}"
+		path="${path//\'/}"
+		lib="${path##*/}"
+		for c in "${candidates[@]}"; do
+			[ "${c##*/}" = "$lib" ] || continue
+			[ -n "${in_scan[$c]:-}" ] && continue
+			in_scan[$c]=1
+			scan+=("$c")               # grows the worklist: sourcing is transitive
+		done
+	done < <(grep -E '^[[:space:]]*(\.|source)[[:space:]]' "$f" || true)
+done
+
+# --- 1. Every file that turns pipefail on is actually scanned ---------------
+# The all-clear below is only worth the paper it is printed on if the scan
+# covers what it claims to. Asserting "at least one file was scanned" would not:
+# this file always matches itself, so it would catch nothing short of total
+# breakage. What is asserted instead is the property that shrinks when coverage
+# does -- a pipefail script that the globs above do not reach.
+{
+	stray=""
+	while IFS= read -r f; do
+		[ -n "${in_scan[$f]:-}" ] || stray="$stray ${f#"$ROOT"/}"
+	done < <(grep -rlE "$pipefail_set" "$ROOT" \
+		--exclude-dir=.git --exclude-dir=node_modules --exclude-dir=.venv \
+		--exclude-dir=.claude --exclude-dir=dist --exclude-dir=.bin || true)
+	if [ -z "$stray" ]; then
+		ok "every file that runs 'set -o pipefail' is in the scan (${#scan[@]} files)"
+	else
+		fail_test "pipefail file(s) outside the scanned globs -- widen them:$stray"
+	fi
+}
+
+# --- 2. No branch is decided by a quiet grep reading from a pipe ------------
 {
 	offenders=""
-	scanned=0
-	quiet_grep='grep([[:space:]]+-[^[:space:]]+)*[[:space:]]+(-[[:alpha:]]*q[[:alpha:]]*|--quiet|--silent)'
-	# Every shell script and workflow in the repo, filtered to the ones that
-	# actually turn pipefail on -- without it a pipeline reports its LAST
-	# command's status and the early exit inverts nothing. Workflows are in
-	# because GitHub's default `bash -e {0}` has no pipefail, so a `run:` block
-	# is exposed exactly when it opts in, which e2e.yml does.
-	for f in "$ROOT"/.githooks/* "$ROOT"/scripts/*.sh "$ROOT"/.github/workflows/*.yml; do
-		[ -f "$f" ] || continue
-		# grep reads the file directly: no pipe, so no writer to kill. This
-		# guard must not contain the shape it bans.
-		grep -q 'pipefail' "$f" || continue
-		scanned=$((scanned + 1))
+	for f in "${scan[@]}"; do
 		while IFS= read -r line_no; do
 			offenders="$offenders ${f#"$ROOT"/}:${line_no}"
 		done < <(awk -v qg="$quiet_grep" '
@@ -86,12 +151,8 @@ echo "=== pipefail pipeline-shape tests ==="
 			}
 		' "$f" || true)
 	done
-	# A guard that silently scanned nothing is worse than no guard: it reports
-	# the all-clear that the acceptance criterion is read off.
-	if [ "$scanned" -eq 0 ]; then
-		fail_test "no pipefail file was scanned -- the guard found nothing to check"
-	elif [ -z "$offenders" ]; then
-		ok "no branch is decided by a quiet grep reading from a pipe ($scanned files)"
+	if [ -z "$offenders" ]; then
+		ok "no branch is decided by a quiet grep reading from a pipe"
 	else
 		fail_test "a quiet grep is fed from a pipe -- SIGPIPE under pipefail (#2447) at:$offenders"
 	fi

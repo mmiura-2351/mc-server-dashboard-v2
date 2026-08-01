@@ -111,13 +111,10 @@ jobs:
           # degraded (with ok=false), so assert the body reports ok=true.
           ready=
           for _ in $(seq 1 60); do
-            # Captured and then matched, not piped into a quiet grep: `grep -q`
-            # exits at its first match, so `curl` can still be mid-write and take
-            # SIGPIPE, and the `pipefail` set above turns that 141 into the
-            # pipeline's status -- a ready API read as not ready (#2465). The
-            # `|| health=""` restores what the pipeline gave for free: before the
-            # API is up `curl -fsS` exits non-zero, which under `set -e` would
-            # now end the step instead of polling again.
+            # Captured, then matched -- piping into `grep -q` lets the pipefail
+            # set above read a SIGPIPE'd curl as "not ready" (#2465, mechanism in
+            # scripts/test_shell_pipefail.sh). `|| health=""` keeps a pre-ready
+            # curl failure non-fatal under `set -e`, as the pipeline did.
             health="$(curl -fsS http://127.0.0.1:8000/api/healthz 2>/dev/null)" || health=""
             if grep -q '"ok":true' <<< "$health"; then
               ready=1
