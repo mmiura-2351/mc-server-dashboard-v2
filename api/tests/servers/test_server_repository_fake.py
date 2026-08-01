@@ -1,4 +1,5 @@
-"""Fidelity of :class:`FakeServerRepository` against the adapter (#2505, #2516).
+"""Fidelity of :class:`FakeServerRepository` against the adapter (#2505, #2516,
+#2520).
 
 Every writer on the real ``SqlAlchemyServerRepository`` turns an entity into an
 INSERT/UPDATE, and once that statement has been serialized no in-memory mutation
@@ -11,10 +12,19 @@ test believes was persisted, so a persisted-state assert can pass while the
 adapter would have stored something else.
 
 ``update`` / ``update_lifecycle`` execute their UPDATE immediately, so the fake
-matches them exactly. ``add`` is the one writer where the fake snapshots
-*earlier* than the adapter, which stages the model and serializes at flush; that
-is the harmless direction (more isolating, so an extra red at worst) and is
-asserted as such below.
+matches their detachment timing exactly. ``add`` is the one writer where the fake
+snapshots *earlier* than the adapter, which stages the model and serializes at
+flush; that is the harmless direction (more isolating, so an extra red at worst)
+and is asserted as such below.
+
+Detachment is only half of the fidelity, though: an UPDATE also names a COLUMN
+SET, and everything outside it keeps whatever the row already holds (#2520).
+A fake that stores the entity wholesale lets any caller's stale view of a column
+it never touched — ``observed_state`` / ``observed_at`` above all, which the
+lifecycle entities always carry a transaction out of date — overwrite a fresher
+row, so the #216 freshest-wins guard cannot be modelled at all. The tests below
+pin each writer's column set from both sides: what it writes, and what it must
+leave alone.
 
 Readers are the same street travelled outward (#2516): a SELECT materializes a
 fresh entity per call, so mutating a loaded one can never reach the row until a
@@ -51,6 +61,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 from tests.servers.fakes import FakeServerRepository
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.UTC)
+_LATER = _NOW + dt.timedelta(minutes=5)
 _CONFIG: dict[str, Any] = {"properties": {"motd": "hi"}}
 _RETENTION: dict[str, Any] = {"keep_last": 2, "nested": {"k": 1}}
 
@@ -135,6 +146,123 @@ async def test_update_lifecycle_stores_a_copy_the_caller_cannot_rewrite() -> Non
     assert stored.observed_state is ObservedState.RUNNING
     assert stored.config == _CONFIG
     assert stored.backup_retention == _RETENTION
+
+
+async def test_update_writes_the_columns_the_adapter_writes() -> None:
+    repo = FakeServerRepository()
+    server = _server()
+    repo.seed(server)
+    server.name = ServerName("renamed")
+    server.config = {"properties": {"motd": "edited"}}
+    server.game_port = 25566
+    server.bedrock_port = 19133
+    server.slug = "renamed"
+    server.updated_at = _LATER
+
+    await repo.update(server)
+
+    stored = repo.by_id[server.id]
+    assert stored.name == ServerName("renamed")
+    assert stored.config == {"properties": {"motd": "edited"}}
+    assert stored.game_port == 25566
+    assert stored.bedrock_port == 19133
+    assert stored.slug == "renamed"
+    assert stored.updated_at == _LATER
+
+
+async def test_update_leaves_the_columns_the_adapter_does_not_write() -> None:
+    # The column-scope half of the same street (#2520): the adapter's UPDATE
+    # names six columns, so a caller carrying a STALE observed_state/observed_at
+    # -- every lifecycle entity does, it was loaded before the edit -- cannot
+    # clobber a fresher row. Storing the entity wholesale lets it, which is
+    # exactly the rule the #216 freshest-wins guard exists to enforce.
+    repo = FakeServerRepository()
+    worker = WorkerId(uuid.uuid4())
+    server = _server(observed=ObservedState.RUNNING, assigned_worker_id=worker)
+    repo.seed(server)
+    # A fresher Worker report lands on the row after the caller loaded its entity.
+    assert await repo.record_observed_state(server.id, ObservedState.CRASHED, _LATER)
+
+    server.assigned_worker_id = None
+    server.observed_state = ObservedState.RUNNING
+    server.observed_at = _NOW
+    server.desired_state = DesiredState.STOPPED
+    server.backup_retention = {"keep_last": 99}
+    server.name = ServerName("renamed")
+
+    await repo.update(server)
+
+    stored = repo.by_id[server.id]
+    assert stored.observed_state is ObservedState.CRASHED
+    assert stored.observed_at == _LATER
+    assert stored.desired_state is DesiredState.RUNNING
+    assert stored.assigned_worker_id == worker
+    assert stored.backup_retention == _RETENTION
+    # The edit the caller actually made still lands.
+    assert stored.name == ServerName("renamed")
+
+
+async def test_update_lifecycle_writes_the_columns_the_adapter_writes() -> None:
+    repo = FakeServerRepository()
+    server = _server()
+    repo.seed(server)
+    worker = WorkerId(uuid.uuid4())
+    server.desired_state = DesiredState.STOPPED
+    server.assigned_worker_id = worker
+    server.config = {"properties": {"motd": "edited"}}
+    server.updated_at = _LATER
+
+    assert await repo.update_lifecycle(server, expected_from=DesiredState.RUNNING)
+
+    stored = repo.by_id[server.id]
+    assert stored.desired_state is DesiredState.STOPPED
+    assert stored.assigned_worker_id == worker
+    assert stored.config == {"properties": {"motd": "edited"}}
+    assert stored.updated_at == _LATER
+
+
+async def test_update_lifecycle_leaves_the_columns_the_adapter_does_not_write() -> None:
+    # Same column-scope rule on the lifecycle writer (#2520), where it bites
+    # hardest: this is the writer the convergence paths call while holding an
+    # entity whose observed_* they loaded a transaction ago.
+    repo = FakeServerRepository()
+    server = _server(observed=ObservedState.RUNNING)
+    repo.seed(server)
+    # A fresher Worker report lands on the row after the caller loaded its entity.
+    assert await repo.record_observed_state(server.id, ObservedState.CRASHED, _LATER)
+
+    server.observed_state = ObservedState.RUNNING
+    server.observed_at = _NOW
+    server.backup_retention = {"keep_last": 99}
+    server.name = ServerName("renamed")
+    server.game_port = 25566
+    server.bedrock_port = 19133
+    server.slug = "renamed"
+    server.desired_state = DesiredState.STOPPED
+
+    assert await repo.update_lifecycle(server, expected_from=DesiredState.RUNNING)
+
+    stored = repo.by_id[server.id]
+    assert stored.observed_state is ObservedState.CRASHED
+    assert stored.observed_at == _LATER
+    assert stored.backup_retention == _RETENTION
+    assert stored.name == ServerName("srv")
+    assert stored.game_port is None
+    assert stored.bedrock_port is None
+    assert stored.slug == "srv"
+    # The transition the caller actually made still lands.
+    assert stored.desired_state is DesiredState.STOPPED
+
+
+async def test_update_on_a_missing_row_is_a_no_op() -> None:
+    # ``UPDATE ... WHERE id = :id`` matches no row and writes nothing; the fake
+    # must not conjure one, which the wholesale ``by_id[id] = entity`` did.
+    repo = FakeServerRepository()
+    server = _server()
+
+    await repo.update(server)
+
+    assert repo.by_id == {}
 
 
 async def test_add_stores_a_copy_the_caller_cannot_rewrite() -> None:
