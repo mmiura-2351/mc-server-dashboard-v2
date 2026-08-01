@@ -120,6 +120,15 @@ class FakeJarFetcher(JarFetcher):
         return self._blobs[url]
 
 
+# Store time reported for a JAR seeded straight into ``stored`` without a stamp.
+# Fixed and far future so the GC's safety window spares it under *any* clock: a
+# test that seeds a JAR and forgets the stamp then reddens on the delete it was
+# not asserting, instead of passing by accident. Reading the host clock here made
+# that fail-loud property depend on the host clock running later than the test's
+# fixed ``now`` minus the window — an unstated environmental assumption (#2529).
+_UNSTAMPED_STORE_TIME = dt.datetime(9999, 1, 1, tzinfo=dt.UTC)
+
+
 class FakeJarPool(JarPool):
     """In-memory content-addressed JAR pool."""
 
@@ -128,9 +137,10 @@ class FakeJarPool(JarPool):
         self.put_calls = 0
         # Each ``delete`` call, including the ones for keys already gone.
         self.deleted: list[str] = []
-        # Store time per content key, as ``list_entries`` reports it. A JAR
-        # seeded straight into ``stored`` has none and is reported as stored
-        # just now; the GC tests set it to age a JAR past the safety window.
+        # Store time per content key, as ``list_entries`` reports it. ``put``
+        # stamps it, like both storage backends do when they store the JAR; the
+        # GC tests set it to age a JAR past the safety window. A JAR seeded
+        # straight into ``stored`` has none — see :data:`_UNSTAMPED_STORE_TIME`.
         self.modified_at: dict[str, dt.datetime] = {}
 
     async def has(self, sha256: str) -> bool:
@@ -142,6 +152,13 @@ class FakeJarPool(JarPool):
         self.put_calls += 1
         key = hashlib.sha256(data).hexdigest()
         self.stored[key] = data
+        # Both backends give a freshly pooled JAR a store time. What a *re*-put
+        # does to it is backend-specific — the fs adapter always ``os.replace``s
+        # the staged file (``st_mtime`` refreshes) while the object adapter
+        # head-checks the content key and skips the upload (``last_modified``
+        # stays) — and neither Port docstring picks a side, so the fake keeps the
+        # first stamp rather than claim one backend's behaviour (issue #2529).
+        self.modified_at.setdefault(key, dt.datetime.now(dt.UTC))
         return key
 
     async def stats(self) -> PoolStats:
@@ -151,12 +168,11 @@ class FakeJarPool(JarPool):
         )
 
     async def list_entries(self) -> list[PoolEntry]:
-        now = dt.datetime.now(dt.UTC)
         return [
             PoolEntry(
                 sha256=key,
                 size_bytes=len(data),
-                modified_at=self.modified_at.get(key, now),
+                modified_at=self.modified_at.get(key, _UNSTAMPED_STORE_TIME),
             )
             for key, data in self.stored.items()
         ]
