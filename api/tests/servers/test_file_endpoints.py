@@ -2153,11 +2153,15 @@ def test_file_head_answers_the_gets_headers_under_every_credential(
         assert resp.content == b""
         for name in ("content-type", "content-disposition", "cache-control"):
             assert resp.headers[name] == served.headers[name], name
-        # The directory zip is built incrementally, so the GET declares no
-        # length; a probe that answered "0" would tell the client it is empty.
-        assert resp.headers.get("content-length") == served.headers.get(
-            "content-length"
-        )
+        if is_dir:
+            # The directory zip is built incrementally, so the GET declares no
+            # length; a probe that answered "0" would tell the client it is
+            # empty. Asserted as an absence, not as equality with the GET's own
+            # absent header — that comparison is None == None and can never fail.
+            assert "content-length" not in resp.headers
+            assert "content-length" not in served.headers
+        else:
+            assert resp.headers["content-length"] == served.headers["content-length"]
 
 
 @pytest.mark.parametrize(("path", "is_dir"), [("world", True), ("level.dat", False)])

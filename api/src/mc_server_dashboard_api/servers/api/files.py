@@ -687,8 +687,11 @@ async def download_file(
             if size is not None:
                 headers["Content-Length"] = str(size)
             if probing:
-                # The size came from the parent listing, so the probe answers the
-                # length question without opening the file's bytes at all.
+                # The size came from the cheap parent listing, so the probe
+                # answers the length question without opening the download
+                # stream. (``is_dir`` above still resolves the branch the way the
+                # GET does, which for a file confirms readability by pulling one
+                # chunk; the probe skips the download, not the dispatch.)
                 response = head_response(media_type=_FILE_MEDIA_TYPE, headers=headers)
             else:
                 file_stream = await use_case.file_stream(
