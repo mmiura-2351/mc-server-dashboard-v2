@@ -6,7 +6,7 @@ cases and authorization Ports faked (NFR-TEST-1, no database). Verifies:
 - the two-layer gate per route (non-member -> 404, member-without-permission ->
   403, authorized member -> 2xx);
 - domain-error -> HTTP-code mapping (unsupported_server_type 422,
-  catalog_unavailable 502, server_unsettled 409, checksum_mismatch 502, etc.);
+  catalog_upstream_failed 502, server_unsettled 409, checksum_mismatch 502, etc.);
 - correct status codes for each catalog endpoint.
 """
 
@@ -32,6 +32,7 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     UserId,
 )
 from mc_server_dashboard_api.dependencies import (
+    get_create_server,
     get_current_user,
     get_get_catalog_project,
     get_install_from_catalog,
@@ -61,6 +62,9 @@ from mc_server_dashboard_api.servers.domain.plugin import (
     ServerPlugin,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
+from mc_server_dashboard_api.servers.domain.version_validator import (
+    CatalogUnavailableError as VersionCatalogUnavailableError,
+)
 from tests.identity.fakes import make_user
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
@@ -118,6 +122,7 @@ def _app(
     search: _FakeUseCase | None = None,
     get_project: _FakeUseCase | None = None,
     install: _FakeUseCase | None = None,
+    create: _FakeUseCase | None = None,
 ) -> object:
     app = _shared_app
     app.dependency_overrides.clear()
@@ -132,11 +137,23 @@ def _app(
         app.dependency_overrides[get_get_catalog_project] = lambda: get_project
     if install is not None:
         app.dependency_overrides[get_install_from_catalog] = lambda: install
+    if create is not None:
+        app.dependency_overrides[get_create_server] = lambda: create
     return app
 
 
 def _url(community: uuid.UUID, server: uuid.UUID, suffix: str = "") -> str:
     return f"/api/communities/{community}/servers/{server}/catalog{suffix}"
+
+
+def _create_body() -> dict[str, object]:
+    return {
+        "name": "survival",
+        "mc_edition": "java",
+        "mc_version": "1.21.1",
+        "server_type": "vanilla",
+        "config": {"motd": "hi"},
+    }
 
 
 def _search_result() -> CatalogSearchResponse:
@@ -256,7 +273,7 @@ def test_search_unsupported_type_is_422() -> None:
     assert resp.json()["reason"] == "unsupported_server_type"
 
 
-def test_search_catalog_unavailable_is_502() -> None:
+def test_search_catalog_upstream_failure_is_502() -> None:
     app = _app(
         member=True,
         allow=True,
@@ -265,7 +282,36 @@ def test_search_catalog_unavailable_is_502() -> None:
     client = next(_client(app))
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), "/search"), params={"q": "test"})
     assert resp.status_code == 502
-    assert resp.json()["reason"] == "catalog_unavailable"
+    assert resp.json()["reason"] == "catalog_upstream_failed"
+
+
+def test_gateway_and_dependency_catalog_reasons_differ() -> None:
+    """The two catalog failures stay tellable apart from the reason (issue #2406).
+
+    Both surfaces are driven on one app so the assertion reads *both* live
+    reasons: it fails whichever side is later renamed onto the other. The 502 is
+    the gateway case (Modrinth/GeyserMC answered us badly, RFC 9110 15.6.3); the
+    503 is our own version catalog exhausted after its retry budget.
+    """
+
+    app = _app(
+        member=True,
+        allow=True,
+        search=_FakeUseCase(error=CatalogUnavailableError("down")),
+        create=_FakeUseCase(error=VersionCatalogUnavailableError("source down")),
+    )
+    client = next(_client(app))
+
+    gateway = client.get(
+        _url(uuid.uuid4(), uuid.uuid4(), "/search"), params={"q": "test"}
+    )
+    dependency = client.post(
+        f"/api/communities/{uuid.uuid4()}/servers", json=_create_body()
+    )
+
+    assert gateway.status_code == 502
+    assert dependency.status_code == 503
+    assert gateway.json()["reason"] != dependency.json()["reason"]
 
 
 # --- get project -----------------------------------------------------------
@@ -364,7 +410,7 @@ def test_install_from_catalog_bedrock_port_race_is_409() -> None:
     assert resp.json()["reason"] == "bedrock_port_taken"
 
 
-def test_install_from_catalog_unavailable_is_502() -> None:
+def test_install_from_catalog_upstream_failure_is_502() -> None:
     app = _app(
         member=True,
         allow=True,
@@ -376,7 +422,7 @@ def test_install_from_catalog_unavailable_is_502() -> None:
         json={"project_id": "proj-1", "version_id": "ver-1"},
     )
     assert resp.status_code == 502
-    assert resp.json()["reason"] == "catalog_unavailable"
+    assert resp.json()["reason"] == "catalog_upstream_failed"
 
 
 def test_install_from_catalog_checksum_mismatch_is_502() -> None:

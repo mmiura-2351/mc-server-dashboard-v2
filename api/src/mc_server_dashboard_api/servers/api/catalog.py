@@ -237,7 +237,7 @@ async def search_catalog(
     except UnsupportedPluginServerTypeError as exc:
         raise _unprocessable("unsupported_server_type") from exc
     except CatalogUnavailableError as exc:
-        raise _bad_gateway("catalog_unavailable") from exc
+        raise _bad_gateway("catalog_upstream_failed") from exc
     return CatalogSearchListResponse(
         hits=[CatalogSearchResultResponse.from_domain(h) for h in result.hits],
         total_hits=result.total_hits,
@@ -280,7 +280,7 @@ async def get_catalog_project(
     except CatalogProjectNotFoundError as exc:
         raise _not_found_catalog() from exc
     except CatalogUnavailableError as exc:
-        raise _bad_gateway("catalog_unavailable") from exc
+        raise _bad_gateway("catalog_upstream_failed") from exc
     return CatalogProjectDetailResponse(
         project=CatalogProjectResponse.from_domain(project),
         versions=[CatalogVersionResponse.from_domain(v) for v in versions],
@@ -325,7 +325,7 @@ async def install_from_catalog(
     except CatalogProjectNotFoundError as exc:
         raise _not_found_catalog() from exc
     except CatalogUnavailableError as exc:
-        raise _bad_gateway("catalog_unavailable") from exc
+        raise _bad_gateway("catalog_upstream_failed") from exc
     except CatalogChecksumMismatchError as exc:
         raise _bad_gateway("checksum_mismatch") from exc
     except InvalidFilePathError as exc:

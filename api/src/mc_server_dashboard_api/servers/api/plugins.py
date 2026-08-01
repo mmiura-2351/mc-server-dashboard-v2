@@ -565,7 +565,7 @@ async def check_updates(
     except UnsupportedPluginServerTypeError as exc:
         raise _unprocessable("unsupported_server_type") from exc
     except CatalogUnavailableError as exc:
-        raise _bad_gateway("catalog_unavailable") from exc
+        raise _bad_gateway("catalog_upstream_failed") from exc
     return PluginUpdatesResponse(
         updates=[
             PluginUpdateInfoResponse(
@@ -652,7 +652,7 @@ async def resolve_plugin_dependencies(
     except UnsupportedPluginServerTypeError as exc:
         raise _unprocessable("unsupported_server_type") from exc
     except CatalogUnavailableError as exc:
-        raise _bad_gateway("catalog_unavailable") from exc
+        raise _bad_gateway("catalog_upstream_failed") from exc
     return ResolutionPlanResponse.from_plan(plan)
 
 
@@ -693,7 +693,7 @@ async def apply_plugin_resolution(
     except UnsupportedPluginServerTypeError as exc:
         raise _unprocessable("unsupported_server_type") from exc
     except CatalogUnavailableError as exc:
-        raise _bad_gateway("catalog_unavailable") from exc
+        raise _bad_gateway("catalog_upstream_failed") from exc
     except ServerFilesUnsettledError as exc:
         await _record_plugin_failure(
             recorder,
@@ -761,7 +761,7 @@ async def check_plugin_update(
     except PluginNotFoundError as exc:
         raise _not_found() from exc
     except CatalogUnavailableError as exc:
-        raise _bad_gateway("catalog_unavailable") from exc
+        raise _bad_gateway("catalog_upstream_failed") from exc
     return PluginUpdateInfoResponse(
         plugin=PluginResponse.from_plugin(result.plugin),
         latest_version=(
@@ -843,7 +843,7 @@ async def update_plugin(
     except CatalogProjectNotFoundError as exc:
         raise _not_found_catalog() from exc
     except CatalogUnavailableError as exc:
-        raise _bad_gateway("catalog_unavailable") from exc
+        raise _bad_gateway("catalog_upstream_failed") from exc
     except CatalogChecksumMismatchError as exc:
         raise _bad_gateway("checksum_mismatch") from exc
     except InvalidFilePathError as exc:
@@ -900,7 +900,7 @@ async def list_plugin_dependencies(
     except PluginNotFoundError as exc:
         raise _not_found() from exc
     except CatalogUnavailableError as exc:
-        raise _bad_gateway("catalog_unavailable") from exc
+        raise _bad_gateway("catalog_upstream_failed") from exc
     return PluginDependenciesResponse(
         dependencies=[
             PluginDependencyResponse(

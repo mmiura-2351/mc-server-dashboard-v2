@@ -23,7 +23,13 @@ class CatalogUnavailableError(VersionError):
     """The external source could not be reached and no cached payload exists.
 
     Raised after the bounded retry budget is spent with no last-good cache to fall
-    back on (FR-VER-2). The edge maps it to a transient 503.
+    back on (FR-VER-2). The edge maps it to a transient 503
+    ``catalog_unavailable``.
+
+    Not to be confused with the *content* catalog's
+    :class:`mc_server_dashboard_api.servers.domain.errors.CatalogUnavailableError`,
+    which is the gateway case (502 ``catalog_upstream_failed``) and carries the
+    rationale for the split (issue #2406).
     """
 
 

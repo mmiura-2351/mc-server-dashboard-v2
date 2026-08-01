@@ -831,11 +831,11 @@ describe("ServerPluginsTab error messages (issue #1345)", () => {
     });
   });
 
-  it("shows a specific message for catalog_unavailable", async () => {
+  it("shows a specific message for catalog_upstream_failed", async () => {
     // 502 is the status the catalog-backed plugin routes render this reason
     // with (plugins.py `_bad_gateway`); the upload mock is only the vehicle,
     // since every plugin mutation shares one `onError`.
-    await triggerUploadError(502, "catalog_unavailable");
+    await triggerUploadError(502, "catalog_upstream_failed");
     await waitFor(() => {
       expect(
         screen.getByText("Could not reach Modrinth. Please try again later."),
