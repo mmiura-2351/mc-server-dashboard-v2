@@ -752,7 +752,12 @@ async def export_server(
         export.stream,
         media_type="application/zip",
         headers={
-            "Content-Disposition": content_disposition(f"{export.server_name}.zip")
+            "Content-Disposition": content_disposition(f"{export.server_name}.zip"),
+            # A per-user body is never stored, whichever credential fetched it
+            # (issue #2491): a cookie-authenticated request carries no
+            # ``Authorization``, so RFC 9111 Section 3.5's default protection from
+            # shared caches does not cover it.
+            "Cache-Control": "no-store",
         },
     )
 
