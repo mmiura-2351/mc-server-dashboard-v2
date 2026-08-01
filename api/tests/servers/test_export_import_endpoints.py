@@ -612,8 +612,8 @@ def test_export_grant_redemption_sets_a_path_scoped_cookie() -> None:
     assert "Secure" in cookie
     assert "SameSite=strict" in cookie
     assert f"Path={_export_url(community, server)}" in cookie
-    # The export declared no freshness of its own, so a shared cache could have
-    # replayed this Set-Cookie to a second client (RFC 6265 Section 8.6).
+    # RFC 6265 Section 3 leaves a Set-Cookie response cacheable, so without this
+    # header a shared cache could replay the credential to a second client.
     assert resp.headers["cache-control"] == "no-store"
 
 
@@ -662,6 +662,31 @@ def test_an_unsettled_export_mints_no_cookie() -> None:
         h.startswith(f"{DOWNLOAD_COOKIE_NAME}=")
         for h in resp.headers.get_list("set-cookie")
     )
+
+
+# --- Cache-Control on the served export (issue #2491) ----------------------
+
+
+def test_export_download_declares_no_store_under_every_credential() -> None:
+    # The header belongs to the response being a per-user body, not to the
+    # credential that fetched it. A cookie-authenticated request in particular
+    # carries no Authorization, so RFC 9111 Section 3.5's default protection from
+    # shared caches does not cover it.
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, export=_FakeExport(chunks=[b"zip-bytes"]))
+    client = next(_client(app))
+
+    with_bearer = client.get(_export_url(community, server), headers=_bearer())
+    with_cookie = client.get(
+        _export_url(community, server),
+        headers=_export_cookie_header(community, server),
+    )
+    # Last, because redeeming a grant mints the cookie into the client's jar.
+    with_grant = client.get(_export_grant_url(community, server, subject=_user))
+
+    for resp in (with_bearer, with_cookie, with_grant):
+        assert resp.status_code == 200
+        assert resp.headers["cache-control"] == "no-store"
 
 
 # --- import ----------------------------------------------------------------

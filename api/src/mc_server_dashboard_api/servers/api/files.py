@@ -629,7 +629,14 @@ async def download_file(
             response: Response = StreamingResponse(
                 stream,
                 media_type="application/zip",
-                headers={"Content-Disposition": content_disposition(f"{name}.zip")},
+                headers={
+                    "Content-Disposition": content_disposition(f"{name}.zip"),
+                    # A per-user body is never stored, whichever credential fetched
+                    # it (issue #2491): a cookie-authenticated request carries no
+                    # ``Authorization``, so RFC 9111 Section 3.5's default
+                    # protection from shared caches does not cover it.
+                    "Cache-Control": "no-store",
+                },
             )
         else:
             # Stream the file's bytes (issue #265) so a large single-file download
@@ -648,7 +655,11 @@ async def download_file(
                 rel_path=path,
             )
             name = posixpath.basename(path) or "download"
-            headers = {"Content-Disposition": content_disposition(name)}
+            headers = {
+                "Content-Disposition": content_disposition(name),
+                # Per-user body, same as the directory zip above.
+                "Cache-Control": "no-store",
+            }
             if size is not None:
                 headers["Content-Length"] = str(size)
             response = StreamingResponse(
