@@ -291,10 +291,14 @@ the transfer is one no log, browser history or `Referer` ever saw.
 - **Identity, never authority**, exactly like a grant: every request re-runs the
   full permission gate, so a revocation, a membership removal or a deactivated
   account invalidates the cookie immediately.
-- **Never cached.** A response carrying the cookie is stamped
-  `Cache-Control: no-store` (RFC 6265 Section 8.6). The backup download already
-  declared that; the export and directory ZIPs declared no freshness at all, so a
-  shared cache could otherwise have handed the `Set-Cookie` to a second client.
+- **Never cached.** All three downloads declare `Cache-Control: no-store` on
+  every `200` / `206`, whichever credential fetched them (issue #2491): the body
+  is per-user, and a cookie-authenticated request carries no `Authorization`, so
+  RFC 9111 Section 3.5's default protection from shared caches does not cover it.
+  That same declaration covers the response carrying the `Set-Cookie`, which the
+  cookie spec pointedly does not protect: RFC 6265 Section 3 states that the
+  presence of a `Cookie` or `Set-Cookie` header field "does not preclude HTTP
+  caches from storing and reusing a response".
 - **Not cleared by logout.** Nothing enumerates the per-resource paths a jar might
   hold, so logout clears only the refresh cookie (`Path=/api/auth`). The residual
   is one resource, re-authorized on every read, for the cookie's TTL — the same
