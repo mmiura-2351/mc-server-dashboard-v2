@@ -333,7 +333,7 @@ def test_version_retention_zero_is_accepted(
 def test_metrics_listener_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
     settings = load_settings(config_file=None)
-    # Opt-in, like the relay's metrics endpoint (issue #2565, RELAY.md 17).
+    # Opt-in, like the relay's metrics endpoint (issue #2565, RELAY.md 13).
     assert settings.metrics.enabled is False
     # 0.0.0.0, NOT loopback: the API's canonical deployment is a container, and
     # a sibling scraper on the compose network must be able to reach it. The

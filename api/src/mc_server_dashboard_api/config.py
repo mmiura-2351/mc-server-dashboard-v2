@@ -222,7 +222,7 @@ class MetricsSettings(_Section):
     API port: the bundled Compose deployment fronts the API with ``cloudflared``,
     which forwards the whole public hostname to ``api:8000``, so a route there is
     a route on the internet. Like the relay's metrics endpoint (RELAY.md Section
-    17) this listener is **opt-in and off by default** — a deployment that does
+    13) this listener is **opt-in and off by default** — a deployment that does
     not scrape binds no second port at all.
 
     ``host`` deliberately defaults to ``0.0.0.0`` and NOT to the relay's

@@ -1169,7 +1169,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # public HTTP port (issue #2565): ``cloudflared`` forwards the whole
         # public hostname to ``api:8000``, so a route there is a route on the
         # internet. Off by default, like the relay's metrics endpoint (RELAY.md
-        # Section 17). Started last, so everything it observes already exists.
+        # Section 13). Started last, so everything it observes already exists.
         metrics_listener = None
         if settings.metrics.enabled:
             observability_app = create_observability_app()

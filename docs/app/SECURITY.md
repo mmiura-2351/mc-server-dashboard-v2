@@ -309,7 +309,7 @@ routes, which are exposed the same way) is tracked separately in issue #2568.
 (`metrics.enabled`, CONFIGURATION.md Section 5.10). It is not mounted on the
 HTTP API app at all, so the tunnel cannot reach it by construction: `cloudflared`
 targets `:8000`, and the exposition is not on `:8000`. This is the posture the
-relay already takes for its own metrics endpoint (RELAY.md Section 17).
+relay already takes for its own metrics endpoint (RELAY.md Section 13).
 
 The content is aggregates only — no names, ids, emails or IPs, and the label
 sets are structurally bounded (route *templates*, a fixed observed-state tuple,

@@ -12,7 +12,7 @@ construction* rather than reachable-and-rejected: ``cloudflared`` targets
 ``:8000``, and the exposition is no longer on ``:8000``. Nothing a future
 routing or middleware change can silently undo. The listener is opt-in and off
 by default — the posture the relay already takes for its own metrics endpoint
-(RELAY.md Section 17), so the two modules answer this question the same way.
+(RELAY.md Section 13), so the two modules answer this question the same way.
 
 Reachability is governed by the deployment, not by this module: the container
 port is simply never published, so only the compose network can reach it. See

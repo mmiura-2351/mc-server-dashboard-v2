@@ -373,7 +373,7 @@ The Prometheus exposition is served on a **separate HTTP listener**, never on
 `server.http_port` (issue #2565): the bundled `cloudflared` service forwards the
 whole public hostname to `api:8000` and path-scopes nothing, so a route on the
 API's HTTP port is a route on the internet. Off by default, like the relay's
-metrics endpoint (RELAY.md Section 17) — a deployment that does not scrape binds
+metrics endpoint (RELAY.md Section 13) — a deployment that does not scrape binds
 no second port at all. When enabled, the listener serves `GET /metrics` and
 nothing else.
 

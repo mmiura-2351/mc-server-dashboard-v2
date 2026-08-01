@@ -3,7 +3,7 @@
 The Prometheus exposition moved off the public API port onto its own listener,
 because the bundled Cloudflare tunnel forwards the whole hostname to `api:8000`
 and so published every path the API served. The listener is opt-in
-(`metrics.enabled`, default false), mirroring the relay (RELAY.md Section 17).
+(`metrics.enabled`, default false), mirroring the relay (RELAY.md Section 13).
 
 These tests bind a real ephemeral port on loopback and scrape it over HTTP —
 the point of the change is that the exposition is served by a *separate socket*,
