@@ -5,9 +5,8 @@ agent-facing complement to [`CONTRIBUTING.md`](CONTRIBUTING.md). Every rule
 there (issues, branches, commits, PRs, review, merge) applies unchanged; this
 document adds what agents need beyond it: deployment-host ground rules,
 worktree mechanics, silently failing commands, tooling quirks, and a pre-PR
-checklist. It is written for
-machine consumption and may be reorganized freely for that purpose without
-affecting the human-facing docs.
+checklist. It is written for machine consumption and may be reorganized freely
+for that purpose without affecting the human-facing docs.
 
 Read before touching anything, in order:
 [`../../CLAUDE.md`](../../CLAUDE.md) (behavioral rules — simplicity first,
@@ -63,37 +62,34 @@ rebuild ships (issue #432).
 Each one succeeds, or appears to; the damage surfaces later.
 
 - **`git checkout <path>` restores from the index, not from `HEAD`.** Unstaged
-  edits to that path are gone — no confirmation, no reflog entry, nothing to
-  recover from. Mutation-testing production code to prove a test is a real pin
-  (routine in review here) is exactly this edit-then-revert shape, so copy the
-  file to the scratchpad before experimenting and restore from that copy
-  (PR #2521).
+  edits are gone — no confirmation, no reflog entry, nothing to recover from.
+  Mutation-testing production code to prove a test is a real pin has exactly
+  this edit-then-revert shape, so copy the file to the scratchpad first and
+  restore from the copy (PR #2521).
 - **`--no-verify` cannot establish what the gate establishes.** The rule is in
   [`CONTRIBUTING.md`](CONTRIBUTING.md) Section 4; it is unconditional because a
-  bypass is only known to have been harmless *afterwards*, which is precisely
-  the fact the gate exists to establish beforehand. "The only failures are the
-  known flake" is a prediction, not a result. When a gate is flaky, escalate it
-  as an issue (#2513 is exactly that) and re-run — do not push around it
+  bypass is only known to have been harmless *afterwards* — the very fact the
+  gate exists to establish beforehand. "Only the known flake" is a prediction,
+  not a result. Escalate a flaky gate as an issue (#2513) and re-run instead
   (PR #2517).
 - **`pgrep -f <pattern>` matches the waiting shell itself.** `pgrep` omits only
-  its own process, not the shell that invoked it, and that shell's command line
-  contains the pattern — so `until ! pgrep -f "make check"; do sleep 30; done`
-  always matches itself and never exits. A different token does not fix it: a
-  waiter polling `pgrep -f check_parallel.sh` self-matches identically. Run the
-  command in the foreground and let it block; a wait loop around a process you
-  did not start usually means the work should have been sequenced differently.
-  If a poll is genuinely needed, exclude the waiter's own pid explicitly. A
-  self-deadlocked waiter is indistinguishable from a contended host (#2513), so
-  it never diagnoses itself (PR #2514).
+  its own process, not the shell that invoked it — whose command line contains
+  the pattern. So `until ! pgrep -f "make check"; do sleep 30; done` never
+  exits, and a different token does not help (`pgrep -f check_parallel.sh`
+  self-matches identically). Run the command in the foreground and let it
+  block; if a poll is genuinely needed, bracket one character so the pattern
+  cannot match its own literal text — `pgrep -f "make chec[k]"` matches the
+  gate but not the waiter. A self-deadlocked waiter is indistinguishable from a
+  contended host (#2513), so it never diagnoses itself.
 - **`uv run --active` in a worktree re-points the primary checkout's
-  `api/.venv`.** Worktree shells inherit `VIRTUAL_ENV` pointing at the repo
-  root's `api/.venv`; plain `uv run` ignores it and uses the worktree's own
-  `.venv`, but `--active` adopts the inherited one as the project environment
-  and installs the *branch's* `api/src` into it — so the primary checkout then
-  imports branch sources. Never pass `--active`; repair with `cd api && uv sync`
-  in the affected checkout. The `api-env-check` preflight
-  (`scripts/check_api_env.py`, issue #566) catches a shadowed environment, but
-  only when a gate next runs there; nothing warns at the moment of damage.
+  `api/.venv`.** Worktree shells inherit `VIRTUAL_ENV` from the repo root;
+  plain `uv run` ignores it and uses the worktree's own `.venv`, but `--active`
+  adopts the inherited one and installs the *branch's* `api/src` into it, so
+  the primary checkout imports branch sources. Nothing reports this: the
+  `api-env-check` preflight (`scripts/check_api_env.py`, issue #566) would fail
+  on the mismatch, but the plain `uv run` in front of it re-syncs the damage
+  away first, so the gate prints `OK`. Never pass `--active`; repair a checkout
+  explicitly with `cd api && uv sync`.
 
 ## 4. Tooling and account quirks
 
