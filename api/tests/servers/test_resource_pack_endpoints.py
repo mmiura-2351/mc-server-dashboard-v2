@@ -348,6 +348,18 @@ class TestDownloadEndpoint:
         assert len(recorder.events) == 1
         assert recorder.events[0].operation == ops.RESOURCE_PACK_DOWNLOAD
 
+    def test_download_declares_no_store(self) -> None:
+        # Pinned at the route, not at a transport, so a future auth change cannot
+        # silently drop the header (issue #2491). Bearer is the only credential
+        # this route accepts (``get_current_user``), so one is full coverage.
+        p = _pack()
+        uc = _FakeDownloadUseCase(pack=p, data=b"zipbytes")
+        app = _app(download=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.get(f"/api/resource-packs/{p.id.value}/download")
+        assert resp.status_code == 200
+        assert resp.headers["cache-control"] == "no-store"
+
     def test_download_declares_content_length_matching_streamed_bytes(self) -> None:
         # The load-bearing invariant (issue #2317): a declared length that
         # disagrees with the streamed byte count corrupts or hangs the response

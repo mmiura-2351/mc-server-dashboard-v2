@@ -293,10 +293,23 @@ async def download_resource_pack(
         headers={
             "Content-Disposition": content_disposition(pack.filename),
             "Content-Length": str(size_bytes),
+            # Every authenticated download declares no-store (issue #2491). Here
+            # that is a consistency call rather than a leak fix, and the
+            # distinction is worth recording: the body is the same global library
+            # object for every caller, and the public route below serves those
+            # same bytes to the world unauthenticated (issue #2519).
+            "Cache-Control": "no-store",
         },
     )
 
 
+# Deliberately no ``Cache-Control`` on the route below (issue #2519). It is
+# unauthenticated by design (issue #1176) and serves immutable content — a pack
+# has create and delete, no update — to the Minecraft game client, which caches
+# it locally and verifies it against the ``resource-pack-sha1`` written beside
+# the URL in ``server.properties``. ``no-store`` would defeat that cache and
+# re-fetch a multi-MB pack on every player join. Declaring a positive directive
+# instead is the better answer, but it needs a max-age chosen: issue #2562.
 @public_router.get("/public/resource-packs/{resource_pack_id}/{filename}")
 async def public_download_resource_pack(
     resource_pack_id: uuid.UUID,

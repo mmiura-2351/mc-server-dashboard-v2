@@ -181,7 +181,7 @@ Global resource pack library (not community-scoped) and per-server assignment.
 | POST | `/resource-packs` | Upload a resource pack (multipart; requires `server:update` in at least one community). |
 | GET | `/resource-packs` | List all resource packs (authenticated). |
 | DELETE | `/resource-packs/{id}` | Delete a resource pack (uploader or platform admin; 409 when still assigned to a server). |
-| GET | `/resource-packs/{id}/download` | Download (authenticated). |
+| GET | `/resource-packs/{id}/download` | Download (authenticated). The response declares `Cache-Control: no-store` (#2519). |
 | GET | `/public/resource-packs/{id}/{filename}` | Public download (no auth) — the URL Minecraft clients fetch. Validates `filename` matches. |
 | POST | `…/{sid}/resource-pack` | Assign a resource pack to a server (`server:update`). Body: `{resource_pack_id, require_resource_pack, resource_pack_prompt}`. |
 | DELETE | `…/{sid}/resource-pack` | Unassign (`server:update`). |
@@ -506,7 +506,8 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   and then auto-imports the missing Modrinth dependencies.
 - Client modpack (mod loaders only): when at least one enabled mod is
   client-relevant (side `client` / `both`), a **Download client modpack** button
-  bundles them (`GET …/client-mods/download`, #1342).
+  bundles them (`GET …/client-mods/download`, #1342; the response declares
+  `Cache-Control: no-store`, #2519).
 - Bedrock hint: on a Paper server, when the deployment's Bedrock gate is on
   (`/meta`'s `bedrock_enabled`, Section 2.4) and a Geyser plugin is installed, an
   inline note links to Floodgate setup (epic #1540).

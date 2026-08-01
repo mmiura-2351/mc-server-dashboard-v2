@@ -1434,8 +1434,11 @@ button.link:focus-visible {
   border-collapse: collapse;
   font-size: 13px;
 }
-.schedules-runs th,
-.schedules-runs td {
+/* Qualified with `table.data` — matching every other `.wrapper table.data th`
+ * block above — so the cell rules do not descend in specificity below the
+ * shared `.data` table rules declared earlier in the file. */
+table.data.schedules-runs th,
+table.data.schedules-runs td {
   text-align: left;
   padding: 6px 10px;
   border-bottom: 1px solid var(--border-subtle);
