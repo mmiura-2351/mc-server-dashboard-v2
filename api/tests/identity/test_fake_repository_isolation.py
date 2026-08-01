@@ -15,6 +15,11 @@ visible in the test source. ``test_admin_create_user`` had made that aliasing
 load-bearing (``assert uow.users.by_id[user.id] is user``), so the fake could
 not be corrected without correcting the assertion.
 
+Detachment is one half of a writer's fidelity; whether the row EXISTS at all is
+the other (#2557, following PR #2556). An ``UPDATE ... WHERE id = :id`` matches
+nothing on an absent id, so nothing is written and no row appears -- the fake
+must not conjure one, or a test can assert a state production never reaches.
+
 ``User`` and ``RefreshToken`` carry no mutable field -- every one is a scalar, a
 datetime, or a frozen value object -- so a new entity is the full copy depth.
 """
@@ -74,6 +79,23 @@ async def test_user_update_stores_a_copy_the_caller_cannot_rewrite() -> None:
     stored = repo.by_id[user.id]
     user.password_hash = "hashed::after-the-write"
     assert stored.password_hash == "hashed::rotated"
+
+
+async def test_user_update_on_a_missing_row_is_a_no_op() -> None:
+    # ``SqlAlchemyUserRepository.update`` issues
+    # ``UPDATE "user" SET ... WHERE id = :id``
+    # (identity/adapters/repositories.py:117-138), which matches no row on an
+    # absent id: nothing is written, nothing is raised, and the result of
+    # ``session.execute`` is discarded under a ``-> None`` signature, so no
+    # caller can read a rows-affected signal either. Its one error path --
+    # translating the IntegrityError a rename into a taken username/email
+    # raises -- needs a matching row to fire at all (#2557).
+    repo = FakeUserRepository()
+    user = make_user()
+
+    await repo.update(user)
+
+    assert repo.by_id == {}
 
 
 async def test_user_readers_hand_out_copies() -> None:
