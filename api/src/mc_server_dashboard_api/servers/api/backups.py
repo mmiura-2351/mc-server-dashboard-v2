@@ -363,6 +363,12 @@ async def list_backups(
         )
     except ServerNotFoundError as exc:
         raise _not_found() from exc
+    except BackupStorageUnavailableError as exc:
+        # The listing's lazy size backfill probes the store (#661), so an outage
+        # decides this route's status too (issue #2405): the same transient 503 the
+        # five sibling backup routes report (#2378), not a 200 whose null sizes are
+        # indistinguishable from legitimately unrecorded ones.
+        raise _service_unavailable("storage_unavailable") from exc
     return BackupListResponse(backups=[BackupResponse.from_listed(b) for b in backups])
 
 
@@ -923,6 +929,11 @@ async def server_backup_statistics(
         )
     except ServerNotFoundError as exc:
         raise _not_found() from exc
+    except BackupStorageUnavailableError as exc:
+        # Statistics shares the listing's backfill, so it shares the outage answer
+        # (issue #2405): 503 rather than a total silently missing the rows the store
+        # could not size.
+        raise _service_unavailable("storage_unavailable") from exc
     return BackupStatisticsResponse.from_stats(stats)
 
 

@@ -456,6 +456,19 @@ def test_list_unknown_server_is_404() -> None:
     assert resp.status_code == 404
 
 
+def test_list_storage_unavailable_is_503_with_reason() -> None:
+    # The listing's lazy size backfill probes the store, so an outage decides this
+    # route's status too (issue #2405). It answers the same 503 storage_unavailable
+    # as the five sibling backup routes (#2378) rather than a 200 whose null sizes
+    # are indistinguishable from legitimately unrecorded ones.
+    use_case = _FakeUseCase(error=BackupStorageUnavailableError("x"))
+    app = _app(member=True, allow=True, list_=use_case)
+    client = next(_client(app))
+    resp = client.get(_url(uuid.uuid4(), uuid.uuid4()))
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "storage_unavailable"
+
+
 # --- restore ---------------------------------------------------------------
 
 
@@ -1832,6 +1845,18 @@ def test_statistics_unknown_server_is_404() -> None:
     client = next(_client(app))
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), "/statistics"))
     assert resp.status_code == 404
+
+
+def test_statistics_storage_unavailable_is_503_with_reason() -> None:
+    # Statistics shares the listing's backfill, so it shares its outage answer
+    # (issue #2405): 503 storage_unavailable rather than a total silently missing
+    # the rows the store could not size.
+    use_case = _FakeUseCase(error=BackupStorageUnavailableError("x"))
+    app = _app(member=True, allow=True, statistics=use_case)
+    client = next(_client(app))
+    resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), "/statistics"))
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "storage_unavailable"
 
 
 # --- global statistics (platform-admin, issue #281) ------------------------
