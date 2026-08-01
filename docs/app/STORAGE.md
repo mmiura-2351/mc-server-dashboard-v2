@@ -1256,27 +1256,37 @@ snapshot publishes (issue #845).
 The snapshot does not decide the stop's outcome, but it does decide the
 release:
 
-- **Success, or the Worker disconnected** — the assignment is cleared. A
-  failure is logged loud (everything since the last periodic snapshot is lost,
-  and no retry exists for a stopped server), but the stop itself already
-  succeeded and the server is down, so the release still proceeds.
-- **The snapshot dispatch timed out** — the assignment is HELD. The Worker
-  session is healthy and the transfer is still uploading (the control plane has
-  no command-cancel, so the Worker uploads to completion and may publish late);
-  releasing would reopen the very race above, whereas an upload that lands
-  while the row is still held publishes against the base it hydrated from. The
-  Worker's late `CommandResult` releases the hold as soon as the upload settles
-  (issue #891), and the reconciler is the backstop once the stop grace lapses.
+- **Success, or the Worker disconnected** — the assignment is cleared (the
+  `SERVER_NOT_FOUND` path additionally requires that the same call established
+  the row is at rest under this Worker; a convergence write beaten by a fresher
+  report holds instead). A failure is logged loud — everything since the last
+  periodic snapshot is lost, and no retry exists for a stopped server — but the
+  stop already succeeded and the server is down, so the release still proceeds.
+  The deliberate exception is the Worker's `working_set_absent` refusal: it
+  holds no working set for the id, so there was nothing to capture and the line
+  is INFO, not loss.
+- **The snapshot dispatch timed out, or the HTTP request was cancelled** — the
+  assignment is HELD. The Worker session is healthy and the transfer is still
+  uploading (the control plane has no command-cancel, so abandoning the pending
+  result signals nothing to the Worker: it uploads to completion and may publish
+  late); releasing would reopen the very race above, whereas an upload that
+  lands while the row is still held publishes against the base it hydrated from.
+  The Worker's late `CommandResult` releases the hold as soon as the upload
+  settles (issue #891), and the reconciler is the backstop once the stop grace
+  lapses.
 
-Every release path takes that order: the graceful `StopServer`, the
-reconciler's `redispatch_stop` replay of it, the `SERVER_NOT_FOUND` release
-those two share when the Worker holds no live instance for the id (issue #2448
-— that is the answer a Worker gives for a *crashed* instance, whose retained
-scratch still holds the crash-window world), and the reconciler's
-stale-assignment arm, which re-drives the final snapshot for a stopped or
-crashed server whose Worker is still connected before it clears (issues
-#1004/#2439). A `HydrateTrigger` is only valid for a stopped server (refreshing
-a running server's working set would corrupt live state).
+Wherever a final snapshot is taken, it precedes the clear: on the graceful
+`StopServer`, on the reconciler's `redispatch_stop` replay of it, on the
+`SERVER_NOT_FOUND` release those two share when the Worker holds no live
+instance for the id (issue #2448 — that is the answer a Worker gives for a
+*crashed* instance, whose retained scratch still holds the crash-window world),
+and on the reconciler's stale-assignment arm for a stopped or crashed server
+whose Worker is still connected (issues #1004/#2439). The remaining legs of that
+arm release with **no** snapshot at all: a disconnected Worker cannot be asked
+for one, and an `unknown` or `stopping` row may still have a live process, so
+there is no settled working set to capture. A `HydrateTrigger` is only valid for
+a stopped server (refreshing a running server's working set would corrupt live
+state).
 
 ---
 
