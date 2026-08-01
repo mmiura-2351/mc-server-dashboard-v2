@@ -15,8 +15,9 @@ cases and authorization Ports faked (NFR-TEST-1, no database). Verifies:
 from __future__ import annotations
 
 import datetime as dt
+import inspect
 import uuid
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 
 import httpx2
 import pytest
@@ -68,6 +69,7 @@ from mc_server_dashboard_api.identity.application.authenticate_request import (
 )
 from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.servers.application.backups import (
+    DownloadBackup,
     ListedBackup,
     RestoreResult,
     download_grant_resource,
@@ -182,7 +184,7 @@ def _app(
     list_: _FakeUseCase | None = None,
     restore: _FakeUseCase | None = None,
     delete: _FakeUseCase | None = None,
-    download: _FakeUseCase | _FakeDownload | None = None,
+    download: _FakeDownload | None = None,
     upload: _FakeUseCase | None = None,
     statistics: _FakeUseCase | None = None,
     global_statistics: _FakeUseCase | None = None,
@@ -588,6 +590,9 @@ _ARCHIVE = b"archive-bytes"
 class _FakeDownload:
     """A download use case over fixed archive bytes, ranged like the real one.
 
+    The two methods mirror :class:`DownloadBackup`'s signatures exactly, down to
+    the ids this double never reads; the test below holds them there.
+
     A fresh stream per call (an async generator is exhausted by its first
     consumer, and one test fetches the same archive twice). ``declared``
     overstates the size so a test can model the archive vanishing under an open
@@ -622,7 +627,13 @@ class _FakeDownload:
         # reached the store rather than being sliced off a full stream (#2372).
         self.ranges: list[tuple[int, int] | None] = []
 
-    async def archive_size(self, **kwargs: object) -> int:
+    async def archive_size(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        backup_id: BackupId,
+    ) -> int:
         if self._error is not None:
             raise self._error
         if self._declared is not None:
@@ -630,8 +641,13 @@ class _FakeDownload:
         return sum(len(chunk) for chunk in self._chunks)
 
     async def archive_stream(
-        self, *, byte_range: tuple[int, int] | None = None, **kwargs: object
-    ) -> object:
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        backup_id: BackupId,
+        byte_range: tuple[int, int] | None = None,
+    ) -> AsyncIterator[bytes]:
         if self._error is not None:
             raise self._error
         if self._stream_error is not None:
@@ -639,7 +655,7 @@ class _FakeDownload:
         self.ranges.append(byte_range)
         return self._stream(byte_range)
 
-    async def _stream(self, byte_range: tuple[int, int] | None) -> object:
+    async def _stream(self, byte_range: tuple[int, int] | None) -> AsyncIterator[bytes]:
         if self._open_error is not None:
             raise self._open_error
         if byte_range is None:
@@ -650,6 +666,36 @@ class _FakeDownload:
             yield b"".join(self._chunks)[first : last + 1]
         if self._mid_stream_error is not None:
             raise self._mid_stream_error
+
+
+def test_the_download_double_has_the_real_use_cases_shape() -> None:
+    # _FakeDownload is the only stand-in for DownloadBackup in this file, so it is
+    # also the only description of that interface a reader gets here. Nothing else
+    # keeps the two in step: when #2382 split the use case into archive_size() +
+    # archive_stream(), the then-current double kept passing because the tests
+    # holding it reject before it is ever called (issue #2384). Comparing the two
+    # directly makes the next such split red here, at the double, instead of
+    # leaving a double that misdescribes what it stands for.
+    #
+    # Names, kinds and defaults only, deliberately not annotations: whether an
+    # annotation comes back as a string or as the type itself is decided by
+    # ``from __future__ import annotations`` in the module that declared it, so
+    # comparing them would redden every method at once the day either module
+    # drops that import — an alarm about nothing, on the one test here whose
+    # whole value is that a red means something.
+    def methods(cls: type) -> dict[str, list[tuple[str, object, object]]]:
+        return {
+            name: [
+                (p.name, p.kind, p.default)
+                for p in inspect.signature(func).parameters.values()
+            ]
+            for name, func in inspect.getmembers(cls, inspect.isfunction)
+            if not name.startswith("_")
+        }
+
+    real = methods(DownloadBackup)
+    assert real, "found no public methods on DownloadBackup to compare against"
+    assert methods(_FakeDownload) == real
 
 
 def _bearer() -> dict[str, str]:
@@ -1133,7 +1179,7 @@ def test_grant_redeemed_download_matches_the_bearer_response() -> None:
 
 def test_grant_is_rejected_after_its_ttl() -> None:
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
-    app = _app(member=True, allow=True, download=_FakeUseCase())
+    app = _app(member=True, allow=True, download=_FakeDownload())
     client = next(_client(app))
     url = _grant_url(community, server, backup, subject=_user)
 
@@ -1144,7 +1190,7 @@ def test_grant_is_rejected_after_its_ttl() -> None:
 
 def test_grant_is_rejected_on_another_backup() -> None:
     community, server = uuid.uuid4(), uuid.uuid4()
-    app = _app(member=True, allow=True, download=_FakeUseCase())
+    app = _app(member=True, allow=True, download=_FakeDownload())
     client = next(_client(app))
     issued = _tokens.issue_download_grant(
         _user.id, download_grant_resource(community, server, uuid.uuid4())
@@ -1160,7 +1206,7 @@ def test_grant_is_rejected_on_another_backup() -> None:
 
 def test_grant_is_rejected_under_another_server_or_community() -> None:
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
-    app = _app(member=True, allow=True, download=_FakeUseCase())
+    app = _app(member=True, allow=True, download=_FakeDownload())
     client = next(_client(app))
     issued = _tokens.issue_download_grant(
         _user.id, download_grant_resource(community, server, backup)
@@ -1179,7 +1225,7 @@ def test_grant_is_rejected_under_another_server_or_community() -> None:
 
 def test_grant_is_not_accepted_as_a_bearer_token() -> None:
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
-    app = _app(member=True, allow=True, download=_FakeUseCase())
+    app = _app(member=True, allow=True, download=_FakeDownload())
     client = next(_client(app))
     issued = _tokens.issue_download_grant(
         _user.id, download_grant_resource(community, server, backup)
@@ -1195,7 +1241,7 @@ def test_grant_is_not_accepted_as_a_bearer_token() -> None:
 
 def test_access_token_is_not_accepted_as_a_grant() -> None:
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
-    app = _app(member=True, allow=True, download=_FakeUseCase())
+    app = _app(member=True, allow=True, download=_FakeDownload())
     client = next(_client(app))
     access = _tokens.issue_access_token(_user.id)
 
@@ -1207,7 +1253,7 @@ def test_access_token_is_not_accepted_as_a_grant() -> None:
 def test_grant_loses_to_a_permission_revoked_after_issuance() -> None:
     # The grant proves identity, never authority: authorization is decided afresh.
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
-    app = _app(member=True, allow=False, download=_FakeUseCase())
+    app = _app(member=True, allow=False, download=_FakeDownload())
     client = next(_client(app))
 
     resp = client.get(_grant_url(community, server, backup, subject=_user))
@@ -1217,7 +1263,7 @@ def test_grant_loses_to_a_permission_revoked_after_issuance() -> None:
 
 def test_grant_loses_to_a_membership_removed_after_issuance() -> None:
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
-    app = _app(member=False, allow=True, download=_FakeUseCase())
+    app = _app(member=False, allow=True, download=_FakeDownload())
     client = next(_client(app))
 
     resp = client.get(_grant_url(community, server, backup, subject=_user))
@@ -1231,7 +1277,7 @@ def test_grant_for_a_deactivated_subject_is_rejected() -> None:
         member=True,
         allow=True,
         subject=make_user(active=False),
-        download=_FakeUseCase(),
+        download=_FakeDownload(),
     )
     client = next(_client(app))
 
@@ -1367,7 +1413,7 @@ def test_cookie_alone_downloads_without_any_grant_in_the_url() -> None:
 
 def test_cookie_is_rejected_after_its_own_ttl() -> None:
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
-    app = _app(member=True, allow=True, download=_FakeUseCase())
+    app = _app(member=True, allow=True, download=_FakeDownload())
     client = next(_client(app))
     headers = _cookie_header(community, server, backup)
 
@@ -1381,7 +1427,7 @@ def test_cookie_is_rejected_on_another_backup() -> None:
     # The Path scope narrows what the browser sends; the signed resource claim is
     # what decides. A cookie replayed onto a sibling resource opens nothing.
     community, server = uuid.uuid4(), uuid.uuid4()
-    app = _app(member=True, allow=True, download=_FakeUseCase())
+    app = _app(member=True, allow=True, download=_FakeDownload())
     client = next(_client(app))
     headers = _cookie_header(community, server, uuid.uuid4())
 
@@ -1394,7 +1440,7 @@ def test_cookie_is_rejected_on_another_backup() -> None:
 
 def test_cookie_is_rejected_under_another_server_or_community() -> None:
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
-    app = _app(member=True, allow=True, download=_FakeUseCase())
+    app = _app(member=True, allow=True, download=_FakeDownload())
     client = next(_client(app))
     headers = _cookie_header(community, server, backup)
 
@@ -1413,7 +1459,7 @@ def test_cookie_is_not_accepted_in_the_query_string() -> None:
     # The separation that keeps the longer-lived credential out of access logs,
     # browser history and any Referer.
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
-    app = _app(member=True, allow=True, download=_FakeUseCase())
+    app = _app(member=True, allow=True, download=_FakeDownload())
     client = next(_client(app))
     value = _tokens.issue_download_cookie(
         _user.id, download_grant_resource(community, server, backup)
@@ -1426,7 +1472,7 @@ def test_cookie_is_not_accepted_in_the_query_string() -> None:
 
 def test_grant_is_not_accepted_as_the_cookie() -> None:
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
-    app = _app(member=True, allow=True, download=_FakeUseCase())
+    app = _app(member=True, allow=True, download=_FakeDownload())
     client = next(_client(app))
     issued = _tokens.issue_download_grant(
         _user.id, download_grant_resource(community, server, backup)
@@ -1442,7 +1488,7 @@ def test_grant_is_not_accepted_as_the_cookie() -> None:
 
 def test_cookie_is_not_accepted_as_a_bearer_token() -> None:
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
-    app = _app(member=True, allow=True, download=_FakeUseCase())
+    app = _app(member=True, allow=True, download=_FakeDownload())
     client = next(_client(app))
     value = _tokens.issue_download_cookie(
         _user.id, download_grant_resource(community, server, backup)
@@ -1460,7 +1506,7 @@ def test_cookie_does_not_rescue_a_rejected_bearer_token() -> None:
     # The header still wins outright: the cookie is a fallback transport for a
     # browser, never a way around a session token the server refused.
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
-    app = _app(member=True, allow=True, download=_FakeUseCase())
+    app = _app(member=True, allow=True, download=_FakeDownload())
     client = next(_client(app))
     headers = _cookie_header(community, server, backup) | {
         "Authorization": "Bearer not-a-token"
@@ -1511,7 +1557,7 @@ def test_a_cookie_naming_an_unknown_user_is_rejected() -> None:
     # Nothing but the signature vouches for the ``sub`` claim, so the row is loaded:
     # a cookie for a user this deployment does not have opens nothing.
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
-    app = _app(member=True, allow=True, download=_FakeUseCase())
+    app = _app(member=True, allow=True, download=_FakeDownload())
     client = next(_client(app))
 
     resp = client.get(
@@ -1530,7 +1576,7 @@ def test_a_cookie_naming_an_unknown_user_is_rejected() -> None:
 def test_cookie_loses_to_a_permission_revoked_after_the_mint() -> None:
     # Identity, never authority — the same posture the grant has.
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
-    app = _app(member=True, allow=False, download=_FakeUseCase())
+    app = _app(member=True, allow=False, download=_FakeDownload())
     client = next(_client(app))
 
     resp = client.get(
@@ -1547,7 +1593,7 @@ def test_cookie_for_a_deactivated_subject_is_rejected() -> None:
         member=True,
         allow=True,
         subject=make_user(active=False),
-        download=_FakeUseCase(),
+        download=_FakeDownload(),
     )
     client = next(_client(app))
 
@@ -1561,7 +1607,7 @@ def test_cookie_for_a_deactivated_subject_is_rejected() -> None:
 
 def test_a_grant_redemption_that_fails_the_gate_mints_no_cookie() -> None:
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
-    app = _app(member=True, allow=False, download=_FakeUseCase())
+    app = _app(member=True, allow=False, download=_FakeDownload())
     client = next(_client(app))
 
     resp = client.get(_grant_url(community, server, backup, subject=_user))
@@ -1613,7 +1659,7 @@ def test_a_download_with_no_credential_at_all_is_401_before_the_path_is_parsed()
     # Reading the cookie must not pull the resource composition ahead of the
     # no-credential 401: composing it parses the path ids, which would turn this
     # into a 422 (issue #630's re-raise) instead of the 401 it has always been.
-    app = _app(member=True, allow=True, download=_FakeUseCase())
+    app = _app(member=True, allow=True, download=_FakeDownload())
     client = next(_client(app))
 
     resp = client.get(
