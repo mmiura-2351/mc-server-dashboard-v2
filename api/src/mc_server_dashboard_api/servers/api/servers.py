@@ -67,6 +67,7 @@ from mc_server_dashboard_api.dependencies import (
 )
 from mc_server_dashboard_api.http_content_disposition import content_disposition
 from mc_server_dashboard_api.http_datetime import UtcDatetime
+from mc_server_dashboard_api.http_head import head_response
 from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.identity.domain.token_service import TokenService
 from mc_server_dashboard_api.identity.domain.value_objects import (
@@ -160,6 +161,15 @@ _SERVER_RESOURCE_TYPE = "server"
 # How much of the multipart import body to pull per chunk while counting it
 # against the upload cap (the bounded-read loop in ``_read_capped_upload``).
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
+
+# A whole-server export is a streamed zip; the HEAD probe declares the same type.
+_EXPORT_MEDIA_TYPE = "application/zip"
+
+# Named once because two decorators register it: Starlette does not synthesize
+# HEAD from a GET route, so the probe has to be declared (issue #2383). Both
+# registrations point at the same endpoint function, so the gate, the headers and
+# the error mapping cannot drift apart between the two methods.
+_EXPORT_PATH = "/communities/{community_id}/servers/{server_id}/export"
 
 
 def _export_grant_resource(request: Request) -> str:
@@ -697,8 +707,10 @@ async def list_sessions(
     )
 
 
-@router.get("/communities/{community_id}/servers/{server_id}/export")
+@router.get(_EXPORT_PATH)
+@router.head(_EXPORT_PATH)
 async def export_server(
+    request: Request,
     community_id: uuid.UUID,
     server_id: uuid.UUID,
     authorized: Annotated[
@@ -733,8 +745,14 @@ async def export_server(
     -- a pasted grant link, a CLI fetch -- does not save the last path segment,
     ``export``. A server name is free-form, so the header is built by the shared
     hardened helper (RFC 5987 ``filename*``, no traversal, no injection).
+
+    **Probe** (issue #2383): a ``HEAD`` answers with the ``GET``'s status and
+    headers and no body -- notably *no* ``Content-Length``, since the ``GET``
+    declares none either. It is the same endpoint behind the same gate; only the
+    zip stream and the audit record are skipped.
     """
 
+    probing = request.method == "HEAD"
     try:
         export = await use_case(
             community_id=CommunityId(community_id),
@@ -743,22 +761,33 @@ async def export_server(
     except ServerNotFoundError as exc:
         raise _not_found() from exc
     except ServerFilesUnsettledError as exc:
-        await _record_denied(
-            recorder, ops.SERVER_EXPORT, authorized, community_id, server_id
-        )
+        if not probing:
+            await _record_denied(
+                recorder, ops.SERVER_EXPORT, authorized, community_id, server_id
+            )
         raise _conflict("server_unsettled") from exc
+    headers = {
+        "Content-Disposition": content_disposition(f"{export.server_name}.zip"),
+        # A per-user body is never stored, whichever credential fetched it
+        # (issue #2491): a cookie-authenticated request carries no
+        # ``Authorization``, so RFC 9111 Section 3.5's default protection from
+        # shared caches does not cover it.
+        "Cache-Control": "no-store",
+    }
+    if probing:
+        # ``export.stream`` is a lazy generator -- the working-set walk, the zip
+        # sink and the snapshot lease all live inside its body -- so leaving it
+        # unconsumed is the probe doing none of the export's work.
+        return head_response(media_type=_EXPORT_MEDIA_TYPE, headers=headers)
+    # Only the GET reaches here, and deliberately so: a HEAD returned above
+    # unrecorded (issue #2383). A metadata probe is not an export -- neither a
+    # successful one nor, in the branch above, a refused one -- and recording it
+    # identically would inflate the server:export counts.
     await _record(recorder, ops.SERVER_EXPORT, authorized, community_id, server_id)
     return StreamingResponse(
         export.stream,
-        media_type="application/zip",
-        headers={
-            "Content-Disposition": content_disposition(f"{export.server_name}.zip"),
-            # A per-user body is never stored, whichever credential fetched it
-            # (issue #2491): a cookie-authenticated request carries no
-            # ``Authorization``, so RFC 9111 Section 3.5's default protection from
-            # shared caches does not cover it.
-            "Cache-Control": "no-store",
-        },
+        media_type=_EXPORT_MEDIA_TYPE,
+        headers=headers,
     )
 
 

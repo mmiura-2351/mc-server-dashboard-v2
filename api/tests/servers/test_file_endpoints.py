@@ -2113,3 +2113,154 @@ def test_file_download_declares_no_store_under_every_credential(
     for resp in (with_bearer, with_cookie, with_grant):
         assert resp.status_code == 200
         assert resp.headers["cache-control"] == "no-store"
+
+
+# --- the HEAD probe (issue #2383) ------------------------------------------
+#
+# A download client asks HEAD first, to learn what the transfer would be before
+# starting it. Per credential and per branch, like the Cache-Control section
+# above: the gate is what a future auth change could silently drop a route from.
+
+
+@pytest.mark.parametrize(("path", "is_dir"), [("world", True), ("level.dat", False)])
+def test_file_head_answers_the_gets_headers_under_every_credential(
+    path: str, is_dir: bool
+) -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(
+        member=True,
+        allow=True,
+        download=_FakeDownload(
+            is_dir=is_dir, zip_chunks=[b"PK"], file_content=b"level-bytes"
+        ),
+    )
+    client = next(_client(app))
+    url = _url(community, server, "/download")
+    cookie = _file_cookie_header(community, server, path)
+    # Last, because redeeming a grant mints the cookie into the client's jar.
+    grant_url = _file_grant_url(community, server, path, subject=_user)
+
+    probes = [
+        client.head(url, params={"path": path}, headers=_bearer()),
+        client.head(url, params={"path": path}, headers=cookie),
+        client.head(grant_url),
+    ]
+    served = client.get(url, params={"path": path}, headers=_bearer())
+
+    for resp in probes:
+        assert resp.status_code == served.status_code == 200
+        # A HEAD carries the GET's headers and none of its bytes.
+        assert resp.content == b""
+        for name in ("content-type", "content-disposition", "cache-control"):
+            assert resp.headers[name] == served.headers[name], name
+        # The directory zip is built incrementally, so the GET declares no
+        # length; a probe that answered "0" would tell the client it is empty.
+        assert resp.headers.get("content-length") == served.headers.get(
+            "content-length"
+        )
+
+
+@pytest.mark.parametrize(("path", "is_dir"), [("world", True), ("level.dat", False)])
+def test_file_head_neither_opens_the_download_nor_records_one(
+    path: str, is_dir: bool
+) -> None:
+    # Returning the right headers is easy; doing it without opening the bytes is
+    # the point of the probe (issue #2383). And a probe is not a download, so it
+    # records nothing: an audited HEAD would inflate the file:download count.
+    community, server = uuid.uuid4(), uuid.uuid4()
+    download = _FakeDownload(
+        is_dir=is_dir, zip_chunks=[b"PK"], file_content=b"level-bytes"
+    )
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, download=download, recorder=recorder)
+    client = next(_client(app))
+
+    resp = client.head(
+        _url(community, server, "/download"), params={"path": path}, headers=_bearer()
+    )
+
+    assert resp.status_code == 200
+    # Only the cheap probes ran: never dir_zip, never file_stream.
+    assert download.calls == (["is_dir"] if is_dir else ["is_dir", "file_size"])
+    assert recorder.events == []
+
+
+def test_file_head_of_a_running_server_is_409_and_records_nothing() -> None:
+    # The GET records file:download DENIED here; the probe does not, for the same
+    # reason it does not record a success — it is not a download attempt.
+    community, server = uuid.uuid4(), uuid.uuid4()
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        download=_FakeDownload(error=ServerFilesUnsettledError("x")),
+        recorder=recorder,
+    )
+    client = next(_client(app))
+
+    resp = client.head(
+        _url(community, server, "/download"),
+        params={"path": "world"},
+        headers=_bearer(),
+    )
+
+    assert resp.status_code == 409
+    assert recorder.events == []
+
+
+def _download_credential(
+    kind: str, community: uuid.UUID, server: uuid.UUID, path: str
+) -> tuple[str, dict[str, str] | None, dict[str, str]]:
+    """The download URL, query and headers for one of the three transports.
+
+    The grant URL already carries the ``?path=`` it was bound to, so its query is
+    ``None`` rather than an empty dict — httpx drops the URL's own parameters when
+    a ``params`` mapping is passed.
+    """
+
+    url = _url(community, server, "/download")
+    if kind == "bearer":
+        return url, {"path": path}, _bearer()
+    if kind == "cookie":
+        return url, {"path": path}, _file_cookie_header(community, server, path)
+    return _file_grant_url(community, server, path, subject=_user), None, {}
+
+
+@pytest.mark.parametrize("kind", ["bearer", "cookie", "grant"])
+@pytest.mark.parametrize(
+    ("member", "allow", "error", "expected"),
+    [
+        (True, True, None, 200),
+        (False, True, None, 404),
+        (True, False, None, 403),
+        (True, True, ServerFileNotFoundError("x"), 404),
+        (True, True, InvalidFilePathError("x", reason="symlink_refused"), 422),
+        (True, True, ServerFilesUnsettledError("x"), 409),
+    ],
+)
+def test_file_head_is_answered_exactly_like_the_get(
+    kind: str, member: bool, allow: bool, error: Exception | None, expected: int
+) -> None:
+    # A HEAD that skipped or weakened a check would be a security defect, not a
+    # convenience gap. Every credential must be refused on the probe exactly
+    # where it is refused on the download.
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(
+        member=member, allow=allow, download=_FakeDownload(is_dir=True, error=error)
+    )
+    url, params, headers = _download_credential(kind, community, server, "world")
+
+    probed = next(_client(app)).head(url, params=params, headers=headers)
+    served = next(_client(app)).get(url, params=params, headers=headers)
+
+    assert probed.status_code == served.status_code == expected
+
+
+def test_file_head_without_credentials_is_401() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download=_FakeDownload(is_dir=True))
+    client = next(_client(app))
+
+    resp = client.head(_url(community, server, "/download"), params={"path": "world"})
+
+    assert resp.status_code == 401

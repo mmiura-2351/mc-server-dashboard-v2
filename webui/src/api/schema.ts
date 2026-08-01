@@ -790,13 +790,47 @@ export interface paths {
          *     browser's retry once the grant's own short window has closed (issue #2373).
          *     Whichever credential arrives, the same ``backup:read`` gate decides and the
          *     response body is identical.
+         *
+         *     **Probe** (issue #2383): a ``HEAD`` answers with the ``GET``'s status and
+         *     headers and no body, so a client learns the size and that resumption is
+         *     offered without starting a transfer. It is the same endpoint behind the same
+         *     gate; only the archive stream and the audit record are skipped.
          */
         get: operations["download_backup_api_communities__community_id__servers__server_id__backups__backup_id__download_get"];
         put?: never;
         post?: never;
         delete?: never;
         options?: never;
-        head?: never;
+        /**
+         * Download Backup
+         * @description Stream a backup archive in its native ``tar.gz`` format (backup:read, #281).
+         *
+         *     No recompression: the exact stored bytes stream out with a ``.tar.gz``
+         *     attachment. An unknown / cross-community backup is 404 (no existence signal).
+         *
+         *     The response declares the archive's exact size as ``Content-Length``, so a
+         *     client can show download progress and refuse an over-cap archive up front.
+         *
+         *     **Resumable** (issue #2372): the response declares ``Accept-Ranges: bytes``
+         *     and an ``ETag``, and a single ``Range`` request is served as ``206`` over a
+         *     ranged read of the stored bytes — a multi-GB archive is never re-read from
+         *     the start to serve its tail. An interrupted transfer therefore resumes
+         *     instead of restarting.
+         *
+         *     The caller authenticates with the usual Bearer access token, or — for a
+         *     browser that cannot set a header on a plain navigation — with a short-lived
+         *     ``?grant=`` minted by ``POST .../download-grant`` (issue #2313). Redeeming a
+         *     grant also sets an httpOnly download cookie, which is what authenticates the
+         *     browser's retry once the grant's own short window has closed (issue #2373).
+         *     Whichever credential arrives, the same ``backup:read`` gate decides and the
+         *     response body is identical.
+         *
+         *     **Probe** (issue #2383): a ``HEAD`` answers with the ``GET``'s status and
+         *     headers and no body, so a client learns the size and that resumption is
+         *     offered without starting a transfer. It is the same endpoint behind the same
+         *     gate; only the archive stream and the audit record are skipped.
+         */
+        head: operations["download_backup_api_communities__community_id__servers__server_id__backups__backup_id__download_head"];
         patch?: never;
         trace?: never;
     };
@@ -1009,13 +1043,49 @@ export interface paths {
          *     -- a pasted grant link, a CLI fetch -- does not save the last path segment,
          *     ``export``. A server name is free-form, so the header is built by the shared
          *     hardened helper (RFC 5987 ``filename*``, no traversal, no injection).
+         *
+         *     **Probe** (issue #2383): a ``HEAD`` answers with the ``GET``'s status and
+         *     headers and no body -- notably *no* ``Content-Length``, since the ``GET``
+         *     declares none either. It is the same endpoint behind the same gate; only the
+         *     zip stream and the audit record are skipped.
          */
         get: operations["export_server_api_communities__community_id__servers__server_id__export_get"];
         put?: never;
         post?: never;
         delete?: never;
         options?: never;
-        head?: never;
+        /**
+         * Export Server
+         * @description Export a whole server as a streamed ZIP at rest (issue #274).
+         *
+         *     Gated by ``file:read``: an export is a bulk read of the whole working set, so
+         *     it reuses the file-read permission (and the per-resource grant) rather than a
+         *     dedicated code -- the same permission the directory download uses. At rest only
+         *     (Section 6.9): a running server is 409 ``server_unsettled`` (the authoritative
+         *     copy is only well-defined at rest). The zip carries the working set plus an
+         *     ``export_metadata.json`` descriptor. Recorded under ``server:export``.
+         *
+         *     The zip is built incrementally, so it carries no ``Content-Length`` and a
+         *     browser cannot cap it up front; a multi-GB export is therefore fetched as a
+         *     plain navigation to a URL carrying a short-lived ``?grant=`` minted by
+         *     ``POST .../export/download-grant`` instead of being buffered into a Blob to
+         *     attach a Bearer header (issue #2352). Redeeming a grant also sets an httpOnly
+         *     download cookie, which authenticates the browser's retry of an interrupted
+         *     transfer once the grant's own window has closed (issue #2373). Every
+         *     credential runs the same ``file:read`` gate, and the response is identical.
+         *
+         *     The response names itself ``{server name}.zip`` via ``Content-Disposition``
+         *     (issue #2357), so a client that navigates the URL without supplying a filename
+         *     -- a pasted grant link, a CLI fetch -- does not save the last path segment,
+         *     ``export``. A server name is free-form, so the header is built by the shared
+         *     hardened helper (RFC 5987 ``filename*``, no traversal, no injection).
+         *
+         *     **Probe** (issue #2383): a ``HEAD`` answers with the ``GET``'s status and
+         *     headers and no body -- notably *no* ``Content-Length``, since the ``GET``
+         *     declares none either. It is the same endpoint behind the same gate; only the
+         *     zip stream and the audit record are skipped.
+         */
+        head: operations["export_server_api_communities__community_id__servers__server_id__export_head"];
         patch?: never;
         trace?: never;
     };
@@ -1146,13 +1216,42 @@ export interface paths {
          *     download cookie, which authenticates the browser's retry of an interrupted
          *     transfer once the grant's own window has closed (issue #2373). Every
          *     credential runs the same ``file:read`` gate, and the response is identical.
+         *
+         *     **Probe** (issue #2383): a ``HEAD`` answers with the ``GET``'s status and
+         *     headers and no body — a single file's ``Content-Length`` when it is known, and
+         *     none at all for the incrementally built directory zip, exactly as the ``GET``
+         *     declares them. It is the same endpoint behind the same gate; only the bytes
+         *     and the audit record are skipped.
          */
         get: operations["download_file_api_communities__community_id__servers__server_id__files_download_get"];
         put?: never;
         post?: never;
         delete?: never;
         options?: never;
-        head?: never;
+        /**
+         * Download File
+         * @description Download a file (bytes) or a directory (streamed zip) at rest (file:read).
+         *
+         *     At rest only (Section 6.9): a running server is 409 ``server_unsettled``. A
+         *     directory streams as a zip built incrementally over the Storage read stream
+         *     (bounded memory); a file streams its bytes with an attachment disposition.
+         *
+         *     The directory zip is built incrementally, so it carries no ``Content-Length``
+         *     and a browser cannot cap it up front; a multi-GB ``world`` is therefore fetched
+         *     as a plain navigation to a URL carrying a short-lived ``?grant=`` minted by
+         *     ``POST .../files/download-grant`` instead of being buffered into a Blob to
+         *     attach a Bearer header (issue #2352). Redeeming a grant also sets an httpOnly
+         *     download cookie, which authenticates the browser's retry of an interrupted
+         *     transfer once the grant's own window has closed (issue #2373). Every
+         *     credential runs the same ``file:read`` gate, and the response is identical.
+         *
+         *     **Probe** (issue #2383): a ``HEAD`` answers with the ``GET``'s status and
+         *     headers and no body — a single file's ``Content-Length`` when it is known, and
+         *     none at all for the incrementally built directory zip, exactly as the ``GET``
+         *     declares them. It is the same endpoint behind the same gate; only the bytes
+         *     and the audit record are skipped.
+         */
+        head: operations["download_file_api_communities__community_id__servers__server_id__files_download_head"];
         patch?: never;
         trace?: never;
     };
@@ -5855,6 +5954,41 @@ export interface operations {
             };
         };
     };
+    download_backup_api_communities__community_id__servers__server_id__backups__backup_id__download_head: {
+        parameters: {
+            query?: {
+                grant?: string | null;
+            };
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+                backup_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     issue_backup_download_grant_api_communities__community_id__servers__server_id__backups__backup_id__download_grant_post: {
         parameters: {
             query?: never;
@@ -6160,6 +6294,40 @@ export interface operations {
             };
         };
     };
+    export_server_api_communities__community_id__servers__server_id__export_head: {
+        parameters: {
+            query?: {
+                grant?: string | null;
+            };
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     issue_export_download_grant_api_communities__community_id__servers__server_id__export_download_grant_post: {
         parameters: {
             query?: never;
@@ -6328,6 +6496,41 @@ export interface operations {
         };
     };
     download_file_api_communities__community_id__servers__server_id__files_download_get: {
+        parameters: {
+            query?: {
+                path?: string;
+                grant?: string | null;
+            };
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    download_file_api_communities__community_id__servers__server_id__files_download_head: {
         parameters: {
             query?: {
                 path?: string;

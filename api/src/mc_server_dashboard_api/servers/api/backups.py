@@ -50,6 +50,7 @@ from mc_server_dashboard_api.dependencies import (
 )
 from mc_server_dashboard_api.http_content_disposition import content_disposition
 from mc_server_dashboard_api.http_datetime import UtcDatetime
+from mc_server_dashboard_api.http_head import head_response
 from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.http_range import (
     ByteRange,
@@ -116,6 +117,14 @@ _UPLOAD_CHUNK_BYTES = 1024 * 1024
 # Backups are self-contained gzip tar archives (STORAGE.md Section 2); download
 # streams the native bytes with this content type and a ``.tar.gz`` attachment.
 _BACKUP_MEDIA_TYPE = "application/gzip"
+
+# Named once because two decorators register it: Starlette does not synthesize
+# HEAD from a GET route, so the probe has to be declared (issue #2383). Both
+# registrations point at the same endpoint function, so the gate, the headers and
+# the error mapping cannot drift apart between the two methods.
+_DOWNLOAD_PATH = (
+    "/communities/{community_id}/servers/{server_id}/backups/{backup_id}/download"
+)
 
 
 def _grant_resource(request: Request) -> str:
@@ -661,9 +670,8 @@ async def delete_backup(
     await _record(recorder, ops.BACKUP_DELETE, authorized, community_id, backup_id)
 
 
-@router.get(
-    "/communities/{community_id}/servers/{server_id}/backups/{backup_id}/download",
-)
+@router.get(_DOWNLOAD_PATH)
+@router.head(_DOWNLOAD_PATH)
 async def download_backup(
     request: Request,
     community_id: uuid.UUID,
@@ -697,6 +705,11 @@ async def download_backup(
     browser's retry once the grant's own short window has closed (issue #2373).
     Whichever credential arrives, the same ``backup:read`` gate decides and the
     response body is identical.
+
+    **Probe** (issue #2383): a ``HEAD`` answers with the ``GET``'s status and
+    headers and no body, so a client learns the size and that resumption is
+    offered without starting a transfer. It is the same endpoint behind the same
+    gate; only the archive stream and the audit record are skipped.
     """
 
     try:
@@ -716,6 +729,19 @@ async def download_backup(
         # committed — and stays the short body the route's byte count already fails.
         raise _service_unavailable("storage_unavailable") from exc
     etag = _archive_etag(backup_id, size_bytes)
+    if request.method == "HEAD":
+        # Returning before the open is what the probe is for (issue #2383): it
+        # must not make the store locate the archive — nor, on the filesystem
+        # backend, hold a descriptor to it — for a caller that asked for no bytes.
+        #
+        # Range is not consulted: RFC 9110 Section 14.2 requires a server to
+        # ignore it on any method whose range handling is not defined, and GET is
+        # the only method for which it is. So the probe is always answered over
+        # the whole archive, including where a GET would have answered 416.
+        return head_response(
+            media_type=_BACKUP_MEDIA_TYPE,
+            headers=_download_headers(backup_id, declared=size_bytes, etag=etag),
+        )
     served = _served_range(request, size_bytes, etag)
     try:
         stream = await use_case.archive_stream(
@@ -744,20 +770,15 @@ async def download_backup(
         # wire, so an outage that begins after the size probe can still choose the
         # same retryable 503 that probe answers with (issue #2378).
         raise _service_unavailable("storage_unavailable") from exc
+    # Only the GET reaches here, and deliberately so: a HEAD returned above
+    # unrecorded (issue #2383). A metadata probe is not a download, and recording
+    # one identically would inflate the backup:download count.
     await _record(recorder, ops.BACKUP_DOWNLOAD, authorized, community_id, backup_id)
-    # Starlette populates no Content-Length for a streaming body, so without an
-    # explicit header the response is chunked (issue #2312). The declared value is
-    # the archive size from the store, or — for a 206 — the requested range's
-    # length; either way it equals the streamed byte count, and a length that
-    # disagrees corrupts or hangs the response over HTTP/2.
+    # The declared value is the archive size from the store, or — for a 206 — the
+    # requested range's length; either way it equals the streamed byte count, and
+    # a length that disagrees corrupts or hangs the response over HTTP/2.
     declared = size_bytes if served is None else served.length
-    headers = {
-        "Content-Disposition": content_disposition(f"{backup_id}.tar.gz"),
-        "Content-Length": str(declared),
-        "Cache-Control": "no-store",
-        "Accept-Ranges": "bytes",
-        "ETag": etag,
-    }
+    headers = _download_headers(backup_id, declared=declared, etag=etag)
     if served is not None:
         headers["Content-Range"] = f"bytes {served.start}-{served.end}/{size_bytes}"
     # Fail the response if the body ends below the declared length (issue #2318).
@@ -969,6 +990,27 @@ async def _read_capped_upload(file: UploadFile) -> bytes:
             raise _too_large()
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+def _download_headers(
+    backup_id: uuid.UUID, *, declared: int, etag: str
+) -> dict[str, str]:
+    """The archive download's headers, shared by the GET and its HEAD probe.
+
+    One source for both, so a probe cannot come to answer with a different header
+    set than the download it is probing (issue #2383).
+
+    Starlette populates no ``Content-Length`` for a streaming body, so without the
+    explicit header the response would be chunked (issue #2312).
+    """
+
+    return {
+        "Content-Disposition": content_disposition(f"{backup_id}.tar.gz"),
+        "Content-Length": str(declared),
+        "Cache-Control": "no-store",
+        "Accept-Ranges": "bytes",
+        "ETag": etag,
+    }
 
 
 def _archive_etag(backup_id: uuid.UUID, size_bytes: int) -> str:
