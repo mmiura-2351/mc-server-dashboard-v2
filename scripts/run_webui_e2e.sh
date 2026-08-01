@@ -141,7 +141,13 @@ for _ in $(seq 1 60); do
     cat "$UVICORN_LOG" >&2
     exit 1
   fi
-  if curl -fsS "$API_URL/api/healthz" 2>/dev/null | grep -q '"ok":true'; then
+  # Captured, then matched. Piping into `grep -q` lets it exit at the match with
+  # `curl` still writing, and pipefail reads the resulting SIGPIPE as "not
+  # ready" -- mechanism in scripts/test_shell_pipefail.sh (#2465). The
+  # `|| health=""` keeps a pre-ready `curl -fsS` failure non-fatal under
+  # `set -e`, which the pipeline did for free; an empty body matches nothing.
+  health="$(curl -fsS "$API_URL/api/healthz" 2>/dev/null)" || health=""
+  if grep -q '"ok":true' <<< "$health"; then
     ready=1
     break
   fi

@@ -111,7 +111,12 @@ jobs:
           # degraded (with ok=false), so assert the body reports ok=true.
           ready=
           for _ in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:8000/api/healthz 2>/dev/null | grep -q '"ok":true'; then
+            # Captured, then matched -- piping into `grep -q` lets the pipefail
+            # set above read a SIGPIPE'd curl as "not ready" (#2465, mechanism in
+            # scripts/test_shell_pipefail.sh). `|| health=""` keeps a pre-ready
+            # curl failure non-fatal under `set -e`, as the pipeline did.
+            health="$(curl -fsS http://127.0.0.1:8000/api/healthz 2>/dev/null)" || health=""
+            if grep -q '"ok":true' <<< "$health"; then
               ready=1
               break
             fi

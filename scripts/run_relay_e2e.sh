@@ -146,7 +146,13 @@ API_URL="http://127.0.0.1:${API_PORT}"
 echo "==> waiting for the API to be ready ($API_URL)"
 ready=
 for _ in $(seq 1 90); do
-  if curl -fsS "$API_URL/api/healthz" 2>/dev/null | grep -q '"ok":true'; then
+  # Captured, then matched. Piping into `grep -q` lets it exit at the match with
+  # `curl` still writing, and pipefail reads the resulting SIGPIPE as "not
+  # ready" -- mechanism in scripts/test_shell_pipefail.sh (#2465). The
+  # `|| health=""` keeps a pre-ready `curl -fsS` failure non-fatal under
+  # `set -e`, which the pipeline did for free; an empty body matches nothing.
+  health="$(curl -fsS "$API_URL/api/healthz" 2>/dev/null)" || health=""
+  if grep -q '"ok":true' <<< "$health"; then
     ready=1
     break
   fi
@@ -165,8 +171,12 @@ echo "==> waiting for the relay to register (it learns base_domain from the API)
 # registration unless we wait for this exact line.
 relay_ready=
 for _ in $(seq 1 30); do
-  if "${COMPOSE[@]}" --env-file "$ENV_FILE" logs --tail=200 relay 2>/dev/null \
-      | grep -q "relay registered with API"; then
+  # Polled, not one-shot, so a lost SIGPIPE race costs a second rather than the
+  # run -- but this is the most exposed of the sites #2465 lists: the
+  # registration line lands early and up to 200 lines follow it, so `grep -q`
+  # exits with most of the log still unwritten.
+  relay_log="$("${COMPOSE[@]}" --env-file "$ENV_FILE" logs --tail=200 relay 2>/dev/null)" || relay_log=""
+  if grep -q "relay registered with API" <<< "$relay_log"; then
     relay_ready=1
     break
   fi

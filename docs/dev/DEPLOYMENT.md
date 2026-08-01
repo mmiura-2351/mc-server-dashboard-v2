@@ -1049,7 +1049,7 @@ container was replaced, so the existing stamp still describes what is running.
 > docker run --rm --entrypoint sh \
 >   -v mc-server-dashboard-v2_db-data:/src:ro -v "$(pwd)/..":/out postgres:17 \
 >   -c 'tar czf /out/db-data-pg17.tar.gz -C /src .'
-> tar tzf ../db-data-pg17.tar.gz | grep -q PG_VERSION
+> tar tzf ../db-data-pg17.tar.gz | grep PG_VERSION   # prints it, or the archive is bad
 > docker volume rm mc-server-dashboard-v2_db-data
 >
 > # 3. Start the 18 db on a fresh volume (step 0 already put its compose.yaml

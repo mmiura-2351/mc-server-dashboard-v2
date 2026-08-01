@@ -148,7 +148,14 @@ echo "=== post-checkout tests ==="
 		cd "$repo"
 		bash "$HOOK" "$main_sha" "$feature_sha" "1" 2>&1 >/dev/null
 	)"
-	if echo "$out" | grep -q "AUTO-RESTORE"; then
+	# A here-string rather than a pipe, here and at the two banner assertions
+	# below: `grep -q` exits at its first match, so the `echo` feeding it can
+	# still be mid-write and take SIGPIPE, and `pipefail` (set above) turns that
+	# 141 into the pipeline's status -- the assertion then reports the banner
+	# missing BECAUSE it was found (#2447, #2465). What is matched is unchanged:
+	# `echo "$out"` and `<<< "$out"` both present "$out" plus one newline, and
+	# the pattern is a plain substring either way.
+	if grep -q "AUTO-RESTORE" <<< "$out"; then
 		ok "clean tree: auto-restore message printed"
 	else
 		fail_test "clean tree: missing AUTO-RESTORE in output: $out"
@@ -195,7 +202,10 @@ echo "=== post-checkout tests ==="
 		cd "$repo"
 		bash "$HOOK" "$main_sha" "$feature_sha" "1" 2>&1 >/dev/null || true
 	)"
-	if echo "$out" | grep -q "ERROR"; then
+	# This is the case that flaked in #2344 -- red once with the ERROR banner
+	# visibly present in the very output the failure message printed. Measured
+	# on the real banner: 5 inversions in 20000, exit status 141.
+	if grep -q "ERROR" <<< "$out"; then
 		ok "dirty tree: ERROR message printed"
 	else
 		fail_test "dirty tree: missing ERROR in output: $out"
@@ -232,7 +242,7 @@ echo "=== post-checkout tests ==="
 		cd "$repo"
 		MCSD_ALLOW_PRIMARY_BRANCH=1 bash "$HOOK" "$main_sha" "$feature_sha" "1" 2>&1 >/dev/null
 	)"
-	if echo "$out" | grep -q "NOTICE"; then
+	if grep -q "NOTICE" <<< "$out"; then
 		ok "MCSD_ALLOW_PRIMARY_BRANCH=1: NOTICE message printed"
 	else
 		fail_test "MCSD_ALLOW_PRIMARY_BRANCH=1: missing NOTICE in output: $out"
