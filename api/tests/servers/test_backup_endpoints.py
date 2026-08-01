@@ -590,6 +590,9 @@ _ARCHIVE = b"archive-bytes"
 class _FakeDownload:
     """A download use case over fixed archive bytes, ranged like the real one.
 
+    The two methods mirror :class:`DownloadBackup`'s signatures exactly, ids they
+    do not need included; the test below holds them there.
+
     A fresh stream per call (an async generator is exhausted by its first
     consumer, and one test fetches the same archive twice). ``declared``
     overstates the size so a test can model the archive vanishing under an open

@@ -557,9 +557,9 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   GB, so the tab mints a short-lived self-authenticating URL
   (`POST …/backups/{bid}/download-grant`, #2313;
   `POST …/{sid}/export/download-grant` and
-  `POST …/{sid}/files/download-grant?path=…`, #2352 — all live for
-  `auth.token.download_grant_ttl_seconds`) and clicks an `<a download>` at
-  it — same-origin (7.7), so the browser saves the
+  `POST …/{sid}/files/download-grant?path=…`, #2352 — all with the
+  `auth.token.download_grant_ttl_seconds` TTL) and clicks
+  an `<a download>` at it — same-origin (7.7), so the browser saves the
   response natively with no size ceiling and no bytes read by the application
   (#2314, #2353, #2354). The grant is minted on click, never on render or on
   selection, and the `download` attribute names the file — redundant but
