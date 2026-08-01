@@ -7,6 +7,8 @@ fake :class:`JarFetcher` / :class:`JarPool` hold bytes in memory.
 
 from __future__ import annotations
 
+import datetime as dt
+
 from mc_server_dashboard_api.versions.domain.fetcher import (
     FetchError,
     FetchNotFoundError,
@@ -124,6 +126,12 @@ class FakeJarPool(JarPool):
     def __init__(self) -> None:
         self.stored: dict[str, bytes] = {}
         self.put_calls = 0
+        # Each ``delete`` call, including the ones for keys already gone.
+        self.deleted: list[str] = []
+        # Store time per content key, as ``list_entries`` reports it. A JAR
+        # seeded straight into ``stored`` has none and is reported as stored
+        # just now; the GC tests set it to age a JAR past the safety window.
+        self.modified_at: dict[str, dt.datetime] = {}
 
     async def has(self, sha256: str) -> bool:
         return sha256 in self.stored
@@ -143,16 +151,17 @@ class FakeJarPool(JarPool):
         )
 
     async def list_entries(self) -> list[PoolEntry]:
-        import datetime as dt
-
+        now = dt.datetime.now(dt.UTC)
         return [
             PoolEntry(
                 sha256=key,
                 size_bytes=len(data),
-                modified_at=dt.datetime.now(dt.UTC),
+                modified_at=self.modified_at.get(key, now),
             )
             for key, data in self.stored.items()
         ]
 
     async def delete(self, sha256: str) -> None:
+        self.deleted.append(sha256)
         self.stored.pop(sha256, None)
+        self.modified_at.pop(sha256, None)
