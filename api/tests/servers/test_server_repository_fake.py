@@ -191,6 +191,26 @@ async def test_seed_stores_a_copy_the_caller_cannot_rewrite() -> None:
     assert stored.backup_retention == _RETENTION
 
 
+async def test_update_backup_retention_stores_a_copy_of_the_policy() -> None:
+    # The narrow single-column writer (issue #1841) takes a raw dict rather than
+    # an entity, so it does not run through ``_copy`` -- but the adapter
+    # serializes the jsonb value whole and immediately, so the caller's dict must
+    # not stay reachable from the row either.
+    repo = FakeServerRepository()
+    server = _server()
+    repo.seed(server)
+    # Deliberately NOT ``_RETENTION``: a distinct value means the assertion
+    # below fails if the narrow write were skipped, not only if it aliased.
+    policy: dict[str, Any] = {"keep_last": 5, "nested": {"k": 7}}
+
+    await repo.update_backup_retention(server.id, policy)
+
+    stored = repo.by_id[server.id]
+    policy["keep_last"] = 99
+    policy["nested"]["k"] = 99
+    assert stored.backup_retention == {"keep_last": 5, "nested": {"k": 7}}
+
+
 async def test_get_by_id_hands_out_a_copy_the_caller_cannot_write_through() -> None:
     repo = FakeServerRepository()
     server = _server()

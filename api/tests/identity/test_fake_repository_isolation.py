@@ -39,7 +39,7 @@ from tests.identity.fakes import (
 _NOW = dt.datetime(2026, 6, 4, tzinfo=dt.UTC)
 
 
-async def test_user_seed_stores_a_copy_the_caller_cannot_rewrite() -> None:
+def test_user_seed_stores_a_copy_the_caller_cannot_rewrite() -> None:
     repo = FakeUserRepository()
     user = make_user()
 

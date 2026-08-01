@@ -97,7 +97,7 @@ def _backup() -> Backup:
     )
 
 
-async def test_backup_seed_stores_a_copy_the_caller_cannot_rewrite() -> None:
+def test_backup_seed_stores_a_copy_the_caller_cannot_rewrite() -> None:
     repo = FakeBackupRepository()
     backup = _backup()
 
@@ -188,7 +188,7 @@ def _assert_plugin_unchanged(plugin: ServerPlugin) -> None:
     assert plugin.catalog_dependencies == [{"project_id": "cdep", "required": True}]
 
 
-async def test_plugin_seed_stores_a_copy_the_caller_cannot_rewrite() -> None:
+def test_plugin_seed_stores_a_copy_the_caller_cannot_rewrite() -> None:
     repo = FakePluginRepository()
     plugin = _plugin()
 
@@ -254,7 +254,7 @@ def _group() -> PlayerGroup:
     )
 
 
-async def test_group_seed_stores_a_copy_the_caller_cannot_rewrite() -> None:
+def test_group_seed_stores_a_copy_the_caller_cannot_rewrite() -> None:
     # ``add`` / ``save`` already copy; ``seed`` -- the arrange half of the same
     # boundary -- did not, so a test keeping its seeded aggregate was asserting
     # on the row only by aliasing.
@@ -298,7 +298,7 @@ def _run(schedule_id: ScheduleId) -> ScheduleRun:
     )
 
 
-async def test_schedule_seed_stores_a_copy_the_caller_cannot_rewrite() -> None:
+def test_schedule_seed_stores_a_copy_the_caller_cannot_rewrite() -> None:
     repo = FakeScheduleRepository()
     schedule = _schedule()
 

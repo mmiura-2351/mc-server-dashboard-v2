@@ -506,9 +506,15 @@ class FakeServerRepository(ServerRepository):
     ) -> None:
         # Mirror the real adapter's narrow single-column write (issue #1841):
         # a missing id matches no row — a harmless no-op.
+        #
+        # The value is copied all the way down for the same reason ``_copy``
+        # copies it (issue #2516): the adapter's UPDATE serializes the jsonb
+        # blob whole, there and then, so neither a replacement of the caller's
+        # dict nor a nested edit inside it can reach the row afterwards. The
+        # column is held raw, so the copy may not assume it flat.
         server = self.by_id.get(server_id)
         if server is not None:
-            server.backup_retention = retention
+            server.backup_retention = deepcopy(retention)
 
     async def update_lifecycle(
         self,
