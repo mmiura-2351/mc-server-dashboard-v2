@@ -857,7 +857,12 @@ class FakeGroupRepository(GroupRepository):
         ]
 
     async def save(self, group: PlayerGroup) -> None:
-        self.by_id[group.id] = self._copy(group)
+        # Not an upsert despite the name: the adapter renames the loaded row
+        # only ``if row is not None`` and never constructs a ``PlayerGroupModel``,
+        # so no ``save`` can make a group appear -- ``add`` is the only insert
+        # path (#2557).
+        if group.id in self.by_id:
+            self.by_id[group.id] = self._copy(group)
 
     async def delete(self, group_id: GroupId) -> None:
         self.by_id.pop(group_id, None)
@@ -972,7 +977,12 @@ class FakePluginRepository(PluginRepository):
         return self._copy(candidates[0]) if candidates else None
 
     async def update(self, plugin: ServerPlugin) -> None:
-        self.by_id[plugin.id] = self._copy(plugin)
+        # Mirror the adapter's ``UPDATE server_plugin ... WHERE id = :id``: a
+        # missing id matches no row, so nothing is written and no row appears --
+        # keying the entity in regardless made this an insert the adapter cannot
+        # perform (#2557).
+        if plugin.id in self.by_id:
+            self.by_id[plugin.id] = self._copy(plugin)
 
     async def list_catalog_plugins(self, server_id: ServerId) -> list[ServerPlugin]:
         return sorted(

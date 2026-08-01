@@ -21,6 +21,14 @@ collection (``ServerPlugin``'s jsonb list columns, ``PlayerGroup.players``) the
 mutation goes one level in, so a shallow copy that claims a detachment it does
 not have reddens too.
 
+Detachment is one half of a writer's fidelity; whether the row EXISTS at all is
+the other (#2557, following PR #2556). An ``UPDATE ... WHERE id = :id`` matches
+nothing on an absent id, so nothing is written and no row appears. A fake that
+keys the entity in regardless conjures a row production cannot produce, and a
+test that updates a deleted entity and then reads it back is asserting a state
+production can never reach. The ``_on_a_missing_row_is_a_no_op`` tests pin that
+per writer, against the adapter each one stands in for.
+
 ``FakeGameSessionRepository`` is absent on purpose: ``GameSession`` is
 ``frozen=True``, so no mutation can cross its boundary in either direction and
 there is nothing for a copy to protect.
@@ -222,6 +230,21 @@ async def test_plugin_update_stores_a_copy_the_caller_cannot_rewrite() -> None:
     _assert_plugin_unchanged(stored)
 
 
+async def test_plugin_update_on_a_missing_row_is_a_no_op() -> None:
+    # ``SqlAlchemyPluginRepository.update`` issues
+    # ``UPDATE server_plugin SET ... WHERE id = :id``
+    # (servers/adapters/plugin_repository.py:162-190), which matches no row on
+    # an absent id: nothing is written, nothing is raised, and the result of
+    # ``session.execute`` is discarded under a ``-> None`` signature, so no
+    # caller can read a rows-affected signal either.
+    repo = FakePluginRepository()
+    plugin = _plugin()
+
+    await repo.update(plugin)
+
+    assert repo.by_id == {}
+
+
 async def test_plugin_readers_hand_out_copies() -> None:
     repo = FakePluginRepository()
     plugin = _plugin()
@@ -268,6 +291,31 @@ def test_group_seed_stores_a_copy_the_caller_cannot_rewrite() -> None:
     group.upsert_player(Player(uuid.uuid4(), "smuggled"))
     assert stored.name == GroupName("ops")
     assert [p.username for p in stored.players] == ["steve"]
+
+
+async def test_group_save_on_a_missing_row_is_a_no_op() -> None:
+    # ``save`` reads as an upsert but is not one: it never constructs a
+    # ``PlayerGroupModel`` (servers/adapters/group_repository.py:90-101). It
+    # loads the row and renames it only ``if row is not None``, then replaces
+    # the child ``group_player`` set. No ``save`` can therefore make a group
+    # appear -- ``add`` is the only insert path -- and all three call sites
+    # (application/groups.py:178, 237, 270) ``_load_group`` first, which raises
+    # ``GroupNotFoundError`` on an absent id.
+    #
+    # One divergence, recorded rather than modelled: with a non-empty player
+    # list the adapter also stages ``group_player`` INSERTs whose FK to
+    # ``player_group.id`` has no parent, so the transaction dies at commit on
+    # ``fk_group_player_group_id_player_group`` rather than passing silently
+    # (measured against PostgreSQL 18, both branches). The PERSISTED state is
+    # the same either way -- that transaction rolls back, so no row appears in
+    # either table -- and the fake has no flush boundary to raise from, so it
+    # models the state and not the exception (#2557).
+    repo = FakeGroupRepository()
+    group = _group()
+
+    await repo.save(group)
+
+    assert repo.by_id == {}
 
 
 # -- FakeScheduleRepository / FakeScheduleRunRepository --
