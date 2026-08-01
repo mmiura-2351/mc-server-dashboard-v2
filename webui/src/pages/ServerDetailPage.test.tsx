@@ -110,6 +110,22 @@ function server(overrides: Record<string, unknown> = {}) {
   };
 }
 
+// Route api.get by path: the Settings tab's resource-pack assignment (#1179) is
+// its own endpoint whose contract is `null | ResourcePackAssignmentResponse`, so
+// it must not be answered by the server-detail catch-all (issue #2247).
+// Everything else still falls through to the server detail body.
+function routeGet(opts: { srv?: Record<string, unknown> } = {}) {
+  const srv = server(opts.srv);
+  mockApi.get.mockImplementation((path: string) => {
+    if (path.endsWith("/resource-pack")) {
+      // "No pack assigned" is a 200 with a null body, not a 404 (issue #2238).
+      // The assigned state is covered by ServerResourcePackSection.test.tsx.
+      return Promise.resolve(null);
+    }
+    return Promise.resolve(srv);
+  });
+}
+
 // A history probe: drives navigate(-1) so a test can simulate the Back button
 // against the in-memory router (#514 tab history).
 function BackProbe() {
@@ -353,7 +369,7 @@ describe("ServerDetailPage URL-driven tabs (#514)", () => {
   }
 
   it("deep-links to a tab named by the URL hash", async () => {
-    mockApi.get.mockResolvedValue(server());
+    routeGet();
     renderPage(`/communities/${CID}/servers/${SID}#settings`);
 
     await screen.findByText("survival");
@@ -362,7 +378,7 @@ describe("ServerDetailPage URL-driven tabs (#514)", () => {
   });
 
   it("Back restores the previously active tab", async () => {
-    mockApi.get.mockResolvedValue(server());
+    routeGet();
     renderPage();
     await screen.findByText("survival");
     expect(activeTab()).toBe(t("serverDetail.tab.overview"));
@@ -1010,9 +1026,7 @@ describe("ServerDetailPage export (minted grant, #2353)", () => {
   }
 
   it("mints a grant and saves it under the server filename", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ observed_state: "stopped", desired_state: "stopped" }),
-    );
+    routeGet({ srv: { observed_state: "stopped", desired_state: "stopped" } });
     mockApi.post.mockResolvedValue({
       download_url: GRANT_URL,
       expires_at: "2026-07-27T04:00:30Z",
@@ -1041,9 +1055,7 @@ describe("ServerDetailPage export (minted grant, #2353)", () => {
   });
 
   it("disables the export button while the mint is in flight", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ observed_state: "stopped", desired_state: "stopped" }),
-    );
+    routeGet({ srv: { observed_state: "stopped", desired_state: "stopped" } });
     let settleMint: (grant: { download_url: string }) => void = () => {};
     mockApi.post.mockReturnValue(
       new Promise<{ download_url: string }>((resolve) => {
@@ -1069,9 +1081,7 @@ describe("ServerDetailPage export (minted grant, #2353)", () => {
   });
 
   it("shows the unsettled toast when the actions-bar mint 409s, and saves nothing", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ observed_state: "stopped", desired_state: "stopped" }),
-    );
+    routeGet({ srv: { observed_state: "stopped", desired_state: "stopped" } });
     mockApi.post.mockRejectedValue(
       new ApiError(409, { reason: "server_unsettled" }),
     );
@@ -1089,9 +1099,7 @@ describe("ServerDetailPage export (minted grant, #2353)", () => {
   });
 
   it("routes a mint 403 through the permission glue, and saves nothing", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ observed_state: "stopped", desired_state: "stopped" }),
-    );
+    routeGet({ srv: { observed_state: "stopped", desired_state: "stopped" } });
     mockApi.post.mockRejectedValue(
       new ApiError(403, { reason: "forbidden", permission: "file:read" }),
     );
@@ -1111,9 +1119,7 @@ describe("ServerDetailPage export (minted grant, #2353)", () => {
   });
 
   it("mints a grant from the danger-zone export button too", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ observed_state: "stopped", desired_state: "stopped" }),
-    );
+    routeGet({ srv: { observed_state: "stopped", desired_state: "stopped" } });
     mockApi.post.mockResolvedValue({
       download_url: GRANT_URL,
       expires_at: "2026-07-27T04:00:30Z",
@@ -1136,9 +1142,7 @@ describe("ServerDetailPage export (minted grant, #2353)", () => {
   });
 
   it("shows the unsettled toast when the danger-zone mint 409s", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ observed_state: "stopped", desired_state: "stopped" }),
-    );
+    routeGet({ srv: { observed_state: "stopped", desired_state: "stopped" } });
     mockApi.post.mockRejectedValue(
       new ApiError(409, { reason: "server_unsettled" }),
     );
@@ -1159,9 +1163,7 @@ describe("ServerDetailPage export (minted grant, #2353)", () => {
   });
 
   it("mints no grant on render — only on click", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ observed_state: "stopped", desired_state: "stopped" }),
-    );
+    routeGet({ srv: { observed_state: "stopped", desired_state: "stopped" } });
     renderPage();
 
     await screen.findByText("survival");
@@ -1171,7 +1173,7 @@ describe("ServerDetailPage export (minted grant, #2353)", () => {
   });
 
   it("disables export while the server is running", async () => {
-    mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
+    routeGet({ srv: { observed_state: "running" } });
     renderPage();
 
     await screen.findByText("survival");
@@ -1182,7 +1184,7 @@ describe("ServerDetailPage export (minted grant, #2353)", () => {
 
   it("hides export when the caller lacks file:read", async () => {
     mockCan = (code) => code !== "file:read";
-    mockApi.get.mockResolvedValue(server({ observed_state: "stopped" }));
+    routeGet({ srv: { observed_state: "stopped" } });
     renderPage();
 
     await screen.findByText("survival");
@@ -1212,9 +1214,7 @@ describe("ServerDetailPage settings", () => {
   }
 
   it("renders name, port, read-only backend and config rows from the server", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ config: { "max-players": "20", difficulty: "hard" } }),
-    );
+    routeGet({ srv: { config: { "max-players": "20", difficulty: "hard" } } });
     renderPage();
 
     await screen.findByText("survival");
@@ -1229,9 +1229,7 @@ describe("ServerDetailPage settings", () => {
   it("hides the game-port control in relay mode (#1002)", async () => {
     // A non-null join_hostname signals relay mode: players join port-less, so
     // the port is internal plumbing the API manages and the control is hidden.
-    mockApi.get.mockResolvedValue(
-      server({ join_hostname: "survival.mc.example.com" }),
-    );
+    routeGet({ srv: { join_hostname: "survival.mc.example.com" } });
     renderPage();
 
     await screen.findByText("survival");
@@ -1247,7 +1245,7 @@ describe("ServerDetailPage settings", () => {
   });
 
   it("shows the game-port control in direct mode (relay off, #1002)", async () => {
-    mockApi.get.mockResolvedValue(server({ join_hostname: null }));
+    routeGet({ srv: { join_hostname: null } });
     renderPage();
 
     await screen.findByText("survival");
@@ -1259,13 +1257,13 @@ describe("ServerDetailPage settings", () => {
   });
 
   it("omits game_port from the PATCH body in relay mode (#1002)", async () => {
-    mockApi.get.mockResolvedValue(
-      server({
+    routeGet({
+      srv: {
         observed_state: "stopped",
         join_hostname: "survival.mc.example.com",
         config: { motd: "hi" },
-      }),
-    );
+      },
+    });
     mockApi.patch.mockResolvedValue(server());
     renderPage();
 
@@ -1286,7 +1284,8 @@ describe("ServerDetailPage settings", () => {
     const srv = server({ observed_state: "stopped" });
     mockApi.get.mockImplementation((path: string) => {
       if (path.endsWith("/resource-pack")) {
-        return Promise.reject(new ApiError(404, { reason: "not_found" }));
+        // "No pack assigned" is a 200 with a null body, not a 404 (#2238).
+        return Promise.resolve(null);
       }
       if (path === "/api/meta") {
         return Promise.resolve({
@@ -1329,7 +1328,8 @@ describe("ServerDetailPage settings", () => {
     let resolveSecond: (v: unknown) => void = () => {};
     mockApi.get.mockImplementation((path: string) => {
       if (path.endsWith("/resource-pack")) {
-        return Promise.reject(new ApiError(404, { reason: "not_found" }));
+        // "No pack assigned" is a 200 with a null body, not a 404 (#2238).
+        return Promise.resolve(null);
       }
       if (path === "/api/meta") {
         return Promise.resolve({
@@ -1379,9 +1379,7 @@ describe("ServerDetailPage settings", () => {
   });
 
   it("saves name + port + config round-trip via PATCH", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ observed_state: "stopped", config: { motd: "hi" } }),
-    );
+    routeGet({ srv: { observed_state: "stopped", config: { motd: "hi" } } });
     mockApi.patch.mockResolvedValue(server());
     renderPage();
 
@@ -1405,9 +1403,7 @@ describe("ServerDetailPage settings", () => {
   });
 
   it("adds and removes config rows", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ observed_state: "stopped", config: {} }),
-    );
+    routeGet({ srv: { observed_state: "stopped", config: {} } });
     mockApi.patch.mockResolvedValue(server());
     renderPage();
 
@@ -1442,12 +1438,12 @@ describe("ServerDetailPage settings", () => {
   });
 
   it("preserves an untouched non-string config value when another key is renamed", async () => {
-    mockApi.get.mockResolvedValue(
-      server({
+    routeGet({
+      srv: {
         observed_state: "stopped",
         config: { snapshot_interval_seconds: 3600, motd: "hi" },
-      }),
-    );
+      },
+    });
     mockApi.patch.mockResolvedValue(server());
     renderPage();
 
@@ -1472,12 +1468,12 @@ describe("ServerDetailPage settings", () => {
     // A string value that parses as a JSON literal ("12" → 12 via
     // parseConfigValue) must stay a string if the user only renamed the key —
     // the row must NOT be flagged as edited in that case.
-    mockApi.get.mockResolvedValue(
-      server({
+    routeGet({
+      srv: {
         observed_state: "stopped",
         config: { motd: "12" },
-      }),
-    );
+      },
+    });
     mockApi.patch.mockResolvedValue(server());
     renderPage();
 
@@ -1499,12 +1495,12 @@ describe("ServerDetailPage settings", () => {
   });
 
   it("sends an edited integer config value as a number", async () => {
-    mockApi.get.mockResolvedValue(
-      server({
+    routeGet({
+      srv: {
         observed_state: "stopped",
         config: { snapshot_interval_seconds: 3600 },
-      }),
-    );
+      },
+    });
     mockApi.patch.mockResolvedValue(server());
     renderPage();
 
@@ -1524,11 +1520,11 @@ describe("ServerDetailPage settings", () => {
   });
 
   it("hides the system-managed resolved_jar_sha256 key from the overrides editor", async () => {
-    mockApi.get.mockResolvedValue(
-      server({
+    routeGet({
+      srv: {
         config: { resolved_jar_sha256: "abc123", motd: "hi" },
-      }),
-    );
+      },
+    });
     renderPage();
 
     await screen.findByText("survival");
@@ -1540,12 +1536,12 @@ describe("ServerDetailPage settings", () => {
   });
 
   it("preserves the hidden resolved_jar_sha256 key on save", async () => {
-    mockApi.get.mockResolvedValue(
-      server({
+    routeGet({
+      srv: {
         observed_state: "stopped",
         config: { resolved_jar_sha256: "abc123", motd: "hi" },
-      }),
-    );
+      },
+    });
     mockApi.patch.mockResolvedValue(server());
     renderPage();
 
@@ -1566,7 +1562,7 @@ describe("ServerDetailPage settings", () => {
   });
 
   it("surfaces a 422 invalid_snapshot_interval specifically on save", async () => {
-    mockApi.get.mockResolvedValue(server({ observed_state: "stopped" }));
+    routeGet({ srv: { observed_state: "stopped" } });
     mockApi.patch.mockRejectedValue(
       new ApiError(422, { reason: "invalid_snapshot_interval" }),
     );
@@ -1584,7 +1580,7 @@ describe("ServerDetailPage settings", () => {
   });
 
   it("surfaces a 409 server_not_stopped specifically on save", async () => {
-    mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
+    routeGet({ srv: { observed_state: "running" } });
     mockApi.patch.mockRejectedValue(
       new ApiError(409, { reason: "server_not_stopped" }),
     );
@@ -1603,7 +1599,7 @@ describe("ServerDetailPage settings", () => {
 
   it("disables the save button without server:update", async () => {
     mockCan = (code) => code !== "server:update";
-    mockApi.get.mockResolvedValue(server({ observed_state: "stopped" }));
+    routeGet({ srv: { observed_state: "stopped" } });
     renderPage();
 
     await screen.findByText("survival");
@@ -1614,8 +1610,8 @@ describe("ServerDetailPage settings", () => {
   });
 
   it("re-syncs form fields when the server prop changes (#1212)", async () => {
-    mockApi.get.mockResolvedValue(
-      server({
+    routeGet({
+      srv: {
         name: "old-name",
         slug: "old-slug",
         game_port: 25565,
@@ -1623,8 +1619,8 @@ describe("ServerDetailPage settings", () => {
         cpu_millis: 1000,
         config: { motd: "hello" },
         observed_state: "stopped",
-      }),
-    );
+      },
+    });
     const { queryClient } = renderPage();
 
     await screen.findByText("old-name");
@@ -1635,8 +1631,8 @@ describe("ServerDetailPage settings", () => {
     expect(screen.getByDisplayValue("1000")).toBeInTheDocument();
 
     // Simulate a react-query refetch returning updated server data.
-    mockApi.get.mockResolvedValue(
-      server({
+    routeGet({
+      srv: {
         name: "new-name",
         slug: "new-slug",
         game_port: 25570,
@@ -1644,8 +1640,8 @@ describe("ServerDetailPage settings", () => {
         cpu_millis: 1500,
         config: { motd: "bye" },
         observed_state: "stopped",
-      }),
-    );
+      },
+    });
     await act(() => queryClient.invalidateQueries());
 
     await waitFor(() =>
@@ -1679,9 +1675,9 @@ describe("ServerDetailPage settings memory limit", () => {
   }
 
   it("shows the driver-default placeholder when the limit is unset", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ observed_state: "stopped", memory_limit_mb: null, config: {} }),
-    );
+    routeGet({
+      srv: { observed_state: "stopped", memory_limit_mb: null, config: {} },
+    });
     renderPage();
 
     await screen.findByText("survival");
@@ -1696,13 +1692,13 @@ describe("ServerDetailPage settings memory limit", () => {
   });
 
   it("shows the current limit when set", async () => {
-    mockApi.get.mockResolvedValue(
-      server({
+    routeGet({
+      srv: {
         observed_state: "stopped",
         memory_limit_mb: 2048,
         config: { memory_limit_mb: 2048 },
-      }),
-    );
+      },
+    });
     renderPage();
 
     await screen.findByText("survival");
@@ -1712,13 +1708,13 @@ describe("ServerDetailPage settings memory limit", () => {
   });
 
   it("does not show memory_limit_mb as a raw config override row", async () => {
-    mockApi.get.mockResolvedValue(
-      server({
+    routeGet({
+      srv: {
         observed_state: "stopped",
         memory_limit_mb: 2048,
         config: { memory_limit_mb: 2048, motd: "hi" },
-      }),
-    );
+      },
+    });
     renderPage();
 
     await screen.findByText("survival");
@@ -1729,9 +1725,9 @@ describe("ServerDetailPage settings memory limit", () => {
   });
 
   it("saves a set memory limit into the config blob", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ observed_state: "stopped", memory_limit_mb: null, config: {} }),
-    );
+    routeGet({
+      srv: { observed_state: "stopped", memory_limit_mb: null, config: {} },
+    });
     mockApi.patch.mockResolvedValue(server());
     renderPage();
 
@@ -1749,13 +1745,13 @@ describe("ServerDetailPage settings memory limit", () => {
   });
 
   it("omits the key from the config blob when the limit is cleared", async () => {
-    mockApi.get.mockResolvedValue(
-      server({
+    routeGet({
+      srv: {
         observed_state: "stopped",
         memory_limit_mb: 2048,
         config: { memory_limit_mb: 2048, motd: "hi" },
-      }),
-    );
+      },
+    });
     mockApi.patch.mockResolvedValue(server());
     renderPage();
 
@@ -1772,9 +1768,9 @@ describe("ServerDetailPage settings memory limit", () => {
   });
 
   it("rejects a below-floor value and blocks the save", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ observed_state: "stopped", memory_limit_mb: null, config: {} }),
-    );
+    routeGet({
+      srv: { observed_state: "stopped", memory_limit_mb: null, config: {} },
+    });
     renderPage();
 
     await screen.findByText("survival");
@@ -1788,9 +1784,9 @@ describe("ServerDetailPage settings memory limit", () => {
   });
 
   it("rejects an above-ceiling value and blocks the save", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ observed_state: "stopped", memory_limit_mb: null, config: {} }),
-    );
+    routeGet({
+      srv: { observed_state: "stopped", memory_limit_mb: null, config: {} },
+    });
     renderPage();
 
     await screen.findByText("survival");
@@ -1804,9 +1800,9 @@ describe("ServerDetailPage settings memory limit", () => {
   });
 
   it("rejects a non-integer value and blocks the save", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ observed_state: "stopped", memory_limit_mb: null, config: {} }),
-    );
+    routeGet({
+      srv: { observed_state: "stopped", memory_limit_mb: null, config: {} },
+    });
     renderPage();
 
     await screen.findByText("survival");
@@ -1821,9 +1817,7 @@ describe("ServerDetailPage settings memory limit", () => {
 
   it("disables the memory limit field without server:update", async () => {
     mockCan = (code) => code !== "server:update";
-    mockApi.get.mockResolvedValue(
-      server({ observed_state: "stopped", memory_limit_mb: 2048 }),
-    );
+    routeGet({ srv: { observed_state: "stopped", memory_limit_mb: 2048 } });
     renderPage();
 
     await screen.findByText("survival");
@@ -1832,9 +1826,9 @@ describe("ServerDetailPage settings memory limit", () => {
   });
 
   it("surfaces a 422 invalid_memory_limit specifically on save", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ observed_state: "stopped", memory_limit_mb: null, config: {} }),
-    );
+    routeGet({
+      srv: { observed_state: "stopped", memory_limit_mb: null, config: {} },
+    });
     mockApi.patch.mockRejectedValue(
       new ApiError(422, { reason: "invalid_memory_limit" }),
     );
@@ -1874,9 +1868,9 @@ describe("ServerDetailPage settings CPU allocation", () => {
   }
 
   it("shows the auto placeholder when the allocation is unset", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ observed_state: "stopped", cpu_millis: null, config: {} }),
-    );
+    routeGet({
+      srv: { observed_state: "stopped", cpu_millis: null, config: {} },
+    });
     renderPage();
 
     await screen.findByText("survival");
@@ -1891,13 +1885,13 @@ describe("ServerDetailPage settings CPU allocation", () => {
   });
 
   it("shows the current allocation when set", async () => {
-    mockApi.get.mockResolvedValue(
-      server({
+    routeGet({
+      srv: {
         observed_state: "stopped",
         cpu_millis: 1500,
         config: { cpu_millis: 1500 },
-      }),
-    );
+      },
+    });
     renderPage();
 
     await screen.findByText("survival");
@@ -1907,13 +1901,13 @@ describe("ServerDetailPage settings CPU allocation", () => {
   });
 
   it("does not show cpu_millis as a raw config override row", async () => {
-    mockApi.get.mockResolvedValue(
-      server({
+    routeGet({
+      srv: {
         observed_state: "stopped",
         cpu_millis: 1500,
         config: { cpu_millis: 1500, motd: "hi" },
-      }),
-    );
+      },
+    });
     renderPage();
 
     await screen.findByText("survival");
@@ -1924,9 +1918,9 @@ describe("ServerDetailPage settings CPU allocation", () => {
   });
 
   it("saves a set CPU allocation into the config blob", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ observed_state: "stopped", cpu_millis: null, config: {} }),
-    );
+    routeGet({
+      srv: { observed_state: "stopped", cpu_millis: null, config: {} },
+    });
     mockApi.patch.mockResolvedValue(server());
     renderPage();
 
@@ -1944,13 +1938,13 @@ describe("ServerDetailPage settings CPU allocation", () => {
   });
 
   it("omits the key from the config blob when the allocation is cleared", async () => {
-    mockApi.get.mockResolvedValue(
-      server({
+    routeGet({
+      srv: {
         observed_state: "stopped",
         cpu_millis: 1500,
         config: { cpu_millis: 1500, motd: "hi" },
-      }),
-    );
+      },
+    });
     mockApi.patch.mockResolvedValue(server());
     renderPage();
 
@@ -1967,9 +1961,9 @@ describe("ServerDetailPage settings CPU allocation", () => {
   });
 
   it("rejects a below-floor value and blocks the save", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ observed_state: "stopped", cpu_millis: null, config: {} }),
-    );
+    routeGet({
+      srv: { observed_state: "stopped", cpu_millis: null, config: {} },
+    });
     renderPage();
 
     await screen.findByText("survival");
@@ -1983,9 +1977,9 @@ describe("ServerDetailPage settings CPU allocation", () => {
   });
 
   it("rejects an above-ceiling value and blocks the save", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ observed_state: "stopped", cpu_millis: null, config: {} }),
-    );
+    routeGet({
+      srv: { observed_state: "stopped", cpu_millis: null, config: {} },
+    });
     renderPage();
 
     await screen.findByText("survival");
@@ -1999,9 +1993,9 @@ describe("ServerDetailPage settings CPU allocation", () => {
   });
 
   it("rejects a non-integer value and blocks the save", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ observed_state: "stopped", cpu_millis: null, config: {} }),
-    );
+    routeGet({
+      srv: { observed_state: "stopped", cpu_millis: null, config: {} },
+    });
     renderPage();
 
     await screen.findByText("survival");
@@ -2016,9 +2010,7 @@ describe("ServerDetailPage settings CPU allocation", () => {
 
   it("disables the CPU allocation field without server:update", async () => {
     mockCan = (code) => code !== "server:update";
-    mockApi.get.mockResolvedValue(
-      server({ observed_state: "stopped", cpu_millis: 1500 }),
-    );
+    routeGet({ srv: { observed_state: "stopped", cpu_millis: 1500 } });
     renderPage();
 
     await screen.findByText("survival");
@@ -2027,9 +2019,9 @@ describe("ServerDetailPage settings CPU allocation", () => {
   });
 
   it("surfaces a 422 invalid_cpu_allocation specifically on save", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ observed_state: "stopped", cpu_millis: null, config: {} }),
-    );
+    routeGet({
+      srv: { observed_state: "stopped", cpu_millis: null, config: {} },
+    });
     mockApi.patch.mockRejectedValue(
       new ApiError(422, { reason: "invalid_cpu_allocation" }),
     );
@@ -2305,9 +2297,7 @@ describe("ServerDetailPage settings slug (issue #961)", () => {
   }
 
   it("hides the slug field when relay is disabled (join_hostname null)", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ join_hostname: null, slug: "survival" }),
-    );
+    routeGet({ srv: { join_hostname: null, slug: "survival" } });
     renderPage();
 
     await screen.findByText("survival");
@@ -2320,9 +2310,9 @@ describe("ServerDetailPage settings slug (issue #961)", () => {
   });
 
   it("shows the slug field when relay is enabled (join_hostname non-null)", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ join_hostname: "survival.relay.example.com", slug: "survival" }),
-    );
+    routeGet({
+      srv: { join_hostname: "survival.relay.example.com", slug: "survival" },
+    });
     renderPage();
 
     await screen.findByText("survival");
@@ -2334,9 +2324,9 @@ describe("ServerDetailPage settings slug (issue #961)", () => {
   });
 
   it("shows inline error for invalid slug format", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ join_hostname: "survival.relay.example.com", slug: "survival" }),
-    );
+    routeGet({
+      srv: { join_hostname: "survival.relay.example.com", slug: "survival" },
+    });
     renderPage();
 
     await screen.findByText("survival");
@@ -2351,9 +2341,9 @@ describe("ServerDetailPage settings slug (issue #961)", () => {
   });
 
   it("disables save button when slug is invalid", async () => {
-    mockApi.get.mockResolvedValue(
-      server({ join_hostname: "survival.relay.example.com", slug: "survival" }),
-    );
+    routeGet({
+      srv: { join_hostname: "survival.relay.example.com", slug: "survival" },
+    });
     renderPage();
 
     await screen.findByText("survival");
@@ -2369,13 +2359,13 @@ describe("ServerDetailPage settings slug (issue #961)", () => {
   });
 
   it("includes slug in PATCH when changed", async () => {
-    mockApi.get.mockResolvedValue(
-      server({
+    routeGet({
+      srv: {
         observed_state: "stopped",
         join_hostname: "survival.relay.example.com",
         slug: "survival",
-      }),
-    );
+      },
+    });
     mockApi.patch.mockResolvedValue(server());
     renderPage();
 
@@ -2394,13 +2384,13 @@ describe("ServerDetailPage settings slug (issue #961)", () => {
   });
 
   it("omits slug from PATCH when unchanged", async () => {
-    mockApi.get.mockResolvedValue(
-      server({
+    routeGet({
+      srv: {
         observed_state: "stopped",
         join_hostname: "survival.relay.example.com",
         slug: "survival",
-      }),
-    );
+      },
+    });
     mockApi.patch.mockResolvedValue(server());
     renderPage();
 
@@ -2417,13 +2407,13 @@ describe("ServerDetailPage settings slug (issue #961)", () => {
   });
 
   it("surfaces a 409 slug_taken error inline on save", async () => {
-    mockApi.get.mockResolvedValue(
-      server({
+    routeGet({
+      srv: {
         observed_state: "stopped",
         join_hostname: "survival.relay.example.com",
         slug: "survival",
-      }),
-    );
+      },
+    });
     mockApi.patch.mockRejectedValue(
       new ApiError(409, { reason: "slug_taken" }),
     );
@@ -2444,13 +2434,13 @@ describe("ServerDetailPage settings slug (issue #961)", () => {
   });
 
   it("surfaces a 422 invalid_slug error inline on save", async () => {
-    mockApi.get.mockResolvedValue(
-      server({
+    routeGet({
+      srv: {
         observed_state: "stopped",
         join_hostname: "survival.relay.example.com",
         slug: "survival",
-      }),
-    );
+      },
+    });
     mockApi.patch.mockRejectedValue(
       new ApiError(422, { reason: "invalid_slug" }),
     );
@@ -2473,7 +2463,7 @@ describe("ServerDetailPage settings slug (issue #961)", () => {
 
 describe("ServerDetailPage delete (typed confirm)", () => {
   it("deletes after typed confirm and navigates to the dashboard", async () => {
-    mockApi.get.mockResolvedValue(server({ observed_state: "stopped" }));
+    routeGet({ srv: { observed_state: "stopped" } });
     mockApi.delete.mockResolvedValue(undefined);
     renderPage();
 
@@ -2509,7 +2499,7 @@ describe("ServerDetailPage delete (typed confirm)", () => {
 
   it("hides the delete control without server:delete", async () => {
     mockCan = (code) => code !== "server:delete";
-    mockApi.get.mockResolvedValue(server({ observed_state: "stopped" }));
+    routeGet({ srv: { observed_state: "stopped" } });
     renderPage();
 
     await screen.findByText("survival");
