@@ -142,9 +142,16 @@ async def test_update_lifecycle_stores_a_copy_the_caller_cannot_rewrite() -> Non
     server.observed_at = _NOW - dt.timedelta(minutes=5)
     server.observed_state = ObservedState.CRASHED
     _rewrite_jsonb(server)
+    # ``config`` is the one assertion here that discriminates the COPY: it is in
+    # ``update_lifecycle``'s column set, so the row took the caller's value and
+    # holds it only because the narrow write deep-copied it (#2505/#2520).
+    assert stored.config == _CONFIG
+    # These three are not about detachment at all -- ``update_lifecycle`` never
+    # names them, so the row still holds what ``seed`` put there whatever the
+    # caller does to its object (#2520). The column-scope tests below pin that
+    # directly; they are kept here so this test reads as the whole write.
     assert stored.observed_at == _NOW
     assert stored.observed_state is ObservedState.RUNNING
-    assert stored.config == _CONFIG
     assert stored.backup_retention == _RETENTION
 
 
@@ -296,8 +303,13 @@ async def test_update_stores_a_copy_the_caller_cannot_rewrite() -> None:
     assert stored is not server
     server.name = ServerName("renamed")
     _rewrite_jsonb(server)
+    # ``name`` and ``config`` ARE in ``update``'s column set, so these two are the
+    # copy assertions: the row took the caller's values and the later rename and
+    # nested jsonb edit must not follow them in (#2505/#2520).
     assert stored.name == ServerName("srv")
     assert stored.config == _CONFIG
+    # ``backup_retention`` is not, so this one holds by column scope rather than
+    # by detachment -- ``update`` never touches the column (#2520).
     assert stored.backup_retention == _RETENTION
 
 
