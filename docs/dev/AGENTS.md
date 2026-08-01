@@ -4,9 +4,9 @@ Operational knowledge for LLM agents working in this repository — the
 agent-facing complement to [`CONTRIBUTING.md`](CONTRIBUTING.md). Every rule
 there (issues, branches, commits, PRs, review, merge) applies unchanged; this
 document adds what agents need beyond it: deployment-host ground rules,
-worktree mechanics, tooling quirks, and a pre-PR checklist. It is written for
-machine consumption and may be reorganized freely for that purpose without
-affecting the human-facing docs.
+worktree mechanics, silently failing commands, tooling quirks, and a pre-PR
+checklist. It is written for machine consumption and may be reorganized freely
+for that purpose without affecting the human-facing docs.
 
 Read before touching anything, in order:
 [`../../CLAUDE.md`](../../CLAUDE.md) (behavioral rules — simplicity first,
@@ -57,7 +57,41 @@ rebuild ships (issue #432).
    held by a lingering worktree blocks `git checkout` / `gh pr checkout` of
    that branch everywhere else, and blocks `gh pr merge --delete-branch`.
 
-## 3. Tooling and account quirks
+## 3. Commands that fail silently
+
+Each one succeeds, or appears to; the damage surfaces later.
+
+- **`git checkout <path>` restores from the index, not from `HEAD`.** Unstaged
+  edits are gone — no confirmation, no reflog entry, nothing to recover from.
+  Mutation-testing production code to prove a test is a real pin has exactly
+  this edit-then-revert shape, so copy the file to the scratchpad first and
+  restore from the copy (PR #2521).
+- **`--no-verify` cannot establish what the gate establishes.** The rule is in
+  [`CONTRIBUTING.md`](CONTRIBUTING.md) Section 4; it is unconditional because a
+  bypass is only known to have been harmless *afterwards* — the very fact the
+  gate exists to establish beforehand. "Only the known flake" is a prediction,
+  not a result. Escalate a flaky gate as an issue (#2513) and re-run instead
+  (PR #2517).
+- **`pgrep -f <pattern>` matches the waiting shell itself.** `pgrep` omits only
+  its own process, not the shell that invoked it — whose command line contains
+  the pattern. So `until ! pgrep -f "make check"; do sleep 30; done` never
+  exits, and a different token does not help (`pgrep -f check_parallel.sh`
+  self-matches identically). Run the command in the foreground and let it
+  block; if a poll is genuinely needed, bracket one character so the pattern
+  cannot match its own literal text — `pgrep -f "make chec[k]"` matches the
+  gate but not the waiter. A self-deadlocked waiter is indistinguishable from a
+  contended host (#2513), so it never diagnoses itself.
+- **`uv run --active` in a worktree re-points the primary checkout's
+  `api/.venv`.** Worktree shells inherit `VIRTUAL_ENV` from the repo root;
+  plain `uv run` ignores it and uses the worktree's own `.venv`, but `--active`
+  adopts the inherited one and installs the *branch's* `api/src` into it, so
+  the primary checkout imports branch sources. Nothing reports this: the
+  `api-env-check` preflight (`scripts/check_api_env.py`, issue #566) would fail
+  on the mismatch, but the plain `uv run` in front of it re-syncs the damage
+  away first, so the gate prints `OK`. Never pass `--active`; repair a checkout
+  explicitly with `cd api && uv sync`.
+
+## 4. Tooling and account quirks
 
 - Bare `gh pr view <N>` **errors** on this account's token (it queries the
   retired Projects-classic API). Always pass `--json ...`, or use the REST
@@ -81,7 +115,7 @@ rebuild ships (issue #432).
   merge sequence is update-branch → wait for checks (`gh pr checks <N>
   --watch`) → squash-merge (CONTRIBUTING.md Section 7).
 
-## 4. Pre-PR checklist (monorepo tripwires)
+## 5. Pre-PR checklist (monorepo tripwires)
 
 - `make check` green locally — the same gate as pre-push and CI.
 - `proto/` changed → one atomic change set: `make proto-gen`, update `api/`
