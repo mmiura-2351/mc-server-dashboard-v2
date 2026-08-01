@@ -426,6 +426,7 @@ scripts-test:
 	bash scripts/test_deploy_preflight.sh
 	bash scripts/test_pg_major_upgrade.sh
 	bash scripts/test_deploy_stamp.sh
+	bash scripts/test_shell_pipefail.sh
 
 # ---------------------------------------------------------------------------
 # proto/ (buf) -- the shared control-plane contract.

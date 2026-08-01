@@ -141,7 +141,16 @@ for _ in $(seq 1 60); do
     cat "$UVICORN_LOG" >&2
     exit 1
   fi
-  if curl -fsS "$API_URL/api/healthz" 2>/dev/null | grep -q '"ok":true'; then
+  # Captured and then matched, not piped into a quiet grep: `grep -q` exits at
+  # its first match, so `curl` can still be mid-write and take SIGPIPE, and
+  # `pipefail` turns that 141 into the pipeline's status -- a ready API read as
+  # not ready, burning one of the 60 seconds this wait has (#2465). The `||
+  # health=""` restores what the pipeline gave for free: before the API is up
+  # `curl -fsS` exits non-zero, which under `set -e` would now end the script
+  # instead of polling again. An empty body matches nothing, so the loop
+  # behaves exactly as it did.
+  health="$(curl -fsS "$API_URL/api/healthz" 2>/dev/null)" || health=""
+  if grep -q '"ok":true' <<< "$health"; then
     ready=1
     break
   fi

@@ -196,7 +196,13 @@ echo "=== hooks-check tests ==="
 		_FORCE_GITDIR="$tmpdir" \
 		run_hooks_check 2>/dev/null
 	)" || exit_code=$?
-	if [ "$exit_code" -eq 0 ] && echo "$out" | grep -q "WARN"; then
+	# A here-string rather than a pipe: `grep -q` exits at its first match, so
+	# the `echo` feeding it can still be mid-write and take SIGPIPE, and
+	# `pipefail` (set above) turns that 141 into the pipeline's status -- the
+	# assertion then reports the WARN missing BECAUSE it was found (#2447,
+	# #2465). What is matched is unchanged: `echo "$out"` and `<<< "$out"` both
+	# present "$out" plus one newline, and the pattern is a plain substring.
+	if [ "$exit_code" -eq 0 ] && grep -q "WARN" <<< "$out"; then
 		ok "wrong hooksPath + symlinks present: exits 0 (WARN)"
 	else
 		fail_test "wrong hooksPath + symlinks present: expected exit 0 + WARN, got exit=$exit_code output=$out"
