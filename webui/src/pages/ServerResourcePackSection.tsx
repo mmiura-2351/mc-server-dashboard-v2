@@ -75,23 +75,13 @@ export function ServerResourcePackSection({
     }): Promise<ResourcePackAssignmentResponse | null> => {
       // "No pack assigned" is a normal state of a valid server: the API returns
       // 200 with a null body, so no 404 special-casing is needed (issue #2238).
-      const result = await api.get(
+      return await api.get(
         apiPath(
           "/api/communities/{community_id}/servers/{server_id}/resource-pack",
           { community_id: communityId, server_id: serverId },
         ),
         { signal },
       );
-      // The body is either a full assignment or null; anything else is treated
-      // as "unassigned".
-      if (
-        result !== null &&
-        typeof result === "object" &&
-        "resource_pack" in result
-      ) {
-        return result;
-      }
-      return null;
     },
   });
 
