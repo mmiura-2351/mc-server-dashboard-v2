@@ -1700,12 +1700,16 @@ class FakePluginCacheStore(PluginCacheStore):
     assert dedup (a second put of identical bytes does not grow ``blobs``) and the
     download cache (a cached blob short-circuits the HTTP download). ``deleted``
     records each ``delete`` call, including the ones for keys already gone.
+    ``opens`` records each ``open`` call, including the ones that go on to miss,
+    so a test whose outcome is the same on the cached and the uncached path can
+    still pin that the cache was read (issue #2462).
     """
 
     def __init__(self) -> None:
         self.blobs: dict[str, bytes] = {}
         self.puts: list[str] = []
         self.deleted: list[str] = []
+        self.opens: list[str] = []
         # Store time per content key, as ``list_entries`` reports it. A blob
         # seeded straight into ``blobs`` has none and is reported as stored just
         # now; the GC tests set it to age a blob past the safety window.
@@ -1718,6 +1722,8 @@ class FakePluginCacheStore(PluginCacheStore):
         self.blobs.setdefault(sha256, data)
 
     def open(self, sha256: str) -> AsyncIterator[bytes]:
+        self.opens.append(sha256)
+
         async def _gen() -> AsyncIterator[bytes]:
             data = self.blobs.get(sha256)
             if data is None:

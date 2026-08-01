@@ -2188,6 +2188,10 @@ async def test_cache_blob_deleted_after_lookup_falls_back_to_download() -> None:
         version_id="ver-1",
     )
     assert plugin.sha256 == sha256
+    # The race was actually run: the index resolved and the cache was read. The
+    # download below happens on the no-index path too, so without this the test
+    # would stay green even if the cache branch stopped being entered (#2462).
+    assert cache.opens == [sha256]
     # Recovered by downloading once and re-ingesting the blob once.
     assert catalog.downloads == [version.files[0].url]
     assert cache.puts == [sha256]
@@ -2223,6 +2227,10 @@ async def test_geyser_cache_blob_deleted_after_lookup_falls_back_to_download() -
     )
     expected_sha256 = hashlib.sha256(content).hexdigest()
     assert plugin.sha256 == expected_sha256
+    # The race was actually run: the cache was read for the published sha256.
+    # The download below happens on either path, so this is what keeps the test
+    # honest if the cache branch stops being entered (#2462).
+    assert cache.opens == [expected_sha256]
     assert catalog.downloads == [version.files[0].url]
     assert cache.puts == [expected_sha256]
 
