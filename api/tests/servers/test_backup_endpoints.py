@@ -590,8 +590,8 @@ _ARCHIVE = b"archive-bytes"
 class _FakeDownload:
     """A download use case over fixed archive bytes, ranged like the real one.
 
-    The two methods mirror :class:`DownloadBackup`'s signatures exactly, ids they
-    do not need included; the test below holds them there.
+    The two methods mirror :class:`DownloadBackup`'s signatures exactly, down to
+    the ids this double never reads; the test below holds them there.
 
     A fresh stream per call (an async generator is exhausted by its first
     consumer, and one test fetches the same archive twice). ``declared``
@@ -676,14 +676,26 @@ def test_the_download_double_has_the_real_use_cases_shape() -> None:
     # holding it reject before it is ever called (issue #2384). Comparing the two
     # directly makes the next such split red here, at the double, instead of
     # leaving a double that misdescribes what it stands for.
-    def methods(cls: type) -> dict[str, inspect.Signature]:
+    #
+    # Names, kinds and defaults only, deliberately not annotations: whether an
+    # annotation comes back as a string or as the type itself is decided by
+    # ``from __future__ import annotations`` in the module that declared it, so
+    # comparing them would redden every method at once the day either module
+    # drops that import — an alarm about nothing, on the one test here whose
+    # whole value is that a red means something.
+    def methods(cls: type) -> dict[str, list[tuple[str, object, object]]]:
         return {
-            name: inspect.signature(func)
+            name: [
+                (p.name, p.kind, p.default)
+                for p in inspect.signature(func).parameters.values()
+            ]
             for name, func in inspect.getmembers(cls, inspect.isfunction)
             if not name.startswith("_")
         }
 
-    assert methods(_FakeDownload) == methods(DownloadBackup)
+    real = methods(DownloadBackup)
+    assert real, "found no public methods on DownloadBackup to compare against"
+    assert methods(_FakeDownload) == real
 
 
 def _bearer() -> dict[str, str]:
