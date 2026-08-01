@@ -25,7 +25,7 @@
 #   make deploy         # first-time deploy with interactive .env setup
 #   make update         # selective rebuild with change detection
 
-.PHONY: all check lint format test docs-check \
+.PHONY: all check lint format test docs-check migrations-check \
 	api-env-check api-lint api-format api-test \
 	worker-lint worker-format worker-test worker-test-race worker-e2e-compile \
 	relay-lint relay-format relay-test relay-test-race relay-e2e relay-e2e-compile \
@@ -107,6 +107,17 @@ test: api-test worker-test worker-e2e-compile relay-test relay-e2e-compile webui
 docs-check:
 	python3 scripts/check_docs.py --self-test
 	python3 scripts/check_docs.py
+
+# Alembic numbering gate (issue #284): exactly one head, unique revision ids,
+# unique NNNN_ filename prefixes. Pure file parsing -- no DB, no alembic import,
+# no api/ venv -- so it costs ~0.1s and belongs in the pre-push gate rather than
+# only in CI (#2511). The renumber it demands is a rebase, the most expensive
+# fix to learn about from a CI runner after the push.
+#
+# Same shape as docs-check: the self-test first, then the real run it guards.
+migrations-check:
+	python3 scripts/check_migrations.py --self-test
+	python3 scripts/check_migrations.py
 
 # ---------------------------------------------------------------------------
 # api/ (Python via uv)
@@ -404,12 +415,13 @@ hooks-test:
 # `sg`/`docker`/HTTP transports: offline, and never touches a real daemon or
 # volume.
 #
-# The self-tests belong here so a regression in the migration guard or the
-# supply-chain cooldown gate fails the pre-push `make check` instead of a CI
-# runner after the push (#2508). check_docs.py --self-test stays in docs-check,
-# next to the real run it guards.
+# A self-test belongs here when the script has no local real run to sit next
+# to, so that a regression in it fails the pre-push `make check` instead of a CI
+# runner after the push (#2508). supply_chain_cooldown.py is such a script: its
+# real run is the Dependabot flow, not a gate. The other two self-tests live
+# next to the real run they guard -- check_docs.py's in docs-check,
+# check_migrations.py's in migrations-check (#2511).
 scripts-test:
-	python3 scripts/check_migrations.py --self-test
 	python3 scripts/supply_chain_cooldown.py --self-test
 	bash scripts/test_deploy_preflight.sh
 	bash scripts/test_pg_major_upgrade.sh
