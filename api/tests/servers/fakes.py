@@ -415,21 +415,29 @@ class FakeServerRepository(ServerRepository):
     @staticmethod
     def _copy(server: Server) -> Server:
         # Detach the row from the caller's entity (issue #2505). Every writer
-        # stores this, mirroring the adapter's INSERT/UPDATE: the values leave the
-        # entity when the statement executes, so a later in-memory mutation of the
-        # caller's object cannot reach the row. Aliasing let a use case's
-        # post-transaction write-back onto its own entity retroactively rewrite
-        # what a test believed was persisted, which is exactly the direction that
-        # can absorb a mutant and make a persisted-state assert look like a pin.
+        # stores this. Aliasing let a use case's post-transaction write-back onto
+        # its own entity retroactively rewrite what a test believed was persisted
+        # -- the direction that makes a persisted-state assert look like a pin
+        # when the adapter would have stored something else.
+        #
+        # For ``update``/``update_lifecycle`` this mirrors the adapter exactly:
+        # the UPDATE executes there and then, so nothing the caller does to its
+        # object afterwards can reach the row. ``add`` snapshots EARLIER than the
+        # adapter, which stages a ServerModel holding the caller's ``config`` by
+        # reference and serializes it only at flush (SqlAlchemyServerRepository.add).
+        # That divergence is deliberate and harmless: it is strictly MORE
+        # isolating, so it can produce an extra red but can never absorb a mutant,
+        # which is the failure mode #2505 is about.
         #
         # Copy depth: a new entity, plus the two jsonb column values (``config``,
         # ``backup_retention``) copied all the way down. Those are the entity's only
         # mutable fields -- everything else is a scalar, an enum, or a frozen value
         # object, and a Server references no other entity, so this deep-copies no
-        # graph. They go down rather than one level because the adapter SERIALIZES
-        # them at execute time: a nested edit (``config["properties"][k] = v`` is
-        # the shape use cases actually write) cannot reach an already-written row
+        # graph. They go down rather than one level because the adapter serializes
+        # each blob whole: a nested edit (``config["properties"][k] = v`` is the
+        # shape use cases actually write) cannot reach an already-written row
         # either, and a one-level copy would claim a detachment it does not have.
+        # Both are held raw here, so neither may be assumed flat.
         return replace(
             server,
             config=deepcopy(server.config),
