@@ -31,6 +31,16 @@ from mc_server_dashboard_api.storage.domain.errors import (
     ObjectStoreUnavailableError,
 )
 
+# Store time reported for an object seeded straight into ``objects`` without a
+# stamp. Fixed and far future so the JAR-pool (#293) and plugin-cache (#1332) GC
+# safety windows spare it under *any* clock: a test that seeds an object and
+# forgets the stamp then reddens on the delete it was not asserting, instead of
+# passing by accident. Reading the host clock here made that fail-loud property
+# depend on the host clock running later than the caller's ``now`` minus the
+# window — an unstated environmental assumption (#2529). Same spelling as the
+# constant in ``tests/versions/fakes.py`` and ``tests/servers/fakes.py``.
+_UNSTAMPED_STORE_TIME = dt.datetime(9999, 1, 1, tzinfo=dt.UTC)
+
 
 class FakeS3Store:
     """The shared bucket contents: an ordered key -> bytes map.
@@ -50,8 +60,9 @@ class FakeS3Store:
         # upload — letting a dedup-skip test prove no second upload occurred.
         self.upload_calls: dict[str, int] = {}
         # Per-key store time, mirroring S3 ``LastModified`` for the JAR-pool GC
-        # safety window (#293). Set on every write; defaulted to "now" on read for
-        # any key a test seeded directly into ``objects``.
+        # safety window (#293). Set on every write, as the real backend stamps an
+        # object it stores. A key a test seeded directly into ``objects`` has
+        # none — see :data:`_UNSTAMPED_STORE_TIME` (issue #2542).
         self.mtimes: dict[str, dt.datetime] = {}
         # In-progress multipart uploads keyed by upload id, each a
         # (key, initiated) pair — the orphan-part sweep input (issue #903). Tests
@@ -148,7 +159,7 @@ class FakeS3Client:
             S3Object(
                 key=key,
                 size=len(data),
-                last_modified=self._store.mtimes.get(key, dt.datetime.now(dt.UTC)),
+                last_modified=self._store.mtimes.get(key, _UNSTAMPED_STORE_TIME),
             )
             for key, data in sorted(self._store.objects.items())
             if key.startswith(prefix)
