@@ -153,7 +153,10 @@ async def test_create_defaults_to_stopped_and_commits() -> None:
     assert server.assigned_worker_id is None
     assert server.server_type is ServerType.PAPER
     assert uow.commits == 1
-    assert uow.servers.by_id[server.id] is server
+    # Equality, not identity: the repository persists the entity's VALUES, so the
+    # stored row is a detached copy (issue #2505) exactly as the adapter's INSERT
+    # leaves it.
+    assert uow.servers.by_id[server.id] == server
 
 
 async def test_create_accepts_java_edition() -> None:
@@ -528,7 +531,7 @@ async def test_create_with_accept_eula_seeds_eula_and_properties() -> None:
     assert file_store.files["eula.txt"] == b"eula=true\n"
     assert file_store.files["server.properties"] == _SEEDED_PROPERTIES
     assert uow.commits == 1
-    assert uow.servers.by_id[server.id] is server
+    assert uow.servers.by_id[server.id] == server
 
 
 async def test_create_without_accept_eula_still_seeds_properties() -> None:
@@ -2253,8 +2256,13 @@ async def test_delete_rechecks_at_rest_after_the_pack_window() -> None:
     uow.servers.seed(server)
 
     def _start_during_pack() -> None:
-        server.desired_state = DesiredState.RUNNING
-        server.observed_state = ObservedState.RUNNING
+        # Write the concurrent start onto the stored ROW, the way the racing
+        # transaction would: the repository keeps a detached copy of the seeded
+        # entity (issue #2505), so mutating the local one changes nothing the
+        # delete's second transaction can read.
+        row = uow.servers.by_id[server.id]
+        row.desired_state = DesiredState.RUNNING
+        row.observed_state = ObservedState.RUNNING
 
     store.on_prune = _start_during_pack
 
@@ -2536,7 +2544,8 @@ async def test_delete_rechecks_assignment_after_the_pack_window() -> None:
     uow.servers.seed(server)
 
     def _assign_during_pack() -> None:
-        server.assigned_worker_id = WorkerId(uuid.uuid4())
+        # On the stored ROW, as the racing placement would write it (issue #2505).
+        uow.servers.by_id[server.id].assigned_worker_id = WorkerId(uuid.uuid4())
 
     store.on_prune = _assign_during_pack
 
