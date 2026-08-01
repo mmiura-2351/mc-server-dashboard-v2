@@ -125,7 +125,7 @@ test("schedule:read-only member sees a read-only view", async ({
   page,
   request,
 }) => {
-  const { owner, communityId, serverId, token } = await setupServer(request);
+  const { communityId, serverId, token } = await setupServer(request);
   const scheduleName = uniqueName("readonly");
 
   // Owner seeds a schedule via API.
