@@ -28,6 +28,27 @@
 # The second number is a property of today's coreutils, not of the code, and an
 # edit that splices in a filter reopens the window with nothing to say it did.
 #
+# Why every script is scanned rather than only the ones that set pipefail. Two
+# earlier versions of this guard filtered first -- by the word "pipefail"
+# appearing in the file, then by a `set` command plus a worklist that followed
+# `source` lines to pick up libraries like pg_cluster_lib.sh, which sets no
+# options of its own. Both filters had the same defect one level down: coverage
+# depended on how something was spelled. The first dropped a file when a comment
+# was reworded; the second dropped one when a source line was written
+# `. "$(dirname "$0")/lib.sh"` instead of `. "$script_dir/lib.sh"`. Scanning
+# unconditionally costs a few milliseconds per file and deletes that whole
+# silent-shrink class rather than patching instances of it. A script that does
+# not set pipefail is not exposed, so a hit in one would be a false positive --
+# there are none in this repo, and the shape is worth avoiding there anyway,
+# since `set -o pipefail` is one edit away.
+#
+# There is deliberately no "is the scan wide enough" assertion. With the filter
+# gone, the only way a pipefail-running file escapes is by not being a shell
+# script at all -- a Dockerfile `SHELL ["/bin/bash", "-o", "pipefail", "-c"]` or
+# a Makefile `.SHELLFLAGS`. Neither exists in this repo, so such a check could
+# not fail today, and a check that cannot fail is worse than none: it reports an
+# all-clear nobody has verified.
+#
 # Scope note (#2465): `| head -n 1` is the same early-exiting-reader family and
 # was swept for, but every instance in this repo feeds `head` from a grep or sed
 # whose whole output fits one buffered write, so the write has completed before
@@ -37,6 +58,15 @@
 #
 # Exit code: 0 = all pass, non-zero = at least one failure.
 set -uo pipefail
+
+# `git ls-files` is the file selection: it is the one list that cannot drift out
+# of sync with what is actually in the repo. Globbing directories instead needs
+# an exclusion for every build and vendor tree (.git, node_modules, .venv, dist,
+# .bin) plus .claude/worktrees/, which holds full checkouts of other branches --
+# and it still goes blind to a tracked script that lands somewhere the globs
+# never named. Drop GIT_* first: pre-push exports GIT_DIR pointing at the real
+# repository, which would redirect the listing away from this worktree.
+unset "${!GIT_@}"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -61,88 +91,33 @@ echo "=== pipefail pipeline-shape tests ==="
 # Hence awk over a line regex: `cont` carries "the previous line ended in a
 # pipe" so the two-line form is one state, and `quiet_grep` matches a grep whose
 # options contain a quiet flag however it is spelled.
-quiet_grep='grep([[:space:]]+-[^[:space:]]+)*[[:space:]]+(-[[:alpha:]]*q[[:alpha:]]*|--quiet|--silent)'
-
-# `set -o pipefail` as a COMMAND, not the word appearing in prose. Selecting on
-# the bare word would make coverage depend on comment wording: pg_cluster_lib.sh
-# would be scanned only because a comment in it happens to say "pipefail", and
-# rewording that comment would drop it out silently.
-pipefail_set='^[[:space:]]*set[[:space:]][^#]*pipefail'
-
-# Candidates: every shell script and workflow in the repo. Both workflow
-# extensions -- GitHub accepts .yaml as readily as .yml, and a guard that globs
-# one of them is a guard the next workflow can walk past.
-declare -a candidates=()
-for f in "$ROOT"/.githooks/* "$ROOT"/scripts/*.sh \
-	"$ROOT"/.github/workflows/*.yml "$ROOT"/.github/workflows/*.yaml; do
-	[ -f "$f" ] && candidates+=("$f")
-done
-
-# The scan set: candidates that run `set -o pipefail` themselves, then the
-# libraries those source, transitively. pg_cluster_lib.sh sets no shell options
-# of its own -- it runs under pipefail because pg_major_upgrade.sh and
-# deploy_preflight.sh source it, and being sourced is the reason it has to be
-# scanned. Workflows are in because GitHub's default `bash -e {0}` has no
-# pipefail, so a `run:` block is exposed exactly when it opts in.
-declare -A in_scan=()
-declare -a scan=()
-for f in "${candidates[@]}"; do
-	# grep reads the file directly: no pipe, so no writer to kill. This guard
-	# must not contain the shape it bans.
-	grep -qE "$pipefail_set" "$f" || continue
-	in_scan[$f]=1
-	scan+=("$f")
-done
-i=0
-while [ "$i" -lt "${#scan[@]}" ]; do
-	f="${scan[$i]}"
-	i=$((i + 1))
-	while IFS= read -r line; do
-		# `. "$script_dir/lib.sh"` -> lib.sh. The directory part is a variable
-		# that cannot be expanded statically, so the basename is what gets
-		# matched against the candidates. `read` from a here-string, not a
-		# pipe: it stops at the first line, which is exactly the early exit
-		# this file exists to ban.
-		line="${line%%#*}"
-		read -r _ path _ <<< "$line"
-		path="${path//\"/}"
-		path="${path//\'/}"
-		lib="${path##*/}"
-		for c in "${candidates[@]}"; do
-			[ "${c##*/}" = "$lib" ] || continue
-			[ -n "${in_scan[$c]:-}" ] && continue
-			in_scan[$c]=1
-			scan+=("$c")               # grows the worklist: sourcing is transitive
-		done
-	done < <(grep -E '^[[:space:]]*(\.|source)[[:space:]]' "$f" || true)
-done
-
-# --- 1. Every file that turns pipefail on is actually scanned ---------------
-# The all-clear below is only worth the paper it is printed on if the scan
-# covers what it claims to. Asserting "at least one file was scanned" would not:
-# this file always matches itself, so it would catch nothing short of total
-# breakage. What is asserted instead is the property that shrinks when coverage
-# does -- a pipefail script that the globs above do not reach.
-{
-	stray=""
-	while IFS= read -r f; do
-		[ -n "${in_scan[$f]:-}" ] || stray="$stray ${f#"$ROOT"/}"
-	done < <(grep -rlE "$pipefail_set" "$ROOT" \
-		--exclude-dir=.git --exclude-dir=node_modules --exclude-dir=.venv \
-		--exclude-dir=.claude --exclude-dir=dist --exclude-dir=.bin || true)
-	if [ -z "$stray" ]; then
-		ok "every file that runs 'set -o pipefail' is in the scan (${#scan[@]} files)"
-	else
-		fail_test "pipefail file(s) outside the scanned globs -- widen them:$stray"
-	fi
-}
-
-# --- 2. No branch is decided by a quiet grep reading from a pipe ------------
 {
 	offenders=""
-	for f in "${scan[@]}"; do
+	scanned=0
+	quiet_grep='grep([[:space:]]+-[^[:space:]]+)*[[:space:]]+(-[[:alpha:]]*q[[:alpha:]]*|--quiet|--silent)'
+	while IFS= read -r rel; do
+		f="$ROOT/$rel"
+		[ -f "$f" ] || continue
+		# Shell scripts and workflows by extension. Anything else is sniffed
+		# only when it has no extension at all, which is what the hooks are:
+		# .githooks/pre-push and friends carry a shebang and no suffix.
+		base="${rel##*/}"
+		case "$base" in
+			*.sh | *.bash | *.yml | *.yaml) ;;
+			*.*) continue ;;
+			*)
+				# A redirect, not a pipe: reading a file leaves no writer to kill.
+				shebang=""
+				read -r shebang < "$f" 2> /dev/null || true
+				case "$shebang" in
+					'#!'*sh*) ;;
+					*) continue ;;
+				esac
+				;;
+		esac
+		scanned=$((scanned + 1))
 		while IFS= read -r line_no; do
-			offenders="$offenders ${f#"$ROOT"/}:${line_no}"
+			offenders="$offenders ${rel}:${line_no}"
 		done < <(awk -v qg="$quiet_grep" '
 			{
 				if ($0 ~ "\\|[[:space:]]*" qg) print NR
@@ -150,9 +125,9 @@ done
 				cont = ($0 ~ /\|[[:space:]]*$/)
 			}
 		' "$f" || true)
-	done
+	done < <(git -C "$ROOT" ls-files)
 	if [ -z "$offenders" ]; then
-		ok "no branch is decided by a quiet grep reading from a pipe"
+		ok "no branch is decided by a quiet grep reading from a pipe ($scanned files)"
 	else
 		fail_test "a quiet grep is fed from a pipe -- SIGPIPE under pipefail (#2447) at:$offenders"
 	fi
