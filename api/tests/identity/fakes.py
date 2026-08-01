@@ -8,6 +8,7 @@ TESTING.md Section 4. The fake UnitOfWork shares its repositories across nested
 from __future__ import annotations
 
 import datetime as dt
+from dataclasses import replace
 
 from mc_server_dashboard_api.identity.domain.brute_force import BruteForceConfig
 from mc_server_dashboard_api.identity.domain.clock import Clock
@@ -65,25 +66,41 @@ class FakeUserRepository(UserRepository):
         # FOR UPDATE lock is taken only on active-admin-reducing paths (#260).
         self.lock_calls = 0
 
+    @staticmethod
+    def _copy(user: User) -> User:
+        # Detach the row from the caller's entity in both directions (issue
+        # #2516, applying the rule #2505 set for the servers fakes): a writer's
+        # INSERT/UPDATE has already serialized the values, and a reader's SELECT
+        # materializes a fresh entity, so no in-memory edit may cross this
+        # boundary either way. Aliasing is more forgiving than production, and
+        # that is the direction that can absorb a mutant a persisted-state
+        # assertion should have caught.
+        #
+        # Copy depth: a ``User`` carries no mutable field -- every one is a
+        # scalar, a datetime, or a frozen value object -- so a new entity is the
+        # full depth.
+        return replace(user)
+
     def seed(self, user: User) -> None:
-        self.by_id[user.id] = user
+        self.by_id[user.id] = self._copy(user)
 
     async def add(self, user: User) -> None:
-        self.by_id[user.id] = user
+        self.by_id[user.id] = self._copy(user)
 
     async def get_by_id(self, user_id: UserId) -> User | None:
-        return self.by_id.get(user_id)
+        user = self.by_id.get(user_id)
+        return None if user is None else self._copy(user)
 
     async def get_by_username(self, username: Username) -> User | None:
         for user in self.by_id.values():
             if user.username == username:
-                return user
+                return self._copy(user)
         return None
 
     async def get_by_email(self, email: EmailAddress) -> User | None:
         for user in self.by_id.values():
             if user.email == email:
-                return user
+                return self._copy(user)
         return None
 
     async def usernames_by_id(self, user_ids: list[UserId]) -> dict[UserId, Username]:
@@ -91,14 +108,14 @@ class FakeUserRepository(UserRepository):
         return {uid: user.username for uid, user in self.by_id.items() if uid in wanted}
 
     async def update(self, user: User) -> None:
-        self.by_id[user.id] = user
+        self.by_id[user.id] = self._copy(user)
 
     async def delete(self, user_id: UserId) -> None:
         self.by_id.pop(user_id, None)
 
     async def list_page(self, *, limit: int, offset: int) -> list[User]:
         ordered = sorted(self.by_id.values(), key=lambda u: (u.created_at, u.id.value))
-        return ordered[offset : offset + limit]
+        return [self._copy(u) for u in ordered[offset : offset + limit]]
 
     async def count_all(self) -> int:
         return len(self.by_id)
@@ -124,14 +141,22 @@ class FakeRefreshTokenRepository(RefreshTokenRepository):
     def __init__(self) -> None:
         self.by_hash: dict[str, RefreshToken] = {}
 
+    @staticmethod
+    def _copy(token: RefreshToken) -> RefreshToken:
+        # Same rule as :meth:`FakeUserRepository._copy` (issue #2516); a
+        # ``RefreshToken`` likewise carries no mutable field. The ``revoke*``
+        # writers already rebuild the row through :func:`_with_revoked`.
+        return replace(token)
+
     def seed(self, token: RefreshToken) -> None:
-        self.by_hash[token.token_hash] = token
+        self.by_hash[token.token_hash] = self._copy(token)
 
     async def add(self, token: RefreshToken) -> None:
-        self.by_hash[token.token_hash] = token
+        self.by_hash[token.token_hash] = self._copy(token)
 
     async def get_by_token_hash(self, token_hash: str) -> RefreshToken | None:
-        return self.by_hash.get(token_hash)
+        token = self.by_hash.get(token_hash)
+        return None if token is None else self._copy(token)
 
     async def revoke(
         self, token_hash: str, *, revoked_at: dt.datetime, reason: str
@@ -162,7 +187,7 @@ class FakeRefreshTokenRepository(RefreshTokenRepository):
         self, user_id: UserId, *, now: dt.datetime
     ) -> list[RefreshToken]:
         active = [
-            token
+            self._copy(token)
             for token in self.by_hash.values()
             if token.user_id == user_id and token.is_active(now=now)
         ]

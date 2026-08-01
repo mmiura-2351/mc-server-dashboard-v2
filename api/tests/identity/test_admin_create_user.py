@@ -71,7 +71,15 @@ async def test_creates_user_persists_hash_not_plaintext() -> None:
     assert user.password_hash == f"hashed::{_VALID_PASSWORD}"
     assert user.created_at == _NOW
     assert uow.commits == 1
-    assert uow.users.by_id[user.id] is user
+    # The persisted row, asserted by VALUE and re-read after the returned entity
+    # is mutated (issue #2516). The old ``is user`` assertion said only that the
+    # fake had aliased -- a property the real adapter never grants, since the
+    # INSERT has already serialized the values -- so it survived any change to
+    # what was actually stored.
+    stored = uow.users.by_id[user.id]
+    assert stored == user
+    user.password_hash = "hashed::rotated-after-the-insert"
+    assert stored.password_hash == f"hashed::{_VALID_PASSWORD}"
 
 
 async def test_rejects_weak_password_before_persisting() -> None:

@@ -415,10 +415,17 @@ class FakeServerRepository(ServerRepository):
     @staticmethod
     def _copy(server: Server) -> Server:
         # Detach the row from the caller's entity (issue #2505). Every writer
-        # stores this. Aliasing let a use case's post-transaction write-back onto
-        # its own entity retroactively rewrite what a test believed was persisted
-        # -- the direction that makes a persisted-state assert look like a pin
-        # when the adapter would have stored something else.
+        # stores this and every reader returns it (issue #2516) -- nothing
+        # crosses the fake boundary in either direction uncopied. Aliasing let a
+        # use case's post-transaction write-back onto its own entity
+        # retroactively rewrite what a test believed was persisted -- the
+        # direction that makes a persisted-state assert look like a pin when the
+        # adapter would have stored something else.
+        #
+        # Outbound, the same rule follows from the adapter materializing a fresh
+        # entity per SELECT: an edit to a loaded server reaches the database only
+        # through a writer, so a reader that hands back the row (or shares its
+        # jsonb blobs) lets the edit land with no write at all.
         #
         # For ``update``/``update_lifecycle`` this mirrors the adapter exactly:
         # the UPDATE executes there and then, so nothing the caller does to its
@@ -463,11 +470,13 @@ class FakeServerRepository(ServerRepository):
     ) -> Server | None:
         for server in self.by_id.values():
             if server.community_id == community_id and server.name == name:
-                return server
+                return self._copy(server)
         return None
 
     async def list_for_community(self, community_id: CommunityId) -> list[Server]:
-        return [s for s in self.by_id.values() if s.community_id == community_id]
+        return [
+            self._copy(s) for s in self.by_id.values() if s.community_id == community_id
+        ]
 
     async def list_game_ports(self) -> set[int]:
         return {s.game_port for s in self.by_id.values() if s.game_port is not None}
@@ -483,7 +492,7 @@ class FakeServerRepository(ServerRepository):
     async def get_by_slug(self, slug: str) -> Server | None:
         for server in self.by_id.values():
             if server.slug == slug:
-                return server
+                return self._copy(server)
         return None
 
     async def list_ids_missing_game_port(self) -> list[ServerId]:
@@ -599,14 +608,14 @@ class FakeServerRepository(ServerRepository):
 
     async def list_desired_running_assigned(self) -> list[Server]:
         return [
-            replace(server)
+            self._copy(server)
             for server in self.by_id.values()
             if server.desired_state is DesiredState.RUNNING
             and server.assigned_worker_id is not None
         ]
 
     async def list_all(self) -> list[Server]:
-        return [replace(server) for server in self.by_id.values()]
+        return [self._copy(server) for server in self.by_id.values()]
 
     async def list_reconcilable(self) -> list[Server]:
         out: list[Server] = []
@@ -659,7 +668,7 @@ class FakeServerRepository(ServerRepository):
                 or stop_crashed_wedged
                 or stop_stopping_wedged
             ):
-                out.append(replace(server))
+                out.append(self._copy(server))
         return out
 
     async def existing_ids(self, server_ids: list[ServerId]) -> set[ServerId]:
@@ -686,18 +695,25 @@ class FakeBackupRepository(BackupRepository):
         # FakeLifecycleLock records; see FakeBackupArchiveStore.events.
         self.events: list[tuple[ServerId, str]] = []
 
+    @staticmethod
+    def _copy(backup: Backup) -> Backup:
+        # Detach the row from the caller's entity in both directions (#2516,
+        # following #2505). A ``Backup`` carries no mutable field -- every one is
+        # a scalar, an enum, or a frozen id -- so a new entity is the full depth.
+        return replace(backup)
+
     def seed(self, backup: Backup) -> None:
-        self.by_id[backup.id] = backup
+        self.by_id[backup.id] = self._copy(backup)
 
     async def add(self, backup: Backup) -> None:
-        self.by_id[backup.id] = backup
+        self.by_id[backup.id] = self._copy(backup)
 
     async def get_by_id(self, backup_id: BackupId) -> Backup | None:
         backup = self.by_id.get(backup_id)
-        return None if backup is None else replace(backup)
+        return None if backup is None else self._copy(backup)
 
     async def list_for_server(self, server_id: ServerId) -> list[Backup]:
-        rows = [replace(b) for b in self.by_id.values() if b.server_id == server_id]
+        rows = [self._copy(b) for b in self.by_id.values() if b.server_id == server_id]
         return sorted(rows, key=lambda b: b.created_at, reverse=True)
 
     async def delete(self, backup_id: BackupId) -> None:
@@ -772,10 +788,12 @@ class FakeGroupRepository(GroupRepository):
         self.attachments: set[tuple[GroupId, ServerId]] = set()
 
     def seed(self, group: PlayerGroup) -> None:
-        self.by_id[group.id] = group
+        self.by_id[group.id] = self._copy(group)
 
     @staticmethod
     def _copy(group: PlayerGroup) -> PlayerGroup:
+        # ``players`` is the entity's only mutable field and holds frozen
+        # ``Player`` values, so a new list is the full depth (#2516).
         return replace(group, players=list(group.players))
 
     async def add(self, group: PlayerGroup) -> None:
@@ -846,11 +864,32 @@ class FakePluginRepository(PluginRepository):
     def __init__(self) -> None:
         self.by_id: dict[PluginId, ServerPlugin] = {}
 
+    @staticmethod
+    def _copy(plugin: ServerPlugin) -> ServerPlugin:
+        # Detach the row from the caller's entity in both directions (#2516,
+        # following #2505): a writer's INSERT/UPDATE has already serialized the
+        # values, and a reader's SELECT materializes a fresh entity, so no
+        # in-memory edit may cross this boundary either way.
+        #
+        # Copy depth: a new entity plus the four jsonb list columns copied all
+        # the way down. Those are the entity's only mutable fields (everything
+        # else is a scalar, an enum, or a frozen id). ``dependencies`` and
+        # ``catalog_dependencies`` hold dicts, so a one-level copy would still
+        # let an in-place edit of an element reach an already-written row; the
+        # adapter serializes each column whole, so it cannot.
+        return replace(
+            plugin,
+            provides=deepcopy(plugin.provides),
+            dependencies=deepcopy(plugin.dependencies),
+            mc_versions=deepcopy(plugin.mc_versions),
+            catalog_dependencies=deepcopy(plugin.catalog_dependencies),
+        )
+
     def seed(self, plugin: ServerPlugin) -> None:
-        self.by_id[plugin.id] = plugin
+        self.by_id[plugin.id] = self._copy(plugin)
 
     async def add(self, plugin: ServerPlugin) -> None:
-        self.by_id[plugin.id] = plugin
+        self.by_id[plugin.id] = self._copy(plugin)
 
     async def get_by_id(
         self, server_id: ServerId, plugin_id: PluginId
@@ -858,11 +897,11 @@ class FakePluginRepository(PluginRepository):
         plugin = self.by_id.get(plugin_id)
         if plugin is not None and plugin.server_id != server_id:
             return None
-        return plugin
+        return None if plugin is None else self._copy(plugin)
 
     async def list_for_server(self, server_id: ServerId) -> list[ServerPlugin]:
         return sorted(
-            (p for p in self.by_id.values() if p.server_id == server_id),
+            (self._copy(p) for p in self.by_id.values() if p.server_id == server_id),
             key=lambda p: (p.display_name, str(p.id.value)),
         )
 
@@ -893,16 +932,16 @@ class FakePluginRepository(PluginRepository):
         ]
         exact = next((p for p in candidates if p.rel_path == rel_path), None)
         if exact is not None:
-            return exact
-        return candidates[0] if candidates else None
+            return self._copy(exact)
+        return self._copy(candidates[0]) if candidates else None
 
     async def update(self, plugin: ServerPlugin) -> None:
-        self.by_id[plugin.id] = plugin
+        self.by_id[plugin.id] = self._copy(plugin)
 
     async def list_catalog_plugins(self, server_id: ServerId) -> list[ServerPlugin]:
         return sorted(
             (
-                p
+                self._copy(p)
                 for p in self.by_id.values()
                 if p.server_id == server_id
                 and p.source in CATALOG_SOURCES
@@ -919,7 +958,7 @@ class FakePluginRepository(PluginRepository):
                 plugin.server_id == server_id
                 and plugin.source_project_id == source_project_id
             ):
-                return plugin
+                return self._copy(plugin)
         return None
 
     async def all_sha256s(self) -> set[str]:
@@ -954,15 +993,28 @@ class FakeResourcePackRepository(ResourcePackRepository):
         self.packs: dict[ResourcePackId, ResourcePack] = {}
         self.assignments: dict[ServerId, ResourcePackAssignment] = {}
 
+    @staticmethod
+    def _copy(pack: ResourcePack) -> ResourcePack:
+        # Neither row type carries a mutable field, so a new entity is the full
+        # depth (#2516).
+        return replace(pack)
+
+    @staticmethod
+    def _copy_assignment(
+        assignment: ResourcePackAssignment,
+    ) -> ResourcePackAssignment:
+        return replace(assignment)
+
     async def add(self, pack: ResourcePack) -> None:
-        self.packs[pack.id] = pack
+        self.packs[pack.id] = self._copy(pack)
 
     async def get_by_id(self, pack_id: ResourcePackId) -> ResourcePack | None:
-        return self.packs.get(pack_id)
+        pack = self.packs.get(pack_id)
+        return None if pack is None else self._copy(pack)
 
     async def list_all(self) -> list[ResourcePack]:
         return sorted(
-            self.packs.values(),
+            (self._copy(p) for p in self.packs.values()),
             key=lambda p: (p.display_name, str(p.id.value)),
         )
 
@@ -970,12 +1022,13 @@ class FakeResourcePackRepository(ResourcePackRepository):
         self.packs.pop(pack_id, None)
 
     async def add_assignment(self, assignment: ResourcePackAssignment) -> None:
-        self.assignments[assignment.server_id] = assignment
+        self.assignments[assignment.server_id] = self._copy_assignment(assignment)
 
     async def get_assignment_by_server(
         self, server_id: ServerId
     ) -> ResourcePackAssignment | None:
-        return self.assignments.get(server_id)
+        assignment = self.assignments.get(server_id)
+        return None if assignment is None else self._copy_assignment(assignment)
 
     async def delete_assignment(self, server_id: ServerId) -> None:
         self.assignments.pop(server_id, None)
@@ -983,7 +1036,11 @@ class FakeResourcePackRepository(ResourcePackRepository):
     async def list_assignments_for_pack(
         self, pack_id: ResourcePackId
     ) -> list[ResourcePackAssignment]:
-        return [a for a in self.assignments.values() if a.resource_pack_id == pack_id]
+        return [
+            self._copy_assignment(a)
+            for a in self.assignments.values()
+            if a.resource_pack_id == pack_id
+        ]
 
 
 class FakeScheduleRepository(ScheduleRepository):
@@ -998,10 +1055,12 @@ class FakeScheduleRepository(ScheduleRepository):
         self.by_id: dict[ScheduleId, Schedule] = {}
 
     def seed(self, schedule: Schedule) -> None:
-        self.by_id[schedule.id] = schedule
+        self.by_id[schedule.id] = self._copy(schedule)
 
     @staticmethod
     def _copy(schedule: Schedule) -> Schedule:
+        # ``cadence`` and every ``warning_steps`` element are frozen and the
+        # tuple itself is immutable, so a new entity is the full depth (#2516).
         return replace(schedule)
 
     async def add(self, schedule: Schedule) -> None:
@@ -1076,15 +1135,21 @@ class FakeScheduleRunRepository(ScheduleRunRepository):
     def __init__(self) -> None:
         self.rows: list[ScheduleRun] = []
 
+    @staticmethod
+    def _copy(run: ScheduleRun) -> ScheduleRun:
+        # A ``ScheduleRun`` carries no mutable field, so a new entity is the full
+        # depth (#2516).
+        return replace(run)
+
     def seed(self, run: ScheduleRun) -> None:
-        self.rows.append(run)
+        self.rows.append(self._copy(run))
 
     async def add(self, run: ScheduleRun) -> None:
-        self.rows.append(run)
+        self.rows.append(self._copy(run))
 
     async def list_for_schedule(self, schedule_id: ScheduleId) -> list[ScheduleRun]:
         return sorted(
-            (r for r in self.rows if r.schedule_id == schedule_id),
+            (self._copy(r) for r in self.rows if r.schedule_id == schedule_id),
             key=lambda r: (r.started_at, str(r.id.value)),
             reverse=True,
         )
