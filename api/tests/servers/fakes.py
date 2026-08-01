@@ -1698,12 +1698,18 @@ class FakePluginCacheStore(PluginCacheStore):
     Keyed by SHA-256 content address. ``puts`` records each ``put`` call (even the
     deduped ones) and ``blobs`` holds the keys actually persisted, so a test can
     assert dedup (a second put of identical bytes does not grow ``blobs``) and the
-    download cache (a cached blob short-circuits the HTTP download).
+    download cache (a cached blob short-circuits the HTTP download). ``deleted``
+    records each ``delete`` call, including the ones for keys already gone.
     """
 
     def __init__(self) -> None:
         self.blobs: dict[str, bytes] = {}
         self.puts: list[str] = []
+        self.deleted: list[str] = []
+        # Store time per content key, as ``list_entries`` reports it. A blob
+        # seeded straight into ``blobs`` has none and is reported as stored just
+        # now; the GC tests set it to age a blob past the safety window.
+        self.modified_at: dict[str, dt.datetime] = {}
 
     async def put(self, sha256: str, stream: AsyncIterator[bytes]) -> None:
         self.puts.append(sha256)
@@ -1725,17 +1731,20 @@ class FakePluginCacheStore(PluginCacheStore):
         return _gen()
 
     async def list_entries(self) -> list[CacheEntry]:
+        now = dt.datetime.now(dt.UTC)
         return [
             CacheEntry(
                 sha256=sha,
                 size_bytes=len(data),
-                modified_at=dt.datetime.now(dt.UTC),
+                modified_at=self.modified_at.get(sha, now),
             )
             for sha, data in self.blobs.items()
         ]
 
     async def delete(self, sha256: str) -> None:
+        self.deleted.append(sha256)
         self.blobs.pop(sha256, None)
+        self.modified_at.pop(sha256, None)
 
 
 class FakeBedrockTunnelSync(BedrockTunnelSync):
