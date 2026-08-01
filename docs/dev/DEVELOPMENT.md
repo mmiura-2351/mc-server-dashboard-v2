@@ -73,8 +73,12 @@ covered here.
 | Install pinned local tooling | `make bootstrap` | golangci-lint into `worker/.bin`, `uv sync` for api, `npm ci` for webui |
 | Install git hooks | `make hooks-install` | one-time, sets `core.hooksPath` |
 
-Before opening a PR, run `make check`. It is the same gate CI enforces, so a
-green local run means a green CI run.
+No need to run the full `make check` by hand before pushing: the pre-push hook
+runs it, and a manual run repeats the whole gate on an unchanged tree. Iterate
+with the targeted subset (the module's `make <module>-lint` /
+`make <module>-test`, or `make docs-check` for a docs change) and let the hook
+be the single full-gate run. It is the same gate CI enforces, so a green hook
+run means a green CI run.
 
 ### Per-module commands
 

@@ -117,7 +117,16 @@ Each one succeeds, or appears to; the damage surfaces later.
 
 ## 5. Pre-PR checklist (monorepo tripwires)
 
-- `make check` green locally — the same gate as pre-push and CI.
+- **Don't run the full `make check` by hand before pushing.** The pre-push
+  hook runs exactly it, so a manual run pays the whole gate twice on an
+  unchanged tree — 10-40 min each on a contended host, and two chances at the
+  #2228 / #2513 timeout flakes instead of one (issue #2574). Iterate with the
+  targeted subset (the touched module's `make <module>-lint` /
+  `make <module>-test`, or `make docs-check` for a docs-only change) and let
+  the hook be the single full-gate run. A failed hook leaves the commit intact
+  and the push undone, so the fix is a follow-up commit, squashed away at merge
+  (CONTRIBUTING.md Section 4). The gate itself is unchanged — never
+  `--no-verify` (Section 3).
 - `proto/` changed → one atomic change set: `make proto-gen`, update `api/`
   **and** `worker/` together; an intentional contract break carries the
   `breaking` label (CONTRIBUTING.md Section 5).
