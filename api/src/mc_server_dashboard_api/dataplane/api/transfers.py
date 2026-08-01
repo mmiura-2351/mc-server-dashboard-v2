@@ -201,6 +201,22 @@ def _bearer(authorization: str | None) -> str | None:
     return authorization[len(_BEARER_PREFIX) :]
 
 
+# Deliberately no ``Cache-Control`` on the data-plane transfers (issue #2519),
+# unlike the browser-facing downloads (issue #2491). Three reasons:
+#
+# 1. A data-plane request always carries ``Authorization`` — the Worker sets the
+#    Bearer credential and ``require_worker_credential`` above verifies it — so
+#    RFC 9111 Section 3.5 already bars a shared cache from reusing it. #2491's
+#    argument was about a *cookie*-authenticated request, which carries none.
+# 2. Nothing on the path can store it anyway: ``compose.yaml`` pins the
+#    Worker-facing base URL to the internal compose address regardless of
+#    ``PUBLIC_BASE_URL`` (issue #1549, DEPLOYMENT.md Section 8), so no
+#    intermediary is present, and the Worker's HTTP client is a bare
+#    ``http.Client`` with no cache of its own.
+# 3. Revisit if (2) stops holding: ``effective_data_plane_base_url`` (config.py)
+#    falls back to ``public_base_url`` when ``data_plane_base_url`` is unset, so a
+#    deployment not using the shipped compose file could route the data plane
+#    through its edge. Add the header if one ever does.
 @router.get(
     "/communities/{community_id}/servers/{server_id}/working-set",
     dependencies=[Depends(require_worker_credential)],

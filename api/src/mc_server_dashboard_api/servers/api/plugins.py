@@ -1183,7 +1183,13 @@ async def download_client_modpack(
     return StreamingResponse(
         stream,
         media_type="application/zip",
-        headers={"Content-Disposition": 'attachment; filename="mods.zip"'},
+        headers={
+            "Content-Disposition": 'attachment; filename="mods.zip"',
+            # A per-server body is never stored (issue #2491): the zip is gated by
+            # ``plugin:read`` on this server, so a shared cache serving it to a
+            # non-member would be an authorization bypass (issue #2519).
+            "Cache-Control": "no-store",
+        },
     )
 
 

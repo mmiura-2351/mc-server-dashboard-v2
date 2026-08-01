@@ -793,6 +793,24 @@ def test_download_client_modpack_streams_zip() -> None:
     assert b"fake-zip" in resp.content
 
 
+def test_download_client_modpack_declares_no_store() -> None:
+    # Pinned at the route, not at a transport, so a future auth change cannot
+    # silently drop the header (issue #2491). Bearer is the only credential this
+    # route accepts (``require_permission``), so one is full coverage.
+    async def _stream() -> object:
+        yield b"PK\x03\x04fake-zip"
+
+    app = _app(
+        member=True,
+        allow=True,
+        download_modpack=_FakeUseCase(result=_stream()),
+    )
+    client = next(_client(app))
+    resp = client.get(_client_url(uuid.uuid4(), uuid.uuid4(), "/download"))
+    assert resp.status_code == 200
+    assert resp.headers["cache-control"] == "no-store"
+
+
 def test_download_client_modpack_member_without_permission_is_403() -> None:
     async def _stream() -> object:
         yield b""
