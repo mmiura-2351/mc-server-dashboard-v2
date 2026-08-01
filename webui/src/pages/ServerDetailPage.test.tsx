@@ -110,9 +110,23 @@ function server(overrides: Record<string, unknown> = {}) {
   };
 }
 
+// The real GET /api/meta body: four deployment-wide facts, no server fields
+// (`MetaResponse` in api/src/mc_server_dashboard_api/core/api/meta.py and in the
+// generated src/api/schema.ts). Defaults mirror a relay-off deployment with no
+// operator memory knobs set (issue #2525).
+function meta() {
+  return {
+    relay_enabled: false,
+    bedrock_enabled: false,
+    default_memory_limit_mb: null,
+    max_memory_limit_mb: null,
+  };
+}
+
 // Route api.get by path: the Settings tab's resource-pack assignment (#1179) is
 // its own endpoint whose contract is `null | ResourcePackAssignmentResponse`, so
-// it must not be answered by the server-detail catch-all (issue #2247).
+// it must not be answered by the server-detail catch-all (issue #2247), and
+// /api/meta is a deployment-facts body, not a server (issue #2525).
 // Everything else still falls through to the server detail body.
 function routeGet(opts: { srv?: Record<string, unknown> } = {}) {
   const srv = server(opts.srv);
@@ -121,6 +135,9 @@ function routeGet(opts: { srv?: Record<string, unknown> } = {}) {
       // "No pack assigned" is a 200 with a null body, not a 404 (issue #2238).
       // The assigned state is covered by ServerResourcePackSection.test.tsx.
       return Promise.resolve(null);
+    }
+    if (path === "/api/meta") {
+      return Promise.resolve(meta());
     }
     return Promise.resolve(srv);
   });
@@ -429,6 +446,10 @@ describe("ServerDetailPage URL-driven tabs (#514)", () => {
       if (path.endsWith("/plugins")) {
         return Promise.resolve({ plugins: [] });
       }
+      if (path === "/api/meta") {
+        // The plugins tab reads the deployment's Bedrock flag (#1543).
+        return Promise.resolve(meta());
+      }
       return Promise.resolve(server());
     });
     renderPage();
@@ -468,8 +489,14 @@ describe("ServerDetailPage URL-driven tabs (#514)", () => {
   it("ArrowRight skips the hidden plugins tab on vanilla servers (#2017)", async () => {
     // Keyboard navigation must cycle only through rendered tabs: selecting the
     // filtered-out plugins tab leaves no tab selected and strands focus.
+    // ArrowRight lands on the players tab, which fires both group lists; each
+    // is a `GroupResponse[]`, and the catch-all's server object would make the
+    // tab's `attachedGroups.map` throw once the query resolved (issue #2525).
     mockApi.get.mockImplementation((path: string) => {
       if (path.endsWith("/schedules")) {
+        return Promise.resolve([]);
+      }
+      if (path.endsWith("/groups")) {
         return Promise.resolve([]);
       }
       return Promise.resolve(server({ server_type: "vanilla" }));
@@ -512,6 +539,10 @@ describe("ServerDetailPage URL-driven tabs (#514)", () => {
       }
       if (path.endsWith("/plugins")) {
         return Promise.resolve({ plugins: [] });
+      }
+      if (path === "/api/meta") {
+        // The plugins tab reads the deployment's Bedrock flag (#1543).
+        return Promise.resolve(meta());
       }
       return Promise.resolve(server());
     });
@@ -1288,11 +1319,7 @@ describe("ServerDetailPage settings", () => {
         return Promise.resolve(null);
       }
       if (path === "/api/meta") {
-        return Promise.resolve({
-          relay_enabled: false,
-          default_memory_limit_mb: null,
-          max_memory_limit_mb: null,
-        });
+        return Promise.resolve(meta());
       }
       if (path.startsWith("/api/ports/check/")) {
         return Promise.resolve({
@@ -1332,11 +1359,7 @@ describe("ServerDetailPage settings", () => {
         return Promise.resolve(null);
       }
       if (path === "/api/meta") {
-        return Promise.resolve({
-          relay_enabled: false,
-          default_memory_limit_mb: null,
-          max_memory_limit_mb: null,
-        });
+        return Promise.resolve(meta());
       }
       if (path === "/api/ports/check/25570") {
         return new Promise((resolve) => {
