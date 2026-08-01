@@ -28,8 +28,16 @@ vi.mock("../api/client.ts", async () => {
   return { ...actual, api: mockApi };
 });
 
+// Only `downloadFile` is stubbed; the rest of the module stays real so the
+// exports the detail page reaches for (`saveUrlAs`) survive the mock (#2359).
 const mockDownload = vi.hoisted(() => ({ downloadFile: vi.fn() }));
-vi.mock("../api/download.ts", () => mockDownload);
+vi.mock("../api/download.ts", async () => {
+  const actual =
+    await vi.importActual<typeof import("../api/download.ts")>(
+      "../api/download.ts",
+    );
+  return { ...actual, ...mockDownload };
+});
 
 let mockCan: Can = () => true;
 vi.mock("../permissions/ActiveCommunityProvider.tsx", () => ({
