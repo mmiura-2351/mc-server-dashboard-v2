@@ -7,17 +7,22 @@ served was on the internet, and the exposition's server/worker counts, per-route
 request **and auth-outcome** counters, process start timestamps and control-plane
 liveness were world-readable (confirmed by probe on the live deployments).
 
-Serving it from a second listener makes it unreachable from the tunnel *by
-construction* rather than reachable-and-rejected: ``cloudflared`` targets
-``:8000``, and the exposition is no longer on ``:8000``. Nothing a future
-routing or middleware change can silently undo. The listener is opt-in and off
-by default — the posture the relay already takes for its own metrics endpoint
-(RELAY.md Section 13), so the two modules answer this question the same way.
+Serving it from a second listener makes it unreachable *under the documented
+tunnel configuration* rather than reachable-and-rejected: the public hostname is
+mapped to ``http://api:8000`` (DEPLOYMENT.md Section 8), and the exposition is
+no longer on ``:8000``. No API-side routing or middleware change can undo that.
+It is not an absolute — ``cloudflared`` is a sibling on the same network and
+would happily route to ``api:9090`` if an operator mapped a second public
+hostname to it, which is why "do not add one" is documented rather than
+enforced. The listener is opt-in and off by default — the posture the relay
+already takes for its own metrics endpoint (RELAY.md Section 13), so the two
+modules answer this question the same way.
 
-Reachability is governed by the deployment, not by this module: the container
-port is simply never published, so only the compose network can reach it. See
-:class:`~mc_server_dashboard_api.config.MetricsSettings` for why the bind
-address is deliberately NOT loopback, and what that obliges an operator to do.
+Reachability is otherwise governed by the deployment, not by this module: under
+compose the container port is never published, so only the compose network can
+reach it. See :class:`~mc_server_dashboard_api.config.MetricsSettings` for why
+the bind address is deliberately NOT loopback, and what that obliges an operator
+to do.
 """
 
 from __future__ import annotations
@@ -94,14 +99,43 @@ class ObservabilityListener:
 
         Never raises: this runs first in the lifespan's teardown, and an
         exception here would skip everything after it (gRPC stop, engine
-        dispose).
+        dispose). A serve failure is already reported by :func:`_log_serve_exit`.
         """
 
         self._server.should_exit = True
-        try:
+        with contextlib.suppress(Exception):
             await self._task
-        except Exception:
-            _LOG.error("observability listener stopped with an error", exc_info=True)
+
+
+def _address_family(host: str) -> socket.AddressFamily:
+    """Pick the address family ``host`` needs, the way uvicorn does.
+
+    ``socket.create_server`` defaults to ``AF_INET``, so an IPv6 ``metrics.host``
+    would raise ``OSError`` and be swallowed as a non-fatal bind failure — the
+    listener would silently never start, on exactly the hosts where the
+    documented "scope the bind" remediation matters. uvicorn's own
+    ``Config.bind_socket`` sniffs for ``:``; mirror it so ``metrics.host``
+    accepts the same forms as ``server.host``.
+    """
+
+    return socket.AF_INET6 if ":" in host else socket.AF_INET
+
+
+def _log_serve_exit(task: asyncio.Task[None]) -> None:
+    """Report a serve task that died on its own, rather than on teardown.
+
+    Once the bind has succeeded nothing else watches this task: the handle holds
+    a reference, which also suppresses asyncio's never-retrieved-exception
+    warning, so without this a listener that stopped serving would be invisible
+    until shutdown. The relay logs from its serve goroutine for the same reason
+    (``relay/cmd/relay/main.go``).
+    """
+
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        _LOG.error("metrics listener stopped serving", exc_info=exc)
 
 
 def start_observability_listener(
@@ -120,7 +154,7 @@ def start_observability_listener(
     """
 
     try:
-        sock = socket.create_server((host, port))
+        sock = socket.create_server((host, port), family=_address_family(host))
     except OSError:
         _LOG.error(
             "metrics listener bind failed; continuing without the metrics endpoint",
@@ -145,5 +179,6 @@ def start_observability_listener(
     )
     server = _EmbeddedServer(config)
     task = asyncio.create_task(server.serve(sockets=[sock]))
+    task.add_done_callback(_log_serve_exit)
     _LOG.info("metrics endpoint listening", extra={"host": host, "port": bound_port})
     return ObservabilityListener(server, task, bound_port)

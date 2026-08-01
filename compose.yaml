@@ -257,7 +257,13 @@ services:
       # MCD_API_METRICS__ENABLED=true in .env to bind it, then scrape it from a
       # service on this compose network at http://api:9090/metrics -- the port is
       # deliberately absent from `ports:` below, which is what keeps it private.
+      # HOST/PORT are forwarded so the .env knobs are not silently inert here,
+      # but under compose the default 0.0.0.0 is the CORRECT value: the bind is
+      # inside the container's own network namespace, and narrowing it to
+      # loopback only makes the endpoint unscrapeable by any sibling service.
       MCD_API_METRICS__ENABLED: "${MCD_API_METRICS__ENABLED:-false}"
+      MCD_API_METRICS__HOST: "${MCD_API_METRICS__HOST:-0.0.0.0}"
+      MCD_API_METRICS__PORT: "${MCD_API_METRICS__PORT:-9090}"
     volumes:
       - api-storage:/data/storage
     ports:

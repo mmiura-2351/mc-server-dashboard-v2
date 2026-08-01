@@ -380,27 +380,42 @@ nothing else.
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
 | `metrics.enabled` | `false` | | Whether to bind the Prometheus exposition listener. `false` binds nothing and the exposition is unavailable in this process. |
-| `metrics.host` | `0.0.0.0` | | Bind address for the exposition listener. See the bind-address note below before changing it — and before assuming the default is safe on your topology. |
-| `metrics.port` | `9090` | | Port for the exposition listener. Must be 0..65535; `0` binds an OS-assigned ephemeral port. Matches the relay's `metrics.listen` port so one scrape config can address both. |
+| `metrics.host` | `0.0.0.0` | | Bind address for the exposition listener. IPv4 or IPv6 literal, same forms as `server.host` (a `:` selects `AF_INET6`). See the bind-address note below before changing it — and before assuming the default is safe on your topology. |
+| `metrics.port` | `9090` | | Port for the exposition listener. Must be 0..65535; `0` binds an OS-assigned ephemeral port. Matches the relay's `metrics.listen` port so one scrape config can address both — see the collision note below. |
 
 **The bind address is not the control.** `metrics.host` defaults to `0.0.0.0`
 rather than the relay's `127.0.0.1` because the API's canonical deployment is a
 container: loopback there means "reachable only from inside the API container",
 so no sibling service on the compose network — which is where a scraper runs —
 could ever scrape it. What keeps the endpoint private is that `compose.yaml`
-never publishes the port and that `cloudflared` targets `:8000` only. This
-mirrors `server.host`, which binds `0.0.0.0` in the container for the same
-reason. The relay differs because it *is* an edge process with published host
-ports, so loopback genuinely is its boundary.
+never publishes the port and that the tunnel's public hostname is mapped to
+`api:8000`. This mirrors `server.host`, which binds `0.0.0.0` in the container
+for the same reason. The relay differs because it *is* an edge process with
+published host ports, so loopback genuinely is its boundary.
 
-**The obligation this puts on the operator.** A deployment that reaches the API
-over the network rather than through the tunnel or a same-host proxy — one
-running `API_HTTP_BIND_IP=0.0.0.0` behind an off-host reverse proxy, or a bare
-metal install (`docs/dev/DEPLOYMENT.md` Section 8) — gains a **second port** on
-a network-reachable interface the moment it sets `metrics.enabled=true`. A
-reverse proxy in front of the HTTP port does not cover it. Set `metrics.host` to
-`127.0.0.1` (same-host scraper) or to a private interface, or firewall the port
-(SECURITY.md Section 5).
+**Which topology carries the operator obligation.** Only one of them:
+
+- **Under compose, enabling the listener exposes nothing extra.** The port is
+  absent from the `api` service's `ports:` list, so the bind is confined to the
+  container's network namespace. `API_HTTP_BIND_IP` does not change that — it
+  interpolates only into that `ports:` list, and there is no metrics entry, so
+  `API_HTTP_BIND_IP=0.0.0.0` adds no second reachable port. Keep `metrics.host`
+  at `0.0.0.0` here; narrowing it only breaks scraping.
+- **Outside compose** (bare metal, systemd, any direct run — where
+  `API_HTTP_BIND_IP` has no meaning at all), `0.0.0.0` genuinely is a **second
+  network-reachable port** the moment `metrics.enabled=true`, and a reverse
+  proxy in front of the HTTP port does not cover it. Set `metrics.host` to
+  `127.0.0.1` (same-host scraper) or to a private interface, or firewall the
+  port (SECURITY.md Section 5).
+
+**Port collision with the relay on a single native host.** The API binds
+`0.0.0.0:9090` and the relay binds `127.0.0.1:9090` by default, so co-locating
+them *natively* is a real collision. Under compose they are separate containers
+(`api:9090`, `relay:9090`) and never collide, which is why the shared default is
+worth keeping. When they do collide, whichever binds second logs `metrics
+listener bind failed; continuing without the metrics endpoint` and serves no
+exposition — the process itself keeps running (the bind is deliberately
+non-fatal). Move one of the two in that topology.
 
 ### 5.11 Web UI serving
 

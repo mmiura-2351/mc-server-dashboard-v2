@@ -307,9 +307,15 @@ routes, which are exposed the same way) is tracked separately in issue #2568.
 
 `GET /metrics` is served on its **own listener**, off by default
 (`metrics.enabled`, CONFIGURATION.md Section 5.10). It is not mounted on the
-HTTP API app at all, so the tunnel cannot reach it by construction: `cloudflared`
-targets `:8000`, and the exposition is not on `:8000`. This is the posture the
-relay already takes for its own metrics endpoint (RELAY.md Section 13).
+HTTP API app at all, so under the documented tunnel configuration the tunnel
+cannot reach it: the public hostname is mapped to `http://api:8000`, and the
+exposition is not on `:8000`. No API-side routing or middleware change can undo
+that — but it is not an absolute. `cloudflared` is a sibling container on the
+same network and would route to `api:9090` just as readily if an operator mapped
+a second public hostname to it. The repo cannot enforce that (the mapping lives
+in the Cloudflare Zero Trust dashboard), which is why "do not add one" is
+documented below. This is the posture the relay already takes for its own
+metrics endpoint (RELAY.md Section 13).
 
 The content is aggregates only — no names, ids, emails or IPs, and the label
 sets are structurally bounded (route *templates*, a fixed observed-state tuple,
@@ -319,22 +325,26 @@ auth outcomes** (login success/failure rates, a live oracle for anyone probing
 the FR-AUTH-4 brute-force behaviour), scanning activity as `<unmatched>` 404s,
 process start timestamps, control-plane liveness, and latency histograms.
 
-**The bind address is not the control, and the operator obligation is real.**
-The listener binds `0.0.0.0` by default, because the API's canonical deployment
-is a container where loopback would put the endpoint out of reach of any
-scraper. What keeps it private is the deployment:
+**The bind address is not the control, and which control applies depends on the
+topology.** The listener binds `0.0.0.0` by default, because the API's canonical
+deployment is a container where loopback would put the endpoint out of reach of
+any scraper. What keeps it private differs by deployment:
 
-- **Compose (tunnel or same-host reverse proxy).** The metrics port is not in
-  the `api` service's `ports:` list, so it exists only on the compose network;
-  scrape it from a service on that network (`http://api:9090/metrics`). Do not
-  publish it, and do not add a Cloudflare public hostname for it.
-- **Any topology that reaches the API over the network** — `API_HTTP_BIND_IP=0.0.0.0`
-  behind an off-host reverse proxy, or a bare-metal install (DEPLOYMENT.md
-  Section 8). Enabling the listener adds a **second port** on a
-  network-reachable interface. Set `metrics.host` to a private address (or
-  `127.0.0.1` when the scraper is same-host), or firewall the port. A reverse
-  proxy in front of the HTTP port does not cover it: it is a different port and
-  the proxy never sees it.
+- **Compose.** The metrics port is not in the `api` service's `ports:` list, so
+  the bind happens inside the container's network namespace and the endpoint
+  exists only on the compose network; scrape it from a service on that network
+  (`http://api:9090/metrics`). Keep `metrics.host` at `0.0.0.0` here — narrowing
+  it to loopback only makes the endpoint unscrapeable, and buys nothing, because
+  the missing `ports:` entry is what confines it. `API_HTTP_BIND_IP` does not
+  apply: it only interpolates into that `ports:` list, and there is no metrics
+  entry to interpolate into. The two things not to do are add one, and map a
+  second Cloudflare public hostname to the port.
+- **Non-compose runs** — bare metal, systemd, or any process started outside
+  compose (DEPLOYMENT.md Section 8). Here `0.0.0.0` genuinely is a **second
+  network-reachable port**, and a reverse proxy in front of the API's HTTP port
+  does not cover it: different port, the proxy never sees it. Set `metrics.host`
+  to `127.0.0.1` (same-host scraper) or a private interface, or firewall the
+  port. IPv4 and IPv6 literals are both accepted, as for `server.host`.
 
 ---
 
