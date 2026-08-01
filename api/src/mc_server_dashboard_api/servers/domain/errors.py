@@ -547,26 +547,34 @@ class PluginCacheBlobNotFoundError(ServerError):
 
 
 class CatalogUnavailableError(ServerError):
-    """The content catalog's upstream leg failed: unreachable, or answered badly.
+    """A content catalog request failed: refused before dispatch, or answered badly.
 
-    Covers every way a Modrinth/GeyserMC request can fail -- transport error,
-    non-2xx status, redirect loop, oversized or unparseable body, unexpected
-    payload shape (see :func:`wrap_shape_errors`).
+    Two families of condition reach this one error:
+
+    - The upstream leg failed -- transport error, non-2xx status, redirect loop,
+      oversized or unparseable body, unexpected payload shape (see
+      :func:`wrap_shape_errors`).
+    - Our own SSRF guard refused to dispatch the request at all -- non-HTTPS
+      download URL, host outside the allowlist, or a blocked IP after pinning
+      (``servers/adapters/catalog_ssrf.py``).
 
     The edge maps this to **502** ``catalog_upstream_failed``. Both halves of that
     mapping are deliberate (issue #2406):
 
-    - The 502 stays. On this path we are the gateway and an inbound server
-      answered us invalidly, which is what 502 is for (RFC 9110 15.6.3).
+    - The 502 stays. On the upstream-leg path we are the gateway and an inbound
+      server answered us invalidly, which is what 502 is for (RFC 9110 15.6.3).
+      The guard refusals are not that -- they never reach an inbound server --
+      but they predate this mapping and ride the same status; issue #2406
+      narrowed the reason, not the set of conditions behind it.
     - The reason is *not* ``catalog_unavailable``. That one belongs to the version
       catalog going dark -- our **own** dependency exhausting its retry budget
       with no last-good cache to fall back on -- which maps to 503
       (:class:`mc_server_dashboard_api.versions.domain.errors.CatalogUnavailableError`,
       :class:`mc_server_dashboard_api.servers.domain.version_validator.CatalogUnavailableError`).
 
-    The two conditions are genuinely different, so they carry different reasons: a
-    client tells them apart from the payload alone instead of having to switch on
-    (status, reason) together.
+    That 503 and this 502 are genuinely different conditions, so they carry
+    different reasons: a client tells them apart from the payload alone instead of
+    having to switch on (status, reason) together.
     """
 
 
