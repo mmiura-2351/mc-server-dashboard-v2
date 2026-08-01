@@ -215,6 +215,17 @@ include_external_packages = true
 # (app factory, config, logging, middleware, dependencies) is the only place
 # that may import adapters + application, and is excluded from the layered
 # contracts. Add a new layered contract per context as contexts land.
+#
+# Each context carries three contracts: the layered one, "does not import
+# adapters", and "imports no other context". The third enumerates EVERY sibling
+# top-level package under `mc_server_dashboard_api` — audit, community, core,
+# dataplane, fleet, identity, servers, storage, versions — so a reader can check
+# it against `ls src/mc_server_dashboard_api/`. An enumeration that silently
+# stops short is the defect issue #2552 closed: it reads as complete while
+# enforcing less. Any sibling deliberately left out of one of those lists
+# carries a comment saying why. Own-quadrant bans are NOT repeated in the third
+# contract — the layered and adapters contracts already cover them — and its
+# `source_modules` is domain + application wherever both exist.
 [[tool.importlinter.contracts]]
 name = "core context layers (domain <- application <- api; adapters at the edge)"
 type = "layers"
@@ -237,15 +248,27 @@ source_modules = [
 ]
 forbidden_modules = ["mc_server_dashboard_api.core.adapters"]
 
-# Domain imports nothing internal (ARCHITECTURE.md 2.1: standard library only).
+# Domain imports nothing internal (ARCHITECTURE.md 2.1: standard library only):
+# the own-quadrant half is the two contracts above, this one states the
+# cross-context half. core is a bounded context like the rest, not a shared
+# kernel the others may reach into — every sibling contract already forbids
+# importing `core`, so the ban is now mutual and stated from both ends (#2552).
 [[tool.importlinter.contracts]]
-name = "domain imports nothing internal"
+name = "core domain and application import no other context"
 type = "forbidden"
-source_modules = ["mc_server_dashboard_api.core.domain"]
-forbidden_modules = [
+source_modules = [
+    "mc_server_dashboard_api.core.domain",
     "mc_server_dashboard_api.core.application",
-    "mc_server_dashboard_api.core.adapters",
-    "mc_server_dashboard_api.core.api",
+]
+forbidden_modules = [
+    "mc_server_dashboard_api.community",
+    "mc_server_dashboard_api.identity",
+    "mc_server_dashboard_api.fleet",
+    "mc_server_dashboard_api.servers",
+    "mc_server_dashboard_api.storage",
+    "mc_server_dashboard_api.versions",
+    "mc_server_dashboard_api.audit",
+    "mc_server_dashboard_api.dataplane",
 ]
 
 # --- identity context ------------------------------------------------------
@@ -273,13 +296,20 @@ source_modules = [
 forbidden_modules = ["mc_server_dashboard_api.identity.adapters"]
 
 [[tool.importlinter.contracts]]
-name = "identity domain imports nothing internal (incl. other contexts)"
+name = "identity domain and application import no other context"
 type = "forbidden"
-source_modules = ["mc_server_dashboard_api.identity.domain"]
-forbidden_modules = [
+source_modules = [
+    "mc_server_dashboard_api.identity.domain",
     "mc_server_dashboard_api.identity.application",
-    "mc_server_dashboard_api.identity.adapters",
-    "mc_server_dashboard_api.identity.api",
+]
+forbidden_modules = [
+    "mc_server_dashboard_api.community",
+    "mc_server_dashboard_api.fleet",
+    "mc_server_dashboard_api.servers",
+    "mc_server_dashboard_api.storage",
+    "mc_server_dashboard_api.versions",
+    "mc_server_dashboard_api.audit",
+    "mc_server_dashboard_api.dataplane",
     "mc_server_dashboard_api.core",
 ]
 
@@ -309,12 +339,20 @@ source_modules = [
 forbidden_modules = ["mc_server_dashboard_api.community.adapters"]
 
 [[tool.importlinter.contracts]]
-name = "community domain imports nothing internal (incl. other contexts)"
+name = "community domain and application import no other context"
 type = "forbidden"
-source_modules = ["mc_server_dashboard_api.community.domain"]
+source_modules = [
+    "mc_server_dashboard_api.community.domain",
+    "mc_server_dashboard_api.community.application",
+]
 forbidden_modules = [
-    "mc_server_dashboard_api.community.adapters",
     "mc_server_dashboard_api.identity",
+    "mc_server_dashboard_api.fleet",
+    "mc_server_dashboard_api.servers",
+    "mc_server_dashboard_api.storage",
+    "mc_server_dashboard_api.versions",
+    "mc_server_dashboard_api.audit",
+    "mc_server_dashboard_api.dataplane",
     "mc_server_dashboard_api.core",
 ]
 
@@ -342,14 +380,28 @@ source_modules = [
 ]
 forbidden_modules = ["mc_server_dashboard_api.fleet.adapters"]
 
+# Source is `domain` only, and this is the ONE context whose application layer
+# is left unchecked (issue #2552). `SetWorkerDrain` reaches straight into the
+# servers context — `fleet/application/set_worker_drain.py:55-60` imports
+# `servers.domain.{clock,unit_of_work,value_objects}` — because draining a
+# Worker must also mark its assigned servers `desired=stopped` (FR-WRK-5). That
+# is direct reach-across, not the adapter-layer Port composition the servers and
+# versions contracts describe, so widening this contract is blocked on deciding
+# whether the import or the pattern is wrong. Reported rather than exempted: an
+# `ignore_imports` entry here would assert the coupling is intended, which is
+# exactly the open question.
 [[tool.importlinter.contracts]]
-name = "fleet domain imports nothing internal (incl. other contexts) and no grpcio"
+name = "fleet domain imports no other context and no grpcio"
 type = "forbidden"
 source_modules = ["mc_server_dashboard_api.fleet.domain"]
 forbidden_modules = [
-    "mc_server_dashboard_api.fleet.adapters",
     "mc_server_dashboard_api.community",
     "mc_server_dashboard_api.identity",
+    "mc_server_dashboard_api.servers",
+    "mc_server_dashboard_api.storage",
+    "mc_server_dashboard_api.versions",
+    "mc_server_dashboard_api.audit",
+    "mc_server_dashboard_api.dataplane",
     "mc_server_dashboard_api.core",
     "grpc",
     "mcsd",
@@ -397,7 +449,17 @@ forbidden_modules = [
     "mc_server_dashboard_api.identity",
     "mc_server_dashboard_api.fleet",
     "mc_server_dashboard_api.storage",
+    "mc_server_dashboard_api.versions",
+    "mc_server_dashboard_api.dataplane",
     "mc_server_dashboard_api.core",
+    # `mc_server_dashboard_api.audit` is DELIBERATELY absent (issue #2552): the
+    # three background use cases that have no HTTP edge to record from —
+    # PruneScheduledBackups, the integrity sweep and the schedule runner — hold
+    # an `audit.domain.recorder.AuditRecorder` themselves
+    # (servers/application/{backups,integrity_sweep,schedule_runner}.py). Every
+    # operator-triggered servers operation still audits at the api layer. Adding
+    # audit here would break nine real imports, so the rule is not stated rather
+    # than exempted.
     # The scheduler's cron engine (issue #1835) lives only in the adapter
     # behind the NextRunCalculator Port; the domain stays stdlib-only (the
     # fleet-domain grpc precedent).
@@ -423,16 +485,21 @@ type = "forbidden"
 source_modules = ["mc_server_dashboard_api.storage.domain"]
 forbidden_modules = ["mc_server_dashboard_api.storage.adapters"]
 
+# Source is `domain` only — NOT for lack of coverage: storage has no
+# `application` package to name (see above), so `domain` is its whole inward
+# side. This contract widens to domain + application the moment one lands.
 [[tool.importlinter.contracts]]
-name = "storage domain imports nothing internal (incl. other contexts)"
+name = "storage domain imports no other context"
 type = "forbidden"
 source_modules = ["mc_server_dashboard_api.storage.domain"]
 forbidden_modules = [
-    "mc_server_dashboard_api.storage.adapters",
     "mc_server_dashboard_api.community",
     "mc_server_dashboard_api.identity",
     "mc_server_dashboard_api.fleet",
     "mc_server_dashboard_api.servers",
+    "mc_server_dashboard_api.versions",
+    "mc_server_dashboard_api.audit",
+    "mc_server_dashboard_api.dataplane",
     "mc_server_dashboard_api.core",
 ]
 
@@ -475,6 +542,8 @@ forbidden_modules = [
     "mc_server_dashboard_api.fleet",
     "mc_server_dashboard_api.servers",
     "mc_server_dashboard_api.storage",
+    "mc_server_dashboard_api.audit",
+    "mc_server_dashboard_api.dataplane",
     "mc_server_dashboard_api.core",
     "httpx2",
 ]
@@ -507,17 +576,19 @@ source_modules = [
 forbidden_modules = ["mc_server_dashboard_api.audit.adapters"]
 
 [[tool.importlinter.contracts]]
-name = "audit domain imports nothing internal (incl. other contexts)"
+name = "audit domain and application import no other context"
 type = "forbidden"
-source_modules = ["mc_server_dashboard_api.audit.domain"]
-forbidden_modules = [
-    "mc_server_dashboard_api.audit.adapters",
+source_modules = [
+    "mc_server_dashboard_api.audit.domain",
     "mc_server_dashboard_api.audit.application",
-    "mc_server_dashboard_api.audit.api",
+]
+forbidden_modules = [
     "mc_server_dashboard_api.community",
     "mc_server_dashboard_api.identity",
     "mc_server_dashboard_api.fleet",
     "mc_server_dashboard_api.servers",
     "mc_server_dashboard_api.storage",
+    "mc_server_dashboard_api.versions",
+    "mc_server_dashboard_api.dataplane",
     "mc_server_dashboard_api.core",
 ]
