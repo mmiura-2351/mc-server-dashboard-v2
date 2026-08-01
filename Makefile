@@ -398,9 +398,19 @@ hooks-test:
 	bash .githooks/test-post-checkout.sh
 	bash .githooks/test-hooks-check.sh
 
-# Unit-test the deploy shell helpers. Same shape as hooks-test: pure bash, temp
-# dirs, and stubbed `sg`/`docker` -- never touches a real daemon or volume.
+# Unit-test everything under scripts/: the `--self-test` suites of the
+# checked-in python tools first, then the deploy shell helpers. Same shape as
+# hooks-test -- stdlib python3 and pure bash, temp dirs, and stubbed
+# `sg`/`docker`/HTTP transports: offline, and never touches a real daemon or
+# volume.
+#
+# The self-tests belong here so a regression in the migration guard or the
+# supply-chain cooldown gate fails the pre-push `make check` instead of a CI
+# runner after the push (#2508). check_docs.py --self-test stays in docs-check,
+# next to the real run it guards.
 scripts-test:
+	python3 scripts/check_migrations.py --self-test
+	python3 scripts/supply_chain_cooldown.py --self-test
 	bash scripts/test_deploy_preflight.sh
 	bash scripts/test_pg_major_upgrade.sh
 	bash scripts/test_deploy_stamp.sh
