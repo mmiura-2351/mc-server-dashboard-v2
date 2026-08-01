@@ -110,11 +110,13 @@ async def download_cookie_middleware(
             secure=pending.secure,
             samesite=_SAMESITE,
         )
-        # A response carrying a credential is never stored (RFC 6265 Section 8.6):
-        # a shared cache could otherwise hand this Set-Cookie to a second client.
-        # All three download routes declare ``no-store`` themselves (issue #2491),
-        # which already covers every response reached today -- do not delete this
-        # as redundant: it is what holds for any future route the gate mints a
-        # cookie on, whose own declaration is one line for a reader to forget.
+        # A Set-Cookie does not protect itself: RFC 6265 Section 3 is explicit that
+        # its presence "does not preclude HTTP caches from storing and reusing a
+        # response", so only this header keeps a shared cache from replaying the
+        # credential to a second client. All three download routes declare
+        # ``no-store`` themselves (issue #2491), which already covers every
+        # response reached today -- do not delete this as redundant: it is what
+        # holds for any future route the gate mints a cookie on, whose own
+        # declaration is one line for a reader to forget.
         response.headers["Cache-Control"] = "no-store"
     return response

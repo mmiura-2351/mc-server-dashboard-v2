@@ -612,8 +612,8 @@ def test_export_grant_redemption_sets_a_path_scoped_cookie() -> None:
     assert "Secure" in cookie
     assert "SameSite=strict" in cookie
     assert f"Path={_export_url(community, server)}" in cookie
-    # The export declared no freshness of its own, so a shared cache could have
-    # replayed this Set-Cookie to a second client (RFC 6265 Section 8.6).
+    # RFC 6265 Section 3 leaves a Set-Cookie response cacheable, so without this
+    # header a shared cache could replay the credential to a second client.
     assert resp.headers["cache-control"] == "no-store"
 
 

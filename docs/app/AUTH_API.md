@@ -295,8 +295,10 @@ the transfer is one no log, browser history or `Referer` ever saw.
   every `200` / `206`, whichever credential fetched them (issue #2491): the body
   is per-user, and a cookie-authenticated request carries no `Authorization`, so
   RFC 9111 Section 3.5's default protection from shared caches does not cover it.
-  That same declaration covers the response carrying the `Set-Cookie`, which must
-  not be stored either (RFC 6265 Section 8.6).
+  That same declaration covers the response carrying the `Set-Cookie`, which the
+  cookie spec pointedly does not protect: RFC 6265 Section 3 states that the
+  presence of a `Cookie` or `Set-Cookie` header field "does not preclude HTTP
+  caches from storing and reusing a response".
 - **Not cleared by logout.** Nothing enumerates the per-resource paths a jar might
   hold, so logout clears only the refresh cookie (`Path=/api/auth`). The residual
   is one resource, re-authorized on every read, for the cookie's TTL — the same

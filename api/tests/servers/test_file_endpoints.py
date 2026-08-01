@@ -2024,8 +2024,8 @@ def test_file_grant_redemption_sets_a_path_scoped_cookie() -> None:
     assert "SameSite=strict" in cookie
     # The query string is not part of a cookie's Path, so the scope is the route.
     assert f"Path={_url(community, server, '/download')}" in cookie
-    # The download declared no freshness of its own, so a shared cache could have
-    # replayed this Set-Cookie to a second client (RFC 6265 Section 8.6).
+    # RFC 6265 Section 3 leaves a Set-Cookie response cacheable, so without this
+    # header a shared cache could replay the credential to a second client.
     assert resp.headers["cache-control"] == "no-store"
 
 
