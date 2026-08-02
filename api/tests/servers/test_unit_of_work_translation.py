@@ -316,8 +316,17 @@ async def test_group_add_reraises_unknown_violation_untranslated() -> None:
 class _FakeSaveSession:
     """A session shaped for ``save``: ``flush`` raises, the rest are no-ops.
 
-    ``get`` returns ``None`` (the concurrent racer already deleted the row), so
-    only the staged ``group_player`` INSERTs are left to violate at the flush.
+    ``get`` returns ``None``, which is what production really does here, though
+    not for the obvious reason. The natural guess is that ``_load_group`` leaves
+    the row in the session's identity map, so a concurrent delete would leave
+    ``get`` handing back a *stale* row -- but the identity map is **weak**, and
+    ``get_by_id`` hydrates a framework-free ``PlayerGroup`` and drops the
+    ``PlayerGroupModel``, so nothing holds it. Measured on PostgreSQL 18: after
+    ``get_by_id`` the identity map is empty and ``get`` re-queries to ``None``;
+    pin a strong reference to the row instead and the same call hands back the
+    stale row. Either way the staged ``group_player`` INSERTs are what violate
+    and the flush is where the translation must sit; the live-FK behaviour is
+    pinned in ``tests/integration/test_group_repositories.py``.
     """
 
     def __init__(self, error: IntegrityError) -> None:

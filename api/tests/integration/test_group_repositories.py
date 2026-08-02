@@ -327,6 +327,51 @@ async def test_save_after_concurrent_group_delete_reports_not_found(
             await uow.groups.save(loaded)
 
 
+async def test_save_after_concurrent_group_delete_without_players_is_a_no_op(
+    engine: AsyncEngine,
+) -> None:
+    # The other half of the branch above, pinned against the live FK for the same
+    # reason: a fake asserting its own no-op establishes nothing about the
+    # adapter, so both branches modelled by ``FakeGroupRepository.save``
+    # (tests/servers/test_fake_repository_isolation.py) get a real flush here.
+    # With the player set emptied there is no INSERT to violate the FK, the
+    # DELETE matches zero rows, and save passes silently.
+    #
+    # This is the shape behind #2613: the caller is told the edit succeeded when
+    # the group is gone. Pinned as the behaviour that is, not the behaviour that
+    # should be -- deciding whether ``save`` re-asserts the row's existence is
+    # that issue's question, and it governs every call site rather than this one.
+    community_id = await _seed_community(engine)
+    factory = create_session_factory(engine)
+    only_player = uuid.uuid4()
+    group = _group(community_id, [Player(only_player, "alice")])
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.groups.add(group)
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        loaded = await uow.groups.get_by_id(group.id)
+        assert loaded is not None
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM player_group WHERE id = :id"), {"id": group.id.value}
+            )
+        loaded.remove_player(only_player)
+        await uow.groups.save(loaded)
+        await uow.commit()
+
+    async with engine.connect() as conn:
+        groups = (
+            await conn.execute(text("SELECT count(*) FROM player_group"))
+        ).scalar_one()
+        players = (
+            await conn.execute(text("SELECT count(*) FROM group_player"))
+        ).scalar_one()
+    assert groups == 0
+    assert players == 0
+
+
 async def test_save_after_concurrent_name_take_reports_name_exists(
     engine: AsyncEngine,
 ) -> None:

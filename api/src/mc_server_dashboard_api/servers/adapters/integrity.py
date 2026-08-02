@@ -20,6 +20,13 @@ the vanished parent row translates to that context's not-found error (404) --
 the very error the use case's own pre-read would have raised had the delete
 landed a moment earlier.
 
+The map below is **deliberately partial**. The issue #2583 audit walked every
+named UNIQUE and FOREIGN KEY constraint in ``api/migrations/`` against it and
+found further reachable-but-untranslated ones; each needs its own typed error and
+its own decision, so they are tracked as issues #2611, #2612 and #2613 rather
+than guessed at here. A constraint's absence below is therefore not evidence that
+violating it is unreachable.
+
 Shared by two kinds of call site, because *when* a violation surfaces depends on
 the statement shape: an INSERT staged via ``session.add`` (create) flushes at
 commit, so :class:`SqlAlchemyUnitOfWork` translates in ``commit``; an UPDATE

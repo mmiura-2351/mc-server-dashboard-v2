@@ -325,6 +325,12 @@ async def test_group_save_on_a_missing_row_without_players_is_a_no_op() -> None:
     # The other half of the same branch: an empty player set stages no INSERT,
     # so nothing can violate the FK. The adapter's DELETE and its rename UPDATE
     # both match zero rows and the save passes silently, leaving no row behind.
+    #
+    # Like the raising branch above, this one is what the *adapter* does, so the
+    # claim is pinned against a live FK rather than against the fake alone --
+    # ``tests/integration/test_group_repositories.py::
+    # test_save_after_concurrent_group_delete_without_players_is_a_no_op``.
+    # A fake asserting its own no-op would be true by construction.
     repo = FakeGroupRepository()
     group = _group()
     group.players = []
