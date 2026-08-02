@@ -78,32 +78,44 @@ def test_permissions_policy_present(client: TestClient) -> None:
 # -- (b) Cache-Control: no-store on auth/me endpoints but NOT on generic --
 
 
+# Each of these asserts the status alongside the header (issue #2587). Without
+# it the test cannot tell "the endpoint answered and carries no-store" from "the
+# endpoint is gone and the middleware stamped its 404": the middleware matches on
+# ``request.url.path``, so a renamed route leaves the assertion green on the 404.
+# The status is what reddens on a rename.
+
+
 def test_cache_control_no_store_on_auth_login(client: TestClient) -> None:
     resp = client.post("/api/auth/login", json={"username": "x", "password": "y"})
     # The endpoint returns 401 (fake rejects all); the middleware still runs.
+    assert resp.status_code == 401
     assert resp.headers.get("cache-control") == "no-store"
 
 
 def test_cache_control_no_store_on_auth_refresh(client: TestClient) -> None:
     resp = client.post("/api/auth/refresh", json={"refresh_token": "x"})
+    assert resp.status_code == 401
     assert resp.headers.get("cache-control") == "no-store"
 
 
 def test_cache_control_no_store_on_auth_session(client: TestClient) -> None:
     resp = client.post("/api/auth/session")
     # Returns 401 (no refresh cookie); the middleware still runs.
+    assert resp.status_code == 401
     assert resp.headers.get("cache-control") == "no-store"
 
 
 def test_cache_control_no_store_on_users_me(client: TestClient) -> None:
     resp = client.get("/api/users/me")
     # Returns 401 (no Bearer token); the middleware still runs.
+    assert resp.status_code == 401
     assert resp.headers.get("cache-control") == "no-store"
 
 
 def test_cache_control_no_store_on_users_me_sessions(client: TestClient) -> None:
     resp = client.get("/api/users/me/sessions")
     # Returns 401 (no Bearer token); the middleware still runs.
+    assert resp.status_code == 401
     assert resp.headers.get("cache-control") == "no-store"
 
 
