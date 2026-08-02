@@ -491,10 +491,10 @@ networks:
   # migrate, seaweedfs-lifecycle, relay, cloudflared and the worker. First-party
   # is not the same as authenticated — most of what binds here takes no
   # credential (see the seaweedfs block above: nine ports, one of them gated),
-  # so membership of `mcsd` is itself the privilege. What this PR changes is
-  # only WHO is a member: the containers running third-party plugin code moved
-  # to `servers` below (issue #2590). `relay` and `cloudflared` remain, and both
-  # terminate internet traffic, so a compromise of either lands on `mcsd`.
+  # so membership of `mcsd` is itself the privilege. That is why the containers
+  # running third-party plugin code are on `servers` below instead (issue #2590).
+  # `relay` and `cloudflared` are still here, and both terminate internet
+  # traffic, so a compromise of either lands on `mcsd`.
   # CAUTION: renaming the default network recreates every service container on the
   # next `docker compose up` (the old default network is replaced).
   default:
