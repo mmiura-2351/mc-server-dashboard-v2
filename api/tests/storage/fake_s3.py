@@ -67,9 +67,12 @@ _UNSTAMPED_STORE_TIME = dt.datetime(9999, 1, 1, tzinfo=dt.UTC)
 #   (``now() + GC_SAFETY_WINDOW + 1h``) is a weaker, end-to-end check on top: it
 #   stops ageing the JAR the test just put once the stamp is the sentinel, but a
 #   past constant would slip by it.
-# - Those pins cover the sibling ``put``s, not the three stamps below: changing
-#   these reddens no test at all (mutation-checked at #2576), so this comment is
-#   the only thing holding them.
+# - The three stamps below are pinned the same way, by
+#   ``tests/storage/test_fake_s3.py``: it brackets each of ``put_object``,
+#   ``upload_multipart`` and ``copy_object`` between two host-clock reads, so a
+#   sentinel or a constant stamp reddens exactly that path's test (issue #2606).
+#   Until that suite existed these three reddened no test at all and this comment
+#   was the only thing holding them (the asymmetry PR #2603 recorded in prose).
 # - Revisit if a GC test ever writes through a fake instead of seeding the store
 #   time and pins its clock to a *constant* ahead of the host clock: it would
 #   read the fresh stamp as ancient and pass for the wrong reason. None does
