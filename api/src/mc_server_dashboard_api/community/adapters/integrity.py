@@ -7,12 +7,52 @@ promised 409 instead of a raw ``IntegrityError`` (500). The four backstops are
 ``uq_membership_user_community`` and ``uq_resource_grant_user_resource`` (all
 migration 0004).
 
-Extracted from :mod:`mc_server_dashboard_api.community.adapters.unit_of_work`,
-which is where the map lived while ``flush`` and ``commit`` were its only call
-sites; a second kind of call site cannot reach it there, because the unit of work
-imports the repositories and so the repositories cannot import it back. The
-module mirrors ``servers/adapters/integrity.py``, which the servers context
-extracted for the same reason.
+Shared by two kinds of call site, because *when* a violation surfaces depends on
+the statement shape: an INSERT staged via ``session.add`` flushes at commit -- or
+at ``ProvisionCommunity``'s mid-transaction flush -- so
+:class:`~mc_server_dashboard_api.community.adapters.unit_of_work.SqlAlchemyUnitOfWork`
+translates in ``flush`` and ``commit``; an UPDATE executes -- and violates --
+immediately inside the transaction, one statement before any commit is reached,
+so the community and role repositories translate at their ``update`` execute
+sites. That second kind is why the map lives here rather than in the unit of
+work, where it started: the unit of work imports the repositories, so the
+repositories cannot import it back. ``servers/adapters/integrity.py`` is split
+out for the same reason and is the pattern this mirrors.
+
+``UpdateRole`` has no name-clash pre-check, so its rename is not a race but the
+ordinary user action: until the execute site was wrapped it was a deterministic
+500, while ``community/api/roles.py`` caught a ``RoleAlreadyExistsError`` that
+nothing on that path could raise (issue #2611).
+
+**Why this context maps its own constraints instead of sharing the servers map.**
+A translation map's output is its own context's domain errors, so a single shared
+function would have to import both ``servers.domain.errors`` and
+``community.domain.errors``, and would raise each context's errors into the
+other's use cases. The constraint namespaces are disjoint anyway -- the four
+above name community tables -- so sharing buys nothing but that coupling. (The
+import-linter contracts do not forbid it: they bar the community *domain* and
+*application* from reaching into ``servers``, and this is the adapter layer,
+which already reaches ``servers.adapters.models`` for the resource-existence
+check. The reason to keep the maps apart is the coupling, not a contract.)
+
+**Foreign keys are deliberately absent, and their absence is not a claim that
+they are unreachable.** Every FK in migration 0004 --
+``fk_role_community_id_community``, ``fk_membership_user_id_user``,
+``fk_membership_community_id_community``,
+``fk_membership_role_membership_id_membership``,
+``fk_membership_role_role_id_role``, ``fk_resource_grant_user_id_user``,
+``fk_resource_grant_community_id_community`` -- plus the composite
+``pk_membership_role`` is violable only by a *concurrent delete* of the parent
+row, or for the PK a concurrent double assignment: they are all
+``ON DELETE CASCADE``, every use case pre-reads what it writes to, and
+``AssignRole`` pre-checks the assignment for idempotence. Translating one means
+deciding a typed error *and* an HTTP status for "the community / user /
+membership vanished mid-write", which none of these routes maps today -- a
+decision per constraint rather than a map entry, and a different defect from the
+deterministic one above. Note also that a map entry alone would not be enough:
+these FKs are not DEFERRABLE, so each violation surfaces at whichever statement
+ends up flushing the staged row, and that statement has to be inside a wrap for
+the entry to be reached at all (issue #2612).
 """
 
 from __future__ import annotations
