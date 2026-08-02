@@ -184,6 +184,16 @@ def test_update_profile_returns_user_and_audits() -> None:
     assert [e.operation for e in recorder.events] == [ops.AUTH_PROFILE_UPDATE]
 
 
+def test_update_profile_declares_no_store() -> None:
+    # The 200 returns the updated user — per-user data, never stored (#2587).
+    user = make_user()
+    fake = _Fake(result=make_user(username="alice2"))
+    client = next(_client(user, update_profile=fake))
+    resp = client.patch("/api/users/me", json={"username": "alice2"})
+    assert resp.status_code == 200
+    assert resp.headers["cache-control"] == "no-store"
+
+
 def test_update_profile_username_conflict_returns_409() -> None:
     user = make_user()
     fake = _Fake(error=UsernameAlreadyExistsError("taken"))
@@ -225,6 +235,18 @@ def test_delete_account_returns_204_and_audits() -> None:
     assert [e.operation for e in recorder.events] == [ops.AUTH_ACCOUNT_DELETE]
     assert recorder.events[0].actor_id == user.id.value
     assert recorder.events[0].target_id == user.id.value
+
+
+def test_delete_account_declares_no_store() -> None:
+    # A 204 has no body to store, so this is defence in depth — kept because the
+    # retired middleware set stamped every method on /users/me and the swap to
+    # per-route declarations covers each of them (issue #2587).
+    user = make_user()
+    fake = _Fake(result=None)
+    client = next(_client(user, delete_account=fake))
+    resp = client.request("DELETE", "/api/users/me", json={"password": _VALID_PASSWORD})
+    assert resp.status_code == 204
+    assert resp.headers["cache-control"] == "no-store"
 
 
 def test_delete_account_wrong_password_returns_uniform_401() -> None:

@@ -1,8 +1,10 @@
 """Tests for hardening HTTP response headers (issue #635).
 
 Verifies that the security-headers middleware stamps the expected headers on
-every response, applies ``Cache-Control: no-store`` only to credential-bearing
-endpoints, and emits HSTS only when the request arrives over HTTPS.
+every response and emits HSTS only when the request arrives over HTTPS.
+``Cache-Control: no-store`` is not the middleware's to stamp (issue #2587): the
+routes that need it declare it themselves, and those pins live beside each
+route's own tests.
 """
 
 from collections.abc import Iterator
@@ -12,31 +14,13 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.routing import Route
 
-from mc_server_dashboard_api.dependencies import get_login, get_refresh_session
-from mc_server_dashboard_api.identity.domain.errors import (
-    InvalidCredentialsError,
-    InvalidRefreshTokenError,
-)
-from mc_server_dashboard_api.middleware import _DOCS_PATHS, _NO_STORE_PATHS
-
-
-class _RejectLogin:
-    async def __call__(self, **kwargs: object) -> object:
-        raise InvalidCredentialsError
-
-
-class _RejectRefresh:
-    async def __call__(self, **kwargs: object) -> object:
-        raise InvalidRefreshTokenError
+from mc_server_dashboard_api.middleware import _DOCS_PATHS
 
 
 @pytest.fixture
 def client(shared_app: FastAPI) -> Iterator[TestClient]:
     app = shared_app
     app.dependency_overrides.clear()
-    # Override auth use cases so the endpoints respond without a database.
-    app.dependency_overrides[get_login] = lambda: _RejectLogin()
-    app.dependency_overrides[get_refresh_session] = lambda: _RejectRefresh()
     with TestClient(app) as c:
         yield c
 
@@ -75,73 +59,15 @@ def test_permissions_policy_present(client: TestClient) -> None:
     assert "geolocation=()" in policy
 
 
-# -- (b) Cache-Control: no-store on auth/me endpoints but NOT on generic --
-
-
-# Each of these asserts the status alongside the header (issue #2587). Without
-# it the test cannot tell "the endpoint answered and carries no-store" from "the
-# endpoint is gone and the middleware stamped its 404": the middleware matches on
-# ``request.url.path``, so a renamed route leaves the assertion green on the 404.
-# The status is what reddens on a rename.
-
-
-def test_cache_control_no_store_on_auth_login(client: TestClient) -> None:
-    resp = client.post("/api/auth/login", json={"username": "x", "password": "y"})
-    # The endpoint returns 401 (fake rejects all); the middleware still runs.
-    assert resp.status_code == 401
-    assert resp.headers.get("cache-control") == "no-store"
-
-
-def test_cache_control_no_store_on_auth_refresh(client: TestClient) -> None:
-    resp = client.post("/api/auth/refresh", json={"refresh_token": "x"})
-    assert resp.status_code == 401
-    assert resp.headers.get("cache-control") == "no-store"
-
-
-def test_cache_control_no_store_on_auth_session(client: TestClient) -> None:
-    resp = client.post("/api/auth/session")
-    # Returns 401 (no refresh cookie); the middleware still runs.
-    assert resp.status_code == 401
-    assert resp.headers.get("cache-control") == "no-store"
-
-
-def test_cache_control_no_store_on_users_me(client: TestClient) -> None:
-    resp = client.get("/api/users/me")
-    # Returns 401 (no Bearer token); the middleware still runs.
-    assert resp.status_code == 401
-    assert resp.headers.get("cache-control") == "no-store"
-
-
-def test_cache_control_no_store_on_users_me_sessions(client: TestClient) -> None:
-    resp = client.get("/api/users/me/sessions")
-    # Returns 401 (no Bearer token); the middleware still runs.
-    assert resp.status_code == 401
-    assert resp.headers.get("cache-control") == "no-store"
+# -- (b) The middleware stamps no Cache-Control of its own --
 
 
 def test_cache_control_absent_on_generic_endpoint(client: TestClient) -> None:
+    # No route on this path declares a caching policy, and the middleware adds
+    # none: a blanket Cache-Control here would decide the policy for every route
+    # that has not stated one (issue #2587).
     resp = client.get("/api/healthz")
     assert "cache-control" not in resp.headers
-
-
-@pytest.mark.parametrize("path", sorted(_NO_STORE_PATHS))
-def test_no_store_path_names_a_live_route(shared_app: FastAPI, path: str) -> None:
-    """Every entry in the set is a path the app still routes (issue #2563).
-
-    The middleware compares ``request.url.path`` against the frozenset, so it
-    stamps the header on a 404 exactly as readily as on the endpoint the entry
-    was written for. That makes the five per-path tests above blind to the
-    failure they look like they cover: rename ``/api/auth/login`` and its test
-    stays green on the 404 while the real endpoint silently loses ``no-store``.
-    Checking the entry against the route table is what reddens on a rename, a
-    new path prefix, or a route that moved to a different path.
-    """
-
-    declared = {route.path for route in shared_app.routes if isinstance(route, Route)}
-    assert path in declared, (
-        f"{path} is in _NO_STORE_PATHS but no route declares it -- a renamed or "
-        "re-prefixed endpoint is no longer getting Cache-Control: no-store"
-    )
 
 
 @pytest.mark.parametrize("path", sorted(_DOCS_PATHS))
@@ -149,10 +75,11 @@ def test_docs_path_names_a_live_route(shared_app: FastAPI, path: str) -> None:
     """Every entry in the docs set is a path the app still routes (issue #2587).
 
     ``_DOCS_PATHS`` selects the relaxed CSP that allows the swagger init script
-    by hash, and it is matched by exact path just as ``_NO_STORE_PATHS`` is.
-    Renaming a docs route without updating the set reapplies the strict
+    by hash, and it is matched by exact path, so nothing in the routers signals
+    that renaming a docs route drops the relaxation. That reapplies the strict
     ``script-src 'self'``, which blocks that script: the page still returns 200
-    and only the browser console says why it renders blank.
+    and only the browser console says why it renders blank. Checking the entry
+    against the route table is what reddens on the rename.
     """
 
     declared = {route.path for route in shared_app.routes if isinstance(route, Route)}

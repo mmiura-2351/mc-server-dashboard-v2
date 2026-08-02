@@ -155,6 +155,22 @@ def test_login_sets_refresh_cookie_with_security_attributes() -> None:
     assert "Max-Age=1209600" in cookie
 
 
+def test_login_declares_no_store() -> None:
+    # The body carries an access token and the response a refresh cookie, so no
+    # cache may store either. Declared on the route rather than by a path-matching
+    # middleware, so a rename carries the declaration with it (issue #2587).
+    fake = _Fake(
+        result=LoginResult(
+            pair=TokenPair(access_token="acc", refresh_token="ref"),
+            user_id=uuid.uuid4(),
+        )
+    )
+    client = next(_client(login=fake))
+    resp = client.post("/api/auth/login", json={"username": "alice", "password": "pw"})
+    assert resp.status_code == 200
+    assert resp.headers["cache-control"] == "no-store"
+
+
 def test_login_passes_resolved_client_ip_to_use_case() -> None:
     # With proxy trust off (default), the resolved IP is the immediate peer; the
     # endpoint must forward it to the use case for the per-IP counter.
@@ -250,6 +266,16 @@ def test_refresh_returns_new_pair() -> None:
     resp = client.post("/api/auth/refresh", json={"refresh_token": "ref1"})
     assert resp.status_code == 200
     assert resp.json()["access_token"] == "acc2"
+
+
+def test_refresh_declares_no_store() -> None:
+    # The rotated pair is the most cache-sensitive body on the surface: it hands
+    # back both tokens (issue #2587).
+    fake = _Fake(result=TokenPair(access_token="acc2", refresh_token="ref2"))
+    client = next(_client(refresh=fake))
+    resp = client.post("/api/auth/refresh", json={"refresh_token": "ref1"})
+    assert resp.status_code == 200
+    assert resp.headers["cache-control"] == "no-store"
 
 
 def test_refresh_reads_token_from_cookie_when_body_omits_it() -> None:
@@ -354,6 +380,17 @@ def test_session_returns_access_token_only() -> None:
     assert fake.calls == [{"refresh_token": "live-cookie"}]
 
 
+def test_session_declares_no_store() -> None:
+    # The bootstrap path returns an access token, so its body is a credential
+    # too (issue #2587).
+    fake = _Fake(result=RestoreResult(access_token="acc3", user_id=uuid.uuid4()))
+    client = next(_client(restore=fake))
+    client.cookies.set("mcd_refresh", "live-cookie")
+    resp = client.post("/api/auth/session")
+    assert resp.status_code == 200
+    assert resp.headers["cache-control"] == "no-store"
+
+
 def test_session_emits_no_set_cookie() -> None:
     # Restore never rotates, so it must never re-set the refresh cookie — that is
     # the whole point: a page load can no longer leave a torn rotation in the jar.
@@ -453,6 +490,16 @@ def test_me_returns_user_with_valid_bearer() -> None:
     assert resp.status_code == 200
     assert resp.json()["username"] == "alice"
     assert fake.calls == [{"access_token": "good-token"}]
+
+
+def test_me_declares_no_store() -> None:
+    # Per-user data rather than a credential, but the same rule: never stored
+    # by a cache that a second user could read it from (issue #2587).
+    fake = _Fake(result=make_user())
+    client = next(_client(authenticate=fake))
+    resp = client.get("/api/users/me", headers={"Authorization": "Bearer good-token"})
+    assert resp.status_code == 200
+    assert resp.headers["cache-control"] == "no-store"
 
 
 def test_me_without_bearer_returns_401() -> None:
