@@ -73,8 +73,9 @@ covered here.
 | Install pinned local tooling | `make bootstrap` | golangci-lint into `worker/.bin`, `uv sync` for api, `npm ci` for webui |
 | Install git hooks | `make hooks-install` | one-time, sets `core.hooksPath` |
 
-Before opening a PR, run `make check`. It is the same gate CI enforces, so a
-green local run means a green CI run.
+With the hooks installed (Section 2) there is no need to run the full
+`make check` by hand before pushing — pre-push runs it. Iterate with the
+targeted subset instead ([`AGENTS.md`](AGENTS.md) Section 5).
 
 ### Per-module commands
 
