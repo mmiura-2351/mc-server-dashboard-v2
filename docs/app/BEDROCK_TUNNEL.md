@@ -450,7 +450,7 @@ redesign.
   (migration 0034).
 - ~~**Metrics** -- no Prometheus metrics for flow counts, drop counts, or bind
   failures yet~~ **Landed with #1909**: the Bedrock path exports, on the same
-  opt-in `/metrics` endpoint as the Java path (RELAY.md Section 17), active
+  opt-in `/metrics` endpoint as the Java path (RELAY.md Section 13), active
   tunnels/flows gauges (`relay_bedrock_active_tunnels`,
   `relay_bedrock_active_flows`), flow lifecycle counters
   (`relay_bedrock_flows_created_total`, `relay_bedrock_flows_evicted_total`),
