@@ -1271,14 +1271,14 @@ func TestStartWithNetworkDropsRCONPublication(t *testing.T) {
 	docker := newFakeDocker()
 	d := New(docker, images(), func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
 		return nil, errors.New("no rcon")
-	}, Options{WorkerID: "w1", StopTimeout: 50 * time.Millisecond, GameBindIP: "0.0.0.0", Network: "mcsd"})
+	}, Options{WorkerID: "w1", StopTimeout: 50 * time.Millisecond, GameBindIP: "0.0.0.0", Network: "mcsd-servers"})
 
 	if _, err := d.Start(context.Background(), spec()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
-	if docker.createSpec.Network != "mcsd" {
-		t.Errorf("Network = %q, want mcsd", docker.createSpec.Network)
+	if docker.createSpec.Network != "mcsd-servers" {
+		t.Errorf("Network = %q, want mcsd-servers", docker.createSpec.Network)
 	}
 	if hasPort(docker.createSpec.Ports, defaultRCONPort) {
 		t.Errorf("Ports = %v, want NO RCON publication when network is set", docker.createSpec.Ports)

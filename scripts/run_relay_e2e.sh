@@ -35,8 +35,9 @@ cd "$REPO_ROOT"
 
 # A dedicated compose project so this harness never collides with a developer's
 # running `docker compose` stack (separate volumes and container names). The
-# override file renames the default network (the base compose pins it to a fixed
-# `mcsd`, which a live stack already owns) so this harness is fully isolated.
+# override file renames BOTH pinned networks (the base compose fixes them to
+# `mcsd` and `mcsd-servers`, which a live stack already owns) so this harness is
+# fully isolated.
 PROJECT="mcsd-relay-e2e"
 COMPOSE=(docker compose -p "$PROJECT"
   -f "$REPO_ROOT/compose.yaml"
