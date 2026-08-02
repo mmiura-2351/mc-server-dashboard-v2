@@ -40,10 +40,10 @@ from mc_server_dashboard_api.storage.domain.errors import (
 # window — an unstated environmental assumption (#2529). Spelled identically in
 # ``tests/versions/fakes.py`` and ``tests/servers/fakes.py``: three copies, one
 # beside each store-time dict, because ``api/tests/`` has no shared helper module
-# to hold it (only ``tests/conftest.py``). The reviews of PR #2540 and PR #2573
-# each weighed that and accepted three. A fourth copy is the trigger to stop
-# copying: extract the constant to ``tests/store_times.py`` and import it at all
-# four sites (issue #2576).
+# to hold it (only ``tests/conftest.py``). PR #2540's review weighed that at two
+# copies and PR #2573's at three; both accepted. A fourth copy is the trigger to
+# stop copying: extract the constant to ``tests/store_times.py`` and import it at
+# all four sites (issue #2576).
 _UNSTAMPED_STORE_TIME = dt.datetime(9999, 1, 1, tzinfo=dt.UTC)
 
 # Write stamps read the host clock. That is the standing convention for every
@@ -59,19 +59,23 @@ _UNSTAMPED_STORE_TIME = dt.datetime(9999, 1, 1, tzinfo=dt.UTC)
 #   in the same commit that replaced their read-side wall-clock fallback with the
 #   sentinel, and PR #2573 left the stamps here (in place since #295) untouched
 #   when it brought the sentinel over: the split is the design, not an oversight.
-# - Not a fixed constant either. ``tests/versions/test_ensure_jar.py``'s
-#   ``_PastClock`` returns ``now() + GC_SAFETY_WINDOW + 1h`` and ages a JAR only
-#   because ``FakeJarPool.put`` stamps from the same host clock, and
-#   ``tests/versions/test_jar_pool_fake.py`` /
-#   ``tests/servers/test_plugin_cache_store_fake.py`` bracket that ``put``
-#   between two host-clock reads.
+# - Not a fixed constant either, and that is what the pins say:
+#   ``tests/versions/test_jar_pool_fake.py`` and
+#   ``tests/servers/test_plugin_cache_store_fake.py`` bracket the siblings'
+#   ``put`` between two host-clock reads, so any constant reddens them, a past
+#   one included. ``tests/versions/test_ensure_jar.py``'s ``_PastClock``
+#   (``now() + GC_SAFETY_WINDOW + 1h``) is a weaker, end-to-end check on top: it
+#   stops ageing the JAR it just put once the stamp is the sentinel, but a past
+#   constant would slip by it.
 # - Those pins cover the sibling ``put``s, not the three stamps below: changing
 #   these reddens no test at all (mutation-checked at #2576), so this comment is
 #   the only thing holding them.
 # - Revisit if a GC test ever writes through a fake instead of seeding the store
-#   time and fixes its clock *ahead* of the host clock: it would read the fresh
-#   stamp as ancient and pass for the wrong reason. No test does that today
-#   (checked at #2576).
+#   time and pins its clock to a *constant* ahead of the host clock: it would
+#   read the fresh stamp as ancient and pass for the wrong reason. None does
+#   today (checked at #2576). ``tests/versions/test_ensure_jar.py`` does run the
+#   GC ahead of the host clock over a ``put``-stamped JAR, but derives that clock
+#   from ``now()`` and means the ageing, so it passes for its own reason.
 
 
 class FakeS3Store:
