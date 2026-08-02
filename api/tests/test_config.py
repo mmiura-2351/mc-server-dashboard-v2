@@ -330,6 +330,32 @@ def test_version_retention_zero_is_accepted(
     assert settings.storage.version_retention == 0
 
 
+def test_metrics_listener_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    settings = load_settings(config_file=None)
+    # Opt-in, like the relay's metrics endpoint (issue #2565, RELAY.md 13).
+    assert settings.metrics.enabled is False
+    # 0.0.0.0, NOT loopback: the API's canonical deployment is a container, and
+    # a sibling scraper on the compose network must be able to reach it. The
+    # port is simply never published (see CONFIGURATION.md Section 5.10).
+    assert settings.metrics.host == "0.0.0.0"
+    assert settings.metrics.port == 9090
+
+
+def test_metrics_listener_from_toml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    cfg = _write_toml(
+        tmp_path,
+        '[metrics]\nenabled = true\nhost = "127.0.0.1"\nport = 9900\n',
+    )
+    settings = load_settings(config_file=cfg)
+    assert settings.metrics.enabled is True
+    assert settings.metrics.host == "127.0.0.1"
+    assert settings.metrics.port == 9900
+
+
 def test_snapshot_cadence_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
     settings = load_settings(config_file=None)

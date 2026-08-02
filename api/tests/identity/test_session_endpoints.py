@@ -116,6 +116,18 @@ def test_list_returns_safe_metadata_without_token_hash() -> None:
     assert fake.calls == [{"user_id": user.id}]
 
 
+def test_list_declares_no_store() -> None:
+    # The listing is per-user data — session ids and timestamps (issue #2587).
+    user = make_user()
+    fake = _Fake(result=[_session(user.id)])
+    client = next(_client(user, list_sessions=fake))
+
+    resp = client.get("/api/users/me/sessions")
+
+    assert resp.status_code == 200
+    assert resp.headers["cache-control"] == "no-store"
+
+
 # --- DELETE /users/me/sessions/{id} ----------------------------------------
 
 
@@ -189,6 +201,20 @@ def test_revoke_others_passes_presented_token_and_audits() -> None:
         }
     ]
     assert [e.operation for e in recorder.events] == [ops.AUTH_SESSION_REVOKE]
+
+
+def test_revoke_others_declares_no_store() -> None:
+    # A 204 has no body to store, so this is defence in depth — kept because the
+    # retired middleware set stamped every method on /users/me/sessions and the
+    # swap to per-route declarations covers each of them (issue #2587).
+    user = make_user()
+    fake = _Fake(result=None)
+    client = next(_client(user, revoke_other_sessions=fake))
+
+    resp = client.delete("/api/users/me/sessions")
+
+    assert resp.status_code == 204
+    assert resp.headers["cache-control"] == "no-store"
 
 
 def test_revoke_others_without_body_passes_none() -> None:

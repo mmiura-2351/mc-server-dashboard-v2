@@ -40,7 +40,7 @@ from mc_server_dashboard_api.core.adapters.database import (
     create_session_factory,
 )
 from mc_server_dashboard_api.core.adapters.metrics_middleware import metrics_middleware
-from mc_server_dashboard_api.core.api import health, meta, metrics, readiness
+from mc_server_dashboard_api.core.api import health, meta, readiness
 from mc_server_dashboard_api.dataplane.api import transfers
 from mc_server_dashboard_api.dependencies import (
     build_brute_force_config,
@@ -88,6 +88,10 @@ from mc_server_dashboard_api.middleware import (
     correlation_id_middleware,
     security_headers_middleware,
     strip_no_content_body_headers_middleware,
+)
+from mc_server_dashboard_api.observability import (
+    create_observability_app,
+    start_observability_listener,
 )
 from mc_server_dashboard_api.servers.adapters.backup_store import (
     StorageBackupStoreAdapter,
@@ -531,6 +535,52 @@ def _warn_reconciler_grace_floor(settings: Settings) -> None:
         )
 
 
+def _warn_data_plane_base_url_fallback(settings: Settings) -> None:
+    """Warn when the Worker-facing data-plane URL is only the public URL (#2564).
+
+    ``server.data_plane_base_url`` is optional; left unset it resolves to
+    ``server.public_base_url`` (``effective_data_plane_base_url``, issue #1549), so
+    Workers are handed the public URL for hydrate/snapshot transfers. That is
+    correct when the public URL is directly reachable, and silently wrong when it
+    routes through a body-size-capped edge (Cloudflare Tunnel, ~100 MB): the
+    snapshot upload 413s and world progression is lost on every stop. Nothing
+    reports it at boot — the Worker registers fine and the control plane looks
+    healthy — so it first appears at the first snapshot of a non-trivial server,
+    and for a cross-host Worker (DEPLOYMENT.md Section 8) on a different machine
+    from the API, with nothing connecting it back to the unset setting.
+
+    A warning, not a hard failure: the API cannot tell whether the public URL is
+    behind a capped edge, so this condition is a proxy for the fault rather than
+    the fault itself, and the fallback is the documented correct default for a
+    deployment with no edge proxy (CONFIGURATION.md Section 5.1). The fail-fast
+    guards in ``create_app`` are reserved for configs that are broken under every
+    topology. Setting ``data_plane_base_url`` explicitly — including to the same
+    value as ``public_base_url`` — states the intent and silences this, which is
+    why the check is on the fallback and not on the two URLs being equal.
+
+    Silent for the shipped ``compose.yaml``: it always sets
+    ``MCD_API_SERVER__DATA_PLANE_BASE_URL``, pinned to the internal compose address
+    regardless of ``PUBLIC_BASE_URL`` (issue #1549).
+    """
+
+    # Mirrors the ``or`` in ``effective_data_plane_base_url``, so a blank-collapsed
+    # value counts as unset here exactly as it does there.
+    if settings.server.data_plane_base_url or settings.server.public_base_url is None:
+        return
+    logging.getLogger(__name__).warning(
+        "server.data_plane_base_url is unset; Workers will be handed "
+        "server.public_base_url (%s) for hydrate/snapshot transfers (issue #1549). "
+        "That is correct only if Workers can reach that URL directly. If it routes "
+        "through a body-size-capped edge (e.g. Cloudflare Tunnel, ~100 MB) every "
+        "working-set upload above the cap is rejected and world progression is lost "
+        "on every stop — a failure that first surfaces at snapshot time, not here. "
+        "Set server.data_plane_base_url to an address Workers can reach that is not "
+        "behind that edge (DEPLOYMENT.md Section 8); set it explicitly to the same "
+        "value to confirm the fallback is intended and silence this.",
+        settings.server.public_base_url,
+    )
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     if settings is None:
         settings = load_settings(_resolve_config_file())
@@ -602,6 +652,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # (issue #822). Only meaningful when the control plane — and thus the
         # reconciler — is enabled.
         _warn_reconciler_grace_floor(settings)
+        # Warn (not fatal) if Workers will be handed the public URL for
+        # hydrate/snapshot transfers because data_plane_base_url is unset (issue
+        # #2564). Gated on the control plane like the grace floor: with no Worker
+        # channel the data-plane URL is never advertised to anyone.
+        _warn_data_plane_base_url_fallback(settings)
 
     # Bind the Storage Port to the config-selected backend now, so an unsupported
     # backend (or, by construction, a missing fs root) fails fast at boot rather
@@ -1161,9 +1216,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         )
         logging.getLogger(__name__).info("storage sweep loop started")
+        # The Prometheus exposition is served on its OWN listener, never on the
+        # public HTTP port (issue #2565): ``cloudflared`` forwards the whole
+        # public hostname to ``api:8000``, so a route there is a route on the
+        # internet. Off by default, like the relay's metrics endpoint (RELAY.md
+        # Section 13). Started last, so everything it observes already exists.
+        metrics_listener = None
+        if settings.metrics.enabled:
+            observability_app = create_observability_app()
+            observability_app.state.engine = engine
+            observability_app.state.worker_registry = registry
+            metrics_listener = start_observability_listener(
+                observability_app,
+                host=settings.metrics.host,
+                port=settings.metrics.port,
+            )
+        app.state.metrics_listener = metrics_listener
         try:
             yield
         finally:
+            # Stopped first: scrapes must stop before the engine and registry
+            # they read are torn down below.
+            if metrics_listener is not None:
+                await metrics_listener.stop()
             prune_attempts_task.cancel()
             with suppress(asyncio.CancelledError):
                 await prune_attempts_task
@@ -1204,10 +1279,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # same origin (WEBUI_SPEC 7.7), and three of its deep-links shared paths
     # with API GET routes, returning JSON on a hard reload. With every route
     # (REST, WebSocket, and the OpenAPI schema + docs) under ``/api``, the rule
-    # becomes absolute — any non-``/api`` path falls through to the SPA. Health
-    # and readiness probes and the Prometheus ``/metrics`` endpoint move under
-    # ``/api`` too so there is no carve-out in the fallback (DEPLOYMENT.md,
-    # SECURITY.md).
+    # becomes absolute — any non-``/api`` path falls through to the SPA. The
+    # health and readiness probes move under ``/api`` too so there is no
+    # carve-out in the fallback (DEPLOYMENT.md, SECURITY.md). The Prometheus
+    # exposition is not served here at all: it has its own listener (issue
+    # #2565, ``observability.py``).
     app = FastAPI(
         title="mc-server-dashboard API",
         lifespan=lifespan,
@@ -1257,7 +1333,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api_router = APIRouter(prefix="/api")
     api_router.include_router(health.router)
     api_router.include_router(readiness.router)
-    api_router.include_router(metrics.router)
     api_router.include_router(meta.router)
     api_router.include_router(users.router)
     api_router.include_router(admin_users.router)

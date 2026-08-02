@@ -10971,22 +10971,6 @@
         "summary": "Meta"
       }
     },
-    "/api/metrics": {
-      "get": {
-        "operationId": "metrics_api_metrics_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Metrics"
-      }
-    },
     "/api/ports/available": {
       "get": {
         "description": "Return the next ``count`` free in-range ports (issue #243).",

@@ -26,6 +26,7 @@ import { setAccessToken } from "../auth/tokenStore.ts";
 import { ToastProvider } from "../components/Toast.tsx";
 import { t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
+import { meta } from "../test/meta.ts";
 import { installMockWebSocket, MockWebSocket } from "../test/mockWebSocket.ts";
 import { ServerDetailPage, sparklinePoints } from "./ServerDetailPage.tsx";
 
@@ -107,19 +108,6 @@ function server(overrides: Record<string, unknown> = {}) {
     bedrock_address: null,
     bedrock_port: null,
     ...overrides,
-  };
-}
-
-// The real GET /api/meta body: four deployment-wide facts, no server fields
-// (`MetaResponse` in api/src/mc_server_dashboard_api/core/api/meta.py and in the
-// generated src/api/schema.ts). Defaults mirror a relay-off deployment with no
-// operator memory knobs set (issue #2525).
-function meta() {
-  return {
-    relay_enabled: false,
-    bedrock_enabled: false,
-    default_memory_limit_mb: null,
-    max_memory_limit_mb: null,
   };
 }
 

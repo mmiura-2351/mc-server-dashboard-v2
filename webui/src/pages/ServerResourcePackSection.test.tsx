@@ -7,6 +7,7 @@ import { setAccessToken } from "../auth/tokenStore.ts";
 import { ToastProvider } from "../components/Toast.tsx";
 import { t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
+import { meta } from "../test/meta.ts";
 import { installMockWebSocket } from "../test/mockWebSocket.ts";
 import { ServerDetailPage } from "./ServerDetailPage.tsx";
 
@@ -112,11 +113,7 @@ function routeGet(
       return Promise.resolve({ resource_packs: packs });
     }
     if (path === "/api/meta") {
-      return Promise.resolve({
-        relay_enabled: false,
-        default_memory_limit_mb: null,
-        max_memory_limit_mb: null,
-      });
+      return Promise.resolve(meta());
     }
     return Promise.resolve(srv);
   });
@@ -178,11 +175,7 @@ describe("ServerResourcePackSection — assignment load error", () => {
         return Promise.resolve({ resource_packs: [PACK] });
       }
       if (path === "/api/meta") {
-        return Promise.resolve({
-          relay_enabled: false,
-          default_memory_limit_mb: null,
-          max_memory_limit_mb: null,
-        });
+        return Promise.resolve(meta());
       }
       return Promise.resolve(server());
     });
@@ -202,11 +195,7 @@ describe("ServerResourcePackSection — assignment load error", () => {
         return Promise.resolve({ resource_packs: [PACK] });
       }
       if (path === "/api/meta") {
-        return Promise.resolve({
-          relay_enabled: false,
-          default_memory_limit_mb: null,
-          max_memory_limit_mb: null,
-        });
+        return Promise.resolve(meta());
       }
       return Promise.resolve(server());
     });

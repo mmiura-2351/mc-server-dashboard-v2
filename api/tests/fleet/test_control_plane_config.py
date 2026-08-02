@@ -8,6 +8,9 @@ credential is masked in the logged config dump (NFR-OBS-1).
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import pytest
 
 from mc_server_dashboard_api.app import create_app
@@ -214,3 +217,147 @@ def test_stock_held_start_grace_does_not_warn(
     with caplog.at_level("WARNING"):
         create_app()
     assert not any("held_start_grace_seconds" in r.message for r in caplog.records)
+
+
+# --- data-plane URL fallback warning (issue #2564) ---
+
+
+def _set_base_urls(
+    monkeypatch: pytest.MonkeyPatch, *, public: str | None, data_plane: str | None
+) -> None:
+    for var, value in (
+        ("MCD_API_SERVER__PUBLIC_BASE_URL", public),
+        ("MCD_API_SERVER__DATA_PLANE_BASE_URL", data_plane),
+    ):
+        if value is None:
+            monkeypatch.delenv(var, raising=False)
+        else:
+            monkeypatch.setenv(var, value)
+
+
+def test_create_app_warns_when_data_plane_base_url_falls_back_to_public(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # With data_plane_base_url unset, effective_data_plane_base_url falls back to
+    # public_base_url (issue #1549), so Workers are handed the public URL for
+    # hydrate/snapshot transfers. Behind a body-size-capped edge (Cloudflare
+    # Tunnel, ~100 MB) that first fails at snapshot time — on a cross-host Worker,
+    # on a different machine — with nothing pointing back at the unset setting
+    # (issue #2564). Surface it at boot instead.
+    _enable_control(monkeypatch)
+    _set_base_urls(monkeypatch, public="https://mc.example.com", data_plane=None)
+    with caplog.at_level("WARNING"):
+        create_app()
+    warnings = [r.message for r in caplog.records if "data_plane_base_url" in r.message]
+    assert warnings, "expected a data_plane_base_url fallback warning"
+    # The warning has to name the URL Workers will actually be handed, or an
+    # operator cannot tell which side is misconfigured.
+    assert "https://mc.example.com" in warnings[0]
+
+
+def test_create_app_does_not_warn_when_data_plane_base_url_is_set(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _enable_control(monkeypatch)
+    _set_base_urls(
+        monkeypatch, public="https://mc.example.com", data_plane="http://10.0.0.5:8000"
+    )
+    with caplog.at_level("WARNING"):
+        create_app()
+    assert not any("data_plane_base_url" in r.message for r in caplog.records)
+
+
+def test_create_app_does_not_warn_when_data_plane_base_url_equals_public(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The guard fires on the *fallback*, not on the two URLs being equal. Setting
+    # data_plane_base_url explicitly — including to the same value as
+    # public_base_url — is how an operator whose public URL is directly reachable
+    # states that intent, and it is what makes this a warning rather than a hard
+    # failure: there is a one-line way to say "yes, I mean it" (issue #2564).
+    _enable_control(monkeypatch)
+    _set_base_urls(
+        monkeypatch,
+        public="https://mc.example.com",
+        data_plane="https://mc.example.com",
+    )
+    with caplog.at_level("WARNING"):
+        create_app()
+    assert not any("data_plane_base_url" in r.message for r in caplog.records)
+
+
+def test_create_app_does_not_warn_when_public_base_url_is_unset(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # With neither set the effective URL is None: no Worker is handed a tunnel
+    # hostname, so there is nothing to warn about (the transfer layer already
+    # fails loudly when it needs a URL and has none).
+    _enable_control(monkeypatch)
+    _set_base_urls(monkeypatch, public=None, data_plane=None)
+    with caplog.at_level("WARNING"):
+        create_app()
+    assert not any("data_plane_base_url" in r.message for r in caplog.records)
+
+
+_COMPOSE_FILE = Path(__file__).resolve().parents[3] / "compose.yaml"
+
+
+def _compose_env_default(variable: str) -> str:
+    """What the shipped ``compose.yaml`` gives the api service with ``.env`` unset.
+
+    ``compose.yaml`` pins ``MCD_API_SERVER__DATA_PLANE_BASE_URL`` to the internal
+    compose address regardless of ``PUBLIC_BASE_URL`` (issue #1549). Read the pins
+    out of the file rather than restating them, so this tracks the shipped values
+    instead of a copy of them.
+    """
+
+    match = re.search(
+        rf"^\s*{variable}:\s*(\S+)\s*$", _COMPOSE_FILE.read_text(), re.MULTILINE
+    )
+    assert match is not None, (
+        f"compose.yaml no longer sets {variable} for the api service; if the "
+        "#1549 data-plane pin is gone, the #2564 warning fires on the shipped path"
+    )
+    # `${VAR:-default}` -> `default`; a bare literal is returned as-is.
+    interpolated = re.fullmatch(r"\$\{[^:}]+:-([^}]*)\}", match.group(1))
+    return interpolated.group(1) if interpolated else match.group(1)
+
+
+@pytest.mark.parametrize(
+    "public",
+    [
+        # `.env` untouched: compose defaults PUBLIC_BASE_URL to the same internal
+        # address it pins the data plane to, so the two URLs are EQUAL on the most
+        # common deployment there is. A guard keyed on "the two URLs match" would
+        # fire here — on the normal path — which is why this one is keyed on the
+        # fallback instead.
+        None,
+        # `.env` overriding PUBLIC_BASE_URL to a tunnel hostname: the exact #1549
+        # topology this warning is about, still silent because compose keeps the
+        # data-plane pin independent of PUBLIC_BASE_URL.
+        "https://mc.example.com",
+    ],
+)
+def test_shipped_compose_file_does_not_trip_the_data_plane_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    public: str | None,
+) -> None:
+    """The guard must stay silent for every deployment using the shipped compose
+    file (issue #2564).
+
+    A warning that fires on the normal path is worse than no warning: it trains
+    operators to ignore startup output. ``compose.yaml`` always sets the
+    worker-facing URL, so the fallback this guard detects cannot arise there under
+    either ``.env``.
+    """
+
+    _enable_control(monkeypatch)
+    _set_base_urls(
+        monkeypatch,
+        public=public or _compose_env_default("MCD_API_SERVER__PUBLIC_BASE_URL"),
+        data_plane=_compose_env_default("MCD_API_SERVER__DATA_PLANE_BASE_URL"),
+    )
+    with caplog.at_level("WARNING"):
+        create_app()
+    assert not any("data_plane_base_url" in r.message for r in caplog.records)

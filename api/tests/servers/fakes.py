@@ -1833,6 +1833,9 @@ class FakeResourcePackStore(ResourcePackStore):
 # not asserting, instead of passing by accident. Reading the host clock here made
 # that fail-loud property depend on the host clock running later than the test's
 # fixed ``now`` minus the window — an unstated environmental assumption (#2529).
+# Spelled identically in ``tests/storage/fake_s3.py`` and
+# ``tests/versions/fakes.py``; the trigger for extracting the three copies into a
+# shared module is recorded beside the ``fake_s3.py`` one (issue #2576).
 _UNSTAMPED_STORE_TIME = dt.datetime(9999, 1, 1, tzinfo=dt.UTC)
 
 
@@ -1868,6 +1871,9 @@ class FakePluginCacheStore(PluginCacheStore):
         # a re-put leaves the object's ``last_modified`` alone — stamp the first
         # put only (issue #2529). The plugin-cache GC re-checks live references
         # before deleting precisely because of that.
+        # The stamp reads the host clock by convention, recorded with
+        # ``tests/storage/fake_s3.py``'s copy of the sentinel (issue #2576);
+        # ``tests/servers/test_plugin_cache_store_fake.py`` pins it.
         self.blobs.setdefault(sha256, data)
         self.modified_at.setdefault(sha256, dt.datetime.now(dt.UTC))
 
