@@ -1798,15 +1798,36 @@ describe("ServerDetailPage settings memory limit", () => {
     routeGet({
       srv: { observed_state: "stopped", memory_limit_mb: null, config: {} },
     });
-    renderPage();
+    mockApi.patch.mockResolvedValue(server());
+    const { queryClient } = renderPage();
 
     await screen.findByText("survival");
     openSettings();
+
+    // Wait for the operator-configured ceiling from /api/meta (#1069) to land
+    // before entering the value, so it is validated against the meta ceiling and
+    // not the hardcoded pre-meta fallback. Without this barrier findByText below
+    // resolves on the pre-meta render — whose error comes from the fallback
+    // ceiling — and the test is blind to the operator ceiling it claims to cover
+    // (issue #2597). Raising the fixture's max_memory_limit_mb above 1048577 then
+    // reddens this: the value becomes in-range and the error never renders.
+    await waitFor(() =>
+      expect(queryClient.getQueryData(["meta"])).toBeDefined(),
+    );
     fireEvent.change(memoryInput(), { target: { value: "1048577" } });
 
     expect(
       await screen.findByText(t("serverDetail.settings.memoryLimitRange")),
     ).toBeInTheDocument();
+
+    // Drive a real save so "blocks the save" is asserted, not assumed: the save
+    // button is disabled while the value is out of range, so patch never fires.
+    // The bare `patch not called` was vacuous — no save was attempted (#2597).
+    const saveButton = screen.getByRole("button", {
+      name: t("serverDetail.settings.save"),
+    });
+    expect(saveButton).toBeDisabled();
+    fireEvent.click(saveButton);
     expect(mockApi.patch).not.toHaveBeenCalled();
   });
 
