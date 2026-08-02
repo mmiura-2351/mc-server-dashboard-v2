@@ -101,6 +101,15 @@ func Dial(ctx context.Context, addr, password string) (*Client, error) {
 // command: the arrival of the marker's reply deterministically signals that all
 // fragments for the real command have been received.
 //
+// The marker goes on the wire only once the command's first reply packet has
+// been read, and never back-to-back with the command itself (issue #2618).
+// Vanilla reads one packet per read() and drops the connection when the length
+// prefix does not match the byte count that read returned, so two request
+// packets landing in the same read are one malformed packet to it: it closes
+// the connection without running either command. Waiting for a reply byte
+// proves the server has consumed the command and is back at its next read, so
+// the marker can only ever arrive alone.
+//
 // It honours ctx's deadline for the round trip, and falls back to
 // defaultExecuteTimeout when ctx carries none, so a server that accepts the
 // connection but never replies cannot block the call forever. It returns
@@ -117,14 +126,20 @@ func (c *Client) Execute(ctx context.Context, line string) (string, error) {
 		if err := c.write(cmdID, typeExecCommand, line); err != nil {
 			return err
 		}
-		if err := c.write(markerID, typeExecCommand, ""); err != nil {
-			return err
-		}
 		var buf strings.Builder
+		markerSent := false
 		for {
 			respID, typ, b, err := c.read()
 			if err != nil {
 				return err
+			}
+			if !markerSent {
+				// The first reply byte proves the server has consumed the command
+				// packet, so the marker cannot share a read with it.
+				if err := c.write(markerID, typeExecCommand, ""); err != nil {
+					return err
+				}
+				markerSent = true
 			}
 			if respID == markerID {
 				break
