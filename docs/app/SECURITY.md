@@ -415,14 +415,26 @@ gets the same result as one that resolves `api`.
 **This covers docker-network paths only.** A port **published to the host** on a
 non-loopback interface is reachable from `mcsd-servers` through the bridge
 gateway (`172.17.0.1`, each bridge's own gateway address, or the host's LAN
-address), because Docker DNATs published ports from every interface. The shipped
-default publishes the API on `127.0.0.1` (`API_HTTP_BIND_IP`), which is refused
-from both networks — but `API_HTTP_BIND_IP=0.0.0.0` and
-`API_HTTP_BIND_IP=<lan-ip>` are documented, supported configurations
-([`../dev/DEPLOYMENT.md`](../dev/DEPLOYMENT.md) Section 8), and either one
-re-opens `api:8000` to every Minecraft container on the host. Segmentation
-removes the docker-network path; it does not remove host-published ports. If you
-publish the API off loopback, put a firewall rule in front of it or accept that
+address), because Docker DNATs published ports from every interface.
+Segmentation removes the docker-network path; it does not remove host-published
+ports. Two cases, and the second is not hypothetical:
+
+- **The API is loopback by default and safe as shipped.** `API_HTTP_BIND_IP`
+  defaults to `127.0.0.1`, which is refused from both networks. But
+  `API_HTTP_BIND_IP=0.0.0.0` and `API_HTTP_BIND_IP=<lan-ip>` are documented,
+  supported configurations ([`../dev/DEPLOYMENT.md`](../dev/DEPLOYMENT.md)
+  Section 8), and either one re-opens `api:8000` to every Minecraft container on
+  the host.
+- **The relay publishes on every interface, with no opt-out.** With the `relay`
+  profile active, `compose.yaml` publishes `25565/tcp`, `25665/tcp`,
+  `25675/udp` and `19132-19231/udp` with **no host IP** — there is no
+  `RELAY_BIND_IP` equivalent. So on any relay-enabled deployment a Minecraft
+  container can already reach all of them via the bridge gateway today,
+  including **`25665`, the Worker dial-back tunnel**. That is a live instance of
+  this bypass in the shipped configuration, not a consequence of operator
+  choice.
+
+If you publish anything off loopback, firewall it at the host or accept that
 plugins can reach it.
 
 ### What this deliberately does not close
@@ -455,21 +467,26 @@ security model, and the following remain true:
   worlds, snapshots and JARs: the SeaweedFS filer (`8888`), master (`9333`) and
   volume (`8080`) ports take no credential, and the S3 gRPC port (`18333`) serves
   reflection uncredentialed, handing out `SeaweedS3IamCache` and
-  `SeaweedS3LifecycleInternal`. Only the S3 gateway (`8333`) checks the keys.
-  Membership of `mcsd` is therefore equivalent to object-store admin. Closing
-  that is issues #2599 and #2616; until one lands, treat "first-party" in the
-  table above as a statement about *who is attached*, not about what an attached
-  process would have to prove.
+  `SeaweedS3LifecycleInternal`. Only the S3 gateway (`8333`) enforces across the
+  board; the Iceberg REST port (`8181`) rejects catalog calls but serves its
+  config endpoint open. Membership of `mcsd` is therefore equivalent to
+  object-store admin. Closing that is issue #2626; until it lands, treat
+  "first-party" in the table above as a statement about *who is attached*, not
+  about what an attached process would have to prove.
 - **Two members of `mcsd` terminate internet traffic.** `relay` accepts arbitrary
   player connections (`25565`, `25665`, `19132-19231/udp`, `25675/udp`) and
   `cloudflared` terminates a public tunnel. Compromising either puts an attacker
   exactly where the Minecraft containers were just removed from, with the
   unauthenticated storage surface above in reach. Segmentation raised the bar for
   a hostile *plugin*; it did not raise it for a hostile *packet* arriving at the
-  relay.
+  relay. And the relay is reachable from **both** directions: because its ports
+  are published on every interface, a Minecraft container can reach them through
+  the host gateway even though `relay` is not on `mcsd-servers` — so the plugin
+  path to the relay survives segmentation too.
 - **Host-published ports bypass the split entirely.** See the note at the end of
-  "What an MC container can reach": publishing the API off loopback puts it back
-  within reach of every Minecraft container on the host.
+  "What an MC container can reach": publishing the API off loopback, and the
+  relay's own always-published ports, are both reachable from every Minecraft
+  container on the host.
 - **The split applies at a server's next start, not at upgrade.** A Minecraft
   container that was already running when the operator upgraded stays attached to
   `mcsd` and keeps its full pre-upgrade reach until it is restarted — measured

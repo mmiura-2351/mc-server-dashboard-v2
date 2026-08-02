@@ -59,18 +59,35 @@ on it as a substitute for keeping heavy build pipelines off the game host.
 ## 2. Prerequisites
 
 - A Linux host with **Docker Engine 28.0+** and the **Compose plugin
-  (`docker compose`) v2.34.0+**. The floor comes from one feature: `compose.yaml`
-  sets `gw_priority` on the `worker` service's network attachments to pin which
-  of its two networks provides the default route (issue #2590, Section 1).
-  `GwPriority` arrived in Engine API `v1.48` (Engine 28.0), and Compose honours it
-  from v2.34.0 — **v2.33.1 accepts the key and silently ignores it**
-  (docker/compose#12574), which is the one version to avoid, since it leaves the
-  route unpinned while appearing configured. An Engine or Compose older than the
-  floor rejects the key outright, so `up -d` fails loudly rather than reverting
-  to unpinned. To check a host before deploying:
+  (`docker compose`) v2.34.0+**. **Check this before deploying — below the floor
+  the stack comes up clean and the setting is silently dropped:**
 
   ```sh
   docker compose version --short && docker version --format '{{.Server.Version}}'
+  ```
+
+  The floor comes from one feature: `compose.yaml` sets `gw_priority` on the
+  `worker` service's network attachments to pin which of its two networks
+  provides the default route (issue #2590, Section 1). `GwPriority` arrived in
+  Engine API `v1.48` (Engine 28.0), and Compose honours it from v2.34.0
+  (docker/compose#12574). What an under-floor host actually does, measured:
+
+  | Compose | Engine | Result |
+  |---|---|---|
+  | < 2.33.1 | any | **Loud.** The compose-spec schema rejects the unknown key and `up -d` fails |
+  | 2.33.1 | any | **Silent.** Validates, then leaves `GwPriority` at 0 |
+  | 2.34.0+ | < 28.0 | **Silent.** The daemon ignores endpoint fields it does not know |
+  | 2.34.0+ | 28.0+ | Pinned, as intended |
+
+  Only the first band fails loudly, so **do not rely on a failed `up -d` to tell
+  you**. In the two silent bands the worker's default route falls back to
+  Docker's own endpoint ordering, which may happen to pick the right network —
+  that is what makes it hard to notice. Confirm it took:
+
+  ```sh
+  docker inspect "$(docker compose ps -q worker)" \
+    --format '{{range $n, $e := .NetworkSettings.Networks}}{{$n}} {{$e.GwPriority}}{{println}}{{end}}'
+  # expect: mcsd 100   /   mcsd-servers 0
   ```
 - The host user in the `docker` group (or run compose with sufficient
   privileges). The worker container needs access to the Docker socket.
@@ -701,11 +718,11 @@ separate `relay` profile).
 
 How it works: the browser reaches the Cloudflare edge over HTTPS (the public
 hostname is configured in the Cloudflare Zero Trust dashboard); `cloudflared`
-runs inside the compose network and forwards traffic to `api:8000` over plain
-HTTP on the internal Docker network. No inbound port, no TLS certificate, and
+runs on the `mcsd` network and forwards traffic to `api:8000` over plain
+HTTP on that network. No inbound port, no TLS certificate, and
 no reverse proxy are needed on the host. The default loopback bind
 (`API_HTTP_BIND_IP=127.0.0.1`) is correct for this topology — `cloudflared`
-reaches the API via the compose-internal network, not the host port, so the
+reaches the API over the `mcsd` network, not the host port, so the
 API does not need to be published on all interfaces.
 
 To enable:
@@ -752,7 +769,7 @@ can reach directly (CONFIGURATION.md Section 5.1).
 **The tunnel publishes every path on `api:8000` (issue #2565).** `cloudflared`
 forwards the whole hostname to `api:8000` and path-scopes nothing, so the
 loopback publish in `compose.yaml` constrains only *host* reachability — the
-tunnel reaches the API over the compose-internal network, past that bind. Treat
+tunnel reaches the API over the `mcsd` network, past that bind. Treat
 anything you mount on the API's HTTP port as internet-facing. This is why the
 Prometheus exposition is not on that port (see the metrics subsection at the end
 of this section), and why the OpenAPI schema, the docs routes and `/api/readyz`
@@ -768,8 +785,10 @@ result. The proxy terminates TLS with a certificate from Let's Encrypt (or
 another CA) and forwards to `http://localhost:${API_HTTP_PORT}`. The default
 loopback bind (`API_HTTP_BIND_IP=127.0.0.1`) works when the proxy runs on the
 same host; set `API_HTTP_BIND_IP=0.0.0.0` in `.env` if the proxy is on a
-different host. This is a standard reverse-proxy setup and is not detailed
-here.
+different host — which also exposes `api:8000` to every Minecraft container on
+this host, so firewall the port to the proxy's address
+([`../app/SECURITY.md`](../app/SECURITY.md) Section 6). This is a standard
+reverse-proxy setup and is not detailed here.
 
 #### HTTP-only fallback (LAN / development)
 
@@ -782,7 +801,11 @@ API_HTTP_BIND_IP=0.0.0.0
 ```
 
 `API_HTTP_BIND_IP=0.0.0.0` is required here because there is no tunnel or
-same-host reverse proxy — clients on the LAN must reach the API directly.
+same-host reverse proxy — clients on the LAN must reach the API directly. It
+also puts `api:8000` back within reach of every Minecraft container on this
+host, via the docker bridge gateway ([`../app/SECURITY.md`](../app/SECURITY.md)
+Section 6) — so this topology suits a trusted LAN or a development box, not a
+deployment whose community can upload plugins.
 
 This drops the `Secure` attribute from the refresh cookie so the browser stores
 it over HTTP and silent refresh works. **Security caveat:** the cookie is then
@@ -843,7 +866,7 @@ of them (`MCD_API_METRICS__PORT` / `MCD_RELAY_METRICS_LISTEN`) in that topology.
 ### gRPC control-plane TLS (cross-host worker)
 
 The in-compose deployment runs the control plane in plaintext on the private
-compose network: `api` sets `MCD_API_CONTROL__TLS__INSECURE=true` and `worker`
+`mcsd` network: `api` sets `MCD_API_CONTROL__TLS__INSECURE=true` and `worker`
 sets `MCD_WORKER_API_TLS_INSECURE=true`. This rests on two conditions, both of
 which have to keep holding: the gRPC control listener is not published to the
 host, and the traffic stays on `mcsd`, whose only members are first-party
@@ -893,7 +916,7 @@ back to `server.public_base_url` when that is unset (CONFIGURATION.md Section
 5.1). Neither of the two values that work on a single host works here:
 
 - `compose.yaml` pins the variable to `http://api:8000`, which resolves only on
-  the compose network. A worker on another machine cannot resolve it at all.
+  the `mcsd` network. A worker on another machine cannot resolve it at all.
 - The fallback hands the worker `PUBLIC_BASE_URL`. If that is a Cloudflare
   Tunnel hostname, every snapshot larger than the tunnel's ~100 MB body cap is
   rejected (issue #1549 — a booted Paper server alone is ~200+ MB), so world
@@ -909,7 +932,9 @@ edge — the API host's LAN/VPN address, not the tunnel hostname:
 # in .env on the API host
 MCD_API_SERVER__DATA_PLANE_BASE_URL=http://10.0.0.5:8000
 # the HTTP port is published to loopback by default; a remote worker needs it on
-# an interface it can reach (Section 3)
+# an interface it can reach (Section 3). This also makes api:8000 reachable from
+# every Minecraft container on the API host -- firewall it to the worker's
+# address (docs/app/SECURITY.md Section 6)
 API_HTTP_BIND_IP=10.0.0.5
 ```
 

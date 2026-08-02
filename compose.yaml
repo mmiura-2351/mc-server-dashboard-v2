@@ -98,25 +98,28 @@ services:
     # so no init job is needed.
     #
     # WHAT THIS BINDS, and who can reach it. `netstat -lntp` inside this container
-    # with the entrypoint flags below (4.40, enumerated 2026-08-02, issues #2599 /
-    # #2616) shows NINE TCP listeners, not one:
+    # with the entrypoint flags below (4.40, enumerated 2026-08-02; the surface
+    # was first reported in #2599 / #2616) shows NINE TCP listeners, not one:
     #
     #   8333   S3 gateway (access/secret keys from .env)
     #   8888   filer HTTP        9333   master HTTP     8080   volume HTTP
     #   8181   Iceberg REST     18333   S3 gRPC        18080  volume gRPC
     #  18888   filer gRPC       19333   master gRPC
     #
-    # Only 8333 takes the S3 credentials. The filer, master and volume ports serve
-    # the same bytes with NO authentication, and 18333 answers gRPC reflection
-    # uncredentialed (`SeaweedS3IamCache`, `SeaweedS3LifecycleInternal`). So every
-    # member of the `mcsd` network below is effectively an object-store admin over
-    # every tenant's data. None of these ports is published to the host.
+    # Credential enforcement, probed uncredentialed against these exact flags:
+    # 8333 rejects (403). 8181 rejects catalog calls (/v1/namespaces 403) but
+    # serves /v1/config open. 8888 filer and 9333 master answer 200 with no
+    # credential at all, serving the same bytes the S3 gateway does, and 18333
+    # answers gRPC reflection uncredentialed (`SeaweedS3IamCache`,
+    # `SeaweedS3LifecycleInternal`). So every member of the `mcsd` network below
+    # is effectively an object-store admin over every tenant's data. None of
+    # these ports is published to the host.
     #
     # What keeps that off attacker-controlled code is the TOPOLOGY, not this
     # service's configuration: the Minecraft server containers run third-party
     # plugins and are attached to `mcsd-servers`, a different network (issue
     # #2590). Do not attach anything that runs untrusted code to `mcsd`.
-    # Authenticating these ports is tracked separately (#2599, #2616).
+    # Authenticating these ports is tracked separately (#2626).
     entrypoint:
       - sh
       - -c
@@ -491,8 +494,9 @@ networks:
   # `default` (mcsd) carries every first-party service: api, db, seaweedfs,
   # migrate, seaweedfs-lifecycle, relay, cloudflared and the worker. First-party
   # is not the same as authenticated — most of what binds here takes no
-  # credential (see the seaweedfs block above: nine ports, one of them gated),
-  # so membership of `mcsd` is itself the privilege. That is why the containers
+  # credential (see the seaweedfs block above: of its nine ports, only the S3
+  # gateway enforces across the board), so membership of `mcsd` is itself the
+  # privilege. That is why the containers
   # running third-party plugin code are on `servers` below instead (issue #2590).
   # `relay` and `cloudflared` are still here, and both terminate internet
   # traffic, so a compromise of either lands on `mcsd`.
