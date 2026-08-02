@@ -173,10 +173,10 @@ The entire HTTP API is namespaced under `/api` (issue #498), so `/api/*` is the
 API (REST, WebSocket, the OpenAPI schema/docs, and the health/readiness probes)
 and `/assets/*` is the built SPA chunks — both are excluded from the SPA
 fallback. The Prometheus exposition is **not** on this port at all; it has its
-own listener (Section 8, issue #2565).
-A `/api/*` miss is a wrong/removed route and an unmatched `/assets/*`
-request returns 404 (a stale/renamed chunk, never a client-side route; issue
-#634); *every other unmatched path* falls back to the SPA's `index.html` so
+own listener (Section 8, issue #2565). A `/api/*` miss is a wrong/removed route
+and an unmatched `/assets/*` request returns 404 (a stale/renamed chunk, never
+a client-side route; issue #634); *every other unmatched path* falls back to
+the SPA's `index.html` so
 client-side routing works on deep links and reloads with no path ever colliding. Same-origin
 serving is why the API ships **no CORS** and the refresh cookie is
 `SameSite=Strict; Path=/api/auth` — do not add CORS or split the origin (WEBUI_SPEC

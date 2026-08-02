@@ -339,6 +339,17 @@ any scraper. What keeps it private differs by deployment:
   apply: it only interpolates into that `ports:` list, and there is no metrics
   entry to interpolate into. The two things not to do are add one, and map a
   second Cloudflare public hostname to the port.
+
+  **The `mcsd` network is not a trust boundary.** The Worker attaches every MC
+  server container it creates to that same user-defined network, by design (it
+  reaches their RCON by container name; `compose.yaml` `networks.default.name`,
+  issue #218). Those containers run operator- and community-supplied JARs,
+  plugins and mods, so "only the compose network" means "and anything running
+  inside a managed Minecraft server". Enabling the listener makes the exposition
+  readable by an uploaded plugin. That is not a regression — the same containers
+  already reach `api:8000`, which is strictly more — and it is why the listener
+  is off by default rather than on. Weigh it before enabling on a deployment
+  whose community can upload plugins.
 - **Non-compose runs** — bare metal, systemd, or any process started outside
   compose (DEPLOYMENT.md Section 8). Here `0.0.0.0` genuinely is a **second
   network-reachable port**, and a reverse proxy in front of the API's HTTP port

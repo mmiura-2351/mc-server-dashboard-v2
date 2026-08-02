@@ -10,6 +10,8 @@ the point of the change is that the exposition is served by a *separate socket*,
 which only a real socket can demonstrate.
 """
 
+import asyncio
+import logging
 import signal
 import socket
 from collections.abc import Iterator
@@ -21,7 +23,23 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from mc_server_dashboard_api.app import create_app
-from mc_server_dashboard_api.observability import _address_family, _EmbeddedServer
+from mc_server_dashboard_api.observability import (
+    _SHUTDOWN_TIMEOUT_SECONDS,
+    _address_family,
+    _EmbeddedServer,
+    create_observability_app,
+    start_observability_listener,
+)
+
+
+def _ipv6_loopback_available() -> bool:
+    """Whether this host can bind ``::1`` at all (some CI images cannot)."""
+
+    try:
+        socket.create_server(("::1", 0), family=socket.AF_INET6).close()
+    except OSError:
+        return False
+    return True
 
 
 @pytest.fixture
@@ -51,6 +69,92 @@ def test_listener_serves_the_exposition_on_its_own_port() -> None:
         assert resp.status_code == 200
         assert resp.headers["content-type"].startswith("text/plain")
         assert "http_requests_total" in resp.text
+
+
+@pytest.mark.usefixtures("_loopback_listener")
+def test_listener_is_built_from_the_embedded_server() -> None:
+    """The listener must actually USE the signal-safe server subclass.
+
+    Pinning ``_EmbeddedServer``'s behaviour is not enough: swapping it back for
+    a plain ``uvicorn.Server`` at the call site leaves every other test green
+    while a container SIGTERM starts being intercepted by this inner listener
+    instead of reaching the API's own server. This is the assertion that reddens
+    on that swap.
+
+    The two `uvicorn.Config` values are here for the same reason — each is a
+    kwarg that could silently stop being passed. ``timeout_graceful_shutdown``
+    bounds the lifespan teardown against a client holding a scrape connection
+    open; ``log_config=None`` keeps uvicorn from re-running its own
+    ``dictConfig`` over the logging this process already configured (NFR-OBS-1).
+    """
+
+    app = create_app()
+    with TestClient(app):
+        listener = app.state.metrics_listener
+        assert isinstance(listener._server, _EmbeddedServer)
+        assert listener._server.config.timeout_graceful_shutdown == (
+            _SHUTDOWN_TIMEOUT_SECONDS
+        )
+        assert listener._server.config.log_config is None
+
+
+@pytest.mark.skipif(
+    not _ipv6_loopback_available(), reason="host has no IPv6 loopback to bind"
+)
+def test_listener_binds_an_ipv6_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An IPv6 ``metrics.host`` must actually bind, end to end.
+
+    ``_address_family`` being unit-correct is not enough: drop the ``family=``
+    argument at the call site and ``socket.create_server`` falls back to
+    ``AF_INET``, raises, and the failure is swallowed as a non-fatal bind error
+    — so the listener silently never starts, on exactly the hosts where the
+    documented "scope the bind" remediation is what an operator was told to do.
+    This is the assertion that reddens on that drop.
+    """
+
+    monkeypatch.setenv("MCD_API_METRICS__ENABLED", "true")
+    monkeypatch.setenv("MCD_API_METRICS__HOST", "::1")
+    monkeypatch.setenv("MCD_API_METRICS__PORT", "0")
+    app = create_app()
+    with TestClient(app):
+        listener = app.state.metrics_listener
+        assert listener is not None
+        resp = httpx2.get(f"http://[::1]:{listener.port}/metrics", timeout=10.0)
+        assert resp.status_code == 200
+        assert "http_requests_total" in resp.text
+
+
+def test_a_serve_failure_is_reported_while_running(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A serve task that dies after a successful bind must not be silent.
+
+    The handle keeps a reference to the task, which also suppresses asyncio's
+    never-retrieved-exception warning, so without the done callback a listener
+    that stopped serving would go unreported until shutdown. Drop the
+    ``add_done_callback`` and this test reddens.
+    """
+
+    async def _boom(self: object, sockets: list[socket.socket] | None = None) -> None:
+        for bound in sockets or []:
+            bound.close()
+        raise RuntimeError("serve exploded")
+
+    async def _run() -> None:
+        monkeypatch.setattr(_EmbeddedServer, "serve", _boom)
+        listener = start_observability_listener(
+            create_observability_app(), host="127.0.0.1", port=0
+        )
+        assert listener is not None
+        # stop() must still not re-raise: it runs first in the lifespan teardown.
+        await listener.stop()
+
+    with caplog.at_level(logging.ERROR):
+        asyncio.run(_run())
+    assert any(
+        "metrics listener stopped serving" in record.message
+        for record in caplog.records
+    )
 
 
 @pytest.mark.usefixtures("_loopback_listener")
@@ -87,12 +191,16 @@ def test_bind_failure_leaves_the_api_serving(monkeypatch: pytest.MonkeyPatch) ->
 # --- the embedded server must not touch process signal handling (#2565) ---
 #
 # The lifespan owns this listener's shutdown; the OUTER uvicorn server owns the
-# process's SIGINT/SIGTERM. Swapping ``_EmbeddedServer`` back for a plain
-# ``uvicorn.Server`` breaks nothing any other test observes — the container's
-# SIGTERM just silently starts reaching the inner listener instead of the API's
-# own server. These two pin the difference. They run on pytest's main thread,
-# which is where ``capture_signals`` actually does something (it returns early
-# off the main thread, which is why a TestClient-driven lifespan cannot see it).
+# process's SIGINT/SIGTERM. These two pin only what the subclass DOES: that the
+# override neutralises uvicorn's handler installation, and (the control) that
+# the base class really would install one, so the override is still earning its
+# place. That the listener is BUILT from the subclass is a separate coupling,
+# pinned by test_listener_is_built_from_the_embedded_server above — without it
+# both of these stay green through a swap back to plain ``uvicorn.Server``.
+#
+# They run on pytest's main thread, which is where ``capture_signals`` actually
+# does something: it returns early off the main thread, which is why a
+# TestClient-driven lifespan cannot observe this at all.
 
 
 def test_embedded_server_leaves_process_signal_handlers_alone() -> None:

@@ -97,9 +97,16 @@ class ObservabilityListener:
     async def stop(self) -> None:
         """Stop serving and wait for the server task to finish.
 
-        Never raises: this runs first in the lifespan's teardown, and an
-        exception here would skip everything after it (gRPC stop, engine
-        dispose). A serve failure is already reported by :func:`_log_serve_exit`.
+        Swallows any ``Exception`` the serve task ended with: this runs first in
+        the lifespan's teardown, so raising here would skip everything after it
+        (gRPC stop, engine dispose). The failure itself is not lost —
+        :func:`_log_serve_exit` has already reported it.
+
+        ``CancelledError`` is deliberately NOT swallowed. It is a
+        ``BaseException``, and it means the teardown itself is being cancelled;
+        suppressing it would break cancellation for the caller, and the rest of
+        the teardown is being abandoned either way. Nothing cancels this task
+        today, so the case is unreachable rather than handled.
         """
 
         self._server.should_exit = True
