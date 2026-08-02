@@ -17,7 +17,7 @@ from mc_server_dashboard_api.identity.domain.errors import (
     InvalidCredentialsError,
     InvalidRefreshTokenError,
 )
-from mc_server_dashboard_api.middleware import _NO_STORE_PATHS
+from mc_server_dashboard_api.middleware import _DOCS_PATHS, _NO_STORE_PATHS
 
 
 class _RejectLogin:
@@ -141,6 +141,24 @@ def test_no_store_path_names_a_live_route(shared_app: FastAPI, path: str) -> Non
     assert path in declared, (
         f"{path} is in _NO_STORE_PATHS but no route declares it -- a renamed or "
         "re-prefixed endpoint is no longer getting Cache-Control: no-store"
+    )
+
+
+@pytest.mark.parametrize("path", sorted(_DOCS_PATHS))
+def test_docs_path_names_a_live_route(shared_app: FastAPI, path: str) -> None:
+    """Every entry in the docs set is a path the app still routes (issue #2587).
+
+    ``_DOCS_PATHS`` selects the relaxed CSP that allows the swagger init script
+    by hash, and it is matched by exact path just as ``_NO_STORE_PATHS`` is.
+    Renaming a docs route without updating the set reapplies the strict
+    ``script-src 'self'``, which blocks that script: the page still returns 200
+    and only the browser console says why it renders blank.
+    """
+
+    declared = {route.path for route in shared_app.routes if isinstance(route, Route)}
+    assert path in declared, (
+        f"{path} is in _DOCS_PATHS but no route declares it -- a renamed docs "
+        "page is back under the strict CSP, which blocks its init script"
     )
 
 
