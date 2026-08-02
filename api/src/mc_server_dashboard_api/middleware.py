@@ -89,6 +89,14 @@ _PERMISSIONS_POLICY = "camera=(), microphone=(), geolocation=()"
 
 # Paths whose responses carry ``Cache-Control: no-store`` because the body
 # contains credentials (tokens) or per-user data.
+#
+# Matching is by exact path, so nothing in the routers signals that renaming one
+# of these silently drops the header — the response still returns 200, and the
+# middleware stamps the header on the resulting 404 just the same. The route
+# table is the coupling: ``test_no_store_path_names_a_live_route`` (issue #2563)
+# reddens when an entry stops naming a declared route. Templated routes cannot
+# join this set at all; those declare ``no-store`` in their own response headers
+# (issue #2491).
 _NO_STORE_PATHS = frozenset(
     {
         "/api/auth/login",
