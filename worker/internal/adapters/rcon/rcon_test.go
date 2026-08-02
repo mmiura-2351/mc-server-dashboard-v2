@@ -14,11 +14,18 @@ import (
 )
 
 // mcReadSettle is how long the fake server waits for the wire to go quiet before
-// each read, so "what one read() returns" is what the client has actually put on
-// the wire rather than a race. Two packets written back-to-back land within
+// each command read, so "what one read() returns" is what the client has actually
+// put on the wire rather than a race. Two packets written back-to-back land within
 // microseconds on loopback, so this window makes a client that keeps two request
 // packets in flight fail deterministically; a client that keeps only one in
 // flight is unaffected however long the window is.
+//
+// The settle covers only the post-auth (command) read, not the auth read: the
+// sequencing it catches is a property of the EXEC_COMMAND path (a command written
+// back-to-back with its end-of-response marker, issue #2618), and the auth
+// handshake only ever puts a single packet on the wire. Keeping the auth read off
+// the settle also keeps this constant decoupled from Dial's handshake deadline —
+// raising it no longer eats into that budget (issue #2624). See serve().
 const mcReadSettle = 25 * time.Millisecond
 
 // errMCFraming is what the fake reports when a read carried something other than
@@ -86,8 +93,12 @@ func (fs *fakeServer) serve() {
 	}
 	defer func() { _ = conn.Close() }()
 
+	// settle turns on once the handshake is done, so the settle window covers the
+	// command reads (where a client can keep two request packets in flight) but
+	// not the single-packet auth read. See mcReadSettle.
+	settle := false
 	for {
-		id, typ, body, n, err := readPacketMC(conn)
+		id, typ, body, n, err := readPacketMC(conn, settle)
 		if errors.Is(err, errMCFraming) {
 			// Vanilla drops the connection on a malformed read without executing
 			// anything. Record the byte count first so a test can name the cause.
@@ -112,6 +123,7 @@ func (fs *fakeServer) serve() {
 			// Server sends an (empty) RESPONSE_VALUE then the AUTH_RESPONSE.
 			_ = writePacket(conn, id, typeResponseValue, "")
 			_ = writePacket(conn, respID, typeAuthResponse, "")
+			settle = true // command reads settle; the auth read did not.
 		case typeExecCommand:
 			fs.got <- body
 			if fs.silent {
@@ -632,10 +644,16 @@ func TestExecuteRejectsWrongPacketType(t *testing.T) {
 //
 // n is the byte count the read returned, reported so a framing violation can be
 // described rather than surfacing as a bare EOF on the client.
-func readPacketMC(conn net.Conn) (id, typ int32, body string, n int, err error) {
+//
+// settle gates the pre-read settle window (mcReadSettle): the caller passes true
+// for command reads, where a client can keep two request packets in flight, and
+// false for the single-packet auth read, which has nothing to settle for.
+func readPacketMC(conn net.Conn, settle bool) (id, typ int32, body string, n int, err error) {
 	// Let the wire settle first, so a client that put two packets on it is seen
 	// to have done so rather than racing the read.
-	time.Sleep(mcReadSettle)
+	if settle {
+		time.Sleep(mcReadSettle)
+	}
 
 	buf := make([]byte, 1460) // vanilla's RconClient buffer size
 	n, err = conn.Read(buf)

@@ -503,6 +503,23 @@ describe("Step 2 — resource allocation (#715)", () => {
     expect(body.config).toEqual({});
   });
 
+  it("prefills the memory limit with the operator default from /meta (#1069)", async () => {
+    // The sibling knob to max_memory_limit_mb: when the operator configures a
+    // default, the untouched field seeds from it rather than staying blank.
+    mockApi.get.mockImplementation((path: string) => {
+      if (path === "/api/meta") {
+        return Promise.resolve(meta({ default_memory_limit_mb: 2048 }));
+      }
+      return defaultGet(path);
+    });
+    renderPage();
+    await reachConfigStep();
+    const input = (await screen.findByLabelText(
+      t("serverCreate.memoryLimitLabel"),
+    )) as HTMLInputElement;
+    await waitFor(() => expect(input.value).toBe("2048"));
+  });
+
   it("blocks submit on a memory limit below the floor", async () => {
     renderPage();
     await reachConfigStep();
@@ -528,6 +545,32 @@ describe("Step 2 — resource allocation (#715)", () => {
     expect(
       screen.getByRole("button", { name: t("serverCreate.create") }),
     ).toBeDisabled();
+  });
+
+  it("blocks submit above the operator-configured ceiling that the default would allow (#1069)", async () => {
+    // With a configured max of 4096 MiB, 8192 is out of range even though it
+    // sits well under the default 1 TiB ceiling — so this reddens only if the
+    // page honours the /meta ceiling rather than the hardcoded default.
+    mockApi.get.mockImplementation((path: string) => {
+      if (path === "/api/meta") {
+        return Promise.resolve(meta({ max_memory_limit_mb: 4096 }));
+      }
+      return defaultGet(path);
+    });
+    renderPage();
+    await reachConfigStep();
+    fireEvent.change(
+      screen.getByLabelText(t("serverCreate.memoryLimitLabel")),
+      { target: { value: "8192" } },
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: t("serverCreate.create") }),
+      ).toBeDisabled(),
+    );
+    expect(
+      screen.getByText(t("serverCreate.memoryLimitRange")),
+    ).toBeInTheDocument();
   });
 
   it("blocks submit on a non-integer memory limit", async () => {
