@@ -51,6 +51,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     BackupNotFoundError,
     BackupStorageUnavailableError,
     BackupUnreadableError,
+    GroupNotFoundError,
     PluginCacheBlobNotFoundError,
     ResourcePackNotFoundError,
     ServerFileNotFoundError,
@@ -861,8 +862,16 @@ class FakeGroupRepository(GroupRepository):
         # only ``if row is not None`` and never constructs a ``PlayerGroupModel``,
         # so no ``save`` can make a group appear -- ``add`` is the only insert
         # path (#2557).
-        if group.id in self.by_id:
-            self.by_id[group.id] = self._copy(group)
+        if group.id not in self.by_id:
+            # A concurrent delete took the row. With players to write, the
+            # adapter's replacement ``group_player`` INSERTs hit
+            # ``fk_group_player_group_id_player_group`` at its own flush and it
+            # raises not-found; with an empty set there is nothing to insert and
+            # the whole save is a silent no-op (#2583, measured on PostgreSQL 18).
+            if group.players:
+                raise GroupNotFoundError(str(group.id.value))
+            return
+        self.by_id[group.id] = self._copy(group)
 
     async def delete(self, group_id: GroupId) -> None:
         self.by_id.pop(group_id, None)
