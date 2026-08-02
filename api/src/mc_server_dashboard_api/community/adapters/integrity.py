@@ -25,15 +25,20 @@ ordinary user action: until the execute site was wrapped it was a deterministic
 nothing on that path could raise (issue #2611).
 
 **Why this context maps its own constraints instead of sharing the servers map.**
-A translation map's output is its own context's domain errors, so a single shared
-function would have to import both ``servers.domain.errors`` and
-``community.domain.errors``, and would raise each context's errors into the
-other's use cases. The constraint namespaces are disjoint anyway -- the four
-above name community tables -- so sharing buys nothing but that coupling. (The
-import-linter contracts do not forbid it: they bar the community *domain* and
-*application* from reaching into ``servers``, and this is the adapter layer,
-which already reaches ``servers.adapters.models`` for the resource-existence
-check. The reason to keep the maps apart is the coupling, not a contract.)
+Per-context is already the convention, and by more than one example:
+``identity/adapters/integrity.py`` holds its own two-entry map and is likewise
+shared by its unit of work's commit path and its repository's eager Core UPDATE
+-- the same two call-site kinds, split out for the same reason. Of the three
+contexts that translate at all, community was simply the one that had neither the
+split-out module nor the UPDATE-site wrap. Sharing a single map instead would
+mean one function importing every context's ``domain.errors`` and raising each
+context's errors into the others' use cases, for no gain: the constraint
+namespaces are disjoint, so no entry would ever be reached from more than one
+context. (The import-linter contracts do not forbid the import -- they bar the
+community *domain* and *application* from reaching into ``servers``, and this is
+the adapter layer, which already reaches ``servers.adapters.models`` for the
+resource-existence check. What keeps the maps apart is the coupling, not a
+contract.)
 
 **Foreign keys are deliberately absent, and their absence is not a claim that
 they are unreachable.** Every FK in migration 0004 --
