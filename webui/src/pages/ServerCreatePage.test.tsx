@@ -16,6 +16,7 @@ import {
   useUploadProgress,
 } from "../components/useUploadProgress.ts";
 import { t } from "../i18n/index.ts";
+import { meta } from "../test/meta.ts";
 import { ServerCreatePage } from "./ServerCreatePage.tsx";
 
 const CID = "c1";
@@ -67,8 +68,12 @@ function defaultGet(path: string) {
     return Promise.resolve({ ports: [25570] });
   }
   if (path === "/api/meta") {
-    // Default to direct mode (relay off): the port control stays visible.
-    return Promise.resolve({ relay_enabled: false });
+    // Default to direct mode (relay off): the port control stays visible. The
+    // memory knobs come back `null` — the page reads them defensively, so
+    // omitting them would be indistinguishable from an unconfigured operator
+    // and would leave the memory-limit tests passing for the wrong reason
+    // (issue #2537).
+    return Promise.resolve(meta());
   }
   return Promise.reject(new Error(`unexpected GET ${path}`));
 }
@@ -333,7 +338,7 @@ describe("Step 2 — port check", () => {
 describe("Step 2 — port control gated on relay mode (#1002)", () => {
   function relayGet(path: string) {
     if (path === "/api/meta") {
-      return Promise.resolve({ relay_enabled: true });
+      return Promise.resolve(meta({ relay_enabled: true }));
     }
     return defaultGet(path);
   }
@@ -639,7 +644,7 @@ describe("Step 2 — join address name (slug) field (issue #981, gated on relay 
   // The slug field is only shown when relay is enabled (#1006).
   function relayGet(path: string) {
     if (path === "/api/meta") {
-      return Promise.resolve({ relay_enabled: true });
+      return Promise.resolve(meta({ relay_enabled: true }));
     }
     return defaultGet(path);
   }
