@@ -28,7 +28,7 @@ from mc_server_dashboard_api.servers.domain.catalog_provider import (
 )
 from mc_server_dashboard_api.servers.domain.errors import (
     CatalogProjectNotFoundError,
-    CatalogUnavailableError,
+    CatalogUpstreamFailedError,
     FileTooLargeError,
     wrap_shape_errors,
 )
@@ -180,15 +180,15 @@ class ModrinthCatalog(CatalogProvider):
                                 )
                             chunks.append(chunk)
                         return b"".join(chunks)
-                raise CatalogUnavailableError("too many redirects")
-        except (FileTooLargeError, CatalogUnavailableError):
+                raise CatalogUpstreamFailedError("too many redirects")
+        except (FileTooLargeError, CatalogUpstreamFailedError):
             raise
         except httpx2.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 raise CatalogProjectNotFoundError(url) from exc
-            raise CatalogUnavailableError(str(exc)) from exc
+            raise CatalogUpstreamFailedError(str(exc)) from exc
         except httpx2.TransportError as exc:
-            raise CatalogUnavailableError(str(exc)) from exc
+            raise CatalogUpstreamFailedError(str(exc)) from exc
 
     # -- internal helpers --
 
@@ -208,7 +208,7 @@ class ModrinthCatalog(CatalogProvider):
             return cached
         try:
             members = await self._get_json(f"/team/{quote(team_id, safe='')}/members")
-        except (CatalogProjectNotFoundError, CatalogUnavailableError):
+        except (CatalogProjectNotFoundError, CatalogUpstreamFailedError):
             return None
         owner = self._owner_username(members)
         if owner is not None:
@@ -248,17 +248,17 @@ class ModrinthCatalog(CatalogProvider):
                     async for chunk in response.aiter_bytes():
                         total += len(chunk)
                         if total > _MAX_JSON_BYTES:
-                            raise CatalogUnavailableError(
+                            raise CatalogUpstreamFailedError(
                                 f"response too large: {total} bytes"
                             )
                         chunks.append(chunk)
                     return json.loads(b"".join(chunks))
-        except (CatalogProjectNotFoundError, CatalogUnavailableError):
+        except (CatalogProjectNotFoundError, CatalogUpstreamFailedError):
             raise
         except httpx2.HTTPStatusError as exc:
-            raise CatalogUnavailableError(str(exc)) from exc
+            raise CatalogUpstreamFailedError(str(exc)) from exc
         except (httpx2.TransportError, ValueError) as exc:
-            raise CatalogUnavailableError(str(exc)) from exc
+            raise CatalogUpstreamFailedError(str(exc)) from exc
 
     @staticmethod
     def _parse_version(v: dict) -> CatalogVersion:  # type: ignore[type-arg]

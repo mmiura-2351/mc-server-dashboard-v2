@@ -104,7 +104,7 @@ const pluginErrorKeys: Record<string, TranslationKey> = {
   server_busy: "plugins.error.busy",
   invalid_path: "plugins.error.invalidPath",
   file_too_large: "plugins.error.tooLarge",
-  catalog_upstream_failed: "plugins.error.catalogUnavailable",
+  catalog_upstream_failed: "plugins.error.catalogUpstreamFailed",
   catalog_project_not_found: "plugins.error.catalogNotFound",
   checksum_mismatch: "plugins.error.checksumMismatch",
   unsupported_server_type: "plugins.error.unsupportedServerType",

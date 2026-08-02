@@ -40,7 +40,7 @@ from mc_server_dashboard_api.servers.application.plugin_resolution import (
     WillImport,
 )
 from mc_server_dashboard_api.servers.domain.errors import (
-    CatalogUnavailableError,
+    CatalogUpstreamFailedError,
     ServerFilesUnsettledError,
 )
 from mc_server_dashboard_api.servers.domain.plugin import (
@@ -201,7 +201,7 @@ def test_plan_catalog_upstream_failure_is_502() -> None:
     app = _app(
         member=True,
         allow=True,
-        resolve=_FakeUseCase(error=CatalogUnavailableError("down")),
+        resolve=_FakeUseCase(error=CatalogUpstreamFailedError("down")),
     )
     client = next(_client(app))
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/resolve"))

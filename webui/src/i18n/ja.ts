@@ -1632,7 +1632,7 @@ export const ja: Record<TranslationKey, string> = {
     "無効なファイルです。{nouns}としてアップロードできるのは .jar ファイルのみです。",
   "plugins.error.tooLarge":
     "ファイルが大きすぎます。アップロードの上限は 512 MB です。",
-  "plugins.error.catalogUnavailable":
+  "plugins.error.catalogUpstreamFailed":
     "Modrinth に接続できませんでした。しばらくしてからもう一度お試しください。",
   "plugins.error.catalogNotFound":
     "Modrinth でプロジェクトまたはバージョンが見つかりませんでした。",

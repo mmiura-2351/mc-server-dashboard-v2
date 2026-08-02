@@ -41,7 +41,7 @@ class CatalogUnavailableError(ServerError):
     ``catalog_unavailable`` so the client retries once the source recovers.
 
     Not to be confused with the *content* catalog's
-    :class:`mc_server_dashboard_api.servers.domain.errors.CatalogUnavailableError`,
+    :class:`mc_server_dashboard_api.servers.domain.errors.CatalogUpstreamFailedError`,
     which is the gateway case (502 ``catalog_upstream_failed``) and carries the
     rationale for the split (issue #2406).
     """

@@ -34,7 +34,7 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     CatalogChecksumMismatchError,
     CatalogProjectNotFoundError,
-    CatalogUnavailableError,
+    CatalogUpstreamFailedError,
     InvalidFilePathError,
     PluginAlreadyExistsError,
     PluginCacheBlobNotFoundError,
@@ -121,7 +121,7 @@ async def capture_catalog_dependencies(
                 proj = await catalog.get_project(dep.project_id)
                 slug = proj.slug
                 title = proj.title
-            except (CatalogUnavailableError, CatalogProjectNotFoundError):
+            except (CatalogUpstreamFailedError, CatalogProjectNotFoundError):
                 pass
         kind = (
             "required" if dep.dependency_type == _REQUIRED_DEP_TYPE else "incompatible"
@@ -527,7 +527,7 @@ async def _check_one(
                 loader=loader,
                 game_versions=[mc_version],
             )
-        except CatalogUnavailableError:
+        except CatalogUpstreamFailedError:
             return PluginUpdateInfo(plugin=plugin, latest_version=None)
         latest = versions[0] if versions else None
         if latest and latest.version_id != plugin.source_version_id:
@@ -808,7 +808,7 @@ class ListPluginDependencies:
                     proj = await self.catalog.get_project(dep.project_id)
                     project_title = proj.title
                     project_slug = proj.slug
-                except (CatalogUnavailableError, CatalogProjectNotFoundError):
+                except (CatalogUpstreamFailedError, CatalogProjectNotFoundError):
                     pass
                 return PluginDependencyInfo(
                     project_id=dep.project_id,
