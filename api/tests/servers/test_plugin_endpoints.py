@@ -825,6 +825,122 @@ def test_download_client_modpack_member_without_permission_is_403() -> None:
     assert resp.status_code == 403
 
 
+# --- the HEAD probe (issue #2560) ------------------------------------------
+#
+# A resumable-download client asks HEAD first, before committing to a transfer.
+# The route registered GET-only, so that probe used to get a 405. Bearer is the
+# only credential this route accepts (``require_permission``), so one is full
+# coverage — like the no-store section above.
+
+# The headers the GET declares (content-length / accept-ranges / etag are absent:
+# the zip is built on the fly from a variable jar set, so its size is not known
+# ahead of the stream and the route offers neither a length nor resumption).
+_MODPACK_HEADERS_PRESENT = ("content-type", "content-disposition", "cache-control")
+_MODPACK_HEADERS_ABSENT = ("content-length", "accept-ranges", "etag")
+
+
+def test_download_client_modpack_head_answers_the_gets_headers() -> None:
+    community, server = uuid.uuid4(), uuid.uuid4()
+    url = _client_url(community, server, "/download")
+
+    async def _served_stream() -> object:
+        yield b"PK\x03\x04fake-zip"
+
+    served = next(
+        _client(
+            _app(
+                member=True,
+                allow=True,
+                download_modpack=_FakeUseCase(result=_served_stream()),
+            )
+        )
+    ).get(url)
+
+    async def _probe_stream() -> object:
+        yield b"PK\x03\x04fake-zip"
+
+    probed = next(
+        _client(
+            _app(
+                member=True,
+                allow=True,
+                download_modpack=_FakeUseCase(result=_probe_stream()),
+            )
+        )
+    ).head(url)
+
+    assert probed.status_code == served.status_code == 200
+    # A HEAD carries the GET's headers and none of its bytes.
+    assert probed.content == b""
+    for name in _MODPACK_HEADERS_PRESENT:
+        assert probed.headers[name] == served.headers[name], name
+    # The non-vacuous parity form (issue #2560): assert the header is absent on
+    # both sides, rather than comparing two ``.get()`` calls that both return None.
+    for name in _MODPACK_HEADERS_ABSENT:
+        assert name not in probed.headers, name
+        assert name not in served.headers, name
+
+
+def test_download_client_modpack_head_does_not_open_the_stream() -> None:
+    # The load-bearing half of the probe (issue #2560): the headers are static, so
+    # the point is to answer them without building the zip. The modpack generator
+    # is obtained to decide the status, but a probe must never iterate it — that is
+    # what pulls each jar from the content-addressed cache. Moving the probe past
+    # the ``StreamingResponse`` reddens this: Starlette would then iterate the real
+    # stream on the HEAD.
+    opened = False
+
+    async def _stream() -> object:
+        nonlocal opened
+        opened = True
+        yield b"PK\x03\x04fake-zip"
+
+    community, server = uuid.uuid4(), uuid.uuid4()
+    app = _app(member=True, allow=True, download_modpack=_FakeUseCase(result=_stream()))
+    resp = next(_client(app)).head(_client_url(community, server, "/download"))
+
+    assert resp.status_code == 200
+    assert resp.content == b""
+    assert opened is False
+
+
+@pytest.mark.parametrize(
+    ("member", "allow", "error", "expected"),
+    [
+        (True, True, None, 200),
+        (False, True, None, 404),
+        (True, False, None, 403),
+        (True, True, ServerNotFoundError("x"), 404),
+        (True, True, UnsupportedPluginServerTypeError("x"), 422),
+    ],
+)
+def test_download_client_modpack_head_is_answered_exactly_like_the_get(
+    member: bool, allow: bool, error: Exception | None, expected: int
+) -> None:
+    # A HEAD that skipped or weakened the gate would be a security defect, not a
+    # convenience gap: it must be refused exactly where the download is.
+    community, server = uuid.uuid4(), uuid.uuid4()
+    url = _client_url(community, server, "/download")
+
+    def _make() -> _FakeUseCase:
+        if error is not None:
+            return _FakeUseCase(error=error)
+
+        async def _stream() -> object:
+            yield b"zip"
+
+        return _FakeUseCase(result=_stream())
+
+    probed = next(
+        _client(_app(member=member, allow=allow, download_modpack=_make()))
+    ).head(url)
+    served = next(
+        _client(_app(member=member, allow=allow, download_modpack=_make()))
+    ).get(url)
+
+    assert probed.status_code == served.status_code == expected
+
+
 # --- audit target_type correctness (issue #1414) ----------------------------
 
 

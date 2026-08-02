@@ -181,7 +181,7 @@ Global resource pack library (not community-scoped) and per-server assignment.
 | POST | `/resource-packs` | Upload a resource pack (multipart; requires `server:update` in at least one community). |
 | GET | `/resource-packs` | List all resource packs (authenticated). |
 | DELETE | `/resource-packs/{id}` | Delete a resource pack (uploader or platform admin; 409 when still assigned to a server). |
-| GET | `/resource-packs/{id}/download` | Download (authenticated). The response declares `Cache-Control: no-store` (#2519). |
+| GET / HEAD | `/resource-packs/{id}/download` | Download (authenticated). The response declares `Cache-Control: no-store` (#2519). `HEAD` is the metadata probe (#2560): the same gate and the same headers with no body, so a client learns the `Content-Length` without starting a transfer; it never opens the blob nor records a `resource_pack:download` audit event. |
 | GET | `/public/resource-packs/{id}/{filename}` | Public download (no auth) — the URL Minecraft clients fetch. Validates `filename` matches. The two statuses declare different caching policies (#2562), because the URL ends in the stored filename and an undeclared policy is decided by the edge's extension heuristic instead: the `200` declares `Cache-Control: public, max-age=3600, immutable` — a pack is immutable and the game client verifies it against `resource-pack-sha1`, so the max-age bounds only how long a deleted pack stays fetchable from a cache — and the `404` declares `Cache-Control: no-store`, since a pack's id and filename are both fixed at creation and a URL that 404s can never later become a `200`. |
 | POST | `…/{sid}/resource-pack` | Assign a resource pack to a server (`server:update`). Body: `{resource_pack_id, require_resource_pack, resource_pack_prompt}`. |
 | DELETE | `…/{sid}/resource-pack` | Unassign (`server:update`). |
@@ -507,7 +507,10 @@ backend support; the tab body also self-guards with an "unsupported" notice).
 - Client modpack (mod loaders only): when at least one enabled mod is
   client-relevant (side `client` / `both`), a **Download client modpack** button
   bundles them (`GET …/client-mods/download`, #1342; the response declares
-  `Cache-Control: no-store`, #2519).
+  `Cache-Control: no-store`, #2519). `HEAD` is the metadata probe (#2560): the
+  same `plugin:read` gate and headers with no body, and it never builds the zip;
+  the zip's size is not known ahead of the build, so neither `GET` nor `HEAD`
+  declares a `Content-Length`.
 - Bedrock hint: on a Paper server, when the deployment's Bedrock gate is on
   (`/meta`'s `bedrock_enabled`, Section 2.4) and a Geyser plugin is installed, an
   inline note links to Floodgate setup (epic #1540).

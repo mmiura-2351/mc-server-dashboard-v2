@@ -472,6 +472,79 @@ class TestDownloadEndpoint:
         assert resp.json()["reason"] == "storage_unavailable"
 
 
+class TestDownloadHeadProbe:
+    # A resumable-download client asks HEAD first, to learn the size before
+    # committing to a transfer (issue #2560). The route registered GET-only, so
+    # that probe used to get a 405. Bearer is the only credential this route
+    # accepts (``get_current_user``), so one is full coverage.
+
+    # Present on the GET; accept-ranges / etag are absent — this route declares a
+    # length but offers no resumption.
+    _HEADERS_PRESENT = (
+        "content-type",
+        "content-length",
+        "content-disposition",
+        "cache-control",
+    )
+    _HEADERS_ABSENT = ("accept-ranges", "etag")
+
+    def test_head_answers_the_gets_headers(self) -> None:
+        p = _pack()
+        uc = _FakeDownloadUseCase(pack=p, data=b"zipbytes")
+        app = _app(download=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            served = client.get(f"/api/resource-packs/{p.id.value}/download")
+            probed = client.head(f"/api/resource-packs/{p.id.value}/download")
+        assert probed.status_code == served.status_code == 200
+        # A HEAD carries the GET's headers and none of its bytes.
+        assert probed.content == b""
+        for name in self._HEADERS_PRESENT:
+            assert probed.headers[name] == served.headers[name], name
+        # The non-vacuous parity form (issue #2560): the header is absent on both
+        # sides, not two ``.get()`` calls that both return None.
+        for name in self._HEADERS_ABSENT:
+            assert name not in probed.headers, name
+            assert name not in served.headers, name
+
+    def test_head_neither_opens_the_blob_nor_records_a_download(self) -> None:
+        # The load-bearing half of the probe (issue #2560): the size is answered
+        # from the store's HEAD already done in the use case, and the probe returns
+        # before ``started()`` performs the body GET. ``open_error`` fires on the
+        # stream's FIRST iteration, so a probe that never opens it stays 200; move
+        # the probe past ``started()`` and this reddens to 404. A probe is not a
+        # download either, so it records nothing.
+        p = _pack()
+        recorder = RecordingAuditRecorder()
+        uc = _FakeDownloadUseCase(
+            pack=p, open_error=ResourcePackNotFoundError("gone"), declared=1024
+        )
+        app = _app(download=uc, recorder=recorder)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.head(f"/api/resource-packs/{p.id.value}/download")
+        assert resp.status_code == 200
+        assert int(resp.headers["content-length"]) == 1024
+        assert recorder.events == []
+
+    @pytest.mark.parametrize(
+        ("error", "expected"),
+        [
+            (None, 200),
+            (ResourcePackNotFoundError("nope"), 404),
+            (ResourcePackStorageUnavailableError("down"), 503),
+        ],
+    )
+    def test_head_is_answered_exactly_like_the_get(
+        self, error: Exception | None, expected: int
+    ) -> None:
+        # The probe is gated and error-mapped exactly like the download it probes.
+        p = _pack()
+        with TestClient(_app(download=_FakeDownloadUseCase(pack=p, error=error))) as c:  # type: ignore[arg-type]
+            probed = c.head(f"/api/resource-packs/{p.id.value}/download")
+        with TestClient(_app(download=_FakeDownloadUseCase(pack=p, error=error))) as c:  # type: ignore[arg-type]
+            served = c.get(f"/api/resource-packs/{p.id.value}/download")
+        assert probed.status_code == served.status_code == expected
+
+
 class TestPublicDownloadEndpoint:
     def test_public_download_200(self) -> None:
         p = _pack(filename="my-pack.zip")
