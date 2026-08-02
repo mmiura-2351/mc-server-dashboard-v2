@@ -75,9 +75,11 @@ make bootstrap
 Without it the **pre-push** `make check` fails before it can run. The target
 runs `npm ci` (webui) and `uv sync` (api).
 
-- Don't bypass failing pre-commit / pre-push hooks; fix the cause. If a hook
-  fails, the commit did not happen — make a **new** commit rather than
-  `--amend`.
+- Don't bypass failing pre-commit / pre-push hooks; fix the cause. A failed
+  **pre-commit** means the commit did not happen; a failed **pre-push** means
+  the push did not happen but the commit stands. Either way, fix the cause in a
+  **new** commit rather than `--amend` — the branch is squashed at merge
+  (Section 7), so the extra commit costs nothing.
 - Commit messages are English, with a short imperative subject.
 
 ## 5. Pull requests
