@@ -288,6 +288,54 @@ async def test_duplicate_role_name_in_community_raises(engine: AsyncEngine) -> N
             await uow.commit()
 
 
+async def test_role_rename_onto_an_existing_name_raises(engine: AsyncEngine) -> None:
+    """``roles.update`` translates ``uq_role_community_name`` at its own execute.
+
+    A rename UPDATE violates at statement end, inside the transaction — before the
+    translating ``commit`` is ever reached — so without a wrap at the execute site
+    this raises a raw ``IntegrityError`` (issue #2611).
+    """
+
+    factory = create_session_factory(engine)
+    community = _community()
+    renamed = _role(community.id, "Moderator")
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.communities.add(community)
+        await uow.roles.add(_role(community.id, "Owner"))
+        await uow.roles.add(renamed)
+        await uow.commit()
+
+    renamed.name = RoleName("Owner")
+    with pytest.raises(RoleAlreadyExistsError):
+        async with SqlAlchemyUnitOfWork(factory) as uow:
+            await uow.roles.update(renamed)
+            await uow.commit()
+
+
+async def test_community_rename_onto_an_existing_name_raises(
+    engine: AsyncEngine,
+) -> None:
+    """``communities.update`` translates ``uq_community_name`` at its own execute.
+
+    ``RenameCommunity`` pre-checks the name, so only a racer reaches this — but it
+    reaches the same unwrapped UPDATE the role rename does (issue #2611).
+    """
+
+    factory = create_session_factory(engine)
+    taken = _community("taken")
+    renamed = _community("free")
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.communities.add(taken)
+        await uow.communities.add(renamed)
+        await uow.commit()
+
+    renamed.name = CommunityName("taken")
+    with pytest.raises(CommunityAlreadyExistsError):
+        async with SqlAlchemyUnitOfWork(factory) as uow:
+            await uow.communities.update(renamed)
+            await uow.commit()
+
+
 async def test_same_role_name_in_two_communities_is_allowed(
     engine: AsyncEngine,
 ) -> None:

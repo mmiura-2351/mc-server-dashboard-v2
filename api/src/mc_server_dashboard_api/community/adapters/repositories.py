@@ -12,9 +12,13 @@ import uuid
 from collections.abc import Sequence
 
 from sqlalchemy import delete, func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
 
+from mc_server_dashboard_api.community.adapters.integrity import (
+    translate_integrity_error,
+)
 from mc_server_dashboard_api.community.adapters.models import (
     CommunityModel,
     MembershipModel,
@@ -182,7 +186,16 @@ class SqlAlchemyCommunityRepository(CommunityRepository):
             .where(CommunityModel.id == community.id.value)
             .values(name=community.name.value, updated_at=community.updated_at)
         )
-        await self._session.execute(stmt)
+        try:
+            await self._session.execute(stmt)
+        except IntegrityError as exc:
+            # A rename UPDATE violates uq_community_name at execute time, inside
+            # the transaction (unlike a staged INSERT, which flushes at commit),
+            # so the translation must run here for the racer that slipped past
+            # RenameCommunity's get_by_name pre-check to surface typed (409)
+            # rather than as a raw 500. The enclosing UnitOfWork rolls back.
+            translate_integrity_error(exc)
+            raise
 
     async def delete(self, community_id: CommunityId) -> None:
         stmt = delete(CommunityModel).where(CommunityModel.id == community_id.value)
@@ -326,7 +339,18 @@ class SqlAlchemyRoleRepository(RoleRepository):
                 updated_at=role.updated_at,
             )
         )
-        await self._session.execute(stmt)
+        try:
+            await self._session.execute(stmt)
+        except IntegrityError as exc:
+            # A rename UPDATE violates uq_role_community_name at execute time,
+            # inside the transaction (unlike a staged INSERT, which flushes at
+            # commit), so the translation must run here. UpdateRole has no
+            # name-clash pre-check, so this is not a race but the ordinary user
+            # action: without this the rename was a deterministic 500 and the
+            # route's RoleAlreadyExistsError handler could never fire (#2611).
+            # The enclosing UnitOfWork rolls back.
+            translate_integrity_error(exc)
+            raise
 
     async def delete(self, role_id: RoleId) -> None:
         stmt = delete(RoleModel).where(RoleModel.id == role_id.value)

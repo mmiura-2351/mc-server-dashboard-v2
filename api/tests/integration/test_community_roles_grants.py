@@ -4,7 +4,8 @@ Runs only when ``MCD_TEST_DATABASE_URL`` is set (the CI Postgres service); skipp
 otherwise (TESTING.md Section 5). Exercises the role/grant use cases end to end
 with the real SqlAlchemy UnitOfWork against the 0004 schema:
 
-- a custom role's duplicate name surfaces as the translated 409 domain error;
+- a custom role's duplicate name surfaces as the translated 409 domain error, on
+  create *and* on the rename that :class:`UpdateRole` performs (issue #2611);
 - deleting a non-preset role cascades its ``membership_role`` assignments via the
   DB FK (``ondelete=CASCADE``, DATABASE.md Section 10);
 - a grant on the M1 ``server`` type persists, and a duplicate
@@ -41,6 +42,7 @@ from mc_server_dashboard_api.community.application.manage_membership import (
 from mc_server_dashboard_api.community.application.manage_role import (
     CreateRole,
     DeleteRole,
+    UpdateRole,
 )
 from mc_server_dashboard_api.community.application.provision_community import (
     ProvisionCommunity,
@@ -160,6 +162,77 @@ async def test_create_role_duplicate_name_is_translated_to_conflict(
             name="Editor",
             permissions={Permission("server:start")},
         )
+
+
+async def test_update_role_onto_an_existing_name_is_translated_to_conflict(
+    engine: AsyncEngine,
+) -> None:
+    """Renaming a role onto a name the community already uses must 409, not 500.
+
+    ``UpdateRole`` has no name-clash pre-check, so this is not a race: it is the
+    ordinary user action, every time (issue #2611). The clash surfaces from the
+    repository's rename UPDATE, which is why the pin needs a real flush — an
+    in-memory fake has no ``uq_role_community_name`` to violate.
+    """
+
+    owner_id = uuid.uuid4()
+    await _insert_user(engine, owner_id, "alice")
+    community = await _provision(engine)(name="guild", owner_user_id=UserId(owner_id))
+    factory = create_session_factory(engine)
+    create = CreateRole(uow=SqlAlchemyUnitOfWork(factory), clock=SystemClock())
+
+    await create(
+        community_id=community.id,
+        actor_id=UserId(owner_id),
+        name="Editor",
+        permissions={Permission("server:read")},
+    )
+    moderator = await create(
+        community_id=community.id,
+        actor_id=UserId(owner_id),
+        name="Moderator",
+        permissions={Permission("server:read")},
+    )
+
+    with pytest.raises(RoleAlreadyExistsError):
+        await UpdateRole(uow=SqlAlchemyUnitOfWork(factory), clock=SystemClock())(
+            community_id=community.id,
+            role_id=moderator.id,
+            actor_id=UserId(owner_id),
+            name="Editor",
+        )
+
+
+async def test_update_role_keeping_its_own_name_is_not_a_conflict(
+    engine: AsyncEngine,
+) -> None:
+    """A role may be re-saved under the name it already holds.
+
+    ``UpdateRole`` writes ``name`` on every call, so a permissions-only edit sets
+    the name to its current value; the row cannot collide with itself. Pinned
+    because the obvious way to "improve" the fix above — a
+    ``get_by_name``-style pre-check without the ``!= this role`` guard
+    ``RenameCommunity`` carries — turns this into a 409.
+    """
+
+    owner_id = uuid.uuid4()
+    await _insert_user(engine, owner_id, "alice")
+    community = await _provision(engine)(name="guild", owner_user_id=UserId(owner_id))
+    factory = create_session_factory(engine)
+    editor = await CreateRole(uow=SqlAlchemyUnitOfWork(factory), clock=SystemClock())(
+        community_id=community.id,
+        actor_id=UserId(owner_id),
+        name="Editor",
+        permissions={Permission("server:read")},
+    )
+
+    updated = await UpdateRole(uow=SqlAlchemyUnitOfWork(factory), clock=SystemClock())(
+        community_id=community.id,
+        role_id=editor.id,
+        actor_id=UserId(owner_id),
+        name="Editor",
+    )
+    assert updated.name.value == "Editor"
 
 
 async def test_delete_role_cascades_membership_assignments(
