@@ -23,6 +23,7 @@ import { ToastProvider } from "../components/Toast.tsx";
 import { humanizeBytes } from "../format.ts";
 import { t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
+import { meta } from "../test/meta.ts";
 import { ServerPluginsTab } from "./ServerPluginsTab.tsx";
 
 type PluginValidationResponse =
@@ -1469,7 +1470,16 @@ describe("ServerPluginsTab Bedrock discovery hint (issue #1543)", () => {
         return Promise.resolve({ plugins });
       }
       if (url === "/api/meta") {
-        return Promise.resolve({ bedrock_enabled: bedrockEnabled });
+        // The API derives `bedrock_enabled` as `relay_enabled AND
+        // relay.bedrock_enabled` (core/api/meta.py), so Bedrock-on with the
+        // relay off is a body no deployment can send. Move both flags together
+        // rather than stubbing `bedrock_enabled` alone (issue #2537).
+        return Promise.resolve(
+          meta({
+            relay_enabled: bedrockEnabled,
+            bedrock_enabled: bedrockEnabled,
+          }),
+        );
       }
       return Promise.resolve({});
     });

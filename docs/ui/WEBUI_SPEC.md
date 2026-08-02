@@ -169,7 +169,7 @@ Execution backend: `container` (the only shipped backend).
 | GET | `/audit` `[A]` | Global audit (`community`, `operation`, `actor`, `since`, `until`, `limit`, `offset`). |
 | GET | `/communities/{cid}/audit` | Community-scoped audit (same filters minus `community`). |
 | GET | `/backups/statistics` `[A]` | Global backup statistics. |
-| GET | `/healthz` · `/readyz` · `/metrics` | Liveness / readiness / Prometheus (ops-facing, not UI-core). |
+| GET | `/healthz` · `/readyz` | Liveness / readiness (ops-facing, not UI-core). The Prometheus exposition is not on this API — it has its own listener (issue #2565). |
 | GET | `/meta` | Deployment facts the Web UI reads before a server exists (issue #1002): `{relay_enabled, bedrock_enabled, default_memory_limit_mb, max_memory_limit_mb}`. Requires authentication. Used by the create wizard to decide whether to surface the game-port control (relay mode auto-allocates), and by the plugins tab to decide whether to show the Bedrock/Geyser discovery hint (epic #1540, `bedrock_enabled` = `relay_enabled` AND the deployment's Bedrock capability flag). |
 
 ### 2.5 Resource packs (issues #1176, #1177)
@@ -721,7 +721,7 @@ backend support; the tab body also self-guards with an "unsupported" notice).
 - **Production.** The API container serves the built SPA (`webui/dist`) via
   FastAPI `StaticFiles` with an SPA fallback, on the same origin as the API. No
   reverse proxy and no new Compose service. The `/api/*` routes (including the WS
-  paths and the health/readiness/metrics probes) and `/assets/*` (the built SPA
+  paths and the health/readiness probes) and `/assets/*` (the built SPA
   chunks) are both excluded from the SPA fallback: a `/api/*` path is the API,
   and an unmatched `/assets/*` request returns 404 (a stale/renamed chunk, never
   a client-side route). Every other unmatched path falls back to the SPA's

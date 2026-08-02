@@ -152,10 +152,14 @@ async def register_user(
 
 @router.get("/users/me")
 async def read_current_user(
+    response: Response,
     user: Annotated[User, Depends(get_current_user)],
 ) -> UserResponse:
     """Return the authenticated user — the trivially protected endpoint."""
 
+    # A per-user body, so no cache may keep it where a second user could be
+    # served it (issue #2587).
+    response.headers["Cache-Control"] = "no-store"
     return UserResponse.from_entity(user)
 
 
@@ -218,6 +222,7 @@ async def change_password(
 @router.patch("/users/me")
 async def update_profile(
     body: UpdateProfileRequest,
+    response: Response,
     user: Annotated[User, Depends(get_current_user)],
     use_case: Annotated[UpdateProfile, Depends(get_update_profile)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
@@ -246,6 +251,8 @@ async def update_profile(
             target_id=user.id.value,
         )
     )
+    # The updated user is a per-user body, so no cache may keep it (issue #2587).
+    response.headers["Cache-Control"] = "no-store"
     return UserResponse.from_entity(updated)
 
 
@@ -282,7 +289,12 @@ async def delete_account(
             target_id=deleted_id.value,
         )
     )
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    # A 204 has no body to store; declared so every method on /users/me states
+    # the same policy rather than leaving it to which one answered (issue #2587).
+    return Response(
+        status_code=status.HTTP_204_NO_CONTENT,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 class SessionResponse(BaseModel):
@@ -319,12 +331,15 @@ class RevokeOtherSessionsRequest(BaseModel):
 
 @router.get("/users/me/sessions")
 async def list_sessions(
+    response: Response,
     user: Annotated[User, Depends(get_current_user)],
     use_case: Annotated[ListSessions, Depends(get_list_sessions)],
 ) -> list[SessionResponse]:
     """List the caller's active (non-revoked, non-expired) sessions (issue #387)."""
 
     tokens = await use_case(user_id=user.id)
+    # A per-user body, so no cache may keep it (issue #2587).
+    response.headers["Cache-Control"] = "no-store"
     return [SessionResponse.from_entity(token) for token in tokens]
 
 
@@ -394,7 +409,12 @@ async def revoke_other_sessions(
             target_id=user.id.value,
         )
     )
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    # A 204 has no body to store; declared so every method on /users/me/sessions
+    # states the same policy (issue #2587), as on /users/me above.
+    return Response(
+        status_code=status.HTTP_204_NO_CONTENT,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 def _conflict_reason(exc: Exception) -> str:

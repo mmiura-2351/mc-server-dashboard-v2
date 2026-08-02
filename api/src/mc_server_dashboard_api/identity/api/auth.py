@@ -157,6 +157,9 @@ async def login(
             actor_id=result.user_id,
         )
     )
+    # The access token in the body and the refresh cookie on the response are both
+    # credentials, so no cache may keep this response (issue #2587).
+    response.headers["Cache-Control"] = "no-store"
     _set_refresh_cookie(response, result.pair.refresh_token, settings.auth.token)
     return AccessTokenResponse(access_token=result.pair.access_token)
 
@@ -208,6 +211,9 @@ async def refresh(
     await recorder.record(
         AuditEvent(operation=ops.AUTH_REFRESH, outcome=Outcome.SUCCESS)
     )
+    # The rotated pair rides in the body, so no cache may keep this response
+    # (issue #2587).
+    response.headers["Cache-Control"] = "no-store"
     # Rotate the cookie only for clients that carried it, so the body-only
     # worker/CLI contract stays byte-identical including headers (issue #372).
     if cookie_token is not None:
@@ -218,6 +224,7 @@ async def refresh(
 @router.post("/auth/session")
 async def session(
     request: Request,
+    response: Response,
     use_case: Annotated[RestoreSession, Depends(get_restore_session)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
     settings: Annotated[Settings, Depends(get_settings)],
@@ -251,6 +258,8 @@ async def session(
             target_id=result.user_id,
         )
     )
+    # The body carries an access token, so no cache may keep it (issue #2587).
+    response.headers["Cache-Control"] = "no-store"
     return AccessTokenResponse(access_token=result.access_token)
 
 

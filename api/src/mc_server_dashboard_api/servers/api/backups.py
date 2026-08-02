@@ -854,9 +854,8 @@ async def issue_backup_download_grant(
     grant = tokens.issue_download_grant(
         IdentityUserId(authorized.user_id.value), _grant_resource(request)
     )
-    # The middleware's no-store set is matched by exact path (middleware.py), which
-    # a templated route cannot join; set it here so a credential-bearing URL is
-    # never cached.
+    # The body hands back a credential-bearing URL, so no cache may keep it
+    # (issue #2491).
     response.headers["Cache-Control"] = "no-store"
     return BackupDownloadGrantResponse(
         download_url=(
