@@ -6,9 +6,10 @@ is bound to the logging context for the duration of the request and echoed back
 on the response.
 
 The security-headers middleware stamps defence-in-depth headers (CSP,
-X-Frame-Options, nosniff, Referrer-Policy, Permissions-Policy) on every
-response, ``Cache-Control: no-store`` on credential-bearing endpoints, and HSTS
-when the request arrived over HTTPS.
+X-Frame-Options, nosniff, Referrer-Policy, Permissions-Policy) on every response,
+and HSTS when the request arrived over HTTPS. ``Cache-Control: no-store`` is not
+among them: it is declared by the routes that need it, so it is method-granular
+and a rename carries it along (issues #2491, #2587).
 """
 
 from __future__ import annotations
@@ -87,26 +88,6 @@ _DOCS_CSP = (
 
 _PERMISSIONS_POLICY = "camera=(), microphone=(), geolocation=()"
 
-# Paths whose responses carry ``Cache-Control: no-store`` because the body
-# contains credentials (tokens) or per-user data.
-#
-# Matching is by exact path, so nothing in the routers signals that renaming one
-# of these silently drops the header — the response still returns 200, and the
-# middleware stamps the header on the resulting 404 just the same. The route
-# table is the coupling: ``test_no_store_path_names_a_live_route`` (issue #2563)
-# reddens when an entry stops naming a declared route. Templated routes cannot
-# join this set at all; those declare ``no-store`` in their own response headers
-# (issue #2491).
-_NO_STORE_PATHS = frozenset(
-    {
-        "/api/auth/login",
-        "/api/auth/refresh",
-        "/api/auth/session",
-        "/api/users/me",
-        "/api/users/me/sessions",
-    }
-)
-
 
 async def security_headers_middleware(
     request: Request, call_next: Callable[[Request], Awaitable[Response]]
@@ -123,9 +104,6 @@ async def security_headers_middleware(
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = _PERMISSIONS_POLICY
-
-    if request.url.path in _NO_STORE_PATHS:
-        response.headers["Cache-Control"] = "no-store"
 
     # HSTS only when the request arrived over TLS (directly or via a reverse
     # proxy advertising X-Forwarded-Proto).
