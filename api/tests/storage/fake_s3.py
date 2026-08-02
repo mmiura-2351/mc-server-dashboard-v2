@@ -55,8 +55,10 @@ _UNSTAMPED_STORE_TIME = dt.datetime(9999, 1, 1, tzinfo=dt.UTC)
 #   reusing it would also make it mean "written just now": an object written
 #   through the fake would report the year 9999 and silently disable the GC
 #   safety window the test meant to exercise — the fail-loud direction #2529
-#   established, inverted. PR #2540 added these stamps in the same commit that
-#   removed the wall-clock fallbacks.
+#   established, inverted. PR #2540 added the siblings' host-clock ``put`` stamps
+#   in the same commit that replaced their read-side wall-clock fallback with the
+#   sentinel, and PR #2573 left the stamps here (in place since #295) untouched
+#   when it brought the sentinel over: the split is the design, not an oversight.
 # - Not a fixed constant either. ``tests/versions/test_ensure_jar.py``'s
 #   ``_PastClock`` returns ``now() + GC_SAFETY_WINDOW + 1h`` and ages a JAR only
 #   because ``FakeJarPool.put`` stamps from the same host clock, and
