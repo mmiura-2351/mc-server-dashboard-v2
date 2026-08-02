@@ -419,12 +419,11 @@ address), because Docker DNATs published ports from every interface.
 Segmentation removes the docker-network path; it does not remove host-published
 ports. Two cases, and the second is not hypothetical:
 
-- **The API is loopback by default and safe as shipped.** `API_HTTP_BIND_IP`
-  defaults to `127.0.0.1`, which is refused from both networks. But
-  `API_HTTP_BIND_IP=0.0.0.0` and `API_HTTP_BIND_IP=<lan-ip>` are documented,
-  supported configurations ([`../dev/DEPLOYMENT.md`](../dev/DEPLOYMENT.md)
-  Section 8), and either one re-opens `api:8000` to every Minecraft container on
-  the host.
+- **The API is loopback by default, and refused from both networks as shipped.**
+  `API_HTTP_BIND_IP` defaults to `127.0.0.1`. But `API_HTTP_BIND_IP=0.0.0.0` and
+  `API_HTTP_BIND_IP=<lan-ip>` are documented, supported configurations
+  ([`../dev/DEPLOYMENT.md`](../dev/DEPLOYMENT.md) Section 8), and either one
+  re-opens `api:8000` to every Minecraft container on the host.
 - **The relay publishes on every interface, with no opt-out.** With the `relay`
   profile active, `compose.yaml` publishes `25565/tcp`, `25665/tcp`,
   `25675/udp` and `19132-19231/udp` with **no host IP** — there is no
