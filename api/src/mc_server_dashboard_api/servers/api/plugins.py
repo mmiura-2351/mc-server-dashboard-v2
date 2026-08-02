@@ -81,7 +81,7 @@ from mc_server_dashboard_api.servers.domain.catalog_provider import (
 from mc_server_dashboard_api.servers.domain.errors import (
     CatalogChecksumMismatchError,
     CatalogProjectNotFoundError,
-    CatalogUnavailableError,
+    CatalogUpstreamFailedError,
     FileTooLargeError,
     InvalidFilePathError,
     InvalidPluginSideError,
@@ -565,7 +565,7 @@ async def check_updates(
         raise _not_found() from exc
     except UnsupportedPluginServerTypeError as exc:
         raise _unprocessable("unsupported_server_type") from exc
-    except CatalogUnavailableError as exc:
+    except CatalogUpstreamFailedError as exc:
         raise _bad_gateway("catalog_upstream_failed") from exc
     return PluginUpdatesResponse(
         updates=[
@@ -652,7 +652,7 @@ async def resolve_plugin_dependencies(
         raise _not_found() from exc
     except UnsupportedPluginServerTypeError as exc:
         raise _unprocessable("unsupported_server_type") from exc
-    except CatalogUnavailableError as exc:
+    except CatalogUpstreamFailedError as exc:
         raise _bad_gateway("catalog_upstream_failed") from exc
     return ResolutionPlanResponse.from_plan(plan)
 
@@ -693,7 +693,7 @@ async def apply_plugin_resolution(
         raise _not_found() from exc
     except UnsupportedPluginServerTypeError as exc:
         raise _unprocessable("unsupported_server_type") from exc
-    except CatalogUnavailableError as exc:
+    except CatalogUpstreamFailedError as exc:
         raise _bad_gateway("catalog_upstream_failed") from exc
     except ServerFilesUnsettledError as exc:
         await _record_plugin_failure(
@@ -761,7 +761,7 @@ async def check_plugin_update(
         raise _not_found() from exc
     except PluginNotFoundError as exc:
         raise _not_found() from exc
-    except CatalogUnavailableError as exc:
+    except CatalogUpstreamFailedError as exc:
         raise _bad_gateway("catalog_upstream_failed") from exc
     return PluginUpdateInfoResponse(
         plugin=PluginResponse.from_plugin(result.plugin),
@@ -843,7 +843,7 @@ async def update_plugin(
         raise _not_found() from exc
     except CatalogProjectNotFoundError as exc:
         raise _not_found_catalog() from exc
-    except CatalogUnavailableError as exc:
+    except CatalogUpstreamFailedError as exc:
         raise _bad_gateway("catalog_upstream_failed") from exc
     except CatalogChecksumMismatchError as exc:
         raise _bad_gateway("checksum_mismatch") from exc
@@ -900,7 +900,7 @@ async def list_plugin_dependencies(
         raise _not_found() from exc
     except PluginNotFoundError as exc:
         raise _not_found() from exc
-    except CatalogUnavailableError as exc:
+    except CatalogUpstreamFailedError as exc:
         raise _bad_gateway("catalog_upstream_failed") from exc
     return PluginDependenciesResponse(
         dependencies=[

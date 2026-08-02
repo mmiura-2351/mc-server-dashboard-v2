@@ -47,7 +47,7 @@ from mc_server_dashboard_api.servers.domain.catalog_provider import (
 from mc_server_dashboard_api.servers.domain.errors import (
     CatalogChecksumMismatchError,
     CatalogProjectNotFoundError,
-    CatalogUnavailableError,
+    CatalogUpstreamFailedError,
     FileTooLargeError,
     InvalidFilePathError,
     PluginAlreadyExistsError,
@@ -236,7 +236,7 @@ async def search_catalog(
         raise _not_found() from exc
     except UnsupportedPluginServerTypeError as exc:
         raise _unprocessable("unsupported_server_type") from exc
-    except CatalogUnavailableError as exc:
+    except CatalogUpstreamFailedError as exc:
         raise _bad_gateway("catalog_upstream_failed") from exc
     return CatalogSearchListResponse(
         hits=[CatalogSearchResultResponse.from_domain(h) for h in result.hits],
@@ -279,7 +279,7 @@ async def get_catalog_project(
         raise _unprocessable("unsupported_server_type") from exc
     except CatalogProjectNotFoundError as exc:
         raise _not_found_catalog() from exc
-    except CatalogUnavailableError as exc:
+    except CatalogUpstreamFailedError as exc:
         raise _bad_gateway("catalog_upstream_failed") from exc
     return CatalogProjectDetailResponse(
         project=CatalogProjectResponse.from_domain(project),
@@ -324,7 +324,7 @@ async def install_from_catalog(
         raise _unprocessable("unsupported_server_type") from exc
     except CatalogProjectNotFoundError as exc:
         raise _not_found_catalog() from exc
-    except CatalogUnavailableError as exc:
+    except CatalogUpstreamFailedError as exc:
         raise _bad_gateway("catalog_upstream_failed") from exc
     except CatalogChecksumMismatchError as exc:
         raise _bad_gateway("checksum_mismatch") from exc
