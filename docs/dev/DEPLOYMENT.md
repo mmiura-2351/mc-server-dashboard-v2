@@ -58,7 +58,20 @@ on it as a substitute for keeping heavy build pipelines off the game host.
 
 ## 2. Prerequisites
 
-- A Linux host with Docker Engine and the Compose plugin (`docker compose`).
+- A Linux host with **Docker Engine 28.0+** and the **Compose plugin
+  (`docker compose`) v2.34.0+**. The floor comes from one feature: `compose.yaml`
+  sets `gw_priority` on the `worker` service's network attachments to pin which
+  of its two networks provides the default route (issue #2590, Section 1).
+  `GwPriority` arrived in Engine API `v1.48` (Engine 28.0), and Compose honours it
+  from v2.34.0 — **v2.33.1 accepts the key and silently ignores it**
+  (docker/compose#12574), which is the one version to avoid, since it leaves the
+  route unpinned while appearing configured. An Engine or Compose older than the
+  floor rejects the key outright, so `up -d` fails loudly rather than reverting
+  to unpinned. To check a host before deploying:
+
+  ```sh
+  docker compose version --short && docker version --format '{{.Server.Version}}'
+  ```
 - The host user in the `docker` group (or run compose with sufficient
   privileges). The worker container needs access to the Docker socket.
 - Outbound network access from the host: the API fetches Minecraft/Paper version

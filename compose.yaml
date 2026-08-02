@@ -379,9 +379,10 @@ services:
     # `default`: everything the worker sends off-subnet (a cross-host api or
     # relay) would otherwise egress through the bridge that hostile MC containers
     # sit on, where they hold CAP_NET_RAW and can spoof (SECURITY.md Section 6).
-    # Verified 2026-08-02: default route via 172.19.0.1, the mcsd gateway.
-    # Needs Engine 28+ / Compose 2.36+; older versions reject the key outright
-    # rather than ignoring it, so a failure here is loud.
+    # Verified 2026-08-02: default route via 172.19.0.1, the mcsd gateway, and
+    # moving the priority to the other attachment moves the route with it.
+    # Needs Engine 28.0+ / Compose 2.34.0+ (DEPLOYMENT.md Section 2 has the
+    # detail, including why Compose 2.33.1 specifically must be avoided).
     networks:
       default:
         gw_priority: 100
