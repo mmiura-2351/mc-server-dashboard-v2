@@ -158,6 +158,13 @@ func TestEngineClientCreateOmitsMemoryWhenZero(t *testing.T) {
 // A configured network is encoded as a NetworkingConfig endpoint so the daemon
 // attaches the container to that user-defined network at create time (issue
 // #218). An empty network omits it, keeping the default bridge.
+//
+// The fixture is the network the shipped compose file actually points the driver
+// at: `mcsd-servers`, the dedicated MC-server network, NOT the control-plane
+// `mcsd` (issue #2590). This client encodes whatever name it is handed — the
+// segmentation itself is a deployment property, owned by `compose.yaml`
+// (MCD_WORKER_DRIVER_CONTAINER_NETWORK) and described in
+// docs/app/SECURITY.md — so this test pins the encoding, not the choice.
 func TestEngineClientCreateEncodesNetwork(t *testing.T) {
 	d := startFakeDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"Id": "abc123"})
@@ -167,7 +174,7 @@ func TestEngineClientCreateEncodesNetwork(t *testing.T) {
 	if _, err := c.Create(context.Background(), CreateSpec{
 		Name:    "mcsd-s1",
 		Image:   "eclipse-temurin:21-jre",
-		Network: "mcsd",
+		Network: "mcsd-servers",
 	}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -177,10 +184,10 @@ func TestEngineClientCreateEncodesNetwork(t *testing.T) {
 		t.Fatalf("decode body: %v", err)
 	}
 	if body.NetworkingConfig == nil {
-		t.Fatal("NetworkingConfig = nil, want mcsd endpoint")
+		t.Fatal("NetworkingConfig = nil, want an mcsd-servers endpoint")
 	}
-	if _, ok := body.NetworkingConfig.EndpointsConfig["mcsd"]; !ok {
-		t.Fatalf("EndpointsConfig = %v, want an mcsd endpoint", body.NetworkingConfig.EndpointsConfig)
+	if _, ok := body.NetworkingConfig.EndpointsConfig["mcsd-servers"]; !ok {
+		t.Fatalf("EndpointsConfig = %v, want an mcsd-servers endpoint", body.NetworkingConfig.EndpointsConfig)
 	}
 }
 

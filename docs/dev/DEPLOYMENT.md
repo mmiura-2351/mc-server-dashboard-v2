@@ -16,11 +16,31 @@ app plus the gRPC control-plane server. `worker` is the execution agent: it dial
 the API's control plane, and in this deployment it runs the **container driver
 only** — it creates each Minecraft server as a sibling container via the host
 Docker daemon, mounting the server's working directory and publishing its game
-port. The worker attaches every MC container to the pinned compose network
-(`mcsd`) and reaches each server's RCON by container name over that network, so
-**RCON never leaves the docker network** (the host RCON publication is dropped;
-see Section 7). The `migrate` service is a one-shot that applies the database
-schema before `api` starts.
+port. The worker attaches every MC container to **`mcsd-servers`**, a second
+pinned network kept separate from the control-plane network `mcsd`, and reaches
+each server's RCON by container name over it, so **RCON never leaves the docker
+network** (the host RCON publication is dropped; see Section 7). The `migrate`
+service is a one-shot that applies the database schema before `api` starts.
+
+**Two networks, split by trust (issue #2590).** `mcsd` carries the control and
+data planes — `api`, `db`, `seaweedfs`, the two one-shots, `relay`, `cloudflared`
+and the worker. `mcsd-servers` carries the Minecraft server containers, which run
+operator- and community-supplied JARs, plugins and mods. The `worker` is the only
+service on both, because it has to be: it dials `api:50051` and `api:8000` on one
+side and resolves container names for its RCON and relay game dials on the other.
+
+Over the docker networks, a Minecraft container reaches none of the API, database
+or object-store ports (enumerated by probe from a booted server —
+[`../app/SECURITY.md`](../app/SECURITY.md) Section 6). Two things that split does
+**not** cover, both of which an operator controls: a port **published to the
+host** on a non-loopback interface stays reachable from `mcsd-servers` through
+the bridge gateway, so `API_HTTP_BIND_IP=0.0.0.0` re-opens `api:8000` to every
+Minecraft container (Section 8); and a server that was **already running** when
+you upgraded stays on `mcsd` until it is restarted (Section 9). A Minecraft
+container also keeps outbound internet — Mojang online-mode authentication and
+plugin/mod downloads need it — and can still reach the *other* Minecraft
+containers. `SECURITY.md` Section 6 states the full residual, including what
+`mcsd` still carries unauthenticated.
 
 ### CPU priority for game-server containers
 
@@ -38,7 +58,37 @@ on it as a substitute for keeping heavy build pipelines off the game host.
 
 ## 2. Prerequisites
 
-- A Linux host with Docker Engine and the Compose plugin (`docker compose`).
+- A Linux host with **Docker Engine 28.0+** and the **Compose plugin
+  (`docker compose`) v2.34.0+**. **Check this before deploying — below the floor
+  the stack comes up clean and the setting is silently dropped:**
+
+  ```sh
+  docker compose version --short && docker version --format '{{.Server.Version}}'
+  ```
+
+  The floor comes from one feature: `compose.yaml` sets `gw_priority` on the
+  `worker` service's network attachments to pin which of its two networks
+  provides the default route (issue #2590, Section 1). `GwPriority` arrived in
+  Engine API `v1.48` (Engine 28.0), and Compose honours it from v2.34.0
+  (docker/compose#12574). What an under-floor host actually does, measured:
+
+  | Compose | Engine | Result |
+  |---|---|---|
+  | < 2.33.0 | any | **Loud.** The compose-spec schema rejects the unknown key and `up -d` fails |
+  | 2.33.0 - 2.33.1 | any | **Silent.** Validates, drops the key, leaves `GwPriority` at 0 |
+  | 2.34.0+ | < 28.0 | **Silent.** The daemon ignores endpoint fields it does not know |
+  | 2.34.0+ | 28.0+ | Pinned, as intended |
+
+  Only the first band fails loudly, so **do not rely on a failed `up -d` to tell
+  you**. In the two silent bands the worker's default route falls back to
+  Docker's own endpoint ordering, which may happen to pick the right network —
+  that is what makes it hard to notice. Confirm it took:
+
+  ```sh
+  docker inspect "$(docker compose ps -q worker)" \
+    --format '{{range $n, $e := .NetworkSettings.Networks}}{{$n}} {{$e.GwPriority}}{{println}}{{end}}'
+  # expect: mcsd 100   /   mcsd-servers 0
+  ```
 - The host user in the `docker` group (or run compose with sufficient
   privileges). The worker container needs access to the Docker socket.
 - Outbound network access from the host: the API fetches Minecraft/Paper version
@@ -89,12 +139,13 @@ default) and unused after the fs opt-out — see
 [Section 5](#5-storage-backend-object-on-seaweedfs-default).
 
 `MCD_API_SERVER__PUBLIC_BASE_URL` is not in the table above — compose
-defaults it to `http://api:8000`, reachable only on the compose network — but
-it is mandatory to set in `.env` for any real deployment: player-facing links
-(e.g. resource-pack download URLs) are rendered from this value, so leaving
-the compose default renders those links unreachable outside the compose
-network. Set it to this deployment's externally reachable origin (see
-[Cloudflare Tunnel](#cloudflare-tunnel-recommended) below for a worked
+defaults it to `http://api:8000`, which resolves only on the control-plane
+network `mcsd` (not on `mcsd-servers`, where the Minecraft containers run, and
+not off-host) — but it is mandatory to set in `.env` for any real deployment:
+player-facing links (e.g. resource-pack download URLs) are rendered from this
+value, so leaving the compose default renders those links unreachable to every
+browser and game client. Set it to this deployment's externally reachable origin
+(see [Cloudflare Tunnel](#cloudflare-tunnel-recommended) below for a worked
 example).
 
 The scratch directory must exist on the host before the first `up` so the bind
@@ -631,17 +682,18 @@ The **RCON port** is the worker's control channel and is never exposed off-host.
 Its handling depends on `driver.container.network` (env
 `MCD_WORKER_DRIVER_CONTAINER_NETWORK`):
 
-- **Set** (this `compose.yaml`, value `mcsd`): the worker attaches each MC
-  container to that user-defined network and dials RCON at the container's name
-  over the network. The host RCON publication is **dropped** — RCON never leaves
-  the docker network. This is required for the containerized worker, whose own
-  loopback is not the host loopback where a published RCON port would land
-  (issue #218). The compose default network's name is pinned to `mcsd` so the
-  worker (a compose service) and the sibling MC containers it creates share the
-  same network with container-name DNS. The network **must be user-defined**
-  (a `docker network create` network, as the pinned `mcsd` is): the default
-  `bridge` has no container-name DNS, so pointing this at `bridge` lets the
-  attach succeed but the RCON dial silently fails.
+- **Set** (this `compose.yaml`, value `mcsd-servers`): the worker attaches each
+  MC container to that user-defined network and dials RCON at the container's
+  name over the network. The host RCON publication is **dropped** — RCON never
+  leaves the docker network. This is required for the containerized worker, whose
+  own loopback is not the host loopback where a published RCON port would land
+  (issue #218). `mcsd-servers` is pinned as a second network, separate from the
+  control-plane `mcsd`, and the `worker` service is attached to both so it shares
+  container-name DNS with the MC containers it creates while still reaching
+  `api:50051` / `api:8000` (issue #2590). The network **must be user-defined**
+  (a `docker network create` network, as the pinned `mcsd-servers` is): the
+  default `bridge` has no container-name DNS, so pointing this at `bridge` lets
+  the attach succeed but the RCON dial silently fails.
 - **Unset** (bare-metal worker): RCON is published to the host loopback
   (`127.0.0.1`) and dialed there, the historical behavior.
 
@@ -666,11 +718,11 @@ separate `relay` profile).
 
 How it works: the browser reaches the Cloudflare edge over HTTPS (the public
 hostname is configured in the Cloudflare Zero Trust dashboard); `cloudflared`
-runs inside the compose network and forwards traffic to `api:8000` over plain
-HTTP on the internal Docker network. No inbound port, no TLS certificate, and
+runs on the `mcsd` network and forwards traffic to `api:8000` over plain
+HTTP on that network. No inbound port, no TLS certificate, and
 no reverse proxy are needed on the host. The default loopback bind
 (`API_HTTP_BIND_IP=127.0.0.1`) is correct for this topology — `cloudflared`
-reaches the API via the compose-internal network, not the host port, so the
+reaches the API over the `mcsd` network, not the host port, so the
 API does not need to be published on all interfaces.
 
 To enable:
@@ -717,7 +769,7 @@ can reach directly (CONFIGURATION.md Section 5.1).
 **The tunnel publishes every path on `api:8000` (issue #2565).** `cloudflared`
 forwards the whole hostname to `api:8000` and path-scopes nothing, so the
 loopback publish in `compose.yaml` constrains only *host* reachability — the
-tunnel reaches the API over the compose-internal network, past that bind. Treat
+tunnel reaches the API over the `mcsd` network, past that bind. Treat
 anything you mount on the API's HTTP port as internet-facing. This is why the
 Prometheus exposition is not on that port (see the metrics subsection at the end
 of this section), and why the OpenAPI schema, the docs routes and `/api/readyz`
@@ -733,8 +785,10 @@ result. The proxy terminates TLS with a certificate from Let's Encrypt (or
 another CA) and forwards to `http://localhost:${API_HTTP_PORT}`. The default
 loopback bind (`API_HTTP_BIND_IP=127.0.0.1`) works when the proxy runs on the
 same host; set `API_HTTP_BIND_IP=0.0.0.0` in `.env` if the proxy is on a
-different host. This is a standard reverse-proxy setup and is not detailed
-here.
+different host — which also exposes `api:8000` to every Minecraft container on
+this host, so firewall the port to the proxy's address
+([`../app/SECURITY.md`](../app/SECURITY.md) Section 6). This is a standard
+reverse-proxy setup and is not detailed here.
 
 #### HTTP-only fallback (LAN / development)
 
@@ -747,7 +801,11 @@ API_HTTP_BIND_IP=0.0.0.0
 ```
 
 `API_HTTP_BIND_IP=0.0.0.0` is required here because there is no tunnel or
-same-host reverse proxy — clients on the LAN must reach the API directly.
+same-host reverse proxy — clients on the LAN must reach the API directly. It
+also puts `api:8000` back within reach of every Minecraft container on this
+host, via the docker bridge gateway ([`../app/SECURITY.md`](../app/SECURITY.md)
+Section 6) — so this topology suits a trusted LAN or a development box, not a
+deployment whose community can upload plugins.
 
 This drops the `Secure` attribute from the refresh cookie so the browser stores
 it over HTTP and silent refresh works. **Security caveat:** the cookie is then
@@ -771,9 +829,10 @@ MCD_API_METRICS__ENABLED=true
 
 The port is deliberately **not** in the `api` service's `ports:` list, so the
 bind happens inside the container's own network namespace and the endpoint
-exists only on the compose network. Scrape it from a service on that network
-(`http://api:9090/metrics`) — a Prometheus container you add to `compose.yaml`,
-for example; the repo ships no scraper.
+exists only on the `mcsd` network — not on `mcsd-servers`, where the Minecraft
+containers run. Scrape it from a service on `mcsd` (`http://api:9090/metrics`) —
+a Prometheus container you add to `compose.yaml`, for example; the repo ships no
+scraper.
 
 Leave `MCD_API_METRICS__HOST` at its `0.0.0.0` default here. Narrowing it to
 loopback makes the endpoint unscrapeable by any sibling container and protects
@@ -807,10 +866,16 @@ of them (`MCD_API_METRICS__PORT` / `MCD_RELAY_METRICS_LISTEN`) in that topology.
 ### gRPC control-plane TLS (cross-host worker)
 
 The in-compose deployment runs the control plane in plaintext on the private
-compose network: `api` sets `MCD_API_CONTROL__TLS__INSECURE=true` and `worker`
-sets `MCD_WORKER_API_TLS_INSECURE=true`. This is acceptable only because the
-gRPC control listener is not published to the host and the traffic stays on the
-internal Docker network.
+`mcsd` network: `api` sets `MCD_API_CONTROL__TLS__INSECURE=true` and `worker`
+sets `MCD_WORKER_API_TLS_INSECURE=true`. This rests on two conditions, both of
+which have to keep holding: the gRPC control listener is not published to the
+host, and the traffic stays on `mcsd`, whose only members are first-party
+services. The Minecraft containers — the one place third-party code runs — are
+on `mcsd-servers` and cannot reach `mcsd` at all (issue #2590,
+[`../app/SECURITY.md`](../app/SECURITY.md) Section 6). Attaching anything that
+runs untrusted code to `mcsd`, or moving the MC containers back onto it,
+invalidates the plaintext posture: the worker credential rides this channel in
+the clear.
 
 A **multi-host** worker (a worker on a different machine dialing this API over a
 real network) must not use the insecure posture, and the gRPC control plane must
@@ -851,7 +916,7 @@ back to `server.public_base_url` when that is unset (CONFIGURATION.md Section
 5.1). Neither of the two values that work on a single host works here:
 
 - `compose.yaml` pins the variable to `http://api:8000`, which resolves only on
-  the compose network. A worker on another machine cannot resolve it at all.
+  the `mcsd` network. A worker on another machine cannot resolve it at all.
 - The fallback hands the worker `PUBLIC_BASE_URL`. If that is a Cloudflare
   Tunnel hostname, every snapshot larger than the tunnel's ~100 MB body cap is
   rejected (issue #1549 — a booted Paper server alone is ~200+ MB), so world
@@ -867,7 +932,9 @@ edge — the API host's LAN/VPN address, not the tunnel hostname:
 # in .env on the API host
 MCD_API_SERVER__DATA_PLANE_BASE_URL=http://10.0.0.5:8000
 # the HTTP port is published to loopback by default; a remote worker needs it on
-# an interface it can reach (Section 3)
+# an interface it can reach (Section 3). This also makes api:8000 reachable from
+# every Minecraft container on the API host -- firewall it to the worker's
+# address (docs/app/SECURITY.md Section 6)
 API_HTTP_BIND_IP=10.0.0.5
 ```
 
@@ -1005,6 +1072,31 @@ container was replaced, so the existing stamp still describes what is running.
 > [`../app/RELAY.md`](../app/RELAY.md) Section 13 and
 > [`../app/BEDROCK_TUNNEL.md`](../app/BEDROCK_TUNNEL.md) Section 9 for the
 > `bedrock.enabled` key, and "Bedrock (Geyser)" below for turning Bedrock on.
+
+> **Upgrade note — Minecraft containers move to their own network (issue
+> #2590).** `compose.yaml` now declares a second pinned network,
+> `mcsd-servers`, attaches `worker` to both it and `mcsd`, and points
+> `MCD_WORKER_DRIVER_CONTAINER_NETWORK` at it, so newly started MC containers no
+> longer sit on the control-plane network.
+>
+> **Restart every running server to get the mitigation.** `docker compose up -d`
+> creates the network and recreates `worker`. A Minecraft container that was
+> already running is **not** moved: it stays attached to `mcsd` and keeps the
+> full pre-upgrade reach — measured after a real upgrade,
+> `grpcurl -plaintext seaweedfs:18333 list` still answered from one. Each server
+> lands on `mcsd-servers` only at its next start, so until you cycle them the
+> segmentation is not in effect for them. Nothing breaks in the meantime — the
+> dual-homed worker still resolves them by name, so the upgrade itself is
+> non-disruptive — but "non-disruptive" and "mitigated" are different states, and
+> `up -d` alone only gives you the first.
+>
+> **React if your compose file is customised**: an override that redefines the
+> `worker` service's `networks:` list, or a second stack that renames the pinned
+> network (as `scripts/compose.relay-e2e.yaml` does), must now name **both**
+> networks — listing only `default` silently strands the worker without
+> container-name DNS and every RCON dial fails. Anything you deliberately
+> attached to `mcsd` to talk to a Minecraft container needs moving to
+> `mcsd-servers`.
 
 > **Upgrade note — the API port now binds to loopback by default (issue
 > #1609).** `compose.yaml` now publishes the API HTTP port on `127.0.0.1`
@@ -1493,8 +1585,8 @@ relay control surface is active.
 | 25665 | TCP | inbound | Worker dial-back (TLS tunnel) |
 | 25675 | UDP | inbound | Worker's Bedrock QUIC tunnel dial-back (epic #1540, `bedrock.tunnel_listen`) — only when the Bedrock gate is on |
 | 19132-19231 | UDP | inbound | Bedrock player connections (`ports.bedrock_range_start..end` default window) — only when the Bedrock gate is on |
-| 50051 | TCP | internal (compose network only) | gRPC control plane (not published) |
-| 9090 | TCP | internal (compose network only) | API Prometheus exposition (not published; off unless `MCD_API_METRICS__ENABLED=true` — see Section 8) |
+| 50051 | TCP | internal (the `mcsd` network only — not `mcsd-servers`) | gRPC control plane (not published) |
+| 9090 | TCP | internal (the `mcsd` network only — not `mcsd-servers`) | API Prometheus exposition (not published; off unless `MCD_API_METRICS__ENABLED=true` — see Section 8) |
 | 9090 | TCP | relay-local (loopback) | Relay Prometheus exposition + `/healthz` (off unless `MCD_RELAY_METRICS_ENABLED=true`; binds `127.0.0.1` by default, RELAY.md Section 13). Same port number as the API's, above: distinct containers under compose, but a collision if both run natively on this host |
 
 ### Bedrock (Geyser)

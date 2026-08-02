@@ -13,8 +13,26 @@ import (
 	"time"
 )
 
-// fakeServer is an in-process Source RCON server for tests. It authenticates a
-// single password and echoes a canned reply per command, recording what it saw.
+// mcReadSettle is how long the fake server waits for the wire to go quiet before
+// each read, so "what one read() returns" is what the client has actually put on
+// the wire rather than a race. Two packets written back-to-back land within
+// microseconds on loopback, so this window makes a client that keeps two request
+// packets in flight fail deterministically; a client that keeps only one in
+// flight is unaffected however long the window is.
+const mcReadSettle = 25 * time.Millisecond
+
+// errMCFraming is what the fake reports when a read carried something other than
+// exactly one packet. See readPacketMC.
+var errMCFraming = errors.New("fake mc server: read did not carry exactly one packet")
+
+// fakeServer is an in-process RCON server for tests. It authenticates a single
+// password and echoes a canned reply per command, recording what it saw.
+//
+// It frames reads the way Minecraft's own RCON server does, not the way a
+// stream-oriented client would — see readPacketMC. That distinction is the whole
+// point of the fake: a stub that reassembles the request stream accepts wire
+// traffic vanilla Minecraft rejects, which is exactly how issue #2618 survived
+// a full test suite.
 type fakeServer struct {
 	ln       net.Listener
 	password string
@@ -34,6 +52,10 @@ type fakeServer struct {
 	silentAuth bool
 
 	got chan string
+	// framingViolation carries the byte count of a read that did not carry
+	// exactly one packet, so a test can report the cause instead of the bare EOF
+	// the client sees once the server drops the connection.
+	framingViolation chan int
 }
 
 func newFakeServer(t *testing.T, password string) *fakeServer {
@@ -43,11 +65,12 @@ func newFakeServer(t *testing.T, password string) *fakeServer {
 		t.Fatalf("listen: %v", err)
 	}
 	fs := &fakeServer{
-		ln:            ln,
-		password:      password,
-		reply:         map[string]string{},
-		fragmentReply: map[string][]string{},
-		got:           make(chan string, 8),
+		ln:               ln,
+		password:         password,
+		reply:            map[string]string{},
+		fragmentReply:    map[string][]string{},
+		got:              make(chan string, 8),
+		framingViolation: make(chan int, 1),
 	}
 	go fs.serve()
 	t.Cleanup(func() { _ = ln.Close() })
@@ -64,7 +87,16 @@ func (fs *fakeServer) serve() {
 	defer func() { _ = conn.Close() }()
 
 	for {
-		id, typ, body, err := readPacket(conn)
+		id, typ, body, n, err := readPacketMC(conn)
+		if errors.Is(err, errMCFraming) {
+			// Vanilla drops the connection on a malformed read without executing
+			// anything. Record the byte count first so a test can name the cause.
+			select {
+			case fs.framingViolation <- n:
+			default:
+			}
+			return
+		}
 		if err != nil {
 			return
 		}
@@ -133,12 +165,13 @@ func newSilentFakeServer(t *testing.T, password string) *fakeServer {
 		t.Fatalf("listen: %v", err)
 	}
 	fs := &fakeServer{
-		ln:            ln,
-		password:      password,
-		reply:         map[string]string{},
-		fragmentReply: map[string][]string{},
-		silent:        true,
-		got:           make(chan string, 8),
+		ln:               ln,
+		password:         password,
+		reply:            map[string]string{},
+		fragmentReply:    map[string][]string{},
+		silent:           true,
+		got:              make(chan string, 8),
+		framingViolation: make(chan int, 1),
 	}
 	go fs.serve()
 	t.Cleanup(func() { _ = ln.Close() })
@@ -223,6 +256,65 @@ func TestExecuteCtxCancellationUnblocksSilentServer(t *testing.T) {
 	}
 }
 
+// Execute must never keep two request packets in flight (issue #2618): vanilla
+// Minecraft reads one packet per read() and drops the connection when the length
+// prefix does not match the bytes that read returned, so a command written
+// back-to-back with its end-of-response marker lands in one read and kills the
+// connection before either command runs. Against a real 1.21.1 server that made
+// every save-off / save-all fail with "rcon: read length: EOF", so no running
+// server could be quiesced.
+func TestExecuteKeepsOneRequestPacketInFlight(t *testing.T) {
+	fs := newFakeServer(t, "secret")
+	fs.reply["save-off"] = "Automatic saving is now disabled"
+
+	ctx := context.Background()
+	c, err := Dial(ctx, fs.addr(), "secret")
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	out, execErr := c.Execute(ctx, "save-off")
+	select {
+	case n := <-fs.framingViolation:
+		t.Fatalf("server read %d bytes in one read: Execute put two request packets on the wire at once, "+
+			"which vanilla Minecraft rejects as one malformed packet (Execute error = %v)", n, execErr)
+	default:
+	}
+	if execErr != nil {
+		t.Fatalf("Execute: %v", execErr)
+	}
+	if want := "Automatic saving is now disabled"; out != want {
+		t.Fatalf("Execute reply = %q, want %q", out, want)
+	}
+}
+
+// A command whose reply body is empty must still complete. Vanilla always sends
+// at least one RESPONSE_VALUE per command — measured on 1.21.1, where `say` and
+// `me` reply with a zero-byte body rather than nothing at all — which is what
+// lets Execute wait for the first reply before writing its marker. A server that
+// answered some command with no packet would strand that wait, so pin the
+// boundary.
+func TestExecuteEmptyReplyCompletes(t *testing.T) {
+	fs := newFakeServer(t, "secret")
+	fs.reply["say hello"] = ""
+
+	ctx := context.Background()
+	c, err := Dial(ctx, fs.addr(), "secret")
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	out, err := c.Execute(ctx, "say hello")
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if out != "" {
+		t.Fatalf("Execute reply = %q, want empty", out)
+	}
+}
+
 func TestDialAuthFailure(t *testing.T) {
 	fs := newFakeServer(t, "secret")
 	_, err := Dial(context.Background(), fs.addr(), "wrong")
@@ -270,11 +362,12 @@ func TestDialDefaultDeadlineUnblocksSilentAuthServer(t *testing.T) {
 		t.Fatalf("listen: %v", err)
 	}
 	fs := &fakeServer{
-		ln:         ln,
-		password:   "secret",
-		reply:      map[string]string{},
-		silentAuth: true,
-		got:        make(chan string, 8),
+		ln:               ln,
+		password:         "secret",
+		reply:            map[string]string{},
+		silentAuth:       true,
+		got:              make(chan string, 8),
+		framingViolation: make(chan int, 1),
 	}
 	go fs.serve()
 
@@ -444,18 +537,21 @@ func TestExecuteRejectsOversizedResponse(t *testing.T) {
 
 	go func() {
 		defer func() { _ = srv.Close() }()
-		// Read the command and marker packets from Execute.
 		cmdID, _, _, err := readPacket(srv)
 		if err != nil {
 			return
 		}
-		_, _, _, err = readPacket(srv) // marker
-		if err != nil {
+		// Execute writes the marker only after the command's first reply packet
+		// arrives (#2618), so send one fragment, drain the marker, then send the
+		// rest — fragments totalling > maxResponseSize.
+		frag := strings.Repeat("X", 4096)
+		if err := writePacket(srv, cmdID, typeResponseValue, frag); err != nil {
 			return
 		}
-		// Send fragments totalling > maxResponseSize.
-		frag := strings.Repeat("X", 4096)
-		for i := 0; i < 300; i++ {
+		if _, _, _, err := readPacket(srv); err != nil { // marker
+			return
+		}
+		for i := 0; i < 299; i++ {
 			if err := writePacket(srv, cmdID, typeResponseValue, frag); err != nil {
 				return
 			}
@@ -496,17 +592,17 @@ func TestExecuteRejectsWrongPacketType(t *testing.T) {
 
 	go func() {
 		defer func() { _ = srv.Close() }()
-		// Read the command and marker packets.
 		cmdID, _, _, err := readPacket(srv)
 		if err != nil {
 			return
 		}
-		_, _, _, err = readPacket(srv) // marker
-		if err != nil {
+		// Execute writes the marker only after the command's first reply packet
+		// arrives (#2618), so send one valid fragment, drain the marker, then send
+		// a fragment with the wrong packet type.
+		_ = writePacket(srv, cmdID, typeResponseValue, "good")
+		if _, _, _, err := readPacket(srv); err != nil { // marker
 			return
 		}
-		// Send one valid fragment, then a fragment with the wrong packet type.
-		_ = writePacket(srv, cmdID, typeResponseValue, "good")
 		_ = writePacket(srv, cmdID, typeAuth, "bad-type")
 	}()
 
@@ -518,6 +614,44 @@ func TestExecuteRejectsWrongPacketType(t *testing.T) {
 	if !strings.Contains(err.Error(), "unexpected packet type") {
 		t.Fatalf("Execute error = %v, want error mentioning unexpected packet type", err)
 	}
+}
+
+// readPacketMC reads one request packet the way vanilla Minecraft's RCON server
+// does. Measured against a real 1.21.1 server for issue #2618: it performs ONE
+// read() per loop iteration into a fixed 1460-byte buffer and requires the
+// length prefix to equal the bytes that read returned, minus the 4 prefix bytes.
+// Anything else — including two well-formed packets that happened to arrive in
+// the same read — is a malformed packet, and the server closes the connection
+// without executing either.
+//
+// So a client must never keep two request packets in flight: writing a command
+// and its end-of-response marker back-to-back puts both in one read and kills
+// the connection. A stream-oriented reader (readPacket below) reassembles that
+// traffic happily and hides the defect, which is why the fake models the real
+// framing instead.
+//
+// n is the byte count the read returned, reported so a framing violation can be
+// described rather than surfacing as a bare EOF on the client.
+func readPacketMC(conn net.Conn) (id, typ int32, body string, n int, err error) {
+	// Let the wire settle first, so a client that put two packets on it is seen
+	// to have done so rather than racing the read.
+	time.Sleep(mcReadSettle)
+
+	buf := make([]byte, 1460) // vanilla's RconClient buffer size
+	n, err = conn.Read(buf)
+	if err != nil {
+		return 0, 0, "", n, err
+	}
+	if n < 10 {
+		return 0, 0, "", n, errMCFraming
+	}
+	if length := int32(binary.LittleEndian.Uint32(buf[0:4])); length != int32(n-4) {
+		return 0, 0, "", n, errMCFraming
+	}
+	id = int32(binary.LittleEndian.Uint32(buf[4:8]))
+	typ = int32(binary.LittleEndian.Uint32(buf[8:12]))
+	body = string(buf[12 : n-2]) // strip the two trailing NULs
+	return id, typ, body, n, nil
 }
 
 // readPacket reads one RCON packet from the test server side.
