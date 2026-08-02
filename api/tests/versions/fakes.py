@@ -126,6 +126,9 @@ class FakeJarFetcher(JarFetcher):
 # not asserting, instead of passing by accident. Reading the host clock here made
 # that fail-loud property depend on the host clock running later than the test's
 # fixed ``now`` minus the window — an unstated environmental assumption (#2529).
+# Spelled identically in ``tests/storage/fake_s3.py`` and
+# ``tests/servers/fakes.py``; the trigger for extracting the three copies into a
+# shared module is recorded beside the ``fake_s3.py`` one (issue #2576).
 _UNSTAMPED_STORE_TIME = dt.datetime(9999, 1, 1, tzinfo=dt.UTC)
 
 
@@ -158,6 +161,11 @@ class FakeJarPool(JarPool):
         # head-checks the content key and skips the upload (``last_modified``
         # stays) — and neither Port docstring picks a side, so the fake keeps the
         # first stamp rather than claim one backend's behaviour (issue #2529).
+        # The stamp reads the host clock by convention, recorded with
+        # ``tests/storage/fake_s3.py``'s copy of the sentinel (issue #2576);
+        # ``tests/versions/test_jar_pool_fake.py`` pins it, and
+        # ``tests/versions/test_ensure_jar.py``'s ``_PastClock`` stops ageing the
+        # JAR the test just put if this line ever stamps the far-future sentinel.
         self.modified_at.setdefault(key, dt.datetime.now(dt.UTC))
         return key
 

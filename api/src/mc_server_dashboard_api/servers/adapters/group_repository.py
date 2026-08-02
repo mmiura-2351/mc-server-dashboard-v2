@@ -92,13 +92,27 @@ class SqlAlchemyGroupRepository(GroupRepository):
         row = await self._session.get(PlayerGroupModel, group.id.value)
         if row is not None:
             row.name = group.name.value
-        # Replace the player set wholesale (delete-then-insert): the in-memory
-        # aggregate is the source of truth for the upsert/remove the caller made.
-        await self._session.execute(
-            delete(GroupPlayerModel).where(GroupPlayerModel.group_id == group.id.value)
-        )
-        for player in group.players:
-            self._session.add(_player_model(group.id, player))
+        try:
+            # Replace the player set wholesale (delete-then-insert): the in-memory
+            # aggregate is the source of truth for the upsert/remove the caller made.
+            # This execute autoflushes the name update above, so
+            # uq_player_group_community_kind_name can surface here for a concurrent
+            # rename racer (issue #2000).
+            await self._session.execute(
+                delete(GroupPlayerModel).where(
+                    GroupPlayerModel.group_id == group.id.value
+                )
+            )
+            for player in group.players:
+                self._session.add(_player_model(group.id, player))
+            # Flush the staged rows here rather than leaving them for whichever
+            # autoflush the caller happens to trigger next: a concurrent group
+            # delete makes them violate fk_group_player_group_id_player_group, and
+            # only a flush this method owns can translate that (issue #2583).
+            await self._session.flush()
+        except IntegrityError as exc:
+            translate_integrity_error(exc)
+            raise
 
     async def delete(self, group_id: GroupId) -> None:
         # group_player and server_group rows cascade from the FK ON DELETE CASCADE.
