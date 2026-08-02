@@ -323,8 +323,12 @@ async def test_group_save_on_a_missing_row_with_players_reports_not_found() -> N
 
 async def test_group_save_on_a_missing_row_without_players_is_a_no_op() -> None:
     # The other half of the same branch: an empty player set stages no INSERT,
-    # so nothing can violate the FK. The adapter's DELETE and its rename UPDATE
-    # both match zero rows and the save passes silently, leaving no row behind.
+    # so nothing can violate the FK. The DELETE is the only *write* the adapter
+    # emits, and it matches zero rows -- with the row gone, ``save``'s ``get``
+    # re-queries and returns ``None`` (the identity map is weak and retains
+    # nothing, #2583), so the ``if row is not None`` guard skips the rename and
+    # no UPDATE is emitted at all. Measured: SELECT then DELETE, no UPDATE and no
+    # INSERT. The save passes silently, leaving no row behind.
     #
     # Like the raising branch above, this one is what the *adapter* does, so the
     # claim is pinned against a live FK rather than against the fake alone --
