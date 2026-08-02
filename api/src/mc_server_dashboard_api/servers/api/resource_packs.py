@@ -303,13 +303,21 @@ async def download_resource_pack(
     )
 
 
-# Deliberately no ``Cache-Control`` on the route below (issue #2519). It is
-# unauthenticated by design (issue #1176) and serves immutable content — a pack
-# has create and delete, no update — to the Minecraft game client, which caches
-# it locally and verifies it against the ``resource-pack-sha1`` written beside
-# the URL in ``server.properties``. ``no-store`` would defeat that cache and
-# re-fetch a multi-MB pack on every player join. Declaring a positive directive
-# instead is the better answer, but it needs a max-age chosen: issue #2562.
+# The route below declares its own caching policy, and the 200 and the 404
+# declare different ones (issue #2562). Undeclared, neither was the origin's
+# choice: this URL ends in the stored filename and so usually in ``.zip``, which
+# hands the response to Cloudflare's extension heuristic — measured against the
+# dev deployment, that cached even the 404 and injected a ``max-age=14400`` the
+# origin never sent. Every other download URL here lacks an extension and is left
+# alone, which is why this is the only route where the accident was observable.
+#
+# ``no-store`` is not the answer here, unlike on the authenticated route above
+# (issue #2519): this one is unauthenticated by design (issue #1176) and serves
+# immutable content — a pack has create and delete, no update — to the Minecraft
+# game client, which caches it locally and verifies it against the
+# ``resource-pack-sha1`` written beside the URL in ``server.properties``.
+# ``no-store`` would defeat that cache and re-fetch a multi-MB pack on every
+# player join.
 @public_router.get("/public/resource-packs/{resource_pack_id}/{filename}")
 async def public_download_resource_pack(
     resource_pack_id: uuid.UUID,
@@ -341,7 +349,18 @@ async def public_download_resource_pack(
         # deliver. A game client shown that 200 records a truncated pack.
         stream = await started(stream)
     except ResourcePackNotFoundError as exc:
-        raise _not_found() from exc
+        # This 404 is never stored, unlike the 200 below (issue #2562): a pack's id
+        # is minted at creation and its filename is fixed at the same moment, so a
+        # URL that 404s can never later become a 200. There is no staleness for a
+        # cache to protect against and nothing to gain by storing it — and the
+        # absence of a directive here is exactly how the four-hour negative cache
+        # appeared. Declared at the raise rather than in ``_not_found``, which the
+        # authenticated routes share.
+        raise problem(
+            status.HTTP_404_NOT_FOUND,
+            "not_found",
+            headers={"Cache-Control": "no-store"},
+        ) from exc
     except ResourcePackStorageUnavailableError as exc:
         # 503, not 404: the pack is there and the fetch is worth retrying, which is
         # not what a client told "not found" would do (issue #2455).
@@ -356,6 +375,12 @@ async def public_download_resource_pack(
         headers={
             "Content-Disposition": content_disposition(pack.filename),
             "Content-Length": str(size_bytes),
+            # Public and long-lived, because the body is immutable and the client
+            # verifies it by SHA-1 anyway (issue #2562): the max-age bounds only
+            # how long a deleted pack stays fetchable from an edge. An hour is 4x
+            # tighter than the value Cloudflare injects unasked, and still covers
+            # the join storm that makes edge caching worth having.
+            "Cache-Control": "public, max-age=3600, immutable",
         },
     )
 
