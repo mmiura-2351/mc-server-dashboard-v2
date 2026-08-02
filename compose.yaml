@@ -107,13 +107,16 @@ services:
     #  18888   filer gRPC       19333   master gRPC
     #
     # Credential enforcement, probed uncredentialed against these exact flags:
-    # 8333 rejects (403). 8181 rejects catalog calls (/v1/namespaces 403) but
-    # serves /v1/config open. 8888 filer and 9333 master answer 200 with no
-    # credential at all, serving the same bytes the S3 gateway does, and 18333
-    # answers gRPC reflection uncredentialed (`SeaweedS3IamCache`,
-    # `SeaweedS3LifecycleInternal`). So every member of the `mcsd` network below
-    # is effectively an object-store admin over every tenant's data. None of
-    # these ports is published to the host.
+    # 8333 rejects every data-path call (403; its /status probe answers 200,
+    # which is what the healthcheck below uses). 8181 rejects catalog calls
+    # (/v1/namespaces 403) but serves /v1/config open. 8888 filer answers 200
+    # with no credential at all and serves the same object bytes the S3 gateway
+    # does; 9333 master and 8080 volume are likewise uncredentialed, and a
+    # master /dir/lookup followed by a volume read reaches those same bytes in
+    # two hops. 18333 answers gRPC reflection uncredentialed
+    # (`SeaweedS3IamCache`, `SeaweedS3LifecycleInternal`). So every member of the
+    # `mcsd` network below is effectively an object-store admin over every
+    # tenant's data. None of these ports is published to the host.
     #
     # What keeps that off attacker-controlled code is the TOPOLOGY, not this
     # service's configuration: the Minecraft server containers run third-party
@@ -384,8 +387,8 @@ services:
     # sit on, where they hold CAP_NET_RAW and can spoof (SECURITY.md Section 6).
     # Verified 2026-08-02: default route via 172.19.0.1, the mcsd gateway, and
     # moving the priority to the other attachment moves the route with it.
-    # Needs Engine 28.0+ / Compose 2.34.0+ (DEPLOYMENT.md Section 2 has the
-    # detail, including why Compose 2.33.1 specifically must be avoided).
+    # Needs Engine 28.0+ / Compose 2.34.0+ (DEPLOYMENT.md Section 2 tables what
+    # each under-floor version band actually does; two of them fail silently).
     networks:
       default:
         gw_priority: 100
@@ -495,9 +498,9 @@ networks:
   # migrate, seaweedfs-lifecycle, relay, cloudflared and the worker. First-party
   # is not the same as authenticated — most of what binds here takes no
   # credential (see the seaweedfs block above: of its nine ports, only the S3
-  # gateway enforces across the board), so membership of `mcsd` is itself the
-  # privilege. That is why the containers
-  # running third-party plugin code are on `servers` below instead (issue #2590).
+  # gateway enforces on its data path), so membership of `mcsd` is itself the
+  # privilege. That is why the containers running third-party plugin code are on
+  # `servers` below instead (issue #2590).
   # `relay` and `cloudflared` are still here, and both terminate internet
   # traffic, so a compromise of either lands on `mcsd`.
   # CAUTION: renaming the default network recreates every service container on the

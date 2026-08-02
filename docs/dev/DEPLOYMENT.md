@@ -74,8 +74,8 @@ on it as a substitute for keeping heavy build pipelines off the game host.
 
   | Compose | Engine | Result |
   |---|---|---|
-  | < 2.33.1 | any | **Loud.** The compose-spec schema rejects the unknown key and `up -d` fails |
-  | 2.33.1 | any | **Silent.** Validates, then leaves `GwPriority` at 0 |
+  | < 2.33.0 | any | **Loud.** The compose-spec schema rejects the unknown key and `up -d` fails |
+  | 2.33.0 - 2.33.1 | any | **Silent.** Validates, drops the key, leaves `GwPriority` at 0 |
   | 2.34.0+ | < 28.0 | **Silent.** The daemon ignores endpoint fields it does not know |
   | 2.34.0+ | 28.0+ | Pinned, as intended |
 

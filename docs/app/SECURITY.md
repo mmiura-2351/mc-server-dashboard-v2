@@ -429,8 +429,11 @@ ports. Two cases, and the second is not hypothetical:
   profile active, `compose.yaml` publishes `25565/tcp`, `25665/tcp`,
   `25675/udp` and `19132-19231/udp` with **no host IP** — there is no
   `RELAY_BIND_IP` equivalent. So on any relay-enabled deployment a Minecraft
-  container can already reach all of them via the bridge gateway today,
-  including **`25665`, the Worker dial-back tunnel**. That is a live instance of
+  container can already reach them via the bridge gateway today — `25565` and
+  `25665` always, the two UDP sets only when `MCD_RELAY_BEDROCK_ENABLED=true`,
+  since the relay publishes those unconditionally but binds them only under that
+  flag (a probe against an unbound one gets a refusal, not a service). That
+  includes **`25665`, the Worker dial-back tunnel**, and it is a live instance of
   this bypass in the shipped configuration, not a consequence of operator
   choice.
 
@@ -467,19 +470,21 @@ security model, and the following remain true:
   worlds, snapshots and JARs: the SeaweedFS filer (`8888`), master (`9333`) and
   volume (`8080`) ports take no credential, and the S3 gRPC port (`18333`) serves
   reflection uncredentialed, handing out `SeaweedS3IamCache` and
-  `SeaweedS3LifecycleInternal`. Only the S3 gateway (`8333`) enforces across the
-  board; the Iceberg REST port (`8181`) rejects catalog calls but serves its
-  config endpoint open. Membership of `mcsd` is therefore equivalent to
-  object-store admin. Closing that is issue #2626; until it lands, treat
-  "first-party" in the table above as a statement about *who is attached*, not
-  about what an attached process would have to prove.
+  `SeaweedS3LifecycleInternal`. Only the S3 gateway (`8333`) enforces on every
+  data-path call (its `/status` probe answers 200 uncredentialed, which is what
+  the compose healthcheck uses); the Iceberg REST port (`8181`) rejects catalog
+  calls but serves its config endpoint open. Membership of `mcsd` is therefore
+  equivalent to object-store admin. Closing that is issue #2626; until it lands,
+  treat "first-party" in the table above as a statement about *who is attached*,
+  not about what an attached process would have to prove.
 - **Two members of `mcsd` terminate internet traffic.** `relay` accepts arbitrary
-  player connections (`25565`, `25665`, `19132-19231/udp`, `25675/udp`) and
-  `cloudflared` terminates a public tunnel. Compromising either puts an attacker
-  exactly where the Minecraft containers were just removed from, with the
-  unauthenticated storage surface above in reach. Segmentation raised the bar for
-  a hostile *plugin*; it did not raise it for a hostile *packet* arriving at the
-  relay. And the relay is reachable from **both** directions: because its ports
+  inbound connections — players on `25565` and `19132-19231/udp`, Worker
+  dial-back tunnels on `25665` and `25675/udp` — and `cloudflared` terminates a
+  public tunnel. Compromising either puts an attacker exactly where the Minecraft
+  containers were just removed from, with the unauthenticated storage surface
+  above in reach. Segmentation raised the bar for a hostile *plugin*; it did not
+  raise it for a hostile *packet* arriving at the relay. And the relay is
+  reachable from **both** directions: because its ports
   are published on every interface, a Minecraft container can reach them through
   the host gateway even though `relay` is not on `mcsd-servers` — so the plugin
   path to the relay survives segmentation too.
