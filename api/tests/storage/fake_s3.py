@@ -65,8 +65,8 @@ _UNSTAMPED_STORE_TIME = dt.datetime(9999, 1, 1, tzinfo=dt.UTC)
 #   ``put`` between two host-clock reads, so any constant reddens them, a past
 #   one included. ``tests/versions/test_ensure_jar.py``'s ``_PastClock``
 #   (``now() + GC_SAFETY_WINDOW + 1h``) is a weaker, end-to-end check on top: it
-#   stops ageing the JAR it just put once the stamp is the sentinel, but a past
-#   constant would slip by it.
+#   stops ageing the JAR the test just put once the stamp is the sentinel, but a
+#   past constant would slip by it.
 # - Those pins cover the sibling ``put``s, not the three stamps below: changing
 #   these reddens no test at all (mutation-checked at #2576), so this comment is
 #   the only thing holding them.

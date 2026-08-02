@@ -165,7 +165,7 @@ class FakeJarPool(JarPool):
         # ``tests/storage/fake_s3.py``'s copy of the sentinel (issue #2576);
         # ``tests/versions/test_jar_pool_fake.py`` pins it, and
         # ``tests/versions/test_ensure_jar.py``'s ``_PastClock`` stops ageing the
-        # JAR it just put if this line ever stamps the far-future sentinel.
+        # JAR the test just put if this line ever stamps the far-future sentinel.
         self.modified_at.setdefault(key, dt.datetime.now(dt.UTC))
         return key
 
