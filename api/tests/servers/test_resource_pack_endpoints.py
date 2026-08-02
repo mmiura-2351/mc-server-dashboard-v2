@@ -496,6 +496,21 @@ class TestPublicDownloadEndpoint:
         assert resp.content == b"".join(chunks)
         assert int(resp.headers["content-length"]) == len(resp.content)
 
+    def test_public_download_declares_a_cacheable_directive(self) -> None:
+        # The origin states its own policy rather than leaving the URL's ``.zip``
+        # suffix to decide it (issue #2562): undeclared, Cloudflare's extension
+        # heuristic caches this route and injects a ``max-age=14400`` the origin
+        # never sent. A pack is immutable — create and delete, no update — and the
+        # game client verifies the body against ``resource-pack-sha1``, so the
+        # max-age bounds only how long a deleted pack stays fetchable from an edge.
+        p = _pack(filename="my-pack.zip")
+        uc = _FakeDownloadUseCase(pack=p, data=b"publiczip")
+        app = _app(download=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.get(f"/api/public/resource-packs/{p.id.value}/my-pack.zip")
+        assert resp.status_code == 200
+        assert resp.headers["cache-control"] == "public, max-age=3600, immutable"
+
     def test_public_download_aborts_when_stream_ends_short_of_declared_length(
         self,
     ) -> None:
@@ -542,6 +557,18 @@ class TestPublicDownloadEndpoint:
         with TestClient(app) as client:  # type: ignore[arg-type]
             resp = client.get(f"/api/public/resource-packs/{uuid.uuid4()}/any.zip")
         assert resp.status_code == 404
+
+    def test_public_download_404_declares_no_store(self) -> None:
+        # The 404 gets its own directive, not the 200's (issue #2562). A pack's id
+        # and filename are both fixed at creation, so a URL that 404s can never
+        # later become a 200 — there is nothing to gain by storing it, and leaving
+        # it undeclared is what let the edge answer it for four hours.
+        uc = _FakeDownloadUseCase(error=ResourcePackNotFoundError("nope"))
+        app = _app(download=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.get(f"/api/public/resource-packs/{uuid.uuid4()}/any.zip")
+        assert resp.status_code == 404
+        assert resp.headers["cache-control"] == "no-store"
 
     def test_public_download_of_a_row_whose_blob_is_missing_404(self) -> None:
         # The route every joining Minecraft client hits: an orphaned row reports
