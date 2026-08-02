@@ -769,6 +769,61 @@ without first putting TLS on the listener:
 Mount the certificate, key, and CA files into the respective containers and point
 the variables at the in-container paths.
 
+TLS is not the only thing a cross-host worker needs: it also has to be able to
+reach the HTTP **data plane**, which is a separate port and a separate setting —
+see the next subsection.
+
+### The data-plane URL for a cross-host worker (issue #2564)
+
+A cross-host worker **must** be given `MCD_API_SERVER__DATA_PLANE_BASE_URL`
+explicitly. Leaving it unset is the most common way to break this topology, and
+it breaks it silently.
+
+The control plane above is only how the API tells a worker *to* transfer. The
+transfer itself is plain HTTP on the API's HTTP port (`/data-plane/...`): the
+worker pulls the working set and the resolved JAR on hydrate (`GET`) and pushes
+it back on snapshot (`POST`). The API advertises where to do that in each
+trigger, and the address it advertises is `server.data_plane_base_url` — falling
+back to `server.public_base_url` when that is unset (CONFIGURATION.md Section
+5.1). Neither of the two values that work on a single host works here:
+
+- `compose.yaml` pins the variable to `http://api:8000`, which resolves only on
+  the compose network. A worker on another machine cannot resolve it at all.
+- The fallback hands the worker `PUBLIC_BASE_URL`. If that is a Cloudflare
+  Tunnel hostname, every snapshot larger than the tunnel's ~100 MB body cap is
+  rejected (issue #1549 — a booted Paper server alone is ~200+ MB), so world
+  progression is lost on every stop. Registration still succeeds and the control
+  plane still looks healthy; the failure appears at the first snapshot of a
+  non-trivial server, on the worker's host, with nothing pointing back at the
+  unset variable.
+
+Set it to an address the worker can reach that is **not** behind a body-size-capped
+edge — the API host's LAN/VPN address, not the tunnel hostname:
+
+```sh
+# in .env on the API host
+MCD_API_SERVER__DATA_PLANE_BASE_URL=http://10.0.0.5:8000
+# the HTTP port is published to loopback by default; a remote worker needs it on
+# an interface it can reach (Section 3)
+API_HTTP_BIND_IP=10.0.0.5
+```
+
+The API warns at startup when `server.data_plane_base_url` is unset while
+`server.public_base_url` is set, naming the URL workers will be handed. If your
+public URL genuinely is directly reachable by workers, set
+`data_plane_base_url` to that same value to record the intent and silence the
+warning. Deployments using the shipped `compose.yaml` never see it — compose
+always sets the variable.
+
+**Protect this port like the control plane.** Data-plane requests carry the
+shared worker credential as an `Authorization: Bearer` header, and the working
+set is the server's world data; over a real network both are in the clear on
+plain HTTP. The control-plane TLS above does not cover it — different port,
+different protocol. Put the data plane on a private network (VPN/WireGuard, or a
+private interface) or terminate TLS in front of it and point
+`MCD_API_SERVER__DATA_PLANE_BASE_URL` at the `https://` address, keeping in mind
+that whatever terminates it must not impose a body-size cap.
+
 ## 9. Upgrade
 
 Pull the new revision and rebuild; `migrate` re-runs `alembic upgrade head`
