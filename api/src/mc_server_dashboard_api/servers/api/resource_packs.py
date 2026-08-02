@@ -48,6 +48,7 @@ from mc_server_dashboard_api.dependencies import (
 )
 from mc_server_dashboard_api.http_content_disposition import content_disposition
 from mc_server_dashboard_api.http_datetime import UtcDatetime
+from mc_server_dashboard_api.http_head import head_response
 from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.http_streaming import counted, started
 from mc_server_dashboard_api.identity.domain.entities import User
@@ -233,8 +234,17 @@ async def delete_resource_pack(
     )
 
 
-@router.get("/resource-packs/{resource_pack_id}/download")
+# Named once because two decorators register it: Starlette does not synthesize
+# HEAD from a GET route, so the probe has to be declared (issue #2560). Both
+# registrations point at the same endpoint function, so the gate, the headers and
+# the error mapping cannot drift apart between the two methods.
+_DOWNLOAD_PATH = "/resource-packs/{resource_pack_id}/download"
+
+
+@router.get(_DOWNLOAD_PATH)
+@router.head(_DOWNLOAD_PATH)
 async def download_resource_pack(
+    request: Request,
     resource_pack_id: uuid.UUID,
     user: Annotated[User, Depends(get_current_user)],
     use_case: Annotated[DownloadResourcePack, Depends(get_download_resource_pack)],
@@ -244,16 +254,28 @@ async def download_resource_pack(
 
     The response declares the pack's exact size as ``Content-Length``, so a client
     can show download progress and refuse an over-cap pack up front.
+
+    **Probe** (issue #2560): a ``HEAD`` answers with the ``GET``'s status and
+    headers and no body, so a client learns the size — from the store's size probe
+    below — without starting a transfer. The route offers no ``Accept-Ranges``, so
+    the probe reports the size but not resumption.
     """
 
-    # Starlette populates no Content-Length for a streaming body, so without an
-    # explicit header the response is chunked (issue #2317). The declared value
-    # comes from the pack store, so it equals the streamed byte count — a length
-    # that disagrees corrupts or hangs the response over HTTP/2.
     try:
         stream, pack, size_bytes = await use_case(
             resource_pack_id=ResourcePackId(resource_pack_id),
         )
+        if request.method == "HEAD":
+            # The size is already answered by the store's size probe inside the use
+            # case; the probe returns before ``started()`` performs the body GET
+            # (issue #2560), so a caller that asked for no bytes never opens the
+            # blob. No download is recorded either: a metadata probe is not a
+            # download, and auditing one would inflate the resource_pack:download
+            # count.
+            return head_response(
+                media_type=_PACK_MEDIA_TYPE,
+                headers=_download_headers(pack, size_bytes=size_bytes),
+            )
         # Begin the stream here, so the blob is located while the status can still
         # be chosen (issue #2455). The size probe and the stream resolve the blob
         # independently, and the stream resolves it on its FIRST iteration — the
@@ -290,17 +312,32 @@ async def download_resource_pack(
     return StreamingResponse(
         counted(stream, size_bytes),
         media_type=_PACK_MEDIA_TYPE,
-        headers={
-            "Content-Disposition": content_disposition(pack.filename),
-            "Content-Length": str(size_bytes),
-            # Every authenticated download declares no-store (issue #2491). Here
-            # that is a consistency call rather than a leak fix, and the
-            # distinction is worth recording: the body is the same global library
-            # object for every caller, and the public route below serves those
-            # same bytes to the world unauthenticated (issue #2519).
-            "Cache-Control": "no-store",
-        },
+        headers=_download_headers(pack, size_bytes=size_bytes),
     )
+
+
+def _download_headers(pack: ResourcePack, *, size_bytes: int) -> dict[str, str]:
+    """The authenticated download's headers, shared by the GET and its HEAD probe.
+
+    One source for both, so a probe cannot answer with a different header set than
+    the download it is probing (issue #2560).
+
+    Starlette populates no ``Content-Length`` for a streaming body, so without the
+    explicit header the response is chunked (issue #2317). The declared value comes
+    from the pack store, so it equals the streamed byte count — a length that
+    disagrees corrupts or hangs the response over HTTP/2.
+    """
+
+    return {
+        "Content-Disposition": content_disposition(pack.filename),
+        "Content-Length": str(size_bytes),
+        # Every authenticated download declares no-store (issue #2491). Here that
+        # is a consistency call rather than a leak fix, and the distinction is
+        # worth recording: the body is the same global library object for every
+        # caller, and the public route below serves those same bytes to the world
+        # unauthenticated (issue #2519).
+        "Cache-Control": "no-store",
+    }
 
 
 # The route below declares its own caching policy, and the 200 and the 404

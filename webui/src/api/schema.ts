@@ -984,13 +984,31 @@ export interface paths {
         /**
          * Download Client Modpack
          * @description Download a server's client mods as a zip (plugin:read, issue #1308).
+         *
+         *     **Probe** (issue #2560): a ``HEAD`` answers with the ``GET``'s status and
+         *     headers and no body, so a client learns the modpack is available under the
+         *     same ``plugin:read`` gate without building it. The zip is assembled on the fly
+         *     from a variable jar set, so its size is not known ahead of the stream: neither
+         *     the ``GET`` nor the probe declares a ``Content-Length``, and the probe learns
+         *     existence rather than size.
          */
         get: operations["download_client_modpack_api_communities__community_id__servers__server_id__client_mods_download_get"];
         put?: never;
         post?: never;
         delete?: never;
         options?: never;
-        head?: never;
+        /**
+         * Download Client Modpack
+         * @description Download a server's client mods as a zip (plugin:read, issue #1308).
+         *
+         *     **Probe** (issue #2560): a ``HEAD`` answers with the ``GET``'s status and
+         *     headers and no body, so a client learns the modpack is available under the
+         *     same ``plugin:read`` gate without building it. The zip is assembled on the fly
+         *     from a variable jar set, so its size is not known ahead of the stream: neither
+         *     the ``GET`` nor the probe declares a ``Content-Length``, and the probe learns
+         *     existence rather than size.
+         */
+        head: operations["download_client_modpack_api_communities__community_id__servers__server_id__client_mods_download_head"];
         patch?: never;
         trace?: never;
     };
@@ -2266,13 +2284,30 @@ export interface paths {
          *
          *     The response declares the pack's exact size as ``Content-Length``, so a client
          *     can show download progress and refuse an over-cap pack up front.
+         *
+         *     **Probe** (issue #2560): a ``HEAD`` answers with the ``GET``'s status and
+         *     headers and no body, so a client learns the size — from the store's size probe
+         *     below — without starting a transfer. The route offers no ``Accept-Ranges``, so
+         *     the probe reports the size but not resumption.
          */
         get: operations["download_resource_pack_api_resource_packs__resource_pack_id__download_get"];
         put?: never;
         post?: never;
         delete?: never;
         options?: never;
-        head?: never;
+        /**
+         * Download Resource Pack
+         * @description Download a resource pack (authenticated, issue #1176).
+         *
+         *     The response declares the pack's exact size as ``Content-Length``, so a client
+         *     can show download progress and refuse an over-cap pack up front.
+         *
+         *     **Probe** (issue #2560): a ``HEAD`` answers with the ``GET``'s status and
+         *     headers and no body, so a client learns the size — from the store's size probe
+         *     below — without starting a transfer. The route offers no ``Accept-Ranges``, so
+         *     the probe reports the size but not resumption.
+         */
+        head: operations["download_resource_pack_api_resource_packs__resource_pack_id__download_head"];
         patch?: never;
         trace?: never;
     };
@@ -6207,6 +6242,38 @@ export interface operations {
             };
         };
     };
+    download_client_modpack_api_communities__community_id__servers__server_id__client_mods_download_head: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     send_server_command_api_communities__community_id__servers__server_id__command_post: {
         parameters: {
             query?: never;
@@ -8069,6 +8136,37 @@ export interface operations {
         };
     };
     download_resource_pack_api_resource_packs__resource_pack_id__download_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                resource_pack_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    download_resource_pack_api_resource_packs__resource_pack_id__download_head: {
         parameters: {
             query?: never;
             header?: never;
