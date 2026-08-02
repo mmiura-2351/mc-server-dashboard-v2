@@ -170,11 +170,13 @@ stage copies that build in. `compose.yaml` points the API at it with
 origin** as the API at `http://127.0.0.1:${API_HTTP_PORT}/`.
 
 The entire HTTP API is namespaced under `/api` (issue #498), so `/api/*` is the
-API (REST, WebSocket, the OpenAPI schema/docs, and the health/readiness/metrics
-probes) and `/assets/*` is the built SPA chunks — both are excluded from the SPA
-fallback. A `/api/*` miss is a wrong/removed route and an unmatched `/assets/*`
-request returns 404 (a stale/renamed chunk, never a client-side route; issue
-#634); *every other unmatched path* falls back to the SPA's `index.html` so
+API (REST, WebSocket, the OpenAPI schema/docs, and the health/readiness probes)
+and `/assets/*` is the built SPA chunks — both are excluded from the SPA
+fallback. The Prometheus exposition is **not** on this port at all; it has its
+own listener (Section 8, issue #2565). A `/api/*` miss is a wrong/removed route
+and an unmatched `/assets/*` request returns 404 (a stale/renamed chunk, never
+a client-side route; issue #634); *every other unmatched path* falls back to
+the SPA's `index.html` so
 client-side routing works on deep links and reloads with no path ever colliding. Same-origin
 serving is why the API ships **no CORS** and the refresh cookie is
 `SameSite=Strict; Path=/api/auth` — do not add CORS or split the origin (WEBUI_SPEC
@@ -712,6 +714,17 @@ reason; any other topology with a co-located Worker behind a body-size-capped
 edge must set `server.data_plane_base_url` to an internal address the Worker
 can reach directly (CONFIGURATION.md Section 5.1).
 
+**The tunnel publishes every path on `api:8000` (issue #2565).** `cloudflared`
+forwards the whole hostname to `api:8000` and path-scopes nothing, so the
+loopback publish in `compose.yaml` constrains only *host* reachability — the
+tunnel reaches the API over the compose-internal network, past that bind. Treat
+anything you mount on the API's HTTP port as internet-facing. This is why the
+Prometheus exposition is not on that port (see the metrics subsection at the end
+of this section), and why the OpenAPI schema, the docs routes and `/api/readyz`
+are reachable from the internet today (tracked in issue #2568). To restrict a
+path, use a Cloudflare Access policy on the public hostname; the repo ships no
+such rule.
+
 #### Reverse proxy + Let's Encrypt (alternative)
 
 For deployments that do not use Cloudflare, any TLS-terminating reverse proxy
@@ -740,6 +753,56 @@ This drops the `Secure` attribute from the refresh cookie so the browser stores
 it over HTTP and silent refresh works. **Security caveat:** the cookie is then
 sent over plaintext, exposing the refresh token to network observers. Use this
 only on trusted networks.
+
+### Prometheus metrics: a separate, unpublished listener
+
+The exposition is served on its own HTTP listener and is **off by default**
+(`metrics.enabled`, CONFIGURATION.md Section 5.10). Enabling it binds a second
+port that serves `GET /metrics`; the API's HTTP port serves no exposition at
+all. The content is aggregates only, but it is operational signal — server and
+worker counts, per-route request volume including login success/failure rates,
+process start timestamps, control-plane liveness (SECURITY.md Section 5).
+
+**Compose (whichever of the three options above you run).** Enable it in `.env`:
+
+```sh
+MCD_API_METRICS__ENABLED=true
+```
+
+The port is deliberately **not** in the `api` service's `ports:` list, so the
+bind happens inside the container's own network namespace and the endpoint
+exists only on the compose network. Scrape it from a service on that network
+(`http://api:9090/metrics`) — a Prometheus container you add to `compose.yaml`,
+for example; the repo ships no scraper.
+
+Leave `MCD_API_METRICS__HOST` at its `0.0.0.0` default here. Narrowing it to
+loopback makes the endpoint unscrapeable by any sibling container and protects
+nothing: inside the container namespace, the missing `ports:` entry is what
+confines it. `API_HTTP_BIND_IP` does not apply either — it only interpolates
+into that `ports:` list, and there is no metrics entry for it to interpolate
+into, so raising it to `0.0.0.0` exposes no second port. The two things not to
+do are add a `ports:` entry for it, and map a second Cloudflare public hostname
+to it.
+
+**Non-compose runs (bare metal, systemd).** Here `0.0.0.0` genuinely is a
+**second network-reachable port**, and a reverse proxy in front of the API's
+HTTP port does not cover it: different port, the proxy never sees it. Either
+scope the bind or firewall the port:
+
+```sh
+# scraper on the same host
+MCD_API_METRICS__HOST=127.0.0.1
+# or a private interface the scraper can reach (IPv6 literals work too)
+MCD_API_METRICS__HOST=10.0.0.5
+MCD_API_METRICS__PORT=9090
+```
+
+**Port 9090 is also the relay's metrics default** (RELAY.md Section 13). Under
+compose they are separate containers (`api:9090`, `relay:9090`) and do not
+collide. On a single host running both **natively**, they do: whichever binds
+second logs `metrics listener bind failed; continuing without the metrics
+endpoint` and serves nothing, while the process itself keeps running. Move one
+of them (`MCD_API_METRICS__PORT` / `MCD_RELAY_METRICS_LISTEN`) in that topology.
 
 ### gRPC control-plane TLS (cross-host worker)
 
@@ -1431,6 +1494,8 @@ relay control surface is active.
 | 25675 | UDP | inbound | Worker's Bedrock QUIC tunnel dial-back (epic #1540, `bedrock.tunnel_listen`) — only when the Bedrock gate is on |
 | 19132-19231 | UDP | inbound | Bedrock player connections (`ports.bedrock_range_start..end` default window) — only when the Bedrock gate is on |
 | 50051 | TCP | internal (compose network only) | gRPC control plane (not published) |
+| 9090 | TCP | internal (compose network only) | API Prometheus exposition (not published; off unless `MCD_API_METRICS__ENABLED=true` — see Section 8) |
+| 9090 | TCP | relay-local (loopback) | Relay Prometheus exposition + `/healthz` (off unless `MCD_RELAY_METRICS_ENABLED=true`; binds `127.0.0.1` by default, RELAY.md Section 13). Same port number as the API's, above: distinct containers under compose, but a collision if both run natively on this host |
 
 ### Bedrock (Geyser)
 

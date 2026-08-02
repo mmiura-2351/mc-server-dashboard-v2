@@ -215,6 +215,35 @@ class LogSettings(_Section):
     format: Literal["json", "text"] = "json"
 
 
+class MetricsSettings(_Section):
+    """Prometheus exposition listener (CONFIGURATION.md Section 5.10, issue #2565).
+
+    The exposition is served on its **own** HTTP listener, never on the public
+    API port: the bundled Compose deployment fronts the API with ``cloudflared``,
+    which forwards the whole public hostname to ``api:8000``, so a route there is
+    a route on the internet. Like the relay's metrics endpoint (RELAY.md Section
+    13) this listener is **opt-in and off by default** — a deployment that does
+    not scrape binds no second port at all.
+
+    ``host`` deliberately defaults to ``0.0.0.0`` and NOT to the relay's
+    loopback. The API's canonical deployment is a container, where loopback means
+    "reachable only from inside the API container" — no sibling service on the
+    compose network, which is where a scraper runs, could ever reach it. **The
+    protection is not the bind address**: it is that the port is never published
+    to the host (``compose.yaml`` publishes only the HTTP API port) and that
+    ``cloudflared`` targets ``:8000`` only. This mirrors ``server.host``, which
+    binds ``0.0.0.0`` in the container for the same reason. An operator running
+    the API outside a container — or publishing this port — must set ``host`` to
+    a private address or firewall the port themselves (SECURITY.md Section 5).
+    """
+
+    enabled: bool = False
+    host: str = "0.0.0.0"
+    # 0..65535, with 0 meaning "bind an OS-assigned ephemeral port", matching
+    # ``server.http_port``.
+    port: int = Field(default=9090, ge=0, le=65535)
+
+
 class DatabaseSettings(_Section):
     """Persistence (CONFIGURATION.md Section 5.2). ``url`` is a secret."""
 
@@ -829,6 +858,7 @@ class Settings(BaseSettings):
     server: ServerSettings = Field(default_factory=ServerSettings)
     control: ControlSettings = Field(default_factory=ControlSettings)
     log: LogSettings = Field(default_factory=LogSettings)
+    metrics: MetricsSettings = Field(default_factory=MetricsSettings)
     database: DatabaseSettings
     storage: StorageSettings = Field(default_factory=StorageSettings)
     snapshot: SnapshotSettings = Field(default_factory=SnapshotSettings)
@@ -892,6 +922,7 @@ class Settings(BaseSettings):
             "server": self.server.model_dump(),
             "control": control,
             "log": self.log.model_dump(),
+            "metrics": self.metrics.model_dump(),
             "database": database,
             "storage": storage,
             "snapshot": self.snapshot.model_dump(),
