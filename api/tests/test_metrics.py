@@ -1,4 +1,8 @@
-"""Endpoint tests for GET /metrics (issue #282).
+"""Endpoint tests for the Prometheus exposition (issues #282, #2565).
+
+The exposition is served by the **observability app** on its own listener, not
+by the public API app: `/api/metrics` was reachable from the internet because
+the Cloudflare tunnel forwards the whole hostname to `api:8000` (issue #2565).
 
 The scrape-time session factory and worker registry are overridden with fakes
 (NFR-TEST-1) so no real database or gRPC fleet is touched. The endpoint must
@@ -19,6 +23,7 @@ from mc_server_dashboard_api.dependencies import (
     get_worker_registry,
 )
 from mc_server_dashboard_api.fleet.domain.registry import WorkerRegistry, WorkerSnapshot
+from mc_server_dashboard_api.observability import create_observability_app
 
 
 class _EmptyRegistry(WorkerRegistry):
@@ -99,9 +104,10 @@ def _failing_session_factory() -> _FailingSession:
 
 
 @pytest.fixture
-def client(shared_app: FastAPI) -> Iterator[TestClient]:
-    app = shared_app
-    app.dependency_overrides.clear()
+def client() -> Iterator[TestClient]:
+    """A client for the observability app, with the scrape seams faked."""
+
+    app = create_observability_app()
     app.dependency_overrides[get_metrics_session_factory] = lambda: (
         _failing_session_factory
     )
@@ -110,8 +116,23 @@ def client(shared_app: FastAPI) -> Iterator[TestClient]:
         yield client
 
 
+@pytest.fixture
+def api_client(shared_app: FastAPI) -> Iterator[TestClient]:
+    """A client for the public API app — the one the tunnel forwards to."""
+
+    shared_app.dependency_overrides.clear()
+    with TestClient(shared_app) as client:
+        yield client
+
+
+def test_metrics_absent_from_the_public_api_app(api_client: TestClient) -> None:
+    # The exposition must not be reachable on the public API port at all: the
+    # Cloudflare tunnel forwards the whole hostname to api:8000 (issue #2565).
+    assert api_client.get("/api/metrics").status_code == 404
+
+
 def test_metrics_renders_prometheus_text(client: TestClient) -> None:
-    resp = client.get("/api/metrics")
+    resp = client.get("/metrics")
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/plain")
     # The body parses as valid Prometheus exposition.
@@ -124,17 +145,21 @@ def test_metrics_renders_prometheus_text(client: TestClient) -> None:
 
 def test_metrics_db_down_still_serves_and_counts_failure(client: TestClient) -> None:
     before = _scrape_failures(client)
-    resp = client.get("/api/metrics")
+    resp = client.get("/metrics")
     assert resp.status_code == 200
     after = _scrape_failures(client)
     # The DB-down scrape was swallowed (200) and the failure counter advanced.
     assert after > before
 
 
-def test_metrics_labels_by_route_template_not_raw_path(client: TestClient) -> None:
+def test_metrics_labels_by_route_template_not_raw_path(
+    api_client: TestClient, client: TestClient
+) -> None:
     # Hit a templated route with a concrete id; the label must be the template.
-    client.get("/api/communities/123e4567-e89b-12d3-a456-426614174000")
-    resp = client.get("/api/metrics")
+    # The API app serves the request; the counters live in the process-wide
+    # registry that the observability app renders.
+    api_client.get("/api/communities/123e4567-e89b-12d3-a456-426614174000")
+    resp = client.get("/metrics")
     samples = [
         sample
         for family in text_string_to_metric_families(resp.text)
@@ -150,7 +175,7 @@ def test_metrics_labels_by_route_template_not_raw_path(client: TestClient) -> No
 
 
 def _scrape_failures(client: TestClient) -> float:
-    resp = client.get("/api/metrics")
+    resp = client.get("/metrics")
     for family in text_string_to_metric_families(resp.text):
         if family.name == "servers_by_state_scrape_failures":
             for sample in family.samples:

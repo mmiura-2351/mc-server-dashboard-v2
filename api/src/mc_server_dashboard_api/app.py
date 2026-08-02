@@ -40,7 +40,7 @@ from mc_server_dashboard_api.core.adapters.database import (
     create_session_factory,
 )
 from mc_server_dashboard_api.core.adapters.metrics_middleware import metrics_middleware
-from mc_server_dashboard_api.core.api import health, meta, metrics, readiness
+from mc_server_dashboard_api.core.api import health, meta, readiness
 from mc_server_dashboard_api.dataplane.api import transfers
 from mc_server_dashboard_api.dependencies import (
     build_brute_force_config,
@@ -88,6 +88,10 @@ from mc_server_dashboard_api.middleware import (
     correlation_id_middleware,
     security_headers_middleware,
     strip_no_content_body_headers_middleware,
+)
+from mc_server_dashboard_api.observability import (
+    create_observability_app,
+    start_observability_listener,
 )
 from mc_server_dashboard_api.servers.adapters.backup_store import (
     StorageBackupStoreAdapter,
@@ -1212,9 +1216,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         )
         logging.getLogger(__name__).info("storage sweep loop started")
+        # The Prometheus exposition is served on its OWN listener, never on the
+        # public HTTP port (issue #2565): ``cloudflared`` forwards the whole
+        # public hostname to ``api:8000``, so a route there is a route on the
+        # internet. Off by default, like the relay's metrics endpoint (RELAY.md
+        # Section 13). Started last, so everything it observes already exists.
+        metrics_listener = None
+        if settings.metrics.enabled:
+            observability_app = create_observability_app()
+            observability_app.state.engine = engine
+            observability_app.state.worker_registry = registry
+            metrics_listener = start_observability_listener(
+                observability_app,
+                host=settings.metrics.host,
+                port=settings.metrics.port,
+            )
+        app.state.metrics_listener = metrics_listener
         try:
             yield
         finally:
+            # Stopped first: scrapes must stop before the engine and registry
+            # they read are torn down below.
+            if metrics_listener is not None:
+                await metrics_listener.stop()
             prune_attempts_task.cancel()
             with suppress(asyncio.CancelledError):
                 await prune_attempts_task
@@ -1255,10 +1279,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # same origin (WEBUI_SPEC 7.7), and three of its deep-links shared paths
     # with API GET routes, returning JSON on a hard reload. With every route
     # (REST, WebSocket, and the OpenAPI schema + docs) under ``/api``, the rule
-    # becomes absolute — any non-``/api`` path falls through to the SPA. Health
-    # and readiness probes and the Prometheus ``/metrics`` endpoint move under
-    # ``/api`` too so there is no carve-out in the fallback (DEPLOYMENT.md,
-    # SECURITY.md).
+    # becomes absolute — any non-``/api`` path falls through to the SPA. The
+    # health and readiness probes move under ``/api`` too so there is no
+    # carve-out in the fallback (DEPLOYMENT.md, SECURITY.md). The Prometheus
+    # exposition is not served here at all: it has its own listener (issue
+    # #2565, ``observability.py``).
     app = FastAPI(
         title="mc-server-dashboard API",
         lifespan=lifespan,
@@ -1308,7 +1333,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api_router = APIRouter(prefix="/api")
     api_router.include_router(health.router)
     api_router.include_router(readiness.router)
-    api_router.include_router(metrics.router)
     api_router.include_router(meta.router)
     api_router.include_router(users.router)
     api_router.include_router(admin_users.router)
