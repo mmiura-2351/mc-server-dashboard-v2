@@ -39,12 +39,15 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 
+import pytest
+
 from mc_server_dashboard_api.servers.domain.backup import (
     Backup,
     BackupHealth,
     BackupId,
     BackupSource,
 )
+from mc_server_dashboard_api.servers.domain.errors import GroupNotFoundError
 from mc_server_dashboard_api.servers.domain.groups import (
     GroupId,
     GroupKind,
@@ -293,25 +296,48 @@ def test_group_seed_stores_a_copy_the_caller_cannot_rewrite() -> None:
     assert [p.username for p in stored.players] == ["steve"]
 
 
-async def test_group_save_on_a_missing_row_is_a_no_op() -> None:
+async def test_group_save_on_a_missing_row_with_players_reports_not_found() -> None:
     # ``save`` reads as an upsert but is not one: it never constructs a
-    # ``PlayerGroupModel`` (servers/adapters/group_repository.py:90-101). It
-    # loads the row and renames it only ``if row is not None``, then replaces
-    # the child ``group_player`` set. No ``save`` can therefore make a group
-    # appear -- ``add`` is the only insert path -- and all three call sites
-    # (application/groups.py:178, 237, 270) ``_load_group`` first, which raises
-    # ``GroupNotFoundError`` on an absent id.
+    # ``PlayerGroupModel``. It loads the row and renames it only ``if row is not
+    # None``, then replaces the child ``group_player`` set. No ``save`` can
+    # therefore make a group appear -- ``add`` is the only insert path -- and all
+    # three call sites (application/groups.py) ``_load_group`` first, which
+    # raises ``GroupNotFoundError`` on an absent id.
     #
-    # One divergence, recorded rather than modelled: with a non-empty player
-    # list the adapter also stages ``group_player`` INSERTs whose FK to
-    # ``player_group.id`` has no parent, so the transaction dies at commit on
-    # ``fk_group_player_group_id_player_group`` rather than passing silently
-    # (measured against PostgreSQL 18, both branches). The PERSISTED state is
-    # the same either way -- that transaction rolls back, so no row appears in
-    # either table -- and the fake has no flush boundary to raise from, so it
-    # models the state and not the exception (#2557).
+    # The absent-row branch is reachable anyway, by a concurrent delete landing
+    # between that pre-read and the write. With players to write, the adapter
+    # stages ``group_player`` INSERTs whose FK to ``player_group.id`` has no
+    # parent and raises the same ``GroupNotFoundError`` at its own flush (#2583,
+    # measured against PostgreSQL 18). Previously that was recorded here as an
+    # unmodelled divergence, because a raw ``IntegrityError`` is a flush boundary
+    # a fake has not got; a typed domain error is not, so the fake now models it
+    # (#2557).
     repo = FakeGroupRepository()
     group = _group()
+
+    with pytest.raises(GroupNotFoundError):
+        await repo.save(group)
+
+    assert repo.by_id == {}
+
+
+async def test_group_save_on_a_missing_row_without_players_is_a_no_op() -> None:
+    # The other half of the same branch: an empty player set stages no INSERT,
+    # so nothing can violate the FK. The DELETE is the only *write* the adapter
+    # emits, and it matches zero rows -- with the row gone, ``save``'s ``get``
+    # re-queries and returns ``None`` (the identity map is weak and retains
+    # nothing, #2583), so the ``if row is not None`` guard skips the rename and
+    # no UPDATE is emitted at all. Measured: SELECT then DELETE, no UPDATE and no
+    # INSERT. The save passes silently, leaving no row behind.
+    #
+    # Like the raising branch above, this one is what the *adapter* does, so the
+    # claim is pinned against a live FK rather than against the fake alone --
+    # ``tests/integration/test_group_repositories.py::
+    # test_save_after_concurrent_group_delete_without_players_is_a_no_op``.
+    # A fake asserting its own no-op would be true by construction.
+    repo = FakeGroupRepository()
+    group = _group()
+    group.players = []
 
     await repo.save(group)
 

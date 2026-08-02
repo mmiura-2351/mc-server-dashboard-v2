@@ -13,12 +13,18 @@ matching domain error
 :class:`GroupNameAlreadyExistsError`) so the API returns 409, not 500. An
 unrelated violation is re-raised untranslated.
 
+A concurrent *delete* is translated the same way: the FK a stale write violates
+names the row that vanished, so it surfaces as the not-found error the use case's
+own pre-read raises (``fk_group_player_group_id_player_group`` ->
+:class:`GroupNotFoundError`, 404, issue #2583).
+
 The call sites share the translation (adapters/integrity.py): the UnitOfWork's
 ``commit`` (an INSERT racer flushes at commit) and the server / schedule /
-group repositories' ``update`` / ``add`` (an UPDATE racer violates at execute
-time, inside the transaction — the re-port/slug-rename/Bedrock-allocation
-write path, issue #1541, the schedule rename path, issue #1837, and the group
-create flush path, issue #2000).
+group repositories' ``update`` / ``add`` / ``save`` (an UPDATE racer violates at
+execute time, inside the transaction — the re-port/slug-rename/Bedrock-allocation
+write path, issue #1541, the schedule rename path, issue #1837, the group
+create flush path, issue #2000, and the group player-edit flush path, issue
+#2583).
 
 The asyncpg/SQLAlchemy stack is faked: a session whose ``commit`` (or
 ``execute`` / ``flush``) raises a prebuilt IntegrityError carrying the violated
@@ -46,6 +52,7 @@ from mc_server_dashboard_api.servers.adapters.unit_of_work import SqlAlchemyUnit
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     GroupNameAlreadyExistsError,
+    GroupNotFoundError,
     PortAlreadyTakenError,
     ResourcePackInUseError,
     ScheduleNameAlreadyExistsError,
@@ -56,6 +63,7 @@ from mc_server_dashboard_api.servers.domain.groups import (
     GroupId,
     GroupKind,
     GroupName,
+    Player,
     PlayerGroup,
 )
 from mc_server_dashboard_api.servers.domain.schedule import (
@@ -296,6 +304,85 @@ async def test_group_add_reraises_unknown_violation_untranslated() -> None:
     repo = SqlAlchemyGroupRepository(session)  # type: ignore[arg-type]
     with pytest.raises(IntegrityError):
         await repo.add(_group_entity())
+
+
+# --- group repository save path (issue #2583, player edit) --------------------
+# SqlAlchemyGroupRepository.save stages the replacement group_player rows and
+# flushes them itself. A concurrent group delete makes those INSERTs violate
+# fk_group_player_group_id_player_group, which means the group is gone: the same
+# GroupNotFoundError (404) the use case's own pre-read raises.
+
+
+class _FakeSaveSession:
+    """A session shaped for ``save``: ``flush`` raises, the rest are no-ops.
+
+    ``get`` returns ``None``, which is what production really does here, though
+    not for the obvious reason. The natural guess is that ``_load_group`` leaves
+    the row in the session's identity map, so a concurrent delete would leave
+    ``get`` handing back a *stale* row -- but the identity map is **weak**, and
+    ``get_by_id`` hydrates a framework-free ``PlayerGroup`` and drops the
+    ``PlayerGroupModel``, so nothing holds it. Measured on PostgreSQL 18: after
+    ``get_by_id`` the identity map is empty and ``get`` re-queries to ``None``;
+    pin a strong reference to the row instead and the same call hands back the
+    stale row. Either way the staged ``group_player`` INSERTs are what violate
+    and the flush is where the translation must sit; the live-FK behaviour is
+    pinned in ``tests/integration/test_group_repositories.py``.
+    """
+
+    def __init__(self, error: IntegrityError) -> None:
+        self._error = error
+
+    async def get(self, entity: object, ident: object) -> None:
+        return None
+
+    async def execute(self, stmt: object) -> None:
+        return None
+
+    def add(self, instance: object) -> None:
+        pass
+
+    async def flush(self) -> None:
+        raise self._error
+
+
+def _group_with_player() -> PlayerGroup:
+    group = _group_entity()
+    group.players = [Player(uuid.uuid4(), "alice")]
+    return group
+
+
+async def test_group_save_translates_player_fk_violation_at_flush() -> None:
+    # issue #2583: the group was deleted mid-edit, so the staged player INSERTs
+    # hit the FK; the caller gets not-found, not a raw IntegrityError (500).
+    error = _integrity_error("fk_group_player_group_id_player_group")
+    repo = SqlAlchemyGroupRepository(_FakeSaveSession(error))  # type: ignore[arg-type]
+    with pytest.raises(GroupNotFoundError):
+        await repo.save(_group_with_player())
+
+
+async def test_group_save_translates_name_violation_at_flush() -> None:
+    # issue #2583: save's own flush is also where a rename's UPDATE lands, so the
+    # name backstop must survive the same wrapping.
+    session = _FakeSaveSession(_integrity_error("uq_player_group_community_kind_name"))
+    repo = SqlAlchemyGroupRepository(session)  # type: ignore[arg-type]
+    with pytest.raises(GroupNameAlreadyExistsError):
+        await repo.save(_group_with_player())
+
+
+async def test_group_save_reraises_unknown_violation_untranslated() -> None:
+    session = _FakeSaveSession(_integrity_error("uq_some_other_constraint"))
+    repo = SqlAlchemyGroupRepository(session)  # type: ignore[arg-type]
+    with pytest.raises(IntegrityError):
+        await repo.save(_group_with_player())
+
+
+async def test_commit_translates_group_player_fk_violation() -> None:
+    # issue #2583: RenameGroup does not query after save, so its staged player
+    # INSERTs reach commit instead — the same violation, the same typed error.
+    uow, session = _uow_with_commit_error("fk_group_player_group_id_player_group")
+    with pytest.raises(GroupNotFoundError):
+        await uow.commit()
+    assert session.rolled_back is True
 
 
 # --- FK violation path (issue #1962) ------------------------------------------

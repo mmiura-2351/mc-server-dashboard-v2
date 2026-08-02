@@ -6,6 +6,12 @@ test via the real 0001-0012 migrations so the adapter runs against the documente
 shape. A community and a server are seeded; the repository's CRUD, player upsert,
 attach/detach, and the cross-direction listings are exercised end to end, plus the
 ``ON DELETE CASCADE`` from server and group deletion.
+
+The concurrent-delete tests (issue #2583) live here rather than beside the other
+group unit tests because they need a **real** flush: the bug is a live FK refusing
+the staged ``group_player`` INSERTs, and an in-memory fake repository has no
+constraints to violate, so it reports success where PostgreSQL raises
+(issues #2557, #2549).
 """
 
 from __future__ import annotations
@@ -17,7 +23,12 @@ from collections.abc import AsyncIterator
 
 import pytest
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from mc_server_dashboard_api.community.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as CommunityUnitOfWork,
@@ -28,8 +39,16 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 )
 from mc_server_dashboard_api.community.domain.value_objects import CommunityName
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
+from mc_server_dashboard_api.servers.adapters.group_repository import (
+    SqlAlchemyGroupRepository,
+)
 from mc_server_dashboard_api.servers.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as ServersUnitOfWork,
+)
+from mc_server_dashboard_api.servers.application.groups import AddPlayer, RemovePlayer
+from mc_server_dashboard_api.servers.domain.errors import (
+    GroupNameAlreadyExistsError,
+    GroupNotFoundError,
 )
 from mc_server_dashboard_api.servers.domain.groups import (
     GroupId,
@@ -40,6 +59,7 @@ from mc_server_dashboard_api.servers.domain.groups import (
 )
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
 from tests.integration.migrate import downgrade_base, upgrade_head
+from tests.servers.fakes import FakeFileStore
 
 _DB_URL = os.environ.get("MCD_TEST_DATABASE_URL")
 
@@ -97,11 +117,13 @@ async def _seed_server(engine: AsyncEngine, community_id: uuid.UUID) -> uuid.UUI
     return server_id
 
 
-def _group(community_id: uuid.UUID, players: list[Player]) -> PlayerGroup:
+def _group(
+    community_id: uuid.UUID, players: list[Player], *, name: str = "admins"
+) -> PlayerGroup:
     return PlayerGroup(
         id=GroupId.new(),
         community_id=CommunityId(community_id),
-        name=GroupName("admins"),
+        name=GroupName(name),
         kind=GroupKind.OP,
         players=players,
     )
@@ -236,3 +258,192 @@ async def test_deleting_server_cascades_attachment(engine: AsyncEngine) -> None:
     # The group itself survives the server delete.
     async with ServersUnitOfWork(factory) as uow:
         assert await uow.groups.get_by_id(group.id) is not None
+
+
+# --- concurrent group delete during a player edit (issue #2583) ---------------
+
+
+class _DeleteOnLoadGroupRepository(SqlAlchemyGroupRepository):
+    """A group repository that deletes the group right after handing it back.
+
+    Reproduces the production interleave deterministically, with no sleeps: the
+    use case's ``_load_group`` read succeeds, another request's ``DeleteGroup``
+    commits on its own connection, and only then does ``save`` stage the
+    replacement ``group_player`` rows against a parent that is gone.
+    """
+
+    def __init__(self, session: AsyncSession, engine: AsyncEngine) -> None:
+        super().__init__(session)
+        self._engine = engine
+
+    async def get_by_id(self, group_id: GroupId) -> PlayerGroup | None:
+        group = await super().get_by_id(group_id)
+        async with self._engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM player_group WHERE id = :id"), {"id": group_id.value}
+            )
+        return group
+
+
+class _RacingUnitOfWork(ServersUnitOfWork):
+    """A servers UnitOfWork wired with :class:`_DeleteOnLoadGroupRepository`."""
+
+    def __init__(
+        self, session_factory: async_sessionmaker[AsyncSession], engine: AsyncEngine
+    ) -> None:
+        super().__init__(session_factory)
+        self._engine = engine
+
+    async def __aenter__(self) -> _RacingUnitOfWork:
+        await super().__aenter__()
+        assert self._session is not None
+        self.groups = _DeleteOnLoadGroupRepository(self._session, self._engine)
+        return self
+
+
+async def test_save_after_concurrent_group_delete_reports_not_found(
+    engine: AsyncEngine,
+) -> None:
+    # The staged group_player INSERTs hit fk_group_player_group_id_player_group
+    # once the parent row is gone. save flushes them itself, so the violation is
+    # translated to the same not-found the use case's own pre-read raises.
+    community_id = await _seed_community(engine)
+    factory = create_session_factory(engine)
+    group = _group(community_id, [Player(uuid.uuid4(), "alice")])
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.groups.add(group)
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        loaded = await uow.groups.get_by_id(group.id)
+        assert loaded is not None
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM player_group WHERE id = :id"), {"id": group.id.value}
+            )
+        loaded.upsert_player(Player(uuid.uuid4(), "bob"))
+        with pytest.raises(GroupNotFoundError):
+            await uow.groups.save(loaded)
+
+
+async def test_save_after_concurrent_group_delete_without_players_is_a_no_op(
+    engine: AsyncEngine,
+) -> None:
+    # The other half of the branch above, pinned against the live FK for the same
+    # reason: a fake asserting its own no-op establishes nothing about the
+    # adapter, so both branches modelled by ``FakeGroupRepository.save``
+    # (tests/servers/test_fake_repository_isolation.py) get a real flush here.
+    # With the player set emptied there is no INSERT to violate the FK, the
+    # DELETE matches zero rows, and save passes silently.
+    #
+    # This is the shape behind #2613: the caller is told the edit succeeded when
+    # the group is gone. Pinned as the behaviour that is, not the behaviour that
+    # should be -- deciding whether ``save`` re-asserts the row's existence is
+    # that issue's question, and it governs every call site rather than this one.
+    community_id = await _seed_community(engine)
+    factory = create_session_factory(engine)
+    only_player = uuid.uuid4()
+    group = _group(community_id, [Player(only_player, "alice")])
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.groups.add(group)
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        loaded = await uow.groups.get_by_id(group.id)
+        assert loaded is not None
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM player_group WHERE id = :id"), {"id": group.id.value}
+            )
+        loaded.remove_player(only_player)
+        await uow.groups.save(loaded)
+        await uow.commit()
+
+    async with engine.connect() as conn:
+        groups = (
+            await conn.execute(text("SELECT count(*) FROM player_group"))
+        ).scalar_one()
+        players = (
+            await conn.execute(text("SELECT count(*) FROM group_player"))
+        ).scalar_one()
+    assert groups == 0
+    assert players == 0
+
+
+async def test_save_after_concurrent_name_take_reports_name_exists(
+    engine: AsyncEngine,
+) -> None:
+    # The rename half of the same flush: save's delete-then-insert autoflushes
+    # the pending name UPDATE, so uq_player_group_community_kind_name surfaces
+    # inside save too and must stay translated (issue #2000).
+    community_id = await _seed_community(engine)
+    factory = create_session_factory(engine)
+    group = _group(community_id, [], name="admins")
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.groups.add(group)
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        loaded = await uow.groups.get_by_id(group.id)
+        assert loaded is not None
+        # A racer takes the name the rename is heading for.
+        async with ServersUnitOfWork(factory) as racer:
+            await racer.groups.add(_group(community_id, [], name="moderators"))
+            await racer.commit()
+        loaded.name = GroupName("moderators")
+        with pytest.raises(GroupNameAlreadyExistsError):
+            await uow.groups.save(loaded)
+
+
+async def test_add_player_reports_a_concurrent_group_delete_as_not_found(
+    engine: AsyncEngine,
+) -> None:
+    # The reachable path: AddPlayer follows save with list_server_ids_for_group,
+    # whose autoflush used to be where the untranslated IntegrityError (500) fired.
+    community_id = await _seed_community(engine)
+    factory = create_session_factory(engine)
+    group = _group(community_id, [Player(uuid.uuid4(), "alice")])
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.groups.add(group)
+        await uow.commit()
+
+    use_case = AddPlayer(
+        uow=_RacingUnitOfWork(factory, engine), file_store=FakeFileStore()
+    )
+    with pytest.raises(GroupNotFoundError):
+        await use_case(
+            community_id=CommunityId(community_id),
+            group_id=group.id,
+            player_uuid=uuid.uuid4(),
+            username="bob",
+        )
+
+
+async def test_remove_player_reports_a_concurrent_group_delete_as_not_found(
+    engine: AsyncEngine,
+) -> None:
+    # Same race on the removal side. The group keeps a second player so save
+    # still stages an INSERT for the surviving one -- with the set emptied there
+    # is nothing left to violate the FK.
+    community_id = await _seed_community(engine)
+    factory = create_session_factory(engine)
+    doomed = uuid.uuid4()
+    group = _group(community_id, [Player(doomed, "alice"), Player(uuid.uuid4(), "bob")])
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.groups.add(group)
+        await uow.commit()
+
+    use_case = RemovePlayer(
+        uow=_RacingUnitOfWork(factory, engine), file_store=FakeFileStore()
+    )
+    with pytest.raises(GroupNotFoundError):
+        await use_case(
+            community_id=CommunityId(community_id),
+            group_id=group.id,
+            player_uuid=doomed,
+        )
