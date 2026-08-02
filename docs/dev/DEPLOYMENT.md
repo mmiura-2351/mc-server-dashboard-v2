@@ -23,17 +23,24 @@ network** (the host RCON publication is dropped; see Section 7). The `migrate`
 service is a one-shot that applies the database schema before `api` starts.
 
 **Two networks, split by trust (issue #2590).** `mcsd` carries the control and
-data planes — `api`, `db`, `seaweedfs`, `relay`, `cloudflared` and the worker.
-`mcsd-servers` carries the Minecraft server containers, which run operator- and
-community-supplied JARs, plugins and mods. The `worker` is the only service on
-both, because it has to be: it dials `api:50051` and `api:8000` on one side and
-resolves container names for its RCON and relay game dials on the other. A
-Minecraft container therefore cannot reach the API, the database or the object
-store at all. It keeps outbound internet (Mojang online-mode authentication and
-plugin/mod downloads need it), and it can still reach the *other* Minecraft
-containers on `mcsd-servers` — see
-[`../app/SECURITY.md`](../app/SECURITY.md) Section 6 for what that boundary
-does and does not cover.
+data planes — `api`, `db`, `seaweedfs`, the two one-shots, `relay`, `cloudflared`
+and the worker. `mcsd-servers` carries the Minecraft server containers, which run
+operator- and community-supplied JARs, plugins and mods. The `worker` is the only
+service on both, because it has to be: it dials `api:50051` and `api:8000` on one
+side and resolves container names for its RCON and relay game dials on the other.
+
+Over the docker networks, a Minecraft container reaches none of the API, database
+or object-store ports (enumerated by probe from a booted server —
+[`../app/SECURITY.md`](../app/SECURITY.md) Section 6). Two things that split does
+**not** cover, both of which an operator controls: a port **published to the
+host** on a non-loopback interface stays reachable from `mcsd-servers` through
+the bridge gateway, so `API_HTTP_BIND_IP=0.0.0.0` re-opens `api:8000` to every
+Minecraft container (Section 8); and a server that was **already running** when
+you upgraded stays on `mcsd` until it is restarted (Section 9). A Minecraft
+container also keeps outbound internet — Mojang online-mode authentication and
+plugin/mod downloads need it — and can still reach the *other* Minecraft
+containers. `SECURITY.md` Section 6 states the full residual, including what
+`mcsd` still carries unauthenticated.
 
 ### CPU priority for game-server containers
 
@@ -786,9 +793,10 @@ MCD_API_METRICS__ENABLED=true
 
 The port is deliberately **not** in the `api` service's `ports:` list, so the
 bind happens inside the container's own network namespace and the endpoint
-exists only on the compose network. Scrape it from a service on that network
-(`http://api:9090/metrics`) — a Prometheus container you add to `compose.yaml`,
-for example; the repo ships no scraper.
+exists only on the `mcsd` network — not on `mcsd-servers`, where the Minecraft
+containers run. Scrape it from a service on `mcsd` (`http://api:9090/metrics`) —
+a Prometheus container you add to `compose.yaml`, for example; the repo ships no
+scraper.
 
 Leave `MCD_API_METRICS__HOST` at its `0.0.0.0` default here. Narrowing it to
 loopback makes the endpoint unscrapeable by any sibling container and protects
@@ -1031,16 +1039,26 @@ container was replaced, so the existing stamp still describes what is running.
 > #2590).** `compose.yaml` now declares a second pinned network,
 > `mcsd-servers`, attaches `worker` to both it and `mcsd`, and points
 > `MCD_WORKER_DRIVER_CONTAINER_NETWORK` at it, so newly started MC containers no
-> longer sit on the control-plane network. The stock upgrade needs **no action**:
-> `docker compose up -d` creates the network and recreates `worker`; MC
-> containers already running stay on `mcsd` and remain reachable (the worker is
-> on both), and each one lands on `mcsd-servers` at its next start. **React if
-> your compose file is customised**: an override that redefines the `worker`
-> service's `networks:` list, or a second stack that renames the pinned network
-> (as `scripts/compose.relay-e2e.yaml` does), must now name **both** networks —
-> listing only `default` silently strands the worker without container-name DNS
-> and every RCON dial fails. Anything you deliberately attached to `mcsd` to talk
-> to a Minecraft container needs moving to `mcsd-servers`.
+> longer sit on the control-plane network.
+>
+> **Restart every running server to get the mitigation.** `docker compose up -d`
+> creates the network and recreates `worker`. A Minecraft container that was
+> already running is **not** moved: it stays attached to `mcsd` and keeps the
+> full pre-upgrade reach — measured after a real upgrade,
+> `grpcurl -plaintext seaweedfs:18333 list` still answered from one. Each server
+> lands on `mcsd-servers` only at its next start, so until you cycle them the
+> segmentation is not in effect for them. Nothing breaks in the meantime — the
+> dual-homed worker still resolves them by name, so the upgrade itself is
+> non-disruptive — but "non-disruptive" and "mitigated" are different states, and
+> `up -d` alone only gives you the first.
+>
+> **React if your compose file is customised**: an override that redefines the
+> `worker` service's `networks:` list, or a second stack that renames the pinned
+> network (as `scripts/compose.relay-e2e.yaml` does), must now name **both**
+> networks — listing only `default` silently strands the worker without
+> container-name DNS and every RCON dial fails. Anything you deliberately
+> attached to `mcsd` to talk to a Minecraft container needs moving to
+> `mcsd-servers`.
 
 > **Upgrade note — the API port now binds to loopback by default (issue
 > #1609).** `compose.yaml` now publishes the API HTTP port on `127.0.0.1`

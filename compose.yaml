@@ -95,8 +95,28 @@ services:
     # identities file is written from .env at startup so the access/secret keys
     # live only in .env (matching the db-password posture) and never in the image
     # or a committed config. The bucket is auto-created by SeaweedFS on first PUT,
-    # so no init job is needed. Only the S3 port (8333) is reachable on the compose
-    # network; master/volume/filer stay internal.
+    # so no init job is needed.
+    #
+    # WHAT THIS BINDS, and who can reach it. `netstat -lntp` inside this container
+    # with the entrypoint flags below (4.40, enumerated 2026-08-02, issues #2599 /
+    # #2616) shows NINE TCP listeners, not one:
+    #
+    #   8333   S3 gateway (access/secret keys from .env)
+    #   8888   filer HTTP        9333   master HTTP     8080   volume HTTP
+    #   8181   Iceberg REST     18333   S3 gRPC        18080  volume gRPC
+    #  18888   filer gRPC       19333   master gRPC
+    #
+    # Only 8333 takes the S3 credentials. The filer, master and volume ports serve
+    # the same bytes with NO authentication, and 18333 answers gRPC reflection
+    # uncredentialed (`SeaweedS3IamCache`, `SeaweedS3LifecycleInternal`). So every
+    # member of the `mcsd` network below is effectively an object-store admin over
+    # every tenant's data. None of these ports is published to the host.
+    #
+    # What keeps that off attacker-controlled code is the TOPOLOGY, not this
+    # service's configuration: the Minecraft server containers run third-party
+    # plugins and are attached to `mcsd-servers`, a different network (issue
+    # #2590). Do not attach anything that runs untrusted code to `mcsd`.
+    # Authenticating these ports is tracked separately (#2599, #2616).
     entrypoint:
       - sh
       - -c
@@ -351,9 +371,21 @@ services:
     # (mcsd), and resolves each MC container's name for its RCON and relay game
     # dials on `servers` (mcsd-servers). Listing networks explicitly opts this
     # service out of the implicit default-only attachment, so both must appear.
+    #
+    # gw_priority pins which endpoint provides the worker's DEFAULT ROUTE. With
+    # two attachments Docker picks one, and the choice is not a documented
+    # contract -- it currently lands on `default` because of endpoint ordering,
+    # which a rename of either network could silently flip. It has to be
+    # `default`: everything the worker sends off-subnet (a cross-host api or
+    # relay) would otherwise egress through the bridge that hostile MC containers
+    # sit on, where they hold CAP_NET_RAW and can spoof (SECURITY.md Section 6).
+    # Verified 2026-08-02: default route via 172.19.0.1, the mcsd gateway.
+    # Needs Engine 28+ / Compose 2.36+; older versions reject the key outright
+    # rather than ignoring it, so a failure here is loud.
     networks:
-      - default
-      - servers
+      default:
+        gw_priority: 100
+      servers: {}
     # init: true injects Docker's tini as PID 1 so it reaps zombie grandchildren
     # (e.g. processes re-parented from Forge installer forks) that exec.Cmd.Wait
     # cannot reap because the worker itself runs as PID 1 without an init.
@@ -455,10 +487,14 @@ networks:
   # the container-name DNS its RCON dial needs — the default bridge does not
   # (issue #218).
   #
-  # `default` (mcsd) is the control/data plane: api, db, seaweedfs, relay,
-  # cloudflared and the worker. Nothing running third-party code is attached to
-  # it, which is what makes "reachable only on the compose network" an actual
-  # statement about who can reach a service (docs/app/SECURITY.md).
+  # `default` (mcsd) carries every first-party service: api, db, seaweedfs,
+  # migrate, seaweedfs-lifecycle, relay, cloudflared and the worker. First-party
+  # is not the same as authenticated — most of what binds here takes no
+  # credential (see the seaweedfs block above: nine ports, one of them gated),
+  # so membership of `mcsd` is itself the privilege. What this PR changes is
+  # only WHO is a member: the containers running third-party plugin code moved
+  # to `servers` below (issue #2590). `relay` and `cloudflared` remain, and both
+  # terminate internet traffic, so a compromise of either lands on `mcsd`.
   # CAUTION: renaming the default network recreates every service container on the
   # next `docker compose up` (the old default network is replaced).
   default:

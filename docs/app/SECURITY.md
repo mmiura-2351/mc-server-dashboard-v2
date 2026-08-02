@@ -13,9 +13,9 @@
 >
 > **Scope.** Authentication-hardening behaviour, plus
 > [Section 6](#6-minecraft-server-container-trust-model), which records what a
-> Minecraft server container is trusted to do — the one deployment-level trust
-> boundary the rest of the documentation leans on when it calls something
-> "reachable only on the compose network". The tunable thresholds and
+> Minecraft server container is trusted to do, which of the two docker networks
+> each service is attached to, and what was measured reachable from where. The
+> tunable thresholds and
 > defaults are owned by [`CONFIGURATION.md`](CONFIGURATION.md) Section 7 and are
 > referenced, not duplicated, here. Token issuance/verification (FR-AUTH-2) and
 > password hashing (FR-AUTH-3) are separate concerns owned by the `TokenService`
@@ -373,16 +373,19 @@ arrives, the operator did not write that code and cannot audit it, and the
 system creates those containers on purpose — so this is a designed-in untrusted
 workload, not an accident.
 
-That makes any claim of the form "X is safe because it is only reachable on the
-compose network" meaningless unless the network in question excludes them.
+This is why phrasing matters here. A claim of the form "X is only reachable on
+the compose network" describes a *network*, and says nothing on its own about
+who is on it. Statements in this repository about reachability should name the
+network, enumerate the ports, and say how and when that was established —
+rather than assert that something is safe.
 
-### The boundary
+### The two networks
 
-`compose.yaml` therefore ships **two** user-defined networks (issue #2590):
+`compose.yaml` ships **two** user-defined networks (issue #2590):
 
-| Network | Members | Trust |
+| Network | Members | What runs there |
 |---|---|---|
-| `mcsd` | `api`, `db`, `seaweedfs`, `relay`, `cloudflared`, `worker` | first-party services only |
+| `mcsd` | `api`, `db`, `seaweedfs`, `migrate`, `seaweedfs-lifecycle`, `relay`, `cloudflared`, `worker` | first-party services only. **First-party is not authenticated** — see the residual below |
 | `mcsd-servers` | the Minecraft server containers, `worker` | untrusted third-party code |
 
 `worker` is the only service on both, and it has to be: it dials `api:50051`
@@ -391,15 +394,36 @@ each MC container's name for its RCON and relay game dials on `mcsd-servers`. It
 binds no listening socket on either network — both of its sessions are outbound
 dials — so being adjacent to it grants no service to talk to.
 
-From an MC container, every control-plane and data-plane path is now
-unreachable: `api:8000`, `api:50051`, `db:5432`, and every SeaweedFS port
-(the S3 gateway *and* the filer). This holds at layer 3, not merely at name
-resolution — a plugin that hardcodes the control-plane subnet's addresses gets
-the same result as one that resolves `api`.
+### What an MC container can reach
 
-When a document elsewhere says a listener is "reachable only on the compose
-network", it means **`mcsd`** specifically. On `mcsd` that is a real statement
-about who can connect; it would not have been one before this split.
+Enumerated 2026-08-02 by TCP connect from inside a **booted** Minecraft server
+container on `mcsd-servers`, by service name and by raw control-plane IP, with a
+positive control from a container on `mcsd` confirming each target was live:
+
+| Target | From `mcsd` (control) | From `mcsd-servers` |
+|---|---|---|
+| `seaweedfs` `8333` S3, `8888` filer, `9333` master, `8080` volume, `8181` Iceberg REST, `18333` S3 gRPC, `18080` volume gRPC, `18888` filer gRPC, `19333` master gRPC | all open | all blocked |
+| `api` `8000`, `api` `50051` | open | blocked |
+| `db` `5432` | open | blocked |
+| `cloudflared` `20241` | open | blocked |
+| `grpcurl -plaintext seaweedfs:18333 list` | lists `SeaweedS3IamCache`, `SeaweedS3LifecycleInternal` | dial fails |
+
+Blocked, not refused: the packets are dropped between bridges, so this holds by
+raw IP as well as by name — a plugin that hardcodes the control-plane subnet
+gets the same result as one that resolves `api`.
+
+**This covers docker-network paths only.** A port **published to the host** on a
+non-loopback interface is reachable from `mcsd-servers` through the bridge
+gateway (`172.17.0.1`, each bridge's own gateway address, or the host's LAN
+address), because Docker DNATs published ports from every interface. The shipped
+default publishes the API on `127.0.0.1` (`API_HTTP_BIND_IP`), which is refused
+from both networks — but `API_HTTP_BIND_IP=0.0.0.0` and
+`API_HTTP_BIND_IP=<lan-ip>` are documented, supported configurations
+([`../dev/DEPLOYMENT.md`](../dev/DEPLOYMENT.md) Section 8), and either one
+re-opens `api:8000` to every Minecraft container on the host. Segmentation
+removes the docker-network path; it does not remove host-published ports. If you
+publish the API off loopback, put a firewall rule in front of it or accept that
+plugins can reach it.
 
 ### What this deliberately does not close
 
@@ -423,9 +447,35 @@ security model, and the following remain true:
   default capability set, and the worker holds the Docker socket. Container-level
   hardening — dropping capabilities, non-root execution, TLS on the control and
   data planes — is defence in depth underneath this boundary and is tracked
-  separately (issue #2600), as is authenticating the SeaweedFS filer (issue
-  #2599). Neither is a substitute for the other: hardening is a checklist where
-  every item must land, segmentation removes the class in one topology change.
+  separately (issue #2600). Neither is a substitute for the other: hardening is a
+  checklist where every item must land, segmentation removes the class in one
+  topology change.
+- **`mcsd` itself is not hardened — only its membership changed.** Everything on
+  it still has unauthenticated read, write and delete over **every tenant's**
+  worlds, snapshots and JARs: the SeaweedFS filer (`8888`), master (`9333`) and
+  volume (`8080`) ports take no credential, and the S3 gRPC port (`18333`) serves
+  reflection uncredentialed, handing out `SeaweedS3IamCache` and
+  `SeaweedS3LifecycleInternal`. Only the S3 gateway (`8333`) checks the keys.
+  Membership of `mcsd` is therefore equivalent to object-store admin. Closing
+  that is issues #2599 and #2616; until one lands, treat "first-party" in the
+  table above as a statement about *who is attached*, not about what an attached
+  process would have to prove.
+- **Two members of `mcsd` terminate internet traffic.** `relay` accepts arbitrary
+  player connections (`25565`, `25665`, `19132-19231/udp`, `25675/udp`) and
+  `cloudflared` terminates a public tunnel. Compromising either puts an attacker
+  exactly where the Minecraft containers were just removed from, with the
+  unauthenticated storage surface above in reach. Segmentation raised the bar for
+  a hostile *plugin*; it did not raise it for a hostile *packet* arriving at the
+  relay.
+- **Host-published ports bypass the split entirely.** See the note at the end of
+  "What an MC container can reach": publishing the API off loopback puts it back
+  within reach of every Minecraft container on the host.
+- **The split applies at a server's next start, not at upgrade.** A Minecraft
+  container that was already running when the operator upgraded stays attached to
+  `mcsd` and keeps its full pre-upgrade reach until it is restarted — measured
+  after a real upgrade. The reachability table above describes a server started
+  on the current topology. See [`../dev/DEPLOYMENT.md`](../dev/DEPLOYMENT.md)
+  Section 9.
 - **The server's own working directory.** Everything bind-mounted into an MC
   container — its world, its `server.properties`, its RCON password — is
   readable and writable by the code running there. That is inherent to running
