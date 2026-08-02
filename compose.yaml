@@ -28,8 +28,10 @@
 # see docs/dev/DEPLOYMENT.md "Opting back to the fs backend".
 #
 # Secrets and host-specific values come from .env (see .env.example). MC server
-# containers are NOT compose services: the worker creates them at runtime.
-# See docs/dev/DEPLOYMENT.md.
+# containers are NOT compose services: the worker creates them at runtime, on
+# their own `mcsd-servers` network — they run untrusted third-party code and are
+# kept off the control plane (see the `networks:` block at the bottom, issue
+# #2590). See docs/dev/DEPLOYMENT.md.
 
 services:
   db:
@@ -322,13 +324,17 @@ services:
       # Set MCD_WORKER_GAME_BIND_IP=127.0.0.1 in .env when the relay is enabled
       # (relay path: Worker dials its own loopback, no inbound game-port range needed).
       MCD_WORKER_DRIVER_CONTAINER_GAME_BIND_IP: "${MCD_WORKER_GAME_BIND_IP:-0.0.0.0}"
-      # Attach the MC containers the worker creates to the compose network (pinned
-      # to "mcsd" below) so RCON is reached over the docker network at the
-      # container's name, never the host loopback. Inside this containerized worker
-      # the host loopback is the worker's own namespace, so the historical
+      # Attach the MC containers the worker creates to the dedicated servers
+      # network (pinned to "mcsd-servers" below), NOT to the control-plane "mcsd"
+      # network the api/db/seaweedfs sit on (issue #2590): those containers run
+      # operator- and community-supplied JARs, plugins and mods, so they are
+      # untrusted workloads and must not share a network with the services that
+      # hold every tenant's data. RCON is still reached over the docker network at
+      # the container's name, never the host loopback. Inside this containerized
+      # worker the host loopback is the worker's own namespace, so the historical
       # loopback-published RCON is unreachable (issue #218). With this set the
       # worker also DROPS the host RCON publication: RCON never leaves the network.
-      MCD_WORKER_DRIVER_CONTAINER_NETWORK: mcsd
+      MCD_WORKER_DRIVER_CONTAINER_NETWORK: mcsd-servers
     # The Docker socket is how the container driver creates sibling MC containers.
     # The worker runs as root (worker/Dockerfile), so it reads the socket
     # regardless of group ownership.
@@ -340,6 +346,14 @@ services:
       # paths. Identical paths make the worker's in-container path a valid host
       # path. The worker-id under it also survives container recreation this way.
       - ${MCSD_SCRATCH_DIR}:${MCSD_SCRATCH_DIR}
+    # The ONLY dual-homed service (issue #2590), and it has to be: it dials
+    # api:50051 (control plane) and api:8000 (data-plane transfers) on `default`
+    # (mcsd), and resolves each MC container's name for its RCON and relay game
+    # dials on `servers` (mcsd-servers). Listing networks explicitly opts this
+    # service out of the implicit default-only attachment, so both must appear.
+    networks:
+      - default
+      - servers
     # init: true injects Docker's tini as PID 1 so it reaps zombie grandchildren
     # (e.g. processes re-parented from Forge installer forks) that exec.Cmd.Wait
     # cannot reap because the worker itself runs as PID 1 without an init.
@@ -435,11 +449,26 @@ volumes:
   seaweedfs-data:
 
 networks:
-  # Pin the compose default network's name so the worker can attach the sibling
-  # MC containers it creates (via the Docker socket) to the SAME user-defined
-  # network and reach their RCON by container name (issue #218). User-defined
-  # networks provide container-name DNS; the default bridge does not.
+  # Two user-defined networks split by trust (issue #2590). Both names are pinned
+  # because the worker attaches the sibling MC containers it creates (via the
+  # Docker socket) to a network by NAME, and only a user-defined network provides
+  # the container-name DNS its RCON dial needs — the default bridge does not
+  # (issue #218).
+  #
+  # `default` (mcsd) is the control/data plane: api, db, seaweedfs, relay,
+  # cloudflared and the worker. Nothing running third-party code is attached to
+  # it, which is what makes "reachable only on the compose network" an actual
+  # statement about who can reach a service (docs/app/SECURITY.md).
   # CAUTION: renaming the default network recreates every service container on the
   # next `docker compose up` (the old default network is replaced).
   default:
     name: mcsd
+  # `servers` (mcsd-servers) holds the Minecraft server containers the worker
+  # creates, plus the worker itself. Those containers run operator- and
+  # community-supplied JARs, plugins and mods — code the operator did not write
+  # and cannot audit — so this is the untrusted side of the split.
+  # Deliberately NOT `internal: true`: MC servers need outbound internet for
+  # Mojang online-mode authentication and plugin/mod downloads. What segmentation
+  # removes is the lateral reach into the control plane, not egress.
+  servers:
+    name: mcsd-servers

@@ -16,11 +16,24 @@ app plus the gRPC control-plane server. `worker` is the execution agent: it dial
 the API's control plane, and in this deployment it runs the **container driver
 only** — it creates each Minecraft server as a sibling container via the host
 Docker daemon, mounting the server's working directory and publishing its game
-port. The worker attaches every MC container to the pinned compose network
-(`mcsd`) and reaches each server's RCON by container name over that network, so
-**RCON never leaves the docker network** (the host RCON publication is dropped;
-see Section 7). The `migrate` service is a one-shot that applies the database
-schema before `api` starts.
+port. The worker attaches every MC container to **`mcsd-servers`**, a second
+pinned network kept separate from the control-plane network `mcsd`, and reaches
+each server's RCON by container name over it, so **RCON never leaves the docker
+network** (the host RCON publication is dropped; see Section 7). The `migrate`
+service is a one-shot that applies the database schema before `api` starts.
+
+**Two networks, split by trust (issue #2590).** `mcsd` carries the control and
+data planes — `api`, `db`, `seaweedfs`, `relay`, `cloudflared` and the worker.
+`mcsd-servers` carries the Minecraft server containers, which run operator- and
+community-supplied JARs, plugins and mods. The `worker` is the only service on
+both, because it has to be: it dials `api:50051` and `api:8000` on one side and
+resolves container names for its RCON and relay game dials on the other. A
+Minecraft container therefore cannot reach the API, the database or the object
+store at all. It keeps outbound internet (Mojang online-mode authentication and
+plugin/mod downloads need it), and it can still reach the *other* Minecraft
+containers on `mcsd-servers` — see
+[`../app/SECURITY.md`](../app/SECURITY.md) Section 6 for what that boundary
+does and does not cover.
 
 ### CPU priority for game-server containers
 
@@ -89,12 +102,13 @@ default) and unused after the fs opt-out — see
 [Section 5](#5-storage-backend-object-on-seaweedfs-default).
 
 `MCD_API_SERVER__PUBLIC_BASE_URL` is not in the table above — compose
-defaults it to `http://api:8000`, reachable only on the compose network — but
-it is mandatory to set in `.env` for any real deployment: player-facing links
-(e.g. resource-pack download URLs) are rendered from this value, so leaving
-the compose default renders those links unreachable outside the compose
-network. Set it to this deployment's externally reachable origin (see
-[Cloudflare Tunnel](#cloudflare-tunnel-recommended) below for a worked
+defaults it to `http://api:8000`, which resolves only on the control-plane
+network `mcsd` (not on `mcsd-servers`, where the Minecraft containers run, and
+not off-host) — but it is mandatory to set in `.env` for any real deployment:
+player-facing links (e.g. resource-pack download URLs) are rendered from this
+value, so leaving the compose default renders those links unreachable to every
+browser and game client. Set it to this deployment's externally reachable origin
+(see [Cloudflare Tunnel](#cloudflare-tunnel-recommended) below for a worked
 example).
 
 The scratch directory must exist on the host before the first `up` so the bind
@@ -631,17 +645,18 @@ The **RCON port** is the worker's control channel and is never exposed off-host.
 Its handling depends on `driver.container.network` (env
 `MCD_WORKER_DRIVER_CONTAINER_NETWORK`):
 
-- **Set** (this `compose.yaml`, value `mcsd`): the worker attaches each MC
-  container to that user-defined network and dials RCON at the container's name
-  over the network. The host RCON publication is **dropped** — RCON never leaves
-  the docker network. This is required for the containerized worker, whose own
-  loopback is not the host loopback where a published RCON port would land
-  (issue #218). The compose default network's name is pinned to `mcsd` so the
-  worker (a compose service) and the sibling MC containers it creates share the
-  same network with container-name DNS. The network **must be user-defined**
-  (a `docker network create` network, as the pinned `mcsd` is): the default
-  `bridge` has no container-name DNS, so pointing this at `bridge` lets the
-  attach succeed but the RCON dial silently fails.
+- **Set** (this `compose.yaml`, value `mcsd-servers`): the worker attaches each
+  MC container to that user-defined network and dials RCON at the container's
+  name over the network. The host RCON publication is **dropped** — RCON never
+  leaves the docker network. This is required for the containerized worker, whose
+  own loopback is not the host loopback where a published RCON port would land
+  (issue #218). `mcsd-servers` is pinned as a second network, separate from the
+  control-plane `mcsd`, and the `worker` service is attached to both so it shares
+  container-name DNS with the MC containers it creates while still reaching
+  `api:50051` / `api:8000` (issue #2590). The network **must be user-defined**
+  (a `docker network create` network, as the pinned `mcsd-servers` is): the
+  default `bridge` has no container-name DNS, so pointing this at `bridge` lets
+  the attach succeed but the RCON dial silently fails.
 - **Unset** (bare-metal worker): RCON is published to the host loopback
   (`127.0.0.1`) and dialed there, the historical behavior.
 
@@ -808,9 +823,15 @@ of them (`MCD_API_METRICS__PORT` / `MCD_RELAY_METRICS_LISTEN`) in that topology.
 
 The in-compose deployment runs the control plane in plaintext on the private
 compose network: `api` sets `MCD_API_CONTROL__TLS__INSECURE=true` and `worker`
-sets `MCD_WORKER_API_TLS_INSECURE=true`. This is acceptable only because the
-gRPC control listener is not published to the host and the traffic stays on the
-internal Docker network.
+sets `MCD_WORKER_API_TLS_INSECURE=true`. This rests on two conditions, both of
+which have to keep holding: the gRPC control listener is not published to the
+host, and the traffic stays on `mcsd`, whose only members are first-party
+services. The Minecraft containers — the one place third-party code runs — are
+on `mcsd-servers` and cannot reach `mcsd` at all (issue #2590,
+[`../app/SECURITY.md`](../app/SECURITY.md) Section 6). Attaching anything that
+runs untrusted code to `mcsd`, or moving the MC containers back onto it,
+invalidates the plaintext posture: the worker credential rides this channel in
+the clear.
 
 A **multi-host** worker (a worker on a different machine dialing this API over a
 real network) must not use the insecure posture, and the gRPC control plane must
@@ -1005,6 +1026,21 @@ container was replaced, so the existing stamp still describes what is running.
 > [`../app/RELAY.md`](../app/RELAY.md) Section 13 and
 > [`../app/BEDROCK_TUNNEL.md`](../app/BEDROCK_TUNNEL.md) Section 9 for the
 > `bedrock.enabled` key, and "Bedrock (Geyser)" below for turning Bedrock on.
+
+> **Upgrade note — Minecraft containers move to their own network (issue
+> #2590).** `compose.yaml` now declares a second pinned network,
+> `mcsd-servers`, attaches `worker` to both it and `mcsd`, and points
+> `MCD_WORKER_DRIVER_CONTAINER_NETWORK` at it, so newly started MC containers no
+> longer sit on the control-plane network. The stock upgrade needs **no action**:
+> `docker compose up -d` creates the network and recreates `worker`; MC
+> containers already running stay on `mcsd` and remain reachable (the worker is
+> on both), and each one lands on `mcsd-servers` at its next start. **React if
+> your compose file is customised**: an override that redefines the `worker`
+> service's `networks:` list, or a second stack that renames the pinned network
+> (as `scripts/compose.relay-e2e.yaml` does), must now name **both** networks —
+> listing only `default` silently strands the worker without container-name DNS
+> and every RCON dial fails. Anything you deliberately attached to `mcsd` to talk
+> to a Minecraft container needs moving to `mcsd-servers`.
 
 > **Upgrade note — the API port now binds to loopback by default (issue
 > #1609).** `compose.yaml` now publishes the API HTTP port on `127.0.0.1`
@@ -1493,8 +1529,8 @@ relay control surface is active.
 | 25665 | TCP | inbound | Worker dial-back (TLS tunnel) |
 | 25675 | UDP | inbound | Worker's Bedrock QUIC tunnel dial-back (epic #1540, `bedrock.tunnel_listen`) — only when the Bedrock gate is on |
 | 19132-19231 | UDP | inbound | Bedrock player connections (`ports.bedrock_range_start..end` default window) — only when the Bedrock gate is on |
-| 50051 | TCP | internal (compose network only) | gRPC control plane (not published) |
-| 9090 | TCP | internal (compose network only) | API Prometheus exposition (not published; off unless `MCD_API_METRICS__ENABLED=true` — see Section 8) |
+| 50051 | TCP | internal (the `mcsd` network only — not `mcsd-servers`) | gRPC control plane (not published) |
+| 9090 | TCP | internal (the `mcsd` network only — not `mcsd-servers`) | API Prometheus exposition (not published; off unless `MCD_API_METRICS__ENABLED=true` — see Section 8) |
 | 9090 | TCP | relay-local (loopback) | Relay Prometheus exposition + `/healthz` (off unless `MCD_RELAY_METRICS_ENABLED=true`; binds `127.0.0.1` by default, RELAY.md Section 13). Same port number as the API's, above: distinct containers under compose, but a collision if both run natively on this host |
 
 ### Bedrock (Geyser)

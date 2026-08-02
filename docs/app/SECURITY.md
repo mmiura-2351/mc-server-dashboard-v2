@@ -11,7 +11,11 @@
 > [`DATABASE.md`](DATABASE.md), and [`CONFIGURATION.md`](CONFIGURATION.md); where
 > they disagree, the requirements win and this document is wrong.
 >
-> **Scope.** Authentication-hardening behaviour only. The tunable thresholds and
+> **Scope.** Authentication-hardening behaviour, plus
+> [Section 6](#6-minecraft-server-container-trust-model), which records what a
+> Minecraft server container is trusted to do — the one deployment-level trust
+> boundary the rest of the documentation leans on when it calls something
+> "reachable only on the compose network". The tunable thresholds and
 > defaults are owned by [`CONFIGURATION.md`](CONFIGURATION.md) Section 7 and are
 > referenced, not duplicated, here. Token issuance/verification (FR-AUTH-2) and
 > password hashing (FR-AUTH-3) are separate concerns owned by the `TokenService`
@@ -27,7 +31,8 @@
 3. [Lockout-state home (decision)](#3-lockout-state-home-decision)
 4. [Trusted-proxy IP resolution](#4-trusted-proxy-ip-resolution)
 5. [Observability endpoints](#5-observability-endpoints)
-6. [Related documents](#6-related-documents)
+6. [Minecraft server container trust model](#6-minecraft-server-container-trust-model)
+7. [Related documents](#7-related-documents)
 
 ---
 
@@ -332,7 +337,7 @@ any scraper. What keeps it private differs by deployment:
 
 - **Compose.** The metrics port is not in the `api` service's `ports:` list, so
   the bind happens inside the container's network namespace and the endpoint
-  exists only on the compose network; scrape it from a service on that network
+  exists only on the `mcsd` network; scrape it from a service on that network
   (`http://api:9090/metrics`). Keep `metrics.host` at `0.0.0.0` here — narrowing
   it to loopback only makes the endpoint unscrapeable, and buys nothing, because
   the missing `ports:` entry is what confines it. `API_HTTP_BIND_IP` does not
@@ -340,16 +345,16 @@ any scraper. What keeps it private differs by deployment:
   entry to interpolate into. The two things not to do are add one, and map a
   second Cloudflare public hostname to the port.
 
-  **The `mcsd` network is not a trust boundary.** The Worker attaches every MC
-  server container it creates to that same user-defined network, by design (it
-  reaches their RCON by container name; `compose.yaml` `networks.default.name`,
-  issue #218). Those containers run operator- and community-supplied JARs,
-  plugins and mods, so "only the compose network" means "and anything running
-  inside a managed Minecraft server". Enabling the listener makes the exposition
-  readable by an uploaded plugin. That is not a regression — the same containers
-  already reach `api:8000`, which is strictly more — and it is why the listener
-  is off by default rather than on. Weigh it before enabling on a deployment
-  whose community can upload plugins.
+  **What "only the `mcsd` network" is worth.** It used to be worth little: the
+  Worker attached every MC server container it creates to that same network, so
+  the phrase meant "and anything running inside a managed Minecraft server". Since
+  issue #2590 those containers sit on a separate `mcsd-servers` network and cannot
+  reach `mcsd` at all, so an uploaded plugin can no longer read the exposition —
+  see [Section 6](#6-minecraft-server-container-trust-model), which also states
+  what that split does not cover. What remains on `mcsd` is first-party only:
+  `db`, `seaweedfs`, `relay`, `cloudflared` and the Worker. The `cloudflared`
+  caveat above is the live one — it would route a second public hostname to
+  `api:9090` as readily as to `api:8000`.
 - **Non-compose runs** — bare metal, systemd, or any process started outside
   compose (DEPLOYMENT.md Section 8). Here `0.0.0.0` genuinely is a **second
   network-reachable port**, and a reverse proxy in front of the API's HTTP port
@@ -359,7 +364,77 @@ any scraper. What keeps it private differs by deployment:
 
 ---
 
-## 6. Related documents
+## 6. Minecraft server container trust model
+
+The worker creates each Minecraft server as a sibling Docker container running
+operator- and community-supplied JARs, plugins and mods. **Treat every MC
+container as hostile.** Plugin ecosystems are exactly where third-party code
+arrives, the operator did not write that code and cannot audit it, and the
+system creates those containers on purpose — so this is a designed-in untrusted
+workload, not an accident.
+
+That makes any claim of the form "X is safe because it is only reachable on the
+compose network" meaningless unless the network in question excludes them.
+
+### The boundary
+
+`compose.yaml` therefore ships **two** user-defined networks (issue #2590):
+
+| Network | Members | Trust |
+|---|---|---|
+| `mcsd` | `api`, `db`, `seaweedfs`, `relay`, `cloudflared`, `worker` | first-party services only |
+| `mcsd-servers` | the Minecraft server containers, `worker` | untrusted third-party code |
+
+`worker` is the only service on both, and it has to be: it dials `api:50051`
+(control plane) and `api:8000` (data-plane transfers) on `mcsd`, and it resolves
+each MC container's name for its RCON and relay game dials on `mcsd-servers`. It
+binds no listening socket on either network — both of its sessions are outbound
+dials — so being adjacent to it grants no service to talk to.
+
+From an MC container, every control-plane and data-plane path is now
+unreachable: `api:8000`, `api:50051`, `db:5432`, and every SeaweedFS port
+(the S3 gateway *and* the filer). This holds at layer 3, not merely at name
+resolution — a plugin that hardcodes the control-plane subnet's addresses gets
+the same result as one that resolves `api`.
+
+When a document elsewhere says a listener is "reachable only on the compose
+network", it means **`mcsd`** specifically. On `mcsd` that is a real statement
+about who can connect; it would not have been one before this split.
+
+### What this deliberately does not close
+
+Segmentation removes a class of lateral reach. It is not a complete container
+security model, and the following remain true:
+
+- **MC container to MC container.** Inter-container communication is on within
+  `mcsd-servers` and the containers keep `CAP_NET_RAW`, so one server's hostile
+  plugin can reach another server's RCON port and game port, and can spoof
+  traffic on that segment. Impact is bounded to other Minecraft servers rather
+  than the object store or the worker credential, but it is not zero. Closing it
+  needs a per-server network, or `enable_icc=false` on `mcsd-servers` plus
+  dropping `NET_RAW`; both are out of scope for the segmentation change and are
+  tracked with the rest of the container hardening (issue #2600).
+- **Outbound internet is unrestricted, on purpose.** `mcsd-servers` is a normal
+  bridge, not `internal: true`: Minecraft servers need egress for Mojang
+  online-mode authentication and for plugin and mod downloads. A hostile plugin
+  can therefore still exfiltrate anything it can read inside its own container
+  and fetch a second stage.
+- **The host, not the network.** MC containers currently run as root with the
+  default capability set, and the worker holds the Docker socket. Container-level
+  hardening — dropping capabilities, non-root execution, TLS on the control and
+  data planes — is defence in depth underneath this boundary and is tracked
+  separately (issue #2600), as is authenticating the SeaweedFS filer (issue
+  #2599). Neither is a substitute for the other: hardening is a checklist where
+  every item must land, segmentation removes the class in one topology change.
+- **The server's own working directory.** Everything bind-mounted into an MC
+  container — its world, its `server.properties`, its RCON password — is
+  readable and writable by the code running there. That is inherent to running
+  the server at all; the boundary protects *other* tenants' data, not the
+  contents of the container that hosts the hostile plugin.
+
+---
+
+## 7. Related documents
 
 | Doc | Covers |
 |---|---|
