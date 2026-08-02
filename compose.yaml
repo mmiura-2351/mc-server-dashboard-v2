@@ -93,8 +93,17 @@ services:
     # identities file is written from .env at startup so the access/secret keys
     # live only in .env (matching the db-password posture) and never in the image
     # or a committed config. The bucket is auto-created by SeaweedFS on first PUT,
-    # so no init job is needed. Only the S3 port (8333) is reachable on the compose
-    # network; master/volume/filer stay internal.
+    # so no init job is needed.
+    #
+    # Reachability (issue #2599): every port a component BINDS is reachable from the
+    # whole compose network, and that network includes the Minecraft server containers
+    # the worker creates -- which run community-supplied JARs, plugins and mods. Only
+    # the S3 gateway is credential-gated (the identities file above); the filer (8888),
+    # master (9333) and volume (8080) HTTP APIs authenticate nothing, and served
+    # unauthenticated cross-tenant reads, writes and deletes over the same bytes until
+    # `-ip=127.0.0.1` below. This comment previously claimed master/volume/filer "stay
+    # internal" -- they were internal to the HOST, not to the compose network, and
+    # believing that claim is why the exposure went unexamined.
     entrypoint:
       - sh
       - -c
@@ -122,7 +131,20 @@ services:
         # write-heavy CopyObject/multipart snapshot churn favors more frequent,
         # smaller compactions (docs/dev/DEPLOYMENT.md Section 5, "Vacuum tuning and
         # manual recovery").
-        exec weed server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json -master.garbageThreshold=0.1
+        #
+        # -ip=127.0.0.1 keeps the unauthenticated filer/master/volume listeners off the
+        # compose network (issue #2599, see the reachability note above). -ip sets both
+        # the bind address AND the address each component advertises to the others, and
+        # both halves are load-bearing: binding alone leaves them advertising the
+        # container IP, so the S3 gateway resolves a volume to 172.x:8080 and every
+        # PutObject dies with "connection refused". All four components live in this one
+        # container, so loopback is a complete path between them -- `weed shell`
+        # (DEPLOYMENT.md Section 5) reaches the master over it too, since it runs via
+        # `docker compose exec` from inside.
+        # -s3.ip.bind=0.0.0.0 then re-opens the ONE credential-gated door: the api and
+        # the seaweedfs-lifecycle one-shot dial it at seaweedfs:8333.
+        exec weed server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json -master.garbageThreshold=0.1 \
+          -ip=127.0.0.1 -s3.ip.bind=0.0.0.0
     environment:
       # `:-` (empty default), NOT `:?`: compose interpolates a service's env even
       # when its profile is inactive, so a `:?` here would break the fs opt-out
