@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { Popover } from "./Popover.tsx";
+import { clampPopoverOffset, Popover } from "./Popover.tsx";
 
 function renderPopover() {
   return render(
@@ -70,6 +70,31 @@ describe("Popover", () => {
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByText("panel content")).not.toBeInTheDocument();
     expect(trigger).toHaveFocus();
+  });
+
+  it("keeps the panel within the viewport when the trigger sits near the right edge", () => {
+    // Regression (#2239 review): at ~375px the trigger sits at x≈289 and a
+    // 160px left-aligned panel overflowed the right edge by 74px. The offset
+    // shifts it left so its right edge lands within the 8px margin.
+    const offset = clampPopoverOffset(289, 160, 375, 8);
+    const panelLeft = 289 + offset;
+    expect(panelLeft).toBeGreaterThanOrEqual(8);
+    expect(panelLeft + 160).toBeLessThanOrEqual(375 - 8);
+  });
+
+  it("leaves a left-wrapped trigger's panel un-shifted", () => {
+    // At ~360px the bar wraps and the trigger moves to x≈79, where the panel
+    // already fits; a naive right-alignment would push it off the LEFT edge.
+    expect(clampPopoverOffset(79, 160, 360, 8)).toBe(0);
+  });
+
+  it("does not shift a panel that already fits with room to spare", () => {
+    expect(clampPopoverOffset(20, 160, 1200, 8)).toBe(0);
+  });
+
+  it("degrades to the left margin when the panel is wider than the viewport", () => {
+    const offset = clampPopoverOffset(100, 160, 170, 8);
+    expect(100 + offset).toBe(8);
   });
 
   it("passes a close callback to a render-prop child", () => {
