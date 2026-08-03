@@ -185,3 +185,49 @@ def test_no_undeclared_match_sites() -> None:
         "added or removed: update API_MATCH_SITES (so it is checked against the "
         "contract table) and this count."
     )
+
+
+def test_invalid_state_has_a_single_meaning_on_the_start_and_hydrate_paths() -> None:
+    """Pin INVALID_STATE to one meaning on the reserve()-gated paths (issue #2496).
+
+    ``StartServer.__call__`` and ``redispatch_start`` read an ``INVALID_STATE``
+    outcome on a start (or a hydrate) as "the instance is already running" and
+    CONVERGE ``observed=running`` off it, keeping the assignment and the running
+    intent (#213/#773/#774). ``redispatch_start``'s arm is deliberately NOT gated
+    on whether the start leg was actually reached, so ``_launch`` returning the
+    outcome of a REFUSED HYDRATE lands in that same arm. That is sound only while
+    ``INVALID_STATE`` carries exactly ONE meaning on both reserve()-gated kinds:
+    ``instance_running`` (an instance is demonstrably live). A refused hydrate then
+    still proves the instance is up, whichever leg produced the code.
+
+    Nothing but this pin and a reader's vigilance enforces that uniqueness. If a
+    second precondition were later routed to ``invalid_state`` on ``StartServer``
+    or ``HydrateTrigger`` -- the mistake ``reserve()`` originally made by answering
+    it for a pending failed-stop orphan as well, which #2467 spent four PRs
+    unwinding and #2476 fixed by moving that case to ``busy`` -- the convergence arm
+    would silently manufacture a false ``observed=running`` from a leg that never
+    started a process, reopening the #2467 wedge. Assert the uniqueness against the
+    contract table so adding a second meaning turns THIS red first, instead of the
+    wedge reappearing in production. The already-running row itself is load-bearing
+    (the convergence exists for it), so its removal reddens this too.
+    """
+
+    rows = json.loads(_CONTRACT_PATH.read_text())["rows"]
+    for kind in ("StartServer", "HydrateTrigger"):
+        invalid_state_preconditions = {
+            row["precondition"]
+            for row in rows
+            if row["kind"] == kind and row["code"] == "invalid_state"
+        }
+        assert invalid_state_preconditions == {"instance_running"}, (
+            f"the API converges observed=running off an INVALID_STATE {kind} outcome "
+            f"(issue #2496), which stays sound only while 'already running' "
+            f"(instance_running) is its ONLY meaning on this reserve()-gated kind. "
+            f"The contract table now has {kind} answering invalid_state for "
+            f"{sorted(invalid_state_preconditions)}. A second meaning here lets a leg "
+            f"that never started a process manufacture a false observed=running (the "
+            f"#2467 wedge): route the new precondition to BUSY as the failed-stop "
+            f"orphan was (#2476), or gate the convergence arm on start-leg evidence "
+            f"(issue #2496 option 1) -- do not let it converge. If instance_running "
+            f"itself is missing, the load-bearing convergence lost its backing row."
+        )

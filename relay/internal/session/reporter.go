@@ -44,6 +44,18 @@ const DefaultFlushTimeout = 10 * time.Second
 // oldest session records rather than the whole process. RELAY.md Section 6.
 const MaxBufferedEvents = 10_000
 
+// maxEventsPerReportRPC bounds the number of session events (starts + ends)
+// carried by a single ReportSessions RPC. A post-outage flush can hold up to
+// 2×MaxBufferedEvents events; sent as one RPC that is ~2.5 MB proto-encoded
+// today — uncomfortably close to gRPC's default 4 MB server max-recv-message
+// size, and a permanently undeliverable poison batch if MaxBufferedEvents is
+// ever raised or the event fields grow (issue #1785). Chunking keeps each RPC
+// small: a SessionStart (the larger event) is ~200 bytes encoded, so 3000
+// events is ≈0.6 MB — roughly a 6× margin under the 4 MB limit even if fields
+// grow. Starts are drained before ends across chunk boundaries (see flush), so
+// a session's Start never lands in a later RPC than its End.
+const maxEventsPerReportRPC = 3000
+
 // reportClient is the subset of the API client the reporter needs. Narrowed to
 // an interface so tests inject a fake.
 type reportClient interface {
@@ -227,12 +239,13 @@ func (r *Reporter) flush(ctx context.Context) {
 	r.pendEnds = nil
 	r.mu.Unlock()
 
-	// Bound the RPC so a black-holed API connection cannot wedge the Run
+	// Bound the flush so a black-holed API connection cannot wedge the Run
 	// goroutine (issue #1719); a timeout falls through to the error-restore
-	// path below like any other failure.
+	// path below like any other failure. The deadline covers the whole flush,
+	// including every chunk RPC.
 	rctx, cancel := context.WithTimeout(ctx, r.flushTimeout)
 	defer cancel()
-	if err := r.client.ReportSessions(rctx, starts, ends); err != nil {
+	if err := r.reportChunked(rctx, starts, ends); err != nil {
 		r.metrics.SessionFlushFailure()
 		r.logger.Warn("session report failed; will retry", "error", err, "starts", len(starts), "ends", len(ends))
 		r.mu.Lock()
@@ -263,6 +276,29 @@ func (r *Reporter) flush(ctx context.Context) {
 		}
 		r.mu.Unlock()
 	}
+}
+
+// reportChunked delivers starts+ends in one or more ReportSessions RPCs, each
+// bounded to maxEventsPerReportRPC events, so a large post-outage flush cannot
+// build a single RPC that exceeds gRPC's 4 MB max-recv limit and become a
+// poison batch (issue #1785). All starts are drained before any ends, and each
+// RPC keeps its starts ahead of its ends (the apiclient preserves intra-RPC
+// order), so a session's Start is never in a later RPC than its End. It stops
+// at the first failing RPC and returns that error; any chunks already delivered
+// are re-sent when the caller restores and retries the batch, which is safe
+// because ReportSessions is idempotent server-side (RELAY.md Section 6). A
+// flush at/under the chunk size sends exactly one RPC.
+func (r *Reporter) reportChunked(ctx context.Context, starts []apiclient.SessionStart, ends []apiclient.SessionEnd) error {
+	for len(starts) > 0 || len(ends) > 0 {
+		nStarts := min(len(starts), maxEventsPerReportRPC)
+		nEnds := min(len(ends), maxEventsPerReportRPC-nStarts)
+		if err := r.client.ReportSessions(ctx, starts[:nStarts], ends[:nEnds]); err != nil {
+			return err
+		}
+		starts = starts[nStarts:]
+		ends = ends[nEnds:]
+	}
+	return nil
 }
 
 // capOldestStarts bounds the pending start slice to MaxBufferedEvents and

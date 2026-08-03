@@ -3541,6 +3541,54 @@ async def test_place_and_start_failed_start_outcome_keeps_assignment() -> None:
     assert cp.decremented == []
 
 
+async def test_place_and_start_invalid_state_outcome_keeps_assignment_and_raises() -> (
+    None
+):
+    # place_and_start has NO INVALID_STATE convergence arm (verified during #2476,
+    # pinned here per issue #2496): unlike __call__ and redispatch_start it never
+    # reads an INVALID_STATE start outcome as "already running" and manufactures
+    # observed=running. It treats it as a plain post-dispatch failure -- keep the
+    # assignment for a same-Worker redispatch (#101) and RAISE. Convergence to
+    # observed=running is deferred to the NEXT reconcile tick's redispatch_start
+    # path; adding a convergence arm here would spread the #2467 wedge class to a
+    # third site. Drive the outcome off the contract row so the pin tracks the code
+    # the Worker really answers for an already-running instance.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.UNKNOWN,
+            worker_id=None,
+        )
+    )
+    cp = FakeControlPlane(
+        place_to=WorkerId(worker),
+        outcomes={
+            "start": CommandOutcome(
+                status=worker_status("StartServer", "instance_running"),
+                message="already running",
+            )
+        },
+    )
+    with pytest.raises(CommandDispatchError):
+        await _start_server(uow, cp).place_and_start(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+    stored = uow.servers.by_id[ServerId(server_id)]
+    # No convergence arm: observed stays as-read (never manufactured to running),
+    # the assignment sticks, and the running intent stands.
+    assert stored.observed_state is ObservedState.UNKNOWN
+    assert stored.desired_state is DesiredState.RUNNING
+    assert stored.assigned_worker_id == WorkerId(worker)
+    assert cp.decremented == []
+    # The start command was reached (hydrate then start), so the assignment must
+    # stick for the same-Worker redispatch rather than unassign.
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
+
+
 async def test_redispatch_start_replays_launch_without_increment() -> None:
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
