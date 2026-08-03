@@ -49,11 +49,13 @@ class _FakeClock(Clock):
 def _seed_member(
     uow: FakeAuthzUnitOfWork, user_id: UserId, community_id: CommunityId
 ) -> None:
-    uow.memberships.by_id[MembershipId.new()] = Membership(
-        id=MembershipId.new(),
-        user_id=user_id,
-        community_id=community_id,
-        created_at=_NOW,
+    uow.memberships.seed(
+        Membership(
+            id=MembershipId.new(),
+            user_id=user_id,
+            community_id=community_id,
+            created_at=_NOW,
+        )
     )
 
 

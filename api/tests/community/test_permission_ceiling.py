@@ -131,7 +131,7 @@ async def test_update_role_adding_code_outside_ceiling_raises() -> None:
         updated_at=_NOW,
         is_preset=False,
     )
-    uow.roles.by_id[role.id] = role
+    uow.roles.seed(role)
     with pytest.raises(PermissionCeilingExceededError) as exc_info:
         await UpdateRole(uow=uow, clock=_FakeClock())(
             community_id=community,
@@ -160,7 +160,7 @@ async def test_update_role_removing_codes_succeeds_even_if_actor_lacks_them() ->
         updated_at=_NOW,
         is_preset=False,
     )
-    uow.roles.by_id[role.id] = role
+    uow.roles.seed(role)
     # Remove community:delete (actor does not hold it, but that is OK).
     updated = await UpdateRole(uow=uow, clock=_FakeClock())(
         community_id=community,
@@ -190,7 +190,7 @@ async def test_update_role_within_ceiling_succeeds() -> None:
         updated_at=_NOW,
         is_preset=False,
     )
-    uow.roles.by_id[role.id] = role
+    uow.roles.seed(role)
     updated = await UpdateRole(uow=uow, clock=_FakeClock())(
         community_id=community,
         role_id=role.id,
@@ -296,7 +296,7 @@ async def test_assign_role_with_permissions_outside_actor_ceiling_raises() -> No
         updated_at=_NOW,
         is_preset=False,
     )
-    uow.roles.by_id[role.id] = role
+    uow.roles.seed(role)
     with pytest.raises(PermissionCeilingExceededError) as exc_info:
         await AssignRole(uow=uow)(
             community_id=community,
@@ -323,7 +323,7 @@ async def test_assign_owner_role_by_role_manage_only_actor_is_rejected() -> None
         updated_at=_NOW,
         is_preset=True,
     )
-    uow.roles.by_id[owner_role.id] = owner_role
+    uow.roles.seed(owner_role)
     with pytest.raises(PermissionCeilingExceededError):
         await AssignRole(uow=uow)(
             community_id=community,
@@ -353,7 +353,7 @@ async def test_assign_role_within_ceiling_succeeds() -> None:
         updated_at=_NOW,
         is_preset=False,
     )
-    uow.roles.by_id[role.id] = role
+    uow.roles.seed(role)
     await AssignRole(uow=uow)(
         community_id=community,
         user_id=target,
