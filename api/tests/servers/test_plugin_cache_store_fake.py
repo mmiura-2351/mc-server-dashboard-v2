@@ -2,10 +2,10 @@
 
 Since #2527 this double is the single description of the ``PluginCacheStore``
 Port for every test under ``tests/servers/``, so a property that drifts away
-from :class:`ObjectPluginCacheStore` drifts everywhere at once. The sibling
-file for the resource-pack store (``test_resource_pack_store_fake.py``, #2330)
-is the shape this follows: assert against the fake the same things
-``test_plugin_cache_store.py`` asserts against the adapter.
+from :class:`ObjectPluginCacheStore` drifts everywhere at once. This asserts
+against the fake the same things ``test_plugin_cache_store.py`` asserts against
+the adapter — the resource-pack store took the next step and folded both sides
+into one parametrized contract (``test_resource_pack_store_contract.py``, #2351).
 
 Pinned here:
 
