@@ -565,7 +565,11 @@ class StartServer:
         return server
 
     async def redispatch_start(
-        self, *, community_id: CommunityId, server_id: ServerId
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        store_generation: int | None = None,
     ) -> Server:
         """Re-send the start to an assigned, desired-running server.
 
@@ -633,12 +637,21 @@ class StartServer:
         # atomically with the working set it names, so there is no lag window in which
         # a Worker holding the prior generation could satisfy held >= store and
         # WRONGLY skip a hydrate it needs — a #696-class world rollback.
+        #
+        # ``store_generation`` may be supplied by the reconciler, which already read
+        # it to pick this redispatch's grace (issue #999). Reusing that exact value —
+        # rather than reading a second time — keeps the grace decision and this
+        # skip-hydrate decision from being made from different generations, which a
+        # store bump between two reads could otherwise cause: hydrating under the
+        # short held-start grace granted for a command-only start (issue #2482). When
+        # called without it (the direct/non-reconciler path), read it here as before.
         held_generation = self.control_plane.held_generation(
             worker_id=worker_id, server_id=server_id
         )
-        store_generation = await self.store_generation.current_generation(
-            community_id=community_id, server_id=server_id
-        )
+        if store_generation is None:
+            store_generation = await self.store_generation.current_generation(
+                community_id=community_id, server_id=server_id
+            )
         skip_hydrate = (
             held_generation is not None and held_generation >= store_generation
         )
