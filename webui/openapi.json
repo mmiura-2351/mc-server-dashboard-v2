@@ -11118,8 +11118,54 @@
     },
     "/api/public/resource-packs/{resource_pack_id}/{filename}": {
       "get": {
-        "description": "Public download endpoint for Minecraft clients (no auth, issue #1176).\n\nValidates that ``filename`` matches the stored filename (404 otherwise). The\nresponse declares the pack's exact size as ``Content-Length``, which the game\nclient shows as download progress.",
+        "description": "Public download endpoint for Minecraft clients (no auth, issue #1176).\n\nValidates that ``filename`` matches the stored filename (404 otherwise). The\nresponse declares the pack's exact size as ``Content-Length``, which the game\nclient shows as download progress.\n\n**Probe** (issue #2632): a ``HEAD`` answers with the ``GET``'s status and\nheaders and no body, so a resumable-download client \u2014 this is the\nunauthenticated URL a Minecraft client fetches at join time, and it declares a\n``Content-Length``, so it has a real reason to probe first \u2014 learns the size,\nfrom the store's size probe below, without starting a transfer. The route\noffers no ``Accept-Ranges``, so the probe reports the size but not resumption.\nThe ``200`` carries the same ``public, max-age=3600, immutable`` the ``GET``\ndeclares, and the size-probe ``404`` its ``no-store``, so an edge (the one URL\na shared cache demonstrably stores, issues #2588 / #2589) does not cache a\nprobe differently from the download.",
         "operationId": "public_download_resource_pack_api_public_resource_packs__resource_pack_id___filename__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "resource_pack_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Resource Pack Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "filename",
+            "required": true,
+            "schema": {
+              "title": "Filename",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Public Download Resource Pack"
+      },
+      "head": {
+        "description": "Public download endpoint for Minecraft clients (no auth, issue #1176).\n\nValidates that ``filename`` matches the stored filename (404 otherwise). The\nresponse declares the pack's exact size as ``Content-Length``, which the game\nclient shows as download progress.\n\n**Probe** (issue #2632): a ``HEAD`` answers with the ``GET``'s status and\nheaders and no body, so a resumable-download client \u2014 this is the\nunauthenticated URL a Minecraft client fetches at join time, and it declares a\n``Content-Length``, so it has a real reason to probe first \u2014 learns the size,\nfrom the store's size probe below, without starting a transfer. The route\noffers no ``Accept-Ranges``, so the probe reports the size but not resumption.\nThe ``200`` carries the same ``public, max-age=3600, immutable`` the ``GET``\ndeclares, and the size-probe ``404`` its ``no-store``, so an edge (the one URL\na shared cache demonstrably stores, issues #2588 / #2589) does not cache a\nprobe differently from the download.",
+        "operationId": "public_download_resource_pack_api_public_resource_packs__resource_pack_id___filename__head",
         "parameters": [
           {
             "in": "path",

@@ -691,6 +691,97 @@ class TestPublicDownloadEndpoint:
         assert resp.json()["reason"] == "storage_unavailable"
 
 
+class TestPublicDownloadHeadProbe:
+    # The unauthenticated URL a Minecraft client fetches at join time (issue
+    # #2632). It declares a ``Content-Length``, so a resumable-download client has
+    # a real reason to probe it with HEAD first; the route registered GET-only, so
+    # that probe used to get a 405. No credential gates this route, so status
+    # coverage is by the use case's outcome, not by a caller identity.
+
+    # Present on the GET; accept-ranges / etag are absent — this route declares a
+    # length but offers no resumption.
+    _HEADERS_PRESENT = (
+        "content-type",
+        "content-length",
+        "content-disposition",
+        "cache-control",
+    )
+    _HEADERS_ABSENT = ("accept-ranges", "etag")
+
+    def test_head_answers_the_gets_headers(self) -> None:
+        p = _pack(filename="my-pack.zip")
+        url = f"/api/public/resource-packs/{p.id.value}/my-pack.zip"
+        app = _app(download=_FakeDownloadUseCase(pack=p, data=b"publiczip"))
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            served = client.get(url)
+            probed = client.head(url)
+        assert probed.status_code == served.status_code == 200
+        # A HEAD carries the GET's headers and none of its bytes.
+        assert probed.content == b""
+        for name in self._HEADERS_PRESENT:
+            assert probed.headers[name] == served.headers[name], name
+        # The 200 carries the edge-cacheable directive the GET declares, so a
+        # shared cache (issues #2588 / #2589) does not store the probe differently
+        # from the download.
+        assert probed.headers["cache-control"] == "public, max-age=3600, immutable"
+        # The non-vacuous parity form (issue #2632): the header is absent on both
+        # sides, not two ``.get()`` calls that both return None.
+        for name in self._HEADERS_ABSENT:
+            assert name not in probed.headers, name
+            assert name not in served.headers, name
+
+    def test_head_does_not_open_the_blob(self) -> None:
+        # The load-bearing half of the probe (issue #2632): the size is answered
+        # from the store's HEAD already done in the use case, and the probe returns
+        # before ``started()`` performs the body GET. ``open_error`` fires on the
+        # stream's FIRST iteration, so a probe that never opens it stays 200; move
+        # the probe past ``started()`` and this reddens to 404.
+        p = _pack(filename="my-pack.zip")
+        uc = _FakeDownloadUseCase(
+            pack=p, open_error=ResourcePackNotFoundError("gone"), declared=1024
+        )
+        app = _app(download=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.head(f"/api/public/resource-packs/{p.id.value}/my-pack.zip")
+        assert resp.status_code == 200
+        assert resp.content == b""
+        assert int(resp.headers["content-length"]) == 1024
+
+    def test_head_404_carries_the_gets_no_store(self) -> None:
+        # The size-probe 404 declares its own directive, not the 200's (issue
+        # #2562); the probe must not be cached differently from the download it
+        # probes, so its 404 carries the same ``no-store`` (issue #2632).
+        uc = _FakeDownloadUseCase(error=ResourcePackNotFoundError("nope"))
+        app = _app(download=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            url = f"/api/public/resource-packs/{uuid.uuid4()}/any.zip"
+            served = client.get(url)
+            probed = client.head(url)
+        assert probed.status_code == served.status_code == 404
+        assert probed.headers["cache-control"] == served.headers["cache-control"]
+        assert probed.headers["cache-control"] == "no-store"
+
+    @pytest.mark.parametrize(
+        ("error", "expected"),
+        [
+            (None, 200),
+            (ResourcePackNotFoundError("nope"), 404),
+            (ResourcePackStorageUnavailableError("down"), 503),
+        ],
+    )
+    def test_head_is_answered_exactly_like_the_get(
+        self, error: Exception | None, expected: int
+    ) -> None:
+        # The probe is error-mapped exactly like the download it probes.
+        p = _pack(filename="my-pack.zip")
+        url = f"/api/public/resource-packs/{p.id.value}/my-pack.zip"
+        with TestClient(_app(download=_FakeDownloadUseCase(pack=p, error=error))) as c:  # type: ignore[arg-type]
+            probed = c.head(url)
+        with TestClient(_app(download=_FakeDownloadUseCase(pack=p, error=error))) as c:  # type: ignore[arg-type]
+            served = c.get(url)
+        assert probed.status_code == served.status_code == expected
+
+
 # ---------------------------------------------------------------------------
 # Assignment endpoint tests (issue #1177)
 # ---------------------------------------------------------------------------
