@@ -49,7 +49,10 @@ the whole of what remains to guard.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
+
+_logger = logging.getLogger(__name__)
 
 
 class ShortResponseBodyError(Exception):
@@ -117,6 +120,18 @@ async def counted(source: AsyncIterator[bytes], declared: int) -> AsyncIterator[
         total += len(chunk)
         yield chunk
     if total < declared:
+        # Starlette's BaseHTTPMiddleware captures this exception into app_exc and
+        # then sends the terminal empty-body message, on which h11 raises its own
+        # generic protocol error before ``raise app_exc`` is reached — so the
+        # exception is discarded and never reaches a log handler. Emit the
+        # attributable diagnosis here, at the point of failure, so both byte
+        # counts survive regardless of that propagation (issue #2385).
+        _logger.error(
+            "streaming response body short: streamed %d bytes, "
+            "declared Content-Length %d",
+            total,
+            declared,
+        )
         raise ShortResponseBodyError(
             f"streamed {total} bytes, declared Content-Length {declared}"
         )
