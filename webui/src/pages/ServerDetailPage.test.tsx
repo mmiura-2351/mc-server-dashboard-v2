@@ -1821,13 +1821,18 @@ describe("ServerDetailPage settings memory limit", () => {
     ).toBeInTheDocument();
 
     // Drive a real save so "blocks the save" is asserted, not assumed: the save
-    // button is disabled while the value is out of range, so patch never fires.
-    // The bare `patch not called` was vacuous — no save was attempted (#2597).
+    // button is disabled while the value is out of range, so clicking it is inert
+    // and patch never fires. The bare `patch not called` was vacuous — no save
+    // was attempted (#2597) — and a synchronous assert would also pass for the
+    // wrong reason: react-query runs the mutationFn in a microtask, so `act`
+    // below flushes it. With the disabled gate removed the click reaches the
+    // mutation and this reddens.
     const saveButton = screen.getByRole("button", {
       name: t("serverDetail.settings.save"),
     });
     expect(saveButton).toBeDisabled();
     fireEvent.click(saveButton);
+    await act(async () => {});
     expect(mockApi.patch).not.toHaveBeenCalled();
   });
 
