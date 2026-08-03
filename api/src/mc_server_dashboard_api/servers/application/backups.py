@@ -901,38 +901,67 @@ class DownloadBackup:
     the store, never from ``Backup.size_bytes`` — that column is nullable on
     legacy rows (#661), while the declared length must equal the streamed byte
     count exactly (issue #2312).
+
+    The backup row is resolved ONCE, up front, and carried to both operations
+    (issue #2456): :meth:`resolve` loads it while the status is still choosable,
+    and :meth:`archive_size` / :meth:`archive_stream` take the loaded row rather
+    than each re-reading it. Loading once cannot change what the client sees on a
+    hit or a miss: a backup's ``storage_ref`` never changes for the row's lifetime
+    (create / upload / restore all leave the archive immutable), and the only
+    concurrent mutation — a delete — removes the archive BEFORE the row
+    (archive-first, epic #649), so a delete racing the download is surfaced by the
+    stream's own store miss on its first iteration regardless of whether the row is
+    re-read (issue #2415). The moment that counts is therefore the single up-front
+    load, exactly as PR #2454 made the archive resolution happen once at the
+    status-choosable point.
     """
 
     uow: UnitOfWork
     backup_store: BackupArchiveStore
+
+    async def resolve(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        backup_id: BackupId,
+    ) -> Backup:
+        """Load the (community-scoped) backup row once, before any byte is served.
+
+        An unknown / cross-server backup is :class:`BackupNotFoundError` here — the
+        same miss the edge 404s — resolved before anything is on the wire. The
+        returned row carries the ``storage_ref`` both :meth:`archive_size` and
+        :meth:`archive_stream` read, so the download reads the metadata row exactly
+        once (issue #2456).
+        """
+
+        return await _load_backup(self.uow, community_id, server_id, backup_id)
 
     async def archive_size(
         self,
         *,
         community_id: CommunityId,
         server_id: ServerId,
-        backup_id: BackupId,
+        backup: Backup,
     ) -> int:
         """The stored archive's byte count — the whole representation's length."""
 
-        backup = await _load_backup(self.uow, community_id, server_id, backup_id)
         return await self.backup_store.size(
             community_id=community_id,
             server_id=server_id,
             storage_ref=backup.storage_ref,
         )
 
-    async def archive_stream(
+    def archive_stream(
         self,
         *,
         community_id: CommunityId,
         server_id: ServerId,
-        backup_id: BackupId,
+        backup: Backup,
         byte_range: tuple[int, int] | None = None,
     ) -> AsyncIterator[bytes]:
         """Open the archive's bytes, or the inclusive ``byte_range`` slice of them."""
 
-        backup = await _load_backup(self.uow, community_id, server_id, backup_id)
         return self.backup_store.open(
             community_id=community_id,
             server_id=server_id,
