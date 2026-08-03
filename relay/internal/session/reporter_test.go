@@ -19,10 +19,21 @@ import (
 )
 
 type fakeReportClient struct {
-	mu     sync.Mutex
-	starts []apiclient.SessionStart
-	ends   []apiclient.SessionEnd
-	failN  int // fail the next N calls
+	mu        sync.Mutex
+	starts    []apiclient.SessionStart
+	ends      []apiclient.SessionEnd
+	failN     int   // fail the next N calls
+	callSizes []int // events (starts+ends) per successful ReportSessions call
+	// eventLog is the flattened delivery order across all successful calls: each
+	// call contributes its starts (in order) then its ends (in order), matching
+	// the apiclient's on-wire ordering. Lets tests assert global Start-before-End
+	// ordering across chunk boundaries.
+	eventLog []loggedEvent
+}
+
+type loggedEvent struct {
+	id   string
+	kind string // "start" or "end"
 }
 
 func (f *fakeReportClient) ReportSessions(_ context.Context, starts []apiclient.SessionStart, ends []apiclient.SessionEnd) error {
@@ -31,6 +42,13 @@ func (f *fakeReportClient) ReportSessions(_ context.Context, starts []apiclient.
 	if f.failN > 0 {
 		f.failN--
 		return errors.New("transient")
+	}
+	f.callSizes = append(f.callSizes, len(starts)+len(ends))
+	for _, s := range starts {
+		f.eventLog = append(f.eventLog, loggedEvent{id: s.SessionID, kind: "start"})
+	}
+	for _, e := range ends {
+		f.eventLog = append(f.eventLog, loggedEvent{id: e.SessionID, kind: "end"})
 	}
 	f.starts = append(f.starts, starts...)
 	f.ends = append(f.ends, ends...)
@@ -85,6 +103,105 @@ func TestReporterFlushDeliversBatch(t *testing.T) {
 	starts, ends := fake.counts()
 	if starts != 1 || ends != 1 {
 		t.Errorf("delivered %d starts / %d ends, want 1/1", starts, ends)
+	}
+}
+
+// TestReporterFlushSingleRPCUnderChunkSize pins that a flush whose total event
+// count is at/under maxEventsPerReportRPC still goes out as exactly one RPC — no
+// regression to the pre-chunking single-RPC behavior for the common case.
+func TestReporterFlushSingleRPCUnderChunkSize(t *testing.T) {
+	fake := &fakeReportClient{}
+	r := NewReporter(fake, discardLogger(), nil, nil)
+	for i := 0; i < 100; i++ {
+		id := r.Start("srv", "amber", "1.2.3.4", "Steve", "", apiclient.SourceJava)
+		r.End(id)
+	}
+	// 200 events (100 starts + 100 ends), well under the chunk size.
+	r.flush(context.Background())
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.callSizes) != 1 {
+		t.Fatalf("flush under chunk size made %d RPCs, want 1 (%v)", len(fake.callSizes), fake.callSizes)
+	}
+	if fake.callSizes[0] != 200 {
+		t.Errorf("single RPC carried %d events, want 200", fake.callSizes[0])
+	}
+}
+
+// TestReporterFlushChunksLargeBatch pins that a flush larger than
+// maxEventsPerReportRPC is split into multiple RPCs, each within the bound, and
+// that every buffered event is still delivered exactly once.
+func TestReporterFlushChunksLargeBatch(t *testing.T) {
+	fake := &fakeReportClient{}
+	r := NewReporter(fake, discardLogger(), nil, nil)
+
+	const total = 2*maxEventsPerReportRPC + 500 // spans three chunks
+	for i := 0; i < total; i++ {
+		r.Start("srv", "amber", "1.2.3.4", "Steve", "", apiclient.SourceJava)
+	}
+	r.flush(context.Background())
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.callSizes) < 2 {
+		t.Fatalf("large flush made %d RPCs, want it chunked into >=2", len(fake.callSizes))
+	}
+	sum := 0
+	for i, n := range fake.callSizes {
+		if n > maxEventsPerReportRPC {
+			t.Errorf("RPC %d carried %d events, exceeds cap %d", i, n, maxEventsPerReportRPC)
+		}
+		sum += n
+	}
+	if sum != total {
+		t.Errorf("delivered %d events across chunks, want %d", sum, total)
+	}
+	if len(fake.starts) != total {
+		t.Errorf("delivered %d starts, want %d", len(fake.starts), total)
+	}
+}
+
+// TestReporterFlushPreservesStartBeforeEndAcrossChunks is the ordering pin: when
+// a flush carrying both starts and ends is split across chunk boundaries, every
+// Start must be delivered before every End (the invariant the apiclient
+// guarantees within a single RPC must hold across RPCs too), so a session's
+// Start never lands in a later RPC than its End.
+func TestReporterFlushPreservesStartBeforeEndAcrossChunks(t *testing.T) {
+	fake := &fakeReportClient{}
+	r := NewReporter(fake, discardLogger(), nil, nil)
+
+	// Enough start/end pairs that starts+ends exceeds the chunk size, forcing a
+	// chunk boundary between the starts and the ends.
+	const pairs = maxEventsPerReportRPC // 2*pairs = 2 chunks
+	ids := make([]string, pairs)
+	for i := 0; i < pairs; i++ {
+		ids[i] = r.Start("srv", "amber", "1.2.3.4", "Steve", "", apiclient.SourceJava)
+	}
+	for _, id := range ids {
+		r.End(id)
+	}
+	r.flush(context.Background())
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.callSizes) < 2 {
+		t.Fatalf("expected the flush to cross a chunk boundary, but made %d RPC(s)", len(fake.callSizes))
+	}
+	// The flattened delivery order must be all starts, then all ends.
+	lastStart, firstEnd := -1, len(fake.eventLog)
+	for i, ev := range fake.eventLog {
+		switch ev.kind {
+		case "start":
+			lastStart = i
+		case "end":
+			if i < firstEnd {
+				firstEnd = i
+			}
+		}
+	}
+	if lastStart >= firstEnd {
+		t.Errorf("End delivered before a Start: lastStart index %d >= firstEnd index %d", lastStart, firstEnd)
 	}
 }
 
