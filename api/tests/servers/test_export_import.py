@@ -860,6 +860,11 @@ async def test_import_plugins_takes_lifecycle_lock() -> None:
     dst_uow = FakeUnitOfWork()
     dst_store = FakeFileStore()
     lock = FakeLifecycleLock()
+    # One timeline for the lock and the plugin-row insert (issue #2546): the
+    # rows are re-created inside the hold so a concurrent PATCH's whole-entity
+    # write-back cannot clobber them (issue #1587). Asserting only
+    # [acquire, release] cannot see the insert land between them.
+    dst_uow.plugins.events = lock.events
     imp = ImportServer(
         create_server=_create_server(dst_uow, dst_store),
         file_store=dst_store,
@@ -872,4 +877,12 @@ async def test_import_plugins_takes_lifecycle_lock() -> None:
         content=archive,
     )
 
-    assert lock.events == [(server.id, "acquire"), (server.id, "release")]
+    # The plugin insert falls strictly between acquire and release: a mutation
+    # that ran the inserts outside the hold would still acquire/release and pass
+    # an endpoint-only assert.
+    ev = lock.events
+    assert (server.id, "add-plugin") in ev, ev
+    insert_at = ev.index((server.id, "add-plugin"))
+    assert (
+        ev.index((server.id, "acquire")) < insert_at < ev.index((server.id, "release"))
+    )
