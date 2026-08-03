@@ -374,10 +374,15 @@ on stale leftover scratch.
 That knowledge comes from `Register.held_servers` (Section 4.1) plus the two
 within-session events the API can *prove* advance the Worker's scratch:
 
-- A **successful hydrate** (issue #2477), recorded at the store generation read
-  immediately *before* the transfer. The data plane serves the generation current at
-  pull time, which the monotonic counter puts at or after that read, so the recorded
-  value can only understate what the Worker ends up holding.
+- A **successful hydrate**, recorded at the generation the Worker **declares** it
+  served in `CommandResult.held_generation` (issue #2500), stamped from its own marker
+  write at hydrate completion — the same on-disk fact the snapshot case below states.
+  For a Worker too old to declare the field the API falls back to the store generation
+  it read immediately *before* the transfer (issue #2477): the data plane serves the
+  generation current at pull time, which the monotonic counter puts at or after that
+  read, so that pre-read can only understate what the Worker ends up holding. The
+  declaration, taken at completion, cannot understate that way, so preferring it when
+  present and the pre-read otherwise records the greater of the two.
 - A **snapshot publish the Worker declared it retained** (issue #2481), recorded at
   the generation the Worker states in `CommandResult.held_generation`.
 
