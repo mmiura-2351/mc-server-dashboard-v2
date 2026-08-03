@@ -308,10 +308,17 @@ export function ServerFilesTab({
   server,
   communityId,
   can,
+  maxBulkDownloadBytes = MAX_DOWNLOAD_BYTES,
 }: {
   server: ServerResponse;
   communityId: string;
   can: Can;
+  /**
+   * Aggregate cap for a multi-file bulk download's running byte total. Injected
+   * only by tests so they can trip the guard on a few small blobs instead of
+   * allocating half a gigabyte (#2063); production always uses the default.
+   */
+  maxBulkDownloadBytes?: number;
 }) {
   const { showToast } = useToast();
   const onForbidden = useOnForbidden();
@@ -1224,6 +1231,7 @@ export function ServerFilesTab({
         communityId={communityId}
         serverId={serverId}
         canEdit={canEdit}
+        maxBulkDownloadBytes={maxBulkDownloadBytes}
         running={notAtRest}
         onChanged={refetchList}
         onError={onError}
@@ -2583,6 +2591,7 @@ function Toolbar({
   communityId,
   serverId,
   canEdit,
+  maxBulkDownloadBytes,
   running,
   onChanged,
   onError,
@@ -2597,6 +2606,7 @@ function Toolbar({
   communityId: string;
   serverId: string;
   canEdit: boolean;
+  maxBulkDownloadBytes: number;
   running: boolean;
   onChanged: () => void;
   onError: (error: unknown) => void;
@@ -2734,6 +2744,12 @@ function Toolbar({
     const files: Record<string, Uint8Array> = {};
     let done = 0;
     let failed = 0;
+    // The pre-check above prices directories at 0 (the listing has no real size
+    // for them), so a folder selection always passes it, and #2027's per-fetch
+    // cap only bounds each response individually. Sum the bytes actually
+    // buffered so N under-cap directories cannot together exhaust browser memory
+    // (#2063).
+    let fetchedBytes = 0;
     for (const path of paths) {
       setBulkProgress(t("files.bulk.download.progress", { done, total }));
       try {
@@ -2745,6 +2761,22 @@ function Toolbar({
           signal,
         );
         const buf = new Uint8Array(await blob.arrayBuffer());
+        fetchedBytes += buf.byteLength;
+        if (fetchedBytes > maxBulkDownloadBytes) {
+          // Stop before buffering the rest of the selection, and save nothing:
+          // a partial ZIP would be a silent surprise. Reuse the pre-check's
+          // too-large toast so an up-front rejection and a mid-fetch one read
+          // identically to the user.
+          showToast(
+            t("files.bulk.download.tooLarge", {
+              size: humanizeBytes(fetchedBytes),
+            }),
+            "error",
+          );
+          setBulkBusy(false);
+          setBulkProgress(null);
+          return;
+        }
         // Use full path as ZIP key to avoid collisions between files with the
         // same basename in different directories.
         files[zipKey(path)] = buf;
