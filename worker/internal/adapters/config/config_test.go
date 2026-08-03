@@ -242,6 +242,71 @@ func TestLoadAcceptsCAFileWithoutInsecure(t *testing.T) {
 	}
 }
 
+// mtlsBaseEnv returns a minimal valid worker env (TLS verified against a CA)
+// without either mTLS client-pair half set, so a test can add zero, one, or both
+// halves. validate() does not read the referenced files, so placeholder paths
+// are fine.
+func mtlsBaseEnv(t *testing.T) map[string]string {
+	t.Helper()
+	return map[string]string{
+		"MCD_WORKER_API_GRPC_ENDPOINT":       "api:50051",
+		"MCD_WORKER_API_CREDENTIAL":          "secret",
+		"MCD_WORKER_API_TLS_CA_FILE":         "/etc/ssl/ca.pem",
+		"MCD_WORKER_WORKER_SCRATCH_DIR":      t.TempDir(),
+		"MCD_WORKER_WORKER_DRIVERS":          "container",
+		"MCD_WORKER_DRIVER_CONTAINER_IMAGES": "21=eclipse-temurin:21-jre",
+	}
+}
+
+// TestLoadRejectsHalfMTLSClientPair pins the reject of a half-configured mTLS
+// client pair (issue #2661): exactly one of api.tls.client_cert_file /
+// api.tls.client_key_file set is a fatal validation error naming the missing
+// half — matching the "exactly one of ca_file/insecure" precedent. This flips
+// the behavior #1981 pinned as "silently ignored".
+func TestLoadRejectsHalfMTLSClientPair(t *testing.T) {
+	tests := []struct {
+		name      string
+		setKey    string // env key to set (the present half)
+		wantNamed string // the missing half the error must name
+	}{
+		{name: "cert without key", setKey: "MCD_WORKER_API_TLS_CLIENT_CERT_FILE", wantNamed: "api.tls.client_key_file"},
+		{name: "key without cert", setKey: "MCD_WORKER_API_TLS_CLIENT_KEY_FILE", wantNamed: "api.tls.client_cert_file"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := mtlsBaseEnv(t)
+			env[tc.setKey] = "/etc/ssl/half.pem"
+
+			_, err := Load("", mapEnv(env))
+			if err == nil {
+				t.Fatal("Load() with a half mTLS client pair: want error, got nil")
+			}
+			if !contains(err.Error(), tc.wantNamed) {
+				t.Errorf("error %q does not name the missing %q", err.Error(), tc.wantNamed)
+			}
+		})
+	}
+}
+
+// TestLoadAcceptsWholeOrNoMTLSClientPair pins the accept side of #2661: both
+// halves of the mTLS client pair set, or neither, passes validation.
+func TestLoadAcceptsWholeOrNoMTLSClientPair(t *testing.T) {
+	t.Run("both halves set", func(t *testing.T) {
+		env := mtlsBaseEnv(t)
+		env["MCD_WORKER_API_TLS_CLIENT_CERT_FILE"] = "/etc/ssl/client.pem"
+		env["MCD_WORKER_API_TLS_CLIENT_KEY_FILE"] = "/etc/ssl/client-key.pem"
+		if _, err := Load("", mapEnv(env)); err != nil {
+			t.Fatalf("Load() with a whole mTLS client pair: %v", err)
+		}
+	})
+
+	t.Run("neither half set", func(t *testing.T) {
+		if _, err := Load("", mapEnv(mtlsBaseEnv(t))); err != nil {
+			t.Fatalf("Load() with no mTLS client pair: %v", err)
+		}
+	})
+}
+
 func TestLoadContainerImagesFromFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "worker.toml")
