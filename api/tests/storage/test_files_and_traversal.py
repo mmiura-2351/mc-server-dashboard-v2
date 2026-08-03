@@ -1192,6 +1192,29 @@ async def test_over_long_source_on_a_mutation_is_a_miss(tmp_path: Path) -> None:
         await storage.rename_dir(community, server, rel, RelPath("moved"))
 
 
+async def test_retain_file_version_of_an_over_long_source_is_a_silent_no_op(
+    tmp_path: Path,
+) -> None:
+    """An over-long retain source names nothing to retain, so it is a no-op (#2433).
+
+    ``retain_file_version``'s contract already makes a missing file a no-op; an
+    over-long name is the same miss. It shares the ``_existing_file`` precheck the
+    other over-long SOURCES use, so it returns silently rather than raising the bare
+    ENAMETOOLONG ``Path.is_file`` throws (which would reach the edge as a 500). This
+    pins that no-op: against the pre-fix code the ``retain_file_version`` call raises
+    ENAMETOOLONG here instead of returning.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"DATA"})
+    rel = RelPath(_TOO_LONG)
+
+    # Returns silently (no raise) and captures nothing for the unnameable path.
+    await storage.retain_file_version(community, server, rel)
+    assert await storage.list_file_versions(community, server, rel) == []
+
+
 async def test_a_file_occupied_parent_on_a_mutation_is_a_conflict(
     tmp_path: Path,
 ) -> None:
