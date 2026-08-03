@@ -49,7 +49,7 @@ from mc_server_dashboard_api.servers.domain.catalog_provider import (
 from mc_server_dashboard_api.servers.domain.errors import (
     CatalogChecksumMismatchError,
     CatalogProjectNotFoundError,
-    CatalogUnavailableError,
+    CatalogUpstreamFailedError,
     PortAlreadyTakenError,
     PortRangeExhaustedError,
     ServerFilesUnsettledError,
@@ -277,7 +277,7 @@ def test_search_catalog_upstream_failure_is_502() -> None:
     app = _app(
         member=True,
         allow=True,
-        search=_FakeUseCase(error=CatalogUnavailableError("down")),
+        search=_FakeUseCase(error=CatalogUpstreamFailedError("down")),
     )
     client = next(_client(app))
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), "/search"), params={"q": "test"})
@@ -297,7 +297,7 @@ def test_gateway_and_dependency_catalog_reasons_differ() -> None:
     app = _app(
         member=True,
         allow=True,
-        search=_FakeUseCase(error=CatalogUnavailableError("down")),
+        search=_FakeUseCase(error=CatalogUpstreamFailedError("down")),
         create=_FakeUseCase(error=VersionCatalogUnavailableError("source down")),
     )
     client = next(_client(app))
@@ -414,7 +414,7 @@ def test_install_from_catalog_upstream_failure_is_502() -> None:
     app = _app(
         member=True,
         allow=True,
-        install=_FakeUseCase(error=CatalogUnavailableError("down")),
+        install=_FakeUseCase(error=CatalogUpstreamFailedError("down")),
     )
     client = next(_client(app))
     resp = client.post(

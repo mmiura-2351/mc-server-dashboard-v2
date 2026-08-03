@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from urllib.parse import urljoin, urlparse
 
-from mc_server_dashboard_api.servers.domain.errors import CatalogUnavailableError
+from mc_server_dashboard_api.servers.domain.errors import CatalogUpstreamFailedError
 from mc_server_dashboard_api.versions.adapters.ssrf_guard import (
     BlockedHostError,
     PinnedRequest,
@@ -28,7 +28,7 @@ async def pin_download_url(
 
     Checks HTTPS scheme and hostname allowlist before delegating to
     :func:`assert_url_allowed` for DNS resolution and IP pinning. Maps
-    :class:`BlockedHostError` to :class:`CatalogUnavailableError`.
+    :class:`BlockedHostError` to :class:`CatalogUpstreamFailedError`.
 
     *redirect* controls the error message prefix (``"redirect to ..."`` vs
     ``"download URL ..."``).
@@ -36,18 +36,18 @@ async def pin_download_url(
     parsed = urlparse(url)
     if parsed.scheme != "https":
         prefix = "redirect to non-HTTPS" if redirect else "download URL must use HTTPS"
-        raise CatalogUnavailableError(f"{prefix}: {url}")
+        raise CatalogUpstreamFailedError(f"{prefix}: {url}")
     if parsed.hostname not in allowed_hosts:
         prefix = (
             "redirect to disallowed host"
             if redirect
             else "download URL host not allowed"
         )
-        raise CatalogUnavailableError(f"{prefix}: {parsed.hostname}")
+        raise CatalogUpstreamFailedError(f"{prefix}: {parsed.hostname}")
     try:
         return await assert_url_allowed(url)
     except BlockedHostError as exc:
-        raise CatalogUnavailableError(str(exc)) from exc
+        raise CatalogUpstreamFailedError(str(exc)) from exc
 
 
 def next_logical_url(location: str, current_logical_url: str) -> str:
