@@ -354,7 +354,7 @@ uncapped. An attacker could flood that traffic instead for identical cost, so a
 `0x05`/`0x07`-specific cap would not lower the worst case.
 
 All of this is hygiene, not volumetric DDoS protection, matching the posture
-RELAY.md already documents for the Java listeners (Section 16 there).
+RELAY.md already documents for the Java listeners (Section 11 there).
 
 The **QUIC tunnel listener itself** carries a separate per-IP cap on
 concurrent unauthenticated handshake windows
