@@ -21,6 +21,12 @@ side of the boundary after the call and shows the other side did not move.
 mutation goes one level in (``permissions.add(...)``): a shared set that claims a
 detachment it does not have reddens too. ``Community`` and ``Membership`` carry
 no mutable field, so a new entity is the full copy depth.
+
+Detachment is one half of a writer's fidelity; whether the row EXISTS at all is
+the other (#2557, extended here from the servers/identity fakes). An
+``UPDATE ... WHERE id = :id`` matches nothing on an absent id, so nothing is
+written and no row appears -- the fake must not conjure one, or a test can
+assert a state production never reaches.
 """
 
 from __future__ import annotations
@@ -105,6 +111,20 @@ async def test_community_update_stores_a_copy_the_caller_cannot_rewrite() -> Non
     stored = repo.by_id[community.id]
     community.name = CommunityName("after-the-write")
     assert stored.name == CommunityName("renamed")
+
+
+async def test_community_update_on_a_missing_row_is_a_no_op() -> None:
+    # ``SqlAlchemyCommunityRepository.update`` issues
+    # ``UPDATE community SET ... WHERE id = :id`` (adapters/repositories.py:183),
+    # which matches no row on an absent id: nothing is written and none is
+    # conjured. Keying the entity in regardless was an insert the adapter cannot
+    # perform (#2557).
+    repo = FakeCommunityRepository()
+    community = _community()
+
+    await repo.update(community)
+
+    assert repo.by_id == {}
 
 
 async def test_community_readers_hand_out_copies() -> None:
@@ -233,6 +253,20 @@ async def test_role_update_stores_a_copy_the_caller_cannot_rewrite() -> None:
     stored = repo.by_id[role.id]
     _rewrite_role(role)
     _assert_role_unchanged(stored)
+
+
+async def test_role_update_on_a_missing_row_is_a_no_op() -> None:
+    # ``SqlAlchemyRoleRepository.update`` issues
+    # ``UPDATE role SET ... WHERE id = :id`` (adapters/repositories.py:332),
+    # which matches no row on an absent id: nothing is written and none is
+    # conjured. Keying the entity in regardless was an insert the adapter cannot
+    # perform (#2557).
+    repo = FakeRoleRepository()
+    role = _role()
+
+    await repo.update(role)
+
+    assert repo.by_id == {}
 
 
 async def test_role_readers_hand_out_copies() -> None:
