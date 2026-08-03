@@ -905,9 +905,15 @@ Consequences worth stating:
   non-strict canonicalization leaves both literal, so step 2 sees nothing crossed
   and the open reports `ELOOP` / `ENAMETOOLONG`, which the read paths already fold
   into the miss (#2393/#2394).
-- **Mutations** apply the rule to their parent chain only; what a mutation does
-  with a **leaf** that is a link is a separate question (#2429), so a leaf link is
-  still resolved there.
+- **Mutations** apply the rule to their parent chain, and a symlink **dirent** (a
+  leaf link) supports exactly two operations — being listed and being deleted
+  (#2429). `delete_file` unlinks the link itself (working, dangling and looping
+  alike), capturing no version because a link has no readable content to retain;
+  every other mutation refuses it — `write_file`, a `rename` **source**, and
+  `make_dir` are `symlink_refused`, `delete_dir` misses (a link is never a
+  directory dirent), and `retain_file_version` is a no-op. So the mutation surface
+  matches the listing: the delete button acts on the dirent the browser shows, and
+  nothing writes through, moves, or destroys a link's target.
 - `path_exists` likewise applies it to the parent chain only: its leaf is described
   as itself, because a link occupies its name whatever it points at (#2426).
 - The fs realization compares the already-computed canonical path against the
