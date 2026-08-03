@@ -38,7 +38,7 @@ from mc_server_dashboard_api.servers.domain.catalog_provider import (
 )
 from mc_server_dashboard_api.servers.domain.errors import (
     CatalogProjectNotFoundError,
-    CatalogUnavailableError,
+    CatalogUpstreamFailedError,
     FileTooLargeError,
     wrap_shape_errors,
 )
@@ -205,15 +205,15 @@ class GeyserMcCatalog(CatalogProvider):
                                 )
                             chunks.append(chunk)
                         return b"".join(chunks)
-                raise CatalogUnavailableError("too many redirects")
-        except (FileTooLargeError, CatalogUnavailableError):
+                raise CatalogUpstreamFailedError("too many redirects")
+        except (FileTooLargeError, CatalogUpstreamFailedError):
             raise
         except httpx2.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 raise CatalogProjectNotFoundError(url) from exc
-            raise CatalogUnavailableError(str(exc)) from exc
+            raise CatalogUpstreamFailedError(str(exc)) from exc
         except httpx2.TransportError as exc:
-            raise CatalogUnavailableError(str(exc)) from exc
+            raise CatalogUpstreamFailedError(str(exc)) from exc
 
     # -- internal helpers --
 
@@ -300,15 +300,15 @@ class GeyserMcCatalog(CatalogProvider):
                         async for chunk in response.aiter_bytes():
                             total += len(chunk)
                             if total > _MAX_JSON_BYTES:
-                                raise CatalogUnavailableError(
+                                raise CatalogUpstreamFailedError(
                                     f"response too large: {total} bytes"
                                 )
                             chunks.append(chunk)
                         return json.loads(b"".join(chunks))
-                raise CatalogUnavailableError("too many redirects")
-        except (CatalogProjectNotFoundError, CatalogUnavailableError):
+                raise CatalogUpstreamFailedError("too many redirects")
+        except (CatalogProjectNotFoundError, CatalogUpstreamFailedError):
             raise
         except httpx2.HTTPStatusError as exc:
-            raise CatalogUnavailableError(str(exc)) from exc
+            raise CatalogUpstreamFailedError(str(exc)) from exc
         except (httpx2.TransportError, ValueError) as exc:
-            raise CatalogUnavailableError(str(exc)) from exc
+            raise CatalogUpstreamFailedError(str(exc)) from exc

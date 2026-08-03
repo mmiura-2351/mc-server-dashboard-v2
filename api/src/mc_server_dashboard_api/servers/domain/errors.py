@@ -546,7 +546,7 @@ class PluginCacheBlobNotFoundError(ServerError):
     """
 
 
-class CatalogUnavailableError(ServerError):
+class CatalogUpstreamFailedError(ServerError):
     """A content catalog request failed: refused before dispatch, or answered badly.
 
     Two families of condition reach this one error:
@@ -584,16 +584,16 @@ def wrap_shape_errors(source_name: str) -> Iterator[None]:
 
     Catches ``AttributeError``, ``KeyError``, ``TypeError``, and ``IndexError``
     raised while destructuring a catalog response and re-raises them as
-    :class:`CatalogUnavailableError`.  A ``CatalogUnavailableError`` already in
-    flight is passed through unchanged.
+    :class:`CatalogUpstreamFailedError`.  A ``CatalogUpstreamFailedError`` already
+    in flight is passed through unchanged.
     """
 
     try:
         yield
-    except CatalogUnavailableError:
+    except CatalogUpstreamFailedError:
         raise
     except (AttributeError, KeyError, TypeError, IndexError) as exc:
-        raise CatalogUnavailableError(f"unexpected response shape: {exc}") from exc
+        raise CatalogUpstreamFailedError(f"unexpected response shape: {exc}") from exc
 
 
 class CatalogProjectNotFoundError(ServerError):

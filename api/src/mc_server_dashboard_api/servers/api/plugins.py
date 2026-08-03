@@ -17,7 +17,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Form, UploadFile, status
+from fastapi import APIRouter, Depends, Form, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -45,6 +45,7 @@ from mc_server_dashboard_api.dependencies import (
     require_permission,
 )
 from mc_server_dashboard_api.http_datetime import UtcDatetime
+from mc_server_dashboard_api.http_head import head_response
 from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.servers.application.catalog import (
     CheckPluginUpdate,
@@ -80,7 +81,7 @@ from mc_server_dashboard_api.servers.domain.catalog_provider import (
 from mc_server_dashboard_api.servers.domain.errors import (
     CatalogChecksumMismatchError,
     CatalogProjectNotFoundError,
-    CatalogUnavailableError,
+    CatalogUpstreamFailedError,
     FileTooLargeError,
     InvalidFilePathError,
     InvalidPluginSideError,
@@ -564,7 +565,7 @@ async def check_updates(
         raise _not_found() from exc
     except UnsupportedPluginServerTypeError as exc:
         raise _unprocessable("unsupported_server_type") from exc
-    except CatalogUnavailableError as exc:
+    except CatalogUpstreamFailedError as exc:
         raise _bad_gateway("catalog_upstream_failed") from exc
     return PluginUpdatesResponse(
         updates=[
@@ -651,7 +652,7 @@ async def resolve_plugin_dependencies(
         raise _not_found() from exc
     except UnsupportedPluginServerTypeError as exc:
         raise _unprocessable("unsupported_server_type") from exc
-    except CatalogUnavailableError as exc:
+    except CatalogUpstreamFailedError as exc:
         raise _bad_gateway("catalog_upstream_failed") from exc
     return ResolutionPlanResponse.from_plan(plan)
 
@@ -692,7 +693,7 @@ async def apply_plugin_resolution(
         raise _not_found() from exc
     except UnsupportedPluginServerTypeError as exc:
         raise _unprocessable("unsupported_server_type") from exc
-    except CatalogUnavailableError as exc:
+    except CatalogUpstreamFailedError as exc:
         raise _bad_gateway("catalog_upstream_failed") from exc
     except ServerFilesUnsettledError as exc:
         await _record_plugin_failure(
@@ -760,7 +761,7 @@ async def check_plugin_update(
         raise _not_found() from exc
     except PluginNotFoundError as exc:
         raise _not_found() from exc
-    except CatalogUnavailableError as exc:
+    except CatalogUpstreamFailedError as exc:
         raise _bad_gateway("catalog_upstream_failed") from exc
     return PluginUpdateInfoResponse(
         plugin=PluginResponse.from_plugin(result.plugin),
@@ -842,7 +843,7 @@ async def update_plugin(
         raise _not_found() from exc
     except CatalogProjectNotFoundError as exc:
         raise _not_found_catalog() from exc
-    except CatalogUnavailableError as exc:
+    except CatalogUpstreamFailedError as exc:
         raise _bad_gateway("catalog_upstream_failed") from exc
     except CatalogChecksumMismatchError as exc:
         raise _bad_gateway("checksum_mismatch") from exc
@@ -899,7 +900,7 @@ async def list_plugin_dependencies(
         raise _not_found() from exc
     except PluginNotFoundError as exc:
         raise _not_found() from exc
-    except CatalogUnavailableError as exc:
+    except CatalogUpstreamFailedError as exc:
         raise _bad_gateway("catalog_upstream_failed") from exc
     return PluginDependenciesResponse(
         dependencies=[
@@ -1153,8 +1154,19 @@ async def list_client_mods(
     return ClientModsResponse(plugins=[PluginResponse.from_plugin(p) for p in plugins])
 
 
-@router.get("/communities/{community_id}/servers/{server_id}/client-mods/download")
+# Named once because two decorators register it: Starlette does not synthesize
+# HEAD from a GET route, so the probe has to be declared (issue #2560). Both
+# registrations point at the same endpoint function, so the gate, the headers and
+# the error mapping cannot drift apart between the two methods.
+_CLIENT_MODS_DOWNLOAD_PATH = (
+    "/communities/{community_id}/servers/{server_id}/client-mods/download"
+)
+
+
+@router.get(_CLIENT_MODS_DOWNLOAD_PATH)
+@router.head(_CLIENT_MODS_DOWNLOAD_PATH)
 async def download_client_modpack(
+    request: Request,
     community_id: uuid.UUID,
     server_id: uuid.UUID,
     _authorized: Annotated[
@@ -1169,7 +1181,15 @@ async def download_client_modpack(
     ],
     use_case: Annotated[DownloadClientModpack, Depends(get_download_client_modpack)],
 ) -> StreamingResponse:
-    """Download a server's client mods as a zip (plugin:read, issue #1308)."""
+    """Download a server's client mods as a zip (plugin:read, issue #1308).
+
+    **Probe** (issue #2560): a ``HEAD`` answers with the ``GET``'s status and
+    headers and no body, so a client learns the modpack is available under the
+    same ``plugin:read`` gate without building it. The zip is assembled on the fly
+    from a variable jar set, so its size is not known ahead of the stream: neither
+    the ``GET`` nor the probe declares a ``Content-Length``, and the probe learns
+    existence rather than size.
+    """
 
     try:
         stream = await use_case(
@@ -1180,17 +1200,37 @@ async def download_client_modpack(
         raise _not_found() from exc
     except UnsupportedPluginServerTypeError as exc:
         raise _unprocessable("unsupported_server_type") from exc
+    if request.method == "HEAD":
+        # Returning before the stream is iterated is what the probe is for (issue
+        # #2560): the generator above is obtained to decide the status but never
+        # opened, so no jar is pulled from the content-addressed cache for a caller
+        # that asked for no bytes. No audit record is skipped here because the
+        # ``GET`` records none either — the client-modpack download is unaudited
+        # (issue #1308).
+        return head_response(
+            media_type="application/zip", headers=_client_modpack_headers()
+        )
     return StreamingResponse(
         stream,
         media_type="application/zip",
-        headers={
-            "Content-Disposition": 'attachment; filename="mods.zip"',
-            # A per-server body is never stored (issue #2491): the zip is gated by
-            # ``plugin:read`` on this server, so a shared cache serving it to a
-            # non-member would be an authorization bypass (issue #2519).
-            "Cache-Control": "no-store",
-        },
+        headers=_client_modpack_headers(),
     )
+
+
+def _client_modpack_headers() -> dict[str, str]:
+    """The client-modpack download's headers, shared by the GET and its HEAD probe.
+
+    One source for both, so a probe cannot answer with a different header set than
+    the download it is probing (issue #2560).
+    """
+
+    return {
+        "Content-Disposition": 'attachment; filename="mods.zip"',
+        # A per-server body is never stored (issue #2491): the zip is gated by
+        # ``plugin:read`` on this server, so a shared cache serving it to a
+        # non-member would be an authorization bypass (issue #2519).
+        "Cache-Control": "no-store",
+    }
 
 
 async def _read_capped_upload(file: UploadFile) -> bytes:

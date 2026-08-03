@@ -116,7 +116,12 @@ function server(overrides: Record<string, unknown> = {}) {
 // it must not be answered by the server-detail catch-all (issue #2247), and
 // /api/meta is a deployment-facts body, not a server (issue #2525).
 // Everything else still falls through to the server detail body.
-function routeGet(opts: { srv?: Record<string, unknown> } = {}) {
+function routeGet(
+  opts: {
+    srv?: Record<string, unknown>;
+    meta?: Parameters<typeof meta>[0];
+  } = {},
+) {
   const srv = server(opts.srv);
   mockApi.get.mockImplementation((path: string) => {
     if (path.endsWith("/resource-pack")) {
@@ -125,7 +130,7 @@ function routeGet(opts: { srv?: Record<string, unknown> } = {}) {
       return Promise.resolve(null);
     }
     if (path === "/api/meta") {
-      return Promise.resolve(meta());
+      return Promise.resolve(meta(opts.meta));
     }
     return Promise.resolve(srv);
   });
@@ -1833,6 +1838,26 @@ describe("ServerDetailPage settings memory limit", () => {
     expect(saveButton).toBeDisabled();
     fireEvent.click(saveButton);
     await act(async () => {});
+    expect(mockApi.patch).not.toHaveBeenCalled();
+  });
+
+  it("rejects a value above the operator-configured ceiling that the default would allow (#1069)", async () => {
+    // With a configured max of 4096 MiB, 8192 is out of range even though it
+    // sits well under the default 1 TiB ceiling — so this reddens only if the
+    // page honours the /meta ceiling rather than the hardcoded default.
+    routeGet({
+      srv: { observed_state: "stopped", memory_limit_mb: null, config: {} },
+      meta: { max_memory_limit_mb: 4096 },
+    });
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    fireEvent.change(memoryInput(), { target: { value: "8192" } });
+
+    expect(
+      await screen.findByText(t("serverDetail.settings.memoryLimitRange")),
+    ).toBeInTheDocument();
     expect(mockApi.patch).not.toHaveBeenCalled();
   });
 
