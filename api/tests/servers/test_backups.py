@@ -795,6 +795,10 @@ async def test_delete_removes_archive_before_metadata_row() -> None:
     archive = FakeBackupArchiveStore()
     archive.archives.add("ref")
     uow = FakeUnitOfWork(servers=repo, backups=backups)
+    # One timeline for the archive delete and the metadata-row delete (issue
+    # #2546): both-gone is the end state a swapped implementation also reaches,
+    # so only their position on a shared timeline can pin "archive first".
+    archive.events = backups.events
 
     await DeleteBackup(uow=uow, backup_store=archive)(
         community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id
@@ -803,6 +807,13 @@ async def test_delete_removes_archive_before_metadata_row() -> None:
     assert archive.deleted == [(server.id, "ref")]
     assert "ref" not in archive.archives
     assert await uow.backups.get_by_id(backup.id) is None
+    # ...and the archive was removed BEFORE the row: a crash between the two must
+    # leave a dangling row (re-deletable), never an orphaned archive with no row
+    # to find it by (module docstring). Endpoint-only asserts stay green under a
+    # swap; the shared timeline reddens.
+    assert archive.events.index((server.id, "delete-archive")) < archive.events.index(
+        (server.id, "delete-row")
+    )
 
 
 async def test_delete_unknown_backup_is_not_found() -> None:

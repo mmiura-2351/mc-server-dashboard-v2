@@ -601,6 +601,8 @@ class TestAssignResourcePack:
         file_store = FakeFileStore()
         file_store.files["server.properties"] = b"motd=hi\n"
         lock = FakeLifecycleLock()
+        # One timeline for the lock and the server.properties rewrite (#2546).
+        file_store.events = lock.events
         user_id = uuid.uuid4()
 
         uc = AssignResourcePack(
@@ -634,8 +636,17 @@ class TestAssignResourcePack:
         assert "resource-pack-prompt=Install this" in props
         assert "motd=hi" in props
 
-        # Lifecycle lock was held
-        assert lock.events == [(server.id, "acquire"), (server.id, "release")]
+        # Lifecycle lock was held AROUND the rewrite: the write falls strictly
+        # between acquire and release on the shared timeline (issue #2546). A
+        # rewrite that ran outside the hold would still acquire/release.
+        ev = lock.events
+        assert (server.id, "write-file") in ev, ev
+        write_at = ev.index((server.id, "write-file"))
+        assert (
+            ev.index((server.id, "acquire"))
+            < write_at
+            < ev.index((server.id, "release"))
+        )
 
     async def test_assign_creates_properties_if_missing(self) -> None:
         server = _at_rest_server()
@@ -787,6 +798,8 @@ class TestUnassignResourcePack:
             b"require-resource-pack=true\nresource-pack-prompt=Hi\n"
         )
         lock = FakeLifecycleLock()
+        # One timeline for the lock and the server.properties rewrite (#2546).
+        file_store.events = lock.events
 
         # Seed an assignment
         assignment = ResourcePackAssignment(
@@ -816,8 +829,16 @@ class TestUnassignResourcePack:
         assert "require-resource-pack=" not in props
         assert "resource-pack-prompt=" not in props
         assert "motd=hi" in props
-        # Lock held
-        assert lock.events == [(server.id, "acquire"), (server.id, "release")]
+        # Lock held AROUND the rewrite: the write falls strictly between acquire
+        # and release on the shared timeline (issue #2546), not merely bracketed.
+        ev = lock.events
+        assert (server.id, "write-file") in ev, ev
+        write_at = ev.index((server.id, "write-file"))
+        assert (
+            ev.index((server.id, "acquire"))
+            < write_at
+            < ev.index((server.id, "release"))
+        )
         assert uow.commits == 1
 
     async def test_unassign_rejects_when_no_assignment(self) -> None:
