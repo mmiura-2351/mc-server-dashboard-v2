@@ -564,7 +564,7 @@ config, wiring at the edge.
 | `bedrock.tunnel_listen` | `:25675` | Bedrock QUIC tunnel listener (RFC 9221 DATAGRAM) — see [`BEDROCK_TUNNEL.md`](BEDROCK_TUNNEL.md). Reuses `tunnel.tls.{cert_file,key_file}` with a distinct ALPN; no separate cert/key config. Bound only when `bedrock.enabled` is true. |
 | `bedrock.tunnel_max_conns_per_ip` | `64` | Per-IP concurrent cap on unauthenticated handshake windows on the Bedrock QUIC listener, mirroring `tunnel.max_conns_per_ip` (Section 11) — see `BEDROCK_TUNNEL.md` Section 8. |
 | `bedrock.max_flows_per_ip` / `bedrock.new_flows_per_ip_per_second` | `32` / `10` | Hygiene caps on a bound Bedrock `bedrock_port`, same posture as `game.max_conns_per_ip` / `game.joins_per_ip_per_second` — see `BEDROCK_TUNNEL.md` Section 8. |
-| `metrics.enabled` | `false` | Master switch for the Prometheus `/metrics` + `/healthz` HTTP endpoint (Section 17). Off by default: the relay is an edge process, so observability is opt-in. Via `MCD_RELAY_METRICS_ENABLED`. A metrics-bind failure is non-fatal (logged, relay keeps serving) — unlike the game/tunnel binds. |
+| `metrics.enabled` | `false` | Master switch for the Prometheus `/metrics` + `/healthz` HTTP endpoint (Section 13). Off by default: the relay is an edge process, so observability is opt-in. Via `MCD_RELAY_METRICS_ENABLED`. A metrics-bind failure is non-fatal (logged, relay keeps serving) — unlike the game/tunnel binds. |
 | `metrics.listen` | `127.0.0.1:9090` | Metrics/health listener address. Loopback by default so the endpoint is never exposed on the public interface without an explicit choice. Via `MCD_RELAY_METRICS_LISTEN`. |
 | `log.level` / `log.format` | as Worker | Standard logging keys. |
 
