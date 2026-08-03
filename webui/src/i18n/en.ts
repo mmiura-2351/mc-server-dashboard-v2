@@ -780,6 +780,7 @@ export const en = {
   "files.error.isDirectory": "Cannot open a directory as a file.",
   "files.error.notDirectory": "The path is a file, not a directory.",
   "files.error.symlinkRefused": "Symbolic links are not allowed.",
+  "files.error.nameTooLong": "The name is too long.",
   "files.error.invalidInput": "The request was invalid.",
   "files.error.workerUnavailable":
     "The server agent is disconnected. Please try again later.",
