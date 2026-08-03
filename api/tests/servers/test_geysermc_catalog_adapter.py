@@ -22,7 +22,7 @@ from mc_server_dashboard_api.servers.adapters.geysermc_catalog import (
 )
 from mc_server_dashboard_api.servers.domain.errors import (
     CatalogProjectNotFoundError,
-    CatalogUnavailableError,
+    CatalogUpstreamFailedError,
 )
 
 _LATEST_PATH = "/v2/projects/floodgate/versions/latest/builds/latest"
@@ -215,13 +215,13 @@ async def test_list_versions_raises_when_no_spigot_download() -> None:
 
 async def test_download_rejects_non_https() -> None:
     catalog = GeyserMcCatalog()
-    with pytest.raises(CatalogUnavailableError, match="HTTPS"):
+    with pytest.raises(CatalogUpstreamFailedError, match="HTTPS"):
         await catalog.download_file("http://download.geysermc.org/x")
 
 
 async def test_download_rejects_disallowed_host() -> None:
     catalog = GeyserMcCatalog()
-    with pytest.raises(CatalogUnavailableError, match="host not allowed"):
+    with pytest.raises(CatalogUpstreamFailedError, match="host not allowed"):
         await catalog.download_file("https://evil.example.com/x")
 
 
@@ -275,14 +275,14 @@ async def test_metadata_redirect_to_disallowed_host_rejected(
 
     catalog = GeyserMcCatalog()
     with _mock_transport(_handler):
-        with pytest.raises(CatalogUnavailableError, match="disallowed host"):
+        with pytest.raises(CatalogUpstreamFailedError, match="disallowed host"):
             await catalog.list_versions("geysermc-floodgate", loader="paper")
 
 
 async def test_get_json_html_body_raises_catalog_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An HTML body on HTTP 200 raises CatalogUnavailableError."""
+    """An HTML body on HTTP 200 raises CatalogUpstreamFailedError."""
     import mc_server_dashboard_api.versions.adapters.ssrf_guard as ssrf_guard
 
     async def _public_resolver(_h: str) -> list[str]:
@@ -297,15 +297,15 @@ async def test_get_json_html_body_raises_catalog_unavailable(
 
     catalog = GeyserMcCatalog()
     with _mock_transport(_handler):
-        with pytest.raises(CatalogUnavailableError):
+        with pytest.raises(CatalogUpstreamFailedError):
             await catalog.list_versions("geysermc-floodgate", loader="paper")
 
 
 async def test_list_versions_shape_error_raises_catalog_unavailable() -> None:
-    """list_versions raises CatalogUnavailableError when build JSON is a non-dict."""
+    """list_versions raises CatalogUpstreamFailedError when build JSON is a non-dict."""
     # Return a JSON array instead of the expected build object.
     catalog = _catalog_with_build(["unexpected", "array"])  # type: ignore[arg-type]
-    with pytest.raises(CatalogUnavailableError):
+    with pytest.raises(CatalogUpstreamFailedError):
         await catalog.list_versions("geysermc-floodgate", loader="paper")
 
 
@@ -321,7 +321,7 @@ async def test_metadata_redirect_to_private_ip_rejected(
     monkeypatch.setattr(ssrf_guard, "_async_resolve_host", _private_resolver)
 
     catalog = GeyserMcCatalog()
-    with pytest.raises(CatalogUnavailableError, match="private/reserved"):
+    with pytest.raises(CatalogUpstreamFailedError, match="private/reserved"):
         await catalog.list_versions("geysermc-floodgate", loader="paper")
 
 

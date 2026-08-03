@@ -7707,8 +7707,60 @@
     },
     "/api/communities/{community_id}/servers/{server_id}/client-mods/download": {
       "get": {
-        "description": "Download a server's client mods as a zip (plugin:read, issue #1308).",
+        "description": "Download a server's client mods as a zip (plugin:read, issue #1308).\n\n**Probe** (issue #2560): a ``HEAD`` answers with the ``GET``'s status and\nheaders and no body, so a client learns the modpack is available under the\nsame ``plugin:read`` gate without building it. The zip is assembled on the fly\nfrom a variable jar set, so its size is not known ahead of the stream: neither\nthe ``GET`` nor the probe declares a ``Content-Length``, and the probe learns\nexistence rather than size.",
         "operationId": "download_client_modpack_api_communities__community_id__servers__server_id__client_mods_download_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Download Client Modpack"
+      },
+      "head": {
+        "description": "Download a server's client mods as a zip (plugin:read, issue #1308).\n\n**Probe** (issue #2560): a ``HEAD`` answers with the ``GET``'s status and\nheaders and no body, so a client learns the modpack is available under the\nsame ``plugin:read`` gate without building it. The zip is assembled on the fly\nfrom a variable jar set, so its size is not known ahead of the stream: neither\nthe ``GET`` nor the probe declares a ``Content-Length``, and the probe learns\nexistence rather than size.",
+        "operationId": "download_client_modpack_api_communities__community_id__servers__server_id__client_mods_download_head",
         "parameters": [
           {
             "in": "path",
@@ -11237,8 +11289,50 @@
     },
     "/api/resource-packs/{resource_pack_id}/download": {
       "get": {
-        "description": "Download a resource pack (authenticated, issue #1176).\n\nThe response declares the pack's exact size as ``Content-Length``, so a client\ncan show download progress and refuse an over-cap pack up front.",
+        "description": "Download a resource pack (authenticated, issue #1176).\n\nThe response declares the pack's exact size as ``Content-Length``, so a client\ncan show download progress and refuse an over-cap pack up front.\n\n**Probe** (issue #2560): a ``HEAD`` answers with the ``GET``'s status and\nheaders and no body, so a client learns the size \u2014 from the store's size probe\nbelow \u2014 without starting a transfer. The route offers no ``Accept-Ranges``, so\nthe probe reports the size but not resumption.",
         "operationId": "download_resource_pack_api_resource_packs__resource_pack_id__download_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "resource_pack_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Resource Pack Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Download Resource Pack"
+      },
+      "head": {
+        "description": "Download a resource pack (authenticated, issue #1176).\n\nThe response declares the pack's exact size as ``Content-Length``, so a client\ncan show download progress and refuse an over-cap pack up front.\n\n**Probe** (issue #2560): a ``HEAD`` answers with the ``GET``'s status and\nheaders and no body, so a client learns the size \u2014 from the store's size probe\nbelow \u2014 without starting a transfer. The route offers no ``Accept-Ranges``, so\nthe probe reports the size but not resumption.",
+        "operationId": "download_resource_pack_api_resource_packs__resource_pack_id__download_head",
         "parameters": [
           {
             "in": "path",

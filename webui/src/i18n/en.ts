@@ -1666,7 +1666,7 @@ export const en = {
     "Invalid file. Only .jar files can be uploaded as {nouns}.",
   "plugins.error.tooLarge":
     "The file is too large. Maximum upload size is 512 MB.",
-  "plugins.error.catalogUnavailable":
+  "plugins.error.catalogUpstreamFailed":
     "Could not reach Modrinth. Please try again later.",
   "plugins.error.catalogNotFound": "Project or version not found on Modrinth.",
   "plugins.error.checksumMismatch":

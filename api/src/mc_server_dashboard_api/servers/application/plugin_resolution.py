@@ -85,7 +85,7 @@ from mc_server_dashboard_api.servers.domain.catalog_provider import (
 from mc_server_dashboard_api.servers.domain.errors import (
     CatalogChecksumMismatchError,
     CatalogProjectNotFoundError,
-    CatalogUnavailableError,
+    CatalogUpstreamFailedError,
     FileTooLargeError,
     InvalidFilePathError,
     PluginAlreadyExistsError,
@@ -123,7 +123,7 @@ _INCOMPATIBLE_DEP_TYPE = "incompatible"
 
 # Catalog errors a per-dep Modrinth lookup may raise; swallowed for isolation so
 # one bad dependency never aborts the whole plan.
-_CATALOG_ERRORS = (CatalogUnavailableError, CatalogProjectNotFoundError)
+_CATALOG_ERRORS = (CatalogUpstreamFailedError, CatalogProjectNotFoundError)
 
 
 @dataclass(frozen=True)
@@ -1051,7 +1051,7 @@ class ApplyPluginResolution:
                     installed_by=applied_by,
                 )
             except (
-                CatalogUnavailableError,
+                CatalogUpstreamFailedError,
                 CatalogProjectNotFoundError,
                 CatalogChecksumMismatchError,
                 InvalidFilePathError,

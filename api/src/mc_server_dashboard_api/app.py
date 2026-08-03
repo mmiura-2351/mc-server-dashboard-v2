@@ -565,7 +565,7 @@ def _warn_data_plane_base_url_fallback(settings: Settings) -> None:
 
     # Mirrors the ``or`` in ``effective_data_plane_base_url``, so a blank-collapsed
     # value counts as unset here exactly as it does there.
-    if settings.server.data_plane_base_url or settings.server.public_base_url is None:
+    if settings.server.data_plane_base_url or not settings.server.public_base_url:
         return
     logging.getLogger(__name__).warning(
         "server.data_plane_base_url is unset; Workers will be handed "

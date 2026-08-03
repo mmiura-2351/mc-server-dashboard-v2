@@ -181,7 +181,7 @@ Global resource pack library (not community-scoped) and per-server assignment.
 | POST | `/resource-packs` | Upload a resource pack (multipart; requires `server:update` in at least one community). |
 | GET | `/resource-packs` | List all resource packs (authenticated). |
 | DELETE | `/resource-packs/{id}` | Delete a resource pack (uploader or platform admin; 409 when still assigned to a server). |
-| GET | `/resource-packs/{id}/download` | Download (authenticated). The response declares `Cache-Control: no-store` (#2519). |
+| GET / HEAD | `/resource-packs/{id}/download` | Download (authenticated). The response declares `Cache-Control: no-store` (#2519). `HEAD` is the metadata probe (#2560): the same gate and the same headers with no body, so a client learns the `Content-Length` without starting a transfer; it never opens the blob nor records a `resource_pack:download` audit event. |
 | GET | `/public/resource-packs/{id}/{filename}` | Public download (no auth) — the URL Minecraft clients fetch. Validates `filename` matches. The two statuses declare different caching policies (#2562), because the URL ends in the stored filename and an undeclared policy is decided by the edge's extension heuristic instead: the `200` declares `Cache-Control: public, max-age=3600, immutable` — a pack is immutable and the game client verifies it against `resource-pack-sha1`, so the max-age bounds only how long a deleted pack stays fetchable from a cache — and the `404` declares `Cache-Control: no-store`, since a pack's id and filename are both fixed at creation and a URL that 404s can never later become a `200`. |
 | POST | `…/{sid}/resource-pack` | Assign a resource pack to a server (`server:update`). Body: `{resource_pack_id, require_resource_pack, resource_pack_prompt}`. |
 | DELETE | `…/{sid}/resource-pack` | Unassign (`server:update`). |
@@ -204,6 +204,39 @@ REST keeps working if the socket dies (FR-MON-4).
 
 Note: the data-plane endpoints (`/api/data-plane/...`) are Worker-credential-only
 transfer endpoints — not part of the UI surface.
+
+### 2.7 Plugins & mods (issue #1150)
+
+Per-server plugin/mod content management (the `#plugins` tab, Section 6.14). All
+paths hang off `/communities/{cid}/servers/{sid}`; the whole family is
+per-resource gated on the server — `plugin:read` for the reads, `plugin:manage`
+for the mutations — and every mutation requires the server **at rest** (409
+`server_unsettled` / `server_busy` while it is transitional, Section 6.9). The
+family is unsupported on `vanilla` servers (422 `unsupported_server_type`).
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `…/{sid}/plugins` | List installed plugins/mods (`plugin:read`). |
+| POST | `…/{sid}/plugins` | Install a plugin jar via multipart upload (`plugin:manage`): `display_name` form field + `file`, jar ≤ 512 MiB (413 `file_too_large`). Returns `201`; a duplicate is 409 `plugin_already_exists`. |
+| GET | `…/{sid}/plugins/updates` | Batch-check every installed plugin for a newer catalog version (`plugin:read`); catalog upstream failure is 502 `catalog_upstream_failed`. |
+| GET | `…/{sid}/plugins/validate` | Phase-B dependency/compatibility checklist — missing deps, unsatisfied version ranges, conflicts, MC-version mismatch (`plugin:read`, #1307). Read-only; never mutates the set. |
+| POST | `…/{sid}/plugins/resolve` | Plan dependency auto-resolution: the transitive closure of required deps, each classified satisfied / needs-import / unresolvable / blocked (`plugin:read`, #1309). Read-only — nothing is downloaded or installed. |
+| POST | `…/{sid}/plugins/resolve/apply` | Apply that plan: install each non-blocked needs-import dep from the catalog, then re-plan (`plugin:manage`, #1309). Per-dep install failures are isolated in `failed`. |
+| GET | `…/{sid}/plugins/{pid}` | Read one installed plugin by id (`plugin:read`). |
+| DELETE | `…/{sid}/plugins/{pid}` | Remove an installed plugin (`plugin:manage`). Returns `204`. |
+| GET | `…/{sid}/plugins/{pid}/updates` | Check a single plugin for a newer catalog version (`plugin:read`). |
+| POST | `…/{sid}/plugins/{pid}/update` | Update a plugin to a specific catalog `version_id` (`plugin:manage`); missing project 404 `catalog_project_not_found`, checksum drift 502 `checksum_mismatch`. |
+| GET | `…/{sid}/plugins/{pid}/dependencies` | List a Modrinth-sourced plugin's declared dependencies, each flagged installed/missing (`plugin:read`). |
+| POST | `…/{sid}/plugins/{pid}/enable` · `/disable` | Toggle a plugin on/off (`plugin:manage`). |
+| POST | `…/{sid}/plugins/{pid}/side` | Override a mod's side — `both` / `server` / `client` (`plugin:manage`, #1308); re-materializes the working set. Invalid side is 422 `invalid_side`. |
+| GET | `…/{sid}/client-mods` | List the server's enabled client-relevant plugins (side `client` / `both`; `plugin:read`, #1308). |
+| GET / HEAD | `…/{sid}/client-mods/download` | Download those client mods bundled as `mods.zip` (`plugin:read`, #1308). The response declares `Cache-Control: no-store` (#2491, #2519) — a per-server body gated by `plugin:read` must never be served from a shared cache. `HEAD` is the metadata probe (#2560): the same gate and headers with no body, and it neither builds the zip nor pulls a jar; the zip is streamed with no `Content-Length` (assembled on the fly from a variable jar set), so the probe learns existence rather than size. |
+
+The Modrinth catalog browse/install endpoints under `…/{sid}/catalog`
+(`/catalog/search`, `/catalog/projects/{id_or_slug}`, `/catalog/install`) back
+the same tab and share the `plugin:*` gate, but are a separate route family
+(issue #1151) with the same Section-2 gap; inventorying them is tracked
+separately (issue #2643).
 
 ## 3. Personas and capability scoping
 
@@ -506,8 +539,8 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   and then auto-imports the missing Modrinth dependencies.
 - Client modpack (mod loaders only): when at least one enabled mod is
   client-relevant (side `client` / `both`), a **Download client modpack** button
-  bundles them (`GET …/client-mods/download`, #1342; the response declares
-  `Cache-Control: no-store`, #2519).
+  bundles them (`GET …/client-mods/download`, #1342; response headers and the
+  `HEAD` metadata probe are in the Section 2.7 inventory row).
 - Bedrock hint: on a Paper server, when the deployment's Bedrock gate is on
   (`/meta`'s `bedrock_enabled`, Section 2.4) and a Geyser plugin is installed, an
   inline note links to Floodgate setup (epic #1540).
