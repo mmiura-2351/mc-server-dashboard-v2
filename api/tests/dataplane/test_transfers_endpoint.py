@@ -1025,6 +1025,64 @@ def test_snapshot_partial_region_loss_report_exactly_at_cap_not_truncated(
     assert payload["truncated"] is False
 
 
+def test_snapshot_partial_region_loss_report_name_list_exactly_at_cap_not_truncated(
+    tmp_path: Path,
+) -> None:
+    import asyncio
+
+    from mc_server_dashboard_api.dataplane.api import transfers
+
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    healthy_mca = bytes(2 * 4096)
+
+    # Sibling to the dir-cap boundary test above, for the per-directory NAME cap:
+    # exactly _MISSING_REGION_NAME_CAP lost names in one directory must be reported
+    # in full and NOT truncated (the builder slices on a strict > against the name
+    # cap). dim000 sorts first and carries exactly the cap in lost names; a second
+    # dir keeps the report multi-directory while staying far under the dir cap, so
+    # only the name boundary is under test. Minimal fsync footprint (issue #2228):
+    # only dim000 stages more than two region files.
+    name_cap = transfers._MISSING_REGION_NAME_CAP  # 50
+    prior: dict[str, bytes] = {}
+    # dim000: one kept + exactly name_cap dropped == name_cap lost names (at the cap).
+    for n in range(name_cap + 1):
+        prior[f"world/dim000/region/r.{n}.0.mca"] = healthy_mca
+    # dim001: a second partial-loss dir (two files, drop one) so the report spans more
+    # than one directory yet stays far below the dir cap.
+    for n in range(2):
+        prior[f"world/dim001/region/r.{n}.0.mca"] = healthy_mca
+    asyncio.run(_publish(storage, community, server, prior))
+
+    # Keep only the first region file of each dir: dim000 loses exactly name_cap
+    # names, dim001 loses one.
+    kept = {
+        "world/dim000/region/r.0.0.mca": healthy_mca,
+        "world/dim001/region/r.0.0.mca": healthy_mca,
+    }
+    body = _tar_bytes(kept)
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"), content=body, headers=_auth()
+        )
+    assert resp.status_code == 422
+    payload = resp.json()
+    assert payload["reason"] == "working_set_incomplete"
+    # Two partial-loss dirs, far under the dir cap, so the dir cap does not fire.
+    assert len(payload["directories"]) == 2
+    dim000 = next(
+        entry
+        for entry in payload["directories"]
+        if entry["directory"] == "world/dim000/region"
+    )
+    # Exactly at the name cap: all name_cap lost names are surfaced in full.
+    assert len(dim000["missing"]) == name_cap
+    # Exactly at cap -> not over -> the report is NOT flagged truncated. An off-by-one
+    # at the name-cap slice (>= instead of >) would slice dim000's list at 50 and set
+    # this flag; the exact-50 pin catches it.
+    assert payload["truncated"] is False
+
+
 def test_snapshot_requires_content_length(tmp_path: Path) -> None:
     client, _ = _setup(tmp_path)
     community, server = _scope()
