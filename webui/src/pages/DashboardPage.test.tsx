@@ -1558,3 +1558,88 @@ describe("DashboardPage filter and sort (#1123)", () => {
     expect(screen.queryByText("creative")).not.toBeInTheDocument();
   });
 });
+
+describe("DashboardPage desired/observed drift (issue #2443)", () => {
+  it("marks a drifting row with the same affordance the detail page shows (cards view)", async () => {
+    // The concrete failed-stop case (#2435): desired=stopped is committed while
+    // the process keeps running, so observed=running. The list must surface the
+    // pending intent using the detail page's exact rule + string.
+    mockApi.get.mockResolvedValue([
+      server({ observed_state: "running", desired_state: "stopped" }),
+    ]);
+    renderPage();
+
+    // The state pill still reads "running"; the drift mark rides alongside it.
+    expect(await screen.findByText("survival")).toBeInTheDocument();
+    expect(screen.getByText(t("dashboard.state.running"))).toBeInTheDocument();
+    expect(screen.getByText(t("serverDetail.converging"))).toBeInTheDocument();
+  });
+
+  it("does not mark a settled row where desired equals observed (cards view)", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ observed_state: "running", desired_state: "running" }),
+    ]);
+    renderPage();
+
+    await screen.findByText("survival");
+    // Flush the react-query settle microtask before the negative assertion so a
+    // late render cannot re-introduce the mark after the check.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(
+      screen.queryByText(t("serverDetail.converging")),
+    ).not.toBeInTheDocument();
+  });
+
+  it("marks a drifting row in the table view too", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ observed_state: "running", desired_state: "stopped" }),
+    ]);
+    renderPage();
+
+    await screen.findByText("survival");
+    fireEvent.click(
+      screen.getByRole("button", { name: t("dashboard.view.table") }),
+    );
+
+    expect(screen.getByText(t("serverDetail.converging"))).toBeInTheDocument();
+  });
+
+  it("keeps the drift mark on a drifting row that passes the observed-state bucket filter", async () => {
+    // s1 is drifting toward stopped but still observed running; s2 is settled
+    // stopped. Filtering to the OBSERVED bucket (running) must keep s1 visible
+    // with its drift mark, and adding the mark must not change which rows pass:
+    // the settled stopped server is still filtered out.
+    mockApi.get.mockResolvedValue([
+      server({
+        id: "s1",
+        name: "survival",
+        observed_state: "running",
+        desired_state: "stopped",
+      }),
+      server({
+        id: "s2",
+        name: "creative",
+        observed_state: "stopped",
+        desired_state: "stopped",
+      }),
+    ]);
+    renderPage();
+
+    await screen.findByText("survival");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: t("dashboard.filter.state") }),
+    );
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: t("dashboard.filter.bucket.running"),
+      }),
+    );
+
+    expect(screen.getByText("survival")).toBeInTheDocument();
+    expect(screen.queryByText("creative")).not.toBeInTheDocument();
+    expect(screen.getByText(t("serverDetail.converging"))).toBeInTheDocument();
+  });
+});
