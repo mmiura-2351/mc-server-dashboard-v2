@@ -60,7 +60,7 @@ def _seed_owner_role(uow: FakeAuthzUnitOfWork, community_id: CommunityId) -> Rol
         updated_at=_NOW,
         is_preset=True,
     )
-    uow.roles.by_id[role.id] = role
+    uow.roles.seed(role)
     return role.id
 
 
@@ -80,7 +80,7 @@ def _seed_custom_role(
         updated_at=_NOW,
         is_preset=False,
     )
-    uow.roles.by_id[role.id] = role
+    uow.roles.seed(role)
     return role.id
 
 
