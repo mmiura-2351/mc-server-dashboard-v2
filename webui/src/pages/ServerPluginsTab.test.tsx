@@ -855,12 +855,31 @@ describe("ServerPluginsTab error messages (issue #1345)", () => {
     });
   });
 
-  it("shows a specific message for file_too_large", async () => {
+  // The reason→key map deliberately omits `file_too_large` (413-only) and
+  // `worker_unavailable` (503-only): each duplicates its status fallback, so the
+  // status alone must carry the message (#2460). These two pin that no rendered
+  // message changed — reverting either drop leaves the assertion identical.
+  it("shows the tooLarge message for a 413 (carried by the status fallback)", async () => {
     await triggerUploadError(413, "file_too_large");
     await waitFor(() => {
       expect(
         screen.getByText(
           "The file is too large. Maximum upload size is 512 MB.",
+        ),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("shows the workerUnavailable message for a 503 (carried by the status fallback)", async () => {
+    // A truthful 503 from a plugin route: an install that exhausts the Bedrock
+    // UDP port window raises `bedrock_port_range_exhausted` (plugins.py
+    // `_service_unavailable`). It has no reason entry, so the 503 fallback must
+    // carry the workerUnavailable message.
+    await triggerUploadError(503, "bedrock_port_range_exhausted");
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "The server agent is disconnected. Please try again later.",
         ),
       ).toBeInTheDocument();
     });
