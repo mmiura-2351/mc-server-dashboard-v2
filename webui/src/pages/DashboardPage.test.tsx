@@ -1242,6 +1242,80 @@ describe("DashboardPage filter and sort (#1123)", () => {
     expect(trigger).not.toHaveTextContent("2");
   });
 
+  it("folds the selected-bucket count into the trigger's accessible name (#2668)", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ id: "s1", name: "survival", observed_state: "running" }),
+    ]);
+    renderPage();
+
+    await screen.findByText("survival");
+    // Zero selected: the plain state label, no count in the accessible name.
+    fireEvent.click(
+      screen.getByRole("button", { name: t("dashboard.filter.state") }),
+    );
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: t("dashboard.filter.bucket.running"),
+      }),
+    );
+
+    // One selected: the count is announced through the accessible name, and the
+    // plain (countless) name no longer matches.
+    await act(async () => {});
+    expect(
+      screen.getByRole("button", {
+        name: t("dashboard.filter.stateCount", { count: 1 }),
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: t("dashboard.filter.state") }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("ignores a stale non-bucket state token in the URL param (#2668)", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ id: "s1", name: "survival", observed_state: "running" }),
+      server({
+        id: "s2",
+        name: "creative",
+        observed_state: "stopped",
+        desired_state: "stopped",
+      }),
+    ]);
+    // `state=starting` is a pre-#2239 raw state name, not a bucket key.
+    const { container } = renderPage(`/communities/${CID}?state=starting`);
+
+    await screen.findByText("survival");
+    // The unrecognised token hides nothing…
+    expect(screen.getByText("creative")).toBeInTheDocument();
+    // …and contributes nothing to the badge count.
+    const trigger = container.querySelector(".filter-state-trigger");
+    expect(trigger).not.toHaveTextContent("1");
+  });
+
+  it("counts and filters on only the valid tokens when the param mixes valid and stale (#2668)", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ id: "s1", name: "survival", observed_state: "running" }),
+      server({
+        id: "s2",
+        name: "creative",
+        observed_state: "stopped",
+        desired_state: "stopped",
+      }),
+    ]);
+    const { container } = renderPage(
+      `/communities/${CID}?state=running,starting`,
+    );
+
+    await screen.findByText("survival");
+    // The valid `running` bucket still filters; stopped `creative` is hidden.
+    expect(screen.queryByText("creative")).not.toBeInTheDocument();
+    // Only the one valid bucket is counted, not the stale token.
+    const trigger = container.querySelector(".filter-state-trigger");
+    expect(trigger).toHaveTextContent("1");
+    expect(trigger).not.toHaveTextContent("2");
+  });
+
   it("round-trips the selected buckets through the state URL param", async () => {
     mockApi.get.mockResolvedValue([
       server({ id: "s1", name: "survival", observed_state: "running" }),

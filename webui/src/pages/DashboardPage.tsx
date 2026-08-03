@@ -132,6 +132,16 @@ function toggleSort(current: SortPref, field: SortField): SortPref {
 // URL-driven filter keys for the dashboard (#1123).
 const FILTER_KEYS = ["search", "state"] as const;
 
+// Parse the `state` URL param into the selected buckets, keeping only tokens
+// that are current bucket keys (STATE_BUCKETS is the single source). A stale
+// bookmark carrying a pre-#2239 raw state name (e.g. `state=starting`) thus
+// selects nothing rather than counting a phantom bucket over an empty list
+// (#2668). Canonical bucket order is preserved.
+function parseStateBuckets(stateFilter: string): StateBucket[] {
+  const tokens = stateFilter ? stateFilter.split(",").filter(Boolean) : [];
+  return STATE_BUCKETS.filter((bucket) => tokens.includes(bucket));
+}
+
 // Apply client-side filtering to the server list. The `state` param holds a
 // comma-separated set of bucket keys (#2239); a server matches when the bucket
 // of its observed state is selected. An empty set shows all servers.
@@ -141,9 +151,7 @@ function filterServers(
   stateFilter: string,
 ): ServerResponse[] {
   const needle = search.trim().toLowerCase();
-  const buckets = new Set(
-    stateFilter ? stateFilter.split(",").filter(Boolean) : [],
-  );
+  const buckets = new Set(parseStateBuckets(stateFilter));
   return servers.filter((s) => {
     if (needle && !s.name.toLowerCase().includes(needle)) return false;
     if (
@@ -427,12 +435,7 @@ function DashboardFilterBar({
   view: ViewMode;
 }) {
   const activeBuckets = useMemo(
-    () =>
-      new Set<StateBucket>(
-        filters.state
-          ? (filters.state.split(",").filter(Boolean) as StateBucket[])
-          : [],
-      ),
+    () => new Set<StateBucket>(parseStateBuckets(filters.state)),
     [filters.state],
   );
 
@@ -467,7 +470,11 @@ function DashboardFilterBar({
         aria-label={t("dashboard.filter.search")}
       />
       <Popover
-        buttonAriaLabel={t("dashboard.filter.state")}
+        buttonAriaLabel={
+          activeBuckets.size > 0
+            ? t("dashboard.filter.stateCount", { count: activeBuckets.size })
+            : t("dashboard.filter.state")
+        }
         buttonClassName="btn sm filter-state-trigger"
         panelClassName="filter-state-menu"
         label={

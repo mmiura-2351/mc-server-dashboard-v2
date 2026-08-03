@@ -124,7 +124,9 @@ export function Popover({
         type="button"
         ref={triggerRef}
         className={buttonClassName}
-        aria-haspopup="true"
+        // No aria-haspopup: the panel is a plain content region (a checkbox
+        // group in the dashboard filter's use), not a menu/listbox, so the
+        // disclosure leans on aria-expanded + aria-controls instead (#2668).
         aria-expanded={open}
         aria-controls={open ? panelId : undefined}
         aria-label={buttonAriaLabel}

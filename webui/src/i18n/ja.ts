@@ -287,6 +287,9 @@ export const ja: Record<TranslationKey, string> = {
   // State filter dropdown: short trigger label, clear action, and the four
   // semantic buckets (#2239).
   "dashboard.filter.stateLabel": "状態",
+  // 選択中のバケット数を状態トリガーのアクセシブル名に含める。カウントバッジ
+  // 自体は aria-hidden のため、支援技術にはこの文字列で数が伝わる（#2668）。
+  "dashboard.filter.stateCount": "状態でフィルター（{count} 件選択中）",
   "dashboard.filter.clear": "クリア",
   "dashboard.filter.bucket.running": "稼働中",
   "dashboard.filter.bucket.stopped": "停止",
