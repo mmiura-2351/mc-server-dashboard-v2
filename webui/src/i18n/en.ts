@@ -253,6 +253,19 @@ export const en = {
     "Could not stop the server: it is still running. The system will keep trying to stop it.",
   "dashboard.lifecycle.restartPending":
     "Could not restart the server: it may be stopped for now. The system will bring it back automatically.",
+  // 409 worker_busy on start (issue #2445). A start refused with worker_busy is
+  // ambiguous at the edge: a post-dispatch BUSY leaves the start pending for the
+  // reconciler, but a pre-dispatch one is undone back to stopped — both arrive
+  // identically, so this must not promise the start will happen. It says it MAY
+  // still come up and to start again only if it stays stopped, rather than the
+  // plain "try again" that on the pending path collides with invalid_transition.
+  "dashboard.lifecycle.startPending":
+    "Could not start the server right now: another operation on it is still in progress. The start may still be applied automatically — check the server's state, and start it again only if it stays stopped.",
+  // 409 invalid_transition on start (issue #2445): the server is already
+  // desired-running, so a retry after being told the start is pending gets this
+  // instead of the contradictory generic state-changed toast.
+  "dashboard.lifecycle.startAlreadyRunning":
+    "The server is already running or starting up, so there is nothing to start.",
   // 409 failed_stop_orphan (issue #2466): the host could not confirm an earlier
   // stop, so the server's process may still be running — it never went down, and
   // repeating the same action is refused identically. Asking the operator to stop
