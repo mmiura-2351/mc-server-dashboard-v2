@@ -9,9 +9,13 @@ contract).
 The seam translates the storage value objects (``RelPath`` rejects traversal at
 construction; ``VersionId`` names a retained version, rejecting a malformed id)
 and the storage errors (``NotFoundError`` -> :class:`ServerFileNotFoundError`,
-``PathTraversalError`` / ``SymlinkRefusedError`` -> :class:`InvalidFilePathError`,
-a ``VersionId`` ``ValueError`` -> :class:`InvalidVersionIdError`) so no storage
-type crosses back into the servers layer.
+``PathTraversalError`` / ``SymlinkRefusedError`` / ``NameTooLongError`` ->
+:class:`InvalidFilePathError`, ``PathOccupiedError`` ->
+:class:`FileAlreadyExistsError`, a ``VersionId`` ``ValueError`` ->
+:class:`InvalidVersionIdError`) so no storage type crosses back into the servers
+layer. The last two are the mutation-side errno vocabulary (issue #2433): an
+over-long destination name is a 422 ``name_too_long`` and a non-directory blocking
+a needed path component is the same 409 the never-clobber rename returns.
 """
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ import zipfile
 from collections.abc import AsyncIterator
 
 from mc_server_dashboard_api.servers.domain.errors import (
+    FileAlreadyExistsError,
     InvalidFilePathError,
     InvalidVersionIdError,
     ServerFileNotFoundError,
@@ -31,7 +36,9 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerId,
 )
 from mc_server_dashboard_api.storage.domain.errors import (
+    NameTooLongError,
     NotFoundError,
+    PathOccupiedError,
     PathTraversalError,
     SymlinkRefusedError,
 )
@@ -46,24 +53,37 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 
 _LOG = logging.getLogger(__name__)
 
-# The two ways Storage refuses a path outright (as opposed to missing it). Caught
-# as one tuple everywhere so no call site can handle the escape and forget the
-# symlink refusal — the drift that would leave a raw storage error crossing back
-# into the servers layer as a 500 (issue #2432).
-_PATH_REFUSED = (PathTraversalError, SymlinkRefusedError)
+# The ways Storage refuses a path outright (as opposed to missing it). Caught as
+# one tuple everywhere so no call site can handle the escape and forget the symlink
+# refusal — the drift that would leave a raw storage error crossing back into the
+# servers layer as a 500 (issue #2432). A mutation's over-long DESTINATION name
+# joins them (issue #2433): it is a refused path too, distinguished only by its 422
+# reason, and the reads that also catch this tuple never raise it (an over-long read
+# is a miss, #2394), so folding it in here refuses it from every mutation without a
+# per-method except.
+_PATH_REFUSED = (PathTraversalError, SymlinkRefusedError, NameTooLongError)
+
+# A non-directory occupying a path component a mutation needs (issue #2433). Mapped
+# to the 409 the never-clobber rename already returns, so a mutation blocked by a
+# file in the way answers the same conflict as one blocked by an existing
+# destination.
+_PATH_CONFLICT = (PathOccupiedError,)
 
 
 def _refused(rel_path: str, exc: Exception) -> InvalidFilePathError:
-    """Translate a Storage path refusal, keeping the two reasons distinguishable.
+    """Translate a Storage path refusal, keeping the reasons distinguishable.
 
     A symlink at any path component carries the ``symlink_refused`` reason the
     Worker's running path already answers with (issue #2432), so the browser shows
     one sentence — ``files.error.symlinkRefused`` — whether the server is at rest or
-    running. A genuine escape keeps the default ``invalid_path``.
+    running. An over-long destination name is ``name_too_long`` (issue #2433). A
+    genuine escape keeps the default ``invalid_path``.
     """
 
     if isinstance(exc, SymlinkRefusedError):
         return InvalidFilePathError(rel_path, reason="symlink_refused")
+    if isinstance(exc, NameTooLongError):
+        return InvalidFilePathError(rel_path, reason="name_too_long")
     return InvalidFilePathError(rel_path)
 
 
@@ -184,6 +204,8 @@ class StorageFileStoreAdapter(FileStore):
             )
         except _PATH_REFUSED as exc:
             raise _refused(rel_path, exc) from exc
+        except _PATH_CONFLICT as exc:
+            raise FileAlreadyExistsError(rel_path) from exc
 
     async def retain_if_changed(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
@@ -233,6 +255,8 @@ class StorageFileStoreAdapter(FileStore):
             )
         except _PATH_REFUSED as exc:
             raise _refused(from_path, exc) from exc
+        except _PATH_CONFLICT as exc:
+            raise FileAlreadyExistsError(to_path) from exc
         except NotFoundError as exc:
             raise ServerFileNotFoundError(str(server_id.value)) from exc
 
@@ -251,6 +275,8 @@ class StorageFileStoreAdapter(FileStore):
             )
         except _PATH_REFUSED as exc:
             raise _refused(from_path, exc) from exc
+        except _PATH_CONFLICT as exc:
+            raise FileAlreadyExistsError(to_path) from exc
         except NotFoundError as exc:
             raise ServerFileNotFoundError(str(server_id.value)) from exc
 
@@ -262,6 +288,8 @@ class StorageFileStoreAdapter(FileStore):
             await self._storage.make_dir(community, server, _rel_path(rel_path))
         except _PATH_REFUSED as exc:
             raise _refused(rel_path, exc) from exc
+        except _PATH_CONFLICT as exc:
+            raise FileAlreadyExistsError(rel_path) from exc
         except NotFoundError as exc:
             raise ServerFileNotFoundError(str(server_id.value)) from exc
 
