@@ -723,6 +723,25 @@ function StatePill({ state }: { state: ObservedState }) {
   );
 }
 
+// The desired/observed drift affordance for a list row (issue #2443). Mirrors
+// the detail page header's rule and string exactly (ServerDetailPage's
+// `Header`): the reconciler has not yet converged when desired ≠ observed, so
+// show an "applying…" hint. Without it a pending intent is invisible on the
+// list — e.g. a stop whose dispatch failed leaves desired=stopped while the
+// process keeps running, yet the row would otherwise show only a green pill.
+// The mark rides on the row wherever the observed state's bucket passes the
+// filter; it does not change which rows `filterServers` keeps.
+function DriftPill({ server }: { server: ServerResponse }) {
+  if (server.desired_state === server.observed_state) {
+    return null;
+  }
+  return (
+    <span className="pill settling blink" role="status">
+      {t("serverDetail.converging")}
+    </span>
+  );
+}
+
 interface ServerRowProps {
   server: ServerResponse;
   communityId: string;
@@ -805,6 +824,7 @@ function ServerCard({ server, communityId, can }: ServerRowProps) {
           </Link>
         </span>
         <StatePill state={displayState} />
+        <DriftPill server={server} />
       </div>
       <div className="meta">
         <span className="badge type">
@@ -996,6 +1016,7 @@ function ServerRow({ server, communityId, can }: ServerRowProps) {
       </td>
       <td>
         <StatePill state={displayState} />
+        <DriftPill server={server} />
       </td>
       <td>
         {server.server_type} {server.mc_version}
