@@ -106,6 +106,7 @@ function fileOperationErrorMessage(error: unknown): TranslationKey {
       if (r === "is_a_directory") return "files.error.isDirectory";
       if (r === "not_a_directory") return "files.error.notDirectory";
       if (r === "symlink_refused") return "files.error.symlinkRefused";
+      if (r === "name_too_long") return "files.error.nameTooLong";
       return "files.error.invalidInput";
     }
     case 503:
