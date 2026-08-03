@@ -116,6 +116,9 @@ const pluginErrorKeys: Record<string, TranslationKey> = {
   checksum_mismatch: "plugins.error.checksumMismatch",
   unsupported_server_type: "plugins.error.unsupportedServerType",
   invalid_side: "plugins.error.invalidSide",
+  invalid_display_name: "plugins.error.invalidDisplayName",
+  bedrock_port_range_exhausted: "plugins.error.bedrockPortRangeExhausted",
+  bedrock_port_taken: "plugins.error.bedrockPortTaken",
   not_found: "plugins.error.notFound",
 };
 

@@ -855,10 +855,9 @@ describe("ServerPluginsTab error messages (issue #1345)", () => {
     });
   });
 
-  // The reason→key map deliberately omits `file_too_large` (413-only) and
-  // `worker_unavailable` (503-only): each duplicates its status fallback, so the
-  // status alone must carry the message (#2460). These two pin that no rendered
-  // message changed — reverting either drop leaves the assertion identical.
+  // The reason→key map deliberately omits `file_too_large` (413-only): its
+  // message equals the 413 status fallback, so the status alone carries it
+  // (#2460). This pins that the drop left the rendered message identical.
   it("shows the tooLarge message for a 413 (carried by the status fallback)", async () => {
     await triggerUploadError(413, "file_too_large");
     await waitFor(() => {
@@ -870,12 +869,62 @@ describe("ServerPluginsTab error messages (issue #1345)", () => {
     });
   });
 
-  it("shows the workerUnavailable message for a 503 (carried by the status fallback)", async () => {
-    // A truthful 503 from a plugin route: an install that exhausts the Bedrock
-    // UDP port window raises `bedrock_port_range_exhausted` (plugins.py
-    // `_service_unavailable`). It has no reason entry, so the 503 fallback must
-    // carry the workerUnavailable message.
+  // A Geyser install that exhausts the Bedrock UDP port window raises a truthful
+  // 503 `bedrock_port_range_exhausted` (plugins.py / catalog.py
+  // `_service_unavailable`). Its own reason entry now names the port cause rather
+  // than falling to the 503 worker-disconnect message (issue #2657).
+  it("shows a specific message for bedrock_port_range_exhausted", async () => {
     await triggerUploadError(503, "bedrock_port_range_exhausted");
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "No free port is available in the Bedrock port range. Please try again later.",
+        ),
+      ).toBeInTheDocument();
+    });
+  });
+
+  // The UNIQUE(bedrock_port) backstop firing on a concurrent allocation racer
+  // raises 409 `bedrock_port_taken` (plugins.py / catalog.py `_conflict`).
+  it("shows a specific message for bedrock_port_taken", async () => {
+    await triggerUploadError(409, "bedrock_port_taken");
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "The Bedrock port is already in use. Please try again.",
+        ),
+      ).toBeInTheDocument();
+    });
+  });
+
+  // A blank or over-long display name raises 422 `invalid_display_name`
+  // (plugins.py `_unprocessable`).
+  it("shows a specific message for invalid_display_name", async () => {
+    await triggerUploadError(422, "invalid_display_name");
+    await waitFor(() => {
+      expect(
+        screen.getByText("The display name is invalid."),
+      ).toBeInTheDocument();
+    });
+  });
+
+  // The `case 503` fallback is load-bearing for a reason-less 503 — a proxy or
+  // gateway 503 whose body carries no `reason` (issue #2657). It must still
+  // render workerUnavailable; deleting the branch would drop this to generic.
+  it("shows the workerUnavailable message for a reason-less 503", async () => {
+    mockGets({ plugins: [plugin()], validation: EMPTY_VALIDATION });
+    mockPostFormWithProgress.mockRejectedValue(new ApiError(503, {}));
+    renderTab();
+    await waitFor(() => {
+      expect(screen.getByText("Sodium")).toBeInTheDocument();
+    });
+    const input = document.querySelector(
+      'input[type="file"]',
+    ) as HTMLInputElement;
+    const file = new File(["x"], "test.jar", {
+      type: "application/java-archive",
+    });
+    fireEvent.change(input, { target: { files: [file] } });
     await waitFor(() => {
       expect(
         screen.getByText(

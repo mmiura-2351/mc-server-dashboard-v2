@@ -1699,6 +1699,11 @@ export const en = {
   "plugins.error.unsupportedServerType":
     "This server type does not support {nouns}.",
   "plugins.error.invalidSide": "Invalid side for this server type.",
+  "plugins.error.invalidDisplayName": "The display name is invalid.",
+  "plugins.error.bedrockPortRangeExhausted":
+    "No free port is available in the Bedrock port range. Please try again later.",
+  "plugins.error.bedrockPortTaken":
+    "The Bedrock port is already in use. Please try again.",
   "plugins.error.notFound": "{Noun} not found. It may have been removed.",
   "plugins.error.workerUnavailable":
     "The server agent is disconnected. Please try again later.",
