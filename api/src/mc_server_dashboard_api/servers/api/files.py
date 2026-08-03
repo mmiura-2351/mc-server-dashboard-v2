@@ -30,6 +30,15 @@ every denial into ``invalid_path``. The file-API problem-reason catalog is:
   followed (the FR-FILE-4 escape-vector defence). Both branches produce it: the
   Worker for a running server, and Storage for one at rest (issue #2432), so the
   same request gets the same reason in either state.
+- ``name_too_long`` (422) — a mutation's DESTINATION name is past the backend's
+  ``NAME_MAX`` (write / make_dir / a rename destination, issue #2433). An over-long
+  SOURCE (delete, rename-from) is a 404 miss instead, matching a read of the same
+  name. An fs realization: object-store keys have no ``NAME_MAX`` so it cannot arise
+  there.
+- ``destination_exists`` (409) — a non-directory occupies the target, or a
+  component the mutation needs as a directory (make_dir / write / rename, issue
+  #2433); the same never-clobber conflict a rename onto an existing destination
+  returns.
 - ``invalid_version_id`` (422) — a malformed ``version_id`` (outside the
   ``VersionId`` charset) on the rollback / version-preview routes.
 - ``file_too_large`` (413) — a read result or an edit payload past the
@@ -365,7 +374,8 @@ async def write_file(
         # exc.reason refines a file denial (issue #548): a non-path condition
         # (is_a_directory / symlink_refused) surfaces honestly instead of a blanket
         # invalid_path. An at-rest write keeps invalid_path except under a symlink
-        # parent, which Storage refuses with symlink_refused (issue #2432).
+        # parent (symlink_refused, issue #2432) or when the name is past NAME_MAX
+        # (name_too_long, issue #2433).
         raise _unprocessable(exc.reason) from exc
     except FileTooLargeError as exc:
         # The edge cap (MAX_EDIT_BYTES) and the Worker's payload_too_large reason
@@ -373,6 +383,10 @@ async def write_file(
         raise _too_large() from exc
     except ContentDirProtectedError as exc:
         raise _conflict("content_dir_protected") from exc
+    except FileAlreadyExistsError as exc:
+        # A non-directory occupies a component the write needs as a directory
+        # (issue #2433): the same never-clobber 409 a rename returns.
+        raise _conflict("destination_exists") from exc
     except ServerFilesUnsettledError as exc:
         await _record_file_failure(
             recorder, ops.FILE_WRITE, authorized, community_id, server_id
@@ -869,7 +883,10 @@ async def rename_file(
     except ServerFileNotFoundError as exc:
         raise _not_found() from exc
     except InvalidFilePathError as exc:
-        raise _unprocessable("invalid_path") from exc
+        # exc.reason, not a hardcoded invalid_path: an over-long destination name is
+        # name_too_long and a symlink-component path is symlink_refused (issues
+        # #2433/#2432); a genuine traversal keeps the default invalid_path.
+        raise _unprocessable(exc.reason) from exc
     except FileAlreadyExistsError as exc:
         raise _conflict("destination_exists") from exc
     except ContentDirProtectedError as exc:
@@ -984,7 +1001,14 @@ async def make_directory(
     except ServerFileNotFoundError as exc:
         raise _not_found() from exc
     except InvalidFilePathError as exc:
-        raise _unprocessable("invalid_path") from exc
+        # exc.reason, not a hardcoded invalid_path: an over-long name is
+        # name_too_long and a symlink-component path is symlink_refused (issues
+        # #2433/#2432); the root/traversal rejection keeps the default invalid_path.
+        raise _unprocessable(exc.reason) from exc
+    except FileAlreadyExistsError as exc:
+        # A file already occupies the target (or an ancestor of it) where a
+        # directory is needed (issue #2433): the never-clobber 409.
+        raise _conflict("destination_exists") from exc
     except ServerFilesUnsettledError as exc:
         await _record_file_failure(
             recorder, ops.FILE_MKDIR, authorized, community_id, server_id
