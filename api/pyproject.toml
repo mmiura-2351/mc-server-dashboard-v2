@@ -72,7 +72,7 @@ dependencies = [
     # and provides the Counter/Histogram/Gauge primitives and the custom-collector
     # protocol the servers-by-state gauge uses. 0.25.0 (2026-04-09) is well outside
     # the 7-day cooldown (Section 3); cap the next minor (0.x, Section 1).
-    "prometheus-client>=0.25.0,<0.26",  # 2026-04-09
+    "prometheus-client>=0.25.0,<0.27",  # 2026-04-09
     # Cron-expression engine behind the scheduler's NextRunCalculator Port
     # (epic #649, issue #1835): validates 5-field expressions and computes the
     # next occurrence with Debian-cron DST semantics. Confined to
