@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -100,41 +101,29 @@ func TestBuildTLSConfigWithClientPair(t *testing.T) {
 	}
 }
 
-// TestBuildTLSConfigHalfClientPairIsIgnored PINS THE CURRENT behavior of the
-// `&&` gate at main.go: when only one of client_cert_file / client_key_file is
-// set, buildTLSConfig silently skips the mTLS branch — no error, no client
-// certificate loaded. Whether a half-configured pair SHOULD instead be a
-// validation error (matching the "exactly one of CA/insecure" precedent) is an
-// open question tracked in #1981; this test only pins today's behavior so a
-// future decision changes it deliberately, not by accident.
-func TestBuildTLSConfigHalfClientPairIsIgnored(t *testing.T) {
-	dir := t.TempDir()
-	caPath, _ := writeSelfSignedCertKey(t, dir)
-	clientCert, clientKey := writeSelfSignedCertKey(t, mkdir(t, dir, "client"))
-
-	tests := []struct {
-		name string
-		tls  config.TLSConfig
-	}{
-		{
-			name: "only client_cert_file set",
-			tls:  config.TLSConfig{CAFile: caPath, ClientCertFile: clientCert},
-		},
-		{
-			name: "only client_key_file set",
-			tls:  config.TLSConfig{CAFile: caPath, ClientKeyFile: clientKey},
-		},
+// TestBuildTLSConfigHalfClientPairIsRejected flips the #1981 pin: a
+// half-configured mTLS client pair (only one of client_cert_file /
+// client_key_file) is now a fatal config-validation error, so buildTLSConfig
+// never sees one. The full both-direction / accept-side coverage lives in the
+// config package's validator tests; this pins that main's Load path rejects it
+// and names the missing half (issue #2661).
+func TestBuildTLSConfigHalfClientPairIsRejected(t *testing.T) {
+	env := map[string]string{
+		"MCD_WORKER_API_GRPC_ENDPOINT":        "api:50051",
+		"MCD_WORKER_API_CREDENTIAL":           "secret",
+		"MCD_WORKER_API_TLS_CA_FILE":          "/etc/ssl/ca.pem",
+		"MCD_WORKER_API_TLS_CLIENT_CERT_FILE": "/etc/ssl/client.pem",
+		"MCD_WORKER_WORKER_SCRATCH_DIR":       t.TempDir(),
+		"MCD_WORKER_WORKER_DRIVERS":           "container",
+		"MCD_WORKER_DRIVER_CONTAINER_IMAGES":  "21=eclipse-temurin:21-jre",
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := buildTLSConfig(tc.tls)
-			if err != nil {
-				t.Fatalf("buildTLSConfig() error = %v, want nil (half pair is silently ignored today)", err)
-			}
-			if len(cfg.Certificates) != 0 {
-				t.Errorf("buildTLSConfig() Certificates = %d, want 0 (half pair loads no cert today)", len(cfg.Certificates))
-			}
-		})
+
+	_, err := config.Load("", func(k string) string { return env[k] })
+	if err == nil {
+		t.Fatal("config.Load() with a half mTLS client pair: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "client_key_file") {
+		t.Errorf("error %q does not name the missing client_key_file", err.Error())
 	}
 }
 

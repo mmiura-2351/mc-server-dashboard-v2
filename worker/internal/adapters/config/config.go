@@ -376,6 +376,16 @@ func (c Config) validate() error {
 		return fmt.Errorf("config: api.tls.ca_file is required (or set api.tls.insecure=true for a plaintext dev dial)")
 	}
 
+	// The mTLS client pair is all-or-nothing: a half-configured pair is a silent
+	// security downgrade (no client cert loaded, no error), so reject it and name
+	// the missing half (issue #2661).
+	if c.API.TLS.ClientCertFile == "" && c.API.TLS.ClientKeyFile != "" {
+		return fmt.Errorf("config: api.tls.client_cert_file is required when api.tls.client_key_file is set")
+	}
+	if c.API.TLS.ClientKeyFile == "" && c.API.TLS.ClientCertFile != "" {
+		return fmt.Errorf("config: api.tls.client_key_file is required when api.tls.client_cert_file is set")
+	}
+
 	if len(c.Worker.Drivers) == 0 {
 		return fmt.Errorf("config: worker.drivers: must advertise at least one driver (want container)")
 	}
