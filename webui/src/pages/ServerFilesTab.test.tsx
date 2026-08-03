@@ -11,6 +11,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { unzipSync } from "fflate";
+import type { ComponentProps } from "react";
 import { MemoryRouter, Route, Routes } from "react-router";
 import {
   afterEach,
@@ -31,7 +32,7 @@ import type { Can } from "../permissions/useCan.ts";
 import { installMockWebSocket } from "../test/mockWebSocket.ts";
 import { encodeUtf8Base64 } from "./fileText.ts";
 import { ServerDetailPage } from "./ServerDetailPage.tsx";
-import { versionDate } from "./ServerFilesTab.tsx";
+import { ServerFilesTab, versionDate } from "./ServerFilesTab.tsx";
 
 const CID = "c1";
 const SID = "s1";
@@ -155,6 +156,35 @@ async function openFiles() {
   await screen.findByText("survival");
   fireEvent.click(
     screen.getByRole("tab", { name: t("serverDetail.tab.files") }),
+  );
+}
+
+// Render ServerFilesTab on its own so a test can inject the bulk-download
+// aggregate cap (#2063). ServerDetailPage never passes that prop, so the whole
+// page can't reach it; the tab takes `server`/`communityId`/`can` directly.
+function renderFilesTab(
+  overrides: Partial<ComponentProps<typeof ServerFilesTab>> = {},
+) {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  return render(
+    <MemoryRouter initialEntries={[`/communities/${CID}/servers/${SID}`]}>
+      <QueryClientProvider client={queryClient}>
+        <ToastProvider>
+          <ServerFilesTab
+            server={
+              server() as unknown as ComponentProps<
+                typeof ServerFilesTab
+              >["server"]
+            }
+            communityId={CID}
+            can={() => true}
+            {...overrides}
+          />
+        </ToastProvider>
+      </QueryClientProvider>
+    </MemoryRouter>,
   );
 }
 
@@ -2238,6 +2268,46 @@ describe("ServerFilesTab bulk operations", () => {
     );
     // downloadFile should NOT have been called (ZIP handles both files).
     expect(mockDownload.downloadFile).not.toHaveBeenCalled();
+  });
+
+  it("aborts the bulk ZIP once the running byte total passes the aggregate cap (#2063)", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "world", is_dir: true },
+        { name: "world_nether", is_dir: true },
+        { name: "world_the_end", is_dir: true },
+      ]),
+    });
+    // Each directory response is individually under the per-fetch cap (#2027),
+    // and the pre-check prices directories at 0 — so only the running total in
+    // the loop can catch the sum. Feed a fixed 8-byte blob per fetch and inject
+    // a 10-byte cap: the total crosses on the second fetch (16 > 10) without
+    // allocating anything near 512 MiB.
+    mockDownload.fetchFileBlob.mockResolvedValue(new Blob(["12345678"]));
+    const createObjectURL = vi.spyOn(URL, "createObjectURL");
+    renderFilesTab({ maxBulkDownloadBytes: 10 });
+    await screen.findByText(/world_nether/);
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "world" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "world_nether" }), {
+      ctrlKey: true,
+    });
+    fireEvent.click(screen.getByRole("checkbox", { name: "world_the_end" }), {
+      ctrlKey: true,
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.bulk.download") }),
+    );
+
+    // The guard surfaces the size-bearing too-large toast and stops.
+    await screen.findByText(
+      t("files.bulk.download.tooLarge", { size: humanizeBytes(16) }),
+    );
+    // It aborts before the third fetch and never builds/saves a ZIP.
+    expect(mockDownload.fetchFileBlob).toHaveBeenCalledTimes(2);
+    expect(createObjectURL).not.toHaveBeenCalled();
+    createObjectURL.mockRestore();
   });
 
   it("aborts the bulk ZIP download when the tab unmounts mid-fetch (#1728)", async () => {
