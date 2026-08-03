@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from collections.abc import Iterator
 
 import pytest
 from fastapi import FastAPI
@@ -24,6 +23,7 @@ from mc_server_dashboard_api.dependencies import (
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
 from mc_server_dashboard_api.fleet.application.set_worker_drain import SetWorkerDrain
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
+from tests.client_utils import enter_client
 from tests.fleet.fakes import FakeClock, make_worker
 from tests.identity.fakes import make_user
 from tests.servers.fakes import FakeClock as ServersFakeClock
@@ -41,9 +41,8 @@ def _bind_shared_app(shared_app: FastAPI) -> None:
     _shared_app = shared_app
 
 
-def _client(app: object) -> Iterator[TestClient]:
-    with TestClient(app) as client:  # type: ignore[arg-type]
-        yield client
+def _client(app: object) -> TestClient:
+    return enter_client(TestClient(app))  # type: ignore[arg-type]
 
 
 def _app(
@@ -67,13 +66,13 @@ def _app(
 
 def test_requires_platform_admin() -> None:
     app, _ = _app(platform_admin=False)
-    client = next(_client(app))
+    client = _client(app)
     assert client.get("/api/workers").status_code == 403
 
 
 def test_lists_registered_worker_with_liveness() -> None:
     app, _ = _app(platform_admin=True)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get("/api/workers")
     assert resp.status_code == 200
     body = resp.json()
@@ -88,7 +87,7 @@ def test_lists_registered_worker_with_liveness() -> None:
 
 def test_empty_when_no_workers() -> None:
     app, _ = _app(platform_admin=True, seed=False)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get("/api/workers")
     assert resp.status_code == 200
     assert resp.json() == {"workers": []}
@@ -96,13 +95,13 @@ def test_empty_when_no_workers() -> None:
 
 def test_set_drain_requires_platform_admin() -> None:
     app, _ = _app(platform_admin=False)
-    client = next(_client(app))
+    client = _client(app)
     assert client.put("/api/workers/worker-1/drain").status_code == 403
 
 
 def test_clear_drain_requires_platform_admin() -> None:
     app, _ = _app(platform_admin=False)
-    client = next(_client(app))
+    client = _client(app)
     assert client.delete("/api/workers/worker-1/drain").status_code == 403
 
 
@@ -113,7 +112,7 @@ def test_set_drain_marks_worker_draining_in_listing() -> None:
         registry=registry, uow=FakeUnitOfWork(), clock=ServersFakeClock(_T0)
     )
     _shared_app.dependency_overrides[get_set_worker_drain] = lambda: use_case
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.put(f"/api/workers/{_WORKER_UUID}/drain")
     assert resp.status_code == 200
@@ -133,7 +132,7 @@ def test_clear_drain_returns_worker_to_online() -> None:
         registry=registry, uow=FakeUnitOfWork(), clock=ServersFakeClock(_T0)
     )
     _shared_app.dependency_overrides[get_set_worker_drain] = lambda: use_case
-    client = next(_client(app))
+    client = _client(app)
 
     assert client.delete(f"/api/workers/{_WORKER_UUID}/drain").status_code == 204
 
@@ -143,11 +142,11 @@ def test_clear_drain_returns_worker_to_online() -> None:
 
 def test_set_drain_unknown_worker_is_404() -> None:
     app, _ = _app(platform_admin=True, seed=False)
-    client = next(_client(app))
+    client = _client(app)
     assert client.put("/api/workers/ghost/drain").status_code == 404
 
 
 def test_clear_drain_unknown_worker_is_404() -> None:
     app, _ = _app(platform_admin=True, seed=False)
-    client = next(_client(app))
+    client = _client(app)
     assert client.delete("/api/workers/ghost/drain").status_code == 404
