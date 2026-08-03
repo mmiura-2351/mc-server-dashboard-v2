@@ -124,6 +124,14 @@ func TestFlowRegistryEvictIdleClosesSocket(t *testing.T) {
 		t.Fatalf("forward: %v", err)
 	}
 
+	// forward's "x" makes the fake geyser echo back, and readPump refreshes
+	// lastSeen to now on that echo. Wait for the echo to be observed (readPump
+	// sets lastSeen before it SendDatagrams the reply) before back-dating, so
+	// the refresh cannot land afterwards and defeat the eviction we assert.
+	// One datagram forwarded means exactly one echo, after which readPump
+	// blocks on the next read and lastSeen stays put.
+	_ = sender.waitSent(t, 1)
+
 	r.mu.Lock()
 	fs := r.byID[5]
 	fs.lastSeen = time.Now().Add(-flowIdleTimeout - time.Second)
