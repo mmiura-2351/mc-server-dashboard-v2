@@ -4,10 +4,14 @@ import { describe, expect, it } from "vitest";
 import {
   actionApplies,
   atRest,
+  bucketOf,
   isTransitional,
   normalizeState,
   type ObservedState,
+  STATE_BUCKETS,
+  type StateBucket,
   statePill,
+  statesForBucket,
 } from "./serverState.ts";
 
 describe("normalizeState", () => {
@@ -140,5 +144,47 @@ describe("atRest", () => {
 
   it("running with desired is not at rest", () => {
     expect(atRest("running", "running")).toBe(false);
+  });
+});
+
+describe("bucketOf", () => {
+  // The 4 semantic buckets shown in the dashboard state dropdown (#2239).
+  const cases: Array<[ObservedState, StateBucket]> = [
+    ["running", "running"],
+    ["stopped", "stopped"],
+    ["crashed", "crashed"],
+    ["starting", "other"],
+    ["stopping", "other"],
+    ["restarting", "other"],
+    ["unknown", "other"],
+  ];
+
+  it.each(cases)("%s -> %s bucket", (state, bucket) => {
+    expect(bucketOf(state)).toBe(bucket);
+  });
+});
+
+describe("statesForBucket", () => {
+  it("running / stopped / crashed each expand to their single raw state", () => {
+    expect(statesForBucket("running")).toEqual(["running"]);
+    expect(statesForBucket("stopped")).toEqual(["stopped"]);
+    expect(statesForBucket("crashed")).toEqual(["crashed"]);
+  });
+
+  it("other folds in the transitional states and unknown", () => {
+    expect(statesForBucket("other")).toEqual([
+      "starting",
+      "stopping",
+      "restarting",
+      "unknown",
+    ]);
+  });
+
+  it("every known state maps back into exactly the bucket it expands from", () => {
+    for (const bucket of STATE_BUCKETS) {
+      for (const state of statesForBucket(bucket)) {
+        expect(bucketOf(state)).toBe(bucket);
+      }
+    }
   });
 });

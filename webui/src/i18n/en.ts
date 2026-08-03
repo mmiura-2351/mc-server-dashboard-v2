@@ -299,6 +299,14 @@ export const en = {
   // Filter and sort controls (#1123).
   "dashboard.filter.search": "Search by name…",
   "dashboard.filter.state": "Filter by state",
+  // State filter dropdown: short trigger label, clear action, and the four
+  // semantic buckets (#2239).
+  "dashboard.filter.stateLabel": "State",
+  "dashboard.filter.clear": "Clear",
+  "dashboard.filter.bucket.running": "Running",
+  "dashboard.filter.bucket.stopped": "Stopped",
+  "dashboard.filter.bucket.crashed": "Crashed",
+  "dashboard.filter.bucket.other": "Other",
   "dashboard.filter.noMatch": "No servers match the current filters.",
   "dashboard.sort.label": "Sort",
   "dashboard.sort.name": "Name",
