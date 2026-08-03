@@ -1435,6 +1435,32 @@ describe("ServerFilesTab 409 reason toasts", () => {
     ).toBeInTheDocument();
   });
 
+  it("maps a 422 name_too_long to the name-too-long message", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "a.txt", is_dir: false }]),
+    });
+    mockApi.delete.mockRejectedValue(
+      new ApiError(422, { reason: "name_too_long" }),
+    );
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+
+    const row = screen.getByText(/a\.txt/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: t("files.contextMenu.delete") }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.delete.confirm") }),
+    );
+
+    expect(
+      await screen.findByText(t("files.error.nameTooLong")),
+    ).toBeInTheDocument();
+  });
+
   it("maps a 503 to the worker-unavailable message", async () => {
     routeGet({
       detail: server(),

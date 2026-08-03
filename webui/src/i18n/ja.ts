@@ -772,6 +772,7 @@ export const ja: Record<TranslationKey, string> = {
   "files.error.notDirectory":
     "指定されたパスはディレクトリではなくファイルです。",
   "files.error.symlinkRefused": "シンボリックリンクは許可されていません。",
+  "files.error.nameTooLong": "名前が長すぎます。",
   "files.error.invalidInput": "リクエストが無効です。",
   "files.error.workerUnavailable":
     "サーバーエージェントが切断されています。しばらくしてから再度お試しください。",
