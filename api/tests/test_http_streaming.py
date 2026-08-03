@@ -1,5 +1,6 @@
 """The declared-length guards for streaming response bodies (issues #2318, #2415)."""
 
+import logging
 from collections.abc import AsyncIterator
 
 import pytest
@@ -33,6 +34,41 @@ async def test_raises_when_the_source_ends_below_the_declared_length() -> None:
 
 async def test_an_empty_source_matching_a_zero_declaration_is_fine() -> None:
     assert await _drain(counted(_chunks([]), 0)) == b""
+
+
+_GUARD_LOGGER = "mc_server_dashboard_api.http_streaming"
+
+
+def _guard_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.name == _GUARD_LOGGER]
+
+
+async def test_a_short_body_logs_the_attributable_failure_naming_both_numbers(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # BaseHTTPMiddleware discards the propagated exception before it reaches a
+    # log handler — h11 raises on the terminal empty-body message first — so the
+    # attributable diagnosis, both byte counts, must be emitted here, at the
+    # point counted() raises, rather than relying on propagation (issue #2385).
+    with caplog.at_level(logging.ERROR, logger=_GUARD_LOGGER):
+        with pytest.raises(ShortResponseBodyError):
+            await _drain(counted(_chunks([b"short"]), 99))
+    records = _guard_records(caplog)
+    assert len(records) == 1
+    assert records[0].levelno == logging.ERROR
+    message = records[0].getMessage()
+    assert "5" in message and "99" in message
+
+
+async def test_a_matching_body_logs_nothing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The normal (non-short) path must stay silent: the diagnostic is only for a
+    # genuine short body, and it must not double-log an in-spec response.
+    with caplog.at_level(logging.ERROR, logger=_GUARD_LOGGER):
+        body = await _drain(counted(_chunks([b"exactly"]), len(b"exactly")))
+    assert body == b"exactly"
+    assert _guard_records(caplog) == []
 
 
 # --- started(): locate the source before the headers (issue #2415) ---------
