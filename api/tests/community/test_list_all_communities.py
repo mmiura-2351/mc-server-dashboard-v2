@@ -34,7 +34,7 @@ def _community(name: str, *, created_at: dt.datetime) -> Community:
 def _seed(
     uow: FakeAuthzUnitOfWork, community: Community, *, members: int, servers: int
 ) -> None:
-    uow.communities.by_id[community.id] = community
+    uow.communities.seed(community)
     uow.communities.member_counts[community.id] = members
     uow.communities.server_counts[community.id] = servers
 

@@ -100,7 +100,12 @@ class FakeCommunityRepository(CommunityRepository):
         ]
 
     async def update(self, community: Community) -> None:
-        self.by_id[community.id] = self._copy(community)
+        # Mirror the adapter's ``UPDATE community ... WHERE id = :id``: a missing
+        # id matches no row, so nothing is written and no row appears -- keying
+        # the entity in regardless made this an insert the adapter cannot
+        # perform (#2557).
+        if community.id in self.by_id:
+            self.by_id[community.id] = self._copy(community)
 
     async def delete(self, community_id: CommunityId) -> None:
         self.by_id.pop(community_id, None)
@@ -214,7 +219,12 @@ class FakeRoleRepository(RoleRepository):
         ]
 
     async def update(self, role: Role) -> None:
-        self.by_id[role.id] = self._copy(role)
+        # Mirror the adapter's ``UPDATE role ... WHERE id = :id``: a missing id
+        # matches no row, so nothing is written and no row appears -- keying the
+        # entity in regardless made this an insert the adapter cannot perform
+        # (#2557).
+        if role.id in self.by_id:
+            self.by_id[role.id] = self._copy(role)
 
     async def delete(self, role_id: RoleId) -> None:
         self.by_id.pop(role_id, None)
@@ -407,7 +417,10 @@ class FakeAuthzUnitOfWork(UnitOfWork):
             None,
         )
         if existing is not None:
-            return existing
+            # Return a detached copy, matching the new-membership path below
+            # (which returns its local, detached from the seeded row): neither
+            # path hands the caller the stored entity by reference (#2638).
+            return self.memberships._copy(existing)
         membership = Membership(
             id=MembershipId.new(),
             user_id=user_id,
