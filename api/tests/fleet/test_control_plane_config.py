@@ -299,7 +299,44 @@ def test_create_app_does_not_warn_when_public_base_url_is_unset(
     assert not any("data_plane_base_url" in r.message for r in caplog.records)
 
 
+def test_create_app_does_not_warn_when_public_base_url_is_blank(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A blank ``PUBLIC_BASE_URL`` arrives as "" (env_ignore_empty is off), which
+    # ``effective_data_plane_base_url`` collapses to unset via its ``or``. The guard
+    # must collapse it the same way: warning here would name an empty URL — noise,
+    # not signal, since no Worker is handed a usable address (issue #2596).
+    _enable_control(monkeypatch)
+    _set_base_urls(monkeypatch, public="", data_plane=None)
+    with caplog.at_level("WARNING"):
+        create_app()
+    assert not any("data_plane_base_url" in r.message for r in caplog.records)
+
+
 _COMPOSE_FILE = Path(__file__).resolve().parents[3] / "compose.yaml"
+
+
+def _compose_api_service() -> str:
+    """The ``api`` service block of the shipped ``compose.yaml``.
+
+    Scopes the pin lookups below to that service so a same-named key under another
+    service — ``worker`` dials the same URLs — can never be picked up by a
+    whole-file search (issue #2596).
+    """
+
+    lines = _COMPOSE_FILE.read_text().splitlines(keepends=True)
+    start = next(i for i, line in enumerate(lines) if line.startswith("  api:"))
+    # The block runs until the next line at service indent or shallower — the next
+    # `  service:` or a top-level key. Deeper-indented and blank lines stay in.
+    end = next(
+        (
+            i
+            for i in range(start + 1, len(lines))
+            if lines[i].strip() and not lines[i].startswith("   ")
+        ),
+        len(lines),
+    )
+    return "".join(lines[start:end])
 
 
 def _compose_env_default(variable: str) -> str:
@@ -311,16 +348,21 @@ def _compose_env_default(variable: str) -> str:
     instead of a copy of them.
     """
 
+    # A balanced optional quote so a quoted value yields its contents, not the
+    # quotes (issue #2596); the value is captured non-greedily up to line end.
     match = re.search(
-        rf"^\s*{variable}:\s*(\S+)\s*$", _COMPOSE_FILE.read_text(), re.MULTILINE
+        rf"""^\s*{variable}:\s*(?P<q>["']?)(?P<value>.+?)(?P=q)\s*$""",
+        _compose_api_service(),
+        re.MULTILINE,
     )
     assert match is not None, (
         f"compose.yaml no longer sets {variable} for the api service; if the "
         "#1549 data-plane pin is gone, the #2564 warning fires on the shipped path"
     )
+    value = match.group("value")
     # `${VAR:-default}` -> `default`; a bare literal is returned as-is.
-    interpolated = re.fullmatch(r"\$\{[^:}]+:-([^}]*)\}", match.group(1))
-    return interpolated.group(1) if interpolated else match.group(1)
+    interpolated = re.fullmatch(r"\$\{[^:}]+:-([^}]*)\}", value)
+    return interpolated.group(1) if interpolated else value
 
 
 @pytest.mark.parametrize(
