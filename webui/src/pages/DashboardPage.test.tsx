@@ -1242,6 +1242,80 @@ describe("DashboardPage filter and sort (#1123)", () => {
     expect(trigger).not.toHaveTextContent("2");
   });
 
+  it("folds the selected-bucket count into the trigger's accessible name (#2668)", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ id: "s1", name: "survival", observed_state: "running" }),
+    ]);
+    renderPage();
+
+    await screen.findByText("survival");
+    // Zero selected: the plain state label, no count in the accessible name.
+    fireEvent.click(
+      screen.getByRole("button", { name: t("dashboard.filter.state") }),
+    );
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: t("dashboard.filter.bucket.running"),
+      }),
+    );
+
+    // One selected: the count is announced through the accessible name, and the
+    // plain (countless) name no longer matches.
+    await act(async () => {});
+    expect(
+      screen.getByRole("button", {
+        name: t("dashboard.filter.stateCount", { count: 1 }),
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: t("dashboard.filter.state") }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("ignores a stale non-bucket state token in the URL param (#2668)", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ id: "s1", name: "survival", observed_state: "running" }),
+      server({
+        id: "s2",
+        name: "creative",
+        observed_state: "stopped",
+        desired_state: "stopped",
+      }),
+    ]);
+    // `state=starting` is a pre-#2239 raw state name, not a bucket key.
+    const { container } = renderPage(`/communities/${CID}?state=starting`);
+
+    await screen.findByText("survival");
+    // The unrecognised token hides nothing…
+    expect(screen.getByText("creative")).toBeInTheDocument();
+    // …and contributes nothing to the badge count.
+    const trigger = container.querySelector(".filter-state-trigger");
+    expect(trigger).not.toHaveTextContent("1");
+  });
+
+  it("counts and filters on only the valid tokens when the param mixes valid and stale (#2668)", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ id: "s1", name: "survival", observed_state: "running" }),
+      server({
+        id: "s2",
+        name: "creative",
+        observed_state: "stopped",
+        desired_state: "stopped",
+      }),
+    ]);
+    const { container } = renderPage(
+      `/communities/${CID}?state=running,starting`,
+    );
+
+    await screen.findByText("survival");
+    // The valid `running` bucket still filters; stopped `creative` is hidden.
+    expect(screen.queryByText("creative")).not.toBeInTheDocument();
+    // Only the one valid bucket is counted, not the stale token.
+    const trigger = container.querySelector(".filter-state-trigger");
+    expect(trigger).toHaveTextContent("1");
+    expect(trigger).not.toHaveTextContent("2");
+  });
+
   it("round-trips the selected buckets through the state URL param", async () => {
     mockApi.get.mockResolvedValue([
       server({ id: "s1", name: "survival", observed_state: "running" }),
@@ -1482,5 +1556,90 @@ describe("DashboardPage filter and sort (#1123)", () => {
     expect(searchInput).toHaveValue("surv");
     // "creative" (stopped) should be hidden by both the name and state filter.
     expect(screen.queryByText("creative")).not.toBeInTheDocument();
+  });
+});
+
+describe("DashboardPage desired/observed drift (issue #2443)", () => {
+  it("marks a drifting row with the same affordance the detail page shows (cards view)", async () => {
+    // The concrete failed-stop case (#2435): desired=stopped is committed while
+    // the process keeps running, so observed=running. The list must surface the
+    // pending intent using the detail page's exact rule + string.
+    mockApi.get.mockResolvedValue([
+      server({ observed_state: "running", desired_state: "stopped" }),
+    ]);
+    renderPage();
+
+    // The state pill still reads "running"; the drift mark rides alongside it.
+    expect(await screen.findByText("survival")).toBeInTheDocument();
+    expect(screen.getByText(t("dashboard.state.running"))).toBeInTheDocument();
+    expect(screen.getByText(t("serverDetail.converging"))).toBeInTheDocument();
+  });
+
+  it("does not mark a settled row where desired equals observed (cards view)", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ observed_state: "running", desired_state: "running" }),
+    ]);
+    renderPage();
+
+    await screen.findByText("survival");
+    // Flush the react-query settle microtask before the negative assertion so a
+    // late render cannot re-introduce the mark after the check.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(
+      screen.queryByText(t("serverDetail.converging")),
+    ).not.toBeInTheDocument();
+  });
+
+  it("marks a drifting row in the table view too", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ observed_state: "running", desired_state: "stopped" }),
+    ]);
+    renderPage();
+
+    await screen.findByText("survival");
+    fireEvent.click(
+      screen.getByRole("button", { name: t("dashboard.view.table") }),
+    );
+
+    expect(screen.getByText(t("serverDetail.converging"))).toBeInTheDocument();
+  });
+
+  it("keeps the drift mark on a drifting row that passes the observed-state bucket filter", async () => {
+    // s1 is drifting toward stopped but still observed running; s2 is settled
+    // stopped. Filtering to the OBSERVED bucket (running) must keep s1 visible
+    // with its drift mark, and adding the mark must not change which rows pass:
+    // the settled stopped server is still filtered out.
+    mockApi.get.mockResolvedValue([
+      server({
+        id: "s1",
+        name: "survival",
+        observed_state: "running",
+        desired_state: "stopped",
+      }),
+      server({
+        id: "s2",
+        name: "creative",
+        observed_state: "stopped",
+        desired_state: "stopped",
+      }),
+    ]);
+    renderPage();
+
+    await screen.findByText("survival");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: t("dashboard.filter.state") }),
+    );
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: t("dashboard.filter.bucket.running"),
+      }),
+    );
+
+    expect(screen.getByText("survival")).toBeInTheDocument();
+    expect(screen.queryByText("creative")).not.toBeInTheDocument();
+    expect(screen.getByText(t("serverDetail.converging"))).toBeInTheDocument();
   });
 });

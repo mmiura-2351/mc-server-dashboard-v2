@@ -33,6 +33,21 @@ describe("Popover", () => {
     expect(trigger).toHaveAttribute("aria-expanded", "true");
   });
 
+  it("claims no menu popup and points aria-controls at the panel only while open", () => {
+    // The panel is a plain content region (a checkbox group in the dashboard
+    // filter's use), not a menu/listbox — so the trigger carries no
+    // aria-haspopup that would promise one, and leans on aria-expanded +
+    // aria-controls instead (#2668).
+    renderPopover();
+    const trigger = screen.getByRole("button", { name: "Menu" });
+    expect(trigger).not.toHaveAttribute("aria-haspopup");
+    expect(trigger).not.toHaveAttribute("aria-controls");
+
+    fireEvent.click(trigger);
+    const panel = screen.getByText("panel content").closest("[id]");
+    expect(trigger.getAttribute("aria-controls")).toBe(panel?.id);
+  });
+
   it("toggles closed on a second trigger click", () => {
     renderPopover();
     const trigger = screen.getByRole("button", { name: "Menu" });

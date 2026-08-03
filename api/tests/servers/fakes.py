@@ -756,6 +756,9 @@ class FakeBackupRepository(BackupRepository):
         # Ordered log of the metadata-row deletions, in the same shape
         # FakeLifecycleLock records; see FakeBackupArchiveStore.events.
         self.events: list[tuple[ServerId, str]] = []
+        # Ordered log of the ids ``get_by_id`` was called for, so a test can pin
+        # that the backup download resolves the row a single time (issue #2456).
+        self.get_by_id_calls: list[BackupId] = []
 
     @staticmethod
     def _copy(backup: Backup) -> Backup:
@@ -771,6 +774,7 @@ class FakeBackupRepository(BackupRepository):
         self.by_id[backup.id] = self._copy(backup)
 
     async def get_by_id(self, backup_id: BackupId) -> Backup | None:
+        self.get_by_id_calls.append(backup_id)
         backup = self.by_id.get(backup_id)
         return None if backup is None else self._copy(backup)
 
