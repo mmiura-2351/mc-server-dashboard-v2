@@ -914,6 +914,16 @@ class DownloadBackup:
     re-read (issue #2415). The moment that counts is therefore the single up-front
     load, exactly as PR #2454 made the archive resolution happen once at the
     status-choosable point.
+
+    The one interleaving where loading once is observable is ``DeleteServer``'s
+    reclaim (issues #777, #1707): it cascades the head backup's ROW away while
+    deliberately RETAINING that head archive, so a download of the *head* backup
+    racing the reclaim has no store miss to arbitrate. There the single up-front
+    load serves a 200 whose body completes at the declared length (the archive is
+    retained) where the old second load could have raced to a 404. That is a valid
+    linearization, not a regression: 200-complete was already in the racing
+    client's outcome set under two loads (a cascade landing after the second load),
+    and a 404 stays reachable whenever the cascade precedes :meth:`resolve`.
     """
 
     uow: UnitOfWork
