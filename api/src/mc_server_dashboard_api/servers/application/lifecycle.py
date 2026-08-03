@@ -777,11 +777,24 @@ class StartServer:
             # The unpack succeeded, so the Worker's scratch IS the store's working set
             # at (at least) that generation. Record it ONLY now: a failed hydrate
             # leaves a torn tree the Worker's own marker does not claim either.
-            if hydrated_generation is not None:
+            #
+            # Prefer the generation the Worker DECLARED it served (issue #2500) over the
+            # pre-dispatch read above: the declaration is the Worker's own marker write,
+            # taken at hydrate completion, so it cannot understate the way the pre-read
+            # can — a publish landing between the read and the hydrate's completion
+            # leaves it behind. The pre-read stays as a floor for a downlevel Worker
+            # that predates the field and so declares nothing; a declared value can
+            # only be >= the pre-read, so this is ``max(declared, pre_read)`` in effect.
+            recorded_generation = (
+                hydrate.held_generation
+                if hydrate.held_generation is not None
+                else hydrated_generation
+            )
+            if recorded_generation is not None:
                 self.control_plane.record_held_generation(
                     worker_id=worker_id,
                     server_id=server_id,
-                    generation=hydrated_generation,
+                    generation=recorded_generation,
                 )
         if dispatch is not None:
             dispatch.attempted = True

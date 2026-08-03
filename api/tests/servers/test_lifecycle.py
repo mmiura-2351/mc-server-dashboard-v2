@@ -742,6 +742,49 @@ async def test_start_records_the_hydrated_generation_as_held() -> None:
     assert cp.recorded_held == [(WorkerId(worker), ServerId(server_id), 6)]
 
 
+async def test_start_records_the_worker_declared_generation_over_the_preread() -> None:
+    # Issue #2500: the Worker now declares on the hydrate's CommandResult the exact
+    # generation it served and stamped on disk. The API prefers that declaration over
+    # its own pre-dispatch store read (#2477), which can only understate — a publish
+    # landing between the read and the hydrate's completion leaves the pre-read behind.
+    # Here the Worker declares 9 while the store read at dispatch was 6; the recorded
+    # value must be the declared 9, so the next start sees what the Worker really holds.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    declared = CommandOutcome(status=CommandStatus.OK, held_generation=9)
+    cp = FakeControlPlane(place_to=WorkerId(worker), outcomes={"hydrate": declared})
+
+    await _start_server(uow, cp, store_generation=6)(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
+    assert cp.recorded_held == [(WorkerId(worker), ServerId(server_id), 9)]
+
+
+async def test_start_falls_back_to_the_preread_when_the_worker_declares_nothing() -> (
+    None
+):
+    # A Worker that predates the held_generation field (issue #2500) declares nothing on
+    # the hydrate result, so the API keeps #2477's behaviour: it records the generation
+    # it read just before dispatching. The pre-read stays as the conservative floor for
+    # a downlevel Worker; a declared value can only be >= it, so preferring the
+    # declaration when present and the pre-read otherwise is max(declared, pre_read).
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    silent = CommandOutcome(status=CommandStatus.OK, held_generation=None)
+    cp = FakeControlPlane(place_to=WorkerId(worker), outcomes={"hydrate": silent})
+
+    await _start_server(uow, cp, store_generation=6)(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
+    assert cp.recorded_held == [(WorkerId(worker), ServerId(server_id), 6)]
+
+
 async def test_start_records_nothing_as_held_when_the_hydrate_fails() -> None:
     # A failed hydrate leaves a torn/partial tree the Worker's own generation marker
     # does not claim either. Recording it would make a later start skip the hydrate

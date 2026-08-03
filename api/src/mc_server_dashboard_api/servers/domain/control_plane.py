@@ -210,10 +210,17 @@ class ControlPlane(abc.ABC):
 
         Two events clear that bar, and each proves retention differently:
 
-        - A SUCCESSFUL hydrate (#2477). Pass the store generation read immediately
-          BEFORE the transfer was dispatched — the data plane serves the store's
-          generation at pull time, which the monotonic counter puts at or after that
-          read, so the value can only understate.
+        - A SUCCESSFUL hydrate. Prefer the generation the WORKER DECLARED it served
+          (#2500, ``CommandOutcome.held_generation``): it stamps that field from its own
+          marker write at hydrate completion, the same on-disk fact the snapshot case
+          below states. Fall back to the store generation read immediately BEFORE the
+          transfer was dispatched (#2477) only when the Worker declared nothing — an
+          older Worker that predates the field. The pre-read can only understate (the
+          data plane serves the store's generation at pull time, at or after that read,
+          and a publish landing between the read and the hydrate's completion leaves it
+          further behind), so a declared value is always >= it: preferring the
+          declaration when present and the pre-read otherwise records the greater of the
+          two, never worse than #2477 and safe against a downlevel Worker.
         - A snapshot publish on which the WORKER DECLARED the generation it still
           holds (#2481, ``CommandOutcome.held_generation``). The API cannot derive
           this one itself: whether the Worker still holds what it published depends
