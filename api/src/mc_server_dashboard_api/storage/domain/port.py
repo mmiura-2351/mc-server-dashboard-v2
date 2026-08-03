@@ -614,6 +614,31 @@ class FileStore(abc.ABC):
     The MUTATIONS apply the rule to their parent chain; what a mutation does with a
     LEAF that is a link is a separate question (issue #2429), so a leaf link is
     still resolved there and each mutation keeps its current behaviour on one.
+
+    **One mutation errno vocabulary too** (issue #2433). ``RelPath`` bounds neither
+    component nor total length, so a name the backend cannot hold reaches every
+    mutation from an ordinary client request. Each mutation answers such a name the
+    same way as its siblings, so the file browser gets one answer whichever mutation
+    it drove:
+
+    - an over-long **source** (:meth:`delete_file`, :meth:`delete_dir`, and the
+      ``from_path`` of a rename) is a **miss** — :class:`~.errors.NotFoundError`,
+      exactly as a read of the same name is (a name that long can hold nothing,
+      issue #2394);
+    - an over-long **destination** or intermediate component (:meth:`write_file`,
+      :meth:`make_dir`, and the ``to_path`` of a rename) is a client error, not a
+      miss — the name the caller GAVE cannot be created — surfaced as
+      :class:`~.errors.NameTooLongError` (the seam's 422);
+    - a non-directory already occupying the target, or a component the mutation must
+      descend through as a directory, is :class:`~.errors.PathOccupiedError` (the
+      seam's 409), the same never-clobber conflict a rename onto an existing
+      destination returns.
+
+    Both of the last two are an **fs / remote-fs realization** (Section 7.3): object
+    storage keys carry no ``NAME_MAX`` and object storage has no real directories (a
+    directory is only the shared key-prefix of its files), so neither condition can
+    arise on the object backend and it raises neither — the same way the symlink
+    refusal above is vacuous there.
     """
 
     @abc.abstractmethod

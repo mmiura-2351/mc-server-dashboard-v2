@@ -41,7 +41,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 
 from mc_server_dashboard_api.storage.adapters.failure_seam import (
@@ -53,7 +53,9 @@ from mc_server_dashboard_api.storage.domain.errors import (
     IncompleteTransferError,
     IntegrityCheckError,
     MissingRegionsError,
+    NameTooLongError,
     NotFoundError,
+    PathOccupiedError,
     PathTraversalError,
     SnapshotHandleError,
     StaleGenerationError,
@@ -1453,25 +1455,34 @@ class FsStorage(Storage):
             # atomic-publish path a snapshot uses: stage the file into an incoming/
             # dir, then flip ``current`` onto it.
             if not self._current_link(community_id, server_id).is_symlink():
-                self._publish_initial(community_id, server_id, rel_path, data)
+                # The write is a DESTINATION mutation even on the first-publish path,
+                # so an over-long name is the same 422 as below (issue #2433).
+                with _dest_mutation_errnos(rel_path):
+                    self._publish_initial(community_id, server_id, rel_path, data)
                 return
             current = self._current_dir(community_id, server_id)
             target = self._safe_target(current, rel_path)
-            # Refuse to overwrite a directory with file bytes (issue #542): the atomic
-            # rename onto an existing directory raises IsADirectoryError, so reject it
-            # as an invalid path rather than crashing.
-            if target.is_dir():
-                raise PathTraversalError(
-                    f"rel_path names a directory, not a file: {rel_path.value}"
-                )
-            # Capture the prior version BEFORE overwriting (Section 4.4/5), so a crash
-            # mid-write leaves both the old content and the retained version
-            # consistent.
-            if target.is_file():
-                self._capture_version(community_id, server_id, rel_path, target)
-            self._seam.reach(PublishPhase.AFTER_VERSION_CAPTURE)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            self._atomic_write(target, data)
+            # Translate the raw fs errnos this destination mutation can raise into
+            # the modelled storage outcomes (issue #2433): an over-long name is a 422
+            # (NameTooLongError), a non-directory blocking the parent is a 409
+            # (PathOccupiedError). The ``is_dir`` probe is inside the block because it
+            # is what raises ENAMETOOLONG for an over-long leaf.
+            with _dest_mutation_errnos(rel_path):
+                # Refuse to overwrite a directory with file bytes (issue #542): the
+                # atomic rename onto an existing directory raises IsADirectoryError, so
+                # reject it as an invalid path rather than crashing.
+                if target.is_dir():
+                    raise PathTraversalError(
+                        f"rel_path names a directory, not a file: {rel_path.value}"
+                    )
+                # Capture the prior version BEFORE overwriting (Section 4.4/5), so a
+                # crash mid-write leaves both the old content and the retained version
+                # consistent.
+                if target.is_file():
+                    self._capture_version(community_id, server_id, rel_path, target)
+                self._seam.reach(PublishPhase.AFTER_VERSION_CAPTURE)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                self._atomic_write(target, data)
             # Bump the generation on this authoritative edit (issue #889): an in-place
             # write replaces the published world just like a snapshot/restore, so it
             # advances the store generation and stamps the API_EDIT_PUBLISHER sentinel.
@@ -1538,7 +1549,10 @@ class FsStorage(Storage):
         with self._server_lock(community_id, server_id):
             current = self._current_dir(community_id, server_id)
             target = self._safe_target(current, rel_path)
-            if not target.is_file():
+            # The path is a SOURCE, so an over-long name is a miss like a read's
+            # (issue #2433): ``_existing_file`` answers False rather than raising
+            # ENAMETOOLONG, so it takes the not-found path below instead of a 500.
+            if not _existing_file(target):
                 raise NotFoundError(f"file not found: {rel_path.value}")
             # Capture the content BEFORE removing it (Section 5), so a delete is
             # reversible by rollback exactly like an overwrite is.
@@ -1570,7 +1584,9 @@ class FsStorage(Storage):
         with self._server_lock(community_id, server_id):
             current = self._current_dir(community_id, server_id)
             target = self._safe_target(current, rel_path)
-            if not target.is_dir():
+            # A SOURCE path, so an over-long name is a miss (issue #2433):
+            # ``_existing_dir`` answers False rather than raising ENAMETOOLONG.
+            if not _existing_dir(target):
                 raise NotFoundError(f"directory not found: {rel_path.value}")
             # rmtree is per-member unlinks — not crash-atomic (#1608).
             shutil.rmtree(target)
@@ -1607,10 +1623,13 @@ class FsStorage(Storage):
             current = self._current_dir(community_id, server_id)
             src = self._safe_target(current, from_path)
             dst = self._safe_target(current, to_path)
-            if not src.is_file():
+            # ``from_path`` is a SOURCE (over-long -> miss), ``to_path`` a DESTINATION
+            # (over-long -> 422, a file-occupied parent -> 409) — issue #2433.
+            if not _existing_file(src):
                 raise NotFoundError(f"file not found: {from_path.value}")
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            os.rename(src, dst)
+            with _dest_mutation_errnos(to_path):
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                os.rename(src, dst)
             _fsync_dir(src.parent)
             if dst.parent != src.parent:
                 _fsync_dir(dst.parent)
@@ -1645,12 +1664,15 @@ class FsStorage(Storage):
             current = self._current_dir(community_id, server_id)
             src = self._safe_target(current, from_path)
             dst = self._safe_target(current, to_path)
-            if not src.is_dir():
+            # ``from_path`` is a SOURCE (over-long -> miss), ``to_path`` a DESTINATION
+            # (over-long -> 422, a file-occupied parent -> 409) — issue #2433.
+            if not _existing_dir(src):
                 raise NotFoundError(f"directory not found: {from_path.value}")
-            # Ensure parent directories exist for the destination (e.g. renaming
-            # ``a/b`` to ``x/y/z`` needs ``x/y`` to exist).
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            os.rename(src, dst)
+            with _dest_mutation_errnos(to_path):
+                # Ensure parent directories exist for the destination (e.g. renaming
+                # ``a/b`` to ``x/y/z`` needs ``x/y`` to exist).
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                os.rename(src, dst)
             _fsync_dir(src.parent)
             if dst.parent != src.parent:
                 _fsync_dir(dst.parent)
@@ -1680,7 +1702,12 @@ class FsStorage(Storage):
         with self._server_lock(community_id, server_id):
             current = self._current_dir(community_id, server_id)
             target = self._safe_target(current, rel_path)
-            target.mkdir(parents=True, exist_ok=True)
+            # A DESTINATION mutation (issue #2433): an over-long name is a 422
+            # (NameTooLongError) and a non-directory already at the target/an ancestor
+            # is a 409 (PathOccupiedError, EEXIST/ENOTDIR) — matching the never-clobber
+            # 409. An existing DIRECTORY stays idempotent (``exist_ok=True``).
+            with _dest_mutation_errnos(rel_path):
+                target.mkdir(parents=True, exist_ok=True)
             _fsync_dir(target.parent)
             # Authoritative edit -> bump the generation (issue #889). An empty
             # directory arguably adds no world content, but bumping uniformly across
@@ -1781,7 +1808,11 @@ class FsStorage(Storage):
             except NotFoundError:
                 return  # never-published server: nothing authoritative to retain
             target = self._safe_target(current, rel_path)
-            if not target.is_file():
+            # A SOURCE read of the authoritative copy: an over-long name names
+            # nothing to retain, so it is the same no-op as a missing file rather than
+            # a raw ENAMETOOLONG (issue #2433), keeping this sibling's over-long answer
+            # consistent with the other mutations' 404-for-a-source.
+            if not _existing_file(target):
                 return  # no authoritative copy yet: nothing to retain
             versions = self._versions_dir(community_id, server_id, rel_path)
             if self._matches_newest_version(versions, target):
@@ -2105,6 +2136,71 @@ _NOT_A_READABLE_FILE = frozenset(
 # which is how a path naming a plain file reports, the miss the ``is_dir()``
 # pre-check folded together with a vanished directory (issue #2394).
 _NOT_A_LISTABLE_DIR = _NOT_A_READABLE_FILE - {errno.EISDIR}
+
+
+def _existing_file(path: Path) -> bool:
+    """``Path.is_file`` where a name the fs cannot hold is absent, not a raise (#2433).
+
+    A mutation's SOURCE precheck (delete, rename-from). ``is_file`` already answers
+    False for a gone / non-directory-reached / looping path, but pathlib RE-RAISES
+    ENAMETOOLONG — so an over-long source leaked as a 500 where a read answers a
+    clean miss (#2394). Folding the same ``_NOT_A_READABLE_FILE`` set here makes the
+    source precheck agree with the reads: a name that long can hold nothing, so it is
+    absent. Every other ``OSError`` (EACCES / EIO — a path that DOES exist) still
+    propagates, exactly as it does on the read side.
+    """
+
+    try:
+        return path.is_file()
+    except OSError as exc:
+        if exc.errno in _NOT_A_READABLE_FILE:
+            return False
+        raise
+
+
+def _existing_dir(path: Path) -> bool:
+    """``Path.is_dir`` sibling of :func:`_existing_file` for a directory source
+    (issue #2433)."""
+
+    try:
+        return path.is_dir()
+    except OSError as exc:
+        if exc.errno in _NOT_A_READABLE_FILE:
+            return False
+        raise
+
+
+@contextlib.contextmanager
+def _dest_mutation_errnos(rel_path: RelPath) -> Iterator[None]:
+    """Translate a DESTINATION mutation's raw fs errnos into storage outcomes (#2433).
+
+    A mutation creating or descending to ``rel_path`` (write, make_dir, a rename
+    destination) can raise, on an ordinary client request that ``RelPath`` did not
+    bound:
+
+    - ENAMETOOLONG — the name the caller GAVE is past the fs ``NAME_MAX``. Unlike a
+      read's over-long name (a miss, #2394), a destination the mutation cannot create
+      is a client error: :class:`NameTooLongError` (the seam maps it to 422).
+    - EEXIST / ENOTDIR — a regular file already sits at the target, or an ancestor is
+      a file the path has to descend through. Something is in the way, so it is the
+      never-clobber's conflict: :class:`PathOccupiedError` (the seam maps it to 409).
+
+    Every other ``OSError`` propagates unchanged (EACCES / EIO name a real failure,
+    not a client-supplied bad name), mirroring the read-side filter's discipline.
+    """
+
+    try:
+        yield
+    except OSError as exc:
+        if exc.errno == errno.ENAMETOOLONG:
+            raise NameTooLongError(
+                f"rel_path {rel_path.value!r} names an over-long destination"
+            ) from exc
+        if exc.errno in (errno.EEXIST, errno.ENOTDIR):
+            raise PathOccupiedError(
+                f"rel_path {rel_path.value!r} is blocked by a non-directory component"
+            ) from exc
+        raise
 
 
 def _open_readable_sync(path: Path, not_found: str) -> io.BufferedReader:

@@ -1613,3 +1613,81 @@ async def test_search_per_file_cap_is_not_bypassed_by_a_symlink(
     )
 
     assert set(result.paths) == {"small.txt"}
+
+
+# --- a mutation's raw fs errno becomes an edge outcome at the seam (issue #2433) ---
+#
+# The fs adapter models the raw errnos (over-long name, a file blocking a needed
+# parent); these pin that the seam then maps them onto the edge vocabulary so none
+# reaches the edge as a bare 500. Over-long DESTINATION -> 422 InvalidFilePathError
+# (reason ``name_too_long``); over-long SOURCE -> 404 ServerFileNotFoundError; a
+# non-directory blocking a component -> 409 FileAlreadyExistsError.
+
+_TOO_LONG = "x" * 300  # past NAME_MAX (255) on every mainstream filesystem
+
+
+async def test_over_long_destination_is_invalid_path_with_name_too_long(
+    tmp_path: Path,
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await _seed(storage, community, server)
+    adapter = StorageFileStoreAdapter(storage=storage)
+    cid, sid = CommunityId(community), ServerId(server)
+
+    with pytest.raises(InvalidFilePathError) as write_exc:
+        await adapter.write_file(
+            community_id=cid, server_id=sid, rel_path=_TOO_LONG, content=b"x"
+        )
+    assert write_exc.value.reason == "name_too_long"
+    with pytest.raises(InvalidFilePathError) as mkdir_exc:
+        await adapter.make_dir(community_id=cid, server_id=sid, rel_path=_TOO_LONG)
+    assert mkdir_exc.value.reason == "name_too_long"
+    with pytest.raises(InvalidFilePathError) as rename_exc:
+        await adapter.rename_file(
+            community_id=cid,
+            server_id=sid,
+            from_path="server.properties",
+            to_path=_TOO_LONG,
+        )
+    assert rename_exc.value.reason == "name_too_long"
+
+
+async def test_over_long_source_is_file_not_found(tmp_path: Path) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await _seed(storage, community, server)
+    adapter = StorageFileStoreAdapter(storage=storage)
+    cid, sid = CommunityId(community), ServerId(server)
+
+    with pytest.raises(ServerFileNotFoundError):
+        await adapter.delete_file(community_id=cid, server_id=sid, rel_path=_TOO_LONG)
+    with pytest.raises(ServerFileNotFoundError):
+        await adapter.rename_file(
+            community_id=cid, server_id=sid, from_path=_TOO_LONG, to_path="moved"
+        )
+
+
+async def test_a_file_occupied_parent_is_a_conflict(tmp_path: Path) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await _seed(storage, community, server)
+    adapter = StorageFileStoreAdapter(storage=storage)
+    cid, sid = CommunityId(community), ServerId(server)
+    # ``server.properties`` is a regular file; a path under it reaches its leaf
+    # through a non-directory.
+    under_file = "server.properties/child"
+
+    with pytest.raises(FileAlreadyExistsError):
+        await adapter.write_file(
+            community_id=cid, server_id=sid, rel_path=under_file, content=b"x"
+        )
+    with pytest.raises(FileAlreadyExistsError):
+        await adapter.make_dir(community_id=cid, server_id=sid, rel_path=under_file)
+    with pytest.raises(FileAlreadyExistsError):
+        await adapter.rename_file(
+            community_id=cid,
+            server_id=sid,
+            from_path="server.properties",
+            to_path=under_file,
+        )

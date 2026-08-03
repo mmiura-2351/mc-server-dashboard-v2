@@ -638,6 +638,41 @@ def test_write_symlink_refused_surfaces_reason() -> None:
     assert resp.json()["reason"] == "symlink_refused"
 
 
+def test_write_name_too_long_surfaces_reason() -> None:
+    # An over-long destination name is a modelled 422, not a bare ENAMETOOLONG 500
+    # (issue #2433).
+    app = _app(
+        member=True,
+        allow=True,
+        write=_FakeUseCase(error=InvalidFilePathError("x", reason="name_too_long")),
+    )
+    client = next(_client(app))
+    resp = client.put(
+        _url(uuid.uuid4(), uuid.uuid4()),
+        params={"path": "x" * 300},
+        json={"content_base64": ""},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "name_too_long"
+
+
+def test_write_under_a_file_parent_is_409() -> None:
+    # A non-directory blocking a needed parent is the never-clobber 409 (issue #2433).
+    app = _app(
+        member=True,
+        allow=True,
+        write=_FakeUseCase(error=FileAlreadyExistsError("file/child")),
+    )
+    client = next(_client(app))
+    resp = client.put(
+        _url(uuid.uuid4(), uuid.uuid4()),
+        params={"path": "file/child"},
+        json={"content_base64": ""},
+    )
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "destination_exists"
+
+
 # --- history / rollback ----------------------------------------------------
 
 
@@ -1279,6 +1314,23 @@ def test_rename_traversal_is_422() -> None:
     assert resp.json()["reason"] == "invalid_path"
 
 
+def test_rename_to_over_long_destination_surfaces_name_too_long() -> None:
+    # An over-long rename destination is a modelled 422 name_too_long, not a bare
+    # ENAMETOOLONG 500 — the route forwards exc.reason (issue #2433).
+    app = _app(
+        member=True,
+        allow=True,
+        rename=_FakeUseCase(error=InvalidFilePathError("x", reason="name_too_long")),
+    )
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/rename"),
+        json={"from": "a", "to": "x" * 300},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "name_too_long"
+
+
 def test_rename_running_is_409() -> None:
     app = _app(
         member=True,
@@ -1404,6 +1456,38 @@ def test_mkdir_traversal_is_422() -> None:
         _url(uuid.uuid4(), uuid.uuid4(), "/directories"), params={"path": "../escape"}
     )
     assert resp.status_code == 422
+
+
+def test_mkdir_over_long_name_surfaces_name_too_long() -> None:
+    # An over-long directory name is a modelled 422 name_too_long, not a bare
+    # ENAMETOOLONG 500 — the route forwards exc.reason (issue #2433).
+    app = _app(
+        member=True,
+        allow=True,
+        mkdir=_FakeUseCase(error=InvalidFilePathError("x", reason="name_too_long")),
+    )
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/directories"), params={"path": "x" * 300}
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "name_too_long"
+
+
+def test_mkdir_onto_a_file_is_409() -> None:
+    # make_dir onto a name held by a file (or an ancestor that is a file) is the
+    # never-clobber 409, not a raw EEXIST/ENOTDIR 500 (issue #2433).
+    app = _app(
+        member=True,
+        allow=True,
+        mkdir=_FakeUseCase(error=FileAlreadyExistsError("occupied")),
+    )
+    client = next(_client(app))
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/directories"), params={"path": "occupied"}
+    )
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "destination_exists"
 
 
 def test_mkdir_running_is_409() -> None:

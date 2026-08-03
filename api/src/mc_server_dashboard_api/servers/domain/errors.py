@@ -256,7 +256,10 @@ class InvalidFilePathError(ServerError):
     ``"not_a_directory"`` (list of a file), or ``"symlink_refused"`` (a refused
     symlink). The at-rest path shares that last one: Storage refuses a path with a
     symlink at any component (issue #2432), so one browser click gets the same
-    reason — and the same sentence — whether the server is at rest or running. The
+    reason — and the same sentence — whether the server is at rest or running. A
+    mutation whose DESTINATION name is past the backend's ``NAME_MAX`` carries
+    ``"name_too_long"`` (issue #2433); an over-long SOURCE is a 404 miss instead, and
+    a non-directory blocking the path is :class:`FileAlreadyExistsError` (409). The
     oversized case is not carried here — it is raised as
     :class:`FileTooLargeError` (413) instead.
     """
