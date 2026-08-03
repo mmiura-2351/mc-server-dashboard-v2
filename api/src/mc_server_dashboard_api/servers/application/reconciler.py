@@ -232,6 +232,22 @@ class _Backoff:
     next_eligible_at: dt.datetime
 
 
+@dataclass(frozen=True)
+class _GraceDecision:
+    """The grace window for a candidate, plus the generation it was decided from.
+
+    ``store_generation`` is the authoritative generation read to decide the
+    held-start grace (issue #999); it is carried into the ``redispatch_start``
+    dispatch so that use case's own skip-hydrate decision is made from the SAME
+    generation, never a second read that a store bump could have advanced between
+    (issue #2482). ``None`` for every path that did not read it — the stop-side
+    actions and ``place_and_start``, which always keep the full grace.
+    """
+
+    grace_seconds: int
+    store_generation: int | None = None
+
+
 @dataclass
 class RunReconcilerTick:
     """One pass of the periodic divergence reconciler (issue #101).
@@ -313,15 +329,15 @@ class RunReconcilerTick:
         action = self._action_for(server)
         if action is None:
             return
-        grace = await self._grace_for(server, action)
-        if self._within_grace(server, now, grace):
+        decision = await self._grace_for(server, action)
+        if self._within_grace(server, now, decision.grace_seconds):
             return
         attempt = self._attempts.get(server.id)
         if attempt is not None and now < attempt.next_eligible_at:
             return
-        await self._run(server, action, now)
+        await self._run(server, action, now, decision.store_generation)
 
-    async def _grace_for(self, server: Server, action: str) -> int:
+    async def _grace_for(self, server: Server, action: str) -> _GraceDecision:
         # A ``redispatch_stop`` whose previous stop dispatch the Worker RETURNED a
         # refusal for, with nothing learned about the row since (issue #2478). The
         # only thing the full grace protects on this path is the #930 floor — never
@@ -331,7 +347,7 @@ class RunReconcilerTick:
         # belong elsewhere: #822 to the hydrating start paths, #847 to
         # ``clear_stale_assignment``. Neither reaches here.
         if action == "redispatch_stop" and self._previous_stop_refused(server):
-            return self.refused_stop_grace_seconds
+            return _GraceDecision(self.refused_stop_grace_seconds)
         # Otherwise select the grace per action and held state (issue #999). A
         # ``redispatch_start`` whose assigned Worker is connected (already true here —
         # ``_action_for`` only returns it for a connected Worker) AND already holds a
@@ -344,7 +360,12 @@ class RunReconcilerTick:
         # non-held ``redispatch_start`` (hydrate will run), and the stop-side actions —
         # keeps the full grace, preserving the #822/#847 safety floors.
         if action != "redispatch_start" or server.assigned_worker_id is None:
-            return self.grace_seconds
+            return _GraceDecision(self.grace_seconds)
+        # Read the authoritative generation ONCE here and carry it in the decision:
+        # ``_run`` hands it to ``redispatch_start`` so that use case's own
+        # skip-hydrate check is made from this exact generation, not a second read a
+        # store bump could have advanced between (issue #2482) — which would let a
+        # redispatch HYDRATE under the short grace granted for a command-only start.
         store_generation = await self.store_generation.current_generation(
             community_id=server.community_id, server_id=server.id
         )
@@ -353,8 +374,8 @@ class RunReconcilerTick:
             server_id=server.id,
             store_generation=store_generation,
         ):
-            return self.held_start_grace_seconds
-        return self.grace_seconds
+            return _GraceDecision(self.held_start_grace_seconds, store_generation)
+        return _GraceDecision(self.grace_seconds, store_generation)
 
     def _previous_stop_refused(self, server: Server) -> bool:
         # True when the last stop dispatch was refused by the Worker AND that
@@ -439,7 +460,13 @@ class RunReconcilerTick:
             return None
         return "redispatch_stop"
 
-    async def _run(self, server: Server, action: str, now: dt.datetime) -> None:
+    async def _run(
+        self,
+        server: Server,
+        action: str,
+        now: dt.datetime,
+        store_generation: int | None,
+    ) -> None:
         _LOG.info(
             "reconciling diverged server %s: desired=%s observed=%s action=%s",
             server.id.value,
@@ -448,7 +475,7 @@ class RunReconcilerTick:
             action,
         )
         try:
-            dispatched = await self._dispatch(server, action)
+            dispatched = await self._dispatch(server, action, store_generation)
         except Exception as exc:  # noqa: BLE001 - never abort the tick
             self._record_failure(server.id, now)
             _LOG.warning(
@@ -497,7 +524,9 @@ class RunReconcilerTick:
             "reconcile action %s succeeded for server %s", action, server.id.value
         )
 
-    async def _dispatch(self, server: Server, action: str) -> Server:
+    async def _dispatch(
+        self, server: Server, action: str, store_generation: int | None
+    ) -> Server:
         # Build a FRESH use case per action so each runs on its own unit of work
         # (#871). The real UnitOfWork binds a single mutable session, so two
         # concurrent actions sharing one use case would corrupt each other's
@@ -512,8 +541,14 @@ class RunReconcilerTick:
                 community_id=server.community_id, server_id=server.id
             )
         elif action == "redispatch_start":
+            # Carry the generation the grace decision was made from (issue #2482), so
+            # redispatch_start's skip-hydrate check cannot see a bumped generation and
+            # hydrate under the short held-start grace. ``None`` on the non-held path
+            # (the full grace ran); redispatch_start then reads it itself.
             return await self.make_start_server().redispatch_start(
-                community_id=server.community_id, server_id=server.id
+                community_id=server.community_id,
+                server_id=server.id,
+                store_generation=store_generation,
             )
         elif action == "clear_stale_assignment":
             return await self.make_stop_server().clear_stale_assignment(
