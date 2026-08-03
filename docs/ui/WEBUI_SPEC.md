@@ -231,12 +231,14 @@ family is unsupported on `vanilla` servers (422 `unsupported_server_type`).
 | POST | `…/{sid}/plugins/{pid}/side` | Override a mod's side — `both` / `server` / `client` (`plugin:manage`, #1308); re-materializes the working set. Invalid side is 422 `invalid_side`. |
 | GET | `…/{sid}/client-mods` | List the server's enabled client-relevant plugins (side `client` / `both`; `plugin:read`, #1308). |
 | GET / HEAD | `…/{sid}/client-mods/download` | Download those client mods bundled as `mods.zip` (`plugin:read`, #1308). The response declares `Cache-Control: no-store` (#2491, #2519) — a per-server body gated by `plugin:read` must never be served from a shared cache. `HEAD` is the metadata probe (#2560): the same gate and headers with no body, and it neither builds the zip nor pulls a jar; the zip is streamed with no `Content-Length` (assembled on the fly from a variable jar set), so the probe learns existence rather than size. |
+| GET | `…/{sid}/catalog/search` | Search the Modrinth catalog with auto-applied server facets (`plugin:read`, #1151): `q` query + `limit` (1–100, default 20) / `offset` paging. Catalog upstream failure is 502 `catalog_upstream_failed`. |
+| GET | `…/{sid}/catalog/projects/{id_or_slug}` | Fetch a catalog project's detail + its server-compatible versions (`plugin:read`, #1151); an unknown project is 404 `catalog_project_not_found`, catalog upstream failure 502 `catalog_upstream_failed`. |
+| POST | `…/{sid}/catalog/install` | Install a plugin/mod from the catalog by `project_id` + `version_id` (`plugin:manage`, #1151). Returns `201`; a missing project is 404 `catalog_project_not_found`, checksum drift 502 `checksum_mismatch`, and a duplicate 409 `plugin_already_exists`. |
 
-The Modrinth catalog browse/install endpoints under `…/{sid}/catalog`
-(`/catalog/search`, `/catalog/projects/{id_or_slug}`, `/catalog/install`) back
-the same tab and share the `plugin:*` gate, but are a separate route family
-(issue #1151) with the same Section-2 gap; inventorying them is tracked
-separately (issue #2643).
+The `…/{sid}/catalog/*` rows are a separate route family (`catalog.py`, #1151) —
+the Modrinth browse/install that backs the same `#plugins` tab — folded in here
+because they share the `plugin:*` gate and the at-rest / vanilla constraints
+above.
 
 ## 3. Personas and capability scoping
 
