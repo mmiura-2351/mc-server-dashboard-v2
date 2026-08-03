@@ -281,6 +281,21 @@ def test_update_role_preset_returns_409() -> None:
     assert resp.json()["reason"] == "preset_role"
 
 
+def test_update_role_duplicate_name_returns_409() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        update_uc=_FakeUseCase(error=RoleAlreadyExistsError("x")),
+    )
+    client = next(_client(app))
+    resp = client.patch(
+        f"/api/communities/{uuid.uuid4()}/roles/{uuid.uuid4()}",
+        json={"name": "Editor"},
+    )
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "name_taken"
+
+
 def test_update_role_cross_community_gets_404() -> None:
     app = _app(
         member=True, allow=True, update_uc=_FakeUseCase(error=RoleNotFoundError("x"))
