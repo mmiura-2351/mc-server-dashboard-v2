@@ -302,6 +302,9 @@ export const en = {
   // State filter dropdown: short trigger label, clear action, and the four
   // semantic buckets (#2239).
   "dashboard.filter.stateLabel": "State",
+  // Accessible name for the state trigger when buckets are selected; the count
+  // badge itself is aria-hidden, so this is how the number reaches AT (#2668).
+  "dashboard.filter.stateCount": "Filter by state ({count} selected)",
   "dashboard.filter.clear": "Clear",
   "dashboard.filter.bucket.running": "Running",
   "dashboard.filter.bucket.stopped": "Stopped",
