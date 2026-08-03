@@ -2,6 +2,15 @@
 
 Keeps the recorder, query use case, and route tests against fakes (no database),
 per TESTING.md Section 4.
+
+The entity-copy rule the servers/identity/community fakes follow (#2516, #2549)
+does not reach here: these doubles are recording spies that capture what was
+passed (``RecordingAuditWriter``, ``RecordingAuditRecorder``) and a query stub
+that returns a caller-supplied list (``CapturingAuditQuery``), and every audit
+entity -- ``AuditEvent`` and ``AuditRecord`` -- is ``frozen=True`` with no
+mutable field. No in-memory edit can cross a boundary in either direction, so
+there is nothing for a copy to protect (the ``FakeGameSessionRepository``
+reasoning of PR #2548, applied to a whole context).
 """
 
 from __future__ import annotations
