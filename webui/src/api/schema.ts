@@ -2200,13 +2200,43 @@ export interface paths {
          *     Validates that ``filename`` matches the stored filename (404 otherwise). The
          *     response declares the pack's exact size as ``Content-Length``, which the game
          *     client shows as download progress.
+         *
+         *     **Probe** (issue #2632): a ``HEAD`` answers with the ``GET``'s status and
+         *     headers and no body, so a resumable-download client — this is the
+         *     unauthenticated URL a Minecraft client fetches at join time, and it declares a
+         *     ``Content-Length``, so it has a real reason to probe first — learns the size,
+         *     from the store's size probe below, without starting a transfer. The route
+         *     offers no ``Accept-Ranges``, so the probe reports the size but not resumption.
+         *     The ``200`` carries the same ``public, max-age=3600, immutable`` the ``GET``
+         *     declares, and the size-probe ``404`` its ``no-store``, so an edge (the one URL
+         *     a shared cache demonstrably stores, issues #2588 / #2589) does not cache a
+         *     probe differently from the download.
          */
         get: operations["public_download_resource_pack_api_public_resource_packs__resource_pack_id___filename__get"];
         put?: never;
         post?: never;
         delete?: never;
         options?: never;
-        head?: never;
+        /**
+         * Public Download Resource Pack
+         * @description Public download endpoint for Minecraft clients (no auth, issue #1176).
+         *
+         *     Validates that ``filename`` matches the stored filename (404 otherwise). The
+         *     response declares the pack's exact size as ``Content-Length``, which the game
+         *     client shows as download progress.
+         *
+         *     **Probe** (issue #2632): a ``HEAD`` answers with the ``GET``'s status and
+         *     headers and no body, so a resumable-download client — this is the
+         *     unauthenticated URL a Minecraft client fetches at join time, and it declares a
+         *     ``Content-Length``, so it has a real reason to probe first — learns the size,
+         *     from the store's size probe below, without starting a transfer. The route
+         *     offers no ``Accept-Ranges``, so the probe reports the size but not resumption.
+         *     The ``200`` carries the same ``public, max-age=3600, immutable`` the ``GET``
+         *     declares, and the size-probe ``404`` its ``no-store``, so an edge (the one URL
+         *     a shared cache demonstrably stores, issues #2588 / #2589) does not cache a
+         *     probe differently from the download.
+         */
+        head: operations["public_download_resource_pack_api_public_resource_packs__resource_pack_id___filename__head"];
         patch?: never;
         trace?: never;
     };
@@ -8002,6 +8032,38 @@ export interface operations {
         };
     };
     public_download_resource_pack_api_public_resource_packs__resource_pack_id___filename__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                resource_pack_id: string;
+                filename: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    public_download_resource_pack_api_public_resource_packs__resource_pack_id___filename__head: {
         parameters: {
             query?: never;
             header?: never;
