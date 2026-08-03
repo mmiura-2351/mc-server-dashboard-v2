@@ -48,7 +48,12 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     RelPath,
     ServerId,
 )
-from tests.storage.fake_s3 import FakeS3Store, close_tracking_factory, fake_s3_factory
+from tests.storage.fake_s3 import (
+    FakeS3Client,
+    FakeS3Store,
+    close_tracking_factory,
+    fake_s3_factory,
+)
 from tests.storage.helpers import (
     bomb_targz,
     drain,
@@ -525,6 +530,45 @@ async def test_create_backup_refuses_corrupt_live_snapshot() -> None:
         await storage.create_backup_from_current(community, server)
     # Fail-closed: no ``.tar.gz`` backup object was uploaded.
     assert not any(k.startswith(backups_prefix) for k in store.objects)
+
+
+async def test_open_backup_streams_without_a_head_precheck() -> None:
+    """The download stream locates the archive with its GET alone — no redundant
+    ``head_object`` round-trip (issue #2456).
+
+    ``get_object`` already turns a missing object into ``NotFoundError`` on the
+    stream's first iteration (the ``open_backup`` contract, #2341), so the head
+    answered nothing the get would not. It is the check-then-act shape the fs
+    adapter shed (#2341/#2394); the object adapter drops it too. A hit still
+    streams the exact bytes, and the miss is covered by the Port contract's
+    ``test_open_unknown_backup_is_not_found`` on this backend.
+    """
+
+    store = FakeS3Store()
+    head_keys: list[str] = []
+
+    class _HeadCountingClient(FakeS3Client):
+        async def head_object(self, key: str) -> int | None:
+            head_keys.append(key)
+            return await super().head_object(key)
+
+    @asynccontextmanager
+    async def _factory() -> AsyncIterator[S3Client]:
+        yield _HeadCountingClient(store)
+
+    storage = ObjectStorage(_factory)
+    community, server = new_scope()
+    await _publish(
+        storage, community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
+    )
+    key = await storage.create_backup_from_current(community, server)
+
+    # Ignore the heads publish/create issued; only the download path is under test.
+    head_keys.clear()
+    archive = await drain(storage.open_backup(community, server, key))
+
+    assert archive, "the archive bytes streamed out"
+    assert head_keys == [], "open_backup issued no head_object round-trip"
 
 
 async def test_commit_refuses_partial_region_loss_and_keeps_prior() -> None:

@@ -252,6 +252,15 @@ export const ja: Record<TranslationKey, string> = {
     "サーバーを停止できませんでした: まだ稼働中です。システムが停止を試行し続けます。",
   "dashboard.lifecycle.restartPending":
     "サーバーを再起動できませんでした: 一時的に停止している可能性があります。システムが自動的に復帰させます。",
+  // 409 worker_busy on start (issue #2445); ambiguous at the edge, so this must
+  // not promise the start will happen — it says it may still come up and to
+  // retry only if the server stays stopped.
+  "dashboard.lifecycle.startPending":
+    "サーバーをすぐに起動できませんでした: このサーバーで別の操作が進行中です。起動は自動的に適用される場合があります。サーバーの状態を確認し、停止したままの場合のみ再度起動してください。",
+  // 409 invalid_transition on start (issue #2445): すでに起動指定済みなので、保留中の
+  // 起動を伝えられた後の再試行にはこのメッセージを返す。
+  "dashboard.lifecycle.startAlreadyRunning":
+    "サーバーはすでに起動中または起動処理中のため、起動する必要はありません。",
   // 409 failed_stop_orphan (issue #2466): the host could not confirm an earlier
   // stop, so the process may still be running. A retry of the same action is
   // refused identically, and since issue #2475 the host converges the orphan on

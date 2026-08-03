@@ -31,7 +31,9 @@ from mc_server_dashboard_api.storage.adapters.fs import (
     _new_version_id,
 )
 from mc_server_dashboard_api.storage.domain.errors import (
+    NameTooLongError,
     NotFoundError,
+    PathOccupiedError,
     PathTraversalError,
     SymlinkRefusedError,
 )
@@ -1139,3 +1141,124 @@ def test_restore_extract_preserves_file_mode_and_mtime(tmp_path: Path) -> None:
     stat = extracted.stat()
     assert stat.st_mode & 0o777 == 0o750
     assert int(stat.st_mtime) == mtime
+
+
+# --- a mutation's raw fs errnos become storage-domain outcomes (issue #2433) ---
+#
+# The read paths already model an over-long name as a miss (#2394); the MUTATIONS
+# leaked the raw errno as a 500. ``RelPath`` bounds no length, so every case below
+# is reachable from an ordinary client request (a long name pasted into a rename
+# dialog). The vocabulary the mutation side maps onto:
+#   over-long DESTINATION / component  -> NameTooLongError  (422 at the edge)
+#   over-long SOURCE (delete, rename-from) -> NotFoundError (404, matching reads)
+#   a non-directory occupying a needed parent / target -> PathOccupiedError (409)
+
+
+async def test_over_long_destination_on_a_mutation_is_name_too_long(
+    tmp_path: Path,
+) -> None:
+    """A destination past NAME_MAX is a modelled 422, never a bare ENAMETOOLONG 500."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"DATA", "d/inner": b"X"})
+    rel = RelPath(_TOO_LONG)
+
+    with pytest.raises(NameTooLongError):
+        await storage.write_file(community, server, rel, b"NEW")
+    with pytest.raises(NameTooLongError):
+        await storage.make_dir(community, server, rel)
+    with pytest.raises(NameTooLongError):
+        await storage.rename_file(community, server, RelPath("f"), rel)
+    with pytest.raises(NameTooLongError):
+        await storage.rename_dir(community, server, RelPath("d"), rel)
+
+
+async def test_over_long_source_on_a_mutation_is_a_miss(tmp_path: Path) -> None:
+    """A source past NAME_MAX names nothing, so delete / rename-from is a miss (404)."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"DATA"})
+    rel = RelPath(_TOO_LONG)
+
+    with pytest.raises(NotFoundError):
+        await storage.delete_file(community, server, rel)
+    with pytest.raises(NotFoundError):
+        await storage.delete_dir(community, server, rel)
+    with pytest.raises(NotFoundError):
+        await storage.rename_file(community, server, rel, RelPath("moved"))
+    with pytest.raises(NotFoundError):
+        await storage.rename_dir(community, server, rel, RelPath("moved"))
+
+
+async def test_retain_file_version_of_an_over_long_source_is_a_silent_no_op(
+    tmp_path: Path,
+) -> None:
+    """An over-long retain source names nothing to retain, so it is a no-op (#2433).
+
+    ``retain_file_version``'s contract already makes a missing file a no-op; an
+    over-long name is the same miss. It shares the ``_existing_file`` precheck the
+    other over-long SOURCES use, so it returns silently rather than raising the bare
+    ENAMETOOLONG ``Path.is_file`` throws (which would reach the edge as a 500). This
+    pins that no-op: against the pre-fix code the ``retain_file_version`` call raises
+    ENAMETOOLONG here instead of returning.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"DATA"})
+    rel = RelPath(_TOO_LONG)
+
+    # Returns silently (no raise) and captures nothing for the unnameable path.
+    await storage.retain_file_version(community, server, rel)
+    assert await storage.list_file_versions(community, server, rel) == []
+
+
+async def test_a_file_occupied_parent_on_a_mutation_is_a_conflict(
+    tmp_path: Path,
+) -> None:
+    """Writing / renaming under a name held by a regular file is a 409, not a 500.
+
+    ``regular/child`` reaches its leaf through ``regular``, a plain file; creating
+    the intermediate directory raises ENOTDIR (or EEXIST), which used to escape as
+    a bare 500. It is the never-clobber's 409 conflict: a non-directory is in the
+    way.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(
+        storage, community, server, {"regular": b"X", "g": b"G", "dd/i": b"I"}
+    )
+    under_file = RelPath("regular/child")
+
+    with pytest.raises(PathOccupiedError):
+        await storage.write_file(community, server, under_file, b"NEW")
+    with pytest.raises(PathOccupiedError):
+        await storage.make_dir(community, server, under_file)
+    with pytest.raises(PathOccupiedError):
+        await storage.rename_file(community, server, RelPath("g"), under_file)
+    with pytest.raises(PathOccupiedError):
+        await storage.rename_dir(community, server, RelPath("dd"), under_file)
+
+    # The blocking file and the untouched sources survive the refusals.
+    live = snapshot_dir(tmp_path, community, server)
+    assert (live / "regular").read_bytes() == b"X"
+    assert (live / "g").read_bytes() == b"G"
+    assert (live / "dd" / "i").read_bytes() == b"I"
+
+
+async def test_make_dir_onto_a_file_is_a_conflict(tmp_path: Path) -> None:
+    """``make_dir`` onto a name held by a file is a 409, not a raw EEXIST 500."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"occupied": b"X"})
+
+    with pytest.raises(PathOccupiedError):
+        await storage.make_dir(community, server, RelPath("occupied"))
+
+    # The file is left intact (the refused mkdir never clobbered it).
+    live = snapshot_dir(tmp_path, community, server)
+    assert (live / "occupied").read_bytes() == b"X"
