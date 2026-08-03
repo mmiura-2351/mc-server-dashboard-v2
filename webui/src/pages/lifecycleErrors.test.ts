@@ -103,15 +103,27 @@ describe("lifecycleErrorMessage", () => {
 
   // worker_busy on restart applied nothing at all — the server keeps running —
   // so it stays on the retry-in-a-moment message (issue #2435).
-  it.each(["start", "restart"] as const)(
-    "keeps the busy message for a 409 worker_busy on %s",
-    (action) => {
-      const error = new ApiError(409, { reason: "worker_busy" });
-      expect(lifecycleErrorMessage(error, action)).toBe(
-        "dashboard.lifecycle.busy",
-      );
-    },
-  );
+  it("keeps the busy message for a 409 worker_busy on restart", () => {
+    const error = new ApiError(409, { reason: "worker_busy" });
+    expect(lifecycleErrorMessage(error, "restart")).toBe(
+      "dashboard.lifecycle.busy",
+    );
+  });
+
+  // A start refused with worker_busy is ambiguous at the edge (issue #2445): a
+  // POST-dispatch BUSY keeps desired_state=running so the reconciler's
+  // redispatch_start applies the start later, while a PRE-dispatch BUSY (a
+  // refused hydrate) is compensated back to stopped so nothing is pending — and
+  // both arrive as a bare worker_busy. The message is honest for both: it does
+  // not promise the start will be applied, and it drops the "try again" the
+  // generic busy message pushes, which on the pending path lands on
+  // invalid_transition (see below).
+  it("maps a 409 worker_busy on start to the start-pending message", () => {
+    const error = new ApiError(409, { reason: "worker_busy" });
+    expect(lifecycleErrorMessage(error, "start")).toBe(
+      "dashboard.lifecycle.startPending",
+    );
+  });
 
   // server_busy is start-only and never commits an intent, so the verb never
   // changes its message (issue #2435).
@@ -127,6 +139,30 @@ describe("lifecycleErrorMessage", () => {
     (reason) => {
       const error = new ApiError(409, { reason });
       expect(lifecycleErrorMessage(error)).toBe("dashboard.stateChanged");
+    },
+  );
+
+  // Retrying a start while desired_state=running — the state the pending-start
+  // case above leaves behind — raises invalid_transition. The generic
+  // state-changed toast contradicts having just been told the start is pending,
+  // so start alone gets a message that says the server is already coming up
+  // (issue #2445).
+  it("maps a 409 invalid_transition on start to the already-running message", () => {
+    const error = new ApiError(409, { reason: "invalid_transition" });
+    expect(lifecycleErrorMessage(error, "start")).toBe(
+      "dashboard.lifecycle.startAlreadyRunning",
+    );
+  });
+
+  // Only start leaves a pending intent a retry collides with; stop and restart
+  // keep the state-changed treatment for invalid_transition (issue #2445).
+  it.each(["stop", "restart"] as const)(
+    "keeps the state-changed treatment for a 409 invalid_transition on %s",
+    (action) => {
+      const error = new ApiError(409, { reason: "invalid_transition" });
+      expect(lifecycleErrorMessage(error, action)).toBe(
+        "dashboard.stateChanged",
+      );
     },
   );
 
