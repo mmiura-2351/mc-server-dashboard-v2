@@ -502,8 +502,23 @@ func (m *Manager) handleHydrate(ctx context.Context, cmd session.Command) sessio
 	// idempotent; on the 204 path it is the only write. Best-effort: a failure only
 	// costs an extra hydrate next start, never correctness, so it is logged not
 	// propagated.
-	m.recordGeneration(workingDir, cmd.ServerID, gen)
-	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
+	//
+	// Declare the served generation to the API only when that stamp actually landed
+	// (issue #2500). The API prefers this over its own pre-dispatch store read (#2477),
+	// which can only understate; but a declaration the marker does not back would let a
+	// later start skip a hydrate it needs, so the value is taken FROM recordGeneration's
+	// report of the write — the same &gen it stamped — not from the transfer succeeding.
+	// This is the snapshot path's argument (#2481) with its guard removed: handleHydrate
+	// holds the per-id reservation across the whole transfer AND is the writer that
+	// produced the tree, so no concurrent stream can have replaced it, and the marker
+	// write is the sole thing that can decline to declare.
+	var declaredGeneration *uint64
+	if m.recordGeneration(workingDir, cmd.ServerID, gen) {
+		declaredGeneration = &gen
+	}
+	return session.CommandResult{
+		CommandID: cmd.CommandID, Success: true, HeldGeneration: declaredGeneration,
+	}
 }
 
 // recordGeneration writes the working-set generation marker, logging (not failing) on
@@ -514,11 +529,20 @@ func (m *Manager) handleHydrate(ctx context.Context, cmd session.Command) sessio
 // what is on disk. The running-id snapshot's tail holds no such reservation and goes
 // through recordGenerationIfUnchanged instead. Do not gate this one: a marker that is
 // never written reads as generation 0, so the API could never skip a hydrate again.
-func (m *Manager) recordGeneration(workingDir, serverID string, gen uint64) {
+//
+// It REPORTS whether the marker was published, and that return value is the sole source
+// of the Worker-declared held generation on the hydrate's CommandResult (issue #2500).
+// The API mirrors that declaration into the inventory its skip-hydrate gate reads, so the
+// declaration has to be the write's own outcome rather than the transfer merely having
+// succeeded: a marker this call could not write is older than the tree, so declaring the
+// served generation anyway would let a later start skip the corrective hydrate.
+func (m *Manager) recordGeneration(workingDir, serverID string, gen uint64) bool {
 	if err := writeGeneration(workingDir, gen); err != nil {
 		m.logger.Warn("could not record working-set generation",
 			"server_id", serverID, "generation", gen, "error", err)
+		return false
 	}
+	return true
 }
 
 // recordGenerationIfUnchanged records the generation only while workingDir is still the

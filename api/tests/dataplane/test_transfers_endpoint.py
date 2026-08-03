@@ -950,13 +950,19 @@ def test_snapshot_partial_region_loss_report_is_bounded_and_truncated(
     community, server = _scope()
     healthy_mca = bytes(2 * 4096)  # a structurally valid empty region.
 
-    # Publish many region dirs, each with more region files than the per-directory
-    # name cap, so a drop of all-but-one from every dir exceeds BOTH caps and the
-    # surfaced list must be bounded and flagged truncated.
-    dir_count = transfers._MISSING_REGION_DIR_CAP + 5
-    names_per_dir = transfers._MISSING_REGION_NAME_CAP + 5
+    # Cross BOTH truncation caps with the smallest durable-write footprint: the
+    # publish fsyncs every staged region file, so only the files that actually push
+    # a count past a cap need to exist. One extra directory past the dir cap fires
+    # the dir cap; a single directory whose lost-name list runs past the name cap
+    # fires the name cap. Every other directory needs just two region files (keep
+    # one, drop one) to count as a partial loss.
+    dir_count = transfers._MISSING_REGION_DIR_CAP + 1  # one directory past the dir cap
+    # dim000 sorts first, so it lands inside the surfaced prefix; give it enough
+    # region files that dropping all-but-one leaves more lost names than the cap.
+    overflow_names = transfers._MISSING_REGION_NAME_CAP + 2
     prior: dict[str, bytes] = {}
     for d in range(dir_count):
+        names_per_dir = overflow_names if d == 0 else 2
         for n in range(names_per_dir):
             prior[f"world/dim{d:03d}/region/r.{n}.0.mca"] = healthy_mca
     asyncio.run(_publish(storage, community, server, prior))
@@ -992,17 +998,19 @@ def test_snapshot_partial_region_loss_report_exactly_at_cap_not_truncated(
     community, server = _scope()
     healthy_mca = bytes(2 * 4096)
 
-    # Publish exactly the cap counts so no cap fires (strict > in the builder).
+    # Exactly the directory cap of partial-loss dirs so the dir cap does not fire
+    # (strict > in the builder). Each dir needs only two region files (keep one,
+    # drop one) to be a partial loss well under the name cap — the publish fsyncs
+    # every staged file, so no dir carries more region files than the boundary needs.
     dir_count = transfers._MISSING_REGION_DIR_CAP  # 20
-    names_per_dir = transfers._MISSING_REGION_NAME_CAP  # 50
     prior: dict[str, bytes] = {}
     for d in range(dir_count):
-        for n in range(names_per_dir):
+        for n in range(2):
             prior[f"world/dim{d:03d}/region/r.{n}.0.mca"] = healthy_mca
     asyncio.run(_publish(storage, community, server, prior))
 
-    # Keep only the first region file of each dir: exactly cap dirs, each with
-    # exactly (names_per_dir - 1) missing names — at the cap, not over.
+    # Keep only the first region file of each dir: exactly cap dirs, each a partial
+    # loss whose lost-name count stays under the name cap — at the dir cap, not over.
     kept = {f"world/dim{d:03d}/region/r.0.0.mca": healthy_mca for d in range(dir_count)}
     body = _tar_bytes(kept)
     with client:
