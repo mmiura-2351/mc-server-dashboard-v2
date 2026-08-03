@@ -236,12 +236,13 @@ class _Backoff:
 class _GraceDecision:
     """The grace window for a candidate, plus the generation it was decided from.
 
-    ``store_generation`` is the authoritative generation read to decide the
-    held-start grace (issue #999); it is carried into the ``redispatch_start``
-    dispatch so that use case's own skip-hydrate decision is made from the SAME
-    generation, never a second read that a store bump could have advanced between
-    (issue #2482). ``None`` for every path that did not read it — the stop-side
-    actions and ``place_and_start``, which always keep the full grace.
+    ``store_generation`` is set ONLY on the SHORT held-start grace (issue #999):
+    the generation that grace was granted on is carried into the
+    ``redispatch_start`` dispatch so that use case's own skip-hydrate decision is
+    made from the SAME generation, never a second read that a store bump could have
+    advanced between (issue #2482). ``None`` on every other path — the stop-side
+    actions, ``place_and_start``, and the non-held full-grace ``redispatch_start``
+    (which always hydrates, so a hydrate is affordable and re-reading is safe).
     """
 
     grace_seconds: int
@@ -375,7 +376,12 @@ class RunReconcilerTick:
             store_generation=store_generation,
         ):
             return _GraceDecision(self.held_start_grace_seconds, store_generation)
-        return _GraceDecision(self.grace_seconds, store_generation)
+        # Non-held: the full grace runs and the redispatch WILL hydrate, which is
+        # always affordable, so there is nothing to confine — do NOT carry the
+        # generation. Carrying a possibly-lower value here could only nudge
+        # ``redispatch_start`` toward skip_hydrate (the #696-unsafe direction) for no
+        # benefit; ``None`` makes it re-read Storage itself exactly as it did before.
+        return _GraceDecision(self.grace_seconds)
 
     def _previous_stop_refused(self, server: Server) -> bool:
         # True when the last stop dispatch was refused by the Worker AND that
