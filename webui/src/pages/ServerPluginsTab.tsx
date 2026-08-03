@@ -96,21 +96,27 @@ function applyNoun(text: string, noun: ContentNoun): string {
     .replace(/\{Noun\}/g, noun.singularCap);
 }
 
-/** Map API reason codes to i18n keys for plugin operation errors. */
+/**
+ * Map API reason codes to i18n keys for plugin operation errors.
+ *
+ * `file_too_large` (413-only) and `worker_unavailable` (503-only) are
+ * deliberately absent: the API emits each at exactly one status and its message
+ * equals that status's fallback below, so a reason branch here would only
+ * duplicate the fallback. The remaining reasons each carry a message distinct
+ * from the 413/503 fallbacks, so every branch below is load-bearing (#2460).
+ */
 const pluginErrorKeys: Record<string, TranslationKey> = {
   plugin_already_exists: "plugins.error.alreadyExists",
   server_not_stopped: "plugins.error.notStopped",
   server_unsettled: "plugins.error.unsettled",
   server_busy: "plugins.error.busy",
   invalid_path: "plugins.error.invalidPath",
-  file_too_large: "plugins.error.tooLarge",
   catalog_upstream_failed: "plugins.error.catalogUpstreamFailed",
   catalog_project_not_found: "plugins.error.catalogNotFound",
   checksum_mismatch: "plugins.error.checksumMismatch",
   unsupported_server_type: "plugins.error.unsupportedServerType",
   invalid_side: "plugins.error.invalidSide",
   not_found: "plugins.error.notFound",
-  worker_unavailable: "plugins.error.workerUnavailable",
 };
 
 function pluginErrorMessage(error: unknown, noun: ContentNoun): string {
