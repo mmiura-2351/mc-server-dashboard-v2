@@ -355,8 +355,18 @@ def _download_headers(pack: ResourcePack, *, size_bytes: int) -> dict[str, str]:
 # ``resource-pack-sha1`` written beside the URL in ``server.properties``.
 # ``no-store`` would defeat that cache and re-fetch a multi-MB pack on every
 # player join.
-@public_router.get("/public/resource-packs/{resource_pack_id}/{filename}")
+#
+# Named once because two decorators register it: Starlette does not synthesize
+# HEAD from a GET route, so the probe has to be declared (issue #2632). Both
+# registrations point at the same endpoint function, so the gate, the headers and
+# the error mapping cannot drift apart between the two methods.
+_PUBLIC_DOWNLOAD_PATH = "/public/resource-packs/{resource_pack_id}/{filename}"
+
+
+@public_router.get(_PUBLIC_DOWNLOAD_PATH)
+@public_router.head(_PUBLIC_DOWNLOAD_PATH)
 async def public_download_resource_pack(
+    request: Request,
     resource_pack_id: uuid.UUID,
     filename: str,
     use_case: Annotated[DownloadResourcePack, Depends(get_download_resource_pack)],
@@ -366,6 +376,17 @@ async def public_download_resource_pack(
     Validates that ``filename`` matches the stored filename (404 otherwise). The
     response declares the pack's exact size as ``Content-Length``, which the game
     client shows as download progress.
+
+    **Probe** (issue #2632): a ``HEAD`` answers with the ``GET``'s status and
+    headers and no body, so a resumable-download client — this is the
+    unauthenticated URL a Minecraft client fetches at join time, and it declares a
+    ``Content-Length``, so it has a real reason to probe first — learns the size,
+    from the store's size probe below, without starting a transfer. The route
+    offers no ``Accept-Ranges``, so the probe reports the size but not resumption.
+    The ``200`` carries the same ``public, max-age=3600, immutable`` the ``GET``
+    declares, and the size-probe ``404`` its ``no-store``, so an edge (the one URL
+    a shared cache demonstrably stores, issues #2588 / #2589) does not cache a
+    probe differently from the download.
     """
 
     # Starlette populates no Content-Length for a streaming body, so the header is
@@ -380,6 +401,16 @@ async def public_download_resource_pack(
             resource_pack_id=ResourcePackId(resource_pack_id),
             expected_filename=filename,
         )
+        if request.method == "HEAD":
+            # The probe returns before ``started()`` performs the body GET (issue
+            # #2632), so a caller that asked for no bytes never opens the blob. The
+            # size is already answered by the store's size probe inside the use
+            # case. This route records no audit event on the GET either, so the
+            # probe has none to skip.
+            return head_response(
+                media_type=_PACK_MEDIA_TYPE,
+                headers=_public_download_headers(pack, size_bytes=size_bytes),
+            )
         # Same window as on the authenticated route (issue #2455): begin the stream
         # while a status can still be chosen, so a blob deleted after the size probe
         # is the 404 it is rather than a 200 declaring a length nothing will
@@ -409,17 +440,27 @@ async def public_download_resource_pack(
     return StreamingResponse(
         counted(stream, size_bytes),
         media_type=_PACK_MEDIA_TYPE,
-        headers={
-            "Content-Disposition": content_disposition(pack.filename),
-            "Content-Length": str(size_bytes),
-            # Public and long-lived, because the body is immutable and the client
-            # verifies it by SHA-1 anyway (issue #2562): the max-age bounds only
-            # how long a deleted pack stays fetchable from an edge. An hour is 4x
-            # tighter than the value Cloudflare injects unasked, and still covers
-            # the join storm that makes edge caching worth having.
-            "Cache-Control": "public, max-age=3600, immutable",
-        },
+        headers=_public_download_headers(pack, size_bytes=size_bytes),
     )
+
+
+def _public_download_headers(pack: ResourcePack, *, size_bytes: int) -> dict[str, str]:
+    """The public download's headers, shared by the GET and its HEAD probe.
+
+    One source for both, so a probe cannot answer with a different header set than
+    the download it is probing (issue #2632).
+    """
+
+    return {
+        "Content-Disposition": content_disposition(pack.filename),
+        "Content-Length": str(size_bytes),
+        # Public and long-lived, because the body is immutable and the client
+        # verifies it by SHA-1 anyway (issue #2562): the max-age bounds only
+        # how long a deleted pack stays fetchable from an edge. An hour is 4x
+        # tighter than the value Cloudflare injects unasked, and still covers
+        # the join storm that makes edge caching worth having.
+        "Cache-Control": "public, max-age=3600, immutable",
+    }
 
 
 async def _read_capped_upload(file: UploadFile) -> bytes:
