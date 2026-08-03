@@ -1665,7 +1665,7 @@ export const ja: Record<TranslationKey, string> = {
   "plugins.error.bedrockPortRangeExhausted":
     "Bedrock のポート範囲に空きポートがありません。しばらくしてからもう一度お試しください。",
   "plugins.error.bedrockPortTaken":
-    "その Bedrock ポートはすでに使用されています。もう一度お試しください。",
+    "Bedrock ポートはすでに使用されています。もう一度お試しください。",
   "plugins.error.notFound":
     "{Noun}が見つかりません。削除された可能性があります。",
   "plugins.error.workerUnavailable":

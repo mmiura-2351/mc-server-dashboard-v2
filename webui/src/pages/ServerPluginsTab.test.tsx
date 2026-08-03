@@ -908,6 +908,32 @@ describe("ServerPluginsTab error messages (issue #1345)", () => {
     });
   });
 
+  // The `case 503` fallback is load-bearing for a reason-less 503 — a proxy or
+  // gateway 503 whose body carries no `reason` (issue #2657). It must still
+  // render workerUnavailable; deleting the branch would drop this to generic.
+  it("shows the workerUnavailable message for a reason-less 503", async () => {
+    mockGets({ plugins: [plugin()], validation: EMPTY_VALIDATION });
+    mockPostFormWithProgress.mockRejectedValue(new ApiError(503, {}));
+    renderTab();
+    await waitFor(() => {
+      expect(screen.getByText("Sodium")).toBeInTheDocument();
+    });
+    const input = document.querySelector(
+      'input[type="file"]',
+    ) as HTMLInputElement;
+    const file = new File(["x"], "test.jar", {
+      type: "application/java-archive",
+    });
+    fireEvent.change(input, { target: { files: [file] } });
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "The server agent is disconnected. Please try again later.",
+        ),
+      ).toBeInTheDocument();
+    });
+  });
+
   it("falls back to the generic message for an unknown reason", async () => {
     // A deliberately synthetic reason on a real upload status: the point is a
     // reason the mapping table does not know, so it must not be a real one.
