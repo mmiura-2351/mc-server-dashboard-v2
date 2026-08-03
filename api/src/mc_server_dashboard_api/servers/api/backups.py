@@ -713,10 +713,19 @@ async def download_backup(
     """
 
     try:
-        size_bytes = await use_case.archive_size(
+        # Resolve the backup row ONCE (issue #2456), then read its size. Both the
+        # size probe and the stream below read the same immutable ``storage_ref``
+        # off this row, so it is loaded a single time while the status is still
+        # choosable and carried to both — never re-read per operation.
+        backup = await use_case.resolve(
             community_id=CommunityId(community_id),
             server_id=ServerId(server_id),
             backup_id=BackupId(backup_id),
+        )
+        size_bytes = await use_case.archive_size(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+            backup=backup,
         )
     except ServerNotFoundError as exc:
         raise _not_found() from exc
@@ -744,26 +753,28 @@ async def download_backup(
         )
     served = _served_range(request, size_bytes, etag)
     try:
-        stream = await use_case.archive_stream(
+        stream = use_case.archive_stream(
             community_id=CommunityId(community_id),
             server_id=ServerId(server_id),
-            backup_id=BackupId(backup_id),
+            backup=backup,
             byte_range=served,
         )
         # Begin the stream here, so the archive is located while the status can
         # still be chosen (issue #2415). The size probe and the stream resolve the
-        # archive independently, and the stream resolves it on its FIRST iteration
-        # — the open stays inside the generator so a stream that is never consumed
-        # holds no descriptor (issues #2341, #2390) — while Starlette writes the
-        # status and Content-Length before it touches the body iterator. A delete
-        # landing after the probe was therefore answered as a 200 declaring a
-        # length the body could never deliver. Beginning the stream makes it the
+        # archive independently against the store, and the stream resolves it on its
+        # FIRST iteration — the open stays inside the generator so a stream that is
+        # never consumed holds no descriptor (issues #2341, #2390) — while Starlette
+        # writes the status and Content-Length before it touches the body iterator.
+        # A delete landing after the probe was therefore answered as a 200 declaring
+        # a length the body could never deliver. Beginning the stream makes it the
         # plain 404 the comment below always claimed it was. Past that first read
         # the filesystem backend is serving an open descriptor, which a later
         # unlink cannot shorten, so the declared length and the body agree.
         stream = await started(stream)
-    except (ServerNotFoundError, BackupNotFoundError) as exc:
-        # Deleted between the size read and the open: still nothing on the wire.
+    except BackupNotFoundError as exc:
+        # Deleted between the size read and the open: the archive is removed before
+        # the row (archive-first, epic #649), so the store miss surfaces on the
+        # stream's first iteration — still nothing on the wire (issues #2415, #2456).
         raise _not_found() from exc
     except BackupStorageUnavailableError as exc:
         # The open reaches the store too, and now runs before any byte is on the

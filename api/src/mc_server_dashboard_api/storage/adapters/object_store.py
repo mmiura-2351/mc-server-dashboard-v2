@@ -1471,12 +1471,19 @@ class ObjectStorage(Storage):
     ) -> AsyncIterator[bytes]:
         backup_key = self._backup_key(community_id, server_id, key)
         async with self._client_factory() as client:
-            if await client.head_object(backup_key) is None:
-                raise NotFoundError(f"backup not found: {key.value}")
             # Stream the stored archive object verbatim (no recompression): the
             # object is already a self-contained tar.gz (issue #281). A byte_range
             # becomes a ranged GET, so the tail of a multi-GB archive never pulls
             # the head across the network (issue #2372).
+            #
+            # No head_object pre-check (issue #2456): ``get_object`` already
+            # translates a missing object into NotFoundError at request initiation
+            # — on this generator's FIRST iteration, the exact point a head
+            # pre-check would have raised and where the seam already expects the
+            # miss (the ``open_backup`` first-iteration contract, issue #2341). The
+            # head was a redundant network round-trip and the check-then-act shape
+            # the fs adapter shed (#2341/#2394); dropping it removes the round-trip
+            # without moving where any caller sees the miss.
             async for chunk in await client.get_object(backup_key, byte_range):
                 yield chunk
 
