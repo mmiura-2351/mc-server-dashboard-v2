@@ -650,7 +650,9 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   Section 2.
 - API error surfaced via toast + inline field errors (422 `errors` list).
 - Conflict-flavored errors get a "state changed — refresh" treatment, not a raw
-  error dump: the lifecycle races `invalid_transition`, `transition_conflict`
+  error dump: the lifecycle races `invalid_transition` (except on **start**,
+  where it means the server is already desired-running — a pending start, not a
+  race — and gets a verb-specific message below, #2445), `transition_conflict`
   and `server_not_running` (the last only away from **restart**, which offers
   the action for a crashed server on purpose and so gets a verb-specific message
   below, #2441). A 409 that reports something other than a race is
