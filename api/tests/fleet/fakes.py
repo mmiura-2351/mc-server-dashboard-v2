@@ -1,4 +1,15 @@
-"""In-memory test doubles for the fleet context (TESTING.md Section 4)."""
+"""In-memory test doubles for the fleet context (TESTING.md Section 4).
+
+The entity-copy rule the servers/identity/community fakes follow (#2516, #2549)
+does not reach here: none of these doubles is a repository stand-in that stores
+an entity and hands it back. ``FakeServerStateSink`` and
+``RecordingRealTimeEvents`` record primitive tuples and ``frozen=True``
+``RealTimeEvent`` values; the live registry the fleet tests drive is the real
+``InMemoryWorkerRegistry`` adapter, not a fake, and ``Worker`` is itself
+``frozen=True``. No boundary here can leak a caller reference, so there is
+nothing for a copy to protect (the ``FakeGameSessionRepository`` reasoning of
+PR #2548, applied to a whole context).
+"""
 
 from __future__ import annotations
 
