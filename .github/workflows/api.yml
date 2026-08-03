@@ -200,7 +200,7 @@ jobs:
         run: |
           uv run pytest -rs --junitxml="$RUNNER_TEMP/junit.xml" \
             tests/storage/test_object_live_seaweedfs.py \
-            tests/servers/test_resource_pack_store_adapter.py
+            tests/servers/test_resource_pack_store_contract.py
           skipped="$(python3 -c 'import sys, xml.etree.ElementTree as ET; print(sum(int(s.attrib["skipped"]) for s in ET.parse(sys.argv[1]).iter("testsuite")))' "$RUNNER_TEMP/junit.xml")"
           if [ "$skipped" != 0 ]; then
             echo "::error::$skipped live-s3 test(s) skipped; MCD_TEST_S3_ENDPOINT did not reach pytest" >&2
