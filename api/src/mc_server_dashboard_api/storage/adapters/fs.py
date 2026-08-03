@@ -57,6 +57,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     NotFoundError,
     PathOccupiedError,
     PathTraversalError,
+    PrunedStoreError,
     SnapshotHandleError,
     StaleGenerationError,
     SymlinkRefusedError,
@@ -655,6 +656,14 @@ class FsStorage(Storage):
             if expected_base is not None:
                 current = self._read_generation(server_root)
                 if current != expected_base:
+                    # ``current == 0`` with ``expected_base > 0`` is the unambiguous
+                    # signature of a concurrent delete/prune that removed the
+                    # generation marker under this same lock during the upload window
+                    # (issue #921): generation is monotonic, so it regressed to 0
+                    # rather than advancing. Raise the distinct subclass so the edge
+                    # names the concurrent delete instead of "generation advanced".
+                    if current == 0 and expected_base > 0:
+                        raise PrunedStoreError(expected_base, current)
                     raise StaleGenerationError(expected_base, current)
             # Missing-region gate (issue #854, #921 item 2): compare the staged
             # region-file set against the prior ``current/`` set INSIDE the lock so

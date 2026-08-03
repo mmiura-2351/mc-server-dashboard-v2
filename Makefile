@@ -25,7 +25,7 @@
 #   make deploy         # first-time deploy with interactive .env setup
 #   make update         # selective rebuild with change detection
 
-.PHONY: all check lint format test docs-check migrations-check \
+.PHONY: all check lint format test docs-check migrations-check test-client-check \
 	api-env-check api-lint api-format api-test \
 	worker-lint worker-format worker-test worker-test-race worker-e2e-compile \
 	relay-lint relay-format relay-test relay-test-race relay-e2e relay-e2e-compile \
@@ -118,6 +118,15 @@ docs-check:
 migrations-check:
 	python3 scripts/check_migrations.py --self-test
 	python3 scripts/check_migrations.py
+
+# Anti-reproliferation guard for the finalize-immediately client bug (#1980):
+# fail if `next(_client(...))` reappears in an already-converted api test dir.
+# Pure file grep -- no api/ venv -- so it costs ~0.01s and belongs in the
+# pre-push gate. Same shape as docs-check/migrations-check: self-test then the
+# real run it guards. Scoped to PR 1's dirs; PR 2 widens it (see the script).
+test-client-check:
+	python3 scripts/check_test_client_pattern.py --self-test
+	python3 scripts/check_test_client_pattern.py
 
 # ---------------------------------------------------------------------------
 # api/ (Python via uv)

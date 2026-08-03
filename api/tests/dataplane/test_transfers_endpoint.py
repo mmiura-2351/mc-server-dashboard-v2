@@ -611,6 +611,64 @@ def test_snapshot_refused_when_edit_lands_during_upload_window_without_base_head
     assert _read_tar(asyncio.run(_read())) == {"k": b"edited-mid-upload"}
 
 
+def test_snapshot_refused_when_delete_prunes_store_during_upload_window(
+    tmp_path: Path,
+) -> None:
+    # Issue #921: a concurrent delete prunes the store DURING the upload window. The
+    # pre-stream guard passes (the worker declares the store's current base), then a
+    # delete removes the generation marker and discards the working set before the
+    # commit's re-check. The re-check reads generation 0 while expected_base is >= 1,
+    # so the commit raises PrunedStoreError — a distinct 409 ``deleted_during_upload``
+    # that names the concurrent delete, NOT the misleading ``stale_generation``
+    # ("generation advanced") the generic advance path uses.
+    import asyncio
+
+    worker = str(uuid.uuid4())
+
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    c, s = CommunityId(community), ServerId(server)
+
+    asyncio.run(_publish(storage, community, server, {"k": b"snap"}, publisher=worker))
+    base = asyncio.run(storage.current_generation(c, s))
+
+    # Simulate the concurrent delete landing in the upload window by hooking the
+    # guard's current_generation read: the FIRST call (the guard) returns the base,
+    # then prunes the store (as DeleteServer's retention prune does) so the marker is
+    # gone and the store reads generation 0 before the commit's re-check.
+    real_current_generation = storage.current_generation
+    pruned = False
+
+    async def _hooked_current_generation(
+        community_id: CommunityId, server_id: ServerId
+    ) -> int:
+        nonlocal pruned
+        value = await real_current_generation(community_id, server_id)
+        if not pruned:
+            pruned = True
+            await storage.prune_to_final_snapshot(c, s)
+        return value
+
+    storage.current_generation = _hooked_current_generation  # type: ignore[method-assign]
+
+    body = _tar_bytes({"k": b"in-flight"})
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"),
+            content=body,
+            headers={
+                **_auth(),
+                # The worker declares the CURRENT base — the pre-stream guard passes.
+                "X-Working-Set-Base-Generation": str(base),
+                "X-Worker-Id": worker,
+            },
+        )
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "deleted_during_upload"
+
+    storage.current_generation = real_current_generation  # type: ignore[method-assign]
+
+
 def test_snapshot_length_mismatch_is_not_published(tmp_path: Path) -> None:
     import asyncio
 
