@@ -1864,6 +1864,7 @@ describe("ServerDetailPage settings memory limit", () => {
       srv: { observed_state: "stopped", memory_limit_mb: null, config: {} },
       meta: { max_memory_limit_mb: 4096 },
     });
+    mockApi.patch.mockResolvedValue(server());
     renderPage();
 
     await screen.findByText("survival");
@@ -1873,6 +1874,20 @@ describe("ServerDetailPage settings memory limit", () => {
     expect(
       await screen.findByText(t("serverDetail.settings.memoryLimitRange")),
     ).toBeInTheDocument();
+
+    // Drive a real save so "blocks the save" is asserted, not assumed: the save
+    // button is disabled while the value exceeds the operator-configured ceiling,
+    // so clicking it is inert and patch never fires. The bare `patch not called`
+    // was vacuous — no save was attempted — and a synchronous assert would pass
+    // for the wrong reason: react-query runs the mutationFn in a microtask, so
+    // `act` below flushes it. With the disabled gate removed the click reaches
+    // the mutation and this reddens.
+    const saveButton = screen.getByRole("button", {
+      name: t("serverDetail.settings.save"),
+    });
+    expect(saveButton).toBeDisabled();
+    fireEvent.click(saveButton);
+    await act(async () => {});
     expect(mockApi.patch).not.toHaveBeenCalled();
   });
 
@@ -2056,6 +2071,7 @@ describe("ServerDetailPage settings CPU allocation", () => {
     routeGet({
       srv: { observed_state: "stopped", cpu_millis: null, config: {} },
     });
+    mockApi.patch.mockResolvedValue(server());
     renderPage();
 
     await screen.findByText("survival");
@@ -2065,6 +2081,20 @@ describe("ServerDetailPage settings CPU allocation", () => {
     expect(
       await screen.findByText(t("serverDetail.settings.cpuAllocationRange")),
     ).toBeInTheDocument();
+
+    // Drive a real save so "blocks the save" is asserted, not assumed: the save
+    // button is disabled below the 100-millicore floor, so clicking it is inert
+    // and patch never fires. The bare `patch not called` was vacuous — no save
+    // was attempted — and a synchronous assert would pass for the wrong reason:
+    // react-query runs the mutationFn in a microtask, so `act` below flushes it.
+    // With the disabled gate removed the click reaches the mutation and this
+    // reddens.
+    const saveButton = screen.getByRole("button", {
+      name: t("serverDetail.settings.save"),
+    });
+    expect(saveButton).toBeDisabled();
+    fireEvent.click(saveButton);
+    await act(async () => {});
     expect(mockApi.patch).not.toHaveBeenCalled();
   });
 
@@ -2072,6 +2102,7 @@ describe("ServerDetailPage settings CPU allocation", () => {
     routeGet({
       srv: { observed_state: "stopped", cpu_millis: null, config: {} },
     });
+    mockApi.patch.mockResolvedValue(server());
     renderPage();
 
     await screen.findByText("survival");
@@ -2081,6 +2112,20 @@ describe("ServerDetailPage settings CPU allocation", () => {
     expect(
       await screen.findByText(t("serverDetail.settings.cpuAllocationRange")),
     ).toBeInTheDocument();
+
+    // Drive a real save so "blocks the save" is asserted, not assumed: the save
+    // button is disabled above the 128000-millicore ceiling, so clicking it is
+    // inert and patch never fires. The bare `patch not called` was vacuous — no
+    // save was attempted — and a synchronous assert would pass for the wrong
+    // reason: react-query runs the mutationFn in a microtask, so `act` below
+    // flushes it. With the disabled gate removed the click reaches the mutation
+    // and this reddens.
+    const saveButton = screen.getByRole("button", {
+      name: t("serverDetail.settings.save"),
+    });
+    expect(saveButton).toBeDisabled();
+    fireEvent.click(saveButton);
+    await act(async () => {});
     expect(mockApi.patch).not.toHaveBeenCalled();
   });
 
@@ -2088,6 +2133,7 @@ describe("ServerDetailPage settings CPU allocation", () => {
     routeGet({
       srv: { observed_state: "stopped", cpu_millis: null, config: {} },
     });
+    mockApi.patch.mockResolvedValue(server());
     renderPage();
 
     await screen.findByText("survival");
@@ -2097,6 +2143,20 @@ describe("ServerDetailPage settings CPU allocation", () => {
     expect(
       await screen.findByText(t("serverDetail.settings.cpuAllocationRange")),
     ).toBeInTheDocument();
+
+    // Drive a real save so "blocks the save" is asserted, not assumed: the save
+    // button is disabled while the value is non-integer, so clicking it is inert
+    // and patch never fires. The bare `patch not called` was vacuous — no save
+    // was attempted — and a synchronous assert would pass for the wrong reason:
+    // react-query runs the mutationFn in a microtask, so `act` below flushes it.
+    // With the disabled gate removed the click reaches the mutation and this
+    // reddens.
+    const saveButton = screen.getByRole("button", {
+      name: t("serverDetail.settings.save"),
+    });
+    expect(saveButton).toBeDisabled();
+    fireEvent.click(saveButton);
+    await act(async () => {});
     expect(mockApi.patch).not.toHaveBeenCalled();
   });
 
