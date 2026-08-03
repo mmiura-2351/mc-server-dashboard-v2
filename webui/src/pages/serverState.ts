@@ -52,6 +52,46 @@ export function atRest(state: ObservedState, desired?: string): boolean {
   return state === "stopped" || state === "crashed" || state === "unknown";
 }
 
+/**
+ * The four semantic buckets the dashboard state filter groups the raw states
+ * into (#2239). `other` folds together the transitional states and `unknown`.
+ */
+export type StateBucket = "running" | "stopped" | "crashed" | "other";
+
+export const STATE_BUCKETS: readonly StateBucket[] = [
+  "running",
+  "stopped",
+  "crashed",
+  "other",
+];
+
+/**
+ * The bucket an observed state belongs to — the single source of truth for the
+ * 4→raw mapping (the dropdown, `filterServers`, and the tests all consume it).
+ * `starting` / `stopping` / `restarting` / `unknown` all fall into `other`.
+ */
+export function bucketOf(state: ObservedState): StateBucket {
+  switch (state) {
+    case "running":
+      return "running";
+    case "stopped":
+      return "stopped";
+    case "crashed":
+      return "crashed";
+    default:
+      return "other";
+  }
+}
+
+/**
+ * The raw observed states a bucket expands to, derived from `bucketOf` so the
+ * membership is never duplicated. `other` yields the transitional states plus
+ * `unknown`, in `KNOWN` order.
+ */
+export function statesForBucket(bucket: StateBucket): ObservedState[] {
+  return KNOWN.filter((state) => bucketOf(state) === bucket);
+}
+
 interface PillSpec {
   /** Pill modifier class (running=green, transition=amber, …). */
   className: string;

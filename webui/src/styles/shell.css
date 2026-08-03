@@ -2471,23 +2471,64 @@ table.data.schedules-runs td {
   color: var(--text);
   min-width: 180px;
 }
-.dashboard-filters .filter-states {
+/* State filter dropdown (#2239): a "State ▾" trigger opening a checkbox
+ * popover of the four semantic buckets. */
+.popover {
+  position: relative;
   display: inline-flex;
-  flex-wrap: wrap;
-  gap: 6px;
+}
+.filter-state-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.filter-state-trigger .badge.count {
+  padding: 0 6px;
+  min-width: 18px;
+  text-align: center;
+  color: var(--accent);
+  border-color: rgba(77, 159, 255, 0.3);
+}
+.popover-panel {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 30;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+  padding: 8px;
+}
+.filter-state-menu {
+  min-width: 160px;
+}
+.filter-state-buckets {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
   border: 0;
   margin: 0;
   padding: 0;
   min-width: 0;
 }
-.dashboard-filters .filter-states .pill {
+.filter-state-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
 }
-.dashboard-filters .filter-states .pill.dim {
-  opacity: 0.45;
+.filter-state-option:hover {
+  background: var(--bg-overlay);
 }
-.dashboard-filters .filter-states .pill.dim:hover {
-  opacity: 0.7;
+.filter-state-option input {
+  cursor: pointer;
+}
+.filter-state-clear {
+  margin-top: 4px;
+  align-self: flex-start;
 }
 .dashboard-filters .sort-control {
   display: inline-flex;

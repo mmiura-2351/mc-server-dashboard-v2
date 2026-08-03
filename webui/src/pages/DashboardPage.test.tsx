@@ -11,7 +11,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
-import { MemoryRouter, Route, Routes } from "react-router";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client.ts";
 import { setAccessToken } from "../auth/tokenStore.ts";
@@ -96,6 +96,14 @@ function renderPage(path = `/communities/${CID}`) {
   return { ...result, queryClient };
 }
 
+// Surfaces the live URL search string so a test can assert the filter param
+// round-trip without reaching into router internals.
+function LocationProbe({ onChange }: { onChange: (search: string) => void }) {
+  const location = useLocation();
+  onChange(location.search);
+  return null;
+}
+
 beforeEach(() => {
   restoreWebSocket = installMockWebSocket();
   setAccessToken("tok-1");
@@ -124,8 +132,9 @@ describe("DashboardPage list", () => {
     expect(
       screen.getByText(`${t("dashboard.col.worker")}: worker`),
     ).toBeInTheDocument();
-    // The filter bar renders a "running" chip; the server card renders another.
-    expect(screen.getAllByText(t("dashboard.state.running"))).toHaveLength(2);
+    // The state filter is a closed dropdown now (#2239), so only the server
+    // card renders the "running" pill.
+    expect(screen.getAllByText(t("dashboard.state.running"))).toHaveLength(1);
   });
 
   it("shows the unknown pill for an unrecognised observed state", async () => {
@@ -385,20 +394,22 @@ describe("DashboardPage lifecycle actions", () => {
     mockApi.post.mockReturnValue(new Promise(() => {}));
     renderPage();
 
-    // The filter bar always shows a "stopped" chip; the server card adds another.
+    // Only the server card renders the state pill (the filter is a dropdown).
     await waitFor(() =>
-      expect(screen.getAllByText(t("dashboard.state.stopped"))).toHaveLength(2),
+      expect(screen.getAllByText(t("dashboard.state.stopped"))).toHaveLength(1),
     );
     fireEvent.click(screen.getByRole("button", { name: t("dashboard.start") }));
 
-    // After the action, the server's pill changes to "starting" (now 2: chip + pill).
-    // "stopped" drops to 1 (the filter chip only).
+    // After the action, the server's pill changes to "starting"; "stopped" is
+    // gone.
     await waitFor(() =>
       expect(screen.getAllByText(t("dashboard.state.starting"))).toHaveLength(
-        2,
+        1,
       ),
     );
-    expect(screen.getAllByText(t("dashboard.state.stopped"))).toHaveLength(1);
+    expect(
+      screen.queryByText(t("dashboard.state.stopped")),
+    ).not.toBeInTheDocument();
   });
 
   it("optimistically shows the transitional pill immediately on stop", async () => {
@@ -407,16 +418,18 @@ describe("DashboardPage lifecycle actions", () => {
     renderPage();
 
     await waitFor(() =>
-      expect(screen.getAllByText(t("dashboard.state.running"))).toHaveLength(2),
+      expect(screen.getAllByText(t("dashboard.state.running"))).toHaveLength(1),
     );
     fireEvent.click(screen.getByRole("button", { name: t("dashboard.stop") }));
 
     await waitFor(() =>
       expect(screen.getAllByText(t("dashboard.state.stopping"))).toHaveLength(
-        2,
+        1,
       ),
     );
-    expect(screen.getAllByText(t("dashboard.state.running"))).toHaveLength(1);
+    expect(
+      screen.queryByText(t("dashboard.state.running")),
+    ).not.toBeInTheDocument();
   });
 
   it("labels the Start button as Restart when the server is crashed", async () => {
@@ -449,13 +462,13 @@ describe("DashboardPage lifecycle actions", () => {
     renderPage();
 
     await waitFor(() =>
-      expect(screen.getAllByText(t("dashboard.state.stopped"))).toHaveLength(2),
+      expect(screen.getAllByText(t("dashboard.state.stopped"))).toHaveLength(1),
     );
     fireEvent.click(screen.getByRole("button", { name: t("dashboard.start") }));
 
-    // After the error, the pill reverts to "Stopped" (filter chip + server pill = 2).
+    // After the error, the server pill reverts to "Stopped".
     await waitFor(() =>
-      expect(screen.getAllByText(t("dashboard.state.stopped"))).toHaveLength(2),
+      expect(screen.getAllByText(t("dashboard.state.stopped"))).toHaveLength(1),
     );
   });
 
@@ -575,7 +588,7 @@ describe("DashboardPage lifecycle actions", () => {
     renderPage();
 
     await waitFor(() =>
-      expect(screen.getAllByText(t("dashboard.state.stopped"))).toHaveLength(2),
+      expect(screen.getAllByText(t("dashboard.state.stopped"))).toHaveLength(1),
     );
 
     // Open the WS socket.
@@ -588,7 +601,7 @@ describe("DashboardPage lifecycle actions", () => {
     // Optimistic update shows "starting".
     await waitFor(() =>
       expect(screen.getAllByText(t("dashboard.state.starting"))).toHaveLength(
-        2,
+        1,
       ),
     );
 
@@ -616,7 +629,7 @@ describe("DashboardPage lifecycle actions", () => {
 
     // The pill should show "running" (from WS), not "stopped" (from rollback).
     await waitFor(() =>
-      expect(screen.getAllByText(t("dashboard.state.running"))).toHaveLength(2),
+      expect(screen.getAllByText(t("dashboard.state.running"))).toHaveLength(1),
     );
   });
 });
@@ -627,8 +640,8 @@ describe("DashboardPage live status", () => {
     renderPage();
 
     await screen.findByText("survival");
-    // Filter bar chip + server pill = 2 "stopped" matches.
-    expect(screen.getAllByText(t("dashboard.state.stopped"))).toHaveLength(2);
+    // Only the server card renders the state pill (the filter is a dropdown).
+    expect(screen.getAllByText(t("dashboard.state.stopped"))).toHaveLength(1);
 
     const socket = MockWebSocket.last();
     socket.open();
@@ -639,9 +652,9 @@ describe("DashboardPage live status", () => {
       server_id: "s1",
     });
 
-    // After the status event, the server pill changes to "running" (chip + pill = 2).
+    // After the status event, the server pill changes to "running".
     await waitFor(() =>
-      expect(screen.getAllByText(t("dashboard.state.running"))).toHaveLength(2),
+      expect(screen.getAllByText(t("dashboard.state.running"))).toHaveLength(1),
     );
     // No second list fetch: the cache was patched in place.
     expect(mockApi.get).toHaveBeenCalledTimes(1);
@@ -712,11 +725,11 @@ describe("DashboardPage view toggle (#541)", () => {
       screen.getByRole("button", { name: t("dashboard.view.table") }),
     );
 
-    // Both servers, plus the shared card data: state pill, type/version,
-    // port, worker. The filter bar adds one more "running" chip.
+    // Both servers, plus the shared row data: state pill, type/version,
+    // port, worker.
     expect(screen.getByText("survival")).toBeInTheDocument();
     expect(screen.getByText("creative")).toBeInTheDocument();
-    expect(screen.getAllByText(t("dashboard.state.running"))).toHaveLength(3);
+    expect(screen.getAllByText(t("dashboard.state.running"))).toHaveLength(2);
     expect(screen.getAllByText("paper 1.21.6")).toHaveLength(2);
     expect(screen.getAllByText("25565")).toHaveLength(2);
     // The worker id is abbreviated to its leading segment (#644).
@@ -1141,7 +1154,7 @@ describe("DashboardPage filter and sort (#1123)", () => {
     expect(screen.queryByText("creative")).not.toBeInTheDocument();
   });
 
-  it("filters servers by state chip toggle", async () => {
+  it("filters servers by state bucket selection", async () => {
     mockApi.get.mockResolvedValue([
       server({ id: "s1", name: "survival", observed_state: "running" }),
       server({
@@ -1156,15 +1169,123 @@ describe("DashboardPage filter and sort (#1123)", () => {
     await screen.findByText("survival");
     expect(screen.getByText("creative")).toBeInTheDocument();
 
-    // Click the "running" filter chip to show only running servers.
-    const runningChip = screen.getByRole("button", {
-      name: t("dashboard.state.running"),
-      pressed: false,
-    });
-    fireEvent.click(runningChip);
+    // Open the state dropdown and check the "Running" bucket.
+    fireEvent.click(
+      screen.getByRole("button", { name: t("dashboard.filter.state") }),
+    );
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: t("dashboard.filter.bucket.running"),
+      }),
+    );
 
     expect(screen.getByText("survival")).toBeInTheDocument();
     expect(screen.queryByText("creative")).not.toBeInTheDocument();
+  });
+
+  it("its bucket covers a server in an unknown observed state (#2239)", async () => {
+    // `unknown` folds into the `other` bucket, closing the gap where an unknown
+    // server was hidden by any active filter.
+    mockApi.get.mockResolvedValue([
+      server({ id: "s1", name: "survival", observed_state: "running" }),
+      server({ id: "s2", name: "mystery", observed_state: "bogus" }),
+    ]);
+    renderPage();
+
+    await screen.findByText("mystery");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: t("dashboard.filter.state") }),
+    );
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: t("dashboard.filter.bucket.other"),
+      }),
+    );
+
+    // Only the unknown-state server survives the `other` filter.
+    expect(screen.getByText("mystery")).toBeInTheDocument();
+    expect(screen.queryByText("survival")).not.toBeInTheDocument();
+  });
+
+  it("shows the selected-bucket count badge only when at least one is picked", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ id: "s1", name: "survival", observed_state: "running" }),
+    ]);
+    renderPage();
+
+    await screen.findByText("survival");
+    const trigger = screen.getByRole("button", {
+      name: t("dashboard.filter.state"),
+    });
+    // No badge while nothing is selected.
+    expect(trigger).not.toHaveTextContent("1");
+
+    fireEvent.click(trigger);
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: t("dashboard.filter.bucket.running"),
+      }),
+    );
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: t("dashboard.filter.bucket.stopped"),
+      }),
+    );
+    // Two buckets selected → badge reads "2".
+    expect(trigger).toHaveTextContent("2");
+
+    // Clear resets the selection and hides the badge again.
+    fireEvent.click(
+      screen.getByRole("button", { name: t("dashboard.filter.clear") }),
+    );
+    expect(trigger).not.toHaveTextContent("2");
+  });
+
+  it("round-trips the selected buckets through the state URL param", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ id: "s1", name: "survival", observed_state: "running" }),
+    ]);
+    let search = "";
+    render(
+      <MemoryRouter initialEntries={[`/communities/${CID}`]}>
+        <QueryClientProvider
+          client={
+            new QueryClient({
+              defaultOptions: {
+                queries: { retry: false },
+                mutations: { retry: false },
+              },
+            })
+          }
+        >
+          <ToastProvider>
+            <Routes>
+              <Route path="/communities/:cid" element={<DashboardPage />} />
+            </Routes>
+            <LocationProbe onChange={(s) => (search = s)} />
+          </ToastProvider>
+        </QueryClientProvider>
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("survival");
+    fireEvent.click(
+      screen.getByRole("button", { name: t("dashboard.filter.state") }),
+    );
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: t("dashboard.filter.bucket.crashed"),
+      }),
+    );
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: t("dashboard.filter.bucket.running"),
+      }),
+    );
+
+    // The param carries bucket keys in canonical order, not raw states.
+    expect(new URLSearchParams(search).get("state")).toBe("running,crashed");
   });
 
   it("shows the empty-filter message when no servers match", async () => {
@@ -1305,12 +1426,15 @@ describe("DashboardPage filter and sort (#1123)", () => {
 
     await screen.findByText("beta-survival");
 
-    // Filter to running only.
-    const runningChip = screen.getByRole("button", {
-      name: t("dashboard.state.running"),
-      pressed: false,
-    });
-    fireEvent.click(runningChip);
+    // Filter to running only via the state dropdown.
+    fireEvent.click(
+      screen.getByRole("button", { name: t("dashboard.filter.state") }),
+    );
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: t("dashboard.filter.bucket.running"),
+      }),
+    );
 
     // gamma-lobby (stopped) is filtered out.
     expect(screen.queryByText("gamma-lobby")).not.toBeInTheDocument();

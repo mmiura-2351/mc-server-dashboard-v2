@@ -284,6 +284,14 @@ export const ja: Record<TranslationKey, string> = {
   // Filter and sort controls (#1123).
   "dashboard.filter.search": "名前で検索…",
   "dashboard.filter.state": "状態でフィルター",
+  // State filter dropdown: short trigger label, clear action, and the four
+  // semantic buckets (#2239).
+  "dashboard.filter.stateLabel": "状態",
+  "dashboard.filter.clear": "クリア",
+  "dashboard.filter.bucket.running": "稼働中",
+  "dashboard.filter.bucket.stopped": "停止",
+  "dashboard.filter.bucket.crashed": "異常",
+  "dashboard.filter.bucket.other": "その他",
   "dashboard.filter.noMatch": "フィルター条件に一致するサーバーがありません。",
   "dashboard.sort.label": "並べ替え",
   "dashboard.sort.name": "名前",
