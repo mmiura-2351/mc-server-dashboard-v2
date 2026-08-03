@@ -705,19 +705,29 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   say the outcome is **unconfirmed** and the intent stands. `no_eligible_worker`
   and `jar_unavailable` stay verb-agnostic: both are raised before any intent is
   committed.
-- **Start keeps the verb-agnostic messages**, but not because nothing is ever
-  pending there. A start that demonstrably did not happen is compensated back to
-  stopped, which covers `command_failed`; a **post-dispatch** `worker_busy` is
-  not — the API keeps `desired_state=running` and the assignment so
-  `redispatch_start` can converge once the raced command settles (#824), while a
-  pre-dispatch one does compensate. A **post-dispatch** `worker_unavailable` is
-  the same carve-out for the same reason (the start may have been applied), while
-  its pre-dispatch twin — a failed hydrate, or a call that never reached the
-  Worker — compensates. The client sees one `worker_busy` and one
-  `worker_unavailable` for both halves of each pair, so start stays on the
-  generic "another operation is in progress" / "could not reach the server host"
-  messages; #2435 and #2440 scoped that case out rather than resolving it, and it
-  is tracked separately (#2445).
+- On **start**, `worker_busy` gets its own message, but a *hedged* one, because
+  the reason is ambiguous at the edge (#2445). A **post-dispatch** `worker_busy`
+  keeps `desired_state=running` and the assignment so `redispatch_start` can
+  converge once the raced command settles (#824) — the start is pending; a
+  **pre-dispatch** one — a refused hydrate before the start command was sent —
+  compensates back to stopped, so nothing is pending. The client sees one bare
+  `worker_busy` for both, so the message cannot promise the start will happen: it
+  says the start *may* still be applied on its own and to start again only if the
+  server stays stopped, replacing the generic "wait and try again". That generic
+  retry was actively misleading on the pending path — a retry while
+  `desired_state=running` raises `invalid_transition`, which on **start** now
+  gets its own message ("already running or starting up") rather than the generic
+  state-changed toast, so the operator does not get a second, contradictory
+  answer (#2445). Stop and restart keep the state-changed treatment for
+  `invalid_transition`: neither leaves a pending intent a retry collides with.
+- **Start keeps the verb-agnostic message for 503 `worker_unavailable`.** A start
+  that demonstrably did not happen is compensated back to stopped, but a
+  **post-dispatch** `worker_unavailable` is not (the start may have been applied),
+  while its pre-dispatch twin — a failed hydrate, or a call that never reached the
+  Worker — compensates. This is the identical pre/post ambiguity as `worker_busy`
+  above, but a timeout answers *nothing*, so there is no honest thing to say
+  beyond "could not reach the server host"; #2440 scoped it out and it stays
+  verb-agnostic.
 - Destructive operations (delete server/community/user/backup-restore) use
   typed-confirm dialogs.
 
