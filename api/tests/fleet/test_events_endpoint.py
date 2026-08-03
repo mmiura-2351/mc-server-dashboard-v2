@@ -14,7 +14,6 @@ import asyncio
 import datetime as dt
 import time
 import uuid
-from collections.abc import Iterator
 
 import pytest
 from fastapi import FastAPI
@@ -49,6 +48,7 @@ from mc_server_dashboard_api.fleet.domain.real_time_events import (
     notification_event,
 )
 from mc_server_dashboard_api.servers.domain.errors import ServerNotFoundError
+from tests.client_utils import enter_client
 from tests.identity.fakes import make_user
 
 
@@ -119,9 +119,8 @@ def _app(
     return app
 
 
-def _client(app: object) -> Iterator[TestClient]:
-    with TestClient(app) as client:  # type: ignore[arg-type]
-        yield client
+def _client(app: object) -> TestClient:
+    return enter_client(TestClient(app))  # type: ignore[arg-type]
 
 
 def _url(
@@ -136,7 +135,7 @@ def _url(
 def _assert_rejected(app: object, code: int) -> None:
     # A pre-accept close surfaces in the TestClient at connect time (the upgrade
     # never completes), so the handshake never reaches the client as accepted.
-    client = next(_client(app))
+    client = _client(app)
     with pytest.raises(WebSocketDisconnect) as exc:
         with client.websocket_connect(_url(uuid.uuid4(), uuid.uuid4())):
             pass
@@ -166,7 +165,7 @@ def test_status_event_is_delivered_as_a_frame() -> None:
     bus = InProcessRealTimeEvents()
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(bus=bus)
-    client = next(_client(app))
+    client = _client(app)
     with client.websocket_connect(_url(community, server)) as ws:
         bus.publish(
             server_id=str(server),
@@ -184,7 +183,7 @@ def test_log_and_metrics_events_are_delivered() -> None:
     bus = InProcessRealTimeEvents()
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(bus=bus)
-    client = next(_client(app))
+    client = _client(app)
     with client.websocket_connect(_url(community, server)) as ws:
         bus.publish(
             server_id=str(server),
@@ -204,7 +203,7 @@ def test_streams_query_filters_delivered_events() -> None:
     bus = InProcessRealTimeEvents()
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(bus=bus)
-    client = next(_client(app))
+    client = _client(app)
     with client.websocket_connect(_url(community, server, streams="status")) as ws:
         bus.publish(
             server_id=str(server),
@@ -225,7 +224,7 @@ def test_notification_stream_is_subscribable_and_delivered() -> None:
     bus = InProcessRealTimeEvents()
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(bus=bus)
-    client = next(_client(app))
+    client = _client(app)
     with client.websocket_connect(
         _url(community, server, streams="notification")
     ) as ws:
@@ -251,7 +250,7 @@ def test_slow_consumer_receives_a_gap_frame() -> None:
     bus = InProcessRealTimeEvents(max_queue=1)
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(bus=bus)
-    client = next(_client(app))
+    client = _client(app)
     with client.websocket_connect(_url(community, server)) as ws:
         for i in range(3):
             bus.publish(
@@ -273,7 +272,7 @@ def test_frame_ts_uses_worker_emitted_at() -> None:
     bus = InProcessRealTimeEvents()
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(bus=bus)
-    client = next(_client(app))
+    client = _client(app)
     emitted = dt.datetime(2026, 6, 3, 12, 0, 0, tzinfo=dt.timezone.utc)
     with client.websocket_connect(_url(community, server)) as ws:
         bus.publish(
@@ -294,7 +293,7 @@ def test_frame_ts_falls_back_to_receive_time_when_unset() -> None:
     bus = InProcessRealTimeEvents()
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(bus=bus)
-    client = next(_client(app))
+    client = _client(app)
     before = dt.datetime.now(dt.timezone.utc)
     with client.websocket_connect(_url(community, server)) as ws:
         bus.publish(
@@ -324,7 +323,7 @@ def test_frame_wire_text_is_the_exact_compact_json() -> None:
     bus = InProcessRealTimeEvents()
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(bus=bus)
-    client = next(_client(app))
+    client = _client(app)
     emitted = dt.datetime(2026, 6, 3, 12, 0, 0, tzinfo=dt.timezone.utc)
     with client.websocket_connect(_url(community, server)) as ws:
         bus.publish(
@@ -362,7 +361,7 @@ def test_frame_is_encoded_once_for_many_subscribers(
     bus = InProcessRealTimeEvents()
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(bus=bus)
-    client = next(_client(app))
+    client = _client(app)
     with (
         client.websocket_connect(_url(community, server)) as ws1,
         client.websocket_connect(_url(community, server)) as ws2,
@@ -411,7 +410,7 @@ def test_gap_marker_frame_is_never_cached() -> None:
 def test_unknown_stream_token_is_rejected_before_accept() -> None:
     bus = InProcessRealTimeEvents()
     app = _app(bus=bus)
-    client = next(_client(app))
+    client = _client(app)
     community, server = uuid.uuid4(), uuid.uuid4()
     with pytest.raises(WebSocketDisconnect) as exc:
         with client.websocket_connect(_url(community, server, streams="bogus")):
@@ -425,7 +424,7 @@ def test_omitted_streams_subscribes_to_all() -> None:
     bus = InProcessRealTimeEvents()
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(bus=bus)
-    client = next(_client(app))
+    client = _client(app)
     url = f"/api/communities/{community}/servers/{server}/events"
     cases: list[tuple[EventStream, dict[str, object]]] = [
         (EventStream.STATUS, {"state": "running"}),
@@ -482,7 +481,7 @@ def test_mid_stream_revocation_closes_with_policy_code(
     app.dependency_overrides[get_permission_checker] = lambda: checker
     app.dependency_overrides[get_read_server] = lambda: _FakeReadServer(found=True)
     app.dependency_overrides[get_real_time_events] = lambda: bus
-    client = next(_client(app))
+    client = _client(app)
 
     with pytest.raises(WebSocketDisconnect) as exc:
         with client.websocket_connect(_url(community, server)) as ws:
@@ -529,7 +528,7 @@ def test_mid_stream_revocation_closes_despite_busy_stream(
     app.dependency_overrides[get_permission_checker] = lambda: checker
     app.dependency_overrides[get_read_server] = lambda: _FakeReadServer(found=True)
     app.dependency_overrides[get_real_time_events] = lambda: bus
-    client = next(_client(app))
+    client = _client(app)
 
     with pytest.raises(WebSocketDisconnect) as exc:
         with client.websocket_connect(_url(community, server)) as ws:
@@ -556,7 +555,7 @@ def test_disconnect_cleans_up_subscription() -> None:
     bus = InProcessRealTimeEvents()
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(bus=bus)
-    client = next(_client(app))
+    client = _client(app)
     with client.websocket_connect(_url(community, server)):
         assert bus.subscriber_count(str(server)) == 1
     # Leaving the context disconnects the client; the subscription is released.
@@ -582,7 +581,7 @@ def test_disconnect_on_quiet_topic_releases_subscription() -> None:
     bus = InProcessRealTimeEvents()
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(bus=bus)
-    client = next(_client(app))
+    client = _client(app)
     with client.websocket_connect(_url(community, server)) as ws:
         assert bus.subscriber_count(str(server)) == 1
         ws.close(1000)
@@ -625,7 +624,7 @@ def test_no_reauthz_queries_after_disconnect_on_quiet_topic(
     app.dependency_overrides[get_permission_checker] = lambda: checker
     app.dependency_overrides[get_read_server] = lambda: _FakeReadServer(found=True)
     app.dependency_overrides[get_real_time_events] = lambda: bus
-    client = next(_client(app))
+    client = _client(app)
 
     with client.websocket_connect(_url(community, server)) as ws:
         ws.close(1000)
@@ -648,7 +647,7 @@ def test_client_sent_data_is_ignored_and_delivery_continues() -> None:
     bus = InProcessRealTimeEvents()
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(bus=bus)
-    client = next(_client(app))
+    client = _client(app)
     with client.websocket_connect(_url(community, server)) as ws:
         ws.send_text("ping")
         bus.publish(
