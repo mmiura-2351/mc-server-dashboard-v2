@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 
 import pytest
 from fastapi import FastAPI
@@ -31,6 +31,7 @@ from mc_server_dashboard_api.identity.domain.value_objects import (
     UserId,
 )
 from tests.audit.fakes import RecordingAuditRecorder
+from tests.client_utils import enter_client
 from tests.identity.fakes import make_user
 
 _NOW = dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc)
@@ -70,14 +71,13 @@ def _bind_shared_app(shared_app: FastAPI) -> None:
     _shared_app = shared_app
 
 
-def _client(user: object, **overrides: object) -> Iterator[TestClient]:
+def _client(user: object, **overrides: object) -> TestClient:
     app = _shared_app
     app.dependency_overrides.clear()
     app.dependency_overrides[get_current_user] = _provider(user)
     for dependency, value in overrides.items():
         app.dependency_overrides[_PROVIDERS[dependency]] = _provider(value)
-    with TestClient(app) as client:
-        yield client
+    return enter_client(TestClient(app))
 
 
 def _session(user_id: UserId) -> RefreshToken:
@@ -97,7 +97,7 @@ def test_list_returns_safe_metadata_without_token_hash() -> None:
     user = make_user()
     token = _session(user.id)
     fake = _Fake(result=[token])
-    client = next(_client(user, list_sessions=fake))
+    client = _client(user, list_sessions=fake)
 
     resp = client.get("/api/users/me/sessions")
 
@@ -120,7 +120,7 @@ def test_list_declares_no_store() -> None:
     # The listing is per-user data — session ids and timestamps (issue #2587).
     user = make_user()
     fake = _Fake(result=[_session(user.id)])
-    client = next(_client(user, list_sessions=fake))
+    client = _client(user, list_sessions=fake)
 
     resp = client.get("/api/users/me/sessions")
 
@@ -135,7 +135,7 @@ def test_revoke_one_returns_204_and_audits() -> None:
     user = make_user()
     recorder = RecordingAuditRecorder()
     fake = _Fake(result=True)
-    client = next(_client(user, revoke_session=fake, recorder=recorder))
+    client = _client(user, revoke_session=fake, recorder=recorder)
     session_id = uuid.uuid4()
 
     resp = client.delete(f"/api/users/me/sessions/{session_id}")
@@ -154,7 +154,7 @@ def test_revoke_one_unknown_or_other_user_returns_404_not_403() -> None:
     recorder = RecordingAuditRecorder()
     # The use case reports a miss for both an unknown id and another user's id.
     fake = _Fake(result=False)
-    client = next(_client(user, revoke_session=fake, recorder=recorder))
+    client = _client(user, revoke_session=fake, recorder=recorder)
 
     resp = client.delete(f"/api/users/me/sessions/{uuid.uuid4()}")
 
@@ -167,7 +167,7 @@ def test_revoke_one_unknown_or_other_user_returns_404_not_403() -> None:
 def test_revoke_one_malformed_id_returns_404() -> None:
     user = make_user()
     fake = _Fake(result=True)
-    client = next(_client(user, revoke_session=fake))
+    client = _client(user, revoke_session=fake)
 
     resp = client.delete("/api/users/me/sessions/not-a-uuid")
 
@@ -184,7 +184,7 @@ def test_revoke_others_passes_presented_token_and_audits() -> None:
     user = make_user()
     recorder = RecordingAuditRecorder()
     fake = _Fake(result=None)
-    client = next(_client(user, revoke_other_sessions=fake, recorder=recorder))
+    client = _client(user, revoke_other_sessions=fake, recorder=recorder)
 
     resp = client.request(
         "DELETE",
@@ -209,7 +209,7 @@ def test_revoke_others_declares_no_store() -> None:
     # swap to per-route declarations covers each of them (issue #2587).
     user = make_user()
     fake = _Fake(result=None)
-    client = next(_client(user, revoke_other_sessions=fake))
+    client = _client(user, revoke_other_sessions=fake)
 
     resp = client.delete("/api/users/me/sessions")
 
@@ -220,7 +220,7 @@ def test_revoke_others_declares_no_store() -> None:
 def test_revoke_others_without_body_passes_none() -> None:
     user = make_user()
     fake = _Fake(result=None)
-    client = next(_client(user, revoke_other_sessions=fake))
+    client = _client(user, revoke_other_sessions=fake)
 
     resp = client.delete("/api/users/me/sessions")
 
@@ -239,7 +239,7 @@ def test_revoke_others_with_keep_session_id() -> None:
     user = make_user()
     recorder = RecordingAuditRecorder()
     fake = _Fake(result=None)
-    client = next(_client(user, revoke_other_sessions=fake, recorder=recorder))
+    client = _client(user, revoke_other_sessions=fake, recorder=recorder)
     session_id = uuid.uuid4()
 
     resp = client.request(

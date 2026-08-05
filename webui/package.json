@@ -23,11 +23,11 @@
     "openapi": "npm run openapi:export && npm run openapi:generate"
   },
   "dependencies": {
-    "@tanstack/react-query": "^5.101.3",
+    "@tanstack/react-query": "^5.101.4",
     "fflate": "^0.8.3",
-    "react": "^19.2.7",
-    "react-dom": "^19.2.7",
-    "react-router": "^8.2.0"
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-router": "^8.3.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.5",
