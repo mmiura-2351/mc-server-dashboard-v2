@@ -795,7 +795,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "grpcio-tools", specifier = ">=1.80.0,<1.83" },
+    { name = "grpcio-tools", specifier = ">=1.80.0,<1.84" },
     { name = "import-linter", specifier = ">=2.11" },
     { name = "mypy", specifier = ">=2.1.0" },
     { name = "mypy-protobuf", specifier = ">=5.1.0,<6" },
@@ -805,7 +805,7 @@ dev = [
     { name = "pytest-cov", specifier = ">=7.1.0,<8" },
     { name = "pytest-timeout", specifier = ">=2.4.0,<3" },
     { name = "pytest-xdist", specifier = ">=3.6.1,<4" },
-    { name = "ruff", specifier = ">=0.15.14,<0.15.23" },
+    { name = "ruff", specifier = ">=0.15.14,<0.16.1" },
 ]
 
 [[package]]

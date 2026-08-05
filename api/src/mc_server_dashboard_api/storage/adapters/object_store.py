@@ -74,6 +74,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     NotFoundError,
     ObjectStoreUnavailableError,
     PathTraversalError,
+    PrunedStoreError,
     SnapshotHandleError,
     StaleGenerationError,
 )
@@ -854,12 +855,20 @@ class ObjectStorage(Storage):
                         # marker (issue #1704). Discard the staging AND the copied
                         # (never-pointed-at) snapshot prefix exactly as the other
                         # refusal paths do (the prior ``current`` keeps the newer
-                        # copy, no bump) and raise so the edge maps it to 409
-                        # stale_generation; the Worker re-bases on next start.
+                        # copy, no bump) and raise so the edge maps it to 409.
                         await _delete_prefix(client, new_prefix)
                         await _delete_prefix(client, incoming)
                         self._release_staging(incoming)
                         h.consumed = True
+                        # ``current == 0`` with ``expected_base > 0`` is the
+                        # unambiguous prune signature (issue #921): generation is
+                        # monotonic and only a concurrent delete/prune deletes the
+                        # marker, so it regressed to 0 rather than advancing. Raise
+                        # the distinct subclass so the edge names the concurrent
+                        # delete instead of "generation advanced"; the Worker
+                        # re-bases on next start either way.
+                        if current == 0 and expected_base > 0:
+                            raise PrunedStoreError(expected_base, current)
                         raise StaleGenerationError(expected_base, current)
                 # Missing-region gate (issue #854): the structural check above only
                 # sees objects that EXIST — a vanished region object would publish
