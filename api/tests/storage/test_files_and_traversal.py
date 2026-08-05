@@ -925,6 +925,200 @@ async def test_mutations_under_a_symlink_parent_are_refused(tmp_path: Path) -> N
     assert (live / "g").read_bytes() == b"G"
 
 
+# --- a MUTATION on a symlink LEAF dirent (issue #2429) ----------------------
+#
+# The listing describes the dirent, so the mutation surface must act on the
+# dirent too. A symlink dirent supports exactly two operations -- being listed
+# and being deleted; every other mutation refuses. delete unlinks the LINK
+# (never the target it points at) and captures no version (a link has no
+# Port-readable content to retain); write / rename-source / make_dir refuse;
+# delete_dir misses (a link is never a directory dirent); retain is a no-op.
+
+
+async def test_delete_file_unlinks_a_working_link_and_keeps_its_target(
+    tmp_path: Path,
+) -> None:
+    """The dirent goes; the target's bytes stay; no version is captured."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"real.txt": b"TARGET"})
+    live = snapshot_dir(tmp_path, community, server)
+    (live / "link.txt").symlink_to("real.txt")
+    before = await storage.current_generation(community, server)
+
+    await storage.delete_file(community, server, RelPath("link.txt"))
+
+    assert not (live / "link.txt").exists(follow_symlinks=False)
+    assert (live / "real.txt").read_bytes() == b"TARGET"
+    # A link has no content to retain, so nothing lands in the version ring.
+    assert (
+        await storage.list_file_versions(community, server, RelPath("link.txt")) == []
+    )
+    # An authoritative edit still bumps the generation.
+    assert await storage.current_generation(community, server) == before + 1
+
+
+async def test_delete_file_unlinks_a_dangling_link(tmp_path: Path) -> None:
+    """A now-visible broken link is removable rather than a 404 (issue #2429)."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"keep": b"K"})
+    live = snapshot_dir(tmp_path, community, server)
+    (live / "broken").symlink_to("nowhere")
+
+    await storage.delete_file(community, server, RelPath("broken"))
+
+    assert not (live / "broken").exists(follow_symlinks=False)
+
+
+async def test_delete_file_unlinks_a_looping_link(tmp_path: Path) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"keep": b"K"})
+    live = snapshot_dir(tmp_path, community, server)
+    _plant_symlink_loop(live / "loop")
+
+    await storage.delete_file(community, server, RelPath("loop"))
+
+    assert not (live / "loop").exists(follow_symlinks=False)
+
+
+async def test_delete_dir_on_a_link_to_a_directory_is_a_miss(tmp_path: Path) -> None:
+    """A link is never a directory dirent, so delete_dir leaves the subtree."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"real/inner": b"X"})
+    live = snapshot_dir(tmp_path, community, server)
+    (live / "alias").symlink_to("real")
+
+    with pytest.raises(NotFoundError):
+        await storage.delete_dir(community, server, RelPath("alias"))
+
+    assert (live / "real" / "inner").read_bytes() == b"X"
+    assert (live / "alias").is_symlink()
+
+
+async def test_write_file_on_a_link_is_refused_and_leaves_the_target(
+    tmp_path: Path,
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"real.txt": b"TARGET"})
+    live = snapshot_dir(tmp_path, community, server)
+    (live / "link.txt").symlink_to("real.txt")
+
+    with pytest.raises(SymlinkRefusedError):
+        await storage.write_file(community, server, RelPath("link.txt"), b"EDITED")
+
+    assert (live / "real.txt").read_bytes() == b"TARGET"
+    assert (live / "link.txt").is_symlink()
+
+
+async def test_write_file_on_a_dangling_link_is_refused_not_materialized(
+    tmp_path: Path,
+) -> None:
+    """A write must not follow the link and create the target it dangles at."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"keep": b"K"})
+    live = snapshot_dir(tmp_path, community, server)
+    (live / "broken").symlink_to("nowhere")
+
+    with pytest.raises(SymlinkRefusedError):
+        await storage.write_file(community, server, RelPath("broken"), b"EDITED")
+
+    assert not (live / "nowhere").exists()
+
+
+async def test_rename_file_with_a_link_source_is_refused(tmp_path: Path) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"real.txt": b"TARGET"})
+    live = snapshot_dir(tmp_path, community, server)
+    (live / "link.txt").symlink_to("real.txt")
+
+    with pytest.raises(SymlinkRefusedError):
+        await storage.rename_file(
+            community, server, RelPath("link.txt"), RelPath("moved.txt")
+        )
+
+    assert (live / "real.txt").read_bytes() == b"TARGET"
+    assert (live / "link.txt").is_symlink()
+    assert not (live / "moved.txt").exists(follow_symlinks=False)
+
+
+async def test_rename_dir_with_a_link_source_is_refused(tmp_path: Path) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"real/inner": b"X"})
+    live = snapshot_dir(tmp_path, community, server)
+    (live / "alias").symlink_to("real")
+
+    with pytest.raises(SymlinkRefusedError):
+        await storage.rename_dir(community, server, RelPath("alias"), RelPath("moved"))
+
+    assert (live / "real" / "inner").read_bytes() == b"X"
+    assert (live / "alias").is_symlink()
+    assert not (live / "moved").exists(follow_symlinks=False)
+
+
+async def test_make_dir_onto_a_link_is_refused(tmp_path: Path) -> None:
+    """make_dir onto a dangling link must not follow it and materialize a dir."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"keep": b"K"})
+    live = snapshot_dir(tmp_path, community, server)
+    (live / "broken").symlink_to("nowhere")
+
+    with pytest.raises(SymlinkRefusedError):
+        await storage.make_dir(community, server, RelPath("broken"))
+
+    assert (live / "broken").is_symlink()
+    assert not (live / "nowhere").exists()
+
+
+async def test_retain_file_version_on_a_link_is_a_no_op(tmp_path: Path) -> None:
+    """A link has no content to retain, so the version ring stays empty."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"real.txt": b"TARGET"})
+    live = snapshot_dir(tmp_path, community, server)
+    (live / "link.txt").symlink_to("real.txt")
+
+    await storage.retain_file_version(community, server, RelPath("link.txt"))
+
+    assert (
+        await storage.list_file_versions(community, server, RelPath("link.txt")) == []
+    )
+
+
+async def test_a_leaf_link_occupies_its_name_so_a_rename_dest_never_clobbers(
+    tmp_path: Path,
+) -> None:
+    """The never-clobber probe reports a link's name occupied (issue #2429).
+
+    A rename destination is refused at the route by ``path_exists``; that a leaf
+    link -- working or dangling -- is reported occupied is what keeps a rename
+    from landing on the link's target.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"real.txt": b"TARGET"})
+    live = snapshot_dir(tmp_path, community, server)
+    (live / "link.txt").symlink_to("real.txt")
+    (live / "broken").symlink_to("nowhere")
+
+    assert await storage.path_exists(community, server, RelPath("link.txt"))
+    assert await storage.path_exists(community, server, RelPath("broken"))
+
+
 # --- READING a symlink dirent (issue #2418 review) --------------------------
 #
 # Describing the link rather than its target split the listing from the read: the

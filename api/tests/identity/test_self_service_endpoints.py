@@ -9,7 +9,7 @@ operation records its audit event.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 
 import pytest
 from fastapi import FastAPI
@@ -34,6 +34,7 @@ from mc_server_dashboard_api.identity.domain.errors import (
     UserNotFoundError,
 )
 from tests.audit.fakes import RecordingAuditRecorder
+from tests.client_utils import enter_client
 from tests.identity.fakes import make_user
 
 _VALID_PASSWORD = "Np4@xZ#Lq9wR"
@@ -76,14 +77,13 @@ def _bind_shared_app(shared_app: FastAPI) -> None:
     _shared_app = shared_app
 
 
-def _client(user: object, **overrides: object) -> Iterator[TestClient]:
+def _client(user: object, **overrides: object) -> TestClient:
     app = _shared_app
     app.dependency_overrides.clear()
     app.dependency_overrides[get_current_user] = _provider(user)
     for dependency, value in overrides.items():
         app.dependency_overrides[_PROVIDERS[dependency]] = _provider(value)
-    with TestClient(app) as client:
-        yield client
+    return enter_client(TestClient(app))
 
 
 # --- PUT /users/me/password ------------------------------------------------
@@ -93,7 +93,7 @@ def test_change_password_returns_204_and_audits() -> None:
     user = make_user()
     recorder = RecordingAuditRecorder()
     fake = _Fake(result=None)
-    client = next(_client(user, change_password=fake, recorder=recorder))
+    client = _client(user, change_password=fake, recorder=recorder)
     resp = client.put(
         "/api/users/me/password",
         json={"current_password": "old", "new_password": _VALID_PASSWORD},
@@ -114,7 +114,7 @@ def test_change_password_returns_204_and_audits() -> None:
 def test_change_password_wrong_current_returns_uniform_401() -> None:
     user = make_user()
     fake = _Fake(error=InvalidCredentialsError())
-    client = next(_client(user, change_password=fake))
+    client = _client(user, change_password=fake)
     resp = client.put(
         "/api/users/me/password",
         json={"current_password": "bad", "new_password": _VALID_PASSWORD},
@@ -126,7 +126,7 @@ def test_change_password_wrong_current_returns_uniform_401() -> None:
 def test_change_password_weak_new_returns_422_with_reason_no_echo() -> None:
     user = make_user()
     fake = _Fake(error=PasswordPolicyError("too_short"))
-    client = next(_client(user, change_password=fake))
+    client = _client(user, change_password=fake)
     weak = "Qz9!pw"
     resp = client.put(
         "/api/users/me/password",
@@ -143,7 +143,7 @@ def test_change_password_user_gone_returns_401_invalid_token() -> None:
     # same 401 invalid_token as an invalidated token, not a 500.
     user = make_user()
     fake = _Fake(error=UserNotFoundError(str(user.id.value)))
-    client = next(_client(user, change_password=fake))
+    client = _client(user, change_password=fake)
     resp = client.put(
         "/api/users/me/password",
         json={"current_password": "old", "new_password": _VALID_PASSWORD},
@@ -172,7 +172,7 @@ def test_update_profile_returns_user_and_audits() -> None:
     updated = make_user(username="alice2", email="alice2@example.com")
     recorder = RecordingAuditRecorder()
     fake = _Fake(result=updated)
-    client = next(_client(user, update_profile=fake, recorder=recorder))
+    client = _client(user, update_profile=fake, recorder=recorder)
     resp = client.patch(
         "/api/users/me", json={"username": "alice2", "email": "alice2@example.com"}
     )
@@ -188,7 +188,7 @@ def test_update_profile_declares_no_store() -> None:
     # The 200 returns the updated user — per-user data, never stored (#2587).
     user = make_user()
     fake = _Fake(result=make_user(username="alice2"))
-    client = next(_client(user, update_profile=fake))
+    client = _client(user, update_profile=fake)
     resp = client.patch("/api/users/me", json={"username": "alice2"})
     assert resp.status_code == 200
     assert resp.headers["cache-control"] == "no-store"
@@ -197,7 +197,7 @@ def test_update_profile_declares_no_store() -> None:
 def test_update_profile_username_conflict_returns_409() -> None:
     user = make_user()
     fake = _Fake(error=UsernameAlreadyExistsError("taken"))
-    client = next(_client(user, update_profile=fake))
+    client = _client(user, update_profile=fake)
     resp = client.patch("/api/users/me", json={"username": "taken"})
     assert resp.status_code == 409
     assert resp.json()["reason"] == "username_taken"
@@ -206,7 +206,7 @@ def test_update_profile_username_conflict_returns_409() -> None:
 def test_update_profile_email_conflict_returns_409() -> None:
     user = make_user()
     fake = _Fake(error=EmailAlreadyExistsError("taken@example.com"))
-    client = next(_client(user, update_profile=fake))
+    client = _client(user, update_profile=fake)
     resp = client.patch("/api/users/me", json={"email": "taken@example.com"})
     assert resp.status_code == 409
     assert resp.json()["reason"] == "email_taken"
@@ -215,7 +215,7 @@ def test_update_profile_email_conflict_returns_409() -> None:
 def test_update_profile_user_gone_returns_401_invalid_token() -> None:
     user = make_user()
     fake = _Fake(error=UserNotFoundError(str(user.id.value)))
-    client = next(_client(user, update_profile=fake))
+    client = _client(user, update_profile=fake)
     resp = client.patch("/api/users/me", json={"username": "alice2"})
     assert resp.status_code == 401
     assert resp.json()["reason"] == "invalid_token"
@@ -228,7 +228,7 @@ def test_delete_account_returns_204_and_audits() -> None:
     user = make_user()
     recorder = RecordingAuditRecorder()
     fake = _Fake(result=None)
-    client = next(_client(user, delete_account=fake, recorder=recorder))
+    client = _client(user, delete_account=fake, recorder=recorder)
     resp = client.request("DELETE", "/api/users/me", json={"password": _VALID_PASSWORD})
     assert resp.status_code == 204
     assert fake.calls == [{"user_id": user.id, "password": _VALID_PASSWORD}]
@@ -243,7 +243,7 @@ def test_delete_account_declares_no_store() -> None:
     # per-route declarations covers each of them (issue #2587).
     user = make_user()
     fake = _Fake(result=None)
-    client = next(_client(user, delete_account=fake))
+    client = _client(user, delete_account=fake)
     resp = client.request("DELETE", "/api/users/me", json={"password": _VALID_PASSWORD})
     assert resp.status_code == 204
     assert resp.headers["cache-control"] == "no-store"
@@ -254,7 +254,7 @@ def test_delete_account_wrong_password_returns_uniform_401() -> None:
     # change-password endpoint returns, so it is no confirmation oracle.
     user = make_user()
     fake = _Fake(error=InvalidCredentialsError())
-    client = next(_client(user, delete_account=fake))
+    client = _client(user, delete_account=fake)
     resp = client.request("DELETE", "/api/users/me", json={"password": "wrong"})
     assert resp.status_code == 401
     assert resp.json()["reason"] == "invalid_credentials"
@@ -263,7 +263,7 @@ def test_delete_account_wrong_password_returns_uniform_401() -> None:
 def test_delete_account_missing_password_returns_422() -> None:
     user = make_user()
     fake = _Fake(result=None)
-    client = next(_client(user, delete_account=fake))
+    client = _client(user, delete_account=fake)
     resp = client.request("DELETE", "/api/users/me", json={})
     assert resp.status_code == 422
     assert fake.calls == []
@@ -272,7 +272,7 @@ def test_delete_account_missing_password_returns_422() -> None:
 def test_delete_account_blank_password_returns_422() -> None:
     user = make_user()
     fake = _Fake(result=None)
-    client = next(_client(user, delete_account=fake))
+    client = _client(user, delete_account=fake)
     resp = client.request("DELETE", "/api/users/me", json={"password": ""})
     assert resp.status_code == 422
     assert fake.calls == []
@@ -281,7 +281,7 @@ def test_delete_account_blank_password_returns_422() -> None:
 def test_delete_account_owner_returns_409() -> None:
     user = make_user()
     fake = _Fake(error=CommunityOwnedError(str(uuid.uuid4())))
-    client = next(_client(user, delete_account=fake))
+    client = _client(user, delete_account=fake)
     resp = client.request("DELETE", "/api/users/me", json={"password": _VALID_PASSWORD})
     assert resp.status_code == 409
     assert resp.json()["reason"] == "owns_community"
@@ -290,7 +290,7 @@ def test_delete_account_owner_returns_409() -> None:
 def test_delete_account_last_admin_returns_409() -> None:
     user = make_user()
     fake = _Fake(error=LastPlatformAdminError(str(uuid.uuid4())))
-    client = next(_client(user, delete_account=fake))
+    client = _client(user, delete_account=fake)
     resp = client.request("DELETE", "/api/users/me", json={"password": _VALID_PASSWORD})
     assert resp.status_code == 409
     assert resp.json()["reason"] == "last_platform_admin"
@@ -299,7 +299,7 @@ def test_delete_account_last_admin_returns_409() -> None:
 def test_delete_account_user_gone_returns_401_invalid_token() -> None:
     user = make_user()
     fake = _Fake(error=UserNotFoundError(str(user.id.value)))
-    client = next(_client(user, delete_account=fake))
+    client = _client(user, delete_account=fake)
     resp = client.request("DELETE", "/api/users/me", json={"password": _VALID_PASSWORD})
     assert resp.status_code == 401
     assert resp.json()["reason"] == "invalid_token"
