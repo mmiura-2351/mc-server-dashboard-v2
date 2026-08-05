@@ -96,7 +96,7 @@ dev = [
     # Control-plane codegen. grpcio-tools bundles protoc + the python/grpc
     # generators; mypy-protobuf adds .pyi type stubs. Both pinned outside the
     # cooldown (grpcio-tools 1.80.0 2026-03-30; mypy-protobuf 5.1.0 2026-04-28).
-    "grpcio-tools>=1.80.0,<1.83",
+    "grpcio-tools>=1.80.0,<1.84",
     "mypy-protobuf>=5.1.0,<6",
     # Async test support for pytest (async DB-probe + endpoint tests).
     # 1.4.0 (2026-05-26) is inside the 7-day cooldown as of this change; cap

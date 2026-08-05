@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import Iterator, Mapping
+from contextlib import ExitStack
 from typing import Any
 
 import pytest
@@ -18,6 +19,7 @@ from fastapi import FastAPI
 
 from mc_server_dashboard_api.app import create_app
 from mc_server_dashboard_api.dependencies import get_audit_recorder
+from tests.client_utils import bind_exit_stack
 
 _SCRATCH_DB_URL: str | None = None
 """The per-run scratch database created for this session, if any (issue #379)."""
@@ -118,6 +120,24 @@ def _set_test_env(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture(autouse=True)
 def _dummy_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_test_env(monkeypatch)
+
+
+@pytest.fixture(autouse=True)
+def _client_exit_stack() -> Iterator[None]:
+    """Own the per-test ExitStack that ``enter_client`` enters clients into (#1980).
+
+    Endpoint ``_client`` helpers acquire their ``TestClient`` via
+    :func:`tests.client_utils.enter_client`, which registers the client on this
+    stack (running lifespan startup). Closing the stack at teardown runs each
+    client's lifespan shutdown AFTER the test body, so requests run with the
+    lifespan open rather than against a torn-down app.
+    """
+    with ExitStack() as stack:
+        bind_exit_stack(stack)
+        try:
+            yield
+        finally:
+            bind_exit_stack(None)
 
 
 @pytest.fixture(scope="session")
