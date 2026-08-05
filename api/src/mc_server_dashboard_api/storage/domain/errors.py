@@ -200,6 +200,24 @@ class StaleGenerationError(StorageError):
         )
 
 
+class PrunedStoreError(StaleGenerationError):
+    """A commit was refused because a concurrent delete pruned the store (#921).
+
+    A specialization of :class:`StaleGenerationError` for the one stale outcome
+    that is NOT an advance: the commit's ``expected_base`` is >= 1 but the store's
+    current generation reads 0. Generation is monotonic and only the delete-retention
+    prune (``prune_to_final_snapshot``, issue #777/#1704) removes the generation
+    marker, so ``current == 0`` with ``expected_base > 0`` is the unambiguous
+    signature of a concurrent delete/prune that ran under the per-server lock during
+    the upload window — the store REGRESSED to 0, it did not advance.
+
+    Being a subclass, every existing ``except StaleGenerationError`` keeps catching
+    it; the edge catches it FIRST to surface a distinct, accurate contract (the
+    working set was deleted mid-upload) instead of the misleading "generation
+    advanced" message. It carries the same ``expected_base``/``current`` fields.
+    """
+
+
 class IntegrityCheckError(StorageError):
     """A working set failed the structural ``.mca`` integrity gate (issue #739).
 
