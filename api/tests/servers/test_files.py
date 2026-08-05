@@ -106,6 +106,13 @@ class FakeFileStore(FileStore):
         self.read_paths: list[str] = []
         self.missing = False
         self.bad_path = False
+        # Leaf symlink dirents (issue #2429): the real seam REFUSES list_dir / read
+        # on one (post #2432), but delete_file acts on the dirent and succeeds. A
+        # path in ``symlink_through`` carries a link at an INTERMEDIATE component,
+        # which the adapter refuses on EVERY op, delete included -- so the route's
+        # delete dispatch cannot slip such a path past the adapter's enforcement.
+        self.symlink_leaves: set[str] = set()
+        self.symlink_through: set[str] = set()
         # When set, list_dir raises ServerFileNotFoundError for a path that is not
         # a seeded directory, so the file-vs-dir resolution (delete / rename /
         # search) can tell a file from a directory; off by default to preserve the
@@ -150,6 +157,10 @@ class FakeFileStore(FileStore):
     async def list_dir(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> list[FileEntry]:
+        if rel_path in self.symlink_leaves or rel_path in self.symlink_through:
+            # A symlink at any component is refused by the real seam (#2432), the
+            # same 422 whether the link is the leaf or an intermediate one.
+            raise InvalidFilePathError(rel_path, reason="symlink_refused")
         if self.missing:
             raise ServerFileNotFoundError(str(server_id.value))
         if self.strict_dirs and rel_path not in self.dirs:
@@ -215,6 +226,15 @@ class FakeFileStore(FileStore):
     ) -> None:
         if self.bad_path:
             raise InvalidFilePathError(rel_path)
+        if rel_path in self.symlink_through:
+            # The adapter refuses a mutation reached through an intermediate link
+            # (#2432), so the route's delete dispatch does not defeat it (#2429).
+            raise InvalidFilePathError(rel_path, reason="symlink_refused")
+        if rel_path in self.symlink_leaves:
+            # A leaf symlink is unlinked as the dirent it is (#2429).
+            self.symlink_leaves.discard(rel_path)
+            self.deleted_files.append(rel_path)
+            return
         if rel_path not in self.files:
             raise ServerFileNotFoundError(str(server_id.value))
         del self.files[rel_path]
@@ -2163,6 +2183,55 @@ async def test_delete_running_is_unsettled() -> None:
             server_id=ServerId(server_id),
             rel_path="f",
         )
+    assert store.deleted_files == []
+
+
+async def test_delete_leaf_symlink_dispatches_to_delete_file() -> None:
+    """A leaf link's ``_path_is_dir`` probe refuses; DELETE routes it to a file
+    delete anyway (issue #2429).
+
+    The listing shows the link, so the delete button must remove it. The probe
+    that tells file from directory raises ``symlink_refused`` on a leaf link
+    (post #2432), so DELETE treats that as "not a directory" and dispatches to
+    ``delete_file``, which unlinks the dirent -- rather than propagating the 422
+    that leaves a now-visible broken link undeletable.
+    """
+
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    store.symlink_leaves.add("alias")
+    use_case = DeleteFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="alias",
+    )
+
+    assert store.deleted_files == ["alias"]
+    assert "alias" not in store.symlink_leaves
+
+
+async def test_delete_through_an_intermediate_symlink_still_refuses() -> None:
+    """The delete dispatch does not defeat the adapter's intermediate refusal.
+
+    Routing a leaf link to ``delete_file`` must not turn a path that resolves
+    THROUGH a link into a delete: the adapter still refuses it (#2432), so the
+    422 propagates rather than a spurious 204 (issue #2429).
+    """
+
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore(strict_dirs=True)
+    store.symlink_through.add("alias/inner")
+    use_case = DeleteFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(InvalidFilePathError) as caught:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="alias/inner",
+        )
+    assert caught.value.reason == "symlink_refused"
     assert store.deleted_files == []
 
 

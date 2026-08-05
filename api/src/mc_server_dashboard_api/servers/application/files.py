@@ -912,6 +912,8 @@ async def _path_is_dir(
     community_id: CommunityId,
     server_id: ServerId,
     rel_path: str,
+    *,
+    treat_symlink_as_file: bool = False,
 ) -> bool:
     """Resolve whether ``rel_path`` is a directory (vs a file), at rest.
 
@@ -924,6 +926,16 @@ async def _path_is_dir(
     any component (#2432), or one escaping the working set — is neither a directory
     nor a file, so the refusal propagates rather than being re-asked as a read that
     would refuse it identically.
+
+    ``treat_symlink_as_file`` is the one caller-picked exception (the DELETE route,
+    issue #2429): a symlink dirent is not a directory (its listing shows
+    ``is_dir=False``), and delete is the one mutation it supports, so the DELETE
+    path asks to have the refusal reported as "not a directory" and dispatch to
+    ``delete_file`` rather than propagate the 422. The path still resolves in the
+    adapter, which enforces the real invariant: a leaf link is unlinked, but a path
+    reaching THROUGH an intermediate link is refused there (#2432). Every other
+    caller (rename source, download) leaves the default, so the refusal is their
+    desired 422.
     """
 
     if rel_path in ("", "."):
@@ -939,6 +951,16 @@ async def _path_is_dir(
             community_id=community_id, server_id=server_id, rel_path=rel_path
         )
         return False
+    except InvalidFilePathError:
+        # A refused path (a symlink at some component, #2432) is neither the
+        # directory ``list_dir`` would confirm nor the file ``read_file`` would —
+        # so by default the refusal propagates (rename source / download want that
+        # 422). The DELETE route instead treats it as not-a-directory so the delete
+        # dispatches to ``delete_file``, where the adapter unlinks a leaf link and
+        # still refuses an intermediate one (issue #2429).
+        if treat_symlink_as_file:
+            return False
+        raise
 
 
 async def _path_exists(
@@ -959,8 +981,9 @@ async def _path_exists(
 
     The seam therefore answers it directly, resolving exactly as a read does:
     containment first, then a symlink ABOVE the leaf is the refusal rather than
-    followed (#2432), and the leaf itself is described as itself. What a mutation
-    should then ACT on when the entry is a link is a separate question (#2429).
+    followed (#2432), and the leaf itself is described as itself. A rename whose
+    DESTINATION names a leaf link is thus refused here (the name is occupied),
+    never landing on the link's target (issue #2429).
     """
 
     return await file_store.path_exists(
@@ -1002,8 +1025,16 @@ class DeleteFile:
 
             _guard_content_dir(server.server_type, rel_path)
 
+            # A leaf symlink is deletable even though its listing is refused
+            # (issue #2429): route its probe to ``delete_file`` rather than
+            # propagate the 422. The adapter still refuses a path through an
+            # intermediate link.
             is_dir = await _path_is_dir(
-                self.file_store, community_id, server_id, rel_path
+                self.file_store,
+                community_id,
+                server_id,
+                rel_path,
+                treat_symlink_as_file=True,
             )
             if is_dir:
                 await self.file_store.delete_dir(
