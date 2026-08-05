@@ -8,20 +8,18 @@ FastAPI's TestClient with settings overridden (no real config load).
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from mc_server_dashboard_api.config import Settings
 from mc_server_dashboard_api.dependencies import get_current_user, get_settings
+from tests.client_utils import enter_client
 from tests.identity.fakes import make_user
 
 
-def _client(app: object) -> Iterator[TestClient]:
-    with TestClient(app) as client:  # type: ignore[arg-type]
-        yield client
+def _client(app: object) -> TestClient:
+    return enter_client(TestClient(app))  # type: ignore[arg-type]
 
 
 _shared_app: FastAPI
@@ -63,14 +61,14 @@ def _app(
 
 def test_meta_requires_authentication() -> None:
     app = _app(authenticated=False)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get("/api/meta")
     assert resp.status_code == 401
 
 
 def test_meta_reports_relay_enabled() -> None:
     app = _app(relay_enabled=True)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get("/api/meta")
     assert resp.status_code == 200
     assert resp.json()["relay_enabled"] is True
@@ -78,7 +76,7 @@ def test_meta_reports_relay_enabled() -> None:
 
 def test_meta_reports_relay_disabled() -> None:
     app = _app(relay_enabled=False)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get("/api/meta")
     assert resp.status_code == 200
     body = resp.json()
@@ -90,7 +88,7 @@ def test_meta_reports_relay_disabled() -> None:
 
 def test_meta_reports_memory_limit_defaults_as_null() -> None:
     app = _app()
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get("/api/meta")
     assert resp.status_code == 200
     body = resp.json()
@@ -108,7 +106,7 @@ def test_meta_reports_configured_memory_limits() -> None:
         }
     )
     app.dependency_overrides[get_settings] = lambda: settings
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get("/api/meta")
     assert resp.status_code == 200
     body = resp.json()
@@ -121,7 +119,7 @@ def test_meta_reports_configured_memory_limits() -> None:
 
 def test_meta_reports_bedrock_enabled_with_relay_and_capability() -> None:
     app = _app(relay_enabled=True, bedrock_enabled=True)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get("/api/meta")
     assert resp.status_code == 200
     assert resp.json()["bedrock_enabled"] is True
@@ -129,7 +127,7 @@ def test_meta_reports_bedrock_enabled_with_relay_and_capability() -> None:
 
 def test_meta_reports_bedrock_disabled_by_default() -> None:
     app = _app(relay_enabled=True)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get("/api/meta")
     assert resp.status_code == 200
     assert resp.json()["bedrock_enabled"] is False
@@ -138,7 +136,7 @@ def test_meta_reports_bedrock_disabled_by_default() -> None:
 def test_meta_reports_bedrock_disabled_without_relay() -> None:
     # The capability flag alone is not enough: the Bedrock path rides the relay.
     app = _app(relay_enabled=False, bedrock_enabled=True)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get("/api/meta")
     assert resp.status_code == 200
     assert resp.json()["bedrock_enabled"] is False

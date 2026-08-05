@@ -8,7 +8,6 @@ the response shape (never the hash), and the policy/duplicate error mappings.
 from __future__ import annotations
 
 import datetime as dt
-from collections.abc import Iterator
 
 import pytest
 from fastapi import FastAPI
@@ -31,6 +30,7 @@ from mc_server_dashboard_api.identity.domain.value_objects import (
     Username,
 )
 from tests.audit.fakes import RecordingAuditRecorder
+from tests.client_utils import enter_client
 
 _VALID_PASSWORD = "Wm7!qz#Lp2vT"
 
@@ -62,14 +62,13 @@ def _bind_shared_app(shared_app: FastAPI) -> None:
 
 def _client(
     use_case: _FakeRegisterUser, recorder: RecordingAuditRecorder | None = None
-) -> Iterator[TestClient]:
+) -> TestClient:
     app = _shared_app
     app.dependency_overrides.clear()
     app.dependency_overrides[get_register_user] = lambda: use_case
     if recorder is not None:
         app.dependency_overrides[get_audit_recorder] = lambda: recorder
-    with TestClient(app) as client:
-        yield client
+    return enter_client(TestClient(app))
 
 
 def _user(*, is_platform_admin: bool = False) -> User:
@@ -88,7 +87,7 @@ def _user(*, is_platform_admin: bool = False) -> User:
 def test_register_returns_201_and_user_without_hash() -> None:
     user = _user()
     fake = _FakeRegisterUser(result=user)
-    client = next(_client(fake))
+    client = _client(fake)
     resp = client.post(
         "/api/users",
         json={
@@ -112,7 +111,7 @@ def test_register_returns_201_and_user_without_hash() -> None:
 
 def test_register_duplicate_username_returns_409() -> None:
     fake = _FakeRegisterUser(error=UsernameAlreadyExistsError("alice"))
-    client = next(_client(fake))
+    client = _client(fake)
     resp = client.post(
         "/api/users",
         json={
@@ -126,7 +125,7 @@ def test_register_duplicate_username_returns_409() -> None:
 
 def test_register_duplicate_email_returns_409() -> None:
     fake = _FakeRegisterUser(error=EmailAlreadyExistsError("alice@example.com"))
-    client = next(_client(fake))
+    client = _client(fake)
     resp = client.post(
         "/api/users",
         json={
@@ -140,7 +139,7 @@ def test_register_duplicate_email_returns_409() -> None:
 
 def test_register_disabled_returns_403() -> None:
     fake = _FakeRegisterUser(error=RegistrationDisabledError())
-    client = next(_client(fake))
+    client = _client(fake)
     resp = client.post(
         "/api/users",
         json={
@@ -155,7 +154,7 @@ def test_register_disabled_returns_403() -> None:
 
 def test_register_throttled_returns_429() -> None:
     fake = _FakeRegisterUser(error=RegistrationThrottledError())
-    client = next(_client(fake))
+    client = _client(fake)
     resp = client.post(
         "/api/users",
         json={
@@ -170,7 +169,7 @@ def test_register_throttled_returns_429() -> None:
 
 def test_register_weak_password_returns_422_with_reason_no_echo() -> None:
     fake = _FakeRegisterUser(error=PasswordPolicyError("too_short"))
-    client = next(_client(fake))
+    client = _client(fake)
     weak = "Qz9!secretpw"
     resp = client.post(
         "/api/users",
@@ -187,7 +186,7 @@ def test_register_password_over_schema_bound_returns_422() -> None:
     # A >1024-character password is rejected by the schema before the use case
     # runs (cheap DoS guard); the use case is never called.
     fake = _FakeRegisterUser(result=_user())
-    client = next(_client(fake))
+    client = _client(fake)
     resp = client.post(
         "/api/users",
         json={
@@ -204,7 +203,7 @@ def test_register_records_only_auth_register_for_non_admin() -> None:
     # An ordinary (non-first) registration records just the auth:register row.
     fake = _FakeRegisterUser(result=_user(is_platform_admin=False))
     recorder = RecordingAuditRecorder()
-    client = next(_client(fake, recorder=recorder))
+    client = _client(fake, recorder=recorder)
     resp = client.post(
         "/api/users",
         json={
@@ -223,7 +222,7 @@ def test_first_user_bootstrap_records_platform_admin_grant() -> None:
     user = _user(is_platform_admin=True)
     fake = _FakeRegisterUser(result=user)
     recorder = RecordingAuditRecorder()
-    client = next(_client(fake, recorder=recorder))
+    client = _client(fake, recorder=recorder)
     resp = client.post(
         "/api/users",
         json={
@@ -247,7 +246,7 @@ def test_first_user_bootstrap_records_platform_admin_grant() -> None:
 @pytest.mark.parametrize("missing", ["username", "email", "password"])
 def test_register_missing_field_returns_422(missing: str) -> None:
     fake = _FakeRegisterUser(result=_user())
-    client = next(_client(fake))
+    client = _client(fake)
     payload = {
         "username": "alice",
         "email": "alice@example.com",

@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from collections.abc import Iterator
 
 import pytest
 from fastapi import FastAPI
@@ -70,6 +69,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerType,
 )
 from tests.audit.fakes import RecordingAuditRecorder
+from tests.client_utils import enter_client
 from tests.identity.fakes import make_user
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
@@ -99,9 +99,8 @@ class _FakeUseCase:
         return self._result
 
 
-def _client(app: object) -> Iterator[TestClient]:
-    with TestClient(app) as client:  # type: ignore[arg-type]
-        yield client
+def _client(app: object) -> TestClient:
+    return enter_client(TestClient(app))  # type: ignore[arg-type]
 
 
 _shared_app: FastAPI
@@ -134,7 +133,7 @@ def test_login_success_records_success_with_actor() -> None:
             pair=TokenPair(access_token="a", refresh_token="r"), user_id=actor
         )
     )
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.post("/api/auth/login", json={"username": "alice", "password": "x"})
 
@@ -152,7 +151,7 @@ def test_login_failure_records_denied_without_actor() -> None:
     app.dependency_overrides[get_login] = lambda: _FakeUseCase(
         error=InvalidCredentialsError()
     )
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.post("/api/auth/login", json={"username": "alice", "password": "x"})
 
@@ -170,7 +169,7 @@ def test_refresh_success_records_success() -> None:
     app.dependency_overrides[get_refresh_session] = lambda: _FakeUseCase(
         result=TokenPair(access_token="a2", refresh_token="r2")
     )
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.post("/api/auth/refresh", json={"refresh_token": "r1"})
 
@@ -187,7 +186,7 @@ def test_refresh_reuse_records_denied_with_actor() -> None:
     app.dependency_overrides[get_refresh_session] = lambda: _FakeUseCase(
         error=RefreshTokenReuseError(affected)
     )
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.post("/api/auth/refresh", json={"refresh_token": "reused"})
 
@@ -206,7 +205,7 @@ def test_refresh_invalid_token_records_nothing() -> None:
     app.dependency_overrides[get_refresh_session] = lambda: _FakeUseCase(
         error=InvalidRefreshTokenError()
     )
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.post("/api/auth/refresh", json={"refresh_token": "stale"})
 
@@ -225,7 +224,7 @@ def test_session_restore_success_records_success_with_actor() -> None:
     app.dependency_overrides[get_restore_session] = lambda: _FakeUseCase(
         result=RestoreResult(access_token="a3", user_id=actor)
     )
-    client = next(_client(app))
+    client = _client(app)
     client.cookies.set("mcd_refresh", "live-cookie")
 
     resp = client.post("/api/auth/session")
@@ -248,7 +247,7 @@ def test_session_restore_invalid_token_records_nothing() -> None:
     app.dependency_overrides[get_restore_session] = lambda: _FakeUseCase(
         error=InvalidRefreshTokenError()
     )
-    client = next(_client(app))
+    client = _client(app)
     client.cookies.set("mcd_refresh", "stale-cookie")
 
     resp = client.post("/api/auth/session")
@@ -269,7 +268,7 @@ def test_provision_community_records_success() -> None:
     app.dependency_overrides[get_provision_community] = lambda: _FakeUseCase(
         result=community
     )
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.post(
         "/api/communities",
@@ -305,7 +304,7 @@ def test_create_server_records_success() -> None:
         updated_at=_NOW,
     )
     app.dependency_overrides[get_create_server] = lambda: _FakeUseCase(result=server)
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.post(
         f"/api/communities/{_COMMUNITY}/servers",
@@ -333,7 +332,7 @@ def test_start_server_transition_conflict_records_denied() -> None:
     app.dependency_overrides[get_start_server] = lambda: _FakeUseCase(
         error=LifecycleTransitionConflictError()
     )
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.post(f"/api/communities/{_COMMUNITY}/servers/{uuid.uuid4()}/start")
 
@@ -353,7 +352,7 @@ def test_start_server_no_eligible_worker_records_error() -> None:
     app.dependency_overrides[get_start_server] = lambda: _FakeUseCase(
         error=NoEligibleWorkerError()
     )
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.post(f"/api/communities/{_COMMUNITY}/servers/{uuid.uuid4()}/start")
 
@@ -367,7 +366,7 @@ def test_set_worker_drain_records_success() -> None:
     recorder = RecordingAuditRecorder()
     app, user = _base_app(recorder, platform_admin=True)
     app.dependency_overrides[get_set_worker_drain] = lambda: _FakeUseCase(result=0)
-    client = next(_client(app))
+    client = _client(app)
     worker_id = uuid.uuid4()
 
     resp = client.put(f"/api/workers/{worker_id}/drain")
@@ -386,7 +385,7 @@ def test_clear_worker_drain_records_success() -> None:
     recorder = RecordingAuditRecorder()
     app, user = _base_app(recorder, platform_admin=True)
     app.dependency_overrides[get_set_worker_drain] = lambda: _FakeUseCase(result=0)
-    client = next(_client(app))
+    client = _client(app)
     worker_id = uuid.uuid4()
 
     resp = client.delete(f"/api/workers/{worker_id}/drain")
@@ -405,7 +404,7 @@ def test_set_worker_drain_unknown_worker_records_nothing() -> None:
     recorder = RecordingAuditRecorder()
     app, _ = _base_app(recorder, platform_admin=True)
     app.dependency_overrides[get_set_worker_drain] = lambda: _FakeUseCase(result=None)
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.put("/api/workers/ghost/drain")
 
