@@ -41,6 +41,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     IntegrityCheckError,
     MissingRegionsError,
     PathTraversalError,
+    PrunedStoreError,
     StaleGenerationError,
 )
 from mc_server_dashboard_api.storage.domain.value_objects import (
@@ -1331,4 +1332,31 @@ async def test_commit_refuses_when_generation_marker_removed() -> None:
     del store.objects[generation_key]
 
     with pytest.raises(StaleGenerationError):
+        await storage.commit_snapshot(handle, expected_base=base)
+
+
+async def test_commit_pruned_store_error_identifies_concurrent_delete() -> None:
+    """Issue #921: a post-prune commit refusal must be identifiable as a concurrent
+    delete, not a generic "generation advanced". When a concurrent prune removes the
+    marker mid-flight the store's current REGRESSES to 0 while expected_base is >= 1
+    — the unambiguous prune signature. The commit raises PrunedStoreError, a
+    StaleGenerationError subclass, so the edge can map it to a distinct code while any
+    existing ``except StaleGenerationError`` still catches it."""
+
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    await _publish(storage, community, server, {"f": b"v1"})
+    base = await storage.current_generation(community, server)
+    assert base >= 1
+
+    # Stage a new snapshot at the pre-removal base...
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(handle, tar_stream({"f": b"late-upload"}))
+
+    # ...then remove the generation marker (as a concurrent prune does).
+    generation_key = _server_prefix(community, server) + _GENERATION
+    assert generation_key in store.objects
+    del store.objects[generation_key]
+
+    with pytest.raises(PrunedStoreError):
         await storage.commit_snapshot(handle, expected_base=base)

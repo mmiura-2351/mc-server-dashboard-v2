@@ -2047,7 +2047,13 @@ export interface paths {
          *     serialization the bump uses and refuses (409 ``stale_generation``, the same
          *     contract as the pre-stream refusal) when it advanced past that base. The staging
          *     is discarded and the newer ``current`` is kept, so the Worker re-bases on its next
-         *     start — the same convergence as the pre-stream refusal.
+         *     start — the same convergence as the pre-stream refusal. One re-check outcome is
+         *     NOT an advance: a concurrent delete's retention prune (issue #777) can run under
+         *     the same per-server lock during the upload window and remove the generation
+         *     marker, so the re-check reads generation 0 while ``expected_base`` is >= 1 — the
+         *     store REGRESSED. That case is refused with a DISTINCT 409 ``deleted_during_upload``
+         *     (issue #921) so the outcome names the concurrent delete rather than the misleading
+         *     "generation advanced"; the staging is discarded and the delete wins.
          *
          *     An assignment-aware fence (issue #1703) adds a second input: the server's
          *     currently-assigned worker id. The pre-stream guard ALLOWS a stale-base publish

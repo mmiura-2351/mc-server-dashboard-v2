@@ -62,6 +62,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     IntegrityCheckError,
     MissingRegionsError,
     NotFoundError,
+    PrunedStoreError,
     StaleGenerationError,
 )
 from mc_server_dashboard_api.storage.domain.port import Storage
@@ -411,7 +412,13 @@ async def publish_snapshot(
     serialization the bump uses and refuses (409 ``stale_generation``, the same
     contract as the pre-stream refusal) when it advanced past that base. The staging
     is discarded and the newer ``current`` is kept, so the Worker re-bases on its next
-    start — the same convergence as the pre-stream refusal.
+    start — the same convergence as the pre-stream refusal. One re-check outcome is
+    NOT an advance: a concurrent delete's retention prune (issue #777) can run under
+    the same per-server lock during the upload window and remove the generation
+    marker, so the re-check reads generation 0 while ``expected_base`` is >= 1 — the
+    store REGRESSED. That case is refused with a DISTINCT 409 ``deleted_during_upload``
+    (issue #921) so the outcome names the concurrent delete rather than the misleading
+    "generation advanced"; the staging is discarded and the delete wins.
 
     An assignment-aware fence (issue #1703) adds a second input: the server's
     currently-assigned worker id. The pre-stream guard ALLOWS a stale-base publish
@@ -571,6 +578,33 @@ async def publish_snapshot(
             await storage.abort_snapshot(handle)
             raise problem(
                 status.HTTP_408_REQUEST_TIMEOUT, "chunk_idle_timeout"
+            ) from None
+        except PrunedStoreError as exc:
+            # A concurrent delete pruned the store DURING the upload window
+            # (issue #921): the delete-retention prune ran under the same
+            # per-server lock the commit takes, removed the generation marker,
+            # and discarded the working set — so the commit's re-check read a
+            # generation of 0 while its expected base was >= 1. This is NOT the
+            # generic "generation advanced" case (the store REGRESSED to 0), so
+            # surface a DISTINCT 409 that names the concurrent delete and log it
+            # accurately, rather than the misleading "advanced during upload".
+            # Caught BEFORE StaleGenerationError because it is a subclass of it.
+            # commit_snapshot already discarded the staging (the delete wins).
+            _logger.warning(
+                "snapshot publish refused: working set was deleted by a "
+                "concurrent delete during upload for server %s "
+                "(guard base %d, store pruned to generation %d)",
+                server_id,
+                exc.expected_base,
+                exc.current,
+            )
+            raise problem(
+                status.HTTP_409_CONFLICT,
+                "deleted_during_upload",
+                extensions={
+                    "base_generation": exc.expected_base,
+                    "current": exc.current,
+                },
             ) from None
         except StaleGenerationError as exc:
             # The store advanced past the base the pre-stream guard
