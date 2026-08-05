@@ -994,8 +994,10 @@ async def test_at_rest_reads_through_a_link_carry_the_worker_s_reason(
 # --- what the file ops do with a symlink DESTINATION / TARGET (issue #2426) --
 #
 # Refusing to follow a symlink leaf on every read moves the branch the file ops
-# pick for such an entry, because they pick it from the same listing. What a
-# mutation ACTS ON is unchanged and stays #2429's question; these pin the branch.
+# pick for such an entry, because they pick it from the same listing. These pin
+# the rename-DESTINATION branch (the never-clobber 409); what a mutation acts on
+# when the leaf is a link is settled in #2429 (delete unlinks the dirent, every
+# other mutation refuses) and pinned in test_files_and_traversal.py.
 #
 # The rename destination is the one that must not be answered from a read at all:
 # "is something already here?" is a question about the DIRENT, so it is answered
@@ -1156,18 +1158,17 @@ async def test_rename_onto_a_directory_under_a_directory_link_is_refused(
     assert (live / "real" / "sub" / "f.txt").read_bytes() == b"F"
 
 
-async def test_delete_of_a_directory_link_leaves_its_target_alone(
+async def test_delete_of_a_directory_link_removes_the_link_not_its_target(
     tmp_path: Path,
 ) -> None:
-    """The delete branch follows the listing too, so it no longer rmtrees a target.
+    """DELETE end-to-end on a directory link removes the dirent, not the target.
 
-    ``DeleteFile`` picks file-vs-directory from the same probe the download uses.
-    While it answered "directory" for a link, deleting the link ran ``delete_dir``
-    on the link's TARGET: the real subtree was destroyed and the link left
-    dangling. The entry is not a directory, and the probe's listing refuses a
-    symlink dirent, so the delete is that refusal (issue #2432 moved it from the
-    seam's miss to 422 ``symlink_refused``). Removing the link ITSELF is still
-    #2429's question -- this only pins that the target survives.
+    ``DeleteFile`` picks file-vs-directory from the same probe the download uses,
+    and that probe refuses a symlink dirent (issue #2432). The DELETE route treats
+    that refusal as "not a directory" and dispatches to ``delete_file`` (issue
+    #2429), which unlinks the LINK itself under lstat semantics. So the operator
+    can remove a link the browser shows, the real subtree survives, and the old
+    behaviour -- ``delete_dir`` rmtree-ing the link's TARGET -- is gone.
     """
 
     storage = FsStorage(tmp_path)
@@ -1185,14 +1186,13 @@ async def test_delete_of_a_directory_link_leaves_its_target_alone(
     adapter = StorageFileStoreAdapter(storage=storage)
     use_case = DeleteFile(uow=_stopped_uow(community, server), file_store=adapter)
 
-    with pytest.raises(InvalidFilePathError) as caught:
-        await use_case(
-            community_id=CommunityId(community),
-            server_id=ServerId(server),
-            rel_path="alias",
-        )
-    assert caught.value.reason == "symlink_refused"
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server),
+        rel_path="alias",
+    )
 
+    assert not (live / "alias").exists(follow_symlinks=False)
     assert (live / "real" / "inner.txt").read_bytes() == b"INNER"
 
 
