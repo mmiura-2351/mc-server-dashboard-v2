@@ -611,9 +611,42 @@ class FileStore(abc.ABC):
     start a server whose set contains one. On a backend without symlinks (object
     storage, Section 7.3) the second rule is vacuous.
 
-    The MUTATIONS apply the rule to their parent chain; what a mutation does with a
-    LEAF that is a link is a separate question (issue #2429), so a leaf link is
-    still resolved there and each mutation keeps its current behaviour on one.
+    The MUTATIONS apply the rule to their parent chain, and a symlink DIRENT (a
+    leaf link) supports exactly two operations — being listed (as the link,
+    :meth:`list_dir`) and being deleted (:meth:`delete_file` unlinks the dirent).
+    Every other operation on a leaf link refuses (issue #2429): :meth:`write_file`,
+    :meth:`rename_file` / :meth:`rename_dir` with the link as source, and
+    :meth:`make_dir` raise :class:`~.errors.SymlinkRefusedError`; :meth:`delete_dir`
+    reports :class:`~.errors.NotFoundError` (a link is never a directory dirent
+    under lstat, matching the listing's ``is_dir=False``); and
+    :meth:`FileVersionStore.retain_file_version` is a no-op. This makes the mutation
+    surface match the listing — the delete button acts on the dirent the browser
+    shows, and nothing writes through, moves, or destroys a link's target.
+
+    **One mutation errno vocabulary too** (issue #2433). ``RelPath`` bounds neither
+    component nor total length, so a name the backend cannot hold reaches every
+    mutation from an ordinary client request. Each mutation answers such a name the
+    same way as its siblings, so the file browser gets one answer whichever mutation
+    it drove:
+
+    - an over-long **source** (:meth:`delete_file`, :meth:`delete_dir`, and the
+      ``from_path`` of a rename) is a **miss** — :class:`~.errors.NotFoundError`,
+      exactly as a read of the same name is (a name that long can hold nothing,
+      issue #2394);
+    - an over-long **destination** or intermediate component (:meth:`write_file`,
+      :meth:`make_dir`, and the ``to_path`` of a rename) is a client error, not a
+      miss — the name the caller GAVE cannot be created — surfaced as
+      :class:`~.errors.NameTooLongError` (the seam's 422);
+    - a non-directory already occupying the target, or a component the mutation must
+      descend through as a directory, is :class:`~.errors.PathOccupiedError` (the
+      seam's 409), the same never-clobber conflict a rename onto an existing
+      destination returns.
+
+    Both of the last two are an **fs / remote-fs realization** (Section 7.3): object
+    storage keys carry no ``NAME_MAX`` and object storage has no real directories (a
+    directory is only the shared key-prefix of its files), so neither condition can
+    arise on the object backend and it raises neither — the same way the symlink
+    refusal above is vacuous there.
     """
 
     @abc.abstractmethod
@@ -762,8 +795,9 @@ class FileStore(abc.ABC):
         A server with no published working set holds nothing, so every path but
         the (empty) root answers ``False``.
 
-        What a mutation should then ACT on when the entry is a link is a separate
-        question this does not answer (issue #2429).
+        A rename whose DESTINATION names a leaf link is therefore refused here (the
+        name is occupied), never landing on the link's target — the never-clobber
+        counterpart to :meth:`delete_file` acting on the link dirent (issue #2429).
         """
 
     @abc.abstractmethod
@@ -792,6 +826,14 @@ class FileStore(abc.ABC):
         (rollback restores the captured version). Raises
         :class:`~.errors.NotFoundError` for a missing path so a no-op delete is
         not silently reported as a success.
+
+        A leaf SYMLINK is the exception (issue #2429): the dirent is unlinked
+        directly — working, dangling and looping links alike — never the target it
+        points at, and NO version is captured, because a link has no Port-readable
+        content to retain (:meth:`read_file` refuses it). Rollback is therefore
+        asymmetric here: deleting a file is reversible, deleting a link is not.
+        This is the one delete the file browser needs on a link: the listing shows
+        the entry (:meth:`list_dir`), so the delete button must remove it.
         """
 
     @abc.abstractmethod
@@ -805,7 +847,11 @@ class FileStore(abc.ABC):
         mechanism (Section 5), whereas whole-subtree recovery is what backups
         (Section 3.3) exist for; capturing a version per member of an arbitrarily
         large subtree would be a storage-amplification bomb for no design benefit.
-        Raises :class:`~.errors.NotFoundError` for a missing directory.
+        Raises :class:`~.errors.NotFoundError` for a missing directory — and for a
+        leaf SYMLINK to a directory, which is never a directory dirent under lstat
+        (matching the listing's ``is_dir=False``), so this misses rather than
+        deleting the subtree it points at (issue #2429). A leaf link is deleted
+        through :meth:`delete_file` instead.
 
         **Crash-atomicity (issue #1608):** the deletion is not crash-atomic
         across the subtree. fs uses ``shutil.rmtree`` (per-member unlinks);
@@ -913,8 +959,10 @@ class FileVersionStore(abc.ABC):
 
         A missing file (no authoritative copy yet) is a no-op (there is nothing to
         retain), mirroring how a running edit of a not-yet-published file proceeds
-        unversioned. Unlike :meth:`FileStore.write_file`, this never mutates
-        ``current/`` — it only manages the version ring.
+        unversioned. A leaf SYMLINK is likewise a no-op (issue #2429): a link has no
+        Port-readable content to retain, matching the read refusal, so the link's
+        target is never captured. Unlike :meth:`FileStore.write_file`, this never
+        mutates ``current/`` — it only manages the version ring.
         """
 
     @abc.abstractmethod

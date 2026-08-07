@@ -28,7 +28,7 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     CatalogChecksumMismatchError,
     CatalogProjectNotFoundError,
-    CatalogUnavailableError,
+    CatalogUpstreamFailedError,
     InvalidFilePathError,
     PluginAlreadyExistsError,
     PluginNotFoundError,
@@ -219,7 +219,7 @@ async def test_search_catalog_unavailable() -> None:
     uow.servers.seed(server)
     catalog = FakeCatalogProvider(unavailable=True)
     uc = SearchCatalog(uow=uow, catalog=catalog)
-    with pytest.raises(CatalogUnavailableError):
+    with pytest.raises(CatalogUpstreamFailedError):
         await uc(
             community_id=_COMMUNITY,
             server_id=server.id,
@@ -892,7 +892,7 @@ async def test_install_from_catalog_unavailable() -> None:
         cache=FakePluginCacheStore(),
         clock=FakeClock(_NOW),
     )
-    with pytest.raises(CatalogUnavailableError):
+    with pytest.raises(CatalogUpstreamFailedError):
         await uc(
             community_id=_COMMUNITY,
             server_id=server.id,
@@ -1212,7 +1212,7 @@ async def test_check_updates_server_not_found() -> None:
 
 
 async def test_check_updates_partial_catalog_unavailable() -> None:
-    """CatalogUnavailableError on one plugin does not fail the entire batch."""
+    """CatalogUpstreamFailedError on one plugin does not fail the entire batch."""
     uow = FakeUnitOfWork()
     server = _server()
     uow.servers.seed(server)
@@ -1239,7 +1239,7 @@ async def test_check_updates_partial_catalog_unavailable() -> None:
     catalog = FakeCatalogProvider()
     catalog.seed_project(proj1, [v1_new])
 
-    # Make list_versions raise CatalogUnavailableError for proj-2 only.
+    # Make list_versions raise CatalogUpstreamFailedError for proj-2 only.
     _original = catalog.list_versions
 
     async def _partial_unavailable(
@@ -1249,7 +1249,7 @@ async def test_check_updates_partial_catalog_unavailable() -> None:
         game_versions: list[str] | None = None,
     ) -> list[CatalogVersion]:
         if project_id_or_slug == "proj-2":
-            raise CatalogUnavailableError("fake partial unavailable")
+            raise CatalogUpstreamFailedError("fake partial unavailable")
         return await _original(
             project_id_or_slug, loader=loader, game_versions=game_versions
         )

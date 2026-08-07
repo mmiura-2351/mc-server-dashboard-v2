@@ -994,8 +994,10 @@ async def test_at_rest_reads_through_a_link_carry_the_worker_s_reason(
 # --- what the file ops do with a symlink DESTINATION / TARGET (issue #2426) --
 #
 # Refusing to follow a symlink leaf on every read moves the branch the file ops
-# pick for such an entry, because they pick it from the same listing. What a
-# mutation ACTS ON is unchanged and stays #2429's question; these pin the branch.
+# pick for such an entry, because they pick it from the same listing. These pin
+# the rename-DESTINATION branch (the never-clobber 409); what a mutation acts on
+# when the leaf is a link is settled in #2429 (delete unlinks the dirent, every
+# other mutation refuses) and pinned in test_files_and_traversal.py.
 #
 # The rename destination is the one that must not be answered from a read at all:
 # "is something already here?" is a question about the DIRENT, so it is answered
@@ -1156,18 +1158,17 @@ async def test_rename_onto_a_directory_under_a_directory_link_is_refused(
     assert (live / "real" / "sub" / "f.txt").read_bytes() == b"F"
 
 
-async def test_delete_of_a_directory_link_leaves_its_target_alone(
+async def test_delete_of_a_directory_link_removes_the_link_not_its_target(
     tmp_path: Path,
 ) -> None:
-    """The delete branch follows the listing too, so it no longer rmtrees a target.
+    """DELETE end-to-end on a directory link removes the dirent, not the target.
 
-    ``DeleteFile`` picks file-vs-directory from the same probe the download uses.
-    While it answered "directory" for a link, deleting the link ran ``delete_dir``
-    on the link's TARGET: the real subtree was destroyed and the link left
-    dangling. The entry is not a directory, and the probe's listing refuses a
-    symlink dirent, so the delete is that refusal (issue #2432 moved it from the
-    seam's miss to 422 ``symlink_refused``). Removing the link ITSELF is still
-    #2429's question -- this only pins that the target survives.
+    ``DeleteFile`` picks file-vs-directory from the same probe the download uses,
+    and that probe refuses a symlink dirent (issue #2432). The DELETE route treats
+    that refusal as "not a directory" and dispatches to ``delete_file`` (issue
+    #2429), which unlinks the LINK itself under lstat semantics. So the operator
+    can remove a link the browser shows, the real subtree survives, and the old
+    behaviour -- ``delete_dir`` rmtree-ing the link's TARGET -- is gone.
     """
 
     storage = FsStorage(tmp_path)
@@ -1185,14 +1186,13 @@ async def test_delete_of_a_directory_link_leaves_its_target_alone(
     adapter = StorageFileStoreAdapter(storage=storage)
     use_case = DeleteFile(uow=_stopped_uow(community, server), file_store=adapter)
 
-    with pytest.raises(InvalidFilePathError) as caught:
-        await use_case(
-            community_id=CommunityId(community),
-            server_id=ServerId(server),
-            rel_path="alias",
-        )
-    assert caught.value.reason == "symlink_refused"
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server),
+        rel_path="alias",
+    )
 
+    assert not (live / "alias").exists(follow_symlinks=False)
     assert (live / "real" / "inner.txt").read_bytes() == b"INNER"
 
 
@@ -1613,3 +1613,81 @@ async def test_search_per_file_cap_is_not_bypassed_by_a_symlink(
     )
 
     assert set(result.paths) == {"small.txt"}
+
+
+# --- a mutation's raw fs errno becomes an edge outcome at the seam (issue #2433) ---
+#
+# The fs adapter models the raw errnos (over-long name, a file blocking a needed
+# parent); these pin that the seam then maps them onto the edge vocabulary so none
+# reaches the edge as a bare 500. Over-long DESTINATION -> 422 InvalidFilePathError
+# (reason ``name_too_long``); over-long SOURCE -> 404 ServerFileNotFoundError; a
+# non-directory blocking a component -> 409 FileAlreadyExistsError.
+
+_TOO_LONG = "x" * 300  # past NAME_MAX (255) on every mainstream filesystem
+
+
+async def test_over_long_destination_is_invalid_path_with_name_too_long(
+    tmp_path: Path,
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await _seed(storage, community, server)
+    adapter = StorageFileStoreAdapter(storage=storage)
+    cid, sid = CommunityId(community), ServerId(server)
+
+    with pytest.raises(InvalidFilePathError) as write_exc:
+        await adapter.write_file(
+            community_id=cid, server_id=sid, rel_path=_TOO_LONG, content=b"x"
+        )
+    assert write_exc.value.reason == "name_too_long"
+    with pytest.raises(InvalidFilePathError) as mkdir_exc:
+        await adapter.make_dir(community_id=cid, server_id=sid, rel_path=_TOO_LONG)
+    assert mkdir_exc.value.reason == "name_too_long"
+    with pytest.raises(InvalidFilePathError) as rename_exc:
+        await adapter.rename_file(
+            community_id=cid,
+            server_id=sid,
+            from_path="server.properties",
+            to_path=_TOO_LONG,
+        )
+    assert rename_exc.value.reason == "name_too_long"
+
+
+async def test_over_long_source_is_file_not_found(tmp_path: Path) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await _seed(storage, community, server)
+    adapter = StorageFileStoreAdapter(storage=storage)
+    cid, sid = CommunityId(community), ServerId(server)
+
+    with pytest.raises(ServerFileNotFoundError):
+        await adapter.delete_file(community_id=cid, server_id=sid, rel_path=_TOO_LONG)
+    with pytest.raises(ServerFileNotFoundError):
+        await adapter.rename_file(
+            community_id=cid, server_id=sid, from_path=_TOO_LONG, to_path="moved"
+        )
+
+
+async def test_a_file_occupied_parent_is_a_conflict(tmp_path: Path) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = _scope()
+    await _seed(storage, community, server)
+    adapter = StorageFileStoreAdapter(storage=storage)
+    cid, sid = CommunityId(community), ServerId(server)
+    # ``server.properties`` is a regular file; a path under it reaches its leaf
+    # through a non-directory.
+    under_file = "server.properties/child"
+
+    with pytest.raises(FileAlreadyExistsError):
+        await adapter.write_file(
+            community_id=cid, server_id=sid, rel_path=under_file, content=b"x"
+        )
+    with pytest.raises(FileAlreadyExistsError):
+        await adapter.make_dir(community_id=cid, server_id=sid, rel_path=under_file)
+    with pytest.raises(FileAlreadyExistsError):
+        await adapter.rename_file(
+            community_id=cid,
+            server_id=sid,
+            from_path="server.properties",
+            to_path=under_file,
+        )

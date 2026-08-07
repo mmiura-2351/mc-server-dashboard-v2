@@ -50,7 +50,7 @@ def _seed_community(uow: FakeAuthzUnitOfWork, name: str = "guild") -> Community:
         created_at=_NOW,
         updated_at=_NOW,
     )
-    uow.communities.by_id[community.id] = community
+    uow.communities.seed(community)
     return community
 
 
@@ -125,17 +125,21 @@ async def test_list_my_communities_scopes_to_member() -> None:
     other = UserId(uuid.uuid4())
     mine = _seed_community(uow, "mine")
     theirs = _seed_community(uow, "theirs")
-    uow.memberships.by_id[MembershipId.new()] = Membership(
-        id=MembershipId.new(),
-        user_id=user,
-        community_id=mine.id,
-        created_at=_NOW,
+    uow.memberships.seed(
+        Membership(
+            id=MembershipId.new(),
+            user_id=user,
+            community_id=mine.id,
+            created_at=_NOW,
+        )
     )
-    uow.memberships.by_id[MembershipId.new()] = Membership(
-        id=MembershipId.new(),
-        user_id=other,
-        community_id=theirs.id,
-        created_at=_NOW,
+    uow.memberships.seed(
+        Membership(
+            id=MembershipId.new(),
+            user_id=other,
+            community_id=theirs.id,
+            created_at=_NOW,
+        )
     )
 
     listed = await ListMyCommunities(uow=uow)(user_id=user)

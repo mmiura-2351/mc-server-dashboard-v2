@@ -209,7 +209,7 @@ class ControlSettings(_Section):
 
 
 class LogSettings(_Section):
-    """Observability (CONFIGURATION.md Section 5.5)."""
+    """Observability (CONFIGURATION.md Section 5.10)."""
 
     level: Literal["debug", "info", "warning", "error"] = "info"
     format: Literal["json", "text"] = "json"

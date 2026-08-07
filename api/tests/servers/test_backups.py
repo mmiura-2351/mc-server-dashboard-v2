@@ -795,6 +795,10 @@ async def test_delete_removes_archive_before_metadata_row() -> None:
     archive = FakeBackupArchiveStore()
     archive.archives.add("ref")
     uow = FakeUnitOfWork(servers=repo, backups=backups)
+    # One timeline for the archive delete and the metadata-row delete (issue
+    # #2546): both-gone is the end state a swapped implementation also reaches,
+    # so only their position on a shared timeline can pin "archive first".
+    archive.events = backups.events
 
     await DeleteBackup(uow=uow, backup_store=archive)(
         community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id
@@ -803,6 +807,13 @@ async def test_delete_removes_archive_before_metadata_row() -> None:
     assert archive.deleted == [(server.id, "ref")]
     assert "ref" not in archive.archives
     assert await uow.backups.get_by_id(backup.id) is None
+    # ...and the archive was removed BEFORE the row: a crash between the two must
+    # leave a dangling row (re-deletable), never an orphaned archive with no row
+    # to find it by (module docstring). Endpoint-only asserts stay green under a
+    # swap; the shared timeline reddens.
+    assert archive.events.index((server.id, "delete-archive")) < archive.events.index(
+        (server.id, "delete-row")
+    )
 
 
 async def test_delete_unknown_backup_is_not_found() -> None:
@@ -880,15 +891,43 @@ async def test_download_streams_archive_for_known_backup() -> None:
     uow = FakeUnitOfWork(servers=repo, backups=backups)
 
     use_case = DownloadBackup(uow=uow, backup_store=archive)
-    size_bytes = await use_case.archive_size(
+    backup_row = await use_case.resolve(
         community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id
     )
-    stream = await use_case.archive_stream(
-        community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id
+    size_bytes = await use_case.archive_size(
+        community_id=_COMMUNITY, server_id=server.id, backup=backup_row
+    )
+    stream = use_case.archive_stream(
+        community_id=_COMMUNITY, server_id=server.id, backup=backup_row
     )
     blob = b"".join([chunk async for chunk in stream])
     assert blob == b"x" * 5
     assert size_bytes == 5
+
+
+async def test_download_resolves_the_backup_row_once() -> None:
+    # The size probe and the stream both read the same immutable storage_ref off
+    # one row, so a full download loads the metadata row exactly once (issue #2456).
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    backups = FakeBackupRepository()
+    archive = FakeBackupArchiveStore()
+    backup = _seed_backup(backups, archive, server.id, storage_ref="ref", size_bytes=5)
+    uow = FakeUnitOfWork(servers=repo, backups=backups)
+
+    use_case = DownloadBackup(uow=uow, backup_store=archive)
+    backup_row = await use_case.resolve(
+        community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id
+    )
+    await use_case.archive_size(
+        community_id=_COMMUNITY, server_id=server.id, backup=backup_row
+    )
+    stream = use_case.archive_stream(
+        community_id=_COMMUNITY, server_id=server.id, backup=backup_row
+    )
+    _ = b"".join([chunk async for chunk in stream])
+    assert backups.get_by_id_calls == [backup.id]
 
 
 async def test_download_streams_only_the_requested_byte_range() -> None:
@@ -903,10 +942,14 @@ async def test_download_streams_only_the_requested_byte_range() -> None:
     archive.bytes_by_ref["ref"] = b"0123456789"
     uow = FakeUnitOfWork(servers=repo, backups=backups)
 
-    stream = await DownloadBackup(uow=uow, backup_store=archive).archive_stream(
+    use_case = DownloadBackup(uow=uow, backup_store=archive)
+    backup_row = await use_case.resolve(
+        community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id
+    )
+    stream = use_case.archive_stream(
         community_id=_COMMUNITY,
         server_id=server.id,
-        backup_id=backup.id,
+        backup=backup_row,
         byte_range=(4, 6),
     )
     assert b"".join([chunk async for chunk in stream]) == b"456"
@@ -926,11 +969,14 @@ async def test_download_size_comes_from_the_archive_store_not_the_row() -> None:
     uow = FakeUnitOfWork(servers=repo, backups=backups)
 
     use_case = DownloadBackup(uow=uow, backup_store=archive)
-    size_bytes = await use_case.archive_size(
+    backup_row = await use_case.resolve(
         community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id
     )
-    stream = await use_case.archive_stream(
-        community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id
+    size_bytes = await use_case.archive_size(
+        community_id=_COMMUNITY, server_id=server.id, backup=backup_row
+    )
+    stream = use_case.archive_stream(
+        community_id=_COMMUNITY, server_id=server.id, backup=backup_row
     )
     assert backup.size_bytes is None
     assert size_bytes == 7
@@ -943,9 +989,7 @@ async def test_download_unknown_backup_is_not_found() -> None:
     repo.seed(server)
     uow = FakeUnitOfWork(servers=repo)
     with pytest.raises(BackupNotFoundError):
-        await DownloadBackup(
-            uow=uow, backup_store=FakeBackupArchiveStore()
-        ).archive_size(
+        await DownloadBackup(uow=uow, backup_store=FakeBackupArchiveStore()).resolve(
             community_id=_COMMUNITY, server_id=server.id, backup_id=BackupId.new()
         )
 
@@ -961,7 +1005,7 @@ async def test_download_cross_server_backup_is_not_found() -> None:
     foreign = _seed_backup(backups, archive, other.id, storage_ref="ref", size_bytes=3)
     uow = FakeUnitOfWork(servers=repo, backups=backups)
     with pytest.raises(BackupNotFoundError):
-        await DownloadBackup(uow=uow, backup_store=archive).archive_size(
+        await DownloadBackup(uow=uow, backup_store=archive).resolve(
             community_id=_COMMUNITY, server_id=server.id, backup_id=foreign.id
         )
 

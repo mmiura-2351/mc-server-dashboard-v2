@@ -354,7 +354,7 @@ uncapped. An attacker could flood that traffic instead for identical cost, so a
 `0x05`/`0x07`-specific cap would not lower the worst case.
 
 All of this is hygiene, not volumetric DDoS protection, matching the posture
-RELAY.md already documents for the Java listeners (Section 16 there).
+RELAY.md already documents for the Java listeners (Section 11 there).
 
 The **QUIC tunnel listener itself** carries a separate per-IP cap on
 concurrent unauthenticated handshake windows
@@ -450,7 +450,7 @@ redesign.
   (migration 0034).
 - ~~**Metrics** -- no Prometheus metrics for flow counts, drop counts, or bind
   failures yet~~ **Landed with #1909**: the Bedrock path exports, on the same
-  opt-in `/metrics` endpoint as the Java path (RELAY.md Section 17), active
+  opt-in `/metrics` endpoint as the Java path (RELAY.md Section 13), active
   tunnels/flows gauges (`relay_bedrock_active_tunnels`,
   `relay_bedrock_active_flows`), flow lifecycle counters
   (`relay_bedrock_flows_created_total`, `relay_bedrock_flows_evicted_total`),

@@ -52,7 +52,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up uv (caches the uv-managed toolchain)
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: true
           cache-dependency-glob: api/uv.lock
@@ -133,7 +133,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up uv (caches the uv-managed toolchain)
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: true
           cache-dependency-glob: api/uv.lock
@@ -200,7 +200,7 @@ jobs:
         run: |
           uv run pytest -rs --junitxml="$RUNNER_TEMP/junit.xml" \
             tests/storage/test_object_live_seaweedfs.py \
-            tests/servers/test_resource_pack_store_adapter.py
+            tests/servers/test_resource_pack_store_contract.py
           skipped="$(python3 -c 'import sys, xml.etree.ElementTree as ET; print(sum(int(s.attrib["skipped"]) for s in ET.parse(sys.argv[1]).iter("testsuite")))' "$RUNNER_TEMP/junit.xml")"
           if [ "$skipped" != 0 ]; then
             echo "::error::$skipped live-s3 test(s) skipped; MCD_TEST_S3_ENDPOINT did not reach pytest" >&2

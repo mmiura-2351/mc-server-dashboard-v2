@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from collections.abc import Iterator
 
 import pytest
 from fastapi import FastAPI
@@ -38,6 +37,7 @@ from mc_server_dashboard_api.dependencies import (
     get_permission_checker,
 )
 from tests.audit.fakes import CapturingAuditQuery, FakeNameResolver
+from tests.client_utils import enter_client
 from tests.identity.fakes import make_user
 
 _COMMUNITY = uuid.uuid4()
@@ -71,9 +71,8 @@ class _FakeChecker(PermissionChecker):
         return self._allow
 
 
-def _client(app: object) -> Iterator[TestClient]:
-    with TestClient(app) as client:  # type: ignore[arg-type]
-        yield client
+def _client(app: object) -> TestClient:
+    return enter_client(TestClient(app))  # type: ignore[arg-type]
 
 
 _shared_app: FastAPI
@@ -114,14 +113,14 @@ def _app(
 
 def test_platform_audit_requires_platform_admin() -> None:
     app = _app(CapturingAuditQuery(), platform_admin=False)
-    client = next(_client(app))
+    client = _client(app)
     assert client.get("/api/audit").status_code == 403
 
 
 def test_platform_audit_lists_records() -> None:
     query = CapturingAuditQuery(records=[_RECORD])
     app = _app(query, platform_admin=True)
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.get("/api/audit")
 
@@ -137,7 +136,7 @@ def test_platform_audit_lists_records() -> None:
 def test_platform_audit_passes_filters_through() -> None:
     query = CapturingAuditQuery()
     app = _app(query, platform_admin=True)
-    client = next(_client(app))
+    client = _client(app)
     actor = uuid.uuid4()
 
     resp = client.get(
@@ -164,7 +163,7 @@ def test_platform_audit_passes_filters_through() -> None:
 
 def test_platform_audit_rejects_oversized_limit() -> None:
     app = _app(CapturingAuditQuery(), platform_admin=True)
-    client = next(_client(app))
+    client = _client(app)
     assert client.get("/api/audit", params={"limit": 9999}).status_code == 422
 
 
@@ -173,20 +172,20 @@ def test_platform_audit_rejects_oversized_limit() -> None:
 
 def test_community_audit_non_member_is_404() -> None:
     app = _app(CapturingAuditQuery(), member=False)
-    client = next(_client(app))
+    client = _client(app)
     assert client.get(f"/api/communities/{_COMMUNITY}/audit").status_code == 404
 
 
 def test_community_audit_member_without_permission_is_403() -> None:
     app = _app(CapturingAuditQuery(), member=True, allow=False)
-    client = next(_client(app))
+    client = _client(app)
     assert client.get(f"/api/communities/{_COMMUNITY}/audit").status_code == 403
 
 
 def test_community_audit_authorized_member_lists_records() -> None:
     query = CapturingAuditQuery(records=[_RECORD])
     app = _app(query, member=True, allow=True)
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.get(f"/api/communities/{_COMMUNITY}/audit")
 
@@ -197,7 +196,7 @@ def test_community_audit_authorized_member_lists_records() -> None:
 def test_community_audit_forces_path_community_onto_filter() -> None:
     query = CapturingAuditQuery()
     app = _app(query, member=True, allow=True)
-    client = next(_client(app))
+    client = _client(app)
     other_community = uuid.uuid4()
 
     # A member cannot read another Community's trail even by passing filters: the
@@ -243,7 +242,7 @@ def test_resolves_actor_username_and_community_name() -> None:
     app = _app(
         CapturingAuditQuery(records=[record]), platform_admin=True, resolver=resolver
     )
-    client = next(_client(app))
+    client = _client(app)
 
     row = client.get("/api/audit").json()["records"][0]
 
@@ -259,7 +258,7 @@ def test_resolves_user_target_to_username() -> None:
     app = _app(
         CapturingAuditQuery(records=[record]), platform_admin=True, resolver=resolver
     )
-    client = next(_client(app))
+    client = _client(app)
 
     row = client.get("/api/audit").json()["records"][0]
 
@@ -273,7 +272,7 @@ def test_resolves_server_target_to_server_name() -> None:
     app = _app(
         CapturingAuditQuery(records=[record]), platform_admin=True, resolver=resolver
     )
-    client = next(_client(app))
+    client = _client(app)
 
     row = client.get("/api/audit").json()["records"][0]
 
@@ -289,7 +288,7 @@ def test_resolves_file_target_as_server_name() -> None:
     app = _app(
         CapturingAuditQuery(records=[record]), platform_admin=True, resolver=resolver
     )
-    client = next(_client(app))
+    client = _client(app)
 
     row = client.get("/api/audit").json()["records"][0]
 
@@ -300,7 +299,7 @@ def test_target_name_null_for_type_with_no_name_source() -> None:
     # A `role` target has no name source the resolver knows about: leave it null.
     record = _record(target_type="role", target_id=uuid.uuid4())
     app = _app(CapturingAuditQuery(records=[record]), platform_admin=True)
-    client = next(_client(app))
+    client = _client(app)
 
     row = client.get("/api/audit").json()["records"][0]
 
@@ -322,7 +321,7 @@ def test_deleted_subject_falls_back_to_null_names() -> None:
         platform_admin=True,
         resolver=FakeNameResolver(),
     )
-    client = next(_client(app))
+    client = _client(app)
 
     row = client.get("/api/audit").json()["records"][0]
 
@@ -345,7 +344,7 @@ def test_batches_lookups_across_rows() -> None:
     app = _app(
         CapturingAuditQuery(records=records), platform_admin=True, resolver=resolver
     )
-    client = next(_client(app))
+    client = _client(app)
 
     rows = client.get("/api/audit").json()["records"]
 
@@ -366,7 +365,7 @@ def test_community_audit_enriches_names() -> None:
         allow=True,
         resolver=resolver,
     )
-    client = next(_client(app))
+    client = _client(app)
 
     row = client.get(f"/api/communities/{_COMMUNITY}/audit").json()["records"][0]
 

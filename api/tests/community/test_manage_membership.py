@@ -87,7 +87,7 @@ def _seed_community(uow: FakeAuthzUnitOfWork, name: str = "guild") -> Community:
         created_at=_NOW,
         updated_at=_NOW,
     )
-    uow.communities.by_id[community.id] = community
+    uow.communities.seed(community)
     return community
 
 
@@ -101,7 +101,7 @@ def _seed_owner_role(uow: FakeAuthzUnitOfWork, community_id: CommunityId) -> Rol
         updated_at=_NOW,
         is_preset=True,
     )
-    uow.roles.by_id[role.id] = role
+    uow.roles.seed(role)
     return role
 
 

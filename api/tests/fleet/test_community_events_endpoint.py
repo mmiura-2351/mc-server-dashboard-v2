@@ -18,7 +18,6 @@ from __future__ import annotations
 import datetime as dt
 import time
 import uuid
-from collections.abc import Iterator
 
 import pytest
 from fastapi import FastAPI
@@ -52,6 +51,7 @@ from mc_server_dashboard_api.fleet.domain.real_time_events import (
     RealTimeEvents,
     notification_event,
 )
+from tests.client_utils import enter_client
 from tests.identity.fakes import make_user
 
 
@@ -122,9 +122,8 @@ def _app(
     return app
 
 
-def _client(app: object) -> Iterator[TestClient]:
-    with TestClient(app) as client:  # type: ignore[arg-type]
-        yield client
+def _client(app: object) -> TestClient:
+    return enter_client(TestClient(app))  # type: ignore[arg-type]
 
 
 def _url(community: uuid.UUID) -> str:
@@ -135,7 +134,7 @@ def _url(community: uuid.UUID) -> str:
 
 
 def _assert_rejected(app: object, code: int) -> None:
-    client = next(_client(app))
+    client = _client(app)
     with pytest.raises(WebSocketDisconnect) as exc:
         with client.websocket_connect(_url(uuid.uuid4())):
             pass
@@ -161,7 +160,7 @@ def test_status_event_is_delivered_with_server_id() -> None:
     bus = InProcessRealTimeEvents()
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(bus=bus, lookup={str(server): community})
-    client = next(_client(app))
+    client = _client(app)
     with client.websocket_connect(_url(community)) as ws:
         bus.publish(
             server_id=str(server),
@@ -184,7 +183,7 @@ def test_fan_out_two_servers_in_community_both_arrive() -> None:
         bus=bus,
         lookup={str(server_a): community, str(server_b): community},
     )
-    client = next(_client(app))
+    client = _client(app)
     with client.websocket_connect(_url(community)) as ws:
         bus.publish(
             server_id=str(server_a),
@@ -206,7 +205,7 @@ def test_other_communitys_server_never_appears() -> None:
         bus=bus,
         lookup={str(server_a): community_a, str(server_b): community_b},
     )
-    client = next(_client(app))
+    client = _client(app)
     with client.websocket_connect(_url(community_a)) as ws:
         # Community B's server is published first; it must be filtered out so the
         # only frame the A-stream sees is A's server.
@@ -227,7 +226,7 @@ def test_log_and_metrics_events_are_not_streamed() -> None:
     bus = InProcessRealTimeEvents()
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(bus=bus, lookup={str(server): community})
-    client = next(_client(app))
+    client = _client(app)
     with client.websocket_connect(_url(community)) as ws:
         # Log lines and metrics are per-server detail, not operator events;
         # only the following STATUS frame must be delivered.
@@ -256,7 +255,7 @@ def test_notification_event_is_delivered_with_server_id() -> None:
     bus = InProcessRealTimeEvents()
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(bus=bus, lookup={str(server): community})
-    client = next(_client(app))
+    client = _client(app)
     with client.websocket_connect(_url(community)) as ws:
         bus.publish(
             server_id=str(server),
@@ -285,7 +284,7 @@ def test_other_communitys_notification_never_appears() -> None:
         bus=bus,
         lookup={str(server_a): community_a, str(server_b): community_b},
     )
-    client = next(_client(app))
+    client = _client(app)
     with client.websocket_connect(_url(community_a)) as ws:
         # Community B's notification is published first; it must be filtered out
         # so the only frame the A-stream sees is A's server's notification.
@@ -316,7 +315,7 @@ def test_community_frame_wire_text_is_the_exact_compact_json() -> None:
     bus = InProcessRealTimeEvents()
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(bus=bus, lookup={str(server): community})
-    client = next(_client(app))
+    client = _client(app)
     emitted = dt.datetime(2026, 6, 3, 12, 0, 0, tzinfo=dt.timezone.utc)
     with client.websocket_connect(_url(community)) as ws:
         bus.publish(
@@ -341,7 +340,7 @@ def test_disconnect_cleans_up_subscription() -> None:
     bus = InProcessRealTimeEvents()
     community = uuid.uuid4()
     app = _app(bus=bus)
-    client = next(_client(app))
+    client = _client(app)
     with client.websocket_connect(_url(community)):
         assert bus.firehose_subscriber_count() == 1
     for _ in range(100):
@@ -365,7 +364,7 @@ def test_disconnect_on_quiet_stream_releases_subscription() -> None:
     bus = InProcessRealTimeEvents()
     community = uuid.uuid4()
     app = _app(bus=bus)
-    client = next(_client(app))
+    client = _client(app)
     with client.websocket_connect(_url(community)) as ws:
         assert bus.firehose_subscriber_count() == 1
         ws.close(1000)

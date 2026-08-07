@@ -181,8 +181,8 @@ Global resource pack library (not community-scoped) and per-server assignment.
 | POST | `/resource-packs` | Upload a resource pack (multipart; requires `server:update` in at least one community). |
 | GET | `/resource-packs` | List all resource packs (authenticated). |
 | DELETE | `/resource-packs/{id}` | Delete a resource pack (uploader or platform admin; 409 when still assigned to a server). |
-| GET | `/resource-packs/{id}/download` | Download (authenticated). The response declares `Cache-Control: no-store` (#2519). |
-| GET | `/public/resource-packs/{id}/{filename}` | Public download (no auth) — the URL Minecraft clients fetch. Validates `filename` matches. The two statuses declare different caching policies (#2562), because the URL ends in the stored filename and an undeclared policy is decided by the edge's extension heuristic instead: the `200` declares `Cache-Control: public, max-age=3600, immutable` — a pack is immutable and the game client verifies it against `resource-pack-sha1`, so the max-age bounds only how long a deleted pack stays fetchable from a cache — and the `404` declares `Cache-Control: no-store`, since a pack's id and filename are both fixed at creation and a URL that 404s can never later become a `200`. |
+| GET / HEAD | `/resource-packs/{id}/download` | Download (authenticated). The response declares `Cache-Control: no-store` (#2519). `HEAD` is the metadata probe (#2560): the same gate and the same headers with no body, so a client learns the `Content-Length` without starting a transfer; it never opens the blob nor records a `resource_pack:download` audit event. |
+| GET / HEAD | `/public/resource-packs/{id}/{filename}` | Public download (no auth) — the URL Minecraft clients fetch. Validates `filename` matches. The two statuses declare different caching policies (#2562), because the URL ends in the stored filename and an undeclared policy is decided by the edge's extension heuristic instead: the `200` declares `Cache-Control: public, max-age=3600, immutable` — a pack is immutable and the game client verifies it against `resource-pack-sha1`, so the max-age bounds only how long a deleted pack stays fetchable from a cache — and the `404` declares `Cache-Control: no-store`, since a pack's id and filename are both fixed at creation and a URL that 404s can never later become a `200`. `HEAD` is the metadata probe (#2632): this is the unauthenticated URL a resumable-download client probes before a transfer, and it declares a `Content-Length`, so it has a real reason to. The probe answers each status with the `GET`'s headers — the same `Cache-Control` per status — and no body, so an edge does not cache a probe differently from the download; it never opens the blob. |
 | POST | `…/{sid}/resource-pack` | Assign a resource pack to a server (`server:update`). Body: `{resource_pack_id, require_resource_pack, resource_pack_prompt}`. |
 | DELETE | `…/{sid}/resource-pack` | Unassign (`server:update`). |
 | GET | `…/{sid}/resource-pack` | Get the current assignment (`server:read`). |
@@ -204,6 +204,41 @@ REST keeps working if the socket dies (FR-MON-4).
 
 Note: the data-plane endpoints (`/api/data-plane/...`) are Worker-credential-only
 transfer endpoints — not part of the UI surface.
+
+### 2.7 Plugins & mods (issue #1150)
+
+Per-server plugin/mod content management (the `#plugins` tab, Section 6.14). All
+paths hang off `/communities/{cid}/servers/{sid}`; the whole family is
+per-resource gated on the server — `plugin:read` for the reads, `plugin:manage`
+for the mutations — and every mutation requires the server **at rest** (409
+`server_unsettled` / `server_busy` while it is transitional, Section 6.9). The
+family is unsupported on `vanilla` servers (422 `unsupported_server_type`).
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `…/{sid}/plugins` | List installed plugins/mods (`plugin:read`). |
+| POST | `…/{sid}/plugins` | Install a plugin jar via multipart upload (`plugin:manage`): `display_name` form field + `file`, jar ≤ 512 MiB (413 `file_too_large`). Returns `201`; a duplicate is 409 `plugin_already_exists`. |
+| GET | `…/{sid}/plugins/updates` | Batch-check every installed plugin for a newer catalog version (`plugin:read`); catalog upstream failure is 502 `catalog_upstream_failed`. |
+| GET | `…/{sid}/plugins/validate` | Phase-B dependency/compatibility checklist — missing deps, unsatisfied version ranges, conflicts, MC-version mismatch (`plugin:read`, #1307). Read-only; never mutates the set. |
+| POST | `…/{sid}/plugins/resolve` | Plan dependency auto-resolution: the transitive closure of required deps, each classified satisfied / needs-import / unresolvable / blocked (`plugin:read`, #1309). Read-only — nothing is downloaded or installed. |
+| POST | `…/{sid}/plugins/resolve/apply` | Apply that plan: install each non-blocked needs-import dep from the catalog, then re-plan (`plugin:manage`, #1309). Per-dep install failures are isolated in `failed`. |
+| GET | `…/{sid}/plugins/{pid}` | Read one installed plugin by id (`plugin:read`). |
+| DELETE | `…/{sid}/plugins/{pid}` | Remove an installed plugin (`plugin:manage`). Returns `204`. |
+| GET | `…/{sid}/plugins/{pid}/updates` | Check a single plugin for a newer catalog version (`plugin:read`). |
+| POST | `…/{sid}/plugins/{pid}/update` | Update a plugin to a specific catalog `version_id` (`plugin:manage`); missing project 404 `catalog_project_not_found`, checksum drift 502 `checksum_mismatch`. |
+| GET | `…/{sid}/plugins/{pid}/dependencies` | List a Modrinth-sourced plugin's declared dependencies, each flagged installed/missing (`plugin:read`). |
+| POST | `…/{sid}/plugins/{pid}/enable` · `/disable` | Toggle a plugin on/off (`plugin:manage`). |
+| POST | `…/{sid}/plugins/{pid}/side` | Override a mod's side — `both` / `server` / `client` (`plugin:manage`, #1308); re-materializes the working set. Invalid side is 422 `invalid_side`. |
+| GET | `…/{sid}/client-mods` | List the server's enabled client-relevant plugins (side `client` / `both`; `plugin:read`, #1308). |
+| GET / HEAD | `…/{sid}/client-mods/download` | Download those client mods bundled as `mods.zip` (`plugin:read`, #1308). The response declares `Cache-Control: no-store` (#2491, #2519) — a per-server body gated by `plugin:read` must never be served from a shared cache. `HEAD` is the metadata probe (#2560): the same gate and headers with no body, and it neither builds the zip nor pulls a jar; the zip is streamed with no `Content-Length` (assembled on the fly from a variable jar set), so the probe learns existence rather than size. |
+| GET | `…/{sid}/catalog/search` | Search the Modrinth catalog with auto-applied server facets (`plugin:read`, #1151): `q` query + `limit` (1–100, default 20) / `offset` paging. Catalog upstream failure is 502 `catalog_upstream_failed`. |
+| GET | `…/{sid}/catalog/projects/{id_or_slug}` | Fetch a catalog project's detail + its server-compatible versions (`plugin:read`, #1151); an unknown project is 404 `catalog_project_not_found`, catalog upstream failure 502 `catalog_upstream_failed`. |
+| POST | `…/{sid}/catalog/install` | Install a plugin/mod from the catalog by `project_id` + `version_id` (`plugin:manage`, #1151). Returns `201`; a missing project is 404 `catalog_project_not_found`, checksum drift 502 `checksum_mismatch`, and a duplicate 409 `plugin_already_exists`. |
+
+The `…/{sid}/catalog/*` rows are a separate route family (`catalog.py`, #1151) —
+the Modrinth browse/install that backs the same `#plugins` tab — folded in here
+because they share the `plugin:*` gate and the at-rest / vanilla constraints
+above.
 
 ## 3. Personas and capability scoping
 
@@ -506,8 +541,8 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   and then auto-imports the missing Modrinth dependencies.
 - Client modpack (mod loaders only): when at least one enabled mod is
   client-relevant (side `client` / `both`), a **Download client modpack** button
-  bundles them (`GET …/client-mods/download`, #1342; the response declares
-  `Cache-Control: no-store`, #2519).
+  bundles them (`GET …/client-mods/download`, #1342; response headers and the
+  `HEAD` metadata probe are in the Section 2.7 inventory row).
 - Bedrock hint: on a Paper server, when the deployment's Bedrock gate is on
   (`/meta`'s `bedrock_enabled`, Section 2.4) and a Geyser plugin is installed, an
   inline note links to Floodgate setup (epic #1540).
@@ -615,7 +650,9 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   Section 2.
 - API error surfaced via toast + inline field errors (422 `errors` list).
 - Conflict-flavored errors get a "state changed — refresh" treatment, not a raw
-  error dump: the lifecycle races `invalid_transition`, `transition_conflict`
+  error dump: the lifecycle races `invalid_transition` (except on **start**,
+  where it means the server is already desired-running — a pending start, not a
+  race — and gets a verb-specific message below, #2445), `transition_conflict`
   and `server_not_running` (the last only away from **restart**, which offers
   the action for a crashed server on purpose and so gets a verb-specific message
   below, #2441). A 409 that reports something other than a race is
@@ -670,19 +707,29 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   say the outcome is **unconfirmed** and the intent stands. `no_eligible_worker`
   and `jar_unavailable` stay verb-agnostic: both are raised before any intent is
   committed.
-- **Start keeps the verb-agnostic messages**, but not because nothing is ever
-  pending there. A start that demonstrably did not happen is compensated back to
-  stopped, which covers `command_failed`; a **post-dispatch** `worker_busy` is
-  not — the API keeps `desired_state=running` and the assignment so
-  `redispatch_start` can converge once the raced command settles (#824), while a
-  pre-dispatch one does compensate. A **post-dispatch** `worker_unavailable` is
-  the same carve-out for the same reason (the start may have been applied), while
-  its pre-dispatch twin — a failed hydrate, or a call that never reached the
-  Worker — compensates. The client sees one `worker_busy` and one
-  `worker_unavailable` for both halves of each pair, so start stays on the
-  generic "another operation is in progress" / "could not reach the server host"
-  messages; #2435 and #2440 scoped that case out rather than resolving it, and it
-  is tracked separately (#2445).
+- On **start**, `worker_busy` gets its own message, but a *hedged* one, because
+  the reason is ambiguous at the edge (#2445). A **post-dispatch** `worker_busy`
+  keeps `desired_state=running` and the assignment so `redispatch_start` can
+  converge once the raced command settles (#824) — the start is pending; a
+  **pre-dispatch** one — a refused hydrate before the start command was sent —
+  compensates back to stopped, so nothing is pending. The client sees one bare
+  `worker_busy` for both, so the message cannot promise the start will happen: it
+  says the start *may* still be applied on its own and to start again only if the
+  server stays stopped, replacing the generic "wait and try again". That generic
+  retry was actively misleading on the pending path — a retry while
+  `desired_state=running` raises `invalid_transition`, which on **start** now
+  gets its own message ("already running or starting up") rather than the generic
+  state-changed toast, so the operator does not get a second, contradictory
+  answer (#2445). Stop and restart keep the state-changed treatment for
+  `invalid_transition`: neither leaves a pending intent a retry collides with.
+- **Start keeps the verb-agnostic message for 503 `worker_unavailable`.** A start
+  that demonstrably did not happen is compensated back to stopped, but a
+  **post-dispatch** `worker_unavailable` is not (the start may have been applied),
+  while its pre-dispatch twin — a failed hydrate, or a call that never reached the
+  Worker — compensates. This is the identical pre/post ambiguity as `worker_busy`
+  above, but a timeout answers *nothing*, so there is no honest thing to say
+  beyond "could not reach the server host"; #2440 scoped it out and it stays
+  verb-agnostic.
 - Destructive operations (delete server/community/user/backup-restore) use
   typed-confirm dialogs.
 

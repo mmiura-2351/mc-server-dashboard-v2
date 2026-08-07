@@ -253,6 +253,19 @@ export const en = {
     "Could not stop the server: it is still running. The system will keep trying to stop it.",
   "dashboard.lifecycle.restartPending":
     "Could not restart the server: it may be stopped for now. The system will bring it back automatically.",
+  // 409 worker_busy on start (issue #2445). A start refused with worker_busy is
+  // ambiguous at the edge: a post-dispatch BUSY leaves the start pending for the
+  // reconciler, but a pre-dispatch one is undone back to stopped — both arrive
+  // identically, so this must not promise the start will happen. It says it MAY
+  // still come up and to start again only if it stays stopped, rather than the
+  // plain "try again" that on the pending path collides with invalid_transition.
+  "dashboard.lifecycle.startPending":
+    "Could not start the server right now: another operation on it is still in progress. The start may still be applied automatically — check the server's state, and start it again only if it stays stopped.",
+  // 409 invalid_transition on start (issue #2445): the server is already
+  // desired-running, so a retry after being told the start is pending gets this
+  // instead of the contradictory generic state-changed toast.
+  "dashboard.lifecycle.startAlreadyRunning":
+    "The server is already running or starting up, so there is nothing to start.",
   // 409 failed_stop_orphan (issue #2466): the host could not confirm an earlier
   // stop, so the server's process may still be running — it never went down, and
   // repeating the same action is refused identically. Asking the operator to stop
@@ -299,6 +312,17 @@ export const en = {
   // Filter and sort controls (#1123).
   "dashboard.filter.search": "Search by name…",
   "dashboard.filter.state": "Filter by state",
+  // State filter dropdown: short trigger label, clear action, and the four
+  // semantic buckets (#2239).
+  "dashboard.filter.stateLabel": "State",
+  // Accessible name for the state trigger when buckets are selected; the count
+  // badge itself is aria-hidden, so this is how the number reaches AT (#2668).
+  "dashboard.filter.stateCount": "Filter by state ({count} selected)",
+  "dashboard.filter.clear": "Clear",
+  "dashboard.filter.bucket.running": "Running",
+  "dashboard.filter.bucket.stopped": "Stopped",
+  "dashboard.filter.bucket.crashed": "Crashed",
+  "dashboard.filter.bucket.other": "Other",
   "dashboard.filter.noMatch": "No servers match the current filters.",
   "dashboard.sort.label": "Sort",
   "dashboard.sort.name": "Name",
@@ -769,6 +793,7 @@ export const en = {
   "files.error.isDirectory": "Cannot open a directory as a file.",
   "files.error.notDirectory": "The path is a file, not a directory.",
   "files.error.symlinkRefused": "Symbolic links are not allowed.",
+  "files.error.nameTooLong": "The name is too long.",
   "files.error.invalidInput": "The request was invalid.",
   "files.error.workerUnavailable":
     "The server agent is disconnected. Please try again later.",
@@ -1666,7 +1691,7 @@ export const en = {
     "Invalid file. Only .jar files can be uploaded as {nouns}.",
   "plugins.error.tooLarge":
     "The file is too large. Maximum upload size is 512 MB.",
-  "plugins.error.catalogUnavailable":
+  "plugins.error.catalogUpstreamFailed":
     "Could not reach Modrinth. Please try again later.",
   "plugins.error.catalogNotFound": "Project or version not found on Modrinth.",
   "plugins.error.checksumMismatch":
@@ -1674,6 +1699,11 @@ export const en = {
   "plugins.error.unsupportedServerType":
     "This server type does not support {nouns}.",
   "plugins.error.invalidSide": "Invalid side for this server type.",
+  "plugins.error.invalidDisplayName": "The display name is invalid.",
+  "plugins.error.bedrockPortRangeExhausted":
+    "No free port is available in the Bedrock port range. Please try again later.",
+  "plugins.error.bedrockPortTaken":
+    "The Bedrock port is already in use. Please try again.",
   "plugins.error.notFound": "{Noun} not found. It may have been removed.",
   "plugins.error.workerUnavailable":
     "The server agent is disconnected. Please try again later.",

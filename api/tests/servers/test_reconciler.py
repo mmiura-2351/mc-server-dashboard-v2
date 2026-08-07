@@ -51,6 +51,9 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import CommandDispatchError
+from mc_server_dashboard_api.servers.domain.store_generation import (
+    StoreGenerationReader,
+)
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     DesiredState,
@@ -143,9 +146,17 @@ def _reconciler(
     clock: FakeClock,
     *,
     store_generation: int = 0,
+    store_reader: StoreGenerationReader | None = None,
     stop_refusals: StopDispatchRefusals | None = None,
 ) -> RunReconcilerTick:
     stop_refusals = stop_refusals or StopDispatchRefusals()
+    # One shared reader across both seams so a test can pin what happens when the
+    # generation the grace decision reads and the one redispatch_start reads are the
+    # same underlying counter (issue #2482); the default fixed-value reader makes the
+    # sharing behaviourally identical to two independent instances.
+    store_reader = store_reader or FakeStoreGenerationReader(
+        generation=store_generation
+    )
     return RunReconcilerTick(
         uow=uow,
         make_start_server=lambda: StartServer(
@@ -153,14 +164,14 @@ def _reconciler(
             control_plane=cp,
             clock=clock,
             jar_provisioner=FakeJarProvisioner(),
-            store_generation=FakeStoreGenerationReader(generation=store_generation),
+            store_generation=store_reader,
             file_store=FakeFileStore(seed_eula=True),
         ),
         make_stop_server=lambda: StopServer(
             uow=uow, control_plane=cp, clock=clock, stop_refusals=stop_refusals
         ),
         control_plane=cp,
-        store_generation=FakeStoreGenerationReader(generation=store_generation),
+        store_generation=store_reader,
         clock=clock,
         stop_refusals=stop_refusals,
         grace_seconds=_GRACE,
@@ -506,6 +517,56 @@ async def test_stale_held_redispatch_start_still_waits_full_grace() -> None:
     clock = FakeClock(_NOW)
     await _reconciler(uow, cp, clock, store_generation=2).tick()
     assert cp.dispatched == []
+
+
+class _BumpingStoreGenerationReader(StoreGenerationReader):
+    """Returns ``first`` on the first read, then ``bumped`` on every read after.
+
+    Models a store bump (a restore #873 or an at-rest edit #889 — both require a
+    stopped server, exactly the interleaving issue #2482 describes) landing between
+    the reconciler's grace-decision read of the generation and ``redispatch_start``'s
+    own skip-hydrate read of it. A single shared instance is handed to both seams so
+    the two reads see the counter advance between them.
+    """
+
+    def __init__(self, *, first: int, bumped: int) -> None:
+        self._first = first
+        self._bumped = bumped
+        self.calls = 0
+
+    async def current_generation(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> int:
+        self.calls += 1
+        return self._first if self.calls == 1 else self._bumped
+
+
+async def test_held_redispatch_start_carries_grace_generation_over_a_bump() -> None:
+    # TOCTOU pin (issue #2482): the reconciler grants the SHORT held-start grace on a
+    # command-only start (held=2 >= store=2), then the store bumps to 3 (a restore /
+    # at-rest edit) before redispatch_start makes its own skip-hydrate decision.
+    # Reading the generation separately there would flip skip_hydrate off and HYDRATE
+    # under the short grace — a round trip the short grace's budget does not cover.
+    # The generation resolved for the grace decision must be CARRIED into the
+    # dispatch, so held=2 >= store=2 still holds and no hydrate runs.
+    uow = FakeUnitOfWork()
+    aged = _NOW - dt.timedelta(seconds=_HELD_GRACE + 1)
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.CRASHED,
+        worker=_WORKER,
+        observed_at=aged,
+        updated_at=aged,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(held={(_WORKER, server.id): 2})
+    clock = FakeClock(_NOW)
+    reader = _BumpingStoreGenerationReader(first=2, bumped=3)
+    # Within the full grace, so only the short held-start grace can license acting now.
+    assert (_NOW - aged) < dt.timedelta(seconds=_GRACE)
+    await _reconciler(uow, cp, clock, store_reader=reader).tick()
+    # Command-only: the carried generation (2) keeps held >= store, so NO hydrate.
+    assert [k for k, _, _ in cp.dispatched] == ["start"]
 
 
 async def test_orphan_place_and_start_uses_full_grace_despite_held() -> None:

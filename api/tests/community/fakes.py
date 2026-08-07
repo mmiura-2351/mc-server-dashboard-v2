@@ -11,6 +11,7 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 from collections.abc import Sequence
+from dataclasses import replace
 
 from mc_server_dashboard_api.community.domain.entities import (
     Community,
@@ -48,16 +49,35 @@ class FakeCommunityRepository(CommunityRepository):
         self.member_counts: dict[CommunityId, int] = {}
         self.server_counts: dict[CommunityId, int] = {}
 
+    @staticmethod
+    def _copy(community: Community) -> Community:
+        # Detach the row from the caller's entity in both directions (issue
+        # #2516, applying the rule #2505 set for the servers fakes): a writer's
+        # INSERT/UPDATE has already serialized the values, and a reader's SELECT
+        # materializes a fresh entity, so no in-memory edit may cross this
+        # boundary either way. Aliasing is more forgiving than production, and
+        # that is the direction that can absorb a mutant a persisted-state
+        # assertion should have caught.
+        #
+        # Copy depth: a ``Community`` carries no mutable field -- every one is a
+        # scalar, a datetime, or a frozen value object -- so a new entity is the
+        # full depth.
+        return replace(community)
+
+    def seed(self, community: Community) -> None:
+        self.by_id[community.id] = self._copy(community)
+
     async def add(self, community: Community) -> None:
-        self.by_id[community.id] = community
+        self.by_id[community.id] = self._copy(community)
 
     async def get_by_id(self, community_id: CommunityId) -> Community | None:
-        return self.by_id.get(community_id)
+        community = self.by_id.get(community_id)
+        return None if community is None else self._copy(community)
 
     async def get_by_name(self, name: CommunityName) -> Community | None:
         for community in self.by_id.values():
             if community.name == name:
-                return community
+                return self._copy(community)
         return None
 
     async def count_all(self) -> int:
@@ -80,7 +100,12 @@ class FakeCommunityRepository(CommunityRepository):
         ]
 
     async def update(self, community: Community) -> None:
-        self.by_id[community.id] = community
+        # Mirror the adapter's ``UPDATE community ... WHERE id = :id``: a missing
+        # id matches no row, so nothing is written and no row appears -- keying
+        # the entity in regardless made this an insert the adapter cannot
+        # perform (#2557).
+        if community.id in self.by_id:
+            self.by_id[community.id] = self._copy(community)
 
     async def delete(self, community_id: CommunityId) -> None:
         self.by_id.pop(community_id, None)
@@ -91,11 +116,23 @@ class FakeMembershipRepository(MembershipRepository):
         self.by_id: dict[MembershipId, Membership] = {}
         self.role_ids: dict[MembershipId, list[RoleId]] = {}
 
+    @staticmethod
+    def _copy(membership: Membership) -> Membership:
+        # Detach in both directions (issue #2516); a ``Membership`` carries no
+        # mutable field, so a new entity is the full depth. Its role attachments
+        # live in ``role_ids``, not on the entity, and ``list_role_ids`` already
+        # hands out a fresh list.
+        return replace(membership)
+
+    def seed(self, membership: Membership) -> None:
+        self.by_id[membership.id] = self._copy(membership)
+
     async def add(self, membership: Membership) -> None:
-        self.by_id[membership.id] = membership
+        self.by_id[membership.id] = self._copy(membership)
 
     async def get_by_id(self, membership_id: MembershipId) -> Membership | None:
-        return self.by_id.get(membership_id)
+        membership = self.by_id.get(membership_id)
+        return None if membership is None else self._copy(membership)
 
     async def get_by_user_and_community(
         self, user_id: UserId, community_id: CommunityId
@@ -105,14 +142,16 @@ class FakeMembershipRepository(MembershipRepository):
                 membership.user_id == user_id
                 and membership.community_id == community_id
             ):
-                return membership
+                return self._copy(membership)
         return None
 
     async def list_for_user(self, user_id: UserId) -> list[Membership]:
-        return [m for m in self.by_id.values() if m.user_id == user_id]
+        return [self._copy(m) for m in self.by_id.values() if m.user_id == user_id]
 
     async def list_for_community(self, community_id: CommunityId) -> list[Membership]:
-        return [m for m in self.by_id.values() if m.community_id == community_id]
+        return [
+            self._copy(m) for m in self.by_id.values() if m.community_id == community_id
+        ]
 
     async def delete(self, membership_id: MembershipId) -> None:
         self.by_id.pop(membership_id, None)
@@ -147,24 +186,45 @@ class FakeRoleRepository(RoleRepository):
         self.get_by_id_calls = 0
         self.get_by_ids_calls = 0
 
+    @staticmethod
+    def _copy(role: Role) -> Role:
+        # Detach in both directions (issue #2516). ``permissions`` is the only
+        # mutable field and holds frozen ``Permission`` values, so a new set is
+        # the full depth -- the same shape ``FakeGroupRepository._copy`` uses for
+        # ``PlayerGroup.players`` (a list of frozen ``Player`` values). A deeper
+        # copy of the elements cannot matter; a shared set would let a caller's
+        # ``permissions.add(...)`` after the call rewrite the stored row.
+        return replace(role, permissions=set(role.permissions))
+
+    def seed(self, role: Role) -> None:
+        self.by_id[role.id] = self._copy(role)
+
     async def add(self, role: Role) -> None:
-        self.by_id[role.id] = role
+        self.by_id[role.id] = self._copy(role)
 
     async def get_by_id(self, role_id: RoleId) -> Role | None:
         self.get_by_id_calls += 1
-        return self.by_id.get(role_id)
+        role = self.by_id.get(role_id)
+        return None if role is None else self._copy(role)
 
     async def get_by_ids(self, role_ids: Sequence[RoleId]) -> list[Role]:
         self.get_by_ids_calls += 1
         if not role_ids:
             return []
-        return [self.by_id[rid] for rid in role_ids if rid in self.by_id]
+        return [self._copy(self.by_id[rid]) for rid in role_ids if rid in self.by_id]
 
     async def list_for_community(self, community_id: CommunityId) -> list[Role]:
-        return [r for r in self.by_id.values() if r.community_id == community_id]
+        return [
+            self._copy(r) for r in self.by_id.values() if r.community_id == community_id
+        ]
 
     async def update(self, role: Role) -> None:
-        self.by_id[role.id] = role
+        # Mirror the adapter's ``UPDATE role ... WHERE id = :id``: a missing id
+        # matches no row, so nothing is written and no row appears -- keying the
+        # entity in regardless made this an insert the adapter cannot perform
+        # (#2557).
+        if role.id in self.by_id:
+            self.by_id[role.id] = self._copy(role)
 
     async def delete(self, role_id: RoleId) -> None:
         self.by_id.pop(role_id, None)
@@ -174,11 +234,22 @@ class FakeResourceGrantRepository(ResourceGrantRepository):
     def __init__(self) -> None:
         self.by_id: dict[ResourceGrantId, ResourceGrant] = {}
 
+    @staticmethod
+    def _copy(grant: ResourceGrant) -> ResourceGrant:
+        # Detach in both directions (issue #2516). ``permissions`` is the only
+        # mutable field and holds frozen ``Permission`` values, so a new set is
+        # the full depth (see :meth:`FakeRoleRepository._copy`).
+        return replace(grant, permissions=set(grant.permissions))
+
+    def seed(self, grant: ResourceGrant) -> None:
+        self.by_id[grant.id] = self._copy(grant)
+
     async def add(self, grant: ResourceGrant) -> None:
-        self.by_id[grant.id] = grant
+        self.by_id[grant.id] = self._copy(grant)
 
     async def get_by_id(self, grant_id: ResourceGrantId) -> ResourceGrant | None:
-        return self.by_id.get(grant_id)
+        grant = self.by_id.get(grant_id)
+        return None if grant is None else self._copy(grant)
 
     async def get_for_user_resource(
         self,
@@ -194,14 +265,14 @@ class FakeResourceGrantRepository(ResourceGrantRepository):
                 and grant.resource_type == resource_type
                 and grant.resource_id == resource_id
             ):
-                return grant
+                return self._copy(grant)
         return None
 
     async def list_for_community(
         self, community_id: CommunityId, user_id: UserId | None = None
     ) -> list[ResourceGrant]:
         return [
-            g
+            self._copy(g)
             for g in self.by_id.values()
             if g.community_id == community_id
             and (user_id is None or g.user_id == user_id)
@@ -299,7 +370,7 @@ class FakeAuthzUnitOfWork(UnitOfWork):
             created_at=_NOW,
             updated_at=_NOW,
         )
-        self.roles.by_id[role.id] = role
+        self.roles.seed(role)
         self.memberships.role_ids.setdefault(membership.id, []).append(role.id)
         return role.id
 
@@ -333,7 +404,7 @@ class FakeAuthzUnitOfWork(UnitOfWork):
             created_at=_NOW,
             updated_at=_NOW,
         )
-        self.resource_grants.by_id[grant.id] = grant
+        self.resource_grants.seed(grant)
         return grant.id
 
     def _membership_for(self, user_id: UserId, community_id: CommunityId) -> Membership:
@@ -346,14 +417,17 @@ class FakeAuthzUnitOfWork(UnitOfWork):
             None,
         )
         if existing is not None:
-            return existing
+            # Return a detached copy, matching the new-membership path below
+            # (which returns its local, detached from the seeded row): neither
+            # path hands the caller the stored entity by reference (#2638).
+            return self.memberships._copy(existing)
         membership = Membership(
             id=MembershipId.new(),
             user_id=user_id,
             community_id=community_id,
             created_at=_NOW,
         )
-        self.memberships.by_id[membership.id] = membership
+        self.memberships.seed(membership)
         return membership
 
 

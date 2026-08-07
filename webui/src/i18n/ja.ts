@@ -252,6 +252,15 @@ export const ja: Record<TranslationKey, string> = {
     "サーバーを停止できませんでした: まだ稼働中です。システムが停止を試行し続けます。",
   "dashboard.lifecycle.restartPending":
     "サーバーを再起動できませんでした: 一時的に停止している可能性があります。システムが自動的に復帰させます。",
+  // 409 worker_busy on start (issue #2445); ambiguous at the edge, so this must
+  // not promise the start will happen — it says it may still come up and to
+  // retry only if the server stays stopped.
+  "dashboard.lifecycle.startPending":
+    "サーバーをすぐに起動できませんでした: このサーバーで別の操作が進行中です。起動は自動的に適用される場合があります。サーバーの状態を確認し、停止したままの場合のみ再度起動してください。",
+  // 409 invalid_transition on start (issue #2445): すでに起動指定済みなので、保留中の
+  // 起動を伝えられた後の再試行にはこのメッセージを返す。
+  "dashboard.lifecycle.startAlreadyRunning":
+    "サーバーはすでに起動中または起動処理中のため、起動する必要はありません。",
   // 409 failed_stop_orphan (issue #2466): the host could not confirm an earlier
   // stop, so the process may still be running. A retry of the same action is
   // refused identically, and since issue #2475 the host converges the orphan on
@@ -284,6 +293,17 @@ export const ja: Record<TranslationKey, string> = {
   // Filter and sort controls (#1123).
   "dashboard.filter.search": "名前で検索…",
   "dashboard.filter.state": "状態でフィルター",
+  // State filter dropdown: short trigger label, clear action, and the four
+  // semantic buckets (#2239).
+  "dashboard.filter.stateLabel": "状態",
+  // 選択中のバケット数を状態トリガーのアクセシブル名に含める。カウントバッジ
+  // 自体は aria-hidden のため、支援技術にはこの文字列で数が伝わる（#2668）。
+  "dashboard.filter.stateCount": "状態でフィルター（{count} 件選択中）",
+  "dashboard.filter.clear": "クリア",
+  "dashboard.filter.bucket.running": "稼働中",
+  "dashboard.filter.bucket.stopped": "停止",
+  "dashboard.filter.bucket.crashed": "異常",
+  "dashboard.filter.bucket.other": "その他",
   "dashboard.filter.noMatch": "フィルター条件に一致するサーバーがありません。",
   "dashboard.sort.label": "並べ替え",
   "dashboard.sort.name": "名前",
@@ -752,6 +772,7 @@ export const ja: Record<TranslationKey, string> = {
   "files.error.notDirectory":
     "指定されたパスはディレクトリではなくファイルです。",
   "files.error.symlinkRefused": "シンボリックリンクは許可されていません。",
+  "files.error.nameTooLong": "名前が長すぎます。",
   "files.error.invalidInput": "リクエストが無効です。",
   "files.error.workerUnavailable":
     "サーバーエージェントが切断されています。しばらくしてから再度お試しください。",
@@ -1632,7 +1653,7 @@ export const ja: Record<TranslationKey, string> = {
     "無効なファイルです。{nouns}としてアップロードできるのは .jar ファイルのみです。",
   "plugins.error.tooLarge":
     "ファイルが大きすぎます。アップロードの上限は 512 MB です。",
-  "plugins.error.catalogUnavailable":
+  "plugins.error.catalogUpstreamFailed":
     "Modrinth に接続できませんでした。しばらくしてからもう一度お試しください。",
   "plugins.error.catalogNotFound":
     "Modrinth でプロジェクトまたはバージョンが見つかりませんでした。",
@@ -1641,6 +1662,11 @@ export const ja: Record<TranslationKey, string> = {
   "plugins.error.unsupportedServerType":
     "このサーバータイプは{nouns}に対応していません。",
   "plugins.error.invalidSide": "このサーバータイプには無効なサイドです。",
+  "plugins.error.invalidDisplayName": "表示名が無効です。",
+  "plugins.error.bedrockPortRangeExhausted":
+    "Bedrock のポート範囲に空きポートがありません。しばらくしてからもう一度お試しください。",
+  "plugins.error.bedrockPortTaken":
+    "Bedrock ポートはすでに使用されています。もう一度お試しください。",
   "plugins.error.notFound":
     "{Noun}が見つかりません。削除された可能性があります。",
   "plugins.error.workerUnavailable":

@@ -141,18 +141,41 @@ const SPECIFIC_409_MESSAGE: Record<string, TranslationKey> = {
 // Restart keeps the plain busy message because a BUSY refusal there applied
 // nothing and left the server running as it was.
 //
-// Start is the subtle one, and it keeps the plain busy message DELIBERATELY,
-// not by oversight. A pre-dispatch BUSY (a hydrate refused for the same race)
-// compensates, so nothing is pending — but a POST-dispatch BUSY does not: the
-// Worker refused because another mutating command for this id is already in
-// flight with an unknown outcome, so StartServer keeps desired=running plus the
-// assignment and lets a later reconcile tick take redispatch_start to the same
-// Worker (issue #824, lifecycle.py StartServer.__call__ under
-// `dispatch.attempted`). That case DOES leave a start intent pending, and the
-// client cannot tell the two apart — both arrive as a bare `worker_busy`.
-// Issue #2435 scoped start out on the grounds that "wait and try again" is at
-// least not harmful there; whether it deserves its own pending message is
-// filed as its own follow-up.
+// Start is the subtle one (issue #2445). It has TWO worker_busy paths that are
+// indistinguishable at the edge — both arrive as a bare `worker_busy` because
+// the API renders BUSY from the command status alone (command_dispatch.py
+// `_SANITIZED_REASONS`):
+//
+// - POST-dispatch BUSY — the Worker refused the START because another mutating
+//   command for this id is already in flight (issue #824) or it holds a
+//   failed-stop orphan its converger is resolving (issue #2476). StartServer
+//   keeps desired=running plus the assignment and a later reconcile tick takes
+//   redispatch_start to the SAME Worker (lifecycle.py StartServer.__call__ under
+//   `dispatch.attempted`). The start IS pending.
+// - PRE-dispatch BUSY — the HYDRATE that runs before the start was refused for
+//   the same two reasons; the start command was never sent, so StartServer
+//   compensates back to desired=stopped and unassigns. NOTHING is pending.
+//
+// So the firm "…will be applied automatically" promise the stop/restart entries
+// make would be a FALSE promise here on the pre-dispatch path. #2435 scoped
+// start out and kept the plain busy message; this message replaces it with one
+// honest for BOTH paths: it says the start MAY still be applied on its own and
+// tells the operator to start it again only if the server stays stopped, rather
+// than the generic "wait and try again" — which on the pending path lands the
+// retry on `invalid_transition` (see the invalid_transition entry below). The
+// 503 `worker_unavailable` start path has the identical pre/post ambiguity and
+// deliberately stays verb-agnostic (VERB_SPECIFIC_503_MESSAGE); the difference
+// is that a timeout answers nothing at all, whereas a BUSY at least tells us the
+// host is busy, which is what this message can honestly say.
+//
+// `invalid_transition` on start is start-only for the same reason: StartServer
+// raises it only when desired_state is ALREADY running (lifecycle.py, the entry
+// guard), which is exactly the state a pending start leaves behind. An operator
+// told the start is pending who clicks start again would otherwise get the
+// generic state-changed toast — a second, contradictory answer (issue #2445) —
+// so start alone maps it to a message that says the server is already coming up.
+// Stop and restart keep the state-changed treatment: neither leaves a pending
+// intent a retry collides with this way.
 //
 // `server_busy` is start-only and never commits an intent, so it is
 // verb-independent throughout.
@@ -181,6 +204,10 @@ const VERB_SPECIFIC_409_MESSAGE: Record<
   },
   worker_busy: {
     stop: "dashboard.lifecycle.stopPending",
+    start: "dashboard.lifecycle.startPending",
+  },
+  invalid_transition: {
+    start: "dashboard.lifecycle.startAlreadyRunning",
   },
   server_not_running: {
     restart: "dashboard.lifecycle.restartPending",

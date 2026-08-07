@@ -704,8 +704,9 @@ body.col-resizing {
 }
 
 /* Force-restore confirmation dialog: the warning and ack row render inside a
- * portaled Modal, out of reach of the page scopes that style `.field-error` /
- * `.field-inline`, so they carry their own self-contained rules (#755). */
+ * Modal, which the ancestor-class page scopes (`.account`, `.settings`, …) that
+ * style `.field-error` / `.field-inline` do not wrap, so they carry their own
+ * self-contained rules (#755). */
 .restore-damaged-warning {
   font-size: 12px;
   color: var(--red);
@@ -1342,8 +1343,9 @@ button.link:focus-visible {
 .schedules-warning-row input[type="text"] {
   flex: 1;
 }
-/* Schedule create/edit dialog — cadence section (portaled modal, so page-scope
-   .field-inline / .field-error don't reach here; see shell.css:707). */
+/* Schedule create/edit dialog — cadence section (inside a Modal, which the
+   ancestor-class page scopes that style .field-inline / .field-error don't
+   wrap, so those rules don't reach here; see shell.css:707). */
 .schedule-cadence {
   margin-bottom: 12px;
 }
@@ -1402,7 +1404,7 @@ button.link:focus-visible {
   color: var(--text-faint);
   margin: 6px 0 0;
 }
-/* Next-runs preview (also inside the portaled modal). */
+/* Next-runs preview (also inside the Modal). */
 .schedule-preview {
   margin-top: 4px;
   margin-bottom: 12px;
@@ -1434,9 +1436,11 @@ button.link:focus-visible {
   border-collapse: collapse;
   font-size: 13px;
 }
-/* Qualified with `table.data` — matching every other `.wrapper table.data th`
- * block above — so the cell rules do not descend in specificity below the
- * shared `.data` table rules declared earlier in the file. */
+/* Qualified as `table.data.schedules-runs` — a compound selector on the table
+ * itself (both classes sit on the table, ServerSchedulesTab.tsx), not a wrapper
+ * descendant like the `.wrapper table.data th` blocks above. What it shares with
+ * them is the resulting specificity, (0,2,2), so the cell rules do not descend
+ * below the shared `.data` table rules declared earlier in the file. */
 table.data.schedules-runs th,
 table.data.schedules-runs td {
   text-align: left;
@@ -2467,23 +2471,64 @@ table.data.schedules-runs td {
   color: var(--text);
   min-width: 180px;
 }
-.dashboard-filters .filter-states {
+/* State filter dropdown (#2239): a "State ▾" trigger opening a checkbox
+ * popover of the four semantic buckets. */
+.popover {
+  position: relative;
   display: inline-flex;
-  flex-wrap: wrap;
-  gap: 6px;
+}
+.filter-state-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.filter-state-trigger .badge.count {
+  padding: 0 6px;
+  min-width: 18px;
+  text-align: center;
+  color: var(--accent);
+  border-color: rgba(77, 159, 255, 0.3);
+}
+.popover-panel {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 30;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+  padding: 8px;
+}
+.filter-state-menu {
+  min-width: 160px;
+}
+.filter-state-buckets {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
   border: 0;
   margin: 0;
   padding: 0;
   min-width: 0;
 }
-.dashboard-filters .filter-states .pill {
+.filter-state-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
 }
-.dashboard-filters .filter-states .pill.dim {
-  opacity: 0.45;
+.filter-state-option:hover {
+  background: var(--bg-overlay);
 }
-.dashboard-filters .filter-states .pill.dim:hover {
-  opacity: 0.7;
+.filter-state-option input {
+  cursor: pointer;
+}
+.filter-state-clear {
+  margin-top: 4px;
+  align-self: flex-start;
 }
 .dashboard-filters .sort-control {
   display: inline-flex;

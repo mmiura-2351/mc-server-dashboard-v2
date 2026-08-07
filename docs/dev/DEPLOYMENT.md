@@ -378,7 +378,7 @@ data as a deliberate cutover, and back up both volumes first.
 `api/tests/storage/test_object_live_seaweedfs.py` exercises the load-bearing
 object-store assumptions (read-after-write on the pointer overwrite PUT,
 server-side CopyObject, multipart + prefix list, and the startup sweep) against a
-real endpoint. `api/tests/servers/test_resource_pack_store_adapter.py` runs its
+real endpoint. `api/tests/servers/test_resource_pack_store_contract.py` runs its
 `live-s3` parametrization against the same endpoint (the resource pack store's
 `size()` == `open()` byte-count invariant, #2320). Both are skipped unless
 `MCD_TEST_S3_ENDPOINT` is set, so `make check` and the main `check` CI job stay
@@ -396,7 +396,7 @@ docker run -d --name swfs-test -p 8333:8333 \
 cd api && MCD_TEST_S3_ENDPOINT=http://localhost:8333 \
   MCD_TEST_S3_ACCESS_KEY=testak MCD_TEST_S3_SECRET_KEY=testsk \
   uv run pytest tests/storage/test_object_live_seaweedfs.py \
-    tests/servers/test_resource_pack_store_adapter.py
+    tests/servers/test_resource_pack_store_contract.py
 
 docker rm -f swfs-test
 ```
@@ -908,7 +908,7 @@ explicitly. Leaving it unset is the most common way to break this topology, and
 it breaks it silently.
 
 The control plane above is only how the API tells a worker *to* transfer. The
-transfer itself is plain HTTP on the API's HTTP port (`/data-plane/...`): the
+transfer itself is plain HTTP on the API's HTTP port (`/api/data-plane/...`): the
 worker pulls the working set and the resolved JAR on hydrate (`GET`) and pushes
 it back on snapshot (`POST`). The API advertises where to do that in each
 trigger, and the address it advertises is `server.data_plane_base_url` — falling
@@ -930,7 +930,7 @@ edge — the API host's LAN/VPN address, not the tunnel hostname:
 
 ```sh
 # in .env on the API host
-MCD_API_SERVER__DATA_PLANE_BASE_URL=http://10.0.0.5:8000
+MCD_API_SERVER__DATA_PLANE_BASE_URL=http://10.0.0.5:${API_HTTP_PORT}
 # the HTTP port is published to loopback by default; a remote worker needs it on
 # an interface it can reach (Section 3). This also makes api:8000 reachable from
 # every Minecraft container on the API host -- firewall it to the worker's
@@ -945,14 +945,22 @@ public URL genuinely is directly reachable by workers, set
 warning. Deployments using the shipped `compose.yaml` never see it — compose
 always sets the variable.
 
-**Protect this port like the control plane.** Data-plane requests carry the
-shared worker credential as an `Authorization: Bearer` header, and the working
-set is the server's world data; over a real network both are in the clear on
-plain HTTP. The control-plane TLS above does not cover it — different port,
-different protocol. Put the data plane on a private network (VPN/WireGuard, or a
-private interface) or terminate TLS in front of it and point
+**Protect this port like the control plane — the bearer token on it *is* the
+control credential.** Data-plane requests carry the shared worker credential as
+an `Authorization: Bearer` header, and the working set is the server's world
+data; over a real network both are in the clear on plain HTTP. That bearer token
+is `MCD_API_CONTROL__WORKER_CREDENTIAL` — the same secret the gRPC control plane
+authenticates with — so leaking it off this port is not scoped to world data: it
+compromises the control channel the TLS subsection above protects. The
+control-plane TLS does not cover this port — different port, different protocol.
+Put the data plane on a private network (VPN/WireGuard, or a private interface)
+or terminate TLS in front of it and point
 `MCD_API_SERVER__DATA_PLANE_BASE_URL` at the `https://` address, keeping in mind
-that whatever terminates it must not impose a body-size cap.
+that whatever terminates it must not impose a body-size cap. Note also that the
+`API_HTTP_BIND_IP` set above is not route-scoped: it publishes the **entire**
+HTTP surface on that interface, not only the data-plane routes (one bind serves
+the whole REST API, `compose.yaml`), so the non-loopback-bind caveats elsewhere
+in this section apply here in full.
 
 ## 9. Upgrade
 

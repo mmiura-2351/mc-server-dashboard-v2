@@ -19,7 +19,7 @@ from mc_server_dashboard_api.servers.adapters.modrinth_catalog import (
     _TEAM_OWNER_CACHE,
     ModrinthCatalog,
 )
-from mc_server_dashboard_api.servers.domain.errors import CatalogUnavailableError
+from mc_server_dashboard_api.servers.domain.errors import CatalogUpstreamFailedError
 
 # -- SSRF redirect bypass --
 
@@ -61,14 +61,14 @@ async def test_download_redirect_to_disallowed_host_raises(
         finally:
             httpx2.AsyncClient.__init__ = real_init  # type: ignore[method-assign]
 
-    with pytest.raises(CatalogUnavailableError, match="disallowed host"):
+    with pytest.raises(CatalogUpstreamFailedError, match="disallowed host"):
         await _patched_download("https://cdn.modrinth.com/data/test.jar")
 
 
 async def test_download_too_many_redirects_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """More than _MAX_REDIRECTS hops raises CatalogUnavailableError."""
+    """More than _MAX_REDIRECTS hops raises CatalogUpstreamFailedError."""
     import mc_server_dashboard_api.versions.adapters.ssrf_guard as ssrf_guard
 
     async def _public_resolver(_host: str) -> list[str]:
@@ -107,7 +107,7 @@ async def test_download_too_many_redirects_raises(
         finally:
             httpx2.AsyncClient.__init__ = real_init  # type: ignore[method-assign]
 
-    with pytest.raises(CatalogUnavailableError, match="too many redirects"):
+    with pytest.raises(CatalogUpstreamFailedError, match="too many redirects"):
         await _patched_download("https://cdn.modrinth.com/data/test.jar")
 
     # Verify we made exactly _MAX_REDIRECTS + 1 attempts (initial + redirects).
@@ -149,7 +149,7 @@ async def test_download_redirect_to_non_https_raises(
         finally:
             httpx2.AsyncClient.__init__ = real_init  # type: ignore[method-assign]
 
-    with pytest.raises(CatalogUnavailableError, match="non-HTTPS"):
+    with pytest.raises(CatalogUpstreamFailedError, match="non-HTTPS"):
         await _patched_download("https://cdn.modrinth.com/data/test.jar")
 
 
@@ -168,7 +168,7 @@ async def test_download_rejects_hostname_resolving_to_private_ip(
     monkeypatch.setattr(ssrf_guard, "_async_resolve_host", _private_resolver)
     catalog = ModrinthCatalog()
 
-    with pytest.raises(CatalogUnavailableError, match="private"):
+    with pytest.raises(CatalogUpstreamFailedError, match="private"):
         await catalog.download_file("https://cdn.modrinth.com/data/test.jar")
 
 
@@ -221,7 +221,7 @@ async def test_download_pins_resolved_ip_in_request(
 
 
 async def test_get_json_oversized_response_raises() -> None:
-    """A JSON response exceeding _MAX_JSON_BYTES raises CatalogUnavailableError."""
+    """A JSON response exceeding _MAX_JSON_BYTES raises CatalogUpstreamFailedError."""
     oversized = b"x" * (_MAX_JSON_BYTES + 1)
 
     def _handler(request: httpx2.Request) -> httpx2.Response:
@@ -238,7 +238,7 @@ async def test_get_json_oversized_response_raises() -> None:
 
     httpx2.AsyncClient.__init__ = patched_init  # type: ignore[assignment]
     try:
-        with pytest.raises(CatalogUnavailableError, match="response too large"):
+        with pytest.raises(CatalogUpstreamFailedError, match="response too large"):
             await catalog.search(
                 query="test", loader="fabric", game_versions=["1.20.4"]
             )
@@ -249,7 +249,7 @@ async def test_get_json_oversized_response_raises() -> None:
 async def test_get_json_enforces_limit_during_streaming() -> None:
     """Size limit is enforced during streaming, not after full buffering.
 
-    A body 5x the limit should trigger CatalogUnavailableError without the
+    A body 5x the limit should trigger CatalogUpstreamFailedError without the
     entire body being consumed by the application-level reader.
     """
     chunk_size = 64 * 1024
@@ -282,7 +282,7 @@ async def test_get_json_enforces_limit_during_streaming() -> None:
 
     httpx2.AsyncClient.__init__ = patched_init  # type: ignore[assignment]
     try:
-        with pytest.raises(CatalogUnavailableError, match="response too large"):
+        with pytest.raises(CatalogUpstreamFailedError, match="response too large"):
             await catalog.search(
                 query="test", loader="fabric", game_versions=["1.20.4"]
             )
@@ -350,7 +350,7 @@ async def test_get_project_encodes_slug_in_url_path() -> None:
 
 
 async def test_get_json_html_body_raises_catalog_unavailable() -> None:
-    """An HTML body on HTTP 200 raises CatalogUnavailableError."""
+    """An HTML body on HTTP 200 raises CatalogUpstreamFailedError."""
 
     def _handler(request: httpx2.Request) -> httpx2.Response:
         return httpx2.Response(
@@ -368,7 +368,7 @@ async def test_get_json_html_body_raises_catalog_unavailable() -> None:
 
     httpx2.AsyncClient.__init__ = patched_init  # type: ignore[assignment]
     try:
-        with pytest.raises(CatalogUnavailableError):
+        with pytest.raises(CatalogUpstreamFailedError):
             await catalog.search(
                 query="test", loader="fabric", game_versions=["1.20.4"]
             )
@@ -377,7 +377,7 @@ async def test_get_json_html_body_raises_catalog_unavailable() -> None:
 
 
 async def test_search_shape_error_raises_catalog_unavailable() -> None:
-    """A valid JSON response with unexpected shape raises CatalogUnavailableError."""
+    """A valid JSON response with unexpected shape raises CatalogUpstreamFailedError."""
 
     def _handler(request: httpx2.Request) -> httpx2.Response:
         # Return a JSON array instead of the expected object with "hits".
@@ -394,7 +394,7 @@ async def test_search_shape_error_raises_catalog_unavailable() -> None:
 
     httpx2.AsyncClient.__init__ = patched_init  # type: ignore[assignment]
     try:
-        with pytest.raises(CatalogUnavailableError):
+        with pytest.raises(CatalogUpstreamFailedError):
             await catalog.search(
                 query="test", loader="fabric", game_versions=["1.20.4"]
             )
@@ -403,7 +403,7 @@ async def test_search_shape_error_raises_catalog_unavailable() -> None:
 
 
 async def test_get_project_shape_error_raises_catalog_unavailable() -> None:
-    """get_project raises CatalogUnavailableError when required keys are missing."""
+    """get_project raises CatalogUpstreamFailedError when required keys are missing."""
 
     def _handler(request: httpx2.Request) -> httpx2.Response:
         # Return valid JSON but missing the required "id" key.
@@ -420,14 +420,14 @@ async def test_get_project_shape_error_raises_catalog_unavailable() -> None:
 
     httpx2.AsyncClient.__init__ = patched_init  # type: ignore[assignment]
     try:
-        with pytest.raises(CatalogUnavailableError):
+        with pytest.raises(CatalogUpstreamFailedError):
             await catalog.get_project("test")
     finally:
         httpx2.AsyncClient.__init__ = real_init  # type: ignore[method-assign]
 
 
 async def test_list_versions_shape_error_raises_catalog_unavailable() -> None:
-    """list_versions raises CatalogUnavailableError on bad shape."""
+    """list_versions raises CatalogUpstreamFailedError on bad shape."""
 
     def _handler(request: httpx2.Request) -> httpx2.Response:
         # Return a list with an entry missing the required "id" key.
@@ -444,7 +444,7 @@ async def test_list_versions_shape_error_raises_catalog_unavailable() -> None:
 
     httpx2.AsyncClient.__init__ = patched_init  # type: ignore[assignment]
     try:
-        with pytest.raises(CatalogUnavailableError):
+        with pytest.raises(CatalogUpstreamFailedError):
             await catalog.list_versions("test")
     finally:
         httpx2.AsyncClient.__init__ = real_init  # type: ignore[method-assign]
@@ -583,7 +583,7 @@ async def test_get_project_non_dict_json_raises_catalog_unavailable() -> None:
 
     httpx2.AsyncClient.__init__ = patched_init  # type: ignore[assignment]
     try:
-        with pytest.raises(CatalogUnavailableError):
+        with pytest.raises(CatalogUpstreamFailedError):
             await catalog.get_project("test")
     finally:
         httpx2.AsyncClient.__init__ = real_init  # type: ignore[method-assign]
@@ -593,7 +593,7 @@ async def test_get_project_non_string_team_raises_catalog_unavailable() -> None:
     """A non-string ``team`` field is wrapped rather than escaping (issue #2163).
 
     ``quote()`` on a non-string raises TypeError inside author resolution; it
-    must surface as CatalogUnavailableError like any other bad-shape response.
+    must surface as CatalogUpstreamFailedError like any other bad-shape response.
     """
 
     def _handler(request: httpx2.Request) -> httpx2.Response:
@@ -614,7 +614,7 @@ async def test_get_project_non_string_team_raises_catalog_unavailable() -> None:
 
     httpx2.AsyncClient.__init__ = patched_init  # type: ignore[assignment]
     try:
-        with pytest.raises(CatalogUnavailableError):
+        with pytest.raises(CatalogUpstreamFailedError):
             await catalog.get_project("x")
     finally:
         httpx2.AsyncClient.__init__ = real_init  # type: ignore[method-assign]

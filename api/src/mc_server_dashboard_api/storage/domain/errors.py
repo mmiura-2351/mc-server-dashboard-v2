@@ -53,6 +53,44 @@ class SymlinkRefusedError(StorageError):
     """
 
 
+class NameTooLongError(StorageError):
+    """A mutation's DESTINATION name exceeds what the backend can name (issue #2433).
+
+    ``RelPath`` bounds neither component nor total length, so a name past the fs
+    ``NAME_MAX`` arrives from an ordinary client request. A read models such a name
+    as a miss (a name that long can hold nothing, #2394), but a mutation's is not a
+    miss — the name the caller GAVE cannot be created — so it is a client error: the
+    seam maps it to :class:`~...servers.domain.errors.InvalidFilePathError` (422,
+    reason ``name_too_long``) rather than the read side's 404.
+
+    An over-long SOURCE (delete, rename-from) stays a miss (:class:`NotFoundError`,
+    matching reads); only a destination name the mutation is asked to create raises
+    this. Distinct from :class:`PathTraversalError` — the name is contained and
+    syntactically fine, merely too long for this backend to hold.
+
+    An fs / remote-fs realization: object storage keys carry no ``NAME_MAX``, so the
+    condition never arises there and this is never raised by the object adapter
+    (STORAGE.md Section 7.3), exactly as the symlink refusal is vacuous there.
+    """
+
+
+class PathOccupiedError(StorageError):
+    """A non-directory occupies a path component a mutation needs (issue #2433).
+
+    ``make_dir`` / ``write_file`` / a rename destination has to create or descend
+    through a directory, but a regular file already sits at that name (``EEXIST`` on
+    the target, ``ENOTDIR`` on an ancestor). The raw errno used to escape as a 500;
+    it is a conflict — something is in the way — so the seam maps it to
+    :class:`~...servers.domain.errors.FileAlreadyExistsError` (409), matching the
+    never-clobber 409 a rename onto an existing destination already returns.
+
+    An fs / remote-fs realization: object storage has no real directories — a
+    directory is only the shared key-prefix of its files (STORAGE.md Section 7.3) —
+    so a file and a "directory" never collide there and the object adapter never
+    raises this.
+    """
+
+
 class NotFoundError(StorageError):
     """The targeted blob does not exist.
 
@@ -160,6 +198,24 @@ class StaleGenerationError(StorageError):
             f"working-set generation advanced during upload: base {expected_base}, "
             f"store now at {current}"
         )
+
+
+class PrunedStoreError(StaleGenerationError):
+    """A commit was refused because a concurrent delete pruned the store (#921).
+
+    A specialization of :class:`StaleGenerationError` for the one stale outcome
+    that is NOT an advance: the commit's ``expected_base`` is >= 1 but the store's
+    current generation reads 0. Generation is monotonic and only the delete-retention
+    prune (``prune_to_final_snapshot``, issue #777/#1704) removes the generation
+    marker, so ``current == 0`` with ``expected_base > 0`` is the unambiguous
+    signature of a concurrent delete/prune that ran under the per-server lock during
+    the upload window — the store REGRESSED to 0, it did not advance.
+
+    Being a subclass, every existing ``except StaleGenerationError`` keeps catching
+    it; the edge catches it FIRST to surface a distinct, accurate contract (the
+    working set was deleted mid-upload) instead of the misleading "generation
+    advanced" message. It carries the same ``expected_base``/``current`` fields.
+    """
 
 
 class IntegrityCheckError(StorageError):

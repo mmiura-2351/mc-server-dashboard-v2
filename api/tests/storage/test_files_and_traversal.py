@@ -31,7 +31,9 @@ from mc_server_dashboard_api.storage.adapters.fs import (
     _new_version_id,
 )
 from mc_server_dashboard_api.storage.domain.errors import (
+    NameTooLongError,
     NotFoundError,
+    PathOccupiedError,
     PathTraversalError,
     SymlinkRefusedError,
 )
@@ -923,6 +925,200 @@ async def test_mutations_under_a_symlink_parent_are_refused(tmp_path: Path) -> N
     assert (live / "g").read_bytes() == b"G"
 
 
+# --- a MUTATION on a symlink LEAF dirent (issue #2429) ----------------------
+#
+# The listing describes the dirent, so the mutation surface must act on the
+# dirent too. A symlink dirent supports exactly two operations -- being listed
+# and being deleted; every other mutation refuses. delete unlinks the LINK
+# (never the target it points at) and captures no version (a link has no
+# Port-readable content to retain); write / rename-source / make_dir refuse;
+# delete_dir misses (a link is never a directory dirent); retain is a no-op.
+
+
+async def test_delete_file_unlinks_a_working_link_and_keeps_its_target(
+    tmp_path: Path,
+) -> None:
+    """The dirent goes; the target's bytes stay; no version is captured."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"real.txt": b"TARGET"})
+    live = snapshot_dir(tmp_path, community, server)
+    (live / "link.txt").symlink_to("real.txt")
+    before = await storage.current_generation(community, server)
+
+    await storage.delete_file(community, server, RelPath("link.txt"))
+
+    assert not (live / "link.txt").exists(follow_symlinks=False)
+    assert (live / "real.txt").read_bytes() == b"TARGET"
+    # A link has no content to retain, so nothing lands in the version ring.
+    assert (
+        await storage.list_file_versions(community, server, RelPath("link.txt")) == []
+    )
+    # An authoritative edit still bumps the generation.
+    assert await storage.current_generation(community, server) == before + 1
+
+
+async def test_delete_file_unlinks_a_dangling_link(tmp_path: Path) -> None:
+    """A now-visible broken link is removable rather than a 404 (issue #2429)."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"keep": b"K"})
+    live = snapshot_dir(tmp_path, community, server)
+    (live / "broken").symlink_to("nowhere")
+
+    await storage.delete_file(community, server, RelPath("broken"))
+
+    assert not (live / "broken").exists(follow_symlinks=False)
+
+
+async def test_delete_file_unlinks_a_looping_link(tmp_path: Path) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"keep": b"K"})
+    live = snapshot_dir(tmp_path, community, server)
+    _plant_symlink_loop(live / "loop")
+
+    await storage.delete_file(community, server, RelPath("loop"))
+
+    assert not (live / "loop").exists(follow_symlinks=False)
+
+
+async def test_delete_dir_on_a_link_to_a_directory_is_a_miss(tmp_path: Path) -> None:
+    """A link is never a directory dirent, so delete_dir leaves the subtree."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"real/inner": b"X"})
+    live = snapshot_dir(tmp_path, community, server)
+    (live / "alias").symlink_to("real")
+
+    with pytest.raises(NotFoundError):
+        await storage.delete_dir(community, server, RelPath("alias"))
+
+    assert (live / "real" / "inner").read_bytes() == b"X"
+    assert (live / "alias").is_symlink()
+
+
+async def test_write_file_on_a_link_is_refused_and_leaves_the_target(
+    tmp_path: Path,
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"real.txt": b"TARGET"})
+    live = snapshot_dir(tmp_path, community, server)
+    (live / "link.txt").symlink_to("real.txt")
+
+    with pytest.raises(SymlinkRefusedError):
+        await storage.write_file(community, server, RelPath("link.txt"), b"EDITED")
+
+    assert (live / "real.txt").read_bytes() == b"TARGET"
+    assert (live / "link.txt").is_symlink()
+
+
+async def test_write_file_on_a_dangling_link_is_refused_not_materialized(
+    tmp_path: Path,
+) -> None:
+    """A write must not follow the link and create the target it dangles at."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"keep": b"K"})
+    live = snapshot_dir(tmp_path, community, server)
+    (live / "broken").symlink_to("nowhere")
+
+    with pytest.raises(SymlinkRefusedError):
+        await storage.write_file(community, server, RelPath("broken"), b"EDITED")
+
+    assert not (live / "nowhere").exists()
+
+
+async def test_rename_file_with_a_link_source_is_refused(tmp_path: Path) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"real.txt": b"TARGET"})
+    live = snapshot_dir(tmp_path, community, server)
+    (live / "link.txt").symlink_to("real.txt")
+
+    with pytest.raises(SymlinkRefusedError):
+        await storage.rename_file(
+            community, server, RelPath("link.txt"), RelPath("moved.txt")
+        )
+
+    assert (live / "real.txt").read_bytes() == b"TARGET"
+    assert (live / "link.txt").is_symlink()
+    assert not (live / "moved.txt").exists(follow_symlinks=False)
+
+
+async def test_rename_dir_with_a_link_source_is_refused(tmp_path: Path) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"real/inner": b"X"})
+    live = snapshot_dir(tmp_path, community, server)
+    (live / "alias").symlink_to("real")
+
+    with pytest.raises(SymlinkRefusedError):
+        await storage.rename_dir(community, server, RelPath("alias"), RelPath("moved"))
+
+    assert (live / "real" / "inner").read_bytes() == b"X"
+    assert (live / "alias").is_symlink()
+    assert not (live / "moved").exists(follow_symlinks=False)
+
+
+async def test_make_dir_onto_a_link_is_refused(tmp_path: Path) -> None:
+    """make_dir onto a dangling link must not follow it and materialize a dir."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"keep": b"K"})
+    live = snapshot_dir(tmp_path, community, server)
+    (live / "broken").symlink_to("nowhere")
+
+    with pytest.raises(SymlinkRefusedError):
+        await storage.make_dir(community, server, RelPath("broken"))
+
+    assert (live / "broken").is_symlink()
+    assert not (live / "nowhere").exists()
+
+
+async def test_retain_file_version_on_a_link_is_a_no_op(tmp_path: Path) -> None:
+    """A link has no content to retain, so the version ring stays empty."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"real.txt": b"TARGET"})
+    live = snapshot_dir(tmp_path, community, server)
+    (live / "link.txt").symlink_to("real.txt")
+
+    await storage.retain_file_version(community, server, RelPath("link.txt"))
+
+    assert (
+        await storage.list_file_versions(community, server, RelPath("link.txt")) == []
+    )
+
+
+async def test_a_leaf_link_occupies_its_name_so_a_rename_dest_never_clobbers(
+    tmp_path: Path,
+) -> None:
+    """The never-clobber probe reports a link's name occupied (issue #2429).
+
+    A rename destination is refused at the route by ``path_exists``; that a leaf
+    link -- working or dangling -- is reported occupied is what keeps a rename
+    from landing on the link's target.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"real.txt": b"TARGET"})
+    live = snapshot_dir(tmp_path, community, server)
+    (live / "link.txt").symlink_to("real.txt")
+    (live / "broken").symlink_to("nowhere")
+
+    assert await storage.path_exists(community, server, RelPath("link.txt"))
+    assert await storage.path_exists(community, server, RelPath("broken"))
+
+
 # --- READING a symlink dirent (issue #2418 review) --------------------------
 #
 # Describing the link rather than its target split the listing from the read: the
@@ -1139,3 +1335,124 @@ def test_restore_extract_preserves_file_mode_and_mtime(tmp_path: Path) -> None:
     stat = extracted.stat()
     assert stat.st_mode & 0o777 == 0o750
     assert int(stat.st_mtime) == mtime
+
+
+# --- a mutation's raw fs errnos become storage-domain outcomes (issue #2433) ---
+#
+# The read paths already model an over-long name as a miss (#2394); the MUTATIONS
+# leaked the raw errno as a 500. ``RelPath`` bounds no length, so every case below
+# is reachable from an ordinary client request (a long name pasted into a rename
+# dialog). The vocabulary the mutation side maps onto:
+#   over-long DESTINATION / component  -> NameTooLongError  (422 at the edge)
+#   over-long SOURCE (delete, rename-from) -> NotFoundError (404, matching reads)
+#   a non-directory occupying a needed parent / target -> PathOccupiedError (409)
+
+
+async def test_over_long_destination_on_a_mutation_is_name_too_long(
+    tmp_path: Path,
+) -> None:
+    """A destination past NAME_MAX is a modelled 422, never a bare ENAMETOOLONG 500."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"DATA", "d/inner": b"X"})
+    rel = RelPath(_TOO_LONG)
+
+    with pytest.raises(NameTooLongError):
+        await storage.write_file(community, server, rel, b"NEW")
+    with pytest.raises(NameTooLongError):
+        await storage.make_dir(community, server, rel)
+    with pytest.raises(NameTooLongError):
+        await storage.rename_file(community, server, RelPath("f"), rel)
+    with pytest.raises(NameTooLongError):
+        await storage.rename_dir(community, server, RelPath("d"), rel)
+
+
+async def test_over_long_source_on_a_mutation_is_a_miss(tmp_path: Path) -> None:
+    """A source past NAME_MAX names nothing, so delete / rename-from is a miss (404)."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"DATA"})
+    rel = RelPath(_TOO_LONG)
+
+    with pytest.raises(NotFoundError):
+        await storage.delete_file(community, server, rel)
+    with pytest.raises(NotFoundError):
+        await storage.delete_dir(community, server, rel)
+    with pytest.raises(NotFoundError):
+        await storage.rename_file(community, server, rel, RelPath("moved"))
+    with pytest.raises(NotFoundError):
+        await storage.rename_dir(community, server, rel, RelPath("moved"))
+
+
+async def test_retain_file_version_of_an_over_long_source_is_a_silent_no_op(
+    tmp_path: Path,
+) -> None:
+    """An over-long retain source names nothing to retain, so it is a no-op (#2433).
+
+    ``retain_file_version``'s contract already makes a missing file a no-op; an
+    over-long name is the same miss. It shares the ``_existing_file`` precheck the
+    other over-long SOURCES use, so it returns silently rather than raising the bare
+    ENAMETOOLONG ``Path.is_file`` throws (which would reach the edge as a 500). This
+    pins that no-op: against the pre-fix code the ``retain_file_version`` call raises
+    ENAMETOOLONG here instead of returning.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"DATA"})
+    rel = RelPath(_TOO_LONG)
+
+    # Returns silently (no raise) and captures nothing for the unnameable path.
+    await storage.retain_file_version(community, server, rel)
+    assert await storage.list_file_versions(community, server, rel) == []
+
+
+async def test_a_file_occupied_parent_on_a_mutation_is_a_conflict(
+    tmp_path: Path,
+) -> None:
+    """Writing / renaming under a name held by a regular file is a 409, not a 500.
+
+    ``regular/child`` reaches its leaf through ``regular``, a plain file; creating
+    the intermediate directory raises ENOTDIR (or EEXIST), which used to escape as
+    a bare 500. It is the never-clobber's 409 conflict: a non-directory is in the
+    way.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(
+        storage, community, server, {"regular": b"X", "g": b"G", "dd/i": b"I"}
+    )
+    under_file = RelPath("regular/child")
+
+    with pytest.raises(PathOccupiedError):
+        await storage.write_file(community, server, under_file, b"NEW")
+    with pytest.raises(PathOccupiedError):
+        await storage.make_dir(community, server, under_file)
+    with pytest.raises(PathOccupiedError):
+        await storage.rename_file(community, server, RelPath("g"), under_file)
+    with pytest.raises(PathOccupiedError):
+        await storage.rename_dir(community, server, RelPath("dd"), under_file)
+
+    # The blocking file and the untouched sources survive the refusals.
+    live = snapshot_dir(tmp_path, community, server)
+    assert (live / "regular").read_bytes() == b"X"
+    assert (live / "g").read_bytes() == b"G"
+    assert (live / "dd" / "i").read_bytes() == b"I"
+
+
+async def test_make_dir_onto_a_file_is_a_conflict(tmp_path: Path) -> None:
+    """``make_dir`` onto a name held by a file is a 409, not a raw EEXIST 500."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"occupied": b"X"})
+
+    with pytest.raises(PathOccupiedError):
+        await storage.make_dir(community, server, RelPath("occupied"))
+
+    # The file is left intact (the refused mkdir never clobbered it).
+    live = snapshot_dir(tmp_path, community, server)
+    assert (live / "occupied").read_bytes() == b"X"

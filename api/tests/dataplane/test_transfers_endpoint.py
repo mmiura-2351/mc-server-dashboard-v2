@@ -611,6 +611,64 @@ def test_snapshot_refused_when_edit_lands_during_upload_window_without_base_head
     assert _read_tar(asyncio.run(_read())) == {"k": b"edited-mid-upload"}
 
 
+def test_snapshot_refused_when_delete_prunes_store_during_upload_window(
+    tmp_path: Path,
+) -> None:
+    # Issue #921: a concurrent delete prunes the store DURING the upload window. The
+    # pre-stream guard passes (the worker declares the store's current base), then a
+    # delete removes the generation marker and discards the working set before the
+    # commit's re-check. The re-check reads generation 0 while expected_base is >= 1,
+    # so the commit raises PrunedStoreError — a distinct 409 ``deleted_during_upload``
+    # that names the concurrent delete, NOT the misleading ``stale_generation``
+    # ("generation advanced") the generic advance path uses.
+    import asyncio
+
+    worker = str(uuid.uuid4())
+
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    c, s = CommunityId(community), ServerId(server)
+
+    asyncio.run(_publish(storage, community, server, {"k": b"snap"}, publisher=worker))
+    base = asyncio.run(storage.current_generation(c, s))
+
+    # Simulate the concurrent delete landing in the upload window by hooking the
+    # guard's current_generation read: the FIRST call (the guard) returns the base,
+    # then prunes the store (as DeleteServer's retention prune does) so the marker is
+    # gone and the store reads generation 0 before the commit's re-check.
+    real_current_generation = storage.current_generation
+    pruned = False
+
+    async def _hooked_current_generation(
+        community_id: CommunityId, server_id: ServerId
+    ) -> int:
+        nonlocal pruned
+        value = await real_current_generation(community_id, server_id)
+        if not pruned:
+            pruned = True
+            await storage.prune_to_final_snapshot(c, s)
+        return value
+
+    storage.current_generation = _hooked_current_generation  # type: ignore[method-assign]
+
+    body = _tar_bytes({"k": b"in-flight"})
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"),
+            content=body,
+            headers={
+                **_auth(),
+                # The worker declares the CURRENT base — the pre-stream guard passes.
+                "X-Working-Set-Base-Generation": str(base),
+                "X-Worker-Id": worker,
+            },
+        )
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "deleted_during_upload"
+
+    storage.current_generation = real_current_generation  # type: ignore[method-assign]
+
+
 def test_snapshot_length_mismatch_is_not_published(tmp_path: Path) -> None:
     import asyncio
 
@@ -950,13 +1008,19 @@ def test_snapshot_partial_region_loss_report_is_bounded_and_truncated(
     community, server = _scope()
     healthy_mca = bytes(2 * 4096)  # a structurally valid empty region.
 
-    # Publish many region dirs, each with more region files than the per-directory
-    # name cap, so a drop of all-but-one from every dir exceeds BOTH caps and the
-    # surfaced list must be bounded and flagged truncated.
-    dir_count = transfers._MISSING_REGION_DIR_CAP + 5
-    names_per_dir = transfers._MISSING_REGION_NAME_CAP + 5
+    # Cross BOTH truncation caps with the smallest durable-write footprint: the
+    # publish fsyncs every staged region file, so only the files that actually push
+    # a count past a cap need to exist. One extra directory past the dir cap fires
+    # the dir cap; a single directory whose lost-name list runs past the name cap
+    # fires the name cap. Every other directory needs just two region files (keep
+    # one, drop one) to count as a partial loss.
+    dir_count = transfers._MISSING_REGION_DIR_CAP + 1  # one directory past the dir cap
+    # dim000 sorts first, so it lands inside the surfaced prefix; give it enough
+    # region files that dropping all-but-one leaves more lost names than the cap.
+    overflow_names = transfers._MISSING_REGION_NAME_CAP + 2
     prior: dict[str, bytes] = {}
     for d in range(dir_count):
+        names_per_dir = overflow_names if d == 0 else 2
         for n in range(names_per_dir):
             prior[f"world/dim{d:03d}/region/r.{n}.0.mca"] = healthy_mca
     asyncio.run(_publish(storage, community, server, prior))
@@ -992,17 +1056,19 @@ def test_snapshot_partial_region_loss_report_exactly_at_cap_not_truncated(
     community, server = _scope()
     healthy_mca = bytes(2 * 4096)
 
-    # Publish exactly the cap counts so no cap fires (strict > in the builder).
+    # Exactly the directory cap of partial-loss dirs so the dir cap does not fire
+    # (strict > in the builder). Each dir needs only two region files (keep one,
+    # drop one) to be a partial loss well under the name cap — the publish fsyncs
+    # every staged file, so no dir carries more region files than the boundary needs.
     dir_count = transfers._MISSING_REGION_DIR_CAP  # 20
-    names_per_dir = transfers._MISSING_REGION_NAME_CAP  # 50
     prior: dict[str, bytes] = {}
     for d in range(dir_count):
-        for n in range(names_per_dir):
+        for n in range(2):
             prior[f"world/dim{d:03d}/region/r.{n}.0.mca"] = healthy_mca
     asyncio.run(_publish(storage, community, server, prior))
 
-    # Keep only the first region file of each dir: exactly cap dirs, each with
-    # exactly (names_per_dir - 1) missing names — at the cap, not over.
+    # Keep only the first region file of each dir: exactly cap dirs, each a partial
+    # loss whose lost-name count stays under the name cap — at the dir cap, not over.
     kept = {f"world/dim{d:03d}/region/r.0.0.mca": healthy_mca for d in range(dir_count)}
     body = _tar_bytes(kept)
     with client:
@@ -1014,6 +1080,64 @@ def test_snapshot_partial_region_loss_report_exactly_at_cap_not_truncated(
     assert payload["reason"] == "working_set_incomplete"
     # Exactly at cap: all dirs are surfaced and truncated must be False.
     assert len(payload["directories"]) == dir_count
+    assert payload["truncated"] is False
+
+
+def test_snapshot_partial_region_loss_report_name_list_exactly_at_cap_not_truncated(
+    tmp_path: Path,
+) -> None:
+    import asyncio
+
+    from mc_server_dashboard_api.dataplane.api import transfers
+
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    healthy_mca = bytes(2 * 4096)
+
+    # Sibling to the dir-cap boundary test above, for the per-directory NAME cap:
+    # exactly _MISSING_REGION_NAME_CAP lost names in one directory must be reported
+    # in full and NOT truncated (the builder slices on a strict > against the name
+    # cap). dim000 sorts first and carries exactly the cap in lost names; a second
+    # dir keeps the report multi-directory while staying far under the dir cap, so
+    # only the name boundary is under test. Minimal fsync footprint (issue #2228):
+    # only dim000 stages more than two region files.
+    name_cap = transfers._MISSING_REGION_NAME_CAP  # 50
+    prior: dict[str, bytes] = {}
+    # dim000: one kept + exactly name_cap dropped == name_cap lost names (at the cap).
+    for n in range(name_cap + 1):
+        prior[f"world/dim000/region/r.{n}.0.mca"] = healthy_mca
+    # dim001: a second partial-loss dir (two files, drop one) so the report spans more
+    # than one directory yet stays far below the dir cap.
+    for n in range(2):
+        prior[f"world/dim001/region/r.{n}.0.mca"] = healthy_mca
+    asyncio.run(_publish(storage, community, server, prior))
+
+    # Keep only the first region file of each dir: dim000 loses exactly name_cap
+    # names, dim001 loses one.
+    kept = {
+        "world/dim000/region/r.0.0.mca": healthy_mca,
+        "world/dim001/region/r.0.0.mca": healthy_mca,
+    }
+    body = _tar_bytes(kept)
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"), content=body, headers=_auth()
+        )
+    assert resp.status_code == 422
+    payload = resp.json()
+    assert payload["reason"] == "working_set_incomplete"
+    # Two partial-loss dirs, far under the dir cap, so the dir cap does not fire.
+    assert len(payload["directories"]) == 2
+    dim000 = next(
+        entry
+        for entry in payload["directories"]
+        if entry["directory"] == "world/dim000/region"
+    )
+    # Exactly at the name cap: all name_cap lost names are surfaced in full.
+    assert len(dim000["missing"]) == name_cap
+    # Exactly at cap -> not over -> the report is NOT flagged truncated. An off-by-one
+    # at the name-cap slice (>= instead of >) would slice dim000's list at 50 and set
+    # this flag; the exact-50 pin catches it.
     assert payload["truncated"] is False
 
 

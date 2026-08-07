@@ -742,6 +742,49 @@ async def test_start_records_the_hydrated_generation_as_held() -> None:
     assert cp.recorded_held == [(WorkerId(worker), ServerId(server_id), 6)]
 
 
+async def test_start_records_the_worker_declared_generation_over_the_preread() -> None:
+    # Issue #2500: the Worker now declares on the hydrate's CommandResult the exact
+    # generation it served and stamped on disk. The API prefers that declaration over
+    # its own pre-dispatch store read (#2477), which can only understate — a publish
+    # landing between the read and the hydrate's completion leaves the pre-read behind.
+    # Here the Worker declares 9 while the store read at dispatch was 6; the recorded
+    # value must be the declared 9, so the next start sees what the Worker really holds.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    declared = CommandOutcome(status=CommandStatus.OK, held_generation=9)
+    cp = FakeControlPlane(place_to=WorkerId(worker), outcomes={"hydrate": declared})
+
+    await _start_server(uow, cp, store_generation=6)(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
+    assert cp.recorded_held == [(WorkerId(worker), ServerId(server_id), 9)]
+
+
+async def test_start_falls_back_to_the_preread_when_the_worker_declares_nothing() -> (
+    None
+):
+    # A Worker that predates the held_generation field (issue #2500) declares nothing on
+    # the hydrate result, so the API keeps #2477's behaviour: it records the generation
+    # it read just before dispatching. The pre-read stays as the conservative floor for
+    # a downlevel Worker; a declared value can only be >= it, so preferring the
+    # declaration when present and the pre-read otherwise is max(declared, pre_read).
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    silent = CommandOutcome(status=CommandStatus.OK, held_generation=None)
+    cp = FakeControlPlane(place_to=WorkerId(worker), outcomes={"hydrate": silent})
+
+    await _start_server(uow, cp, store_generation=6)(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
+    assert cp.recorded_held == [(WorkerId(worker), ServerId(server_id), 6)]
+
+
 async def test_start_records_nothing_as_held_when_the_hydrate_fails() -> None:
     # A failed hydrate leaves a torn/partial tree the Worker's own generation marker
     # does not claim either. Recording it would make a later start skip the hydrate
@@ -3539,6 +3582,54 @@ async def test_place_and_start_failed_start_outcome_keeps_assignment() -> None:
     assert stored.desired_state is DesiredState.RUNNING
     assert stored.assigned_worker_id == WorkerId(worker)
     assert cp.decremented == []
+
+
+async def test_place_and_start_invalid_state_outcome_keeps_assignment_and_raises() -> (
+    None
+):
+    # place_and_start has NO INVALID_STATE convergence arm (verified during #2476,
+    # pinned here per issue #2496): unlike __call__ and redispatch_start it never
+    # reads an INVALID_STATE start outcome as "already running" and manufactures
+    # observed=running. It treats it as a plain post-dispatch failure -- keep the
+    # assignment for a same-Worker redispatch (#101) and RAISE. Convergence to
+    # observed=running is deferred to the NEXT reconcile tick's redispatch_start
+    # path; adding a convergence arm here would spread the #2467 wedge class to a
+    # third site. Drive the outcome off the contract row so the pin tracks the code
+    # the Worker really answers for an already-running instance.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.UNKNOWN,
+            worker_id=None,
+        )
+    )
+    cp = FakeControlPlane(
+        place_to=WorkerId(worker),
+        outcomes={
+            "start": CommandOutcome(
+                status=worker_status("StartServer", "instance_running"),
+                message="already running",
+            )
+        },
+    )
+    with pytest.raises(CommandDispatchError):
+        await _start_server(uow, cp).place_and_start(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+    stored = uow.servers.by_id[ServerId(server_id)]
+    # No convergence arm: observed stays as-read (never manufactured to running),
+    # the assignment sticks, and the running intent stands.
+    assert stored.observed_state is ObservedState.UNKNOWN
+    assert stored.desired_state is DesiredState.RUNNING
+    assert stored.assigned_worker_id == WorkerId(worker)
+    assert cp.decremented == []
+    # The start command was reached (hydrate then start), so the assignment must
+    # stick for the same-Worker redispatch rather than unassign.
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
 
 
 async def test_redispatch_start_replays_launch_without_increment() -> None:

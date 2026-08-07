@@ -41,7 +41,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 
 from mc_server_dashboard_api.storage.adapters.failure_seam import (
@@ -53,8 +53,11 @@ from mc_server_dashboard_api.storage.domain.errors import (
     IncompleteTransferError,
     IntegrityCheckError,
     MissingRegionsError,
+    NameTooLongError,
     NotFoundError,
+    PathOccupiedError,
     PathTraversalError,
+    PrunedStoreError,
     SnapshotHandleError,
     StaleGenerationError,
     SymlinkRefusedError,
@@ -321,10 +324,15 @@ class FsStorage(Storage):
         same way for the same reason: its old justification for following an
         intermediate link was that the reads followed one.
 
-        The LEAF is deliberately still resolved, so this returns the realpath. That
-        is what leaves a mutation's leaf semantics (issue #2429) and
-        ``path_exists``'s "a link occupies its name" (issue #2426) exactly as they
-        are: a leaf link keeps whatever each caller does with it today.
+        Returns the LITERAL join rather than the realpath, so a mutation sees the
+        leaf DIRENT: a leaf link comes back as the link itself, which is what makes
+        ``target.is_symlink()`` meaningful and lets each mutation act on the dirent
+        the listing describes -- ``delete_file`` unlinks a leaf link, every other
+        mutation refuses it (issue #2429). Once the parent chain is clean the
+        literal join equals the realpath for every path whose leaf is not a link,
+        so this changes only the leaf-link case. (``path_exists`` calls this purely
+        for the containment / parent-symlink refusal and answers from its own
+        ``lexists`` on the unresolved join, so its leaf semantics are unaffected.)
         """
 
         literal, resolved = self._contained(base, rel_path)
@@ -332,7 +340,7 @@ class FsStorage(Storage):
             raise SymlinkRefusedError(
                 f"rel_path {rel_path.value!r} resolves through a symlink"
             )
-        return Path(resolved)
+        return Path(literal)
 
     def _safe_read_target(self, base: Path, rel_path: RelPath) -> Path:
         """A READ's resolve: containment, then refuse a symlink at ANY component.
@@ -648,6 +656,14 @@ class FsStorage(Storage):
             if expected_base is not None:
                 current = self._read_generation(server_root)
                 if current != expected_base:
+                    # ``current == 0`` with ``expected_base > 0`` is the unambiguous
+                    # signature of a concurrent delete/prune that removed the
+                    # generation marker under this same lock during the upload window
+                    # (issue #921): generation is monotonic, so it regressed to 0
+                    # rather than advancing. Raise the distinct subclass so the edge
+                    # names the concurrent delete instead of "generation advanced".
+                    if current == 0 and expected_base > 0:
+                        raise PrunedStoreError(expected_base, current)
                     raise StaleGenerationError(expected_base, current)
             # Missing-region gate (issue #854, #921 item 2): compare the staged
             # region-file set against the prior ``current/`` set INSIDE the lock so
@@ -1453,25 +1469,39 @@ class FsStorage(Storage):
             # atomic-publish path a snapshot uses: stage the file into an incoming/
             # dir, then flip ``current`` onto it.
             if not self._current_link(community_id, server_id).is_symlink():
-                self._publish_initial(community_id, server_id, rel_path, data)
+                # The write is a DESTINATION mutation even on the first-publish path,
+                # so an over-long name is the same 422 as below (issue #2433).
+                with _dest_mutation_errnos(rel_path):
+                    self._publish_initial(community_id, server_id, rel_path, data)
                 return
             current = self._current_dir(community_id, server_id)
             target = self._safe_target(current, rel_path)
-            # Refuse to overwrite a directory with file bytes (issue #542): the atomic
-            # rename onto an existing directory raises IsADirectoryError, so reject it
-            # as an invalid path rather than crashing.
-            if target.is_dir():
-                raise PathTraversalError(
-                    f"rel_path names a directory, not a file: {rel_path.value}"
-                )
-            # Capture the prior version BEFORE overwriting (Section 4.4/5), so a crash
-            # mid-write leaves both the old content and the retained version
-            # consistent.
-            if target.is_file():
-                self._capture_version(community_id, server_id, rel_path, target)
-            self._seam.reach(PublishPhase.AFTER_VERSION_CAPTURE)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            self._atomic_write(target, data)
+            # A leaf symlink is refused, never followed (issue #2429): a write must
+            # not edit the target the link points at, nor materialize a dangling
+            # link's target. Checked before the is_dir probe below, which follows it.
+            if _is_symlink(target):
+                raise SymlinkRefusedError(f"rel_path {rel_path.value!r} is a symlink")
+            # Translate the raw fs errnos this destination mutation can raise into
+            # the modelled storage outcomes (issue #2433): an over-long name is a 422
+            # (NameTooLongError), a non-directory blocking the parent is a 409
+            # (PathOccupiedError). The ``is_dir`` probe is inside the block because it
+            # is what raises ENAMETOOLONG for an over-long leaf.
+            with _dest_mutation_errnos(rel_path):
+                # Refuse to overwrite a directory with file bytes (issue #542): the
+                # atomic rename onto an existing directory raises IsADirectoryError, so
+                # reject it as an invalid path rather than crashing.
+                if target.is_dir():
+                    raise PathTraversalError(
+                        f"rel_path names a directory, not a file: {rel_path.value}"
+                    )
+                # Capture the prior version BEFORE overwriting (Section 4.4/5), so a
+                # crash mid-write leaves both the old content and the retained version
+                # consistent.
+                if target.is_file():
+                    self._capture_version(community_id, server_id, rel_path, target)
+                self._seam.reach(PublishPhase.AFTER_VERSION_CAPTURE)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                self._atomic_write(target, data)
             # Bump the generation on this authoritative edit (issue #889): an in-place
             # write replaces the published world just like a snapshot/restore, so it
             # advances the store generation and stamps the API_EDIT_PUBLISHER sentinel.
@@ -1538,7 +1568,23 @@ class FsStorage(Storage):
         with self._server_lock(community_id, server_id):
             current = self._current_dir(community_id, server_id)
             target = self._safe_target(current, rel_path)
-            if not target.is_file():
+            # A leaf symlink is the one mutation a link supports besides listing
+            # (issue #2429): unlink the LINK dirent itself -- working, dangling and
+            # looping alike -- never the target it points at. No version is
+            # captured: a link has no Port-readable content to retain (the read
+            # refuses it), so rollback is asymmetric here (see the Port docs).
+            # Checked before ``_existing_file``, which follows the link.
+            if _is_symlink(target):
+                target.unlink()
+                _fsync_dir(target.parent)
+                self._bump_marker(
+                    self._server_root(community_id, server_id), API_EDIT_PUBLISHER
+                )
+                return
+            # The path is a SOURCE, so an over-long name is a miss like a read's
+            # (issue #2433): ``_existing_file`` answers False rather than raising
+            # ENAMETOOLONG, so it takes the not-found path below instead of a 500.
+            if not _existing_file(target):
                 raise NotFoundError(f"file not found: {rel_path.value}")
             # Capture the content BEFORE removing it (Section 5), so a delete is
             # reversible by rollback exactly like an overwrite is.
@@ -1570,7 +1616,15 @@ class FsStorage(Storage):
         with self._server_lock(community_id, server_id):
             current = self._current_dir(community_id, server_id)
             target = self._safe_target(current, rel_path)
-            if not target.is_dir():
+            # A leaf symlink is never a directory dirent under lstat semantics,
+            # matching the listing's ``is_dir=False`` (issue #2429): a link to a
+            # directory misses here rather than rmtree-ing the subtree it points at.
+            # Checked before ``_existing_dir``, which follows the link.
+            if _is_symlink(target):
+                raise NotFoundError(f"directory not found: {rel_path.value}")
+            # A SOURCE path, so an over-long name is a miss (issue #2433):
+            # ``_existing_dir`` answers False rather than raising ENAMETOOLONG.
+            if not _existing_dir(target):
                 raise NotFoundError(f"directory not found: {rel_path.value}")
             # rmtree is per-member unlinks — not crash-atomic (#1608).
             shutil.rmtree(target)
@@ -1607,10 +1661,19 @@ class FsStorage(Storage):
             current = self._current_dir(community_id, server_id)
             src = self._safe_target(current, from_path)
             dst = self._safe_target(current, to_path)
-            if not src.is_file():
+            # A leaf symlink SOURCE is refused, never followed (issue #2429): a
+            # rename must not move the target the link points at. Checked before
+            # ``_existing_file``, which follows the link. (A DESTINATION that names
+            # a link is refused a step earlier by the route's never-clobber probe.)
+            if _is_symlink(src):
+                raise SymlinkRefusedError(f"rel_path {from_path.value!r} is a symlink")
+            # ``from_path`` is a SOURCE (over-long -> miss), ``to_path`` a DESTINATION
+            # (over-long -> 422, a file-occupied parent -> 409) — issue #2433.
+            if not _existing_file(src):
                 raise NotFoundError(f"file not found: {from_path.value}")
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            os.rename(src, dst)
+            with _dest_mutation_errnos(to_path):
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                os.rename(src, dst)
             _fsync_dir(src.parent)
             if dst.parent != src.parent:
                 _fsync_dir(dst.parent)
@@ -1645,12 +1708,21 @@ class FsStorage(Storage):
             current = self._current_dir(community_id, server_id)
             src = self._safe_target(current, from_path)
             dst = self._safe_target(current, to_path)
-            if not src.is_dir():
+            # A leaf symlink SOURCE is refused, never followed (issue #2429): a
+            # rename must not move the directory the link points at. Checked before
+            # ``_existing_dir``, which follows the link. (A DESTINATION that names a
+            # link is refused a step earlier by the route's never-clobber probe.)
+            if _is_symlink(src):
+                raise SymlinkRefusedError(f"rel_path {from_path.value!r} is a symlink")
+            # ``from_path`` is a SOURCE (over-long -> miss), ``to_path`` a DESTINATION
+            # (over-long -> 422, a file-occupied parent -> 409) — issue #2433.
+            if not _existing_dir(src):
                 raise NotFoundError(f"directory not found: {from_path.value}")
-            # Ensure parent directories exist for the destination (e.g. renaming
-            # ``a/b`` to ``x/y/z`` needs ``x/y`` to exist).
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            os.rename(src, dst)
+            with _dest_mutation_errnos(to_path):
+                # Ensure parent directories exist for the destination (e.g. renaming
+                # ``a/b`` to ``x/y/z`` needs ``x/y`` to exist).
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                os.rename(src, dst)
             _fsync_dir(src.parent)
             if dst.parent != src.parent:
                 _fsync_dir(dst.parent)
@@ -1680,7 +1752,18 @@ class FsStorage(Storage):
         with self._server_lock(community_id, server_id):
             current = self._current_dir(community_id, server_id)
             target = self._safe_target(current, rel_path)
-            target.mkdir(parents=True, exist_ok=True)
+            # A leaf symlink is refused, never followed (issue #2429): make_dir must
+            # not materialize the directory a dangling link points at, nor treat a
+            # link-to-a-directory as an idempotent hit. Checked before the mkdir,
+            # which follows the link.
+            if _is_symlink(target):
+                raise SymlinkRefusedError(f"rel_path {rel_path.value!r} is a symlink")
+            # A DESTINATION mutation (issue #2433): an over-long name is a 422
+            # (NameTooLongError) and a non-directory already at the target/an ancestor
+            # is a 409 (PathOccupiedError, EEXIST/ENOTDIR) — matching the never-clobber
+            # 409. An existing DIRECTORY stays idempotent (``exist_ok=True``).
+            with _dest_mutation_errnos(rel_path):
+                target.mkdir(parents=True, exist_ok=True)
             _fsync_dir(target.parent)
             # Authoritative edit -> bump the generation (issue #889). An empty
             # directory arguably adds no world content, but bumping uniformly across
@@ -1781,7 +1864,16 @@ class FsStorage(Storage):
             except NotFoundError:
                 return  # never-published server: nothing authoritative to retain
             target = self._safe_target(current, rel_path)
-            if not target.is_file():
+            # A leaf symlink has no Port-readable content to retain (issue #2429):
+            # a no-op, matching the read refusal, checked before ``_existing_file``
+            # (which follows the link and would capture the target's bytes).
+            if _is_symlink(target):
+                return
+            # A SOURCE read of the authoritative copy: an over-long name names
+            # nothing to retain, so it is the same no-op as a missing file rather than
+            # a raw ENAMETOOLONG (issue #2433), keeping this sibling's over-long answer
+            # consistent with the other mutations' 404-for-a-source.
+            if not _existing_file(target):
                 return  # no authoritative copy yet: nothing to retain
             versions = self._versions_dir(community_id, server_id, rel_path)
             if self._matches_newest_version(versions, target):
@@ -1926,9 +2018,9 @@ def _crosses_a_symlink_parent(literal: str) -> bool:
     plain path never pays for it; the paths that do are the ones that carry a
     symlink, which only operator SSH can create.
 
-    Splitting leaf from parent is what keeps a mutation's leaf semantics (issue
-    #2429) and ``path_exists``'s "a link occupies its name" (issue #2426) intact
-    while the parent chain stops being followed.
+    Splitting leaf from parent is what lets a mutation act on a leaf link as the
+    dirent it is (issue #2429) and keeps ``path_exists``'s "a link occupies its
+    name" (issue #2426) intact while the parent chain stops being followed.
     """
 
     parent = os.path.dirname(literal)
@@ -2105,6 +2197,92 @@ _NOT_A_READABLE_FILE = frozenset(
 # which is how a path naming a plain file reports, the miss the ``is_dir()``
 # pre-check folded together with a vanished directory (issue #2394).
 _NOT_A_LISTABLE_DIR = _NOT_A_READABLE_FILE - {errno.EISDIR}
+
+
+def _is_symlink(path: Path) -> bool:
+    """``Path.is_symlink`` where a name the fs cannot hold is absent, not a raise.
+
+    Sibling of :func:`_existing_file` (issues #2429, #2433). The leaf-symlink check
+    every mutation runs before its over-long handling must not itself raise
+    ENAMETOOLONG on a name past ``NAME_MAX``: such a name holds nothing, a symlink
+    included, so it is simply not a link and the mutation's existing over-long path
+    still decides it (a miss for a source, :class:`NameTooLongError` for a
+    destination). ``lstat`` never follows the leaf, and an intermediate symlink is
+    already refused by :meth:`FsStorage._safe_target`, so ENAMETOOLONG is the only
+    fold that matters here; every other ``OSError`` (EACCES / EIO) still propagates.
+    """
+
+    try:
+        return path.is_symlink()
+    except OSError as exc:
+        if exc.errno in _NOT_A_READABLE_FILE:
+            return False
+        raise
+
+
+def _existing_file(path: Path) -> bool:
+    """``Path.is_file`` where a name the fs cannot hold is absent, not a raise (#2433).
+
+    A mutation's SOURCE precheck (delete, rename-from). ``is_file`` already answers
+    False for a gone / non-directory-reached / looping path, but pathlib RE-RAISES
+    ENAMETOOLONG — so an over-long source leaked as a 500 where a read answers a
+    clean miss (#2394). Folding the same ``_NOT_A_READABLE_FILE`` set here makes the
+    source precheck agree with the reads: a name that long can hold nothing, so it is
+    absent. Every other ``OSError`` (EACCES / EIO — a path that DOES exist) still
+    propagates, exactly as it does on the read side.
+    """
+
+    try:
+        return path.is_file()
+    except OSError as exc:
+        if exc.errno in _NOT_A_READABLE_FILE:
+            return False
+        raise
+
+
+def _existing_dir(path: Path) -> bool:
+    """``Path.is_dir`` sibling of :func:`_existing_file` for a directory source
+    (issue #2433)."""
+
+    try:
+        return path.is_dir()
+    except OSError as exc:
+        if exc.errno in _NOT_A_READABLE_FILE:
+            return False
+        raise
+
+
+@contextlib.contextmanager
+def _dest_mutation_errnos(rel_path: RelPath) -> Iterator[None]:
+    """Translate a DESTINATION mutation's raw fs errnos into storage outcomes (#2433).
+
+    A mutation creating or descending to ``rel_path`` (write, make_dir, a rename
+    destination) can raise, on an ordinary client request that ``RelPath`` did not
+    bound:
+
+    - ENAMETOOLONG — the name the caller GAVE is past the fs ``NAME_MAX``. Unlike a
+      read's over-long name (a miss, #2394), a destination the mutation cannot create
+      is a client error: :class:`NameTooLongError` (the seam maps it to 422).
+    - EEXIST / ENOTDIR — a regular file already sits at the target, or an ancestor is
+      a file the path has to descend through. Something is in the way, so it is the
+      never-clobber's conflict: :class:`PathOccupiedError` (the seam maps it to 409).
+
+    Every other ``OSError`` propagates unchanged (EACCES / EIO name a real failure,
+    not a client-supplied bad name), mirroring the read-side filter's discipline.
+    """
+
+    try:
+        yield
+    except OSError as exc:
+        if exc.errno == errno.ENAMETOOLONG:
+            raise NameTooLongError(
+                f"rel_path {rel_path.value!r} names an over-long destination"
+            ) from exc
+        if exc.errno in (errno.EEXIST, errno.ENOTDIR):
+            raise PathOccupiedError(
+                f"rel_path {rel_path.value!r} is blocked by a non-directory component"
+            ) from exc
+        raise
 
 
 def _open_readable_sync(path: Path, not_found: str) -> io.BufferedReader:

@@ -137,6 +137,38 @@ func TestLoadEnvOverride(t *testing.T) {
 	}
 }
 
+// TestAdvertisedCASystemSentinelWireValue pins the operator-facing wire value
+// of the SystemRootsCA sentinel: the documented literal an operator writes into
+// tunnel.tls.advertised_ca_file is "system" (RELAY.md Section, config.go
+// SystemRootsCA), and the relay's resolver (cmd/relay advertisedTunnelCA)
+// switches on that exact string to advertise an empty CA bundle. The literal
+// "system" is written here on purpose, not via the SystemRootsCA constant:
+// a rename of the constant's *value* (e.g. "system" -> "system-roots") would
+// keep every constant-based test green while silently breaking every operator
+// config that still says "system". This test reddens on such a rename.
+func TestAdvertisedCASystemSentinelWireValue(t *testing.T) {
+	body := `
+[api]
+grpc_endpoint = "api:50051"
+credential = "secret"
+[api.tls]
+insecure = true
+[tunnel]
+public_endpoint = "relay.example.com:25665"
+[tunnel.tls]
+cert_file = "/tls/cert.pem"
+key_file = "/tls/key.pem"
+advertised_ca_file = "system"
+`
+	cfg, err := Load(writeTOML(t, body), noEnv)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Tunnel.TLS.AdvertisedCAFile != SystemRootsCA {
+		t.Errorf("parsing the documented operator value %q did not resolve to the SystemRootsCA sentinel %q", "system", SystemRootsCA)
+	}
+}
+
 func TestValidateMissingRequired(t *testing.T) {
 	if _, err := Load("", noEnv); err == nil {
 		t.Error("empty config should fail validation")

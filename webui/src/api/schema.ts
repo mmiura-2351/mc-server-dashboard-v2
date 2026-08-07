@@ -984,13 +984,31 @@ export interface paths {
         /**
          * Download Client Modpack
          * @description Download a server's client mods as a zip (plugin:read, issue #1308).
+         *
+         *     **Probe** (issue #2560): a ``HEAD`` answers with the ``GET``'s status and
+         *     headers and no body, so a client learns the modpack is available under the
+         *     same ``plugin:read`` gate without building it. The zip is assembled on the fly
+         *     from a variable jar set, so its size is not known ahead of the stream: neither
+         *     the ``GET`` nor the probe declares a ``Content-Length``, and the probe learns
+         *     existence rather than size.
          */
         get: operations["download_client_modpack_api_communities__community_id__servers__server_id__client_mods_download_get"];
         put?: never;
         post?: never;
         delete?: never;
         options?: never;
-        head?: never;
+        /**
+         * Download Client Modpack
+         * @description Download a server's client mods as a zip (plugin:read, issue #1308).
+         *
+         *     **Probe** (issue #2560): a ``HEAD`` answers with the ``GET``'s status and
+         *     headers and no body, so a client learns the modpack is available under the
+         *     same ``plugin:read`` gate without building it. The zip is assembled on the fly
+         *     from a variable jar set, so its size is not known ahead of the stream: neither
+         *     the ``GET`` nor the probe declares a ``Content-Length``, and the probe learns
+         *     existence rather than size.
+         */
+        head: operations["download_client_modpack_api_communities__community_id__servers__server_id__client_mods_download_head"];
         patch?: never;
         trace?: never;
     };
@@ -2029,7 +2047,13 @@ export interface paths {
          *     serialization the bump uses and refuses (409 ``stale_generation``, the same
          *     contract as the pre-stream refusal) when it advanced past that base. The staging
          *     is discarded and the newer ``current`` is kept, so the Worker re-bases on its next
-         *     start — the same convergence as the pre-stream refusal.
+         *     start — the same convergence as the pre-stream refusal. One re-check outcome is
+         *     NOT an advance: a concurrent delete's retention prune (issue #777) can run under
+         *     the same per-server lock during the upload window and remove the generation
+         *     marker, so the re-check reads generation 0 while ``expected_base`` is >= 1 — the
+         *     store REGRESSED. That case is refused with a DISTINCT 409 ``deleted_during_upload``
+         *     (issue #921) so the outcome names the concurrent delete rather than the misleading
+         *     "generation advanced"; the staging is discarded and the delete wins.
          *
          *     An assignment-aware fence (issue #1703) adds a second input: the server's
          *     currently-assigned worker id. The pre-stream guard ALLOWS a stale-base publish
@@ -2182,13 +2206,43 @@ export interface paths {
          *     Validates that ``filename`` matches the stored filename (404 otherwise). The
          *     response declares the pack's exact size as ``Content-Length``, which the game
          *     client shows as download progress.
+         *
+         *     **Probe** (issue #2632): a ``HEAD`` answers with the ``GET``'s status and
+         *     headers and no body, so a resumable-download client — this is the
+         *     unauthenticated URL a Minecraft client fetches at join time, and it declares a
+         *     ``Content-Length``, so it has a real reason to probe first — learns the size,
+         *     from the store's size probe below, without starting a transfer. The route
+         *     offers no ``Accept-Ranges``, so the probe reports the size but not resumption.
+         *     The ``200`` carries the same ``public, max-age=3600, immutable`` the ``GET``
+         *     declares, and the size-probe ``404`` its ``no-store``, so an edge (the one URL
+         *     a shared cache demonstrably stores, issues #2588 / #2589) does not cache a
+         *     probe differently from the download.
          */
         get: operations["public_download_resource_pack_api_public_resource_packs__resource_pack_id___filename__get"];
         put?: never;
         post?: never;
         delete?: never;
         options?: never;
-        head?: never;
+        /**
+         * Public Download Resource Pack
+         * @description Public download endpoint for Minecraft clients (no auth, issue #1176).
+         *
+         *     Validates that ``filename`` matches the stored filename (404 otherwise). The
+         *     response declares the pack's exact size as ``Content-Length``, which the game
+         *     client shows as download progress.
+         *
+         *     **Probe** (issue #2632): a ``HEAD`` answers with the ``GET``'s status and
+         *     headers and no body, so a resumable-download client — this is the
+         *     unauthenticated URL a Minecraft client fetches at join time, and it declares a
+         *     ``Content-Length``, so it has a real reason to probe first — learns the size,
+         *     from the store's size probe below, without starting a transfer. The route
+         *     offers no ``Accept-Ranges``, so the probe reports the size but not resumption.
+         *     The ``200`` carries the same ``public, max-age=3600, immutable`` the ``GET``
+         *     declares, and the size-probe ``404`` its ``no-store``, so an edge (the one URL
+         *     a shared cache demonstrably stores, issues #2588 / #2589) does not cache a
+         *     probe differently from the download.
+         */
+        head: operations["public_download_resource_pack_api_public_resource_packs__resource_pack_id___filename__head"];
         patch?: never;
         trace?: never;
     };
@@ -2266,13 +2320,30 @@ export interface paths {
          *
          *     The response declares the pack's exact size as ``Content-Length``, so a client
          *     can show download progress and refuse an over-cap pack up front.
+         *
+         *     **Probe** (issue #2560): a ``HEAD`` answers with the ``GET``'s status and
+         *     headers and no body, so a client learns the size — from the store's size probe
+         *     below — without starting a transfer. The route offers no ``Accept-Ranges``, so
+         *     the probe reports the size but not resumption.
          */
         get: operations["download_resource_pack_api_resource_packs__resource_pack_id__download_get"];
         put?: never;
         post?: never;
         delete?: never;
         options?: never;
-        head?: never;
+        /**
+         * Download Resource Pack
+         * @description Download a resource pack (authenticated, issue #1176).
+         *
+         *     The response declares the pack's exact size as ``Content-Length``, so a client
+         *     can show download progress and refuse an over-cap pack up front.
+         *
+         *     **Probe** (issue #2560): a ``HEAD`` answers with the ``GET``'s status and
+         *     headers and no body, so a client learns the size — from the store's size probe
+         *     below — without starting a transfer. The route offers no ``Accept-Ranges``, so
+         *     the probe reports the size but not resumption.
+         */
+        head: operations["download_resource_pack_api_resource_packs__resource_pack_id__download_head"];
         patch?: never;
         trace?: never;
     };
@@ -6207,6 +6278,38 @@ export interface operations {
             };
         };
     };
+    download_client_modpack_api_communities__community_id__servers__server_id__client_mods_download_head: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     send_server_command_api_communities__community_id__servers__server_id__command_post: {
         parameters: {
             query?: never;
@@ -7966,6 +8069,38 @@ export interface operations {
             };
         };
     };
+    public_download_resource_pack_api_public_resource_packs__resource_pack_id___filename__head: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                resource_pack_id: string;
+                filename: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     readyz_api_readyz_get: {
         parameters: {
             query?: never;
@@ -8069,6 +8204,37 @@ export interface operations {
         };
     };
     download_resource_pack_api_resource_packs__resource_pack_id__download_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                resource_pack_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    download_resource_pack_api_resource_packs__resource_pack_id__download_head: {
         parameters: {
             query?: never;
             header?: never;

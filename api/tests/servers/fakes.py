@@ -229,6 +229,15 @@ class FakeFileStore(FileStore):
         if seed_eula:
             self.files["eula.txt"] = b"eula=true\n"
         self.writes: list[tuple[str, bytes]] = []
+        # Ordered log of the at-rest Storage operations, in the same shape
+        # FakeLifecycleLock records: aliasing this onto a lock's ``events``
+        # puts both fakes on one timeline, so a test can assert the mutation
+        # (or the at-rest resolve read a no-op op reduces to) happened strictly
+        # between acquire and release -- the "around its work" the lock exists
+        # for (issue #2546, extending #2515). Appended at method entry, never
+        # reassigned, so an aliased list is only ever mutated (the #2515
+        # aliasing hazard).
+        self.events: list[tuple[ServerId, str]] = []
         # When set, write_file raises to exercise the create seed-failure path
         # (issue #243): the committed row stays, surfaced as a mapped 503.
         self._fail_write = fail_write
@@ -258,6 +267,7 @@ class FakeFileStore(FileStore):
     async def list_dir(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> list[FileEntry]:
+        self.events.append((server_id, "list-dir"))
         prefix = "" if rel_path == "." else rel_path.rstrip("/") + "/"
         seen: set[str] = set()
         entries: list[FileEntry] = []
@@ -293,6 +303,7 @@ class FakeFileStore(FileStore):
         rel_path: str,
         content: bytes,
     ) -> None:
+        self.events.append((server_id, "write-file"))
         if self._fail_write:
             raise RuntimeError("forced storage write failure")
         self.files[rel_path] = content
@@ -306,11 +317,13 @@ class FakeFileStore(FileStore):
     async def delete_file(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> None:
+        self.events.append((server_id, "delete-file"))
         self.files.pop(rel_path, None)
 
     async def delete_dir(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> None:
+        self.events.append((server_id, "delete-dir"))
         return None
 
     async def rename_file(
@@ -321,6 +334,7 @@ class FakeFileStore(FileStore):
         from_path: str,
         to_path: str,
     ) -> None:
+        self.events.append((server_id, "rename-file"))
         if from_path not in self.files:
             raise ServerFileNotFoundError(str(server_id.value))
         self.files[to_path] = self.files.pop(from_path)
@@ -338,6 +352,7 @@ class FakeFileStore(FileStore):
     async def make_dir(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> None:
+        self.events.append((server_id, "make-dir"))
         return None
 
     def download_dir(
@@ -395,6 +410,7 @@ class FakeFileStore(FileStore):
         rel_path: str,
         version_id: str,
     ) -> None:
+        self.events.append((server_id, "rollback"))
         return None
 
 
@@ -412,6 +428,12 @@ class FakeClock(Clock):
 class FakeServerRepository(ServerRepository):
     def __init__(self) -> None:
         self.by_id: dict[ServerId, Server] = {}
+        # Ordered log of the row writes a lock-gated use case makes, in the same
+        # shape FakeLifecycleLock records: aliasing this onto a lock's ``events``
+        # puts both fakes on one timeline, so a test can assert the flip / update
+        # / delete happened strictly between acquire and release (issue #2546,
+        # extending #2515). Appended at method entry, never reassigned.
+        self.events: list[tuple[ServerId, str]] = []
 
     @staticmethod
     def _copy(server: Server) -> Server:
@@ -511,6 +533,7 @@ class FakeServerRepository(ServerRepository):
         # loaded before the edit -- clobber a fresher row, which is the very
         # thing the #216 freshest-wins guard exists to prevent. A missing id
         # matches no row: a no-op, not an insert.
+        self.events.append((server.id, "update-row"))
         current = self.by_id.get(server.id)
         if current is None:
             return
@@ -546,6 +569,7 @@ class FakeServerRepository(ServerRepository):
         expected_from: DesiredState,
         require_unassigned: bool = False,
     ) -> bool:
+        self.events.append((server.id, "flip"))
         current = self.by_id.get(server.id)
         if current is None or current.desired_state is not expected_from:
             return False
@@ -712,6 +736,7 @@ class FakeServerRepository(ServerRepository):
         return {sid for sid in server_ids if sid in self.by_id}
 
     async def delete(self, server_id: ServerId) -> None:
+        self.events.append((server_id, "delete-server"))
         self.by_id.pop(server_id, None)
 
 
@@ -731,6 +756,9 @@ class FakeBackupRepository(BackupRepository):
         # Ordered log of the metadata-row deletions, in the same shape
         # FakeLifecycleLock records; see FakeBackupArchiveStore.events.
         self.events: list[tuple[ServerId, str]] = []
+        # Ordered log of the ids ``get_by_id`` was called for, so a test can pin
+        # that the backup download resolves the row a single time (issue #2456).
+        self.get_by_id_calls: list[BackupId] = []
 
     @staticmethod
     def _copy(backup: Backup) -> Backup:
@@ -746,6 +774,7 @@ class FakeBackupRepository(BackupRepository):
         self.by_id[backup.id] = self._copy(backup)
 
     async def get_by_id(self, backup_id: BackupId) -> Backup | None:
+        self.get_by_id_calls.append(backup_id)
         backup = self.by_id.get(backup_id)
         return None if backup is None else self._copy(backup)
 
@@ -913,6 +942,12 @@ class FakeGroupRepository(GroupRepository):
 class FakePluginRepository(PluginRepository):
     def __init__(self) -> None:
         self.by_id: dict[PluginId, ServerPlugin] = {}
+        # Ordered log of the plugin-row inserts, in the same shape
+        # FakeLifecycleLock records: aliasing this onto a lock's ``events`` puts
+        # both fakes on one timeline, so the import-plugins test can assert the
+        # row insert happened strictly between acquire and release (issue #2546,
+        # extending #2515). Appended at method entry, never reassigned.
+        self.events: list[tuple[ServerId, str]] = []
 
     @staticmethod
     def _copy(plugin: ServerPlugin) -> ServerPlugin:
@@ -939,6 +974,7 @@ class FakePluginRepository(PluginRepository):
         self.by_id[plugin.id] = self._copy(plugin)
 
     async def add(self, plugin: ServerPlugin) -> None:
+        self.events.append((plugin.server_id, "add-plugin"))
         self.by_id[plugin.id] = self._copy(plugin)
 
     async def get_by_id(
@@ -1552,6 +1588,7 @@ class FakeBackupArchiveStore(BackupArchiveStore):
     async def create_from_current(
         self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
     ) -> None:
+        self.events.append((server_id, "create-archive"))
         if self._missing:
             raise BackupNotFoundError(str(server_id.value))
         self.archives.add(storage_ref)
@@ -1571,6 +1608,7 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         storage_ref: str,
         force: bool = False,
     ) -> int:
+        self.events.append((server_id, "restore"))
         if storage_ref not in self.archives:
             raise BackupNotFoundError(storage_ref)
         self.restore_calls.append((server_id, storage_ref, force))
@@ -1608,6 +1646,7 @@ class FakeBackupArchiveStore(BackupArchiveStore):
     ) -> None:
         # The DeleteServer reclaim path (#777). ``pack_fails`` makes it raise so a
         # test can assert the delete aborts with the working set intact.
+        self.events.append((server_id, "prune-final"))
         if self.pack_fails:
             raise RuntimeError("pack failed")
         if self.on_prune is not None:
@@ -1660,7 +1699,7 @@ class FakeCatalogProvider(CatalogProvider):
 
     Stores projects, versions, and downloadable file bytes. Search returns all
     seeded projects (no actual text matching). ``unavailable`` makes every call
-    raise :class:`CatalogUnavailableError`.
+    raise :class:`CatalogUpstreamFailedError`.
     """
 
     def __init__(self, *, unavailable: bool = False) -> None:
@@ -1696,11 +1735,11 @@ class FakeCatalogProvider(CatalogProvider):
         offset: int = 0,
     ) -> CatalogSearchResponse:
         from mc_server_dashboard_api.servers.domain.errors import (
-            CatalogUnavailableError,
+            CatalogUpstreamFailedError,
         )
 
         if self._unavailable:
-            raise CatalogUnavailableError("fake unavailable")
+            raise CatalogUpstreamFailedError("fake unavailable")
         # Deduplicate by project_id (seeded twice: by id and slug).
         seen: set[str] = set()
         hits: list[CatalogSearchResult] = []
@@ -1729,11 +1768,11 @@ class FakeCatalogProvider(CatalogProvider):
     async def get_project(self, project_id_or_slug: str) -> CatalogProject:
         from mc_server_dashboard_api.servers.domain.errors import (
             CatalogProjectNotFoundError,
-            CatalogUnavailableError,
+            CatalogUpstreamFailedError,
         )
 
         if self._unavailable:
-            raise CatalogUnavailableError("fake unavailable")
+            raise CatalogUpstreamFailedError("fake unavailable")
         project = self.projects.get(project_id_or_slug)
         if project is None:
             raise CatalogProjectNotFoundError(project_id_or_slug)
@@ -1747,21 +1786,21 @@ class FakeCatalogProvider(CatalogProvider):
         game_versions: list[str] | None = None,
     ) -> list[CatalogVersion]:
         from mc_server_dashboard_api.servers.domain.errors import (
-            CatalogUnavailableError,
+            CatalogUpstreamFailedError,
         )
 
         if self._unavailable:
-            raise CatalogUnavailableError("fake unavailable")
+            raise CatalogUpstreamFailedError("fake unavailable")
         return self.versions.get(project_id_or_slug, [])
 
     async def download_file(self, url: str) -> bytes:
         from mc_server_dashboard_api.servers.domain.errors import (
             CatalogProjectNotFoundError,
-            CatalogUnavailableError,
+            CatalogUpstreamFailedError,
         )
 
         if self._unavailable:
-            raise CatalogUnavailableError("fake unavailable")
+            raise CatalogUpstreamFailedError("fake unavailable")
         self.downloads.append(url)
         content = self.file_bytes.get(url)
         if content is None:

@@ -13,6 +13,7 @@ import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
 import { copyToClipboard } from "../clipboard.ts";
 import { Modal } from "../components/Modal.tsx";
+import { Popover } from "../components/Popover.tsx";
 import { ResizableTable } from "../components/ResizableColumns.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { shortId } from "../format.ts";
@@ -28,10 +29,13 @@ import {
 } from "./lifecycleErrors.ts";
 import {
   actionApplies,
-  KNOWN,
+  bucketOf,
   normalizeState,
   type ObservedState,
+  STATE_BUCKETS,
+  type StateBucket,
   statePill,
+  statesForBucket,
 } from "./serverState.ts";
 import { useFilterParams } from "./urlState.ts";
 import { serversKey, useCommunityEvents } from "./useCommunityEvents.ts";
@@ -128,17 +132,32 @@ function toggleSort(current: SortPref, field: SortField): SortPref {
 // URL-driven filter keys for the dashboard (#1123).
 const FILTER_KEYS = ["search", "state"] as const;
 
-// Apply client-side filtering to the server list.
+// Parse the `state` URL param into the selected buckets, keeping only tokens
+// that are current bucket keys (STATE_BUCKETS is the single source). A stale
+// bookmark carrying a pre-#2239 raw state name (e.g. `state=starting`) thus
+// selects nothing rather than counting a phantom bucket over an empty list
+// (#2668). Canonical bucket order is preserved.
+function parseStateBuckets(stateFilter: string): StateBucket[] {
+  const tokens = stateFilter ? stateFilter.split(",").filter(Boolean) : [];
+  return STATE_BUCKETS.filter((bucket) => tokens.includes(bucket));
+}
+
+// Apply client-side filtering to the server list. The `state` param holds a
+// comma-separated set of bucket keys (#2239); a server matches when the bucket
+// of its observed state is selected. An empty set shows all servers.
 function filterServers(
   servers: ServerResponse[],
   search: string,
   stateFilter: string,
 ): ServerResponse[] {
   const needle = search.trim().toLowerCase();
-  const states = stateFilter ? stateFilter.split(",").filter(Boolean) : [];
+  const buckets = new Set(parseStateBuckets(stateFilter));
   return servers.filter((s) => {
     if (needle && !s.name.toLowerCase().includes(needle)) return false;
-    if (states.length > 0 && !states.includes(normalizeState(s.observed_state)))
+    if (
+      buckets.size > 0 &&
+      !buckets.has(bucketOf(normalizeState(s.observed_state)))
+    )
       return false;
     return true;
   });
@@ -415,24 +434,26 @@ function DashboardFilterBar({
   onSortChange: (next: SortPref) => void;
   view: ViewMode;
 }) {
-  const activeStates = useMemo(
-    () =>
-      new Set(filters.state ? filters.state.split(",").filter(Boolean) : []),
+  const activeBuckets = useMemo(
+    () => new Set<StateBucket>(parseStateBuckets(filters.state)),
     [filters.state],
   );
 
-  const toggleState = (state: string) => {
-    const next = new Set(activeStates);
-    if (next.has(state)) {
-      next.delete(state);
+  const toggleBucket = (bucket: StateBucket) => {
+    const next = new Set(activeBuckets);
+    if (next.has(bucket)) {
+      next.delete(bucket);
     } else {
-      next.add(state);
+      next.add(bucket);
     }
+    // Serialise in the canonical bucket order so the URL param is stable.
     onFiltersChange({
       ...filters,
-      state: [...next].sort().join(","),
+      state: STATE_BUCKETS.filter((b) => next.has(b)).join(","),
     });
   };
+
+  const clearBuckets = () => onFiltersChange({ ...filters, state: "" });
 
   return (
     <div className="dashboard-filters">
@@ -448,27 +469,58 @@ function DashboardFilterBar({
         }}
         aria-label={t("dashboard.filter.search")}
       />
-      <fieldset
-        className="filter-states"
-        aria-label={t("dashboard.filter.state")}
+      <Popover
+        buttonAriaLabel={
+          activeBuckets.size > 0
+            ? t("dashboard.filter.stateCount", { count: activeBuckets.size })
+            : t("dashboard.filter.state")
+        }
+        buttonClassName="btn sm filter-state-trigger"
+        panelClassName="filter-state-menu"
+        label={
+          <>
+            {t("dashboard.filter.stateLabel")}
+            <span aria-hidden="true"> ▾</span>
+            {/* Badge = number of selected buckets; hidden when zero (#2239). */}
+            {activeBuckets.size > 0 && (
+              <span className="badge count" aria-hidden="true">
+                {activeBuckets.size}
+              </span>
+            )}
+          </>
+        }
       >
-        {/* "unknown" is excluded: it is a fallback for unrecognised API values,
-            not a state users intentionally filter for. */}
-        {KNOWN.filter((s) => s !== "unknown").map((state) => {
-          const pill = statePill(state);
-          return (
-            <button
-              key={state}
-              type="button"
-              className={`pill ${pill.className}${activeStates.has(state) ? "" : " dim"}`}
-              aria-pressed={activeStates.has(state)}
-              onClick={() => toggleState(state)}
-            >
-              {t(pill.labelKey)}
-            </button>
-          );
-        })}
-      </fieldset>
+        <fieldset
+          className="filter-state-buckets"
+          aria-label={t("dashboard.filter.state")}
+        >
+          {STATE_BUCKETS.map((bucket) => {
+            // Reuse a representative state's pill color as the row affordance;
+            // statesForBucket keeps the 4→raw mapping the single source.
+            const pill = statePill(statesForBucket(bucket)[0]);
+            return (
+              <label key={bucket} className="filter-state-option">
+                <input
+                  type="checkbox"
+                  checked={activeBuckets.has(bucket)}
+                  onChange={() => toggleBucket(bucket)}
+                />
+                <span className={`pill ${pill.className}`}>
+                  {t(`dashboard.filter.bucket.${bucket}`)}
+                </span>
+              </label>
+            );
+          })}
+          <button
+            type="button"
+            className="btn sm ghost filter-state-clear"
+            disabled={activeBuckets.size === 0}
+            onClick={clearBuckets}
+          >
+            {t("dashboard.filter.clear")}
+          </button>
+        </fieldset>
+      </Popover>
       {/* In card view, show an explicit sort control; table view uses column headers. */}
       {view === "cards" && (
         <SortControl sort={sort} onSortChange={onSortChange} />
@@ -671,6 +723,25 @@ function StatePill({ state }: { state: ObservedState }) {
   );
 }
 
+// The desired/observed drift affordance for a list row (issue #2443). Mirrors
+// the detail page header's rule and string exactly (ServerDetailPage's
+// `Header`): the reconciler has not yet converged when desired ≠ observed, so
+// show an "applying…" hint. Without it a pending intent is invisible on the
+// list — e.g. a stop whose dispatch failed leaves desired=stopped while the
+// process keeps running, yet the row would otherwise show only a green pill.
+// The mark rides on the row wherever the observed state's bucket passes the
+// filter; it does not change which rows `filterServers` keeps.
+function DriftPill({ server }: { server: ServerResponse }) {
+  if (server.desired_state === server.observed_state) {
+    return null;
+  }
+  return (
+    <span className="pill settling blink" role="status">
+      {t("serverDetail.converging")}
+    </span>
+  );
+}
+
 interface ServerRowProps {
   server: ServerResponse;
   communityId: string;
@@ -753,6 +824,7 @@ function ServerCard({ server, communityId, can }: ServerRowProps) {
           </Link>
         </span>
         <StatePill state={displayState} />
+        <DriftPill server={server} />
       </div>
       <div className="meta">
         <span className="badge type">
@@ -944,6 +1016,7 @@ function ServerRow({ server, communityId, can }: ServerRowProps) {
       </td>
       <td>
         <StatePill state={displayState} />
+        <DriftPill server={server} />
       </td>
       <td>
         {server.server_type} {server.mc_version}

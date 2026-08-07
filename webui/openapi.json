@@ -7707,8 +7707,60 @@
     },
     "/api/communities/{community_id}/servers/{server_id}/client-mods/download": {
       "get": {
-        "description": "Download a server's client mods as a zip (plugin:read, issue #1308).",
+        "description": "Download a server's client mods as a zip (plugin:read, issue #1308).\n\n**Probe** (issue #2560): a ``HEAD`` answers with the ``GET``'s status and\nheaders and no body, so a client learns the modpack is available under the\nsame ``plugin:read`` gate without building it. The zip is assembled on the fly\nfrom a variable jar set, so its size is not known ahead of the stream: neither\nthe ``GET`` nor the probe declares a ``Content-Length``, and the probe learns\nexistence rather than size.",
         "operationId": "download_client_modpack_api_communities__community_id__servers__server_id__client_mods_download_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Download Client Modpack"
+      },
+      "head": {
+        "description": "Download a server's client mods as a zip (plugin:read, issue #1308).\n\n**Probe** (issue #2560): a ``HEAD`` answers with the ``GET``'s status and\nheaders and no body, so a client learns the modpack is available under the\nsame ``plugin:read`` gate without building it. The zip is assembled on the fly\nfrom a variable jar set, so its size is not known ahead of the stream: neither\nthe ``GET`` nor the probe declares a ``Content-Length``, and the probe learns\nexistence rather than size.",
+        "operationId": "download_client_modpack_api_communities__community_id__servers__server_id__client_mods_download_head",
         "parameters": [
           {
             "in": "path",
@@ -10758,7 +10810,7 @@
     },
     "/api/data-plane/communities/{community_id}/servers/{server_id}/snapshot": {
       "post": {
-        "description": "Stage and atomically publish the Worker's working set (snapshot, FR-DATA-4).\n\nThe \"proven complete\" gate: a missing Content-Length is 411, an oversized one\nis 413, a streamed-byte count that does not match Content-Length is 400, and a\nbody that stages zero files (an empty working set) is 400 ``empty_snapshot`` \u2014\nin every reject path the staged transfer is aborted, so ``current/`` keeps the\nprior authoritative copy (FR-DATA-6, STORAGE.md Section 4.1).\n\nThe cap and the declared length are both enforced *during* streaming, not only\nagainst the header: an under-declaring client (small Content-Length, longer\nbody) or one that over-runs the cap is aborted as soon as the counted bytes\ncross the boundary, so a misdeclared length cannot spool the whole body to disk\nbefore the mismatch is caught.\n\nA publish-time generation guard (issue #847) refuses, BEFORE staging, a publish\nwhose declared base generation (the store generation this Worker hydrated from)\nis OLDER than the store's current generation AND whose current was published by a\nDIFFERENT Worker: the set it holds was hydrated from a now-superseded state that\nanother Worker has already advanced past, so committing it would clobber that\nnewer authoritative copy with stale progression (the A->B->A stale-scratch case).\n\nPublisher identity is what keeps the guard from wedging a lost publish-response\n(issue #847 bug 3): a Worker that published generation N+1 but lost the HTTP\nresponse keeps its local marker at base N, so its next publish declares base\nN < current N+1 \u2014 but it is the SAME Worker that produced current, so the guard\nALLOWS it and the publish self-heals (advancing the store again) instead of\nrefusing forever. An absent base-generation header (never hydrated / older\nWorker), a base at or ahead of current, or an unknown current-publisher (an older\npublish that recorded no id) all skip the refusal \u2014 the guard stays permissive,\nand #847's primary fix (the API holds the assignment across the final snapshot)\nalready prevents the genuine stale cross-worker publish from arising. The guard is\ndefense-in-depth on the data plane, where the only prior protection was the\nWorker-side per-stream ctx cancel.\n\nThe pre-stream guard runs ONCE, before the (multi-minute) upload stream, so an\nat-rest edit (issue #889) or a backup restore (issue #873) can land AFTER it\npasses and the commit would silently clobber that just-bumped ``current`` (issue\n#899). To close the upload window, the base the guard validated against \u2014 the\nstore's ``current`` at guard time \u2014 is threaded into ``commit_snapshot`` as\n``expected_base``; the commit re-reads the generation under the same per-server\nserialization the bump uses and refuses (409 ``stale_generation``, the same\ncontract as the pre-stream refusal) when it advanced past that base. The staging\nis discarded and the newer ``current`` is kept, so the Worker re-bases on its next\nstart \u2014 the same convergence as the pre-stream refusal.\n\nAn assignment-aware fence (issue #1703) adds a second input: the server's\ncurrently-assigned worker id. The pre-stream guard ALLOWS a stale-base publish\nfrom a different publisher when that publisher IS the assigned worker (the wedge\ncase: the old worker's late final snapshot advanced the store, and the new assigned\nworker's base now lags). A commit-time fence re-reads the assignment AFTER the\nupload stream and refuses when the publisher is NOT the currently-assigned worker\n(409 ``publisher_not_assigned``): this prevents a late commit from a re-placed\nworker from wedging the new session. The fence is permissive when no worker is\nassigned (``None``): the held-assignment final-snapshot window and the post-clear\nno-replacement case must still land.\n\nThe content-integrity gate uses the single region rule set (issue #927): a\nnon-4096-aligned tail is the normal on-disk shape of a 26.x world, not a tear, on\nevery snapshot source. The earlier source-keyed strict/live split (issue #923)\nrelied on a ``stopped => 4096-padded`` invariant that does not survive a\nsweep-stop timeout, SIGKILL, OOM, or crash \u2014 so the strict rule refused the\nstop-leg checkpoint exactly when it is the last chance to capture the world. The\nbyte-precise check still catches realistic tears (a referenced chunk overrunning\nEOF, an entry past EOF, a severed prefix).",
+        "description": "Stage and atomically publish the Worker's working set (snapshot, FR-DATA-4).\n\nThe \"proven complete\" gate: a missing Content-Length is 411, an oversized one\nis 413, a streamed-byte count that does not match Content-Length is 400, and a\nbody that stages zero files (an empty working set) is 400 ``empty_snapshot`` \u2014\nin every reject path the staged transfer is aborted, so ``current/`` keeps the\nprior authoritative copy (FR-DATA-6, STORAGE.md Section 4.1).\n\nThe cap and the declared length are both enforced *during* streaming, not only\nagainst the header: an under-declaring client (small Content-Length, longer\nbody) or one that over-runs the cap is aborted as soon as the counted bytes\ncross the boundary, so a misdeclared length cannot spool the whole body to disk\nbefore the mismatch is caught.\n\nA publish-time generation guard (issue #847) refuses, BEFORE staging, a publish\nwhose declared base generation (the store generation this Worker hydrated from)\nis OLDER than the store's current generation AND whose current was published by a\nDIFFERENT Worker: the set it holds was hydrated from a now-superseded state that\nanother Worker has already advanced past, so committing it would clobber that\nnewer authoritative copy with stale progression (the A->B->A stale-scratch case).\n\nPublisher identity is what keeps the guard from wedging a lost publish-response\n(issue #847 bug 3): a Worker that published generation N+1 but lost the HTTP\nresponse keeps its local marker at base N, so its next publish declares base\nN < current N+1 \u2014 but it is the SAME Worker that produced current, so the guard\nALLOWS it and the publish self-heals (advancing the store again) instead of\nrefusing forever. An absent base-generation header (never hydrated / older\nWorker), a base at or ahead of current, or an unknown current-publisher (an older\npublish that recorded no id) all skip the refusal \u2014 the guard stays permissive,\nand #847's primary fix (the API holds the assignment across the final snapshot)\nalready prevents the genuine stale cross-worker publish from arising. The guard is\ndefense-in-depth on the data plane, where the only prior protection was the\nWorker-side per-stream ctx cancel.\n\nThe pre-stream guard runs ONCE, before the (multi-minute) upload stream, so an\nat-rest edit (issue #889) or a backup restore (issue #873) can land AFTER it\npasses and the commit would silently clobber that just-bumped ``current`` (issue\n#899). To close the upload window, the base the guard validated against \u2014 the\nstore's ``current`` at guard time \u2014 is threaded into ``commit_snapshot`` as\n``expected_base``; the commit re-reads the generation under the same per-server\nserialization the bump uses and refuses (409 ``stale_generation``, the same\ncontract as the pre-stream refusal) when it advanced past that base. The staging\nis discarded and the newer ``current`` is kept, so the Worker re-bases on its next\nstart \u2014 the same convergence as the pre-stream refusal. One re-check outcome is\nNOT an advance: a concurrent delete's retention prune (issue #777) can run under\nthe same per-server lock during the upload window and remove the generation\nmarker, so the re-check reads generation 0 while ``expected_base`` is >= 1 \u2014 the\nstore REGRESSED. That case is refused with a DISTINCT 409 ``deleted_during_upload``\n(issue #921) so the outcome names the concurrent delete rather than the misleading\n\"generation advanced\"; the staging is discarded and the delete wins.\n\nAn assignment-aware fence (issue #1703) adds a second input: the server's\ncurrently-assigned worker id. The pre-stream guard ALLOWS a stale-base publish\nfrom a different publisher when that publisher IS the assigned worker (the wedge\ncase: the old worker's late final snapshot advanced the store, and the new assigned\nworker's base now lags). A commit-time fence re-reads the assignment AFTER the\nupload stream and refuses when the publisher is NOT the currently-assigned worker\n(409 ``publisher_not_assigned``): this prevents a late commit from a re-placed\nworker from wedging the new session. The fence is permissive when no worker is\nassigned (``None``): the held-assignment final-snapshot window and the post-clear\nno-replacement case must still land.\n\nThe content-integrity gate uses the single region rule set (issue #927): a\nnon-4096-aligned tail is the normal on-disk shape of a 26.x world, not a tear, on\nevery snapshot source. The earlier source-keyed strict/live split (issue #923)\nrelied on a ``stopped => 4096-padded`` invariant that does not survive a\nsweep-stop timeout, SIGKILL, OOM, or crash \u2014 so the strict rule refused the\nstop-leg checkpoint exactly when it is the last chance to capture the world. The\nbyte-precise check still catches realistic tears (a referenced chunk overrunning\nEOF, an entry past EOF, a severed prefix).",
         "operationId": "publish_snapshot_api_data_plane_communities__community_id__servers__server_id__snapshot_post",
         "parameters": [
           {
@@ -11066,8 +11118,54 @@
     },
     "/api/public/resource-packs/{resource_pack_id}/{filename}": {
       "get": {
-        "description": "Public download endpoint for Minecraft clients (no auth, issue #1176).\n\nValidates that ``filename`` matches the stored filename (404 otherwise). The\nresponse declares the pack's exact size as ``Content-Length``, which the game\nclient shows as download progress.",
+        "description": "Public download endpoint for Minecraft clients (no auth, issue #1176).\n\nValidates that ``filename`` matches the stored filename (404 otherwise). The\nresponse declares the pack's exact size as ``Content-Length``, which the game\nclient shows as download progress.\n\n**Probe** (issue #2632): a ``HEAD`` answers with the ``GET``'s status and\nheaders and no body, so a resumable-download client \u2014 this is the\nunauthenticated URL a Minecraft client fetches at join time, and it declares a\n``Content-Length``, so it has a real reason to probe first \u2014 learns the size,\nfrom the store's size probe below, without starting a transfer. The route\noffers no ``Accept-Ranges``, so the probe reports the size but not resumption.\nThe ``200`` carries the same ``public, max-age=3600, immutable`` the ``GET``\ndeclares, and the size-probe ``404`` its ``no-store``, so an edge (the one URL\na shared cache demonstrably stores, issues #2588 / #2589) does not cache a\nprobe differently from the download.",
         "operationId": "public_download_resource_pack_api_public_resource_packs__resource_pack_id___filename__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "resource_pack_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Resource Pack Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "filename",
+            "required": true,
+            "schema": {
+              "title": "Filename",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Public Download Resource Pack"
+      },
+      "head": {
+        "description": "Public download endpoint for Minecraft clients (no auth, issue #1176).\n\nValidates that ``filename`` matches the stored filename (404 otherwise). The\nresponse declares the pack's exact size as ``Content-Length``, which the game\nclient shows as download progress.\n\n**Probe** (issue #2632): a ``HEAD`` answers with the ``GET``'s status and\nheaders and no body, so a resumable-download client \u2014 this is the\nunauthenticated URL a Minecraft client fetches at join time, and it declares a\n``Content-Length``, so it has a real reason to probe first \u2014 learns the size,\nfrom the store's size probe below, without starting a transfer. The route\noffers no ``Accept-Ranges``, so the probe reports the size but not resumption.\nThe ``200`` carries the same ``public, max-age=3600, immutable`` the ``GET``\ndeclares, and the size-probe ``404`` its ``no-store``, so an edge (the one URL\na shared cache demonstrably stores, issues #2588 / #2589) does not cache a\nprobe differently from the download.",
+        "operationId": "public_download_resource_pack_api_public_resource_packs__resource_pack_id___filename__head",
         "parameters": [
           {
             "in": "path",
@@ -11237,8 +11335,50 @@
     },
     "/api/resource-packs/{resource_pack_id}/download": {
       "get": {
-        "description": "Download a resource pack (authenticated, issue #1176).\n\nThe response declares the pack's exact size as ``Content-Length``, so a client\ncan show download progress and refuse an over-cap pack up front.",
+        "description": "Download a resource pack (authenticated, issue #1176).\n\nThe response declares the pack's exact size as ``Content-Length``, so a client\ncan show download progress and refuse an over-cap pack up front.\n\n**Probe** (issue #2560): a ``HEAD`` answers with the ``GET``'s status and\nheaders and no body, so a client learns the size \u2014 from the store's size probe\nbelow \u2014 without starting a transfer. The route offers no ``Accept-Ranges``, so\nthe probe reports the size but not resumption.",
         "operationId": "download_resource_pack_api_resource_packs__resource_pack_id__download_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "resource_pack_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Resource Pack Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Download Resource Pack"
+      },
+      "head": {
+        "description": "Download a resource pack (authenticated, issue #1176).\n\nThe response declares the pack's exact size as ``Content-Length``, so a client\ncan show download progress and refuse an over-cap pack up front.\n\n**Probe** (issue #2560): a ``HEAD`` answers with the ``GET``'s status and\nheaders and no body, so a client learns the size \u2014 from the store's size probe\nbelow \u2014 without starting a transfer. The route offers no ``Accept-Ranges``, so\nthe probe reports the size but not resumption.",
+        "operationId": "download_resource_pack_api_resource_packs__resource_pack_id__download_head",
         "parameters": [
           {
             "in": "path",
