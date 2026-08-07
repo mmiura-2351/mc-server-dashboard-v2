@@ -140,6 +140,9 @@ updates:
     ignore:
       - dependency-name: "python"
         versions: [">=3.14"]
+      # Skip the Node 25 "Current" (non-LTS) line; the next LTS (26) still gets a PR.
+      - dependency-name: "node"
+        versions: [">=25 <26"]
     groups:
       docker:
         patterns:
