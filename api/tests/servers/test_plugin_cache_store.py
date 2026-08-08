@@ -8,6 +8,7 @@ upload, and ``open`` round-trips the bytes.
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 from collections.abc import AsyncIterator
 
@@ -51,6 +52,37 @@ async def test_put_dedups_identical_content() -> None:
     # stub's per-key upload tally stays at one. (multipart_parts can't catch a
     # re-upload of identical content — it's overwritten with the same count.)
     assert store.upload_calls[key] == 1
+
+
+async def test_dedup_reput_preserves_modified_at() -> None:
+    """A dedup re-put leaves ``modified_at`` at its first-write value (#1404).
+
+    ``test_put_dedups_identical_content`` pins that the adapter head-checks the
+    content key and skips the upload for identical bytes; this pins that
+    skip's timestamp consequence — the store is never re-stamped, so the blob's
+    ``modified_at`` still reflects its original write. ``RunPluginCacheGc``
+    depends on exactly this: its live-reference re-check at #1404 exists because
+    a dedup put does not refresh the store time. Were the adapter to start
+    refreshing on re-put, that re-check would become dead code — this test
+    reddens if the preservation ever breaks.
+    """
+    store = FakeS3Store()
+    cache = ObjectPluginCacheStore(fake_s3_factory(store))
+    content = b"dedup-bytes"
+    sha = hashlib.sha256(content).hexdigest()
+    key = f"plugin-cache/{sha}"
+
+    await cache.put(sha, _stream(content))
+    # Stamp a distinctive, unmistakably-old store time. A refreshing re-put would
+    # overwrite it with the host clock's "now", which can never equal this — so
+    # the assertion discriminates preservation from refresh without a clock race.
+    original = dt.datetime(2000, 1, 1, tzinfo=dt.UTC)
+    store.mtimes[key] = original
+
+    await cache.put(sha, _stream(content))
+
+    (entry,) = await cache.list_entries()
+    assert entry.modified_at == original
 
 
 async def test_open_round_trips_bytes() -> None:
