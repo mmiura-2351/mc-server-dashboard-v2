@@ -493,6 +493,9 @@ export const en = {
   // conflicts with sibling i18n PRs minimal.
   "backups.loading": "Loading backups…",
   "backups.loadError": "Could not load backups.",
+  // Statistics is the secondary query: when it fails alone the listing still
+  // renders, so its error shows in the stats slot only (#2554).
+  "backups.stats.loadError": "Could not load backup statistics.",
   "backups.noRead": "You do not have permission to view backups.",
   "backups.none": "—",
   "backups.empty": "No backups yet.",

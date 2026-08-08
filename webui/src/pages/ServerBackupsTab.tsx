@@ -55,9 +55,14 @@ function statsKey(communityId: string, serverId: string) {
   return ["backups", communityId, serverId, "statistics"] as const;
 }
 
-// Map a create/upload/restore error to a specific message; otherwise generic.
-function createErrorMessage(error: unknown): TranslationKey {
-  if (!(error instanceof ApiError)) return "backups.error.generic";
+// Map a create/upload/restore/query error to a specific message; otherwise the
+// caller's `fallback` (mutations use the generic message, the load guards pass a
+// load-context one so an unmapped failure still reads as a load failure, #2554).
+function createErrorMessage(
+  error: unknown,
+  fallback: TranslationKey = "backups.error.generic",
+): TranslationKey {
+  if (!(error instanceof ApiError)) return fallback;
 
   // Check reason first (most specific).
   switch (error.reason) {
@@ -93,7 +98,7 @@ function createErrorMessage(error: unknown): TranslationKey {
       return "backups.error.workerUnavailable";
   }
 
-  return "backups.error.generic";
+  return fallback;
 }
 
 export function ServerBackupsTab({
@@ -260,14 +265,23 @@ export function ServerBackupsTab({
   if (!canRead) {
     return <p className="sub">{t("backups.noRead")}</p>;
   }
-  if (listQuery.isPending || statsQuery.isPending) {
+  // The listing is the primary content; its loading/error drive the whole tab.
+  // Statistics is secondary and handled inline below, so a stats-only failure
+  // can no longer blank a healthy listing (#2554).
+  if (listQuery.isPending) {
     return <p className="sub">{t("backups.loading")}</p>;
   }
   // Error only when there is nothing to show (an initial load failed). A
   // failed background refetch retains `data`, so the cached page keeps
-  // rendering through transient API blips (#1805).
-  if (listQuery.data === undefined || statsQuery.data === undefined) {
-    return <p className="field-error">{t("backups.loadError")}</p>;
+  // rendering through transient API blips (#1805). Route the error through
+  // createErrorMessage so a specific reason (e.g. storage_unavailable) reaches
+  // the user instead of the generic load message (#2554).
+  if (listQuery.data === undefined) {
+    return (
+      <p className="field-error">
+        {t(createErrorMessage(listQuery.error, "backups.loadError"))}
+      </p>
+    );
   }
 
   const stats = statsQuery.data;
@@ -276,37 +290,47 @@ export function ServerBackupsTab({
 
   return (
     <section className="backups">
-      <div className="card metrics-strip backups-stats">
-        <Stat labelKey="backups.stat.count" value={String(stats.count)} />
-        <Stat
-          labelKey="backups.stat.totalSize"
-          value={humanizeBytes(stats.total_bytes)}
-          // total_bytes sums only backups with a recorded size; legacy NULL-size
-          // rows are excluded (#281). Flag the figure as partial so it is not
-          // misread as full usage (#640).
-          hint={
-            stats.unknown_size_count > 0
-              ? t("backups.stat.totalSizePartial")
-              : undefined
-          }
-        />
-        <Stat
-          labelKey="backups.stat.newest"
-          value={
-            stats.newest !== null
-              ? formatDateTime(stats.newest)
-              : t("backups.none")
-          }
-        />
-        <Stat
-          labelKey="backups.stat.oldest"
-          value={
-            stats.oldest !== null
-              ? formatDateTime(stats.oldest)
-              : t("backups.none")
-          }
-        />
-      </div>
+      {/* Statistics is secondary: a failure here must not blank the listing
+          (#2554). While it is still loading render nothing (transient — it
+          resolves alongside the listing); on failure surface its reason in the
+          slot rather than discarding the message. */}
+      {statsQuery.isPending ? null : stats === undefined ? (
+        <p className="field-error backups-stats-error">
+          {t(createErrorMessage(statsQuery.error, "backups.stats.loadError"))}
+        </p>
+      ) : (
+        <div className="card metrics-strip backups-stats">
+          <Stat labelKey="backups.stat.count" value={String(stats.count)} />
+          <Stat
+            labelKey="backups.stat.totalSize"
+            value={humanizeBytes(stats.total_bytes)}
+            // total_bytes sums only backups with a recorded size; legacy
+            // NULL-size rows are excluded (#281). Flag the figure as partial so
+            // it is not misread as full usage (#640).
+            hint={
+              stats.unknown_size_count > 0
+                ? t("backups.stat.totalSizePartial")
+                : undefined
+            }
+          />
+          <Stat
+            labelKey="backups.stat.newest"
+            value={
+              stats.newest !== null
+                ? formatDateTime(stats.newest)
+                : t("backups.none")
+            }
+          />
+          <Stat
+            labelKey="backups.stat.oldest"
+            value={
+              stats.oldest !== null
+                ? formatDateTime(stats.oldest)
+                : t("backups.none")
+            }
+          />
+        </div>
+      )}
 
       <div className="backups-toolbar">
         {canCreate && (
