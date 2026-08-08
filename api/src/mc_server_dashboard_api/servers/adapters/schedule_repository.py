@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import uuid
 from collections.abc import Iterable
 from typing import Any
 
@@ -84,16 +85,23 @@ def _to_schedule(row: ScheduleModel) -> Schedule:
     )
 
 
-def _safe_hydrate(rows: Iterable[ScheduleModel]) -> list[Schedule]:
+def _safe_hydrate(
+    rows: Iterable[ScheduleModel],
+) -> tuple[list[Schedule], list[uuid.UUID]]:
     """Hydrate schedule rows, skipping any that fail domain validation.
 
     Defense-in-depth (issue #1856): a row whose data violates a domain
     invariant (e.g. ``interval_seconds`` below the floor from a past migration
     bug or a manual DB edit) is logged and skipped rather than failing the
     entire list — one bad row must not stop the fleet's schedules.
+
+    Returns the hydrated schedules and the ids of the rows that failed, so the
+    caller can quarantine them (issue #2150) — an enabled corrupt row would
+    otherwise stay perpetually due, respooling this warning every tick.
     """
 
     result: list[Schedule] = []
+    failed_ids: list[uuid.UUID] = []
     for row in rows:
         try:
             result.append(_to_schedule(row))
@@ -103,7 +111,8 @@ def _safe_hydrate(rows: Iterable[ScheduleModel]) -> list[Schedule]:
                 row.id,
                 exc_info=True,
             )
-    return result
+            failed_ids.append(row.id)
+    return result, failed_ids
 
 
 class SqlAlchemyScheduleRepository(ScheduleRepository):
@@ -146,7 +155,10 @@ class SqlAlchemyScheduleRepository(ScheduleRepository):
             .order_by(ScheduleModel.next_run_at, ScheduleModel.id)
         )
         rows = (await self._session.execute(stmt)).scalars().all()
-        return _safe_hydrate(rows)
+        schedules, failed_ids = _safe_hydrate(rows)
+        if failed_ids:
+            await self._quarantine(failed_ids)
+        return schedules
 
     async def list_warning_candidates(
         self, now: dt.datetime, until: dt.datetime
@@ -168,7 +180,33 @@ class SqlAlchemyScheduleRepository(ScheduleRepository):
             .order_by(ScheduleModel.next_run_at, ScheduleModel.id)
         )
         rows = (await self._session.execute(stmt)).scalars().all()
-        return _safe_hydrate(rows)
+        schedules, failed_ids = _safe_hydrate(rows)
+        if failed_ids:
+            await self._quarantine(failed_ids)
+        return schedules
+
+    async def _quarantine(self, ids: list[uuid.UUID]) -> None:
+        # Disable rows that failed hydration (issue #2150): a corrupt row the
+        # domain can't load would otherwise stay perpetually due, respooling the
+        # hydration warning every tick and silently never firing. Disabling drops
+        # it from both list_due and list_warning_candidates (each filters WHERE
+        # enabled), so the quarantine is self-limiting — at most one disable and
+        # one log per row. next_run_at is cleared to keep the disabled-row
+        # invariant (a disabled schedule carries no next_run_at). The ``enabled``
+        # guard mirrors advance_run_state's idempotency; this staged UPDATE is
+        # committed by the enclosing unit of work (the runner commits its poll).
+        stmt = (
+            update(ScheduleModel)
+            .where(ScheduleModel.id.in_(ids), ScheduleModel.enabled)
+            .values(enabled=False, next_run_at=None)
+        )
+        await self._session.execute(stmt)
+        for row_id in ids:
+            _LOG.error(
+                "schedule row %s quarantined (disabled) after hydration failure; "
+                "correct or delete the row to re-enable it",
+                row_id,
+            )
 
     async def list_for_server(self, server_id: ServerId) -> list[Schedule]:
         stmt = (

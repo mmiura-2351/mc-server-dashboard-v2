@@ -11,6 +11,7 @@ verified (a server's schedules go with it; a schedule's runs go with it).
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import os
 import uuid
 from collections.abc import AsyncIterator
@@ -28,6 +29,7 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 )
 from mc_server_dashboard_api.community.domain.value_objects import CommunityName
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
+from mc_server_dashboard_api.servers.adapters.schedule_models import ScheduleModel
 from mc_server_dashboard_api.servers.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as ServersUnitOfWork,
 )
@@ -355,6 +357,131 @@ async def test_list_warning_candidates_returns_upcoming_stop_restart(
     # Only the enabled stop/restart rows strictly ahead of now and within the
     # horizon, ordered by next_run_at.
     assert [s.id for s in listed] == [ahead.id, restart.id]
+
+
+async def _insert_corrupt_row(
+    engine: AsyncEngine,
+    *,
+    server_id: uuid.UUID,
+    name: str,
+    action: ScheduleAction = ScheduleAction.BACKUP,
+    next_run_at: dt.datetime,
+) -> uuid.UUID:
+    """Insert a schedule row the domain cannot hydrate (issue #2150 / #1856).
+
+    An ``interval_seconds`` below the domain floor bypasses ``Cadence``
+    validation only through a raw INSERT — a past migration bug or a manual DB
+    edit. The row is enabled and due, so it would poll on every tick until
+    quarantined.
+    """
+    factory = create_session_factory(engine)
+    row_id = uuid.uuid4()
+    async with factory() as session:
+        session.add(
+            ScheduleModel(
+                id=row_id,
+                server_id=server_id,
+                name=name,
+                action=action.value,
+                payload={},
+                cron=None,
+                interval_seconds=0,  # below the floor: unhydratable
+                timezone="UTC",
+                enabled=True,
+                next_run_at=next_run_at,
+                last_run_at=None,
+                created_by=None,
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+        )
+        await session.commit()
+    return row_id
+
+
+async def test_list_due_quarantines_a_corrupt_row(
+    engine: AsyncEngine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A corrupt due row is disabled once, dropping out of the poll (#2150).
+
+    Left enabled, a row that fails hydration would stay perpetually due: the
+    same warning every tick and a schedule that silently never fires. The poll
+    quarantines it (``enabled = false``) so it leaves both list methods.
+    """
+    server_id = await _seed_server(engine)
+    factory = create_session_factory(engine)
+    good = _schedule(
+        server_id,
+        name="good",
+        enabled=True,
+        next_run_at=_NOW - dt.timedelta(minutes=1),
+    )
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.schedules.add(good)
+        await uow.commit()
+    bad_id = await _insert_corrupt_row(
+        engine,
+        server_id=server_id,
+        name="corrupt",
+        next_run_at=_NOW - dt.timedelta(minutes=1),
+    )
+
+    # The runner's due poll: read, then commit the poll transaction.
+    with caplog.at_level(logging.ERROR):
+        async with ServersUnitOfWork(factory) as uow:
+            listed = await uow.schedules.list_due(_NOW)
+            await uow.commit()
+
+    # The corrupt row is skipped; the valid row is still returned.
+    assert [s.id for s in listed] == [good.id]
+    # A distinct quarantine log identifies the row, logged exactly once.
+    quarantined = [r for r in caplog.records if "quarantined" in r.getMessage()]
+    assert len(quarantined) == 1
+    assert str(bad_id) in quarantined[0].getMessage()
+
+    # The corrupt row is now disabled with next_run_at cleared (the disabled
+    # invariant), so it no longer matches the enabled/due predicate.
+    async with factory() as session:
+        row = await session.get(ScheduleModel, bad_id)
+    assert row is not None
+    assert row.enabled is False
+    assert row.next_run_at is None
+
+    # A second poll returns only the valid row and neither re-disables nor
+    # re-logs — the quarantine is self-limiting.
+    caplog.clear()
+    with caplog.at_level(logging.ERROR):
+        async with ServersUnitOfWork(factory) as uow:
+            second = await uow.schedules.list_due(_NOW)
+            await uow.commit()
+    assert [s.id for s in second] == [good.id]
+    assert not [r for r in caplog.records if "quarantined" in r.getMessage()]
+
+
+async def test_list_warning_candidates_quarantines_a_corrupt_row(
+    engine: AsyncEngine,
+) -> None:
+    """The warning look-ahead also disables a corrupt row it cannot hydrate (#2150)."""
+    server_id = await _seed_server(engine)
+    factory = create_session_factory(engine)
+    until = _NOW + dt.timedelta(minutes=120)
+    bad_id = await _insert_corrupt_row(
+        engine,
+        server_id=server_id,
+        name="corrupt-warn",
+        action=ScheduleAction.STOP,
+        next_run_at=_NOW + dt.timedelta(minutes=30),
+    )
+
+    async with ServersUnitOfWork(factory) as uow:
+        listed = await uow.schedules.list_warning_candidates(_NOW, until)
+        await uow.commit()
+    assert listed == []
+
+    async with factory() as session:
+        row = await session.get(ScheduleModel, bad_id)
+    assert row is not None
+    assert row.enabled is False
 
 
 async def test_advance_run_state_updates_only_bookkeeping(engine: AsyncEngine) -> None:

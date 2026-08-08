@@ -202,22 +202,21 @@ def _bearer(authorization: str | None) -> str | None:
     return authorization[len(_BEARER_PREFIX) :]
 
 
-# Deliberately no ``Cache-Control`` on the data-plane transfers (issue #2519),
-# unlike the browser-facing downloads (issue #2491). Three reasons:
-#
-# 1. A data-plane request always carries ``Authorization`` — the Worker sets the
-#    Bearer credential and ``require_worker_credential`` above verifies it — so
-#    RFC 9111 Section 3.5 already bars a shared cache from reusing it. #2491's
-#    argument was about a *cookie*-authenticated request, which carries none.
-# 2. Nothing on the path can store it anyway: ``compose.yaml`` pins the
-#    Worker-facing base URL to the internal compose address regardless of
-#    ``PUBLIC_BASE_URL`` (issue #1549, DEPLOYMENT.md Section 8), so no
-#    intermediary is present, and the Worker's HTTP client is a bare
-#    ``http.Client`` with no cache of its own.
-# 3. Revisit if (2) stops holding: ``effective_data_plane_base_url`` (config.py)
-#    falls back to ``public_base_url`` when ``data_plane_base_url`` is unset, so a
-#    deployment not using the shipped compose file could route the data plane
-#    through its edge. Add the header if one ever does.
+# Declare ``Cache-Control: no-store`` on the data-plane transfers (issue #2593),
+# as the browser-facing downloads do (issue #2491). #2519 originally declined the
+# header, resting on two legs: (1) every request carries the Bearer credential
+# (``require_worker_credential`` above; the Worker sets it, datatransfer.go), so
+# RFC 9111 Section 3.5 bars a *conforming* shared cache from reusing it; and (2)
+# the shipped compose topology pins the Worker-facing base URL to the internal
+# address (issue #1549), so no intermediary is present. Leg (2) weakened once
+# #2591 documented a cross-host topology in which an operator may terminate TLS in
+# front of the data plane — deliberately inviting an intermediary. Section 3.5
+# does not bind an operator-configured or non-conforming cache, and the hydrate
+# bodies are mutable per-server working sets whose generation advances: a cache
+# serving generation N after N+1 published would roll a world back (a correctness
+# failure, worse than #2491's privacy leak). ``no-store`` is cheap and removes the
+# reliance on leg (2). Both header dicts below (the generation-0 branch and the
+# streaming branch) carry it, feeding all four transfer responses.
 @router.get(
     "/communities/{community_id}/servers/{server_id}/working-set",
     dependencies=[Depends(require_worker_credential)],
@@ -274,7 +273,7 @@ async def hydrate_working_set(
             # literal avoids re-reading current_generation, which would reintroduce
             # the mislabel race if a publish lands between the NotFoundError and the
             # read (issue #1954).
-            headers = {_GENERATION_HEADER: "0"}
+            headers = {_GENERATION_HEADER: "0", "Cache-Control": "no-store"}
             if jar_member is None:
                 transfer_semaphore.release()
                 return StreamingResponse(
@@ -291,7 +290,10 @@ async def hydrate_working_set(
                 headers=headers,
             )
         # The generation was stamped atomically with the lease on first iteration.
-        headers = {_GENERATION_HEADER: str(stream.generation)}
+        headers = {
+            _GENERATION_HEADER: str(stream.generation),
+            "Cache-Control": "no-store",
+        }
         if jar_member is None:
             return _DeadlineStreamingResponse(
                 _releasing(transfer_semaphore, primed),
