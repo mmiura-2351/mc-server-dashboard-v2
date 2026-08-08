@@ -38,6 +38,11 @@ class ScheduleRepository(abc.ABC):
         ``ix_schedule_next_run_at`` on ``(next_run_at) WHERE enabled``. A disabled
         schedule carries no ``next_run_at`` and is never returned. Ordered by
         ``next_run_at`` (id tie-break) so the poll is deterministic.
+
+        A row that fails to hydrate is quarantined (issue #2150) — disabled with
+        ``next_run_at`` cleared — as a staged write, so a corrupt row does not
+        stay perpetually due. The poller must commit its transaction or the
+        quarantine rolls back and respools every tick.
         """
 
     @abc.abstractmethod
@@ -56,6 +61,9 @@ class ScheduleRepository(abc.ABC):
         A past-or-present occurrence (``next_run_at <= now``) is excluded — that
         is the due poll's job, and its warnings would be firing late. Ordered by
         ``next_run_at`` (id tie-break) so the poll is deterministic.
+
+        As with :meth:`list_due`, a row that fails to hydrate is quarantined
+        (issue #2150) as a staged write; the poller must commit its transaction.
         """
 
     @abc.abstractmethod
