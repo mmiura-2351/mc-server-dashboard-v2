@@ -84,6 +84,10 @@ PROTOC_GEN_GO_GRPC_VERSION := v1.6.2
 PROTOC_GEN_GO := worker/.bin/protoc-gen-go
 PROTOC_GEN_GO_GRPC := worker/.bin/protoc-gen-go-grpc
 
+# A bare `make` shows the target listing rather than running the heavy `check`
+# gate. `all: check` stays the first target so `make all` / CI keep working.
+.DEFAULT_GOAL := help
+
 all: check
 
 # Full verification gate. Matches the pre-push hook and CI.
