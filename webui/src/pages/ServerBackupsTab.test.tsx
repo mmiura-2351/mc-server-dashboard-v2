@@ -115,12 +115,17 @@ const STATS = {
   oldest: "2026-06-04T00:00:00Z",
 };
 
-// Route api.get by path: server detail, backups list, statistics.
+// Route api.get by path: server detail, backups list, statistics. Per-endpoint
+// (never a catch-all reject, #2247/#2359/#2525): `listError` / `statsError`
+// reject only their own endpoint so the other two keep resolving — the server
+// detail query must still succeed for the tab to mount.
 function routeGet(
   opts: {
     srv?: Record<string, unknown>;
     backups?: Record<string, unknown>[];
     stats?: typeof STATS;
+    listError?: unknown;
+    statsError?: unknown;
   } = {},
 ) {
   const srv = server(opts.srv);
@@ -128,10 +133,14 @@ function routeGet(
   const stats = opts.stats ?? STATS;
   mockApi.get.mockImplementation((path: string) => {
     if (path.endsWith("/backups/statistics")) {
-      return Promise.resolve(stats);
+      return opts.statsError !== undefined
+        ? Promise.reject(opts.statsError)
+        : Promise.resolve(stats);
     }
     if (path.endsWith("/backups")) {
-      return Promise.resolve(list);
+      return opts.listError !== undefined
+        ? Promise.reject(opts.listError)
+        : Promise.resolve(list);
     }
     return Promise.resolve(srv);
   });
@@ -793,6 +802,41 @@ describe("ServerBackupsTab permission gating", () => {
       await screen.findByText(
         t("permissions.deniedNamed", { permission: "backup:create" }),
       ),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("ServerBackupsTab query error surfacing (#2554)", () => {
+  it("surfaces a 503 storage_unavailable on the listing with the specific message", async () => {
+    // The listing query failing initially must route through createErrorMessage
+    // so the object-store reason reaches the user, not the generic load message.
+    routeGet({
+      listError: new ApiError(503, { reason: "storage_unavailable" }),
+    });
+    await openBackups();
+
+    expect(
+      await screen.findByText(t("backups.error.storageUnavailable")),
+    ).toBeInTheDocument();
+    // Fails if the error is routed back through the generic load path...
+    expect(screen.queryByText(t("backups.loadError"))).not.toBeInTheDocument();
+    // ...or misattributed to the server host by the bare-503 status mapping.
+    expect(
+      screen.queryByText(t("backups.error.workerUnavailable")),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps the listing rendered when statistics alone fails", async () => {
+    // Statistics is the secondary query; its 503 must not blank a healthy 200
+    // listing. The listing renders and the stats error shows in the stats slot.
+    routeGet({
+      statsError: new ApiError(503, { reason: "storage_unavailable" }),
+    });
+    await openBackups();
+
+    expect(await screen.findByText("manual")).toBeInTheDocument();
+    expect(
+      screen.getByText(t("backups.error.storageUnavailable")),
     ).toBeInTheDocument();
   });
 });
