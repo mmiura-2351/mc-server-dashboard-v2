@@ -467,6 +467,7 @@ export const ja: Record<TranslationKey, string> = {
   // Backups tab (WEBUI_SPEC.md 6.7).
   "backups.loading": "バックアップを読み込んでいます…",
   "backups.loadError": "バックアップを読み込めませんでした。",
+  "backups.stats.loadError": "バックアップの統計を読み込めませんでした。",
   "backups.noRead": "バックアップを表示する権限がありません。",
   "backups.none": "—",
   "backups.empty": "まだバックアップがありません。",
