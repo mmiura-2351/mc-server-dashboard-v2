@@ -1226,9 +1226,12 @@ def _client_modpack_headers() -> dict[str, str]:
 
     return {
         "Content-Disposition": 'attachment; filename="mods.zip"',
-        # A per-server body is never stored (issue #2491): the zip is gated by
-        # ``plugin:read`` on this server, so a shared cache serving it to a
-        # non-member would be an authorization bypass (issue #2519).
+        # A per-server body declares no-store regardless of credential (issue
+        # #2491). This route is Bearer-only, so RFC 9111 Section 3.5 already bars
+        # a conforming shared cache — no-store guards the residue: a cache that
+        # ignores Section 3.5, or a credential carried outside ``Authorization``
+        # (the grant/cookie transports ``require_download_access`` routes accept,
+        # not this one today) (issue #2519).
         "Cache-Control": "no-store",
     }
 

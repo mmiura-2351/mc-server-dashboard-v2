@@ -1825,16 +1825,32 @@ def test_safe_hydrate_skips_unloadable_rows_and_logs(
     )
 
     with caplog.at_level(logging.WARNING):
-        result = _safe_hydrate([bad_row, good_row])
+        result, failed_ids = _safe_hydrate([bad_row, good_row])
 
-    # The valid row survived; the bad one was silently dropped.
+    # The valid row survived; the bad one was dropped and reported for quarantine.
     assert len(result) == 1
     assert result[0].id.value == good_id
+    assert failed_ids == [bad_id]
 
     # A warning was logged for the bad row, identifying it by id.
     hydration_warnings = [r for r in caplog.records if "failed to hydrate" in r.message]
     assert len(hydration_warnings) == 1
     assert str(bad_id) in hydration_warnings[0].getMessage()
+
+
+async def test_tick_commits_its_poll_transactions() -> None:
+    """The due poll and the warning poll each commit their transaction (#2150).
+
+    A corrupt row is quarantined (``enabled = false``) by a staged UPDATE inside
+    ``list_due`` / ``list_warning_candidates``; the runner must commit the poll's
+    unit of work or the quarantine would roll back and respool every tick. With
+    no schedules seeded both polls are empty, so the only commits are the two
+    poll-transaction commits.
+    """
+
+    env = _env()
+    await env.runner.tick()
+    assert env.uow.commits == 2
 
 
 # --- advance CAS guard (issue #1963) ----------------------------------------

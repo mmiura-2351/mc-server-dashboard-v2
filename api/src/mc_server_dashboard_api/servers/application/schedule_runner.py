@@ -441,6 +441,10 @@ class RunScheduleTick:
         self._last_tick_at = now
         async with self.uow:
             due = await self.uow.schedules.list_due(now)
+            # Commit the poll transaction: list_due may have quarantined a corrupt
+            # row (disabled it), and without this commit that write would roll back
+            # and respool every tick (issue #2150). A read-only poll commits nothing.
+            await self.uow.commit()
         handled: set[ScheduleId] = set()
 
         # Group due schedules by server so same-server schedules stay serial,
@@ -597,6 +601,9 @@ class RunScheduleTick:
         until = now + dt.timedelta(minutes=MAX_WARNING_OFFSET_MINUTES)
         async with self.uow:
             candidates = await self.uow.schedules.list_warning_candidates(now, until)
+            # Commit the poll transaction so a corrupt row quarantined by the
+            # look-ahead is persisted rather than rolled back (issue #2150).
+            await self.uow.commit()
         for schedule in candidates:
             try:
                 await self._warn_schedule(schedule, now)
