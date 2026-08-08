@@ -1234,6 +1234,24 @@ class StopServer:
         upload_may_be_live = await self._final_snapshot(
             worker_id=worker_id, community_id=community_id, server_id=server_id
         )
+        # Unlike ``_release_after_final_snapshot``, this clear is NOT gated on the
+        # convergence having landed (``at_rest_under_us``); it is the only unconditional
+        # clear in the file, and by design. The CAS above (issue #847) matches only on
+        # desired=stopped + assigned-to-us — it does not screen ``observed`` — so on a
+        # dropped convergence (#216 freshest-wins) the clear would still fire, and if
+        # the winning row read ``running`` it would strand (stopped, running,
+        # unassigned): not ``is_at_rest()`` and skipped by ``_action_for`` when
+        # unassigned, the permanent wedge of the #2439/#2452/#2467 class. What rules
+        # that out here is the CONFIRMED stop: the Worker just reported a terminal
+        # state, and the #96 per-server coalescing dispatcher is latest-state-wins, so
+        # that terminal report replaces any backlogged ``running`` in the pending slot
+        # before it sinks. No such ``running`` can therefore win the freshness compare
+        # after the convergence write. The SERVER_NOT_FOUND paths cannot rely on this:
+        # they run precisely BECAUSE the crash event was lost, so no replacing terminal
+        # report is in flight and a backlogged ``running`` can still sink and win —
+        # hence they gate (this asymmetry became load-bearing once #2448 moved the
+        # unassign out of the ``record_observed_state`` UPDATE, so a dropped write no
+        # longer drops the unassign with it).
         if not upload_may_be_live:
             await asyncio.shield(
                 self._clear_held_assignment(server, worker_id, server_id)
