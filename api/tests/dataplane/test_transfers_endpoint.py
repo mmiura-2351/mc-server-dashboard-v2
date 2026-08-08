@@ -235,6 +235,33 @@ def test_hydrate_resolved_jar_absent_from_pool_sends_working_set_alone(
     assert _read_tar(resp.content) == files
 
 
+# --- Cache-Control on the data-plane transfers (issue #2593) ----------------
+# The hydrate bodies are mutable per-server working sets whose generation
+# advances; the cross-host topology (#2591) admits an operator-configured or
+# non-conforming intermediary that RFC 9111 Section 3.5 does not bind, so the
+# responses declare ``no-store`` to keep a cache from serving a stale generation
+# (a world rollback). Both header dicts are covered: the streaming branch (a
+# published server) and the generation-0 branch (an unpublished 204).
+def test_hydrate_published_declares_no_store(tmp_path: Path) -> None:
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    files = {"server.properties": b"motd=hi"}
+    asyncio.run(_publish(storage, community, server, files))
+    with client:
+        resp = client.get(_url(community, server, "working-set"), headers=_auth())
+    assert resp.status_code == 200
+    assert resp.headers["cache-control"] == "no-store"
+
+
+def test_hydrate_unpublished_declares_no_store(tmp_path: Path) -> None:
+    client, _ = _setup(tmp_path)
+    community, server = _scope()
+    with client:
+        resp = client.get(_url(community, server, "working-set"), headers=_auth())
+    assert resp.status_code == 204
+    assert resp.headers["cache-control"] == "no-store"
+
+
 def test_snapshot_publishes_atomically(tmp_path: Path) -> None:
     import asyncio
 
