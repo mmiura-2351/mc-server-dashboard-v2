@@ -432,7 +432,19 @@ async def public_download_resource_pack(
     except ResourcePackStorageUnavailableError as exc:
         # 503, not 404: the pack is there and the fetch is worth retrying, which is
         # not what a client told "not found" would do (issue #2455).
-        raise _service_unavailable("storage_unavailable") from exc
+        #
+        # A 503 is a transient storage outage and must never be edge-cached (issues
+        # #2562 / #2588 / #2589): this URL ends in the stored filename and so
+        # usually in ``.zip``, the one URL a shared cache demonstrably stores, so a
+        # cached 503 would amplify a brief outage into a multi-hour one for every
+        # joining player. ``no-store``, mirroring the 404's raise above; declared
+        # here rather than in ``_service_unavailable``, which the authenticated
+        # route shares (its URL carries no cacheable extension).
+        raise problem(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "storage_unavailable",
+            headers={"Cache-Control": "no-store"},
+        ) from exc
 
     # Same short-body guard as on the authenticated route (issue #2337), on the
     # route every joining Minecraft client hits: a body ending below the HEAD's
