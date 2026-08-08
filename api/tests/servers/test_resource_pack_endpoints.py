@@ -690,6 +690,19 @@ class TestPublicDownloadEndpoint:
         assert resp.status_code == 503
         assert resp.json()["reason"] == "storage_unavailable"
 
+    def test_public_download_503_declares_no_store(self) -> None:
+        # A 503 is a transient storage outage, so it must never be edge-cached
+        # (issues #2562 / #2588 / #2589): this URL usually ends in ``.zip`` and is
+        # the one URL a shared cache demonstrably stores, so a cached 503 would
+        # amplify a brief outage into a multi-hour one for every joining player.
+        # Mirrors the 404's ``no-store`` raise above.
+        uc = _FakeDownloadUseCase(error=ResourcePackStorageUnavailableError("down"))
+        app = _app(download=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.get(f"/api/public/resource-packs/{uuid.uuid4()}/any.zip")
+        assert resp.status_code == 503
+        assert resp.headers["cache-control"] == "no-store"
+
 
 class TestPublicDownloadHeadProbe:
     # The unauthenticated URL a Minecraft client fetches at join time (issue
@@ -758,6 +771,20 @@ class TestPublicDownloadHeadProbe:
             served = client.get(url)
             probed = client.head(url)
         assert probed.status_code == served.status_code == 404
+        assert probed.headers["cache-control"] == served.headers["cache-control"]
+        assert probed.headers["cache-control"] == "no-store"
+
+    def test_head_503_carries_the_gets_no_store(self) -> None:
+        # A transient 503 must not be edge-cached (issues #2562 / #2588 / #2589),
+        # and the probe must not be cached differently from the download it probes,
+        # so its 503 carries the same ``no-store`` as the GET.
+        uc = _FakeDownloadUseCase(error=ResourcePackStorageUnavailableError("down"))
+        app = _app(download=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            url = f"/api/public/resource-packs/{uuid.uuid4()}/any.zip"
+            served = client.get(url)
+            probed = client.head(url)
+        assert probed.status_code == served.status_code == 503
         assert probed.headers["cache-control"] == served.headers["cache-control"]
         assert probed.headers["cache-control"] == "no-store"
 
