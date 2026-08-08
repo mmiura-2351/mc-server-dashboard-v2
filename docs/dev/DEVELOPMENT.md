@@ -24,9 +24,15 @@ Install these once on your machine. Toolchain versions are pinned per module
 |---|---|---|
 | [uv](https://docs.astral.sh/uv/) | `api/` Python toolchain + dependencies (Python is pinned in `api/.python-version`) | per the uv docs |
 | [Go](https://go.dev/dl/) 1.26 | `worker/` (pinned in `worker/go.mod`) | per the Go docs |
-| [Node.js](https://nodejs.org/) ≥ 24 (+ npm 11) | `webui/` build, lint, and test (pinned in `webui/package.json`) | per the Node.js docs; npm comes bundled |
+| [Node.js](https://nodejs.org/) ≥ 24.15 (+ npm 11) | `webui/` build, lint, and test (pinned in `webui/package.json`) | per the Node.js docs; npm comes bundled |
 | [buf](https://buf.build) 1.70.0 | `proto/` lint + code generation | see [`../../proto/README.md`](../../proto/README.md) |
 | GNU Make | the root unified commands | usually preinstalled; otherwise your OS package manager |
+
+`webui/.nvmrc` pins only the Node major line (`24`), but the effective minimum
+is raised by transitive dependencies (e.g. `jsdom`'s `^24.15.0` floor on the
+v24 line) and enforced by `engine-strict=true` in `webui/.npmrc`. A stale 24.x
+below 24.15 therefore fails `make bootstrap` hard at `npm ci` rather than
+warning.
 
 `golangci-lint` and the protoc plugins are **not** installed by hand — `make
 bootstrap` fetches the pinned versions into the gitignored `worker/.bin/`.
