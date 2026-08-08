@@ -99,7 +99,24 @@ class NotFoundError(StorageError):
     """
 
 
-class ObjectStoreUnavailableError(StorageError):
+class StorageUnavailableError(StorageError):
+    """A storage backend failed or was unreachable during an operation (#2555).
+
+    The backend-agnostic "the store is unavailable, retry" outcome: a transient
+    fault that a retry can plausibly clear, as opposed to a missing key, a corrupt
+    working set, or a standing misconfiguration. The servers backup seam maps it to
+    ``503 storage_unavailable`` (issue #2378), so both storage backends produce the
+    identical wire response for the identical fault.
+
+    Each backend raises it at its own adapter boundary from the fault vocabulary it
+    speaks: the object client from a backend 5xx / transport failure (via
+    :class:`ObjectStoreUnavailableError`), the fs adapter from a transient I/O errno
+    (EIO / device-gone / stale-mount — see ``_STORE_UNAVAILABLE_ERRNOS`` in the fs
+    adapter for the mapping and its deliberate exclusions).
+    """
+
+
+class ObjectStoreUnavailableError(StorageUnavailableError):
     """The object-store backend failed or was unreachable during an operation (#2270).
 
     Raised at the object-client adapter boundary when the S3 client surfaces a
