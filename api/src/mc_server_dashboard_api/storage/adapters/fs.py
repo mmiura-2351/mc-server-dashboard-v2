@@ -31,6 +31,7 @@ import asyncio
 import contextlib
 import datetime as dt
 import errno
+import functools
 import hashlib
 import io
 import os
@@ -41,8 +42,9 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Coroutine, Iterator
 from pathlib import Path
+from typing import Any, ParamSpec, TypeVar
 
 from mc_server_dashboard_api.storage.adapters.failure_seam import (
     FailureSeam,
@@ -60,6 +62,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     PrunedStoreError,
     SnapshotHandleError,
     StaleGenerationError,
+    StorageUnavailableError,
     SymlinkRefusedError,
 )
 from mc_server_dashboard_api.storage.domain.port import (
@@ -106,6 +109,108 @@ _SPOOL_SWEEP_MIN_AGE_S = 3600
 # disk (#287). 8 GiB bounds the amplification while covering a real Minecraft
 # world; a constant is intentional (no config knob requested).
 _DEFAULT_MAX_RESTORE_BYTES = 8 * 1024 * 1024 * 1024
+
+# The errnos an fs backup operation translates to a retryable "store unavailable"
+# outcome (issue #2555). The object backend answers a backend 5xx / transport
+# failure with ``ObjectStoreUnavailableError`` on every backup route (issues #2378,
+# #2405); the fs backend — the M1 default — used to re-raise its raw ``OSError``
+# unchanged, so the identical physical fault was a 503 on one backend and an opaque
+# 500 on the other. Translating these at the fs backup boundary (the
+# ``_translate_io_faults`` decorator below) closes that split: the servers seam maps
+# :class:`StorageUnavailableError` to the same ``503 storage_unavailable`` for both.
+#
+# TRANSLATED — transient device/mount faults a retry can plausibly clear:
+#   EIO    a low-level I/O error reading/writing the medium
+#   ENODEV the backing device is gone (an unmounted/pulled volume)
+#   ENXIO  no such device or address (the device vanished under an open path)
+#   ESTALE a stale handle — the remote-fs (Section 7.2) mount moved under us
+#   EBUSY  the resource is busy (a transient mount/lock contention)
+#
+# EXCLUDED as standing conditions — a 503 would invite a client to retry forever and
+# hide the real cause from the operator, so these stay a 500 (the honest "the server
+# is misconfigured / out of resources" signal), deliberately NOT translated:
+#   EACCES, EPERM  a permission/ownership problem — a permanently misconfigured
+#                  backup directory is not a transient outage (the issue's explicit
+#                  steer; EACCES was called out as arguable and is decided as 500)
+#   EROFS          the filesystem is read-only; on ext4 this is often the terminal
+#                  state after the kernel remounts ro on errors — an operator must
+#                  act, retrying never clears it, so it stays a 500 (arguable, stated)
+#   ENOSPC, EDQUOT the disk / quota is full — a resource-exhaustion condition an
+#                  operator resolves, not a transient the client should hammer
+#
+# EXCLUDED as "not this file" — already the read side's miss set (``NotFoundError``,
+# issue #2394, ``_NOT_A_READABLE_FILE``) and disjoint from the set above by
+# construction: ENOENT, EISDIR, ENOTDIR, ELOOP, ENAMETOOLONG. ENOENT in particular
+# stays the existing miss.
+_STORE_UNAVAILABLE_ERRNOS = frozenset(
+    {errno.EIO, errno.ENODEV, errno.ENXIO, errno.ESTALE, errno.EBUSY}
+)
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+@contextlib.contextmanager
+def _translating_io_faults() -> Iterator[None]:
+    """Translate a transient I/O ``OSError`` into :class:`StorageUnavailableError`.
+
+    The fs counterpart of the object client's ``_translating_backend_faults``
+    (issue #2555): a transient device/mount fault (``_STORE_UNAVAILABLE_ERRNOS``)
+    surfaces as the same retryable storage type the object backend raises, which the
+    servers backup seam then maps to the identical ``503 storage_unavailable``.
+
+    Every other ``OSError`` propagates unchanged: the excluded standing conditions
+    (EACCES / EPERM / EROFS / ENOSPC / EDQUOT) stay a 500, and the read-side miss
+    errnos are already turned into :class:`NotFoundError` before they reach here.
+    ``gzip.BadGzipFile`` is an ``OSError`` subclass with ``errno=None`` (a corrupt
+    archive, not an outage), so the errno filter leaves it — and every other
+    ``errno``-less ``OSError`` — untouched.
+    """
+
+    try:
+        yield
+    except OSError as exc:
+        if exc.errno in _STORE_UNAVAILABLE_ERRNOS:
+            raise StorageUnavailableError(f"fs storage unavailable: {exc}") from exc
+        raise
+
+
+def _translate_io_faults(
+    fn: Callable[_P, Coroutine[Any, Any, _R]],
+) -> Callable[_P, Coroutine[Any, Any, _R]]:
+    """Decorate an async backup Port method with :func:`_translating_io_faults`.
+
+    Keeps the errno policy in one place (issue #2555) while touching each wrapped
+    method by a single line and leaving its body — and its typed signature, so the
+    ``Storage`` override stays sound — unchanged. The streaming ``open_backup`` is
+    NOT a coroutine, so it applies the same context manager inside its generator
+    (:func:`_io_fault_translating_stream`) instead.
+    """
+
+    @functools.wraps(fn)
+    async def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        with _translating_io_faults():
+            return await fn(*args, **kwargs)
+
+    return wrapper
+
+
+def _io_fault_translating_stream(inner: ByteStream) -> AsyncIterator[bytes]:
+    """Wrap a backup egress stream so an I/O fault mid-read translates (issue #2555).
+
+    ``open_backup`` returns a lazily-opened stream, so a transient device/mount
+    fault strikes during iteration, not at the call. The servers seam already
+    iterates the stream and maps :class:`StorageUnavailableError` on the locating
+    half of the read (before any byte is on the wire) to ``503``; a fault once the
+    body is flowing aborts the response the same way the object path's does.
+    """
+
+    async def _gen() -> AsyncIterator[bytes]:
+        with _translating_io_faults():
+            async for chunk in inner:
+                yield chunk
+
+    return _gen()
 
 
 class _FsSnapshotHandle(SnapshotHandle):
@@ -921,6 +1026,7 @@ class FsStorage(Storage):
 
     # --- backup archive create / list / restore / delete (Section 3.3) -----
 
+    @_translate_io_faults
     async def create_backup_from_current(
         self,
         community_id: CommunityId,
@@ -979,6 +1085,7 @@ class FsStorage(Storage):
             raise
         _fsync_dir(archive.parent)
 
+    @_translate_io_faults
     async def list_backups(
         self, community_id: CommunityId, server_id: ServerId
     ) -> list[BackupKey]:
@@ -994,6 +1101,7 @@ class FsStorage(Storage):
             if name.endswith(".tar.gz")
         ]
 
+    @_translate_io_faults
     async def restore_backup(
         self,
         community_id: CommunityId,
@@ -1064,6 +1172,7 @@ class FsStorage(Storage):
         finally:
             self._release_staging(staging)
 
+    @_translate_io_faults
     async def check_backup_health(
         self, community_id: CommunityId, server_id: ServerId, key: BackupKey
     ) -> WorkingSetReport:
@@ -1135,6 +1244,7 @@ class FsStorage(Storage):
         finally:
             release()
 
+    @_translate_io_faults
     async def prune_to_final_snapshot(
         self, community_id: CommunityId, server_id: ServerId
     ) -> None:
@@ -1221,6 +1331,7 @@ class FsStorage(Storage):
             _rmtree(server_root / sub)
         _rmtree(self._marker_path(server_root))
 
+    @_translate_io_faults
     async def delete_backup(
         self, community_id: CommunityId, server_id: ServerId, key: BackupKey
     ) -> None:
@@ -1251,10 +1362,13 @@ class FsStorage(Storage):
         # an unknown key and a delete racing the open take the same NotFoundError
         # path (issue #2341).
         archive = self._backup_path(community_id, server_id, key)
-        return _file_stream(
-            archive, byte_range, not_found=f"backup not found: {key.value}"
+        return _io_fault_translating_stream(
+            _file_stream(
+                archive, byte_range, not_found=f"backup not found: {key.value}"
+            )
         )
 
+    @_translate_io_faults
     async def put_backup(
         self,
         community_id: CommunityId,
@@ -1291,6 +1405,7 @@ class FsStorage(Storage):
         await asyncio.to_thread(_fsync_dir, backups)
         return key
 
+    @_translate_io_faults
     async def backup_size(
         self, community_id: CommunityId, server_id: ServerId, key: BackupKey
     ) -> int:

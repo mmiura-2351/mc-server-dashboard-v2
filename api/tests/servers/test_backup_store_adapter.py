@@ -14,9 +14,11 @@ BackupNotFoundError).
 
 from __future__ import annotations
 
+import errno
 import os
+import tempfile
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
 import pytest
@@ -34,6 +36,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     ServerId,
 )
+from mc_server_dashboard_api.storage.adapters import fs as fs_adapter
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from mc_server_dashboard_api.storage.domain.errors import (
     ArchiveUnreadableError,
@@ -842,3 +845,186 @@ async def test_list_archive_refs_returns_all_filesystem_archives(
 
     refs = await adapter.list_archive_refs(community_id=community, server_id=server)
     assert set(refs) == {ref1, ref2}
+
+
+# --- fs I/O-fault parity (issue #2555) ---------------------------------------
+#
+# The tests above model the object backend by raising ``ObjectStoreUnavailableError``
+# from a stubbed public method. These prove the OTHER half of the seam's contract:
+# a REAL ``FsStorage`` whose underlying I/O raises a transient errno must produce the
+# SAME ``BackupStorageUnavailableError`` the object path does, so both backends answer
+# the identical fault with the identical wire response (503 ``storage_unavailable``,
+# pinned per route in ``test_backup_endpoints.py``). Before the fs adapter translated
+# its errno at the backup boundary, the raw ``OSError`` crossed the seam untranslated
+# and every backup route 500'd on the M1 default backend.
+
+
+def _raise_errno(err: int) -> Callable[..., object]:
+    """A drop-in that raises ``OSError(err)`` for any call signature (self absorbed)."""
+
+    def _raise(*args: object, **kwargs: object) -> object:
+        raise OSError(err, os.strerror(err))
+
+    return _raise
+
+
+async def test_create_fs_io_fault_translates_to_backup_storage_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    await _publish(
+        storage, community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
+    )
+    monkeypatch.setattr(
+        FsStorage, "_write_backup_archive", staticmethod(_raise_errno(errno.EIO))
+    )
+    with pytest.raises(BackupStorageUnavailableError):
+        await adapter.create_from_current(
+            community_id=community, server_id=server, storage_ref=_ref()
+        )
+
+
+async def test_restore_fs_io_fault_translates_to_backup_storage_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    ref = await _put_backup(
+        storage, community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
+    )
+    monkeypatch.setattr(fs_adapter, "_extract_tar_gz_into", _raise_errno(errno.EIO))
+    with pytest.raises(BackupStorageUnavailableError):
+        await adapter.restore(community_id=community, server_id=server, storage_ref=ref)
+
+
+async def test_store_fs_io_fault_translates_to_backup_storage_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    monkeypatch.setattr(tempfile, "mkstemp", _raise_errno(errno.EIO))
+
+    async def _stream() -> AsyncIterator[bytes]:
+        yield b"data"
+
+    with pytest.raises(BackupStorageUnavailableError):
+        await adapter.store(
+            community_id=community,
+            server_id=server,
+            stream=_stream(),
+            storage_ref=_ref(),
+        )
+
+
+async def test_delete_fs_io_fault_translates_to_backup_storage_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    # ``unlink(missing_ok=True)`` swallows ENOENT only; a transient EIO on the unlink
+    # is a real fault the delete route must report as 503, not a 500.
+    monkeypatch.setattr(os, "unlink", _raise_errno(errno.EIO))
+    with pytest.raises(BackupStorageUnavailableError):
+        await adapter.delete(
+            community_id=community, server_id=server, storage_ref=_ref()
+        )
+
+
+async def test_size_fs_io_fault_translates_to_backup_storage_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    monkeypatch.setattr(fs_adapter, "_size_of_readable", _raise_errno(errno.EIO))
+    with pytest.raises(BackupStorageUnavailableError):
+        await adapter.size(community_id=community, server_id=server, storage_ref=_ref())
+
+
+async def test_open_fs_io_fault_translates_to_backup_storage_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The download route's locating half: the stream opens on first iteration, so a
+    transient I/O fault there is translated inside the egress generator (#2555)."""
+
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    monkeypatch.setattr(fs_adapter, "_open_readable_sync", _raise_errno(errno.EIO))
+    with pytest.raises(BackupStorageUnavailableError):
+        await drain(
+            adapter.open(community_id=community, server_id=server, storage_ref=_ref())
+        )
+
+
+async def test_list_fs_io_fault_translates_to_backup_storage_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The listing route (#2405): the listing scans the backups dir, so a transient
+    I/O fault there must reach the edge as 503, matching its five sibling routes."""
+
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    await _publish(storage, community, server, {"a": b"1"})
+    await adapter.create_from_current(
+        community_id=community, server_id=server, storage_ref=_ref()
+    )
+    # The backups dir now exists (is_dir passes); fault the iteration itself.
+    monkeypatch.setattr(Path, "iterdir", _raise_errno(errno.EIO))
+    with pytest.raises(BackupStorageUnavailableError):
+        await adapter.list_archive_refs(community_id=community, server_id=server)
+
+
+async def test_check_backup_health_fs_io_fault_translates_to_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    ref = await _put_backup(
+        storage, community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
+    )
+    monkeypatch.setattr(fs_adapter, "_extract_tar_gz_into", _raise_errno(errno.EIO))
+    with pytest.raises(BackupStorageUnavailableError):
+        await adapter.check_backup_health(
+            community_id=community, server_id=server, storage_ref=ref
+        )
+
+
+async def test_prune_fs_io_fault_translates_to_backup_storage_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    await _publish(storage, community, server, {"a": b"1"})
+    monkeypatch.setattr(fs_adapter, "_write_tar_gz", _raise_errno(errno.EIO))
+    with pytest.raises(BackupStorageUnavailableError):
+        await adapter.prune_to_final_snapshot(community_id=community, server_id=server)
+
+
+async def test_fs_permission_error_stays_a_500_not_a_retryable_503(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """EACCES is a standing misconfiguration, not a transient outage (issue #2555).
+
+    It is deliberately EXCLUDED from the unavailable set: a 503 would invite the
+    client to retry a permanently misconfigured directory forever. It must stay a raw
+    ``OSError`` (a 500 at the edge), NOT ``BackupStorageUnavailableError`` — proving
+    the errno mapping discriminates rather than blanket-translating every ``OSError``.
+    """
+
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    monkeypatch.setattr(fs_adapter, "_size_of_readable", _raise_errno(errno.EACCES))
+    with pytest.raises(OSError) as excinfo:
+        await adapter.size(community_id=community, server_id=server, storage_ref=_ref())
+    assert excinfo.value.errno == errno.EACCES
+    assert not isinstance(excinfo.value, BackupStorageUnavailableError)
