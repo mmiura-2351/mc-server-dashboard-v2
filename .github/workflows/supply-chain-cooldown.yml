@@ -8,15 +8,19 @@ name: supply-chain-cooldown
 # (not a job check) on the PR head SHA -- failure + label while a release is
 # younger than 7 days, success once it ages out. A commit status is used
 # deliberately: the daily `schedule` run re-posts it on the existing head SHA
-# with no new commit, so a blocked PR unblocks itself after 7 days. Add
-# `supply-chain-cooldown` as a REQUIRED status check in branch protection
-# (alongside `check`) to make it enforceable -- a repo-admin step, see the PR.
+# with no new commit, so a blocked PR unblocks itself after 7 days.
+# `supply-chain-cooldown` is a REQUIRED status check on `main` alongside `check`,
+# which is what makes it enforceable rather than advisory.
+#
+# Being required is also why this workflow must post a status for EVERY PR, not
+# only Dependabot's -- see the job comment below.
 #
 # `pull_request_target` (not `pull_request`) is required: a Dependabot
 # `pull_request` run gets a read-only token, which cannot post a status or set a
 # label. `pull_request_target` runs the BASE branch's workflow with a writable
 # token; it never checks out or executes PR head code (only reads PR metadata via
 # the API and queries public registries), so there is no pwn-request exposure.
+# That holds for fork PRs from any author, which this now also runs for.
 
 on:
   pull_request_target:
@@ -38,11 +42,13 @@ concurrency:
 
 jobs:
   cooldown:
-    # On a PR event, only Dependabot's PRs are gated; scheduled / manual runs
-    # sweep every open Dependabot PR.
-    if: >-
-      github.event_name != 'pull_request_target' ||
-      github.event.pull_request.user.login == 'dependabot[bot]'
+    # Runs for EVERY pull_request_target, not just Dependabot's. The context is
+    # required in branch protection, and a required commit status is satisfied
+    # only by being posted -- a skipped job posts nothing, so gating this job on
+    # the author would wedge every human PR on a check that can never arrive
+    # (a skipped *job* is not a posted *status*). The script decides: a
+    # non-Dependabot PR gets an immediate `success` pass-through.
+    # Scheduled / manual runs sweep every open Dependabot PR.
     runs-on: ubuntu-latest
     steps:
       # Action versions are pinned to a commit SHA per
