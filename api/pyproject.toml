@@ -25,10 +25,12 @@ dependencies = [
     # silently downgrades every WS upgrade to plain HTTP — the live /events
     # sockets never handshake. `websockets` is the explicit single dependency
     # (over `uvicorn[standard]`, which would also drag in uvloop/httptools/
-    # watchfiles we don't want); uvicorn 0.48 requires ``websockets>=10.4``. 16.0
-    # (2026-01-10) is well outside the 7-day cooldown (Section 3); cap the next
-    # major (Section 1).
-    "websockets>=16.0,<17",             # 2026-01-10
+    # watchfiles we don't want); uvicorn 0.48 requires ``websockets>=10.4``. 17.0.1
+    # (2026-07-31) is well outside the 7-day cooldown (Section 3); cap the next
+    # major (Section 1). uvicorn 0.48 drives the `websockets.legacy` API, which 17
+    # still ships (deprecated since 14.0) — dropping it is what would break #507,
+    # so the guard test there stays the tripwire.
+    "websockets>=16.0,<18",             # 2026-07-31
     "pydantic-settings>=2.14.2,<3",     # 2026-06-19
     # FastAPI multipart parsing for the file-upload endpoint (issue #259):
     # ``UploadFile``/``Form`` need python-multipart. 0.0.x library, so the
