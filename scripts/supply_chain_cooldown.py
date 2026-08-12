@@ -494,9 +494,15 @@ def evaluate_pr(repo: str, pr: int, now: datetime | None = None) -> str:
     """
     now = now or datetime.now(timezone.utc)
     meta = _gh_json(f"repos/{repo}/pulls/{pr}")
-    if meta["user"]["login"] != BOT:
-        return "skipped: not a Dependabot PR"
     sha = meta["head"]["sha"]
+    if meta["user"]["login"] != BOT:
+        # A human PR adopts no Dependabot-managed pin, so there is nothing to
+        # age -- but the context is REQUIRED, and a required status that is
+        # never posted wedges the PR forever on a check that cannot arrive.
+        # Post the pass explicitly, same reasoning as the ungated-ecosystem
+        # branch in _evaluate_head.
+        set_status(repo, sha, "success", "Not a Dependabot PR -- cooldown not applicable.")
+        return "skipped: not a Dependabot PR"
     try:
         return _evaluate_head(repo, pr, sha, meta, now)
     except Exception as exc:  # noqa: BLE001 -- fail closed with a posted status
@@ -821,6 +827,22 @@ def _self_test() -> int:  # noqa: C901 -- a flat table of independent assertions
     # Boundary: exactly 7 days old is NOT blocked (< COOLDOWN_DAYS).
     check("boundary 7d", (now - datetime(2026, 7, 16, tzinfo=timezone.utc)).days < COOLDOWN_DAYS, False)
     check("boundary 6d", (now - datetime(2026, 7, 17, tzinfo=timezone.utc)).days < COOLDOWN_DAYS, True)
+
+    # A human PR must still get the required status POSTED. Returning without
+    # posting leaves the context unset forever, and since it is required in
+    # branch protection that wedges the PR permanently -- the failure mode this
+    # pass-through exists to prevent. Swap the two module-level GitHub calls
+    # (evaluate_pr resolves both through globals at call time).
+    posted: list[tuple[str, str, str]] = []
+    saved = (globals()["_gh_json"], globals()["set_status"])
+    globals()["_gh_json"] = lambda path: {"user": {"login": "octocat"}, "head": {"sha": "cafe1234"}}
+    globals()["set_status"] = lambda repo, sha, state, description: posted.append((sha, state, description))
+    try:
+        outcome = evaluate_pr("owner/repo", 1)
+    finally:
+        globals()["_gh_json"], globals()["set_status"] = saved
+    check("human PR outcome", outcome, "skipped: not a Dependabot PR")
+    check("human PR status posted", [(s, st) for s, st, _ in posted], [("cafe1234", "success")])
 
     if failures:
         print("supply_chain_cooldown --self-test FAILED:", file=sys.stderr)
