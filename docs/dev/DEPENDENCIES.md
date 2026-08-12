@@ -66,8 +66,13 @@ most public-incident timelines.
   recovers the host from that image's pinned `FROM` / `image:` reference in the
   checked-out tree — which is why the workflow's checkout step is load-bearing. A
   daily schedule re-runs it so blocked PRs unblock themselves with no new commit.
-  Add `supply-chain-cooldown` as a required status check in `main` branch
-  protection to make it enforceable.
+  `supply-chain-cooldown` is a required status check on `main` alongside `check`,
+  which is what makes it enforceable rather than advisory.
+- Because it is required, the workflow runs for **every** PR, not only
+  Dependabot's: a required commit status is satisfied only by being posted, and a
+  skipped job posts nothing, so a PR whose status never arrives can never merge.
+  A non-Dependabot PR adopts no Dependabot-managed pin, so it gets an immediate
+  `success` pass-through ("Not a Dependabot PR").
 - **Security updates bypass the cooldown** (see Section 4); a known-exploited
   vulnerability outweighs the supply-chain risk window. The merge-time gate
   detects them from the advisory reference (GHSA id) Dependabot emits and lets
