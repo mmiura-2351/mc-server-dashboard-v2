@@ -96,8 +96,8 @@ case "$1 $2" in
 			yaml="$(cat compose.yaml)"
 		fi
 		image="$(printf '%s\n' "$yaml" | sed -n 's/^[[:space:]]*image:[[:space:]]*//p' | head -1)"
-		printf '{"services": {"db": {"image": "%s"}}, "volumes": {"db-data": {"name": "testproj_db-data"}}}\n' \
-			"$image"
+		printf '{"services": {"db": {"image": "%s"}}, "volumes": {"db-data": {"name": "%s"}}}\n' \
+			"$image" "${MOCK_VOLUME_NAME-testproj_db-data}"
 		;;
 	"volume ls")
 		# The guard LISTS volumes rather than inspecting one, so that a daemon
@@ -106,13 +106,17 @@ case "$1 $2" in
 		[ "${MOCK_VOLUME_LS_FAILS:-0}" = "1" ] && exit 1
 		# A host's other volumes come back too, including one whose name has the
 		# target as a prefix: the match has to be exact, not a substring.
-		echo "testproj_db-data-old"
-		[ "${MOCK_VOLUME_EXISTS:-1}" = "1" ] && echo "testproj_db-data"
+		echo "${MOCK_VOLUME_NAME-testproj_db-data}-old"
+		[ "${MOCK_VOLUME_EXISTS:-1}" = "1" ] && echo "${MOCK_VOLUME_NAME-testproj_db-data}"
 		exit 0
 		;;
 	"run --rm")
+		# One ARGUMENT per line, not "$*": the point of the log is which argv the
+		# probe was invoked with, and a value that was split by a shell on its way
+		# here is indistinguishable from one that was not once they are joined
+		# back together with spaces (#2308).
 		if [ -n "${MOCK_RUN_LOG:-}" ]; then
-			echo "$*" >> "$MOCK_RUN_LOG"
+			printf '%s\n' "$@" >> "$MOCK_RUN_LOG"
 		fi
 		printf '%s\n' "${MOCK_PG_VERSION:-}"
 		;;
@@ -503,6 +507,37 @@ echo "=== deploy_preflight Postgres version guard tests ==="
 		*SKIPPED*) fail_test "no timeout binary: degraded to a skip -- $output" ;;
 		*) ok "no timeout binary: the check still ran" ;;
 	esac
+	rm -rf "$base"
+}
+
+# --- 18. A volume name with a space and a quote crosses the `sg` boundary ---
+# Every value the guard puts in a docker invocation crosses one shell re-parse:
+# `sg` has only a `-c <string>` interface, so the command is a string exactly
+# once. The volume name is the value that reaches it from furthest away -- the
+# operator's own .env, via `docker compose config` -- and a space or an
+# apostrophe in it is a typo, not an attack. Pasted into the string unquoted
+# (#2308) this name split into three words and its unbalanced quote made the
+# whole command a syntax error: the probe failed, the guard skipped, and the
+# deploy it had to refuse went ahead. Both halves are asserted -- the outcome,
+# and that docker was handed the name as ONE argument.
+{
+	odd_volume="odd 'name"
+	base="$(make_fixture postgres:18)"
+	run_preflight "$base" MOCK_PG_VERSION=17 MOCK_VOLUME_NAME="$odd_volume" MOCK_RUN_LOG="$base/run.log"
+	if [ "$exit_code" -ne 0 ]; then
+		ok "quoted volume name: PG17 data under postgres:18 is still refused"
+	else
+		fail_test "quoted volume name: expected a refusal, got exit 0 -- $output"
+	fi
+	case "$output" in
+		*SKIPPED*) fail_test "quoted volume name: the check degraded to a skip -- $output" ;;
+		*) ok "quoted volume name: the check ran rather than skipping" ;;
+	esac
+	if grep -qxF -- "${odd_volume}:/probedata:ro" "$base/run.log" 2> /dev/null; then
+		ok "quoted volume name: docker received it as a single argument, unchanged"
+	else
+		fail_test "quoted volume name: the probe's -v argument was mangled -- $(cat "$base/run.log" 2> /dev/null)"
+	fi
 	rm -rf "$base"
 }
 
