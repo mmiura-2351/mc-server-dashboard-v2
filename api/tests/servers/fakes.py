@@ -112,6 +112,7 @@ from mc_server_dashboard_api.servers.domain.schedule import (
     ScheduleRun,
 )
 from mc_server_dashboard_api.servers.domain.schedule_repository import (
+    ScheduleRef,
     ScheduleRepository,
     ScheduleRunRepository,
 )
@@ -1160,6 +1161,17 @@ class FakeScheduleRepository(ScheduleRepository):
     async def get_by_id(self, schedule_id: ScheduleId) -> Schedule | None:
         schedule = self.by_id.get(schedule_id)
         return None if schedule is None else self._copy(schedule)
+
+    async def get_ref(self, schedule_id: ScheduleId) -> ScheduleRef | None:
+        # The un-hydrated lookup. A fake holds entities, so it can never carry a
+        # corrupt row; the adapter's behaviour on one is pinned against the real
+        # database (tests/integration/test_schedule_repositories.py, #2712).
+        schedule = self.by_id.get(schedule_id)
+        if schedule is None:
+            return None
+        return ScheduleRef(
+            id=schedule.id, server_id=schedule.server_id, action=schedule.action
+        )
 
     async def list_due(self, now: dt.datetime) -> list[Schedule]:
         due = [

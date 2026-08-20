@@ -38,6 +38,7 @@ from mc_server_dashboard_api.servers.domain.schedule import (
     WarningStep,
 )
 from mc_server_dashboard_api.servers.domain.schedule_repository import (
+    ScheduleRef,
     ScheduleRepository,
     ScheduleRunRepository,
 )
@@ -95,9 +96,10 @@ def _safe_hydrate(
     bug or a manual DB edit) is logged and skipped rather than failing the
     entire list — one bad row must not stop the fleet's schedules.
 
-    Returns the hydrated schedules and the ids of the rows that failed, so the
-    caller can quarantine them (issue #2150) — an enabled corrupt row would
-    otherwise stay perpetually due, respooling this warning every tick.
+    Returns the hydrated schedules and the ids of the rows that failed. The
+    runner's polls quarantine them (issue #2150) — an enabled corrupt row would
+    otherwise stay perpetually due, respooling this warning every tick; the
+    admin/UI read paths (issue #2712) only need the skip, and discard the ids.
     """
 
     result: list[Schedule] = []
@@ -142,8 +144,28 @@ class SqlAlchemyScheduleRepository(ScheduleRepository):
         )
 
     async def get_by_id(self, schedule_id: ScheduleId) -> Schedule | None:
+        # A row that fails domain validation reads as absent (issue #2712): the
+        # operator the quarantine log sent here gets a 404, not a 500. Deleting
+        # it does not go through here — see get_ref.
         row = await self._session.get(ScheduleModel, schedule_id.value)
-        return _to_schedule(row) if row is not None else None
+        if row is None:
+            return None
+        hydrated, _ = _safe_hydrate([row])
+        return hydrated[0] if hydrated else None
+
+    async def get_ref(self, schedule_id: ScheduleId) -> ScheduleRef | None:
+        # Identity, owning server and action straight off the row, with no
+        # domain hydration, so the delete path resolves a corrupt row too
+        # (issue #2712). ``action`` is pinned to the enum by the table's
+        # ``ck_schedule_action`` CHECK.
+        row = await self._session.get(ScheduleModel, schedule_id.value)
+        if row is None:
+            return None
+        return ScheduleRef(
+            id=ScheduleId(row.id),
+            server_id=ServerId(row.server_id),
+            action=ScheduleAction(row.action),
+        )
 
     async def list_due(self, now: dt.datetime) -> list[Schedule]:
         # The runner's due poll over the partial index ``ix_schedule_next_run_at``
@@ -215,7 +237,12 @@ class SqlAlchemyScheduleRepository(ScheduleRepository):
             .order_by(ScheduleModel.name)
         )
         rows = (await self._session.execute(stmt)).scalars().all()
-        return [_to_schedule(row) for row in rows]
+        # The admin/UI listing: a corrupt row is logged and omitted rather than
+        # failing the whole page (issue #2712). No quarantine — this read path
+        # never commits, so a staged disable would only roll back; the runner's
+        # polls own that write.
+        schedules, _ = _safe_hydrate(rows)
+        return schedules
 
     async def update(self, schedule: Schedule) -> None:
         # A staged UPDATE of the mutable fields; commit is the unit of work's

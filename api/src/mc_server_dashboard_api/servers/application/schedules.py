@@ -65,6 +65,7 @@ from mc_server_dashboard_api.servers.domain.schedule import (
     WarningStep,
     next_interval_run,
 )
+from mc_server_dashboard_api.servers.domain.schedule_repository import ScheduleRef
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -126,6 +127,27 @@ async def _load_schedule(
     if schedule is None or schedule.server_id != server_id:
         raise ScheduleNotFoundError(str(schedule_id.value))
     return schedule
+
+
+async def _load_schedule_ref(
+    uow: UnitOfWork,
+    community_id: CommunityId,
+    server_id: ServerId,
+    schedule_id: ScheduleId,
+) -> ScheduleRef:
+    """Resolve a schedule for a write that does not need the entity (issue #2712).
+
+    The same cross-scope not-found posture as :func:`_load_schedule`, but over
+    the un-hydrated :class:`ScheduleRef`, so a row the domain cannot load — one
+    the runner quarantined and the quarantine log tells the operator to delete —
+    still resolves for the delete it names.
+    """
+
+    await _require_server(uow, community_id, server_id)
+    ref = await uow.schedules.get_ref(schedule_id)
+    if ref is None or ref.server_id != server_id:
+        raise ScheduleNotFoundError(str(schedule_id.value))
+    return ref
 
 
 async def _ensure_unique_name(
@@ -354,7 +376,14 @@ class UpdateSchedule:
 
 @dataclass(frozen=True)
 class DeleteSchedule:
-    """Delete a schedule (schedule:manage + the action's permission)."""
+    """Delete a schedule (schedule:manage + the action's permission).
+
+    Resolved through the un-hydrated :class:`ScheduleRef` rather than the entity
+    (issue #2712): delete is the one action the quarantine log (issue #2150) asks
+    an operator to take on a corrupt row, so it must not depend on the domain
+    being able to load that row. The write gate is unchanged — the action comes
+    off the ref.
+    """
 
     uow: UnitOfWork
 
@@ -367,10 +396,10 @@ class DeleteSchedule:
         authorize: Authorize,
     ) -> None:
         async with self.uow:
-            schedule = await _load_schedule(
+            ref = await _load_schedule_ref(
                 self.uow, community_id, server_id, schedule_id
             )
-            await _authorize_write(authorize, schedule.action)
+            await _authorize_write(authorize, ref.action)
             await self.uow.schedules.delete(schedule_id)
             await self.uow.commit()
 
