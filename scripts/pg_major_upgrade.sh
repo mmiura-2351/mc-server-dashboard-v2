@@ -340,7 +340,7 @@ fi
 # the dump, not the compose file that was supposed to have started it. Post-pull
 # the compose file would say ${pg_target_major} while the container it started is still
 # ${pg_cluster_major}, which is exactly the state this must not be confused by.
-running_version="$(pg_docker "docker compose exec -T db pg_dumpall --version" 2> /dev/null)" ||
+running_version="$(pg_docker docker compose exec -T db pg_dumpall --version 2> /dev/null)" ||
 	die "the 'db' service is not running, so there is nothing to dump. Start it from the revision that deploys PostgreSQL ${pg_cluster_major}${old_revision:+ (${old_revision})} -- 'MCSD_ALLOW_PRIMARY_BRANCH=1 git checkout <that revision> && docker compose up -d --wait db' -- then 'git checkout main' and re-run."
 running_major="$(printf '%s' "$running_version" | sed -n 's/.*(PostgreSQL) \([0-9][0-9]*\).*/\1/p')"
 [ -n "$running_major" ] || die "could not read a PostgreSQL major from the running db container's pg_dumpall: '${running_version}'."
@@ -351,7 +351,10 @@ fi
 out_dir="${MCSD_PG_UPGRADE_DIR:-${repo_root%/*}/mcsd-pg-upgrade-$(date -u +%Y%m%dT%H%M%SZ)}"
 mkdir -p "$out_dir" || die "could not create the artifact directory '${out_dir}'."
 out_dir="$(cd "$out_dir" && pwd)"
-# The path is interpolated into a docker command string below.
+# The sentinel below records this path as a key<TAB>value field, and the
+# recovery block interpolates it into the commands it prints for the operator to
+# paste: whitespace would break the first and mis-split the second. (The docker
+# invocations themselves no longer care -- they pass it as an argument, #2308.)
 case "$out_dir" in
 	*[[:space:]]*) die "the artifact directory '${out_dir}' contains whitespace; set MCSD_PG_UPGRADE_DIR to a path without it." ;;
 esac
@@ -363,12 +366,12 @@ say "artifacts will be written to ${out_dir}"
 # because they only error against a stopped API. `db` stays up -- it is what
 # takes the dump.
 say "stopping the writers (api worker relay cloudflared)..."
-pg_docker "docker compose stop api worker relay cloudflared" || die "could not stop the writer services; nothing has been changed."
+pg_docker docker compose stop api worker relay cloudflared || die "could not stop the writer services; nothing has been changed."
 
 backup="$out_dir/pg${pg_cluster_major}-dumpall.sql"
 say "dumping the PostgreSQL ${pg_cluster_major} cluster to ${backup} ..."
 dump_status=0
-pg_docker "docker compose exec -T db pg_dumpall -U ${pg_db_user}" > "$backup" || dump_status=$?
+pg_docker docker compose exec -T db pg_dumpall -U "$pg_db_user" > "$backup" || dump_status=$?
 if [ "$dump_status" -ne 0 ]; then
 	die "pg_dumpall exited ${dump_status}. NOTHING has been changed -- volume '${pg_volume_name}' still holds the PostgreSQL ${pg_cluster_major} cluster and 'docker compose up -d' brings the stack back. The partial output is at ${backup}."
 fi
@@ -405,12 +408,19 @@ say "dump verified: pg_dumpall exited 0 and the output ends with PostgreSQL's co
 # `down` first, so the archive is a quiesced cluster rather than a torn copy of
 # a running one. `down` does not remove volumes.
 say "stopping the stack so the volume is archived quiesced..."
-pg_docker "docker compose down" || die "could not stop the stack; volume '${pg_volume_name}' is intact."
+pg_docker docker compose down || die "could not stop the stack; volume '${pg_volume_name}' is intact."
 
 archive_name="pg${pg_cluster_major}-${pg_volume_name}.tar.gz"
 archive="$out_dir/$archive_name"
 say "archiving volume '${pg_volume_name}' to ${archive} ..."
-pg_docker "docker run --rm --entrypoint sh -v ${pg_volume_name}:/src:ro -v ${out_dir}:/out ${pg_db_image} -c 'tar czf /out/${archive_name} -C /src .'" ||
+# The only command here with a shell INSIDE the container, because `tar` has to
+# write to a path this side names. The name is a positional parameter of that
+# `sh -c` rather than text spliced into it, so the container's shell reads it as
+# a value, exactly as the `sg` boundary already does on the way in (#2308) --
+# `sh` takes the word after the script as $0, hence the literal `sh`.
+pg_docker docker run --rm --entrypoint sh \
+	-v "${pg_volume_name}:/src:ro" -v "${out_dir}:/out" "$pg_db_image" \
+	-c 'tar czf "/out/$1" -C /src .' sh "$archive_name" ||
 	die "could not archive volume '${pg_volume_name}'. It is still intact and nothing has been removed -- free some space under ${out_dir} (or point MCSD_PG_UPGRADE_DIR elsewhere) and re-run."
 # Listing the archive back decompresses it end to end, which is what turns "a
 # file appeared" into "the bytes are readable and hold a cluster". This is the
@@ -455,11 +465,11 @@ die_recoverable() {
 } > "$sentinel"
 
 say "removing volume '${pg_volume_name}' (the verified dump and archive are the surviving copies)..."
-pg_docker "docker volume rm ${pg_volume_name}" || die_recoverable "could not remove volume '${pg_volume_name}'. The dump (${backup}) and archive (${archive}) are both good."
+pg_docker docker volume rm "$pg_volume_name" || die_recoverable "could not remove volume '${pg_volume_name}'. The dump (${backup}) and archive (${archive}) are both good."
 
 # ── 8. Restore into a healthy new cluster ────────────────────────────────────
 say "starting PostgreSQL ${pg_target_major} on a fresh volume..."
-pg_docker "docker compose up -d --wait db" || die_recoverable "the PostgreSQL ${pg_target_major} db did not become healthy. The dump (${backup}) and archive (${archive}) are intact; see 'docker compose logs db'."
+pg_docker docker compose up -d --wait db || die_recoverable "the PostgreSQL ${pg_target_major} db did not become healthy. The dump (${backup}) and archive (${archive}) are intact; see 'docker compose logs db'."
 
 # `--wait` is NOT sufficient on its own, and the comment that used to claim it
 # was is the reason this is here. It blocks on the compose healthcheck, which is
@@ -481,7 +491,7 @@ pg_docker "docker compose up -d --wait db" || die_recoverable "the PostgreSQL ${
 say "waiting for the real server (the image's bootstrap server answers the healthcheck but not TCP)..."
 db_ready=0
 for _ in $(seq 1 120); do
-	if pg_docker "docker compose exec -T db pg_isready -q -h 127.0.0.1 -U ${pg_db_user} -d postgres" > /dev/null 2>&1; then
+	if pg_docker docker compose exec -T db pg_isready -q -h 127.0.0.1 -U "$pg_db_user" -d postgres > /dev/null 2>&1; then
 		db_ready=1
 		break
 	fi
@@ -530,7 +540,8 @@ if [ "$createdb_lines" -gt 1 ]; then
 fi
 if [ "$createdb_lines" -eq 1 ]; then
 	say "dropping the empty '${pg_db_name}' this image's initdb just created, so the dump recreates it as it was..."
-	pg_docker "docker compose exec -T db psql -v ON_ERROR_STOP=1 -U ${pg_db_user} -d postgres -c 'DROP DATABASE IF EXISTS ${pg_db_name}'" ||
+	pg_docker docker compose exec -T db psql -v ON_ERROR_STOP=1 -U "$pg_db_user" -d postgres \
+		-c "DROP DATABASE IF EXISTS ${pg_db_name}" ||
 		die_recoverable "could not drop the freshly created '${pg_db_name}'."
 fi
 
@@ -538,13 +549,14 @@ restore_log="$out_dir/restore.log"
 say "restoring the dump into the new cluster (ON_ERROR_STOP=1 -- any unexpected error aborts)..."
 restore_status=0
 grep -v -x -F -- "$role_stmt" "$backup" |
-	pg_docker "docker compose exec -T db psql -v ON_ERROR_STOP=1 -U ${pg_db_user} -d postgres" 2>&1 |
+	pg_docker docker compose exec -T db psql -v ON_ERROR_STOP=1 -U "$pg_db_user" -d postgres 2>&1 |
 	tee "$restore_log" || restore_status=$?
 if [ "$restore_status" -ne 0 ]; then
 	die_recoverable "the restore failed (exit ${restore_status}); see ${restore_log} for the statement that errored. The database is now PARTIALLY restored -- do not bring the stack up on it."
 fi
 
-table_count="$(pg_docker "docker compose exec -T db psql -U ${pg_db_user} -d ${pg_db_name} -tAc \"select count(*) from pg_tables where schemaname = 'public'\"" 2> /dev/null | tr -d '[:space:]')" || table_count=""
+table_count="$(pg_docker docker compose exec -T db psql -U "$pg_db_user" -d "$pg_db_name" \
+	-tAc "select count(*) from pg_tables where schemaname = 'public'" 2> /dev/null | tr -d '[:space:]')" || table_count=""
 
 # The restore is in; the deployment has a working database again. Clearing the
 # sentinel is what makes a later re-run say "nothing to do" instead of refusing.

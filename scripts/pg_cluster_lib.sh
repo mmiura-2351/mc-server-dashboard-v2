@@ -35,11 +35,37 @@
 # upgrade script turns it into a refusal (it must never start a destructive
 # migration on a guess).
 
-# Docker goes through `sg docker` to match scripts/update.sh -- a session
-# without active docker-group membership would otherwise fail. stdin and stdout
-# pass through, so callers can pipe into and redirect out of it.
+# Run a docker command under `sg docker`, to match scripts/update.sh -- a
+# session without active docker-group membership would otherwise fail. stdin and
+# stdout pass through, so callers can pipe into and redirect out of it:
+#
+#   pg_docker docker compose exec -T db psql -U "$pg_db_user" -c "$sql"
+#
+# Takes the argument VECTOR, never a command string (issue #2308). `sg` has only
+# a `-c <string>` interface, so ONE shell re-parse between here and the daemon is
+# unavoidable; this function is the only place that builds that string, and it
+# quotes every argument on the way in. Values that reach it from the operator's
+# .env -- volume names, image refs, POSTGRES_USER, POSTGRES_DB -- are therefore
+# words no matter what they contain, rather than text the shell splits again on
+# spaces and reads for metacharacters.
+#
+# Single quotes with the embedded ones escaped, because every Bourne shell parses
+# that form back to the bytes it started as. Which shell that is, is not the
+# caller's to choose: sg(1) says "The command will be executed with the /bin/sh
+# shell", and /bin/sh is dash on the deploy host as it is in the test stubs. So a
+# bash-only form is not an option even though this file runs under bash --
+# `printf %q` emits `$'...'` for a tab, which dash does not parse.
+#
+# The one shell left INSIDE the boundary is the `sh -c` of the two commands that
+# run inside a container (the PG_VERSION probe below and the archive step in
+# scripts/pg_major_upgrade.sh). Neither interpolates anything into its script
+# text: values reach those as positional parameters, for the same reason.
 pg_docker() {
-	sg docker -c "$1"
+	local quoted="" arg sq="'" esc="'\\''"
+	for arg in "$@"; do
+		quoted+="'${arg//$sq/$esc}' "
+	done
+	sg docker -c "$quoted"
 }
 
 # Resolve the revision a deploy from THIS checkout would build: origin/main,
@@ -111,7 +137,7 @@ pg_resolve_incoming_revision() {
 # would be worse than resolving both from either.
 pg_compose_db_facts() {
 	local revision="$1" compose_json
-	compose_json="$(git show "${revision}:compose.yaml" 2>/dev/null | pg_docker "docker compose -f - config --format json" 2>/dev/null || true)"
+	compose_json="$(git show "${revision}:compose.yaml" 2>/dev/null | pg_docker docker compose -f - config --format json 2>/dev/null || true)"
 	[ -n "$compose_json" ] || return 1
 
 	# The tag is what follows the LAST colon of the final path segment, with any
@@ -202,7 +228,7 @@ pg_resolve_compose_facts() {
 # An EMPTY `pg_cluster_major` on return 0 means the volume exists but holds no
 # cluster.
 pg_probe_cluster_major() {
-	local volume="$1" image="$2" probe_cmd found_major volumes
+	local volume="$1" image="$2" found_major volumes
 	pg_reason=""
 	pg_cluster_major=""
 
@@ -215,7 +241,7 @@ pg_probe_cluster_major() {
 	# by daemon version: success means the daemon answered, and membership in that
 	# answer is then the fact. The match is exact, or a `<volume>-old` left on the
 	# host would invent a cluster to compare against.
-	if ! volumes="$(pg_docker "docker volume ls --quiet" 2>/dev/null)"; then
+	if ! volumes="$(pg_docker docker volume ls --quiet 2>/dev/null)"; then
 		pg_reason="could not ask Docker whether volume '${volume}' exists."
 		return 1
 	fi
@@ -235,8 +261,10 @@ pg_probe_cluster_major() {
 	# Runs the db image itself with the entrypoint replaced rather than pulling a
 	# helper image: no second image to version-pin and vet (DEPENDENCIES.md), and
 	# `sh` replaces the very docker-entrypoint.sh whose abort this is about.
-	probe_cmd="docker run --rm --entrypoint sh -v ${volume}:/probedata:ro ${image} -c 'cat /probedata/PG_VERSION /probedata/*/docker/PG_VERSION 2>/dev/null | sort -n | head -1'"
-	if ! found_major="$(pg_docker "$probe_cmd" 2>/dev/null)"; then
+	if ! found_major="$(pg_docker docker run --rm --entrypoint sh \
+		-v "${volume}:/probedata:ro" "$image" \
+		-c 'cat /probedata/PG_VERSION /probedata/*/docker/PG_VERSION 2>/dev/null | sort -n | head -1' \
+		2>/dev/null)"; then
 		pg_reason="could not read PG_VERSION from volume '${volume}'."
 		return 1
 	fi
