@@ -1539,14 +1539,12 @@ describe("ServerPluginsTab Bedrock discovery hint (issue #1543)", () => {
       }
       if (url === "/api/meta") {
         // The API derives `bedrock_enabled` as `relay_enabled AND
-        // relay.bedrock_enabled` (core/api/meta.py), so Bedrock-on with the
-        // relay off is a body no deployment can send. Move both flags together
-        // rather than stubbing `bedrock_enabled` alone (issue #2537).
+        // relay.bedrock_enabled` (core/api/meta.py), so `relay_enabled: true`
+        // is the one relay state legal for both values of `bedrockEnabled`.
+        // Pinning it keeps the fixture from also asserting "the relay is off"
+        // in the false case, which these tests are not about (issue #2598).
         return Promise.resolve(
-          meta({
-            relay_enabled: bedrockEnabled,
-            bedrock_enabled: bedrockEnabled,
-          }),
+          meta({ relay_enabled: true, bedrock_enabled: bedrockEnabled }),
         );
       }
       return Promise.resolve({});
