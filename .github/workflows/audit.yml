@@ -32,6 +32,8 @@ on:
       - "relay/go.mod"
       - "relay/go.sum"
       - ".github/workflows/audit.yml"
+  # Manual escape hatch: re-run on demand (post-fix confirmation, new advisory).
+  workflow_dispatch:
 
 permissions:
   contents: read
