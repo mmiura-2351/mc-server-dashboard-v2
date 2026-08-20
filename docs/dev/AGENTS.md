@@ -90,6 +90,28 @@ Each one succeeds, or appears to; the damage surfaces later.
   cannot match its own literal text — `pgrep -f "make chec[k]"` matches the
   gate but not the waiter. A self-deadlocked waiter is indistinguishable from a
   contended host (#2513), so it never diagnoses itself.
+- **Killing a backgrounded `git push` does not kill the gate it started.** The
+  push dies; the pre-push tree it spawned — `make check` →
+  `scripts/check_parallel.sh` → sub-makes → pytest — keeps running in that
+  worktree. While the orphan lives, the next gate run there has been seen dying
+  mid-suite (`api-test Terminated`, at 42%): a red that looks exactly like the
+  #2228 / #2513 timeout flakes, in the same fs-heavy modules, and that a re-run
+  does not clear — so the reflex response buys another full gate of the same
+  (issue #2605, found on PR #2603). Before attributing a red to a flake in a
+  worktree whose push was interrupted, look for the survivor.
+  `pgrep -af "<worktree-pat[h]>"` names `scripts/check_parallel.sh` and its
+  chain subshells (forks share its argv): `make check` passes `$(CURDIR)` to it
+  for exactly this purpose. Bracket one character of the path every time, even
+  for a one-shot — the shell that runs the `pgrep` carries the pattern in its
+  own command line (previous entry), and here a self-match costs more than a
+  stuck poll: it reads as a survivor, and killing its process group kills the
+  session doing the diagnosing. Nothing below those carries the path
+  (sub-makes, pytest and vitest all run with a bare argv), so a stray child is
+  identified only by `readlink /proc/<pid>/cwd`. Kill by process group rather
+  than by pid — `pgid=$(ps -o pgid= -p <pid> | tr -d ' '); kill -- -"$pgid"` —
+  because the script's own TERM trap reaches its subshells but not their
+  sub-makes. Preventing the orphan (one gate at a time per host, via `flock`)
+  is decided on #2513, not here.
 - **`uv run --active` in a worktree re-points the primary checkout's
   `api/.venv`.** Worktree shells inherit `VIRTUAL_ENV` from the repo root;
   plain `uv run` ignores it and uses the worktree's own `.venv`, but `--active`
