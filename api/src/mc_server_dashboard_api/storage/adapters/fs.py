@@ -126,6 +126,17 @@ _DEFAULT_MAX_RESTORE_BYTES = 8 * 1024 * 1024 * 1024
 #   ESTALE a stale handle — the remote-fs (Section 7.2) mount moved under us
 #   EBUSY  the resource is busy (a transient mount/lock contention)
 #
+# TRANSLATED — the networked-mount transport family (issue #2716). Same remote-fs
+# (Section 7.2) rationale as ESTALE, one step lower in the stack: there the handle
+# went stale, here the transport to the file server broke. A disconnected or
+# timed-out mount is transient and retryable, which is what a 503 says:
+#   ETIMEDOUT    the operation timed out against the file server
+#   ENOTCONN     the transport is not connected
+#   EHOSTDOWN    the file server host is down
+#   EHOSTUNREACH no route to the file server host
+#   ENETDOWN     the local network is down
+#   ENETUNREACH  the file server's network is unreachable
+#
 # EXCLUDED as standing conditions — a 503 would invite a client to retry forever and
 # hide the real cause from the operator, so these stay a 500 (the honest "the server
 # is misconfigured / out of resources" signal), deliberately NOT translated:
@@ -143,7 +154,19 @@ _DEFAULT_MAX_RESTORE_BYTES = 8 * 1024 * 1024 * 1024
 # construction: ENOENT, EISDIR, ENOTDIR, ELOOP, ENAMETOOLONG. ENOENT in particular
 # stays the existing miss.
 _STORE_UNAVAILABLE_ERRNOS = frozenset(
-    {errno.EIO, errno.ENODEV, errno.ENXIO, errno.ESTALE, errno.EBUSY}
+    {
+        errno.EIO,
+        errno.ENODEV,
+        errno.ENXIO,
+        errno.ESTALE,
+        errno.EBUSY,
+        errno.ETIMEDOUT,
+        errno.ENOTCONN,
+        errno.EHOSTDOWN,
+        errno.EHOSTUNREACH,
+        errno.ENETDOWN,
+        errno.ENETUNREACH,
+    }
 )
 
 _P = ParamSpec("_P")

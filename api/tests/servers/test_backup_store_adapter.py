@@ -1028,3 +1028,33 @@ async def test_fs_permission_error_stays_a_500_not_a_retryable_503(
         await adapter.size(community_id=community, server_id=server, storage_ref=_ref())
     assert excinfo.value.errno == errno.EACCES
     assert not isinstance(excinfo.value, BackupStorageUnavailableError)
+
+
+@pytest.mark.parametrize(
+    "err",
+    [
+        errno.ETIMEDOUT,
+        errno.ENOTCONN,
+        errno.EHOSTDOWN,
+        errno.EHOSTUNREACH,
+        errno.ENETDOWN,
+        errno.ENETUNREACH,
+    ],
+)
+async def test_network_transport_errno_translates_to_backup_storage_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, err: int
+) -> None:
+    """A remote-fs mount's transport faults are transient outages too (issue #2716).
+
+    ESTALE already translates because a networked mount moved under us; the same
+    mount answering with a timed-out or disconnected transport is the identical
+    physical fault one step lower in the stack, so it must reach the edge as the
+    retryable 503 rather than an opaque 500.
+    """
+
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    monkeypatch.setattr(fs_adapter, "_size_of_readable", _raise_errno(err))
+    with pytest.raises(BackupStorageUnavailableError):
+        await adapter.size(community_id=community, server_id=server, storage_ref=_ref())
