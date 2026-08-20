@@ -175,6 +175,7 @@ class DeleteResourcePack:
             logger.warning(
                 "blob delete failed for resource pack %s; orphaned",
                 resource_pack_id.value,
+                exc_info=True,
             )
 
 
