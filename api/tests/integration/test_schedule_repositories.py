@@ -498,8 +498,9 @@ async def test_list_for_server_skips_a_corrupt_row(
 
     The quarantine log (#2150) tells the operator to correct or delete the row,
     so the listing that would show it must not fail on it. The corrupt row is
-    skipped with a WARN naming its id; unlike the runner's polls this read path
-    never commits, so it does not quarantine — the row is left as it is.
+    skipped with a WARN naming its id and, unlike the runner's polls, the
+    listing stages no quarantine. The unit of work is committed here exactly so
+    that a staged disable would persist: the row is still enabled afterwards.
     """
     server_id = await _seed_server(engine)
     factory = create_session_factory(engine)
@@ -514,6 +515,7 @@ async def test_list_for_server_skips_a_corrupt_row(
     with caplog.at_level(logging.WARNING):
         async with ServersUnitOfWork(factory) as uow:
             listed = await uow.schedules.list_for_server(ServerId(server_id))
+            await uow.commit()
 
     assert [s.id for s in listed] == [good.id]
     skipped = [r for r in caplog.records if "failed to hydrate" in r.getMessage()]
