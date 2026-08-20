@@ -9,6 +9,7 @@ import datetime as dt
 import hashlib
 import io
 import json
+import logging
 import uuid
 import zipfile
 
@@ -370,7 +371,9 @@ class TestDeleteResourcePack:
 
         assert call_log == ["db_delete", "commit", "blob_delete"]
 
-    async def test_delete_tolerates_blob_delete_failure(self) -> None:
+    async def test_delete_tolerates_blob_delete_failure(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         """A blob store failure after DB commit does not propagate (best-effort)."""
         uow = FakeUnitOfWork()
         store = FakeResourcePackStore()
@@ -392,14 +395,21 @@ class TestDeleteResourcePack:
 
         delete_uc = DeleteResourcePack(uow=uow, store=store)
         # Must NOT raise — DB row gone, blob orphan is benign.
-        await delete_uc(
-            resource_pack_id=pack.id,
-            caller_id=user_id,
-            is_platform_admin=False,
-        )
+        with caplog.at_level(logging.WARNING):
+            await delete_uc(
+                resource_pack_id=pack.id,
+                caller_id=user_id,
+                is_platform_admin=False,
+            )
 
         # DB row deleted despite blob failure.
         assert pack.id not in uow.resource_packs.packs
+        # The warning carries the store error, so the orphan is diagnosable
+        # (issue #2165) — swallowing the exception must not swallow its cause.
+        record = next(r for r in caplog.records if r.levelno == logging.WARNING)
+        assert record.exc_info is not None
+        assert isinstance(record.exc_info[1], RuntimeError)
+        assert "S3 unavailable" in str(record.exc_info[1])
 
 
 class TestDownloadResourcePack:
