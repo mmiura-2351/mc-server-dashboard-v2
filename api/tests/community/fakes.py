@@ -4,6 +4,32 @@ Keep the evaluator under test against fakes (no database), per TESTING.md
 Section 4. The fakes implement only what the PermissionChecker / membership
 visibility evaluator reaches through the UnitOfWork; the helpers below seed
 members, roles, and grants concisely.
+
+**Uniqueness and foreign keys are deliberately unmodelled, and this records what
+that costs.** No writer here enforces either: every ``add`` and ``update`` keys a
+row in by id, nothing rejects a name a sibling row already holds, and memberships
+and grants accept any parent id. The real schema enforces both
+(``community/adapters/models.py``, migration 0004), so these fakes are *more
+permissive than the adapter* -- the direction that hides defects rather than
+inventing them.
+
+The cost is that no fast test in this context can express a duplicate-name or a
+concurrent-delete outcome; a green run here says nothing about either. That
+silence hid issue #2611: renaming a role onto a name already used in the same
+community violated ``uq_role_community_name`` and was a deterministic 500 -- an
+ordinary user action, not a race -- while ``community/api/roles.py`` caught a
+``RoleAlreadyExistsError`` nothing on that path could raise. Every fast test
+agreed with the code, because the fakes agreed with the code.
+
+Mirroring the schema here was considered and declined (issue #2625): it is a
+second model to keep in sync, and this defect class is caught where it is real.
+Both outcomes are expressible only against real PostgreSQL, under
+``tests/integration/`` -- duplicate names are pinned there for all four unique
+constraints in ``test_community_repositories.py``, the #2611 rename path
+included; for concurrent deletes, ``community/adapters/integrity.py`` records why
+no foreign key is translated today. Entity isolation is the one fidelity property
+these fakes do pin (``test_fake_repository_isolation.py``, #2516) -- constraint
+fidelity is not.
 """
 
 from __future__ import annotations
