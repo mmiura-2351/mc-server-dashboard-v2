@@ -2,8 +2,9 @@
 
 Drives :class:`RunSnapshotCadenceTick` against in-memory fakes with a faked
 clock: due servers whose worker is connected are dispatched a snapshot; a
-disconnected worker is skipped; a failed dispatch is retried on the next tick;
-and the due math honours the default / override / floor.
+disconnected worker is skipped; a failed dispatch advances next-due like a
+successful one, so the retry waits one interval rather than one tick; and the due
+math honours the default / override / floor.
 """
 
 from __future__ import annotations
@@ -121,7 +122,12 @@ async def test_disconnected_worker_is_skipped() -> None:
     assert cp.dispatched == []
 
 
-async def test_failed_dispatch_is_retried_next_tick() -> None:
+async def test_failed_dispatch_advances_next_due() -> None:
+    # Issue #2485: a failed dispatch advances next-due exactly as a successful one
+    # does, so a persistently failing server is retried at its own interval. Leaving
+    # next-due in the past re-dispatched it on every tick instead, and the tick
+    # period is the interval floor (300s), so the retry — and its WARN — ran at that
+    # cadence forever however long the failure lasted.
     uow = FakeUnitOfWork()
     server = _running_server()
     uow.servers.seed(server)
@@ -132,11 +138,33 @@ async def test_failed_dispatch_is_retried_next_tick() -> None:
     scheduler = _scheduler(uow, cp, clock)
     await scheduler.tick()
     clock.set(_NOW + dt.timedelta(seconds=3600))
-    await scheduler.tick()  # due, dispatched, fails -> next_due unchanged
+    await scheduler.tick()  # due, dispatched, fails -> next-due advances anyway
     assert len(cp.dispatched) == 1
-    clock.set(_NOW + dt.timedelta(seconds=3700))
-    await scheduler.tick()  # still due (no success recorded) -> retried
+    clock.set(_NOW + dt.timedelta(seconds=3700))  # < one interval after the failure
+    await scheduler.tick()  # not due again yet -> no re-dispatch
+    assert len(cp.dispatched) == 1
+    clock.set(_NOW + dt.timedelta(seconds=3600 + 4000))  # > interval after failure
+    await scheduler.tick()  # retried on its own interval
     assert len(cp.dispatched) == 2
+
+
+async def test_unreachable_worker_advances_next_due() -> None:
+    # Issue #2485 for the transport failure: the connectivity gate passed, so the
+    # trigger WAS attempted (and WARNed) — it just did not reach the Worker. Same
+    # rule as any other failed dispatch: retry on the interval, not on the tick.
+    uow = FakeUnitOfWork()
+    server = _running_server()
+    uow.servers.seed(server)
+    cp = FakeControlPlane(unavailable_kinds={"snapshot"})
+    clock = FakeClock(_NOW)
+    scheduler = _scheduler(uow, cp, clock)
+    await scheduler.tick()
+    clock.set(_NOW + dt.timedelta(seconds=3600))
+    await scheduler.tick()  # due, dispatched, unreachable
+    assert len(cp.dispatched) == 1
+    clock.set(_NOW + dt.timedelta(seconds=3700))  # < one interval after the failure
+    await scheduler.tick()
+    assert len(cp.dispatched) == 1
 
 
 async def test_success_reschedules_one_interval_out() -> None:
@@ -205,9 +233,7 @@ async def test_crashed_server_is_still_snapshotted() -> None:
 async def test_working_set_absent_refusal_advances_next_due() -> None:
     # Issue #2480: the at-rest capture GC's the scratch after publishing, so every
     # later dispatch for the same id answers the working_set_absent refusal. There
-    # is nothing left to capture, so that answer advances next-due like a success
-    # instead of leaving it in the past and re-dispatching on every single tick
-    # until the server starts again.
+    # is nothing left to capture, so that answer advances next-due like a success.
     uow = FakeUnitOfWork()
     server = _running_server(observed=ObservedState.CRASHED)
     uow.servers.seed(server)
@@ -228,11 +254,41 @@ async def test_working_set_absent_refusal_advances_next_due() -> None:
     assert len(cp.dispatched) == 1
 
 
-async def test_other_server_not_found_is_retried_next_tick() -> None:
+async def test_working_set_absent_refusal_is_not_logged_as_a_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Since issue #2485 every outcome advances next-due, so the discriminator's
+    # whole remaining effect is how the outcome is logged: nothing was lost, so the
+    # refusal must not WARN. Pinned here (with the guard below) so the
+    # discriminator cannot quietly become dead code.
+    uow = FakeUnitOfWork()
+    server = _running_server(observed=ObservedState.CRASHED)
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(
+            status=worker_status("SnapshotTrigger", "working_set_absent"),
+            message=_WORKING_SET_ABSENT_MESSAGE,
+        )
+    )
+    clock = FakeClock(_NOW)
+    scheduler = _scheduler(uow, cp, clock)
+    await scheduler.tick()
+    clock.set(_NOW + dt.timedelta(seconds=3600))
+
+    with caplog.at_level(logging.INFO):
+        await scheduler.tick()
+
+    assert [r.levelno for r in caplog.records] == [logging.INFO]
+
+
+async def test_other_server_not_found_is_logged_as_a_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     # Guard for issue #1790's rule at this call site: the SERVER_NOT_FOUND code
     # alone must not be read as "nothing to capture" — only the pinned
     # working_set_absent phrase may be. Any other SERVER_NOT_FOUND is a genuine
-    # failure and keeps the retry.
+    # failure, and since issue #2485 that shows in the log level rather than in the
+    # retry cadence.
     uow = FakeUnitOfWork()
     server = _running_server()
     uow.servers.seed(server)
@@ -245,11 +301,11 @@ async def test_other_server_not_found_is_retried_next_tick() -> None:
     scheduler = _scheduler(uow, cp, clock)
     await scheduler.tick()
     clock.set(_NOW + dt.timedelta(seconds=3600))
-    await scheduler.tick()
-    assert len(cp.dispatched) == 1
-    clock.set(_NOW + dt.timedelta(seconds=3700))
-    await scheduler.tick()
-    assert len(cp.dispatched) == 2
+
+    with caplog.at_level(logging.INFO):
+        await scheduler.tick()
+
+    assert [r.levelno for r in caplog.records] == [logging.WARNING]
 
 
 async def test_only_running_assigned_servers_are_considered() -> None:
