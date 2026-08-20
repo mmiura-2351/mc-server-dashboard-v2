@@ -10,6 +10,14 @@ listener — never on the public HTTP port, which the bundled Cloudflare tunnel
 publishes wholesale (issue #2565). The content is aggregates only, but it is
 operational signal (server/worker counts, per-route request and auth-outcome
 counters, process start times) that an external party has no need to see.
+
+"Aggregates only" is pinned by a test rather than by convention (issue #2569):
+``tests/test_metrics_label_vocabulary.py::
+test_exposition_label_values_stay_bounded_and_non_identifying`` renders the
+exposition and asserts every metric family in it is on an explicit allowlist,
+every label value comes from that family's declared bounded vocabulary, and no
+label value carries an identifier shape. Adding a metric reddens it until its
+author states the new metric's label vocabulary there.
 """
 
 from __future__ import annotations
