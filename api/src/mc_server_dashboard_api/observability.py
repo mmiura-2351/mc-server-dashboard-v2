@@ -158,6 +158,13 @@ def start_observability_listener(
     The socket is bound here rather than by uvicorn because uvicorn's own bind
     path calls ``sys.exit(1)``, which from a lifespan task would take the API
     process down — the opposite of the intended posture.
+
+    Handing that socket on as ``serve(sockets=[sock])`` below is therefore
+    load-bearing, and nothing enforces it: dropping the argument leaves the
+    suite green, because ``sock`` loses its last reference when this function
+    returns, CPython closes it at once, and uvicorn's own bind then wins the
+    same port. The difference is a timing window rather than readable state, so
+    no proportionate assertion was found (#2602).
     """
 
     try:
