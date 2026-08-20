@@ -10,13 +10,31 @@ from __future__ import annotations
 
 import abc
 import datetime as dt
+from dataclasses import dataclass
 
 from mc_server_dashboard_api.servers.domain.schedule import (
     Schedule,
+    ScheduleAction,
     ScheduleId,
     ScheduleRun,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
+
+
+@dataclass(frozen=True)
+class ScheduleRef:
+    """A schedule's identity, owning server and action — read without hydrating.
+
+    What a caller needs to *authorize and delete* a schedule, as opposed to show
+    or run it: the owning server (cross-scope not-found) and the action (the
+    write gate's second layer). Deliberately carries nothing that can fail
+    domain validation, so it resolves for a corrupt row too (issue #2712) — the
+    row a quarantine (issue #2150) tells the operator to delete.
+    """
+
+    id: ScheduleId
+    server_id: ServerId
+    action: ScheduleAction
 
 
 class ScheduleRepository(abc.ABC):
@@ -28,7 +46,23 @@ class ScheduleRepository(abc.ABC):
 
     @abc.abstractmethod
     async def get_by_id(self, schedule_id: ScheduleId) -> Schedule | None:
-        """Return the schedule with ``schedule_id``, or ``None`` if absent."""
+        """Return the schedule with ``schedule_id``, or ``None`` if absent.
+
+        A row that fails domain validation reads as absent (issue #2712): it is
+        logged and reported ``None`` rather than raising, so a corrupt row 404s
+        at the edge instead of 500ing every caller. Use :meth:`get_ref` where
+        the row must resolve regardless — the delete path.
+        """
+
+    @abc.abstractmethod
+    async def get_ref(self, schedule_id: ScheduleId) -> ScheduleRef | None:
+        """Return the schedule's :class:`ScheduleRef`, or ``None`` if absent.
+
+        The un-hydrated lookup the delete path uses (issue #2712): identity,
+        owning server and action straight off the row, with no domain
+        validation, so a corrupt row the quarantine (issue #2150) disabled can
+        still be authorized and deleted.
+        """
 
     @abc.abstractmethod
     async def list_due(self, now: dt.datetime) -> list[Schedule]:
@@ -73,6 +107,11 @@ class ScheduleRepository(abc.ABC):
         Community scoping is enforced by the caller, which loads the
         (community-checked) server before listing; this is keyed by
         ``server_id`` only. Names are unique per server, so the order is total.
+
+        A row that fails domain validation is logged and omitted (issue #2712)
+        rather than failing the whole listing — one corrupt row must not 500 the
+        page an operator is told to go fix it on. Unlike the runner's polls this
+        is a pure read: it never quarantines.
         """
 
     @abc.abstractmethod

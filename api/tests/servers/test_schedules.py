@@ -618,6 +618,32 @@ async def test_delete_command_schedule_requires_server_command() -> None:
     assert exc.value.permission == "server:command"
 
 
+async def test_delete_missing_schedule_is_not_found() -> None:
+    uow, server = _uow()
+    with pytest.raises(ScheduleNotFoundError):
+        await DeleteSchedule(uow=uow)(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            schedule_id=ScheduleId.new(),
+            authorize=_allow,
+        )
+
+
+async def test_delete_schedule_on_another_server_is_not_found() -> None:
+    uow, server = _uow()
+    other_server = _server()
+    uow.servers.seed(other_server)
+    seeded = _seed_schedule(uow, other_server.id, name="elsewhere")
+    with pytest.raises(ScheduleNotFoundError):
+        await DeleteSchedule(uow=uow)(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            schedule_id=seeded.id,
+            authorize=_allow,
+        )
+    assert await uow.schedules.get_by_id(seeded.id) is not None
+
+
 async def test_list_runs_returns_history_newest_first() -> None:
     uow, server = _uow()
     seeded = _seed_schedule(uow, server.id)
