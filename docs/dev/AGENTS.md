@@ -105,9 +105,10 @@ Each one succeeds, or appears to; the damage surfaces later.
   self-match, but the same pattern inside a pipeline or a loop does — bracket a
   character there (previous entry). Nothing below those carries the path
   (sub-makes, pytest and vitest all run with a bare argv), so a stray child is
-  identified only by `readlink /proc/<pid>/cwd`. Kill by process group rather than by pid —
-  `pgid=$(ps -o pgid= -p <pid> | tr -d ' '); kill -- -"$pgid"` — because the
-  script's own TERM trap reaches its subshells but not their sub-makes.
+  identified only by `readlink /proc/<pid>/cwd`. Kill by process group rather
+  than by pid — `pgid=$(ps -o pgid= -p <pid> | tr -d ' '); kill -- -"$pgid"` —
+  because the script's own TERM trap reaches its subshells but not their
+  sub-makes.
   Preventing the orphan (one gate at a time per host, via `flock`) is decided
   on #2513, not here.
 - **`uv run --active` in a worktree re-points the primary checkout's
