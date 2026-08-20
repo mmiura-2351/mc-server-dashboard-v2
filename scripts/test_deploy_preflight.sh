@@ -510,18 +510,23 @@ echo "=== deploy_preflight Postgres version guard tests ==="
 	rm -rf "$base"
 }
 
-# --- 18. A volume name with a space and a quote crosses the `sg` boundary ---
+# --- 18. A volume name the shell would rewrite crosses the `sg` boundary ---
 # Every value the guard puts in a docker invocation crosses one shell re-parse:
 # `sg` has only a `-c <string>` interface, so the command is a string exactly
 # once. The volume name is the value that reaches it from furthest away -- the
-# operator's own .env, via `docker compose config` -- and a space or an
-# apostrophe in it is a typo, not an attack. Pasted into the string unquoted
+# operator's own .env, via `docker compose config` -- and a space, an apostrophe
+# or a `$` in it is a typo, not an attack. Pasted into the string unquoted
 # (#2308) this name split into three words and its unbalanced quote made the
 # whole command a syntax error: the probe failed, the guard skipped, and the
 # deploy it had to refuse went ahead. Both halves are asserted -- the outcome,
 # and that docker was handed the name as ONE argument.
+#
+# All three characters are load-bearing. A wrapper that merely put DOUBLE quotes
+# around each argument keeps the name in one word and satisfies everything else
+# here, while still leaving the `$` for the shell to expand -- without it this
+# pins only the splitting half of what the boundary has to do.
 {
-	odd_volume="odd 'name"
+	odd_volume="odd 'na\$me"
 	base="$(make_fixture postgres:18)"
 	run_preflight "$base" MOCK_PG_VERSION=17 MOCK_VOLUME_NAME="$odd_volume" MOCK_RUN_LOG="$base/run.log"
 	if [ "$exit_code" -ne 0 ]; then

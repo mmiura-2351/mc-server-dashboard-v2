@@ -50,9 +50,10 @@
 # spaces and reads for metacharacters.
 #
 # Single quotes with the embedded ones escaped, because every Bourne shell parses
-# that form back to the bytes it started as: `sg` runs the string through the
-# invoking user's login shell (bash on the deploy host) and through /bin/sh
-# (dash) in the test stubs, and bash-only forms would not survive the second --
+# that form back to the bytes it started as. Which shell that is, is not the
+# caller's to choose: sg(1) says "The command will be executed with the /bin/sh
+# shell", and /bin/sh is dash on the deploy host as it is in the test stubs. So a
+# bash-only form is not an option even though this file runs under bash --
 # `printf %q` emits `$'...'` for a tab, which dash does not parse.
 #
 # The one shell left INSIDE the boundary is the `sh -c` of the two commands that

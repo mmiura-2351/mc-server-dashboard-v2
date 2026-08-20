@@ -1306,21 +1306,26 @@ ADVANCEEOF
 	rm -rf "$base"
 }
 
-# --- 15. A volume name with a space and a quote crosses both shell boundaries -
+# --- 15. A volume name the shell would rewrite crosses both boundaries -------
 # `sg` has only a `-c <string>` interface, so every docker command this script
 # runs is a string exactly once and is re-parsed by a shell on the way to the
 # daemon; the archive step adds a second shell, the container's own `sh -c`. A
-# volume name is what crosses both, and a space or an apostrophe in it comes
-# from a typo in the operator's .env, not from an attack. Interpolated into
-# either string (#2308) this one splits into three words and leaves an
+# volume name is what crosses both, and a space, an apostrophe or a `$` in it
+# comes from a typo in the operator's .env, not from an attack. Interpolated
+# into either string (#2308) this one splits into three words and leaves an
 # unbalanced quote behind -- inside the destructive phase, where the failure the
 # operator would see is a syntax error in a command they never typed.
+#
+# The `$` is what makes this pin the QUOTING and not just the splitting: a
+# wrapper that put DOUBLE quotes around each argument would keep the name in one
+# word and pass every assertion below, while still handing the shell a value to
+# expand.
 #
 # The whole run is exercised rather than one call, because "every docker
 # invocation goes through the wrapper" is the property, and a call site left
 # behind would fail here and nowhere else.
 {
-	odd_volume="odd 'name"
+	odd_volume="odd 'na\$me"
 	base="$(make_fixture)"
 	run_upgrade "$base" MOCK_PG_VERSION=17 MOCK_VOLUME_NAME="$odd_volume" \
 		MOCK_ARGV_LOG="$base/argv.log"
