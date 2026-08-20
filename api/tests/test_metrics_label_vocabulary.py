@@ -286,16 +286,20 @@ def test_exposition_label_values_stay_bounded_and_non_identifying(
                 f"vocabulary in _label_vocabulary()"
             )
             for label, value in sample.labels.items():
-                assert _permits(permitted[label], value), (
-                    f"{sample.name} label {label}={value!r} is outside the "
-                    f"vocabulary declared for {declared}: an unbounded label "
-                    f"value grows the series count without bound"
-                )
+                # The shape check runs first: it is the net for a vocabulary
+                # that is itself too permissive (``route`` is a set derived
+                # from the app's router, not a literal), and "this label
+                # carries a UUID" is the more useful red of the two.
                 for shape, pattern in _IDENTIFIER_SHAPES:
                     assert not pattern.search(value), (
                         f"{sample.name} label {label}={value!r} contains "
                         f"a(n) {shape}: the exposition must stay non-identifying"
                     )
+                assert _permits(permitted[label], value), (
+                    f"{sample.name} label {label}={value!r} is outside the "
+                    f"vocabulary declared for {declared}: an unbounded label "
+                    f"value grows the series count without bound"
+                )
         if declared == "http_requests":
             routes.update(sample.labels["route"] for sample in family.samples)
 
