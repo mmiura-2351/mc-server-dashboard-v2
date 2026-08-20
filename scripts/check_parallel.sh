@@ -35,6 +35,18 @@
 
 set -uo pipefail
 
+# The worktree this run belongs to, carried in our own command line (#2605).
+# `make check` passes $(CURDIR); a direct invocation falls back to the current
+# directory. Nothing this script spawns carries the path -- the sub-makes,
+# pytest and vitest below all run with a bare argv -- so this argument is the
+# only thing in the process listing that ties a running gate to its worktree.
+# It is what makes `pgrep -f <worktree>` find a gate orphaned by a killed
+# `git push`, whose process group then holds the rest of the tree
+# (docs/dev/AGENTS.md Section 3). Printing it also stamps the worktree on the
+# run's own output, so a pasted log says which one produced it.
+worktree=${1:-$PWD}
+echo "=== check: $worktree ==="
+
 # Per-chain logs persist after the run (#2031). These used to go to a mktemp
 # dir deleted on exit, so a failure left nothing behind once the terminal
 # output scrolled or was truncated: three of eight reported failures could not

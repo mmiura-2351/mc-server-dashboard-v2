@@ -97,8 +97,13 @@ all: check
 # then the drift checks (proto-check, openapi-check) that run generators
 # follow in Phase 2 after all readers have finished. See the script header
 # for the phasing rationale and bounded-parallelism notes.
+#
+# `$(CURDIR)` is passed for identification only: it puts this worktree's path in
+# the orchestrator's own command line, so `pgrep -f <worktree>` finds a running
+# gate -- notably one orphaned by a killed `git push` (#2605,
+# docs/dev/AGENTS.md Section 3). Pinned by test_check_parallel_identity.sh.
 check:
-	scripts/check_parallel.sh
+	scripts/check_parallel.sh "$(CURDIR)"
 
 lint: api-lint worker-lint relay-lint webui-lint proto-lint
 
@@ -440,6 +445,7 @@ scripts-test:
 	bash scripts/test_pg_major_upgrade.sh
 	bash scripts/test_deploy_stamp.sh
 	bash scripts/test_shell_pipefail.sh
+	bash scripts/test_check_parallel_identity.sh
 
 # ---------------------------------------------------------------------------
 # proto/ (buf) -- the shared control-plane contract.
