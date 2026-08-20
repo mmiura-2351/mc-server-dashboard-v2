@@ -216,6 +216,14 @@ async def change_password(
             target_id=user.id.value,
         )
     )
+    # No caching policy is declared here, deliberately: ``PUT`` is not a cacheable
+    # method (RFC 9110 Section 9.2.3 defines only GET, HEAD and POST as cacheable),
+    # so RFC 9111 Section 3 already forbids storing this response and a
+    # ``Cache-Control`` header would guard nothing — the ground on which #2519
+    # declined to stamp the backup ``416``. Recorded rather than left silent
+    # because every other route in this module declares ``no-store``, two of them
+    # on a ``204`` (issue #2587), so the bare ``204`` here would otherwise read as
+    # the omission it is not (issue #2615).
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

@@ -196,6 +196,49 @@ router — the security posture, not knobs.
   a stale cookie). Login is the exception: it always sets the cookie, because it
   is the entry point that grants it.
 
+### Caching: what may store these responses
+
+Every response in this document's scope whose body is a credential, or is
+specific to one user, declares `Cache-Control: no-store`. That is a contract a
+client may rely on, not an implementation detail:
+
+| Response | `Cache-Control` |
+|---|---|
+| `POST /auth/login` `200` | `no-store` |
+| `POST /auth/session` `200` | `no-store` |
+| `POST /auth/refresh` `200` | `no-store` |
+| `POST /auth/logout` `204` | *(none)* |
+| `GET /users/me/sessions` `200` | `no-store` |
+| `DELETE /users/me/sessions` `204` | `no-store` |
+| `DELETE /users/me/sessions/{id}` `204` | *(none)* |
+| every `401` / `404` / `422` in this scope | *(none)* |
+
+No response in this scope sends `Pragma`, `Expires` or `Vary`. Each `no-store` is
+declared by the route itself rather than by a path-matching middleware, so a
+rename carries the declaration with it (issue #2587); the security-headers
+middleware stamps no `Cache-Control` of its own.
+
+The three token responses declare it because their bodies **are** credentials —
+the access token from login and from restore, the rotated access + refresh pair
+from refresh — and because the same declaration covers the refresh cookie riding
+alongside, which the cookie spec pointedly does not protect (RFC 6265 Section 3:
+the presence of a `Set-Cookie` header field "does not preclude HTTP caches from
+storing and reusing a response"). The guarantee is unconditional rather than
+contingent on the credential the request carried: RFC 9111 Section 3.5 keeps a
+shared cache from reusing a response only when the request carried
+`Authorization`, and the Web UI reaches `/auth/session` and `/auth/refresh` with
+the refresh cookie instead. `GET /users/me/sessions` is per-user data rather than
+a credential and is treated the same way, for the same reason.
+
+The responses that declare nothing have no representation a cache could hand to a
+second client: a `204` carries no body, and the problem+json errors are identical
+for every caller (Section 2) — no token, no per-user data. `POST /auth/logout` is
+in that group even on the response that carries the *clearing* `Set-Cookie`,
+which removes a credential rather than granting one. `DELETE /users/me/sessions`
+declares `no-store` on its `204` regardless, so both methods on that exact path
+state one policy; its per-id sibling does not, and nothing turns on the
+difference — neither `204` has a body to store.
+
 ### Download grants — the third credential kind
 
 A browser cannot put an `Authorization` header on a plain navigation, so a
@@ -470,6 +513,9 @@ are on `/api/users/me/sessions`, so — unlike `/auth/*` — they authenticate b
 | `GET /api/users/me/sessions` | `200` | JSON array of the caller's active sessions | — (empty array if none) |
 | `DELETE /api/users/me/sessions/{id}` | `204` | empty | `404` `session_not_found` (unknown / malformed id, **or** owned by another user) |
 | `DELETE /api/users/me/sessions` | `204` | empty | — |
+
+Which of these three responses declares `Cache-Control: no-store` is stated with
+the rest of this document's caching contract in Section 3.
 
 **List** returns only **active** (non-revoked, non-expired) sessions of the
 caller, newest-first. Each item is safe metadata only — the row id (an opaque
