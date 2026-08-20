@@ -74,7 +74,7 @@ Each one succeeds, or appears to; the damage surfaces later.
   agent's file into this worktree, with no error, no conflict marker, and a
   plausible-looking `git diff` (PR #2591). Every consumer that reads a file
   back has this shape: `gh pr create --body-file <scratchpad>/pr_body.md`
-  opened PR #2746 carrying the concurrent agent's body and its
+  opened PR #2746 carrying a concurrent agent's body and its
   `Resolves #2605`, which would have closed the wrong issue at merge. So name
   uniquely whatever a later command reads back — PR and issue bodies, review
   comments, generated patches, backups: `mktemp`, or embed the agent id or
