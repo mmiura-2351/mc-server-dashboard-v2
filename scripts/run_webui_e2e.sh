@@ -49,8 +49,8 @@ fi
 PG_CONTAINER="mcsd-webui-e2e-pg-${wt_hash:0:8}"
 PG_PORT="${MCD_E2E_PG_PORT:-$((10000 + 16#${wt_hash:8:8} % 5000))}"
 UVICORN_LOG="/tmp/webui-e2e-uvicorn-${wt_hash:0:8}.log"
-# postgres:18.4-alpine, the api.yml-vetted digest (docs/dev/DEPENDENCIES.md).
-PG_IMAGE="postgres@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15"
+# postgres:18.4 (Debian), the api.yml-vetted digest (docs/dev/DEPENDENCIES.md).
+PG_IMAGE="postgres@sha256:a02db8cac496f15b094798a38254f14d6e00741f709360e5e00bb6668ea31636"
 
 started_pg=
 uvicorn_pid=
