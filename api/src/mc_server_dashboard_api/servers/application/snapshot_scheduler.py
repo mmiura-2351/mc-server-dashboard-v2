@@ -21,12 +21,18 @@ after startup (within a jitter window) before settling back into its interval.
 That keeps the RPO bounded (FR-DATA-5) at the cost of one extra, idempotent
 snapshot per server per restart — an acceptable M1 trade.
 
-Failures (a disconnected Worker, a refused trigger, a transport error) are logged
-and left for the next tick: the server's next-due instant is not advanced, so a
-failure is naturally retried, bounding the RPO by the interval rather than
-dropping the snapshot. The one refusal that is NOT a failure is the Worker's
-working_set_absent answer — it holds nothing for this id, so there is nothing to
-retry and next-due advances as it would on a published snapshot (issue #2480).
+A dispatch that fails (a refused trigger, a transport error) is logged and
+advances next-due exactly as a successful one does (issue #2485), so the failure
+is retried on the server's own interval — still bounding the RPO by the interval
+rather than dropping the snapshot. Holding next-due in the past instead retried at
+the TICK period, which is the interval floor, so a persistent per-server failure
+re-dispatched (and re-WARNed) every 300s for as long as it lasted. The one refusal
+that is not a failure at all is the Worker's working_set_absent answer — it holds
+nothing for this id, so nothing was lost and it is logged as such (issue #2480).
+
+The one skip that does not advance next-due is the pre-dispatch connectivity gate:
+nothing is dispatched and nothing is logged there, so retrying it every tick costs
+nothing and the snapshot is taken as soon as the Worker reconnects.
 """
 
 from __future__ import annotations
@@ -132,13 +138,13 @@ class RunSnapshotCadenceTick:
             # The assigned Worker is gone; skip without advancing next-due so the
             # snapshot is retried once it reconnects (FR-WRK-4, FR-DATA-5).
             return
-        if await self._dispatch(server):
-            # Reschedule one interval out (plus jitter) from now only once this
-            # server needs nothing more this tick; a failure leaves next-due in
-            # the past so the next tick retries.
-            self._next_due[server.id] = now + dt.timedelta(
-                seconds=interval + jitter_seconds(server.id, interval_seconds=interval)
-            )
+        await self._dispatch(server)
+        # Reschedule one interval out (plus jitter) from now whatever the dispatch
+        # answered: a failure is retried on this server's own interval rather than
+        # on every tick (issue #2485).
+        self._next_due[server.id] = now + dt.timedelta(
+            seconds=interval + jitter_seconds(server.id, interval_seconds=interval)
+        )
 
     def _interval_for(self, server: Server) -> int | None:
         try:
@@ -160,17 +166,17 @@ class RunSnapshotCadenceTick:
             floor=self.min_interval_seconds,
         )
 
-    async def _dispatch(self, server: Server) -> bool:
-        """Dispatch one snapshot; ``True`` when next-due should advance.
+    async def _dispatch(self, server: Server) -> None:
+        """Dispatch one snapshot and classify the answer in the log.
 
-        A crashed server takes the Worker's at-rest branch here — publish, then
-        scratch GC — which is the intended crash-time capture (issue #2480, see the
-        class docstring). Its consequence is that the FIRST such tick captures the
-        world and leaves the Worker holding nothing, so every later dispatch for
-        the same id is refused with working_set_absent. That refusal is not a
-        failure to retry: there is nothing left to capture until the server starts
-        again, so it advances next-due. Retrying it instead would re-dispatch (and
-        re-WARN) on every tick for as long as the server stays crashed.
+        Every outcome leaves next-due to advance (issue #2485); what differs is how
+        the answer reads to an operator. A crashed server takes the Worker's at-rest
+        branch here — publish, then scratch GC — which is the intended crash-time
+        capture (issue #2480, see the class docstring). Its consequence is that the
+        FIRST such tick captures the world and leaves the Worker holding nothing, so
+        every later dispatch for the same id is refused with working_set_absent.
+        That refusal is not a failure — there is nothing left to capture until the
+        server starts again — so it must not WARN like one.
         """
 
         assert server.assigned_worker_id is not None
@@ -183,10 +189,10 @@ class RunSnapshotCadenceTick:
         except WorkerUnavailableError:
             _LOG.warning(
                 "periodic snapshot could not reach the Worker for server %s; "
-                "will retry next tick",
+                "will retry on the server's next interval",
                 server.id.value,
             )
-            return False
+            return
         if is_working_set_absent_refusal(outcome):
             # Only the pinned working_set_absent phrase may be read this way; the
             # SERVER_NOT_FOUND code alone must not (issue #1790), so any other
@@ -197,15 +203,14 @@ class RunSnapshotCadenceTick:
                 "again",
                 server.id.value,
             )
-            return True
+            return
         if not outcome.success:
             _LOG.warning(
-                "periodic snapshot failed for server %s: %s; will retry next tick",
+                "periodic snapshot failed for server %s: %s; will retry on the "
+                "server's next interval",
                 server.id.value,
                 outcome.message or outcome.status.value,
             )
-            return False
-        return True
 
 
 @dataclass(frozen=True)
