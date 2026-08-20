@@ -16,12 +16,33 @@ layer.
 from __future__ import annotations
 
 import abc
+import enum
 from collections.abc import AsyncIterator
 
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     ServerId,
 )
+
+
+class SnapshotScan(enum.Enum):
+    """Why a snapshot fsck produced no corrupt-region count (issue #2377).
+
+    :meth:`BackupArchiveStore.check_current_health` returns an ``int`` when it has a
+    real verdict about a published snapshot; these are the two ways it has none, and
+    they are kept apart because the sweep summary reports them differently.
+    """
+
+    NOT_PUBLISHED = "not_published"
+    """No snapshot has been published for this server — there is nothing to fsck."""
+
+    NOT_EXAMINED = "not_examined"
+    """The backend examines no published snapshot at rest (the #926 limitation).
+
+    The object backend has no local working set to walk, so it looks at nothing. It
+    answers this for every server, published or not: it reads nothing that would
+    tell the two apart.
+    """
 
 
 class BackupArchiveStore(abc.ABC):
@@ -101,14 +122,17 @@ class BackupArchiveStore(abc.ABC):
     @abc.abstractmethod
     async def check_current_health(
         self, *, community_id: CommunityId, server_id: ServerId
-    ) -> int | None:
+    ) -> int | SnapshotScan:
         """Structurally fsck the on-disk authoritative snapshot (the sweep, issue #744).
 
         Read-only: walks ``current/`` for corrupt ``.mca`` region files (issue #738)
         in place — a published snapshot is immutable/quiesced, so no staging is
         needed and ``current`` is never mutated. Returns the corrupt region-file
-        count (``0`` when healthy), or ``None`` when no snapshot has been published
-        (nothing to fsck) so the sweep skips the server's snapshot without erroring.
+        count (``0`` when healthy), or a :class:`SnapshotScan` when there is no such
+        count to report: ``NOT_PUBLISHED`` when nothing has been published (the sweep
+        skips the server's snapshot without erroring), and ``NOT_EXAMINED`` when the
+        backend walks no published snapshot at all (issue #2377), so the sweep can
+        report it as unexamined instead of counting a verdict nothing produced.
         """
 
     @abc.abstractmethod

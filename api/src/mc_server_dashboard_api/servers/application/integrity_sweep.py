@@ -12,9 +12,12 @@ artifacts of every server (or a single server) and persists/surfaces the result:
   fs adapter extracts the archive under the decompressed-byte cap and fscks the
   region files; the object adapter streams the stored archive end to end and
   proves the store can still produce it (#2371), quarantining one it cannot.
-- **Snapshots** (filesystem-only, no DB row): fsck the published ``current`` world
-  in place and **log/audit** its health — there is no snapshot model to update, so
-  surfacing is report/audit-only.
+- **Snapshots** (no DB row): fsck the published ``current`` world in place and
+  **log/audit** its health — there is no snapshot model to update, so surfacing is
+  report/audit-only. This half is fs-only: the object backend materializes no
+  working set to walk (the #926 limitation), so it examines nothing and the sweep
+  reports its snapshots as **not examined** rather than counting them scanned and
+  clean (#2377).
 
 A quarantined backup and a flagged snapshot each emit an audit entry. The pass is
 heavy (a full read per archive), so it logs per-backup progress. It is idempotent:
@@ -41,7 +44,10 @@ from mc_server_dashboard_api.audit.domain.operations import (
 )
 from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
 from mc_server_dashboard_api.servers.domain.backup import Backup, BackupHealth
-from mc_server_dashboard_api.servers.domain.backup_store import BackupArchiveStore
+from mc_server_dashboard_api.servers.domain.backup_store import (
+    BackupArchiveStore,
+    SnapshotScan,
+)
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupNotFoundError,
@@ -61,9 +67,15 @@ _LOG = logging.getLogger(__name__)
 class SweepSummary:
     """Counts emitted by a sweep run (servers, backups, snapshots).
 
-    ``snapshots_scanned`` counts only servers whose ``current`` was published (an
-    unpublished server has nothing to fsck and is skipped); ``snapshots_flagged``
-    is how many of those were structurally corrupt.
+    ``snapshots_scanned`` counts only servers whose ``current`` was published AND
+    actually walked (an unpublished server has nothing to fsck and is skipped);
+    ``snapshots_flagged`` is how many of those were structurally corrupt.
+
+    ``snapshots_not_examined`` counts servers whose snapshot the backend never
+    looked at (issue #2377) — on the object backend that is every server, published
+    or not, since it reads nothing that would tell the two apart. Keeping it out of
+    ``snapshots_scanned`` is the point: "scanned: N, flagged: 0" is a verdict, and
+    a backend that examines nothing must not be able to produce one.
 
     The three backup-quarantine counts are kept apart because an operator acts on
     them differently: ``backups_quarantined`` is a structurally corrupt world,
@@ -80,6 +92,7 @@ class SweepSummary:
     backups_dangling: int
     snapshots_scanned: int
     snapshots_flagged: int
+    snapshots_not_examined: int
 
 
 @dataclass(frozen=True)
@@ -106,6 +119,7 @@ class IntegritySweep:
         backups_dangling = 0
         snapshots_scanned = 0
         snapshots_flagged = 0
+        snapshots_not_examined = 0
         for server in servers:
             _LOG.info("integrity sweep: scanning server %s", server.id.value)
             (
@@ -118,9 +132,12 @@ class IntegritySweep:
             backups_quarantined += quarantined
             backups_unreadable += unreadable
             backups_dangling += dangling
-            scanned, flagged = await self._sweep_snapshot(server, actor_id)
+            scanned, flagged, not_examined = await self._sweep_snapshot(
+                server, actor_id
+            )
             snapshots_scanned += scanned
             snapshots_flagged += flagged
+            snapshots_not_examined += not_examined
         summary = SweepSummary(
             servers_scanned=len(servers),
             backups_healthy=backups_healthy,
@@ -129,11 +146,13 @@ class IntegritySweep:
             backups_dangling=backups_dangling,
             snapshots_scanned=snapshots_scanned,
             snapshots_flagged=snapshots_flagged,
+            snapshots_not_examined=snapshots_not_examined,
         )
         _LOG.info(
             "integrity sweep done: %d servers, %d backups healthy, %d quarantined "
             "(corrupt world), %d unreadable (archive bytes unproducible), "
-            "%d dangling, %d snapshots scanned, %d flagged",
+            "%d dangling, %d snapshots scanned, %d flagged, %d not examined "
+            "(backend walks no snapshot at rest)",
             summary.servers_scanned,
             summary.backups_healthy,
             summary.backups_quarantined,
@@ -141,6 +160,7 @@ class IntegritySweep:
             summary.backups_dangling,
             summary.snapshots_scanned,
             summary.snapshots_flagged,
+            summary.snapshots_not_examined,
         )
         return summary
 
@@ -245,24 +265,36 @@ class IntegritySweep:
 
     async def _sweep_snapshot(
         self, server: Server, actor_id: uuid.UUID | None
-    ) -> tuple[int, int]:
-        corrupt_count = await self.backup_store.check_current_health(
+    ) -> tuple[int, int, int]:
+        """Fsck one server's published snapshot -> (scanned, flagged, not examined)."""
+
+        outcome = await self.backup_store.check_current_health(
             community_id=server.community_id, server_id=server.id
         )
-        if corrupt_count is None:
-            return 0, 0  # no published snapshot: nothing to fsck.
-        if corrupt_count == 0:
+        if outcome is SnapshotScan.NOT_PUBLISHED:
+            return 0, 0, 0  # no published snapshot: nothing to fsck.
+        if outcome is SnapshotScan.NOT_EXAMINED:
+            # The backend walked nothing (issue #2377). Say so instead of logging a
+            # health verdict it never established: a "healthy" line here is exactly
+            # the vacuous reassurance this counter exists to withdraw.
+            _LOG.info(
+                "integrity sweep: snapshot for server %s not examined (this storage "
+                "backend does not fsck published snapshots at rest)",
+                server.id.value,
+            )
+            return 0, 0, 1
+        if outcome == 0:
             _LOG.info(
                 "integrity sweep: snapshot for server %s healthy", server.id.value
             )
-            return 1, 0
+            return 1, 0, 0
         _LOG.warning(
             "integrity sweep: snapshot for server %s corrupt (%d region files)",
             server.id.value,
-            corrupt_count,
+            outcome,
         )
         await self._audit_snapshot_flag(server, actor_id)
-        return 1, 1
+        return 1, 1, 0
 
     async def _audit_backup_quarantine(
         self, community_id: CommunityId, backup: Backup, actor_id: uuid.UUID | None

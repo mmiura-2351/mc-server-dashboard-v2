@@ -26,6 +26,7 @@ import pytest
 from mc_server_dashboard_api.servers.adapters.backup_store import (
     StorageBackupStoreAdapter,
 )
+from mc_server_dashboard_api.servers.domain.backup_store import SnapshotScan
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
     BackupNotFoundError,
@@ -38,6 +39,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 )
 from mc_server_dashboard_api.storage.adapters import fs as fs_adapter
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
+from mc_server_dashboard_api.storage.adapters.object_store import ObjectStorage
 from mc_server_dashboard_api.storage.domain.errors import (
     ArchiveUnreadableError,
     ObjectStoreUnavailableError,
@@ -53,6 +55,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     ServerId as StorageServerId,
 )
 from mc_server_dashboard_api.storage.integrity.region import WorkingSetReport
+from tests.storage.fake_s3 import FakeS3Store, fake_s3_factory
 from tests.storage.helpers import (
     drain,
     healthy_region_bytes,
@@ -813,15 +816,34 @@ async def test_check_current_health_returns_corrupt_count(tmp_path: Path) -> Non
     )
 
 
-async def test_check_current_health_unpublished_returns_none(tmp_path: Path) -> None:
-    """No published snapshot -> the seam returns None so the sweep skips it (#744)."""
+async def test_check_current_health_unpublished_reports_not_published(
+    tmp_path: Path,
+) -> None:
+    """No published snapshot -> NOT_PUBLISHED, so the sweep skips it (#744)."""
 
     storage = FsStorage(tmp_path, version_retention=10)
     adapter = StorageBackupStoreAdapter(storage=storage)
     community, server = _scope()
     assert (
         await adapter.check_current_health(community_id=community, server_id=server)
-        is None
+        is SnapshotScan.NOT_PUBLISHED
+    )
+
+
+async def test_check_current_health_unexamined_backend_reports_not_examined() -> None:
+    """The seam (issue #2377): a backend that examines nothing reports NOT_EXAMINED,
+    which the sweep counts apart from an examined-and-clean snapshot.
+
+    Driven against the real object adapter — it has no local working set to walk, so
+    it is the backend the distinction exists for.
+    """
+
+    storage = ObjectStorage(fake_s3_factory(FakeS3Store()), version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    assert (
+        await adapter.check_current_health(community_id=community, server_id=server)
+        is SnapshotScan.NOT_EXAMINED
     )
 
 
