@@ -24,12 +24,12 @@ agreed with the code, because the fakes agreed with the code.
 Mirroring the schema here was considered and declined (issue #2625): it is a
 second model to keep in sync, and this defect class is caught where it is real.
 Both outcomes are expressible only against real PostgreSQL, under
-``tests/integration/`` -- duplicate names are pinned there for all four unique
-constraints in ``test_community_repositories.py``, the #2611 rename path
+``tests/integration/`` -- a duplicate outcome is pinned there for each of the four
+unique constraints in ``test_community_repositories.py``, the #2611 rename path
 included; for concurrent deletes, ``community/adapters/integrity.py`` records why
-no foreign key is translated today. Entity isolation is the one fidelity property
-these fakes do pin (``test_fake_repository_isolation.py``, #2516) -- constraint
-fidelity is not.
+no foreign key is translated today. What ``test_fake_repository_isolation.py``
+pins of these fakes is their entity isolation and their update-is-not-an-insert
+semantics (#2516, #2557) -- constraint fidelity is deliberately not pinned.
 """
 
 from __future__ import annotations
