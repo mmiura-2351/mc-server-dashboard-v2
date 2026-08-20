@@ -232,12 +232,14 @@ a credential and is treated the same way, for the same reason.
 
 The responses that declare nothing have no representation a cache could hand to a
 second client: a `204` carries no body, and the problem+json errors are identical
-for every caller (Section 2) — no token, no per-user data. `POST /auth/logout` is
-in that group even on the response that carries the *clearing* `Set-Cookie`,
-which removes a credential rather than granting one. `DELETE /users/me/sessions`
-declares `no-store` on its `204` regardless, so both methods on that exact path
-state one policy; its per-id sibling does not, and nothing turns on the
-difference — neither `204` has a body to store.
+for every caller (Section 2) — no token, no per-user data. That holds even where
+storing the response would itself be permitted. `POST /auth/logout`'s `204` is
+storable in principle — `POST` is a cacheable method (RFC 9110 Section 9.2.3) and
+`204` is heuristically cacheable (Section 15.1) — including the one carrying the
+*clearing* `Set-Cookie`, which removes a credential rather than granting one. The
+two `DELETE`s are barred by the method regardless. `DELETE /users/me/sessions`
+declares `no-store` on its `204` anyway, so both methods on that exact path state
+one policy; its per-id sibling does not, and nothing turns on the difference.
 
 ### Download grants — the third credential kind
 
