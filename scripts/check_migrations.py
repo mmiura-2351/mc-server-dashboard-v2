@@ -23,12 +23,32 @@ violation:
 The head count agrees with ``alembic heads --resolve-dependencies``, which CI
 runs alongside this script, on any tree whose edges are ``down_revision`` --
 including merges. It is **not** a general reimplementation of alembic's head
-resolution: it ignores ``depends_on``, which alembic also resolves into head
-edges, and it matches parents by exact revision id where alembic also accepts
-partial ids and branch-label references. A tree using any of those can report
-more heads here than alembic reports -- fail-safe (a false alarm, never a
-missed collision), and unreachable while no version file uses them, but a real
-divergence rather than a hypothetical one (#2534).
+resolution, so on a tree that uses a construct outside that model it
+**declines to judge** the head count rather than emit a verdict it cannot
+stand behind (#2534): it exits clean, names the construct and the file, and
+points at the authoritative ``alembic heads --resolve-dependencies`` step in
+``.github/workflows/api.yml``. Checks 2 and 3 need no graph resolution and
+still apply.
+
+Two constructs trigger that decline: a non-``None`` ``depends_on`` -- alembic
+resolves a dependency into a head edge, so a revision that another head depends
+on is not itself a head (measured: a two-branch tree whose one tip declares
+``depends_on`` on the other is one head to alembic and two here) -- and a
+non-``None`` ``branch_labels``, a symbolic name alembic accepts wherever it
+accepts a revision id. Both are fields this guard reads but does not resolve
+into its graph, and neither appears by accident: all 36 version files set both
+to ``None``, as the ``script.py.mako`` template generates them.
+
+An unknown ``down_revision`` id is deliberately *not* a decline. Alembic
+matches a ``down_revision`` edge by exact id as well (``RevisionMap`` looks the
+parent up in a dict); the partial-id resolution in ``alembic/script/revision.py``
+applies to command targets and to ``depends_on``, not to ``down_revision``
+links. Measured against alembic 1.18.4, a ``down_revision`` naming a shortened
+id or a nonexistent revision makes alembic exit non-zero, exactly as this guard
+does -- and that shape is also what a typo or a deleted parent looks like, so
+it stays a failure here. (A ``down_revision`` naming a branch label errors in
+alembic too, but such a tree declines anyway: declaring the label is itself a
+trigger.)
 
 The DB-gated metadata-sync test covers chain validity, but only on the merge
 ref and only when CI actually runs; this fast non-DB step makes the head/number
@@ -60,19 +80,42 @@ class Migration:
     ``down_revisions`` is empty for the baseline, holds one id for a normal
     migration, and holds two or more for a merge migration (``alembic merge``,
     the canonical way to reconcile two heads).
+
+    ``depends_on`` and ``branch_labels`` are kept as written, uninterpreted:
+    they are the constructs the guard declines to judge a tree by, and only
+    their being non-``None`` matters (``unmodelled_constructs``).
     """
 
-    def __init__(self, path: Path, revision: str, down_revisions: tuple[str, ...]):
+    def __init__(
+        self,
+        path: Path,
+        revision: str,
+        down_revisions: tuple[str, ...],
+        depends_on: object = None,
+        branch_labels: object = None,
+    ):
         self.path = path
         self.revision = revision
         self.down_revisions = down_revisions
+        self.depends_on = depends_on
+        self.branch_labels = branch_labels
 
 
-def _assigned_literal(tree: ast.Module, name: str, path: Path) -> object:
+_ABSENT = object()
+
+
+def _assigned_literal(
+    tree: ast.Module, name: str, path: Path, default: object = _ABSENT
+) -> object:
     """The value of the module-level ``name = <literal>`` assignment.
 
     A type annotation (``revision: str = "..."``) is optional, matching both the
     annotated form ``migrations/script.py.mako`` generates and the bare form.
+
+    ``default`` is returned when the file has no such assignment; without it a
+    missing assignment is an error. Alembic reads ``branch_labels`` and
+    ``depends_on`` off the module with ``getattr``, so a version file may omit
+    them; ``revision`` and ``down_revision`` it always requires.
     """
     for node in tree.body:
         if isinstance(node, ast.AnnAssign):
@@ -89,6 +132,8 @@ def _assigned_literal(tree: ast.Module, name: str, path: Path) -> object:
             return ast.literal_eval(node.value)
         except ValueError as exc:
             raise ValueError(f"{path}: `{name} = ...` is not a literal") from exc
+    if default is not _ABSENT:
+        return default
     raise ValueError(f"{path}: no `{name} = ...` assignment found")
 
 
@@ -99,6 +144,9 @@ def parse_migration(path: Path) -> Migration:
     so this stays free of alembic, the api/ venv, and any import side effect.
     ``down_revision`` mirrors what alembic accepts (``alembic.util.to_tuple``):
     an id, ``None``, or a tuple/list of ids for a merge migration.
+
+    ``depends_on`` and ``branch_labels`` are read but not interpreted: whether
+    they are ``None`` is all this guard needs (``unmodelled_constructs``).
     """
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
 
@@ -118,18 +166,61 @@ def parse_migration(path: Path) -> Migration:
             f"{path}: `down_revision` is not an id, None, or a tuple of ids: {down!r}"
         )
 
-    return Migration(path, revision, down_revisions)
+    return Migration(
+        path,
+        revision,
+        down_revisions,
+        _assigned_literal(tree, "depends_on", path, None),
+        _assigned_literal(tree, "branch_labels", path, None),
+    )
+
+
+def _label(path: Path, label_root: Path) -> str:
+    """``path`` relative to the repo root when it is inside it."""
+    try:
+        return str(path.relative_to(label_root))
+    except ValueError:
+        return str(path)
+
+
+def unmodelled_constructs(migrations: list[Migration], label_root: Path) -> list[str]:
+    """Constructs in the tree whose head resolution this guard does not model.
+
+    Non-empty means the head count is not this guard's to judge: it declines
+    (see the module docstring). The trigger is the *presence* of a non-``None``
+    ``depends_on`` or ``branch_labels``, not its effect -- deciding the effect
+    is the modelling being declined.
+    """
+    reasons = {
+        "depends_on": (
+            "alembic resolves a dependency into a head edge, so a revision that "
+            "another head depends on is not itself a head"
+        ),
+        "branch_labels": (
+            "alembic accepts a branch label wherever it accepts a revision id, "
+            "including as a `depends_on`"
+        ),
+    }
+    messages: list[str] = []
+    for field, reason in reasons.items():
+        declared = [m.path for m in migrations if getattr(m, field) is not None]
+        if declared:
+            files = ", ".join(_label(p, label_root) for p in sorted(declared))
+            messages.append(f"`{field}` is declared in {files} -- {reason}")
+    return messages
 
 
 def check_migrations(migrations: list[Migration], label_root: Path) -> list[str]:
-    """Return a list of violation messages (empty if clean)."""
+    """Return a list of violation messages (empty if clean).
+
+    The head check is skipped -- not passed -- on a tree that uses a construct
+    ``unmodelled_constructs`` reports; the other two checks need no graph
+    resolution and always apply.
+    """
     errors: list[str] = []
 
     def label(path: Path) -> str:
-        try:
-            return str(path.relative_to(label_root))
-        except ValueError:
-            return str(path)
+        return _label(path, label_root)
 
     # 2. Unique revision ids.
     by_revision: dict[str, list[Path]] = {}
@@ -158,8 +249,11 @@ def check_migrations(migrations: list[Migration], label_root: Path) -> list[str]
     # 1. Single head: every revision that is nobody's down_revision is a head. A
     # merge migration names every head it reconciles, so all of them are
     # consumed -- counting only the first would leave a phantom extra head.
-    # ``depends_on`` edges are deliberately not tracked; see the module
-    # docstring for where that diverges from alembic (#2534).
+    # A tree that uses a construct outside this model gets no verdict at all,
+    # rather than one computed from an incomplete graph (#2534).
+    if unmodelled_constructs(migrations, label_root):
+        return errors
+
     parents = {parent for m in migrations for parent in m.down_revisions}
     heads = sorted(m.revision for m in migrations if m.revision not in parents)
     if migrations and len(heads) != 1:
@@ -197,6 +291,16 @@ def main() -> int:
         print(f"check-migrations failed to parse: {exc}", file=sys.stderr)
         return 2
 
+    declines = unmodelled_constructs(migrations, repo_root)
+    if declines:
+        print("check-migrations: declining to judge the head count (#2534):")
+        for message in declines:
+            print(f"  {message}")
+        print(
+            "  `alembic heads --resolve-dependencies` -- the migration-guard step "
+            "in .github/workflows/api.yml -- is authoritative for this tree."
+        )
+
     errors = check_migrations(migrations, repo_root)
     if errors:
         print("check-migrations found violations:", file=sys.stderr)
@@ -204,7 +308,13 @@ def main() -> int:
             print(f"  {err}", file=sys.stderr)
         return 1
 
-    print(f"check-migrations: OK ({len(migrations)} migrations, single head)")
+    if declines:
+        print(
+            f"check-migrations: {len(migrations)} migrations, revision ids and "
+            "filename prefixes unique (head count not judged)"
+        )
+    else:
+        print(f"check-migrations: OK ({len(migrations)} migrations, single head)")
     return 0
 
 
@@ -213,18 +323,37 @@ def _self_test() -> int:
     root = Path("/repo")
     failures: list[str] = []
 
-    def mig(name: str, revision: str, down: str | tuple[str, ...] | None) -> Migration:
+    def mig(
+        name: str,
+        revision: str,
+        down: str | tuple[str, ...] | None,
+        depends_on: object = None,
+        branch_labels: object = None,
+    ) -> Migration:
         """``down``: a parent id, a tuple of them (merge), or None (baseline)."""
         path = root / "api" / "migrations" / "versions" / name
         parents = () if down is None else (down,) if isinstance(down, str) else down
-        return Migration(path, revision, parents)
+        return Migration(path, revision, parents, depends_on, branch_labels)
 
-    def expect(name: str, got: list[str], should_flag: bool) -> None:
-        flagged = bool(got)
-        if flagged != should_flag:
+    def expect(
+        name: str,
+        migrations: list[Migration],
+        *,
+        flagged: bool,
+        declined: bool = False,
+    ) -> None:
+        """Assert the verdict, and whether the guard declines to judge heads."""
+        got = check_migrations(migrations, root)
+        if bool(got) != flagged:
             failures.append(
-                f"{name}: expected {'a violation' if should_flag else 'no violation'}, "
+                f"{name}: expected {'a violation' if flagged else 'no violation'}, "
                 f"got {got!r}"
+            )
+        got_declines = unmodelled_constructs(migrations, root)
+        if bool(got_declines) != declined:
+            failures.append(
+                f"{name}: expected {'a decline' if declined else 'no decline'}, "
+                f"got {got_declines!r}"
             )
 
     # A clean linear chain: one head, unique ids, unique prefixes.
@@ -233,7 +362,7 @@ def _self_test() -> int:
         mig("0002_b.py", "0002_b", "0001_a"),
         mig("0003_c.py", "0003_c", "0002_b"),
     ]
-    expect("clean chain", check_migrations(clean, root), False)
+    expect("clean chain", clean, flagged=False)
 
     # Two heads: two migrations chained off the same parent (the M2 collision).
     two_heads = [
@@ -241,7 +370,7 @@ def _self_test() -> int:
         mig("0002_b.py", "0002_b", "0001_a"),
         mig("0002_c.py", "0002_c", "0001_a"),
     ]
-    expect("two heads", check_migrations(two_heads, root), True)
+    expect("two heads", two_heads, flagged=True)
 
     # Duplicate revision id (same id in two files).
     dup_id = [
@@ -249,7 +378,7 @@ def _self_test() -> int:
         mig("0002_b.py", "0002_dup", "0001_a"),
         mig("0003_c.py", "0002_dup", "0002_dup"),
     ]
-    expect("duplicate revision id", check_migrations(dup_id, root), True)
+    expect("duplicate revision id", dup_id, flagged=True)
 
     # Duplicate numeric filename prefix (0002 twice) with distinct chained ids.
     dup_prefix = [
@@ -257,7 +386,7 @@ def _self_test() -> int:
         mig("0002_b.py", "0002_b", "0001_a"),
         mig("0002_c.py", "0002_c", "0002_b"),
     ]
-    expect("duplicate filename prefix", check_migrations(dup_prefix, root), True)
+    expect("duplicate filename prefix", dup_prefix, flagged=True)
 
     # A merge migration reconciles two heads: both parents are consumed, so the
     # merge is the single head (this is what alembic reports for such a tree).
@@ -267,7 +396,7 @@ def _self_test() -> int:
         mig("0003_c.py", "0003_c", "0001_a"),
         mig("0004_m.py", "0004_m", ("0002_b", "0003_c")),
     ]
-    expect("merge migration", check_migrations(merged, root), False)
+    expect("merge migration", merged, flagged=False)
 
     # A merge that consumes only one of the two heads leaves the other a head.
     partial_merge = [
@@ -276,7 +405,69 @@ def _self_test() -> int:
         mig("0003_c.py", "0003_c", "0001_a"),
         mig("0004_m.py", "0004_m", "0002_b"),
     ]
-    expect("partial merge", check_migrations(partial_merge, root), True)
+    expect("partial merge", partial_merge, flagged=True)
+
+    # `depends_on` on one of two branch tips: alembic resolves the dependency
+    # into a head edge and reports one head, this guard's parent set does not
+    # model that, so it declines instead of reporting the phantom second head
+    # (#2534; measured against alembic 1.18.4).
+    depends_on_tree = [
+        mig("0001_a.py", "0001_a", None),
+        mig("0002_b.py", "0002_b", "0001_a"),
+        mig("0003_c.py", "0003_c", "0001_a", depends_on="0002_b"),
+    ]
+    expect("depends_on tree", depends_on_tree, flagged=False, declined=True)
+
+    # The decline is on the construct's presence, not on its effect: a
+    # dependency that changes no head is not modelled either, and judging it
+    # would mean modelling it.
+    inert_depends_on = [
+        mig("0001_a.py", "0001_a", None),
+        mig("0002_b.py", "0002_b", "0001_a"),
+        mig("0003_c.py", "0003_c", "0002_b", depends_on="0001_a"),
+    ]
+    expect("inert depends_on", inert_depends_on, flagged=False, declined=True)
+
+    # `branch_labels` names a revision symbolically wherever alembic accepts an
+    # id -- another construct outside this guard's model.
+    labelled = [
+        mig("0001_a.py", "0001_a", None, branch_labels="tip"),
+        mig("0002_b.py", "0002_b", "0001_a"),
+    ]
+    expect("branch_labels", labelled, flagged=False, declined=True)
+
+    # An unknown parent id is NOT a decline: alembic matches a `down_revision`
+    # edge by exact id too (`RevisionMap._revision_map`) and exits non-zero on
+    # a tree like this, so the guard keeps failing rather than excusing what a
+    # typo or a deleted parent looks like.
+    typo_parent = [
+        mig("0001_a.py", "0001_aaaaaaaa", None),
+        mig("0002_b.py", "0002_bbbbbbbb", "0001_zzz"),
+    ]
+    expect("nonexistent parent", typo_parent, flagged=True, declined=False)
+
+    # Same for a shortened parent id: alembic's partial-id resolution applies to
+    # command targets and `depends_on`, not to `down_revision` links -- measured
+    # on alembic 1.18.4, where this tree is an error, not one head.
+    shortened_parent = [
+        mig("0001_a.py", "0001_aaaaaaaa", None),
+        mig("0002_b.py", "0002_bbbbbbbb", "0001_aaa"),
+    ]
+    expect("shortened parent id", shortened_parent, flagged=True, declined=False)
+
+    # Declining is scoped to the head count: the checks that need no graph
+    # resolution still report, so this tree both declines and fails.
+    declined_and_flagged = [
+        mig("0001_a.py", "0001_a", None),
+        mig("0002_b.py", "0002_b", "0001_a"),
+        mig("0002_c.py", "0002_c", "0002_b", depends_on="0001_a"),
+    ]
+    expect(
+        "decline with a duplicate prefix",
+        declined_and_flagged,
+        flagged=True,
+        declined=True,
+    )
 
     # Parsing: the assignment forms alembic accepts. Everything but the merge
     # tuple is what the real versions/ tree already exercises; a merge migration
@@ -341,6 +532,43 @@ def _self_test() -> int:
                 failures.append(
                     f"{name}: expected '0004_m', got {migration.revision!r}"
                 )
+
+        # `branch_labels` / `depends_on` decide whether the guard declines, so
+        # each shape has to read back as written. Alembic takes both as optional
+        # module attributes (`Script._from_path` reads them with getattr), so a
+        # file that omits them is legal and parses as None -- as does the
+        # explicit `None` every file in versions/ carries.
+        def expect_constructs(
+            name: str, body: str, want: tuple[object, object]
+        ) -> None:
+            migration = parsed(name, body)
+            if migration is None:
+                return
+            got = (migration.depends_on, migration.branch_labels)
+            if got != want:
+                failures.append(
+                    f"{name}: expected (depends_on, branch_labels) {want!r}, "
+                    f"got {got!r}"
+                )
+
+        def full_template(depends_on: str, branch_labels: str) -> str:
+            """All four assignments ``migrations/script.py.mako`` generates."""
+            return (
+                'revision: str = "0004_m"\n'
+                'down_revision: str | Sequence[str] | None = "0003_c"\n'
+                f"branch_labels: str | Sequence[str] | None = {branch_labels}\n"
+                f"depends_on: str | Sequence[str] | None = {depends_on}\n"
+            )
+
+        expect_constructs("parse constructs absent", annotated("None"), (None, None))
+        expect_constructs(
+            "parse constructs None", full_template("None", "None"), (None, None)
+        )
+        expect_constructs(
+            "parse constructs declared",
+            full_template('"0002_b"', '("tip",)'),
+            ("0002_b", ("tip",)),
+        )
 
     if failures:
         print("check_migrations --self-test FAILED:", file=sys.stderr)
