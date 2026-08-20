@@ -62,19 +62,24 @@ rebuild ships (issue #432).
 Each one succeeds, or appears to; the damage surfaces later.
 
 - **The scratchpad is shared across concurrently running agents, not
-  session-private, so a backup named after its source collides by
-  construction.** Mutation-testing production code to prove a test is a real
-  pin has an edit-then-revert shape; the reflex revert `git checkout <path>`
-  restores from the index, not `HEAD`, eating any unstaged edits with no
-  confirmation, no reflog entry, nothing to recover from — so PR #2521 copied
-  the file aside and restored from the copy instead. But two agents mutating
-  the same file — normal, not exotic, when several review or implement against
-  one module — both write `<scratchpad>/app.py.orig`; the restore then silently
-  writes the *other* agent's file into this worktree, with no error, no conflict
-  marker, and a plausible-looking `git diff` (PR #2591). Choose the revert by
-  the file's state: `git checkout -- <path>` when it has no unstaged edits
-  (collision-proof, and a mutation on an otherwise-clean file has none); a
-  uniquely-named copy — `mktemp`, or embed the agent id — when it does.
+  session-private, so any generically named file a later command reads back
+  collides by construction.** Mutation-testing production code to prove a test
+  is a real pin has an edit-then-revert shape; the reflex revert
+  `git checkout <path>` restores from the index, not `HEAD`, eating any
+  unstaged edits with no confirmation, no reflog entry, nothing to recover
+  from — so PR #2521 copied the file aside and restored from the copy instead.
+  But two agents mutating the same file — normal, not exotic, when several
+  review or implement against one module — both write
+  `<scratchpad>/app.py.orig`; the restore then silently writes the *other*
+  agent's file into this worktree, with no error, no conflict marker, and a
+  plausible-looking `git diff` (PR #2591). Every consumer that reads a file
+  back has this shape: `gh pr create --body-file <scratchpad>/pr_body.md`
+  opened PR #2746 carrying a concurrent agent's body and its
+  `Resolves #2605`, which would have closed the wrong issue at merge. So name
+  uniquely whatever a later command reads back — PR and issue bodies, review
+  comments, generated patches, backups: `mktemp`, or embed the agent id or
+  branch name. Better still, keep no file: `git checkout -- <path>` reverts a
+  mutation on an otherwise-clean file with no copy to collide.
 - **`--no-verify` cannot establish what the gate establishes.** The rule is in
   [`CONTRIBUTING.md`](CONTRIBUTING.md) Section 4; it is unconditional because a
   bypass is only known to have been harmless *afterwards* — the very fact the
@@ -103,7 +108,7 @@ Each one succeeds, or appears to; the damage surfaces later.
   chain subshells (forks share its argv): `make check` passes `$(CURDIR)` to it
   for exactly this purpose. Bracket one character of the path every time, even
   for a one-shot — the shell that runs the `pgrep` carries the pattern in its
-  own command line (previous entry), and here a self-match costs more than a
+  own command line (the `pgrep` entry), and here a self-match costs more than a
   stuck poll: it reads as a survivor, and killing its process group kills the
   session doing the diagnosing. Nothing below those carries the path
   (sub-makes, pytest and vitest all run with a bare argv), so a stray child is

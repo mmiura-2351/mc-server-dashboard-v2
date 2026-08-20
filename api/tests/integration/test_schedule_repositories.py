@@ -34,6 +34,7 @@ from mc_server_dashboard_api.servers.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as ServersUnitOfWork,
 )
 from mc_server_dashboard_api.servers.application.manage_server import CreateServer
+from mc_server_dashboard_api.servers.application.schedules import DeleteSchedule
 from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.schedule import (
     Cadence,
@@ -60,6 +61,12 @@ pytestmark = pytest.mark.skipif(
 )
 
 _NOW = dt.datetime(2026, 7, 11, 12, 0, tzinfo=dt.timezone.utc)
+
+
+async def _allow(_code: str) -> bool:
+    """Allow-all authorizer: the write gate is not what these tests exercise."""
+
+    return True
 
 
 @pytest.fixture
@@ -482,6 +489,82 @@ async def test_list_warning_candidates_quarantines_a_corrupt_row(
         row = await session.get(ScheduleModel, bad_id)
     assert row is not None
     assert row.enabled is False
+
+
+async def test_list_for_server_skips_a_corrupt_row(
+    engine: AsyncEngine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The admin/UI listing omits a row it cannot hydrate instead of raising (#2712).
+
+    The quarantine log (#2150) tells the operator to correct or delete the row,
+    so the listing that would show it must not fail on it. The corrupt row is
+    skipped with a WARN naming its id and, unlike the runner's polls, the
+    listing stages no quarantine. The unit of work is committed here exactly so
+    that a staged disable would persist: the row is still enabled afterwards.
+    """
+    server_id = await _seed_server(engine)
+    factory = create_session_factory(engine)
+    good = _schedule(server_id, name="alpha")
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.schedules.add(good)
+        await uow.commit()
+    bad_id = await _insert_corrupt_row(
+        engine, server_id=server_id, name="zulu-corrupt", next_run_at=_NOW
+    )
+
+    with caplog.at_level(logging.WARNING):
+        async with ServersUnitOfWork(factory) as uow:
+            listed = await uow.schedules.list_for_server(ServerId(server_id))
+            await uow.commit()
+
+    assert [s.id for s in listed] == [good.id]
+    skipped = [r for r in caplog.records if "failed to hydrate" in r.getMessage()]
+    assert len(skipped) == 1
+    assert str(bad_id) in skipped[0].getMessage()
+
+    async with factory() as session:
+        row = await session.get(ScheduleModel, bad_id)
+    assert row is not None
+    assert row.enabled is True
+
+
+async def test_get_by_id_returns_none_for_a_corrupt_row(engine: AsyncEngine) -> None:
+    """A row the domain cannot hydrate reads as absent (404), not as a 500 (#2712)."""
+    server_id = await _seed_server(engine)
+    factory = create_session_factory(engine)
+    bad_id = await _insert_corrupt_row(
+        engine, server_id=server_id, name="corrupt", next_run_at=_NOW
+    )
+
+    async with ServersUnitOfWork(factory) as uow:
+        assert await uow.schedules.get_by_id(ScheduleId(bad_id)) is None
+
+
+async def test_delete_use_case_removes_a_corrupt_row(engine: AsyncEngine) -> None:
+    """The operator can delete the row the quarantine log names (#2712).
+
+    ``DeleteSchedule`` resolves existence, ownership and action through the
+    un-hydrated ``get_ref``, so deleting never depends on the domain being able
+    to load the row — delete is the one action the quarantine log asks for.
+    """
+    server_id = await _seed_server(engine)
+    factory = create_session_factory(engine)
+    async with ServersUnitOfWork(factory) as uow:
+        server = await uow.servers.get_by_id(ServerId(server_id))
+    assert server is not None
+    bad_id = await _insert_corrupt_row(
+        engine, server_id=server_id, name="corrupt", next_run_at=_NOW
+    )
+
+    await DeleteSchedule(uow=ServersUnitOfWork(factory))(
+        community_id=server.community_id,
+        server_id=ServerId(server_id),
+        schedule_id=ScheduleId(bad_id),
+        authorize=_allow,
+    )
+
+    async with factory() as session:
+        assert await session.get(ScheduleModel, bad_id) is None
 
 
 async def test_advance_run_state_updates_only_bookkeeping(engine: AsyncEngine) -> None:
