@@ -16,7 +16,10 @@ unrelated violation is re-raised untranslated.
 A concurrent *delete* is translated the same way: the FK a stale write violates
 names the row that vanished, so it surfaces as the not-found error the use case's
 own pre-read raises (``fk_group_player_group_id_player_group`` ->
-:class:`GroupNotFoundError`, 404, issue #2583).
+:class:`GroupNotFoundError`, 404, issue #2583;
+``fk_server_group_group_id_player_group`` /
+``fk_server_group_server_id_server`` -> :class:`GroupNotFoundError` /
+:class:`ServerNotFoundError` on an attach whose target vanished, issue #2612).
 
 The call sites share the translation (adapters/integrity.py): the UnitOfWork's
 ``commit`` (an INSERT racer flushes at commit) and the server / schedule /
@@ -42,8 +45,14 @@ from sqlalchemy.exc import IntegrityError
 from mc_server_dashboard_api.servers.adapters.group_repository import (
     SqlAlchemyGroupRepository,
 )
+from mc_server_dashboard_api.servers.adapters.plugin_repository import (
+    SqlAlchemyPluginRepository,
+)
 from mc_server_dashboard_api.servers.adapters.repositories import (
     SqlAlchemyServerRepository,
+)
+from mc_server_dashboard_api.servers.adapters.resource_pack_repository import (
+    SqlAlchemyResourcePackRepository,
 )
 from mc_server_dashboard_api.servers.adapters.schedule_repository import (
     SqlAlchemyScheduleRepository,
@@ -53,6 +62,7 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     GroupNameAlreadyExistsError,
     GroupNotFoundError,
+    PluginAlreadyExistsError,
     PortAlreadyTakenError,
     ResourcePackInUseError,
     ScheduleNameAlreadyExistsError,
@@ -66,6 +76,13 @@ from mc_server_dashboard_api.servers.domain.groups import (
     Player,
     PlayerGroup,
 )
+from mc_server_dashboard_api.servers.domain.plugin import (
+    LoaderType,
+    PluginId,
+    PluginSource,
+    ServerPlugin,
+)
+from mc_server_dashboard_api.servers.domain.resource_pack import ResourcePackId
 from mc_server_dashboard_api.servers.domain.schedule import (
     Cadence,
     Schedule,
@@ -397,3 +414,64 @@ async def test_commit_translates_resource_pack_fk_violation() -> None:
     with pytest.raises(ResourcePackInUseError):
         await uow.commit()
     assert session.rolled_back is True
+
+
+# --- statement-site wraps (issue #2612) --------------------------------------
+# The commit-time translation above never sees these: the pack DELETE is refused
+# at statement end (the FK is not DEFERRABLE), the plugin UPDATE violates at
+# execute time, and the attach INSERT executes immediately. Each repository
+# therefore translates at its own statement.
+
+
+def _plugin_entity() -> ServerPlugin:
+    now = dt.datetime(2026, 8, 20, 12, 0, tzinfo=dt.timezone.utc)
+    return ServerPlugin(
+        id=PluginId(uuid.uuid4()),
+        server_id=ServerId(uuid.uuid4()),
+        rel_path="mods/foo.jar",
+        filename="foo.jar",
+        display_name="Foo",
+        description=None,
+        loader_type=LoaderType.MOD,
+        source=PluginSource.LOCAL,
+        source_project_id=None,
+        source_version_id=None,
+        version_number=None,
+        checksum_sha512=None,
+        sha256=None,
+        size_bytes=None,
+        enabled=True,
+        installed_by=None,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+async def test_plugin_update_translates_rel_path_violation_at_execute() -> None:
+    session = _FakeExecuteSession(_integrity_error("uq_server_plugin_server_rel"))
+    repo = SqlAlchemyPluginRepository(session)  # type: ignore[arg-type]
+    with pytest.raises(PluginAlreadyExistsError):
+        await repo.update(_plugin_entity())
+
+
+async def test_plugin_update_reraises_unknown_violation_untranslated() -> None:
+    session = _FakeExecuteSession(_integrity_error("uq_some_other_constraint"))
+    repo = SqlAlchemyPluginRepository(session)  # type: ignore[arg-type]
+    with pytest.raises(IntegrityError):
+        await repo.update(_plugin_entity())
+
+
+async def test_resource_pack_delete_translates_fk_violation_at_execute() -> None:
+    session = _FakeExecuteSession(
+        _integrity_error("fk_srv_rp_assignments_resource_pack_id_resource_packs")
+    )
+    repo = SqlAlchemyResourcePackRepository(session)  # type: ignore[arg-type]
+    with pytest.raises(ResourcePackInUseError):
+        await repo.delete(ResourcePackId(uuid.uuid4()))
+
+
+async def test_resource_pack_delete_reraises_unknown_violation_untranslated() -> None:
+    session = _FakeExecuteSession(_integrity_error("fk_some_other_constraint"))
+    repo = SqlAlchemyResourcePackRepository(session)  # type: ignore[arg-type]
+    with pytest.raises(IntegrityError):
+        await repo.delete(ResourcePackId(uuid.uuid4()))
