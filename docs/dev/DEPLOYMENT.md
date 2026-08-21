@@ -903,9 +903,12 @@ see the next subsection.
 
 ### The data-plane URL for a cross-host worker (issue #2564)
 
-A cross-host worker **must** be given `MCD_API_SERVER__DATA_PLANE_BASE_URL`
-explicitly. Leaving it unset is the most common way to break this topology, and
-it breaks it silently.
+A cross-host worker **must** be given an `MCD_API_SERVER__DATA_PLANE_BASE_URL`
+that the worker itself can reach. On a deployment running the shipped
+`compose.yaml` that means **overriding** the variable in `.env`, not merely
+setting one: compose already sets it, to the compose-internal `http://api:8000`.
+Both ways of getting this wrong — leaving the variable unset, and keeping
+compose's default — break this topology silently.
 
 The control plane above is only how the API tells a worker *to* transfer. The
 transfer itself is plain HTTP on the API's HTTP port (`/api/data-plane/...`): the
@@ -944,6 +947,28 @@ public URL genuinely is directly reachable by workers, set
 `data_plane_base_url` to that same value to record the intent and silence the
 warning. Deployments using the shipped `compose.yaml` never see it — compose
 always sets the variable.
+
+Which leaves the case this subsection opens with — compose's default kept, a
+worker added on a second host — with **no boot-time signal at all**: the
+variable is set, so the warning has nothing to fire on, and at startup the API
+does not yet know that a worker on another host is going to register (issue
+#2595). The first signal is the first failed hydrate or snapshot, and it names
+the URL the worker was handed, so the misconfiguration is read off that failure
+rather than inferred. Both sides log it — the worker's `command failed` WARN on
+the worker host (with the true `kind`, `HydrateTrigger` / `SnapshotTrigger`),
+and the API's `command ... failed for server <id>` on the API host (where a
+hydrate inside a start is labelled `StartServer`):
+
+```text
+instancemanager: hydrate: datatransfer: hydrate request: Get
+"http://api:8000/api/data-plane/communities/.../working-set":
+dial tcp: lookup api on 127.0.0.11:53: no such host
+```
+
+That message is a single line, wrapped above to fit. Reading `http://api:8000`
+back out of a transfer failure means exactly this misconfiguration: the worker
+was handed compose's internal default. The fix is in `.env` on the **API**
+host — nothing changes on the worker.
 
 **Protect this port like the control plane — the bearer token on it *is* the
 control credential.** Data-plane requests carry the shared worker credential as
