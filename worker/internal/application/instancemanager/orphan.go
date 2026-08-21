@@ -122,9 +122,14 @@ func (m *Manager) convergeOrphan(serverID string) {
 		}
 
 		alive, err := probeAliveWithTimeout(m.shutdown, entry.inst, delay)
-		// A Close landing mid-probe surfaces here as a cancelled probe. That is the
-		// shutdown, not a daemon that cannot answer, so it must not be reported as
-		// `unknown` on the way out (issue #2493).
+		// Whatever this round learned belongs to a manager that is now closed, so act
+		// on none of it (issue #2493). The case that matters is the cancelled probe:
+		// Close kills it through this same context, and reporting that as `unknown`
+		// would make the Worker's last word about the id a state it never observed —
+		// the shutdown misdescribed as a daemon that cannot answer. A probe that did
+		// answer in the same instant is dropped too, deliberately: its round would
+		// end at the park above anyway, and acting on it would mean a retry stop or a
+		// retirement started after the manager was closed.
 		if m.shutdown.Err() != nil {
 			return
 		}

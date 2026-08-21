@@ -1000,3 +1000,71 @@ func TestRecordOrphanAfterCloseSpawnsNoConverger(t *testing.T) {
 		t.Fatal("recordOrphan dropped the record on a closed manager; the id must stay guarded")
 	}
 }
+
+// cancelledProbeInstance answers a probe the way a real driver does when the
+// context it was given dies under it: no verdict, the context's error. It is the
+// shape the converger's own probe bound has — probeAliveWithTimeout derives from
+// the manager's shutdown context — so it is what a Close landing mid-probe
+// actually produces. gatedProbeInstance cannot stand in for it: that one ignores
+// its context and answers `alive`, which sends the converger down the retry path
+// instead.
+type cancelledProbeInstance struct {
+	*fakeInstance
+	probeEntered chan struct{}
+}
+
+func newCancelledProbeInstance(id string) *cancelledProbeInstance {
+	return &cancelledProbeInstance{
+		fakeInstance: newFakeInstance(id),
+		probeEntered: make(chan struct{}, 1),
+	}
+}
+
+func (i *cancelledProbeInstance) ProbeAlive(ctx context.Context) (bool, error) {
+	select {
+	case i.probeEntered <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return false, ctx.Err()
+}
+
+// A probe killed BY the shutdown must not be reported as a daemon that cannot
+// answer. `unknown` is a claim about the server — the API's #1599 arm redispatches
+// a stop on it — so emitting one on the way out would have the Worker's last word
+// about the id be a state it never observed (issue #2493). The converger leaves
+// silently instead, and leaves the record alone: a cancelled probe resolves
+// nothing, and the id stays guarded.
+func TestConvergerLeavesQuietlyWhenTheShutdownCancelsItsProbe(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	// NOT shrinkOrphanConverger: the interval is also the probe's own budget, so
+	// the millisecond cadence would expire the probe on its deadline before Close
+	// could cancel it — and a deadline IS a daemon that did not answer. This is
+	// long enough that the cancellation below is what ends the probe, short enough
+	// that the first round starts immediately.
+	m.orphanProbeInterval = 200 * time.Millisecond
+	inst := newCancelledProbeInstance("s1")
+	m.recordOrphan("s1", inst, "container")
+	awaitEnter(t, inst.probeEntered)
+
+	// Close joins the converger, so everything it did lands before this returns.
+	m.Close()
+
+drain:
+	for {
+		select {
+		case ev := <-m.Events():
+			if ev.ServerID == "s1" && ev.State == orphanUnknownState {
+				t.Fatalf("shutdown-cancelled probe reported as %q: the Worker's last word about the id is a state it never observed", ev.State)
+			}
+		default:
+			break drain
+		}
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.orphans["s1"]; !ok {
+		t.Fatal("the shutdown retired the orphan record; a cancelled probe resolves nothing")
+	}
+}
