@@ -242,7 +242,21 @@ func newManager(t *testing.T, d execution.ExecutionDriver, ctrl execution.Server
 	// snapshot test does not pay the real 2s poll (#907); tests that exercise the
 	// settle-wait itself override it explicitly.
 	m.settlePollInterval = 0
+	closeWithTest(t, m)
 	return m
+}
+
+// closeWithTest ends the manager with the test that built it (issue #2493). A
+// test whose stop fails records a failed-stop orphan, and an orphan nobody
+// resolves keeps its converger probing and re-stopping at the production cadence
+// — inside a test binary, against the fixtures of a test that finished minutes
+// ago. Close joins the convergers, so the goroutines are gone before the test is.
+// Every shared manager constructor in this package registers it: which driver a
+// caller passes decides whether an orphan is reachable, so the guarantee belongs
+// to the constructor, not to the tests that remember.
+func closeWithTest(t *testing.T, m *Manager) {
+	t.Helper()
+	t.Cleanup(m.Close)
 }
 
 func startCmd() session.Command {

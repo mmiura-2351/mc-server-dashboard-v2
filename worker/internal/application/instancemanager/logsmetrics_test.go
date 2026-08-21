@@ -123,7 +123,7 @@ func (c *fakeClock) tick() {
 
 func newRichManager(t *testing.T, d *richDriver, clk session.Clock) *Manager {
 	t.Helper()
-	return New(map[string]execution.ExecutionDriver{"container": d}, t.TempDir(),
+	m := New(map[string]execution.ExecutionDriver{"container": d}, t.TempDir(),
 		// No RCON wired: surface a dial failure (the real openControl never yields a nil
 		// control without an error) so the #1007 stop-flush degrades gracefully instead
 		// of dereferencing a nil control.
@@ -131,6 +131,8 @@ func newRichManager(t *testing.T, d *richDriver, clk session.Clock) *Manager {
 			return nil, fmt.Errorf("test: no rcon control configured")
 		}).
 		WithMetrics(clk, time.Hour)
+	closeWithTest(t, m)
+	return m
 }
 
 // Captured log lines flow from the instance through the manager to the merged
