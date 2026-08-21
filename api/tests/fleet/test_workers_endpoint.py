@@ -20,9 +20,15 @@ from mc_server_dashboard_api.dependencies import (
     get_set_worker_drain,
     get_worker_registry,
 )
+from mc_server_dashboard_api.fleet.adapters.assigned_server_stopper import (
+    ServersAssignedServerStopper,
+)
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
 from mc_server_dashboard_api.fleet.application.set_worker_drain import SetWorkerDrain
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
+from mc_server_dashboard_api.servers.application.lifecycle import (
+    StopServersAssignedToWorker,
+)
 from tests.client_utils import enter_client
 from tests.fleet.fakes import FakeClock, make_worker
 from tests.identity.fakes import make_user
@@ -43,6 +49,20 @@ def _bind_shared_app(shared_app: FastAPI) -> None:
 
 def _client(app: object) -> TestClient:
     return enter_client(TestClient(app))  # type: ignore[arg-type]
+
+
+def _drain_use_case(registry: InMemoryWorkerRegistry) -> SetWorkerDrain:
+    # The real Port binding over an empty in-memory servers fake: this file drives
+    # the registry half of drain (the flag in the listing), so the stop half finds
+    # nothing to flip.
+    return SetWorkerDrain(
+        registry=registry,
+        stopper=ServersAssignedServerStopper(
+            stop_servers=StopServersAssignedToWorker(
+                uow=FakeUnitOfWork(), clock=ServersFakeClock(_T0)
+            )
+        ),
+    )
 
 
 def _app(
@@ -108,9 +128,7 @@ def test_clear_drain_requires_platform_admin() -> None:
 def test_set_drain_marks_worker_draining_in_listing() -> None:
     app, registry = _app(platform_admin=True, seed=False)
     registry.register(make_worker(worker_id=_WORKER_UUID, at=_T0))
-    use_case = SetWorkerDrain(
-        registry=registry, uow=FakeUnitOfWork(), clock=ServersFakeClock(_T0)
-    )
+    use_case = _drain_use_case(registry)
     _shared_app.dependency_overrides[get_set_worker_drain] = lambda: use_case
     client = _client(app)
 
@@ -128,9 +146,7 @@ def test_clear_drain_returns_worker_to_online() -> None:
     app, registry = _app(platform_admin=True, seed=False)
     registry.register(make_worker(worker_id=_WORKER_UUID, at=_T0))
     registry.set_draining(WorkerId(_WORKER_UUID), True)
-    use_case = SetWorkerDrain(
-        registry=registry, uow=FakeUnitOfWork(), clock=ServersFakeClock(_T0)
-    )
+    use_case = _drain_use_case(registry)
     _shared_app.dependency_overrides[get_set_worker_drain] = lambda: use_case
     client = _client(app)
 
