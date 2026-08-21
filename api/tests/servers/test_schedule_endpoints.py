@@ -172,7 +172,7 @@ def _app(
     update: _FakeUseCase | None = None,
     delete: _FakeUseCase | None = None,
     runs: _FakeUseCase | None = None,
-    preview: object | None = None,
+    preview: PreviewSchedule | None = None,
     recorder: _RecordingRecorder | None = None,
 ) -> FastAPI:
     app = _shared_app
