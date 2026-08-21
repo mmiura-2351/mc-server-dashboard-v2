@@ -92,6 +92,14 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// The manager's failed-stop-orphan convergers (issue #2475) are its own
+	// goroutines, and nothing joined them: an orphan that never resolved kept one
+	// probing and re-stopping until the process died under it, mid-round (issue
+	// #2493). Ending them with the session that owns the manager is the honest
+	// lifetime — a converger was never meant to outlive its manager — and it makes
+	// shutdown ordered: a probe in flight is cancelled at once, and a retry stop in
+	// flight is allowed to finish rather than being abandoned half-escalated.
+	defer manager.Close()
 	// Advertise the working sets already on the persistent scratch, each tagged
 	// with its generation, so the API skips the destructive hydrate on a same-worker
 	// restart only when the held generation is fresh enough (issue #763): a hydrate

@@ -217,17 +217,24 @@ func TestFailedStopClosesBedrockTunnel(t *testing.T) {
 	retireOrphan(t, m, d.inst.fakeInstance)
 }
 
-// retireOrphan lets a test's orphan die so its converger retires the record and
-// exits. Without it a test whose stop never confirms leaves a converger running
-// inside the test binary, still probing and re-stopping the fixtures of a
-// finished test.
+// retireOrphan lets a test's orphan die and WATCHES the converger take its
+// sawDead retirement path, which ends with the terminal `stopped` for the id.
+//
+// It observes and does not act: the terminal is read off the merged status
+// stream, and no command is issued. The first version polled by issuing real
+// StopServer commands, and each poll took the orphan, failed, and re-recorded it
+// — so after about a thousand iterations it exhausted the fake's failing-stop
+// budget and retired the orphan through the take path ITSELF. It then reported
+// success whether or not the converger's retirement worked at all (measured on
+// PR #2492: with the sawDead branch no-op'd, the helper still "passed", in
+// ~1.12s against the converger's ~4ms). An observer that can succeed for a
+// reason other than the one under test is the class this repo keeps repaying
+// (#2330/#2334/#2335/#2338/#2462), and this one is what the next orphan test
+// would copy.
 func retireOrphan(t *testing.T, m *Manager, inst *fakeInstance) {
 	t.Helper()
 	inst.setAlive(false, nil)
-	waitFor(t, func() bool {
-		res := m.Handle(context.Background(), session.Command{CommandID: "retired", ServerID: inst.serverID, Kind: "StopServer"})
-		return res.ErrorCode == session.CommandErrorServerNotFound
-	})
+	awaitStatus(t, m, inst.serverID, execution.StateStopped.String())
 }
 
 // While the backend daemon cannot answer whether the orphan is alive, the Worker
@@ -329,6 +336,7 @@ func TestConvergerSkipsRoundWhileOperatorStopInFlight(t *testing.T) {
 		func(context.Context, string, string) (execution.ServerControl, error) {
 			return nil, errors.New("test: no rcon control configured")
 		}).WithMetrics(clk, time.Hour)
+	closeWithTest(t, m)
 
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
@@ -711,6 +719,7 @@ func TestOrphanRetryStopPassesDriverToFlush(t *testing.T) {
 			return &fakeControl{reply: "ok"}, nil
 		})
 	m.settlePollInterval = 0
+	closeWithTest(t, m)
 
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
@@ -775,6 +784,7 @@ func TestFailedStopRestoresSaveOn(t *testing.T) {
 			return &fakeControl{reply: "ok", seq: &seq}, nil
 		})
 	m.settlePollInterval = 0
+	closeWithTest(t, m)
 
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
@@ -818,6 +828,7 @@ func TestFailedStopSaveOnDialFailureStillReturnsStopFailure(t *testing.T) {
 			return nil, errors.New("rcon unreachable")
 		})
 	m.settlePollInterval = 0
+	closeWithTest(t, m)
 
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
@@ -846,6 +857,7 @@ func TestForcedFailedStopSkipsSaveOn(t *testing.T) {
 			return &fakeControl{reply: "ok", seq: &seq}, nil
 		})
 	m.settlePollInterval = 0
+	closeWithTest(t, m)
 
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
@@ -871,6 +883,7 @@ func TestRestartStopFailureRestoresSaveOn(t *testing.T) {
 			return &fakeControl{reply: "ok", seq: &seq}, nil
 		})
 	m.settlePollInterval = 0
+	closeWithTest(t, m)
 
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
@@ -885,5 +898,196 @@ func TestRestartStopFailureRestoresSaveOn(t *testing.T) {
 	}
 	if seq[len(seq)-1] != "save-on" {
 		t.Fatalf("last command = %q, want save-on as the final RCON command after failed restart stop", seq[len(seq)-1])
+	}
+}
+
+// gatedProbeInstance blocks inside ProbeAlive until the test releases it, so a
+// test can hold the converger in the MIDDLE of a round — the window a shutdown
+// that only signalled would return through. It ignores the probe context
+// deliberately: the point is a round that is still in flight when the manager is
+// closed.
+type gatedProbeInstance struct {
+	*fakeInstance
+	probeEntered chan struct{}
+	probeRelease chan struct{}
+}
+
+func newGatedProbeInstance(id string) *gatedProbeInstance {
+	return &gatedProbeInstance{
+		fakeInstance: newFakeInstance(id),
+		probeEntered: make(chan struct{}, 1),
+		probeRelease: make(chan struct{}),
+	}
+}
+
+func (i *gatedProbeInstance) ProbeAlive(ctx context.Context) (bool, error) {
+	select {
+	case i.probeEntered <- struct{}{}:
+	default:
+	}
+	<-i.probeRelease
+	return i.fakeInstance.ProbeAlive(ctx)
+}
+
+// A converger must not outlive the manager that spawned it (issue #2493). The
+// park is what made that leak lethal: the converger sleeps out its probe interval
+// — 30s at the production base, 5 min at the cap — so an orphan nobody resolves
+// left a goroutine probing and re-stopping long after whoever built the manager
+// was done with it. Inside a test binary that is a goroutine writing to a
+// finished test's fixtures.
+//
+// The converger below is parked on the UNSHRUNK production cadence deliberately:
+// the budget this test allows Close is a fraction of one probe interval, so a
+// Close that only stopped it between rounds could not pass.
+func TestCloseStopsAConvergerParkedOnItsProbeInterval(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	m.recordOrphan("s1", newFakeInstance("s1"), "container")
+
+	closed := make(chan struct{})
+	go func() { m.Close(); close(closed) }()
+
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return: the converger slept through the shutdown")
+	}
+}
+
+// Close does not merely signal the convergers, it JOINS them. A converger caught
+// mid-round is still using the manager's fixtures — it probes the instance and
+// re-stops it through attemptStop, which dials openControl — so a Close that
+// returned while one was in flight would leave the #2493 race exactly where it
+// was, only harder to see.
+func TestCloseWaitsForAConvergerMidRound(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	shrinkOrphanConverger(m)
+	inst := newGatedProbeInstance("s1")
+	m.recordOrphan("s1", inst, "container")
+	awaitEnter(t, inst.probeEntered)
+
+	closed := make(chan struct{})
+	go func() { m.Close(); close(closed) }()
+	select {
+	case <-closed:
+		t.Fatal("Close returned while the converger was still inside a probe")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(inst.probeRelease)
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return once the converger's round finished")
+	}
+}
+
+// recordOrphan on a closed manager records the orphan but spawns no converger:
+// Close has already joined them, so one started afterwards is a goroutine nobody
+// waits for — the leak again, and (an Add racing its Wait) a panic away. The
+// record itself must still be written: it is what guards the id.
+func TestRecordOrphanAfterCloseSpawnsNoConverger(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	m.Close()
+
+	m.recordOrphan("s1", newFakeInstance("s1"), "container")
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.converging["s1"] {
+		t.Fatal("a closed manager spawned a converger; nothing will ever join it")
+	}
+	if _, ok := m.orphans["s1"]; !ok {
+		t.Fatal("recordOrphan dropped the record on a closed manager; the id must stay guarded")
+	}
+}
+
+// cancelledProbeInstance answers a probe the way a real driver does when the
+// context it was given dies under it: no verdict, the context's error. It is the
+// shape the converger's own probe bound has — probeAliveWithTimeout derives from
+// the manager's shutdown context — so it is what a Close landing mid-probe
+// actually produces. gatedProbeInstance cannot stand in for it: that one ignores
+// its context and answers `alive`, which sends the converger down the retry path
+// instead.
+//
+// What ends the probe is the test's release channel, never a clock. An earlier
+// version blocked on the context and leaned on an interval long enough for the
+// test to call Close first — which made the assertion a race the test had to win,
+// in the package whose whole issue is latent timing surfaces. Here the test
+// releases the probe only after the shutdown is observably cancelled, so the
+// converger is guaranteed to be inspecting the answer with the manager already
+// closed.
+type cancelledProbeInstance struct {
+	*fakeInstance
+	probeEntered chan struct{}
+	release      chan struct{}
+}
+
+func newCancelledProbeInstance(id string) *cancelledProbeInstance {
+	return &cancelledProbeInstance{
+		fakeInstance: newFakeInstance(id),
+		probeEntered: make(chan struct{}, 1),
+		release:      make(chan struct{}),
+	}
+}
+
+func (i *cancelledProbeInstance) ProbeAlive(ctx context.Context) (bool, error) {
+	select {
+	case i.probeEntered <- struct{}{}:
+	default:
+	}
+	<-i.release
+	return false, ctx.Err()
+}
+
+// A probe killed BY the shutdown must not be reported as a daemon that cannot
+// answer. `unknown` is a claim about the server — the API's #1599 arm redispatches
+// a stop on it — so emitting one on the way out would have the Worker's last word
+// about the id be a state it never observed (issue #2493). The converger leaves
+// silently instead, and leaves the record alone: a cancelled probe resolves
+// nothing, and the id stays guarded.
+//
+// The ordering below is all happens-before, no wall clock: the probe is entered,
+// Close cancels the shutdown, the test observes that cancellation, and only then
+// releases the probe — so the answer the converger inspects is always one that
+// arrived at a closed manager.
+func TestConvergerLeavesQuietlyWhenTheShutdownCancelsItsProbe(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	shrinkOrphanConverger(m)
+	inst := newCancelledProbeInstance("s1")
+	m.recordOrphan("s1", inst, "container")
+	awaitEnter(t, inst.probeEntered)
+
+	closed := make(chan struct{})
+	go func() { m.Close(); close(closed) }()
+
+	select {
+	case <-m.shutdown.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not cancel the shutdown context")
+	}
+	close(inst.release)
+
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return once the cancelled probe finished")
+	}
+
+drain:
+	for {
+		select {
+		case ev := <-m.Events():
+			if ev.ServerID == "s1" && ev.State == orphanUnknownState {
+				t.Fatalf("shutdown-cancelled probe reported as %q: the Worker's last word about the id is a state it never observed", ev.State)
+			}
+		default:
+			break drain
+		}
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.orphans["s1"]; !ok {
+		t.Fatal("the shutdown retired the orphan record; a cancelled probe resolves nothing")
 	}
 }

@@ -32,12 +32,19 @@ const orphanUnknownState = "unknown"
 // claimed in the same critical section as the record, so the retry stops the
 // converger itself issues (which land back here on failure) never spawn a
 // second one.
+//
+// A closed manager (issue #2493) still records the orphan — the record is what
+// guards the id against every other command — but spawns nothing: Close has
+// already joined the convergers, so a fresh one would be a goroutine outliving
+// the manager again. The counter is incremented under the same lock that reads
+// the flag, so a spawn is always visible to the Wait that Close performs.
 func (m *Manager) recordOrphan(serverID string, inst execution.Instance, driverName string) {
 	m.mu.Lock()
 	m.orphans[serverID] = orphanEntry{inst: inst, driver: driverName}
-	spawn := !m.converging[serverID]
+	spawn := !m.converging[serverID] && !m.closed
 	if spawn {
 		m.converging[serverID] = true
+		m.convergers.Add(1)
 	}
 	m.mu.Unlock()
 	if spawn {
@@ -74,7 +81,10 @@ func (m *Manager) recordOrphan(serverID string, inst execution.Instance, driverN
 //     operator-visible meanwhile.
 //
 // It exits when the id has no orphan record left — the resolution above, an
-// operator retry that confirmed termination, or the instance exiting on its own.
+// operator retry that confirmed termination, or the instance exiting on its own —
+// or when the manager is closed (issue #2493): the converger belongs to the
+// manager that spawned it and must not outlive it, so it parks on the shutdown
+// alongside its probe interval and abandons the round the moment one lands.
 // Handing over rather than pinning one instance is deliberate: an id whose
 // orphan is retired, restarted, and orphaned again keeps exactly one converger,
 // and the per-instance flags below reset when the record changes hands.
@@ -86,13 +96,18 @@ func (m *Manager) recordOrphan(serverID string, inst execution.Instance, driverN
 // reserve()'s orphan guard to close it would let a snapshot run over a world
 // that may still be live — the one thing this whole path exists to prevent.
 func (m *Manager) convergeOrphan(serverID string) {
+	defer m.convergers.Done()
 	delay := m.orphanProbeInterval
 	// probed is the orphan the two flags below describe; they reset if the id's
 	// record changes hands.
 	var probed execution.Instance
 	var sawDead, reportedUnknown bool
 	for {
-		<-m.clock.After(delay)
+		select {
+		case <-m.clock.After(delay):
+		case <-m.shutdown.Done():
+			return
+		}
 
 		entry, ok := m.currentOrphan(serverID)
 		if !ok {
@@ -106,7 +121,18 @@ func (m *Manager) convergeOrphan(serverID string) {
 			delay = m.orphanProbeInterval
 		}
 
-		alive, err := probeAliveWithTimeout(entry.inst, delay)
+		alive, err := probeAliveWithTimeout(m.shutdown, entry.inst, delay)
+		// Whatever this round learned belongs to a manager that is now closed, so act
+		// on none of it (issue #2493). The case that matters is the cancelled probe:
+		// Close kills it through this same context, and reporting that as `unknown`
+		// would make the Worker's last word about the id a state it never observed —
+		// the shutdown misdescribed as a daemon that cannot answer. A probe that did
+		// answer in the same instant is dropped too, deliberately: its round would
+		// end at the park above anyway, and acting on it would mean a retry stop or a
+		// retirement started after the manager was closed.
+		if m.shutdown.Err() != nil {
+			return
+		}
 		switch {
 		case err != nil:
 			sawDead = false
@@ -150,8 +176,12 @@ func (m *Manager) convergeOrphan(serverID string) {
 // next one is due is abandoned. Without the bound a wedged-but-connected daemon
 // could park the converger inside a single Inspect forever, which is "gives up
 // probing" by another name.
-func probeAliveWithTimeout(inst execution.Instance, timeout time.Duration) (bool, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+//
+// parent is the manager's shutdown context, so a probe in flight when the manager
+// closes is abandoned immediately instead of holding Close for up to a full probe
+// interval — five minutes at the backoff cap (issue #2493).
+func probeAliveWithTimeout(parent context.Context, inst execution.Instance, timeout time.Duration) (bool, error) {
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	return inst.ProbeAlive(ctx)
 }

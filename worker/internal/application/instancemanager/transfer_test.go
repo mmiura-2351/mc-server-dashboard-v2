@@ -414,6 +414,7 @@ func newManagerWithControls(t *testing.T, d execution.ExecutionDriver, ctrls ...
 		})
 	m.settlePollInterval = 0
 	m.fsckRetryDelay = 0
+	closeWithTest(t, m)
 	return m
 }
 

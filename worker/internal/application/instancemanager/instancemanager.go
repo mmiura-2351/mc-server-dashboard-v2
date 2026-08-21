@@ -218,6 +218,16 @@ type Manager struct {
 	orphanProbeInterval    time.Duration
 	orphanProbeMaxInterval time.Duration
 
+	// shutdown is cancelled by Close and is the lifetime every converger runs
+	// under: they park on it between probe rounds and derive the probe context
+	// from it, so closing the manager ends them instead of leaving goroutines
+	// probing a manager nobody owns any more (issue #2493). convergers counts the
+	// ones still running so Close can join them — a converger caught mid-round is
+	// still driving driver calls, so "signalled" is not "gone".
+	shutdown       context.Context
+	stopConverging context.CancelFunc
+	convergers     sync.WaitGroup
+
 	// transferDeadlineNanos bounds a single data-plane transfer (snapshot upload /
 	// hydrate download) Worker-side (issue #874). The session pushes it from the
 	// RegisterAck after registration (SetTransferDeadline); the hydrate/snapshot
@@ -260,6 +270,13 @@ type Manager struct {
 	// in currentOrphan, in the same critical section that observes the record gone,
 	// so the flag can never outlive its goroutine or block its successor.
 	converging map[string]bool
+	// closed records that Close has run, so a command that records an orphan
+	// during shutdown does not spawn a converger nothing will ever join (issue
+	// #2493). It is set under the SAME mu that guards the converger spawn, which
+	// is what keeps the WaitGroup honest: a spawn either happens before Close
+	// takes the lock (and is counted, so Close waits for it) or observes the flag
+	// and does not happen at all — never an Add racing the Wait.
+	closed bool
 	// reserved marks a server id as having a mutating lifecycle command in flight so
 	// a duplicate re-issued after a stream reconnect cannot overlap the original
 	// (issue #780). It is claimed under mu and held across the long operation, then
@@ -341,8 +358,37 @@ func New(drivers map[string]execution.ExecutionDriver, scratchDir string, openCo
 		orphanProbeMaxInterval: defaultOrphanProbeMaxInterval,
 		converging:             map[string]bool{},
 	}
+	m.shutdown, m.stopConverging = context.WithCancel(context.Background())
 	go m.statusDispatcher()
 	return m
+}
+
+// Close ends the manager's failed-stop-orphan convergers and waits for them to
+// exit (issue #2493). Nothing else joined them before: a converger drives its
+// orphan until the record is retired, so an orphan that never resolves kept one
+// goroutine probing and re-stopping for the life of the process, outliving the
+// manager that spawned it. In the Worker that only ever showed up at shutdown; in
+// the test binary, where a manager's lifetime is one test, it meant a converger
+// still calling into the fixtures of a test that had already finished.
+//
+// The wait is the point: a converger caught mid-round is inside a driver call, so
+// returning on the signal alone would leave exactly the window this closes. The
+// probe is bound to the same cancelled context and returns at once, but a retry
+// stop already in flight is not interruptible by design — the driver detaches the
+// escalation from its caller's context so a dropped stream cannot abandon a
+// half-stopped container (issue #770) — so Close can take that stop's remaining
+// budget to return. Waiting out a stop the Worker is already driving is the right
+// end of that trade: the alternative is exiting while a SIGKILL escalation is
+// half-issued.
+//
+// Close is idempotent and terminal: a manager that has been closed still records
+// orphans (the record is what guards the id) but spawns no new convergers.
+func (m *Manager) Close() {
+	m.mu.Lock()
+	m.closed = true
+	m.mu.Unlock()
+	m.stopConverging()
+	m.convergers.Wait()
 }
 
 // WithLogger sets the manager's logger.
