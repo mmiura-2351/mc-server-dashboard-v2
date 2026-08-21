@@ -416,6 +416,10 @@ class JarStore(abc.ABC):
         """Store a JAR, returning its content key (its SHA-256).
 
         Idempotent: storing identical bytes yields the same key and no duplicate.
+
+        Whether a re-put refreshes the entry's ``modified_at`` is adapter-specific
+        and consumers must not rely on it; the JAR-pool GC's live-reference
+        re-check immediately before each delete is the defense (issue #2541).
         """
 
     @abc.abstractmethod

@@ -216,6 +216,10 @@ async def change_password(
             target_id=user.id.value,
         )
     )
+    # No caching policy is declared here, deliberately: PUT is not a cacheable
+    # method (RFC 9110 Section 9.2.3; Section 9.3.4 states it outright), so a
+    # ``Cache-Control`` header would guard nothing. Follows #2519's reasoning for
+    # not stamping routes whose method already settles it (issue #2615).
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
