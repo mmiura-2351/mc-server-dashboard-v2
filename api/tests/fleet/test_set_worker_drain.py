@@ -2,9 +2,11 @@
 
 Drain flips the registry flag AND marks every assigned, desired-running server
 ``desired=stopped`` (the reconciler's redispatch_stop then drives the actual
-graceful stop + final snapshot). These drive the use case against in-memory fakes
-(no DB, no gRPC): the per-server CAS, idempotent re-drain, the returned count, and
-that un-drain does NOT resurrect desired=running.
+graceful stop + final snapshot). The stop half is reached through the fleet-owned
+``AssignedServerStopper`` Port (#2578), so these compose the real adapter over the
+servers use case and in-memory fakes (no DB, no gRPC) and drive: the per-server
+CAS, idempotent re-drain, the returned count, that un-drain does NOT resurrect
+desired=running, and that the registry flag flips only once the stops commit.
 """
 
 from __future__ import annotations
@@ -14,12 +16,20 @@ import uuid
 
 import pytest
 
+from mc_server_dashboard_api.fleet.adapters.assigned_server_stopper import (
+    ServersAssignedServerStopper,
+)
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
 from mc_server_dashboard_api.fleet.application.set_worker_drain import SetWorkerDrain
+from mc_server_dashboard_api.fleet.domain.assigned_server_stopper import (
+    AssignedServerStopper,
+)
+from mc_server_dashboard_api.fleet.domain.entities import WorkerStatus
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
 from mc_server_dashboard_api.servers.application.lifecycle import (
     StartServer,
     StopServer,
+    StopServersAssignedToWorker,
 )
 from mc_server_dashboard_api.servers.application.reconciler import RunReconcilerTick
 from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
@@ -85,8 +95,20 @@ def _registry() -> InMemoryWorkerRegistry:
     return registry
 
 
+def _stopper(uow: FakeUnitOfWork) -> ServersAssignedServerStopper:
+    return ServersAssignedServerStopper(
+        stop_servers=StopServersAssignedToWorker(uow=uow, clock=ServersFakeClock(_T0))
+    )
+
+
 def _use_case(registry: InMemoryWorkerRegistry, uow: FakeUnitOfWork) -> SetWorkerDrain:
-    return SetWorkerDrain(registry=registry, uow=uow, clock=ServersFakeClock(_T0))
+    return SetWorkerDrain(registry=registry, stopper=_stopper(uow))
+
+
+def _status(registry: InMemoryWorkerRegistry, worker_id: WorkerId) -> WorkerStatus:
+    snapshot = registry.get(worker_id)
+    assert snapshot is not None
+    return snapshot.status
 
 
 def _assigned_count(registry: InMemoryWorkerRegistry, worker_id: WorkerId) -> int:
@@ -96,10 +118,39 @@ def _assigned_count(registry: InMemoryWorkerRegistry, worker_id: WorkerId) -> in
 
 
 class _FailingCommitUnitOfWork(FakeUnitOfWork):
-    """A FakeUnitOfWork whose commit raises, to exercise the rollback path."""
+    """A FakeUnitOfWork whose commit raises, to exercise the rollback path.
+
+    It also rolls the block back on the way out, which the plain fake does not: its
+    repository writes straight into a dict, while a real transaction discards
+    everything the failed commit staged. Without that, "the servers are untouched"
+    could not be asserted at all.
+    """
+
+    async def __aenter__(self) -> "_FailingCommitUnitOfWork":
+        self._snapshot = {
+            server_id: self.servers._copy(server)
+            for server_id, server in self.servers.by_id.items()
+        }
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self.servers.by_id.clear()
+        self.servers.by_id.update(self._snapshot)
 
     async def commit(self) -> None:
         raise RuntimeError("forced commit failure")
+
+
+class _RecordingStopper(AssignedServerStopper):
+    """Records the Worker's registry status as seen from inside the stop pass."""
+
+    def __init__(self, registry: InMemoryWorkerRegistry) -> None:
+        self.registry = registry
+        self.status_during_stop: WorkerStatus | None = None
+
+    async def stop_assigned(self, worker_id: WorkerId) -> list[str]:
+        self.status_during_stop = _status(self.registry, worker_id)
+        return []
 
 
 async def test_drain_stops_assigned_running_servers_only() -> None:
@@ -271,6 +322,44 @@ async def test_drain_does_not_decrement_when_commit_fails() -> None:
     # The CAS flips rolled back with the commit; the load stays at its pre-drain
     # value rather than leaking a decrement.
     assert _assigned_count(registry, worker_id) == 1
+
+
+async def test_drain_does_not_mark_draining_when_the_stop_fails() -> None:
+    # Ordering (#2578): the registry flag flips only AFTER the servers side has
+    # committed, so a failed commit leaves BOTH sides where they were — rather than
+    # a Worker advertised as draining whose servers are still desired=running, which
+    # nothing would ever converge.
+    uow = _FailingCommitUnitOfWork()
+    s = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.RUNNING,
+        worker_uuid=_WORKER_UUID,
+    )
+    uow.servers.seed(s)
+    registry = _registry()
+    worker_id = WorkerId(str(_WORKER_UUID))
+
+    with pytest.raises(RuntimeError, match="forced commit failure"):
+        await _use_case(registry, uow)(worker_id=worker_id, draining=True)
+
+    assert _status(registry, worker_id) is WorkerStatus.ONLINE
+    assert uow.servers.by_id[s.id].desired_state is DesiredState.RUNNING
+
+
+async def test_drain_marks_draining_only_after_the_stops_commit() -> None:
+    # The other half of the ordering pin: the flag is still unset while the stop
+    # pass runs, and set once it returns.
+    registry = _registry()
+    worker_id = WorkerId(str(_WORKER_UUID))
+    stopper = _RecordingStopper(registry)
+
+    count = await SetWorkerDrain(registry=registry, stopper=stopper)(
+        worker_id=worker_id, draining=True
+    )
+
+    assert count == 0
+    assert stopper.status_during_stop is WorkerStatus.ONLINE
+    assert _status(registry, worker_id) is WorkerStatus.DRAINING
 
 
 async def test_drain_converges_through_reconciler_with_final_snapshot() -> None:

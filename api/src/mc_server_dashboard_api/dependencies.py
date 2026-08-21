@@ -114,6 +114,9 @@ from mc_server_dashboard_api.download_cookie import (
     DOWNLOAD_COOKIE_NAME,
     remember_download_cookie,
 )
+from mc_server_dashboard_api.fleet.adapters.assigned_server_stopper import (
+    ServersAssignedServerStopper,
+)
 from mc_server_dashboard_api.fleet.application.list_workers import ListWorkers
 from mc_server_dashboard_api.fleet.application.set_worker_drain import SetWorkerDrain
 from mc_server_dashboard_api.fleet.domain.control_plane import (
@@ -295,6 +298,7 @@ from mc_server_dashboard_api.servers.application.lifecycle import (
     SendServerCommand,
     StartServer,
     StopServer,
+    StopServersAssignedToWorker,
 )
 from mc_server_dashboard_api.servers.application.manage_server import (
     BedrockJoinability,
@@ -680,8 +684,12 @@ def get_set_worker_drain(
     session_factory = create_session_factory(get_engine(request))
     return SetWorkerDrain(
         registry=registry,
-        uow=ServersUnitOfWork(session_factory),
-        clock=ServersSystemClock(),
+        stopper=ServersAssignedServerStopper(
+            stop_servers=StopServersAssignedToWorker(
+                uow=ServersUnitOfWork(session_factory),
+                clock=ServersSystemClock(),
+            )
+        ),
     )
 
 
