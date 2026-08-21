@@ -405,12 +405,29 @@ positive control from a container on `mcsd` confirming each target was live:
 | `seaweedfs` `8333` S3, `8888` filer, `9333` master, `8080` volume, `8181` Iceberg REST, `18333` S3 gRPC, `18080` volume gRPC, `18888` filer gRPC, `19333` master gRPC | all open | all blocked |
 | `api` `8000`, `api` `50051` | open | blocked |
 | `db` `5432` | open | blocked |
-| `cloudflared` `20241` | open | blocked |
+| `cloudflared` `20241` | open (†) | blocked |
 | `grpcurl -plaintext seaweedfs:18333 list` | lists `SeaweedS3IamCache`, `SeaweedS3LifecycleInternal` | dial fails |
 
 Blocked, not refused: the packets are dropped between bridges, so this holds by
 raw IP as well as by name — a plugin that hardcodes the control-plane subnet
 gets the same result as one that resolves `api`.
+
+(†) **`cloudflared` `20241` — measured before the bind changed, not re-measured
+since (issue #2601).** That listener carries cloudflared's own `/metrics`,
+`/debug/pprof/` and `/diag/*`, all unauthenticated, and with no `--metrics`
+argument cloudflared binds it on `0.0.0.0` — which is what the `open` column
+records for a peer on `mcsd`. `compose.yaml` now passes
+`--metrics 127.0.0.1:20241` to the `tunnel` command, so the listener binds the
+container's own loopback interface and no peer on either network has a path to
+it. That is a control independent of topology: segmentation removes the
+`mcsd-servers` path, the loopback bind removes the `mcsd` path as well, and
+neither depends on the other holding. **The row above still reports the
+2026-08-02 probe**, because the flag ships in `compose.yaml` but the deployment
+it describes has not been rebuilt on it. Re-probe from an `mcsd` peer after the
+next deploy — `docker compose exec api python -c "import urllib.request;
+urllib.request.urlopen('http://cloudflared:20241/metrics', timeout=3)"`,
+expecting a connection refusal — and record the result here; issue #2601 stays
+open until then.
 
 **This covers docker-network paths only.** A port **published to the host** on a
 non-loopback interface is reachable from `mcsd-servers` through the bridge
