@@ -98,6 +98,11 @@ all: check
 # follow in Phase 2 after all readers have finished. See the script header
 # for the phasing rationale and bounded-parallelism notes.
 #
+# The script also serialises gates host-wide (a flock on /tmp/mcsd-check.lock,
+# issue #2513): concurrent runs in sibling worktrees each fanned out over all
+# the cores and killed the fs-heavy api tests at the per-test timeout. A
+# contended run now waits, naming the holder, instead of failing.
+#
 # `$(CURDIR)` is passed for identification only: it puts this worktree's path in
 # the orchestrator's own command line, so `pgrep -f <worktree>` finds a running
 # gate -- notably one orphaned by a killed `git push` (#2605,
@@ -446,6 +451,7 @@ scripts-test:
 	bash scripts/test_deploy_stamp.sh
 	bash scripts/test_shell_pipefail.sh
 	bash scripts/test_check_parallel_identity.sh
+	bash scripts/test_check_parallel_lock.sh
 
 # ---------------------------------------------------------------------------
 # proto/ (buf) -- the shared control-plane contract.

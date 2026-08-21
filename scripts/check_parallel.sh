@@ -32,6 +32,9 @@
 # (A, B) are CPU-bound; the lighter ones (C-J) finish quickly and free cores.
 # golangci-lint is capped at --concurrency=2 by the Makefile, and pytest-xdist
 # uses -n auto (4 workers). Oversubscription is transient and tolerable.
+#
+# That budget assumes the run owns the host, so the run takes a host-global
+# flock first and waits, naming the holder, when another gate has it (#2513).
 
 set -uo pipefail
 
@@ -46,6 +49,59 @@ set -uo pipefail
 # run's own output, so a pasted log says which one produced it.
 worktree=${1:-$PWD}
 echo "=== check: $worktree ==="
+
+# --- One gate at a time per host (#2513) ---
+#
+# The measured cause of the timeout reds: several agent worktrees each ran a
+# gate at once on a 4-core box, and every one of them fans pytest out with
+# `-n auto`, which sizes the pool to the host's core count. Four gates therefore
+# claimed ~16 pytest workers plus four vitest pools and four Go suites (observed
+# load average 7-17). The fs-heavy api tests lost first, because an fsync under
+# that load waits on the other runs' writeback: tests that take 3.6 s alone were
+# killed at the 120 s per-test cap (~33x), on diffs containing no Python. The
+# answer is mutual exclusion rather than a bigger budget -- with runs serialised,
+# `-n auto` on an otherwise idle box is the right size again.
+#
+# The lock is host-global, so it must not live inside a worktree or under a
+# per-shell TMPDIR (which would silently give each shell its own lock and no
+# mutual exclusion at all); MCSD_CHECK_LOCK_FILE exists so the self-test can run
+# against an isolated one, not as a knob to relocate the real lock.
+#
+# The waiter names the holder, because a wait with no explanation is
+# indistinguishable from a hang. The holder is often the SAME worktree: the
+# descriptor is inherited by everything this script spawns, so a gate orphaned
+# by a killed `git push` keeps the lock until it finishes, and the next run in
+# that worktree now waits for it and says so -- where before it raced the
+# survivor and died mid-suite (#2605, docs/dev/AGENTS.md Section 3).
+#
+# MCSD_CHECK_LOCK_HELD makes the lock re-entrant. `make scripts-test` runs this
+# script (test_check_parallel_lock.sh, test_check_parallel_identity.sh) from
+# inside a running gate, which would otherwise wait for the lock its own parent
+# holds, forever.
+lock_file=${MCSD_CHECK_LOCK_FILE:-/tmp/mcsd-check.lock}
+if [ -z "${MCSD_CHECK_LOCK_HELD:-}" ]; then
+    # Append rather than truncate: opening the file must not erase the holder
+    # line before the lock is even taken.
+    exec 9>>"$lock_file" || {
+        echo "FAIL: cannot open the gate lock file $lock_file" >&2
+        exit 1
+    }
+    lock_holder() {
+        local line
+        line=$(head -n 1 "$lock_file" 2>/dev/null) || line=""
+        printf '%s' "${line:-<unknown>}"
+    }
+    if ! flock -n 9; then
+        echo "=== check: another gate holds $lock_file; waiting ==="
+        echo "===   held by: $(lock_holder)"
+        while ! flock -w 60 9; do
+            echo "===   still waiting; held by: $(lock_holder)"
+        done
+        echo "=== check: lock acquired ==="
+    fi
+    printf '%s (pid %d, since %s)\n' "$worktree" "$$" "$(date '+%Y-%m-%dT%H:%M:%S%z')" >"$lock_file"
+    export MCSD_CHECK_LOCK_HELD=1
+fi
 
 # Per-chain logs persist after the run (#2031). These used to go to a mktemp
 # dir deleted on exit, so a failure left nothing behind once the terminal
