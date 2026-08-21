@@ -36,8 +36,19 @@ class _FixedClock(Clock):
 class _FakeReferences(LiveJarReferences):
     def __init__(self, keys: set[str]) -> None:
         self._keys = keys
+        # Optional: keys to add after the first live() call, simulating a server
+        # row committing between the initial snapshot and a re-check.
+        self._add_after_first: set[str] = set()
+        self._calls = 0
+
+    def add_after_first_call(self, key: str) -> None:
+        """Schedule *key* to appear in live() only from the second call onward."""
+        self._add_after_first.add(key)
 
     async def live(self) -> set[str]:
+        self._calls += 1
+        if self._calls > 1:
+            self._keys = self._keys | self._add_after_first
         return self._keys
 
 
@@ -123,3 +134,28 @@ async def test_safety_window_boundary_is_inclusive_delete() -> None:
     assert pool.deleted == ["d" * 64]
     assert result.deleted == 1
     assert result.freed_bytes == 40
+
+
+async def test_recheck_before_delete_spares_newly_referenced_jar() -> None:
+    """A JAR that becomes referenced between the initial snapshot and the delete
+    is spared by the pre-delete re-check (issue #2541).
+
+    On the object backend a re-put of an already-pooled JAR skips the upload, so
+    ``ensure_jar`` re-pooling a JAR does not refresh its store time: the JAR stays
+    old enough to delete and the safety window alone cannot protect it. It looks
+    orphaned in the initial live() snapshot, but by the time the GC reaches the
+    delete the start that needs it has committed its row. The GC re-checks live()
+    immediately before each delete to catch this race.
+    """
+    sha = "e" * 64
+    pool = FakeJarPool()
+    _seed(pool, sha, size=50)
+    refs = _FakeReferences(set())  # unreferenced at the initial snapshot
+    # The server row commits after the first live() call (the initial snapshot)
+    # but before the GC attempts the delete (the re-check).
+    refs.add_after_first_call(sha)
+
+    result = await _gc(pool, refs)()
+    assert pool.deleted == []
+    assert result.scanned == 1
+    assert result.deleted == 0

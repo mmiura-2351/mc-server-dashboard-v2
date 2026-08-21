@@ -84,6 +84,15 @@ class RunJarPoolGc:
                 # Inside the safety window: may be an in-flight start's just-pooled
                 # JAR whose server row has not committed yet. Spare it.
                 continue
+            # Re-check live references immediately before delete (issue #2541):
+            # on the object backend a re-put of an already-pooled JAR skips the
+            # upload, so ``ensure_jar`` re-pooling a JAR does not refresh its
+            # store time and the safety window alone cannot protect it. Between
+            # the snapshot above and this point, a start may have committed the
+            # row referencing it — re-checking avoids reclaiming a live JAR.
+            fresh_live = await self.references.live()
+            if entry.sha256 in fresh_live:
+                continue
             await self.pool.delete(entry.sha256)
             deleted += 1
             freed_bytes += entry.size_bytes
