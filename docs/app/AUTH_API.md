@@ -230,16 +230,21 @@ shared cache from reusing a response only when the request carried
 the refresh cookie instead. `GET /users/me/sessions` is per-user data rather than
 a credential and is treated the same way, for the same reason.
 
-The responses that declare nothing have no representation a cache could hand to a
-second client: a `204` carries no body, and the problem+json errors are identical
-for every caller (Section 2) — no token, no per-user data. That holds even where
-storing the response would itself be permitted. `POST /auth/logout`'s `204` is
-storable in principle — `POST` is a cacheable method (RFC 9110 Section 9.2.3) and
-`204` is heuristically cacheable (Section 15.1) — including the one carrying the
-*clearing* `Set-Cookie`, which removes a credential rather than granting one. The
-two `DELETE`s are barred by the method regardless. `DELETE /users/me/sessions`
-declares `no-store` on its `204` anyway, so both methods on that exact path state
-one policy; its per-id sibling does not, and nothing turns on the difference.
+The responses that declare nothing have nothing a cache could hand to a second
+client: a `204` carries no body, and the problem+json error bodies are identical
+for every caller (Section 2) — no token, no per-user data, only the throttled
+login `401`'s `Retry-After` header varying at all. Nor may a cache store them in
+the first place. A `204` is heuristically cacheable (RFC 9110 Section 15.1), but
+only "unless otherwise indicated by the method definition" — and both method
+definitions here do so indicate: `DELETE /users/me/sessions/{id}` by Section
+9.3.5, "responses to the DELETE method are not cacheable", and
+`POST /auth/logout` by Section 9.3.3, which makes a POST response cacheable only
+when it carries explicit freshness information **and** a `Content-Location` equal
+to the target URI. Logout sends neither, so that covers the response carrying the
+*clearing* `Set-Cookie` too — which in any case removes a credential rather than
+granting one. `DELETE /users/me/sessions` declares `no-store` on its `204`
+regardless, so both methods on that exact path state one policy; its per-id
+sibling does not, and nothing turns on the difference.
 
 ### Download grants — the third credential kind
 

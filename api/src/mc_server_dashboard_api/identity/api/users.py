@@ -216,17 +216,10 @@ async def change_password(
             target_id=user.id.value,
         )
     )
-    # No caching policy is declared here, deliberately. Caching is a per-method
-    # property (RFC 9110 Section 9.2.3, which allows it only for GET, HEAD and
-    # POST) and Section 9.3.4 states outright that responses to PUT are not
-    # cacheable. The method gate comes first, so this ``204``'s presence in
-    # Section 15.1's heuristically-cacheable status list does not reopen the
-    # question, and a ``Cache-Control`` header here would guard nothing. #2519
-    # declined to stamp the backup ``416`` on the same shape of reasoning — there
-    # the status settled it, here the method. Recorded rather than left silent
-    # because every other route in this module declares ``no-store``, two of them
-    # on a ``204`` (issue #2587), so the bare ``204`` here would otherwise read as
-    # the omission it is not (issue #2615).
+    # No caching policy is declared here, deliberately: PUT is not a cacheable
+    # method (RFC 9110 Section 9.2.3; Section 9.3.4 states it outright), so a
+    # ``Cache-Control`` header would guard nothing. Follows #2519's reasoning for
+    # not stamping routes whose method already settles it (issue #2615).
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
