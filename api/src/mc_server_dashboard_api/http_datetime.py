@@ -25,8 +25,10 @@ Model UTC-datetime response fields as :data:`UtcDatetime` (or
 ``UtcDatetime | None``) rather than as a ``str`` filled by ``.isoformat()``, so
 the serialization stays consistent as new models are added. For UTC datetimes
 built as raw ``dict`` values rather than response-model fields (e.g. the SSE
-wire frame ``ts`` and the export metadata ``exported_at``), call
-:func:`serialize_utc` directly so they share the same canonical ``Z`` form.
+wire frame ``ts``), call :func:`serialize_utc` directly so they share the same
+canonical ``Z`` form; it is re-exported here for the HTTP callers, but it is
+defined in :mod:`mc_server_dashboard_api.rfc3339` because non-HTTP callers need
+it too (the export manifest's ``exported_at`` is a file format, issue #2579).
 """
 
 from __future__ import annotations
@@ -36,12 +38,9 @@ from typing import Annotated
 
 from pydantic import PlainSerializer, WithJsonSchema
 
+from mc_server_dashboard_api.rfc3339 import serialize_utc
 
-def serialize_utc(value: dt.datetime) -> str:
-    """Render ``value`` as RFC 3339 UTC with the ``Z`` suffix."""
-
-    return value.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
-
+__all__ = ["UtcDatetime", "serialize_utc"]
 
 UtcDatetime = Annotated[
     dt.datetime,

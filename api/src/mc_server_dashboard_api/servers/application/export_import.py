@@ -49,7 +49,7 @@ import zipfile
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 
-from mc_server_dashboard_api.http_datetime import serialize_utc
+from mc_server_dashboard_api.rfc3339 import serialize_utc
 from mc_server_dashboard_api.servers.application.files import (
     MAX_ARCHIVE_ENTRIES,
     MAX_UPLOAD_BYTES,
