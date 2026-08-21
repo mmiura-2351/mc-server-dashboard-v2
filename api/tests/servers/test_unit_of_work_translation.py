@@ -67,6 +67,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ResourcePackInUseError,
     ScheduleNameAlreadyExistsError,
     ServerNameAlreadyExistsError,
+    ServerNotFoundError,
     SlugAlreadyTakenError,
 )
 from mc_server_dashboard_api.servers.domain.groups import (
@@ -475,3 +476,26 @@ async def test_resource_pack_delete_reraises_unknown_violation_untranslated() ->
     repo = SqlAlchemyResourcePackRepository(session)  # type: ignore[arg-type]
     with pytest.raises(IntegrityError):
         await repo.delete(ResourcePackId(uuid.uuid4()))
+
+
+def _attach_repo_with_execute_error(constraint: str) -> SqlAlchemyGroupRepository:
+    session = _FakeExecuteSession(_integrity_error(constraint))
+    return SqlAlchemyGroupRepository(session)  # type: ignore[arg-type]
+
+
+async def test_group_attach_translates_group_fk_violation_at_execute() -> None:
+    repo = _attach_repo_with_execute_error("fk_server_group_group_id_player_group")
+    with pytest.raises(GroupNotFoundError):
+        await repo.attach(GroupId(uuid.uuid4()), ServerId(uuid.uuid4()))
+
+
+async def test_group_attach_translates_server_fk_violation_at_execute() -> None:
+    repo = _attach_repo_with_execute_error("fk_server_group_server_id_server")
+    with pytest.raises(ServerNotFoundError):
+        await repo.attach(GroupId(uuid.uuid4()), ServerId(uuid.uuid4()))
+
+
+async def test_group_attach_reraises_unknown_violation_untranslated() -> None:
+    repo = _attach_repo_with_execute_error("fk_some_other_constraint")
+    with pytest.raises(IntegrityError):
+        await repo.attach(GroupId(uuid.uuid4()), ServerId(uuid.uuid4()))

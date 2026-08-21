@@ -11,6 +11,7 @@ from __future__ import annotations
 import uuid
 
 from sqlalchemy import delete, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -121,11 +122,26 @@ class SqlAlchemyGroupRepository(GroupRepository):
         )
 
     async def attach(self, group_id: GroupId, server_id: ServerId) -> None:
-        if await self.is_attached(group_id, server_id):
-            return
-        self._session.add(
-            ServerGroupModel(group_id=group_id.value, server_id=server_id.value)
+        # Ask PostgreSQL for the already-attached no-op rather than reading it
+        # first: the read-then-stage this replaced let two concurrent attaches of
+        # the same pair both pass the check, and the loser violated
+        # pk_server_group at an untranslated commit (issue #2612). ON CONFLICT
+        # DO NOTHING gives the loser the same silent success the pre-check gave.
+        #
+        # Executing the INSERT here rather than staging it also puts the two FKs
+        # on a statement this method owns, so a group or server deleted since the
+        # use case's pre-read is reported as the not-found that pre-read raises
+        # instead of surfacing at whatever the caller does next.
+        stmt = (
+            pg_insert(ServerGroupModel)
+            .values(group_id=group_id.value, server_id=server_id.value)
+            .on_conflict_do_nothing(constraint="pk_server_group")
         )
+        try:
+            await self._session.execute(stmt)
+        except IntegrityError as exc:
+            translate_integrity_error(exc)
+            raise
 
     async def detach(self, group_id: GroupId, server_id: ServerId) -> bool:
         if not await self.is_attached(group_id, server_id):
