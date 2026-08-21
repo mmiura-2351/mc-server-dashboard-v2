@@ -156,13 +156,19 @@ jobs:
           printf '{"identities":[{"name":"ci","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Admin","Read","Write","List","Tagging"]}]}' \
             mcsdaccess mcsdsecret > "$RUNNER_TEMP/seaweedfs/s3.json"
 
-          # chrislusf/seaweedfs:4.39 — the version compose.yaml deploys, so CI
-          # exercises the backend the deployment actually runs. Digest-pinned
-          # per docs/dev/DEPENDENCIES.md (pinning + 7-day cooldown).
+          # chrislusf/seaweedfs:4.41 (pushed 2026-08-06, outside the cooldown) —
+          # the version compose.yaml pins, so CI exercises the backend the
+          # deployment actually runs. Digest-pinned per docs/dev/DEPENDENCIES.md
+          # (pinning + 7-day cooldown). Dependabot cannot see a digest pinned
+          # inside a workflow `run:` block — neither its docker-compose ecosystem
+          # (compose.yaml only) nor its github-actions one (`uses:` only) — so
+          # this pin is bumped by hand whenever the compose pin moves. It sat on
+          # 4.39 for two compose bumps because nothing does that automatically
+          # (issue #2614).
           docker run -d --name seaweedfs -p 127.0.0.1:8333:8333 \
             -v "$RUNNER_TEMP/seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro" \
             --entrypoint weed \
-            chrislusf/seaweedfs@sha256:c7d6c721b30ae711db766bbbfd40192776e263d4e51e22f57baef7bef93c12c6 \
+            chrislusf/seaweedfs@sha256:43b768cd62b00d132439cda881b93fd1adebf1b315e996e794087743821d771d \
             server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json
 
           # /status returns 200 once the S3 gateway is serving (no auth needed) —
