@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from collections.abc import Iterator
 
 import pytest
 from fastapi import FastAPI
@@ -65,6 +64,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 from mc_server_dashboard_api.servers.domain.version_validator import (
     CatalogUnavailableError as VersionCatalogUnavailableError,
 )
+from tests.client_utils import enter_client
 from tests.identity.fakes import make_user
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
@@ -101,9 +101,8 @@ class _FakeUseCase:
         return self._result
 
 
-def _client(app: object) -> Iterator[TestClient]:
-    with TestClient(app) as client:  # type: ignore[arg-type]
-        yield client
+def _client(app: object) -> TestClient:
+    return enter_client(TestClient(app))  # type: ignore[arg-type]
 
 
 _shared_app: FastAPI
@@ -233,14 +232,14 @@ def _plugin() -> ServerPlugin:
 
 def test_non_member_gets_404_on_search() -> None:
     app = _app(member=False, allow=True, search=_FakeUseCase(result=_search_result()))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), "/search"), params={"q": "test"})
     assert resp.status_code == 404
 
 
 def test_member_without_permission_gets_403_on_install() -> None:
     app = _app(member=True, allow=False, install=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/install"),
         json={"project_id": "proj-1", "version_id": "ver-1"},
@@ -253,7 +252,7 @@ def test_member_without_permission_gets_403_on_install() -> None:
 
 def test_search_returns_200() -> None:
     app = _app(member=True, allow=True, search=_FakeUseCase(result=_search_result()))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), "/search"), params={"q": "test"})
     assert resp.status_code == 200
     body = resp.json()
@@ -267,7 +266,7 @@ def test_search_unsupported_type_is_422() -> None:
         allow=True,
         search=_FakeUseCase(error=UnsupportedPluginServerTypeError("vanilla")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), "/search"), params={"q": "test"})
     assert resp.status_code == 422
     assert resp.json()["reason"] == "unsupported_server_type"
@@ -279,7 +278,7 @@ def test_search_catalog_upstream_failure_is_502() -> None:
         allow=True,
         search=_FakeUseCase(error=CatalogUpstreamFailedError("down")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), "/search"), params={"q": "test"})
     assert resp.status_code == 502
     assert resp.json()["reason"] == "catalog_upstream_failed"
@@ -300,7 +299,7 @@ def test_gateway_and_dependency_catalog_reasons_differ() -> None:
         search=_FakeUseCase(error=CatalogUpstreamFailedError("down")),
         create=_FakeUseCase(error=VersionCatalogUnavailableError("source down")),
     )
-    client = next(_client(app))
+    client = _client(app)
 
     gateway = client.get(
         _url(uuid.uuid4(), uuid.uuid4(), "/search"), params={"q": "test"}
@@ -323,7 +322,7 @@ def test_get_project_returns_200() -> None:
         allow=True,
         get_project=_FakeUseCase(result=_project_detail()),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(
         _url(uuid.uuid4(), uuid.uuid4(), "/projects/test-plugin"),
     )
@@ -339,7 +338,7 @@ def test_get_project_not_found_is_404() -> None:
         allow=True,
         get_project=_FakeUseCase(error=CatalogProjectNotFoundError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(
         _url(uuid.uuid4(), uuid.uuid4(), "/projects/nonexistent"),
     )
@@ -353,7 +352,7 @@ def test_get_project_not_found_is_404() -> None:
 def test_install_from_catalog_returns_201() -> None:
     p = _plugin()
     app = _app(member=True, allow=True, install=_FakeUseCase(result=p))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/install"),
         json={"project_id": "proj-1", "version_id": "ver-1"},
@@ -368,7 +367,7 @@ def test_install_from_catalog_unsettled_is_409() -> None:
         allow=True,
         install=_FakeUseCase(error=ServerFilesUnsettledError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/install"),
         json={"project_id": "proj-1", "version_id": "ver-1"},
@@ -384,7 +383,7 @@ def test_install_from_catalog_bedrock_window_exhausted_is_503() -> None:
         allow=True,
         install=_FakeUseCase(error=PortRangeExhaustedError("19132-19231")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/install"),
         json={"project_id": "geyser", "version_id": "ver-1"},
@@ -401,7 +400,7 @@ def test_install_from_catalog_bedrock_port_race_is_409() -> None:
         allow=True,
         install=_FakeUseCase(error=PortAlreadyTakenError("uq_server_bedrock_port")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/install"),
         json={"project_id": "geyser", "version_id": "ver-1"},
@@ -416,7 +415,7 @@ def test_install_from_catalog_upstream_failure_is_502() -> None:
         allow=True,
         install=_FakeUseCase(error=CatalogUpstreamFailedError("down")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/install"),
         json={"project_id": "proj-1", "version_id": "ver-1"},
@@ -431,7 +430,7 @@ def test_install_from_catalog_checksum_mismatch_is_502() -> None:
         allow=True,
         install=_FakeUseCase(error=CatalogChecksumMismatchError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/install"),
         json={"project_id": "proj-1", "version_id": "ver-1"},

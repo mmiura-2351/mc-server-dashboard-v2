@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from collections.abc import Iterator
 
 import pytest
 from fastapi import FastAPI
@@ -76,6 +75,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerName,
     ServerType,
 )
+from tests.client_utils import enter_client
 from tests.identity.fakes import make_user
 from tests.servers.fakes import FakeClock, FakeUnitOfWork
 
@@ -134,9 +134,8 @@ class _FakeUseCase:
         return self._result
 
 
-def _client(app: object) -> Iterator[TestClient]:
-    with TestClient(app) as client:  # type: ignore[arg-type]
-        yield client
+def _client(app: object) -> TestClient:
+    return enter_client(TestClient(app))  # type: ignore[arg-type]
 
 
 def _schedule(server: uuid.UUID, *, enabled: bool = True) -> Schedule:
@@ -217,21 +216,21 @@ def _create_body() -> dict[str, object]:
 
 def test_non_member_gets_404_on_create() -> None:
     app = _app(member=False, allow=True, create=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4()), json=_create_body())
     assert resp.status_code == 404
 
 
 def test_non_member_gets_404_on_list() -> None:
     app = _app(member=False, allow=True, list_=_FakeUseCase(result=[]))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4()))
     assert resp.status_code == 404
 
 
 def test_non_member_gets_404_on_delete() -> None:
     app = _app(member=False, allow=True, delete=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.delete(_url(uuid.uuid4(), uuid.uuid4(), schedule=uuid.uuid4()))
     assert resp.status_code == 404
 
@@ -241,14 +240,14 @@ def test_non_member_gets_404_on_delete() -> None:
 
 def test_member_without_read_permission_gets_403_on_list() -> None:
     app = _app(member=True, allow=False, list_=_FakeUseCase(result=[]))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4()))
     assert resp.status_code == 403
 
 
 def test_member_without_read_permission_gets_403_on_runs() -> None:
     app = _app(member=True, allow=False, runs=_FakeUseCase(result=[]))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), schedule=uuid.uuid4()) + "/runs")
     assert resp.status_code == 403
 
@@ -260,7 +259,7 @@ def test_create_on_missing_server_is_404() -> None:
     app = _app(
         member=True, allow=True, create=_FakeUseCase(error=ServerNotFoundError("x"))
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4()), json=_create_body())
     assert resp.status_code == 404
 
@@ -271,7 +270,7 @@ def test_create_duplicate_name_is_409() -> None:
         allow=True,
         create=_FakeUseCase(error=ScheduleNameAlreadyExistsError("nightly")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4()), json=_create_body())
     assert resp.status_code == 409
     assert resp.json()["reason"] == "schedule_name_exists"
@@ -283,7 +282,7 @@ def test_create_invalid_cron_is_422() -> None:
         allow=True,
         create=_FakeUseCase(error=InvalidCronExpressionError("bad")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4()), json=_create_body())
     assert resp.status_code == 422
     assert resp.json()["reason"] == "invalid_cron"
@@ -295,7 +294,7 @@ def test_create_invalid_payload_is_422() -> None:
         allow=True,
         create=_FakeUseCase(error=InvalidSchedulePayloadError("bad")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4()), json=_create_body())
     assert resp.status_code == 422
     assert resp.json()["reason"] == "invalid_payload"
@@ -307,7 +306,7 @@ def test_create_invalid_timezone_is_422() -> None:
         allow=True,
         create=_FakeUseCase(error=InvalidScheduleTimezoneError("Mars/Olympus")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4()), json=_create_body())
     assert resp.status_code == 422
     assert resp.json()["reason"] == "invalid_timezone"
@@ -319,7 +318,7 @@ def test_create_permission_denied_is_403_with_permission_member() -> None:
         allow=True,
         create=_FakeUseCase(error=PermissionDeniedError("server:command")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4()), json=_create_body())
     assert resp.status_code == 403
     body = resp.json()
@@ -331,7 +330,7 @@ def test_read_missing_schedule_is_404() -> None:
     app = _app(
         member=True, allow=True, read=_FakeUseCase(error=ScheduleNotFoundError("x"))
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), schedule=uuid.uuid4()))
     assert resp.status_code == 404
 
@@ -340,7 +339,7 @@ def test_update_missing_schedule_is_404() -> None:
     app = _app(
         member=True, allow=True, update=_FakeUseCase(error=ScheduleNotFoundError("x"))
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.patch(
         _url(uuid.uuid4(), uuid.uuid4(), schedule=uuid.uuid4()), json={"enabled": False}
     )
@@ -351,7 +350,7 @@ def test_runs_missing_schedule_is_404() -> None:
     app = _app(
         member=True, allow=True, runs=_FakeUseCase(error=ScheduleNotFoundError("x"))
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), schedule=uuid.uuid4()) + "/runs")
     assert resp.status_code == 404
 
@@ -370,7 +369,7 @@ def test_create_returns_201_and_audits() -> None:
         create=_FakeUseCase(result=schedule),
         recorder=recorder,
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(community, server), json=_create_body())
     assert resp.status_code == 201
     assert resp.json()["action"] == "restart"
@@ -381,7 +380,7 @@ def test_read_disabled_schedule_reports_null_next_run() -> None:
     server = uuid.uuid4()
     schedule = _schedule(server, enabled=False)
     app = _app(member=True, allow=True, read=_FakeUseCase(result=schedule))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), server, schedule=uuid.uuid4()))
     assert resp.status_code == 200
     assert resp.json()["next_run_at"] is None
@@ -390,7 +389,7 @@ def test_read_disabled_schedule_reports_null_next_run() -> None:
 def test_delete_returns_204_and_audits() -> None:
     recorder = _RecordingRecorder()
     app = _app(member=True, allow=True, delete=_FakeUseCase(), recorder=recorder)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.delete(_url(uuid.uuid4(), uuid.uuid4(), schedule=uuid.uuid4()))
     assert resp.status_code == 204
     assert len(recorder.events) == 1
@@ -443,7 +442,7 @@ def _real_create_app(
 def test_manage_without_server_command_cannot_create_command_schedule() -> None:
     # The acceptance criterion: schedule:manage but not server:command -> 403.
     app, community, server = _real_create_app(allowed={"schedule:manage"})
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(community, server),
         json={
@@ -462,7 +461,7 @@ def test_full_authorization_creates_command_schedule() -> None:
     app, community, server = _real_create_app(
         allowed={"schedule:manage", "server:command"}, recorder=recorder
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(community, server),
         json={
@@ -497,7 +496,7 @@ def _preview_use_case() -> PreviewSchedule:
 
 def test_preview_cron_returns_5_datetimes() -> None:
     app = _app(member=True, allow=True, preview=_preview_use_case())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _preview_url(uuid.uuid4(), uuid.uuid4()),
         json={"cron": "0 4 * * *", "timezone": "UTC"},
@@ -513,7 +512,7 @@ def test_preview_cron_returns_5_datetimes() -> None:
 
 def test_preview_interval_returns_5_datetimes() -> None:
     app = _app(member=True, allow=True, preview=_preview_use_case())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _preview_url(uuid.uuid4(), uuid.uuid4()),
         json={"interval_seconds": 3600},
@@ -525,7 +524,7 @@ def test_preview_interval_returns_5_datetimes() -> None:
 
 def test_preview_invalid_cron_is_422() -> None:
     app = _app(member=True, allow=True, preview=_preview_use_case())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _preview_url(uuid.uuid4(), uuid.uuid4()),
         json={"cron": "not valid"},
@@ -536,7 +535,7 @@ def test_preview_invalid_cron_is_422() -> None:
 
 def test_preview_no_cadence_is_422() -> None:
     app = _app(member=True, allow=True, preview=_preview_use_case())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _preview_url(uuid.uuid4(), uuid.uuid4()),
         json={},
@@ -547,7 +546,7 @@ def test_preview_no_cadence_is_422() -> None:
 
 def test_preview_non_member_gets_404() -> None:
     app = _app(member=False, allow=True, preview=_preview_use_case())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _preview_url(uuid.uuid4(), uuid.uuid4()),
         json={"cron": "0 4 * * *"},
@@ -557,7 +556,7 @@ def test_preview_non_member_gets_404() -> None:
 
 def test_preview_member_without_read_permission_gets_403() -> None:
     app = _app(member=True, allow=False, preview=_preview_use_case())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _preview_url(uuid.uuid4(), uuid.uuid4()),
         json={"cron": "0 4 * * *"},

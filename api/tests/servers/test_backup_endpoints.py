@@ -17,7 +17,7 @@ from __future__ import annotations
 import datetime as dt
 import inspect
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 
 import httpx2
 import pytest
@@ -99,6 +99,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
 )
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 from tests.audit.fakes import RecordingAuditRecorder
+from tests.client_utils import enter_client
 from tests.identity.fakes import FakeClock, FakeUnitOfWork, make_user
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
@@ -153,9 +154,8 @@ def _backup(server_id: ServerId) -> Backup:
     )
 
 
-def _client(app: object) -> Iterator[TestClient]:
-    with TestClient(app) as client:  # type: ignore[arg-type]
-        yield client
+def _client(app: object) -> TestClient:
+    return enter_client(TestClient(app))  # type: ignore[arg-type]
 
 
 _shared_app: FastAPI
@@ -270,21 +270,21 @@ def _url(community: uuid.UUID, server: uuid.UUID, suffix: str = "") -> str:
 
 def test_non_member_gets_404_on_create() -> None:
     app = _app(member=False, allow=True, create=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4()))
     assert resp.status_code == 404
 
 
 def test_member_without_permission_gets_403_on_create() -> None:
     app = _app(member=True, allow=False, create=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4()))
     assert resp.status_code == 403
 
 
 def test_member_without_permission_gets_403_on_delete() -> None:
     app = _app(member=True, allow=False, delete=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.delete(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}"))
     assert resp.status_code == 403
 
@@ -297,7 +297,7 @@ def test_create_returns_201_and_passes_actor() -> None:
     use_case = _FakeUseCase(result=_backup(server))
     recorder = RecordingAuditRecorder()
     app = _app(member=True, allow=True, create=use_case, recorder=recorder)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), server.value))
     assert resp.status_code == 201
     body = resp.json()
@@ -317,7 +317,7 @@ def test_create_unsettled_is_409() -> None:
     use_case = _FakeUseCase(error=BackupUnsettledError("x"))
     recorder = RecordingAuditRecorder()
     app = _app(member=True, allow=True, create=use_case, recorder=recorder)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4()))
     assert resp.status_code == 409
     # A create refused because the server is unsettled records backup:create
@@ -330,7 +330,7 @@ def test_create_unsettled_is_409() -> None:
 def test_create_nothing_to_archive_is_404() -> None:
     use_case = _FakeUseCase(error=BackupNotFoundError("x"))
     app = _app(member=True, allow=True, create=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4()))
     assert resp.status_code == 404
 
@@ -338,7 +338,7 @@ def test_create_nothing_to_archive_is_404() -> None:
 def test_create_worker_unavailable_is_503() -> None:
     use_case = _FakeUseCase(error=WorkerUnavailableError("x"))
     app = _app(member=True, allow=True, create=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4()))
     assert resp.status_code == 503
 
@@ -350,7 +350,7 @@ def test_create_storage_unavailable_is_503_with_reason() -> None:
     use_case = _FakeUseCase(error=BackupStorageUnavailableError("x"))
     recorder = RecordingAuditRecorder()
     app = _app(member=True, allow=True, create=use_case, recorder=recorder)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4()))
     assert resp.status_code == 503
     assert resp.json()["reason"] == "storage_unavailable"
@@ -373,7 +373,7 @@ def test_create_dispatch_failure_keeps_the_sanitized_reason() -> None:
     use_case = _FakeUseCase(error=CommandDispatchError("busy", reason="worker_busy"))
     recorder = RecordingAuditRecorder()
     app = _app(member=True, allow=True, create=use_case, recorder=recorder)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4()))
     assert resp.status_code == 409
     assert resp.json()["reason"] == "worker_busy"
@@ -387,7 +387,7 @@ def test_create_unclassified_dispatch_failure_is_command_failed() -> None:
     # the catch-all so the reason stays a closed set (issue #2436).
     use_case = _FakeUseCase(error=CommandDispatchError("boom"))
     app = _app(member=True, allow=True, create=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4()))
     assert resp.status_code == 409
     assert resp.json()["reason"] == "command_failed"
@@ -400,7 +400,7 @@ def test_create_corrupt_working_set_is_500_with_reason() -> None:
     use_case = _FakeUseCase(error=BackupCorruptError("x", corrupt_count=3))
     recorder = RecordingAuditRecorder()
     app = _app(member=True, allow=True, create=use_case, recorder=recorder)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4()))
     assert resp.status_code == 500
     assert resp.json()["reason"] == "working_set_corrupt"
@@ -421,7 +421,7 @@ def test_list_returns_backups() -> None:
         result=[ListedBackup(backup=backup, created_by_username="alice")]
     )
     app = _app(member=True, allow=True, list_=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), server.value))
     assert resp.status_code == 200
     backups = resp.json()["backups"]
@@ -442,7 +442,7 @@ def test_list_unresolved_author_username_is_null() -> None:
         result=[ListedBackup(backup=backup, created_by_username=None)]
     )
     app = _app(member=True, allow=True, list_=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), server.value))
     assert resp.status_code == 200
     assert resp.json()["backups"][0]["created_by_username"] is None
@@ -451,7 +451,7 @@ def test_list_unresolved_author_username_is_null() -> None:
 def test_list_unknown_server_is_404() -> None:
     use_case = _FakeUseCase(error=ServerNotFoundError("x"))
     app = _app(member=True, allow=True, list_=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4()))
     assert resp.status_code == 404
 
@@ -462,7 +462,7 @@ def test_list_storage_unavailable_is_503_with_reason() -> None:
     # backup routes (#2378), rather than a 200 with null sizes (issue #2405).
     use_case = _FakeUseCase(error=BackupStorageUnavailableError("x"))
     app = _app(member=True, allow=True, list_=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4()))
     assert resp.status_code == 503
     assert resp.json()["reason"] == "storage_unavailable"
@@ -475,7 +475,7 @@ def test_restore_running_is_409() -> None:
     use_case = _FakeUseCase(error=ServerNotStoppedError("x"))
     recorder = RecordingAuditRecorder()
     app = _app(member=True, allow=True, restore=use_case, recorder=recorder)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/restore"))
     assert resp.status_code == 409
     # A restore refused because the server is running records backup:restore
@@ -488,7 +488,7 @@ def test_restore_running_is_409() -> None:
 def test_restore_unknown_backup_is_404() -> None:
     use_case = _FakeUseCase(error=BackupNotFoundError("x"))
     app = _app(member=True, allow=True, restore=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/restore"))
     assert resp.status_code == 404
 
@@ -497,7 +497,7 @@ def test_restore_at_rest_is_204() -> None:
     use_case = _FakeUseCase(result=RestoreResult(forced_corrupt=False, corrupt_count=0))
     recorder = RecordingAuditRecorder()
     app = _app(member=True, allow=True, restore=use_case, recorder=recorder)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/restore"))
     assert resp.status_code == 204
     # force defaults to False when the query param is absent.
@@ -515,7 +515,7 @@ def test_restore_corrupt_without_force_is_500_with_reason() -> None:
     use_case = _FakeUseCase(error=BackupCorruptError("x", corrupt_count=3))
     recorder = RecordingAuditRecorder()
     app = _app(member=True, allow=True, restore=use_case, recorder=recorder)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/restore"))
     assert resp.status_code == 500
     assert resp.json()["reason"] == "working_set_corrupt"
@@ -531,7 +531,7 @@ def test_restore_storage_unavailable_is_503_with_reason() -> None:
     use_case = _FakeUseCase(error=BackupStorageUnavailableError("x"))
     recorder = RecordingAuditRecorder()
     app = _app(member=True, allow=True, restore=use_case, recorder=recorder)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/restore"))
     assert resp.status_code == 503
     assert resp.json()["reason"] == "storage_unavailable"
@@ -544,7 +544,7 @@ def test_restore_with_force_query_param_passes_force_true() -> None:
     use_case = _FakeUseCase(result=RestoreResult(forced_corrupt=True, corrupt_count=2))
     recorder = RecordingAuditRecorder()
     app = _app(member=True, allow=True, restore=use_case, recorder=recorder)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/restore?force=true")
     )
@@ -565,7 +565,7 @@ def test_delete_is_204() -> None:
     use_case = _FakeUseCase()
     recorder = RecordingAuditRecorder()
     app = _app(member=True, allow=True, delete=use_case, recorder=recorder)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.delete(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}"))
     assert resp.status_code == 204
     # A successful delete records backup:delete SUCCESS against the backup.
@@ -580,7 +580,7 @@ def test_delete_storage_unavailable_is_503_with_reason() -> None:
     # produces one status across every backup route.
     use_case = _FakeUseCase(error=BackupStorageUnavailableError("x"))
     app = _app(member=True, allow=True, delete=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.delete(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}"))
     assert resp.status_code == 503
     assert resp.json()["reason"] == "storage_unavailable"
@@ -589,7 +589,7 @@ def test_delete_storage_unavailable_is_503_with_reason() -> None:
 def test_delete_unknown_backup_is_404() -> None:
     use_case = _FakeUseCase(error=BackupNotFoundError("x"))
     app = _app(member=True, allow=True, delete=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.delete(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}"))
     assert resp.status_code == 404
 
@@ -732,13 +732,13 @@ def _download(
 
 def test_member_without_permission_gets_403_on_download() -> None:
     app = _app(member=True, allow=False, download=_FakeDownload())
-    client = next(_client(app))
+    client = _client(app)
     assert _download(client).status_code == 403
 
 
 def test_download_without_credentials_is_401() -> None:
     app = _app(member=True, allow=True, download=_FakeDownload())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download"))
     assert resp.status_code == 401
 
@@ -753,7 +753,7 @@ def test_download_storage_unavailable_is_503_with_reason() -> None:
         allow=True,
         download=_FakeDownload(error=BackupStorageUnavailableError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = _download(client)
     assert resp.status_code == 503
     assert resp.json()["reason"] == "storage_unavailable"
@@ -761,7 +761,7 @@ def test_download_storage_unavailable_is_503_with_reason() -> None:
 
 def test_download_streams_archive_with_disposition() -> None:
     app = _app(member=True, allow=True, download=_FakeDownload(b"archive-bytes"))
-    client = next(_client(app))
+    client = _client(app)
     resp = _download(client)
     assert resp.status_code == 200
     assert resp.content == b"archive-bytes"
@@ -781,7 +781,7 @@ def test_download_declares_content_length_matching_streamed_bytes() -> None:
         download=_FakeDownload(chunks=chunks),
         recorder=recorder,
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = _download(client)
     assert resp.status_code == 200
     assert resp.content == b"".join(chunks)
@@ -800,7 +800,7 @@ def test_download_aborts_when_stream_ends_short_of_declared_length() -> None:
     # holds without depending on the ASGI server to notice.
     download = _FakeDownload(chunks=[b"first-chunk", b"second-chunk"], declared=1024)
     app = _app(member=True, allow=True, download=download)
-    client = next(_client(app))
+    client = _client(app)
     with pytest.raises(ShortResponseBodyError):
         _download(client)
 
@@ -816,7 +816,7 @@ def test_download_aborts_when_archive_disappears_mid_stream() -> None:
         mid_stream_error=BackupNotFoundError("x"),
     )
     app = _app(member=True, allow=True, download=download)
-    client = next(_client(app))
+    client = _client(app)
     with pytest.raises(BackupNotFoundError):
         _download(client)
 
@@ -825,7 +825,7 @@ def test_download_unknown_backup_is_404() -> None:
     app = _app(
         member=True, allow=True, download=_FakeDownload(error=BackupNotFoundError("x"))
     )
-    client = next(_client(app))
+    client = _client(app)
     assert _download(client).status_code == 404
 
 
@@ -847,7 +847,7 @@ def test_download_of_an_archive_deleted_before_the_first_read_is_404(
     recorder = RecordingAuditRecorder()
     download = _FakeDownload(open_error=BackupNotFoundError("x"), declared=1024)
     app = _app(member=True, allow=True, download=download, recorder=recorder)
-    client = next(_client(app))
+    client = _client(app)
     headers = _bearer() if header is None else {**_bearer(), "Range": header}
     resp = _download(client, headers)
     assert resp.status_code == 404
@@ -864,7 +864,7 @@ def test_download_storage_outage_at_the_open_is_503() -> None:
     # choose the retryable status the probe's own outage answers with (#2378).
     download = _FakeDownload(open_error=BackupStorageUnavailableError("x"))
     app = _app(member=True, allow=True, download=download)
-    client = next(_client(app))
+    client = _client(app)
     resp = _download(client)
     assert resp.status_code == 503
     assert resp.json()["reason"] == "storage_unavailable"
@@ -881,7 +881,7 @@ def test_full_download_advertises_range_support_and_an_etag() -> None:
     # without an ETag it cannot validate that the bytes it resumes into are the
     # same representation.
     app = _app(member=True, allow=True, download=_FakeDownload(_RANGED))
-    client = next(_client(app))
+    client = _client(app)
     resp = _download(client)
     assert resp.status_code == 200
     assert resp.headers["accept-ranges"] == "bytes"
@@ -893,21 +893,21 @@ def test_the_etag_covers_the_archive_size() -> None:
     # identifies the exact bytes: two archives of different length under the
     # same id could never share a validator.
     app = _app(member=True, allow=True, download=_FakeDownload(_RANGED))
-    client = next(_client(app))
+    client = _client(app)
     path = _url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download")
     first = client.get(path, headers=_bearer())
     same = client.get(path, headers=_bearer())
     assert first.headers["etag"] == same.headers["etag"]
 
     app = _app(member=True, allow=True, download=_FakeDownload(_RANGED + b"!"))
-    other = next(_client(app)).get(path, headers=_bearer())
+    other = _client(app).get(path, headers=_bearer())
     assert other.headers["etag"] != first.headers["etag"]
 
 
 def test_open_ended_range_resumes_from_the_offset() -> None:
     download = _FakeDownload(_RANGED)
     app = _app(member=True, allow=True, download=download)
-    client = next(_client(app))
+    client = _client(app)
     resp = _download(client, {**_bearer(), "Range": "bytes=20-"})
     assert resp.status_code == 206
     assert resp.content == _RANGED[20:]
@@ -920,7 +920,7 @@ def test_open_ended_range_resumes_from_the_offset() -> None:
 
 def test_closed_range_serves_exactly_that_span() -> None:
     app = _app(member=True, allow=True, download=_FakeDownload(_RANGED))
-    client = next(_client(app))
+    client = _client(app)
     resp = _download(client, {**_bearer(), "Range": "bytes=5-9"})
     assert resp.status_code == 206
     assert resp.content == b"fghij"
@@ -930,7 +930,7 @@ def test_closed_range_serves_exactly_that_span() -> None:
 
 def test_suffix_range_serves_the_final_bytes() -> None:
     app = _app(member=True, allow=True, download=_FakeDownload(_RANGED))
-    client = next(_client(app))
+    client = _client(app)
     resp = _download(client, {**_bearer(), "Range": "bytes=-3"})
     assert resp.status_code == 206
     assert resp.content == b"xyz"
@@ -949,7 +949,7 @@ def test_suffix_range_serves_the_final_bytes() -> None:
 )
 def test_range_boundaries(header: str, expected: bytes, content_range: str) -> None:
     app = _app(member=True, allow=True, download=_FakeDownload(_RANGED))
-    client = next(_client(app))
+    client = _client(app)
     resp = _download(client, {**_bearer(), "Range": header})
     assert resp.status_code == 206
     assert resp.content == expected
@@ -961,7 +961,7 @@ def test_unsatisfiable_range_is_416_naming_the_size() -> None:
     recorder = RecordingAuditRecorder()
     download = _FakeDownload(_RANGED)
     app = _app(member=True, allow=True, download=download, recorder=recorder)
-    client = next(_client(app))
+    client = _client(app)
     resp = _download(client, {**_bearer(), "Range": "bytes=26-"})
     assert resp.status_code == 416
     assert resp.headers["content-range"] == "bytes */26"
@@ -980,7 +980,7 @@ def test_unusable_range_serves_the_whole_archive(header: str) -> None:
     # A malformed or multi-range request is answered as if Range were absent.
     download = _FakeDownload(_RANGED)
     app = _app(member=True, allow=True, download=download)
-    client = next(_client(app))
+    client = _client(app)
     resp = _download(client, {**_bearer(), "Range": header})
     assert resp.status_code == 200
     assert resp.content == _RANGED
@@ -992,7 +992,7 @@ def test_partial_download_is_audited_like_a_full_one() -> None:
     app = _app(
         member=True, allow=True, download=_FakeDownload(_RANGED), recorder=recorder
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = _download(client, {**_bearer(), "Range": "bytes=10-"})
     assert resp.status_code == 206
     assert [e.operation for e in recorder.events] == [ops.BACKUP_DOWNLOAD]
@@ -1005,14 +1005,14 @@ def test_partial_download_aborts_when_the_range_ends_short() -> None:
     # fewer bytes than the range promised fails the response here.
     download = _FakeDownload(chunks=[b"short"], declared=1024)
     app = _app(member=True, allow=True, download=download)
-    client = next(_client(app))
+    client = _client(app)
     with pytest.raises(ShortResponseBodyError):
         _download(client, {**_bearer(), "Range": "bytes=0-99"})
 
 
 def test_if_range_matching_the_etag_applies_the_range() -> None:
     app = _app(member=True, allow=True, download=_FakeDownload(_RANGED))
-    client = next(_client(app))
+    client = _client(app)
     path = _url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download")
     etag = client.get(path, headers=_bearer()).headers["etag"]
 
@@ -1027,7 +1027,7 @@ def test_if_range_not_matching_serves_the_whole_archive() -> None:
     # The representation the client started from is gone, so resuming into it
     # would splice two different archives: send the current one whole instead.
     app = _app(member=True, allow=True, download=_FakeDownload(_RANGED))
-    client = next(_client(app))
+    client = _client(app)
     resp = _download(
         client, headers={**_bearer(), "Range": "bytes=20-", "If-Range": '"stale"'}
     )
@@ -1039,7 +1039,7 @@ def test_if_range_carrying_the_weak_form_of_our_etag_serves_the_whole_archive() 
     # If-Range is compared with the STRONG function (RFC 9110 Section 13.1.5), so
     # ``W/`` in front of our own tag is deliberately not a match.
     app = _app(member=True, allow=True, download=_FakeDownload(_RANGED))
-    client = next(_client(app))
+    client = _client(app)
     path = _url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download")
     etag = client.get(path, headers=_bearer()).headers["etag"]
 
@@ -1055,7 +1055,7 @@ def test_if_range_without_a_range_is_a_plain_full_download() -> None:
     # not it matches.
     download = _FakeDownload(_RANGED)
     app = _app(member=True, allow=True, download=download)
-    client = next(_client(app))
+    client = _client(app)
     path = _url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/download")
     etag = client.get(path, headers=_bearer()).headers["etag"]
 
@@ -1093,14 +1093,14 @@ def _mint(
 
 def test_non_member_gets_404_on_download_grant() -> None:
     app = _app(member=False, allow=True, resolve=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = _mint(client, uuid.uuid4(), uuid.uuid4(), uuid.uuid4())
     assert resp.status_code == 404
 
 
 def test_member_without_permission_gets_403_on_download_grant() -> None:
     app = _app(member=True, allow=False, resolve=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = _mint(client, uuid.uuid4(), uuid.uuid4(), uuid.uuid4())
     assert resp.status_code == 403
 
@@ -1109,7 +1109,7 @@ def test_download_grant_for_unknown_backup_is_404() -> None:
     app = _app(
         member=True, allow=True, resolve=_FakeUseCase(error=BackupNotFoundError("x"))
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = _mint(client, uuid.uuid4(), uuid.uuid4(), uuid.uuid4())
     assert resp.status_code == 404
 
@@ -1117,7 +1117,7 @@ def test_download_grant_for_unknown_backup_is_404() -> None:
 def test_download_grant_response_is_not_cached_and_reports_expiry() -> None:
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, resolve=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = _mint(client, community, server, backup)
     assert resp.status_code == 200
     # A URL that carries a credential must never sit in a shared cache.
@@ -1135,7 +1135,7 @@ def test_minting_a_grant_records_no_audit_event() -> None:
     # Bytes leave the system at redemption, not at issuance (issue #2313).
     recorder = RecordingAuditRecorder()
     app = _app(member=True, allow=True, resolve=_FakeUseCase(), recorder=recorder)
-    client = next(_client(app))
+    client = _client(app)
     assert _mint(client, uuid.uuid4(), uuid.uuid4(), uuid.uuid4()).status_code == 200
     assert recorder.events == []
 
@@ -1151,7 +1151,7 @@ def test_minted_url_downloads_without_an_authorization_header() -> None:
         download=download,
         recorder=recorder,
     )
-    client = next(_client(app))
+    client = _client(app)
     url = _mint(client, community, server, backup).json()["download_url"]
 
     resp = client.get(url)
@@ -1175,7 +1175,7 @@ def test_grant_redeemed_download_matches_the_bearer_response() -> None:
         resolve=_FakeUseCase(),
         download=_FakeDownload(_ARCHIVE),
     )
-    client = next(_client(app))
+    client = _client(app)
     path = _url(community, server, f"/{backup}/download")
 
     with_bearer = client.get(path, headers=_bearer())
@@ -1191,7 +1191,7 @@ def test_grant_redeemed_download_matches_the_bearer_response() -> None:
 def test_grant_is_rejected_after_its_ttl() -> None:
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload())
-    client = next(_client(app))
+    client = _client(app)
     url = _grant_url(community, server, backup, subject=_user)
 
     _clock.set(_NOW + dt.timedelta(seconds=_GRANT_TTL_SECONDS))
@@ -1202,7 +1202,7 @@ def test_grant_is_rejected_after_its_ttl() -> None:
 def test_grant_is_rejected_on_another_backup() -> None:
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload())
-    client = next(_client(app))
+    client = _client(app)
     issued = _tokens.issue_download_grant(
         _user.id, download_grant_resource(community, server, uuid.uuid4())
     )
@@ -1218,7 +1218,7 @@ def test_grant_is_rejected_on_another_backup() -> None:
 def test_grant_is_rejected_under_another_server_or_community() -> None:
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload())
-    client = next(_client(app))
+    client = _client(app)
     issued = _tokens.issue_download_grant(
         _user.id, download_grant_resource(community, server, backup)
     )
@@ -1237,7 +1237,7 @@ def test_grant_is_rejected_under_another_server_or_community() -> None:
 def test_grant_is_not_accepted_as_a_bearer_token() -> None:
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload())
-    client = next(_client(app))
+    client = _client(app)
     issued = _tokens.issue_download_grant(
         _user.id, download_grant_resource(community, server, backup)
     )
@@ -1253,7 +1253,7 @@ def test_grant_is_not_accepted_as_a_bearer_token() -> None:
 def test_access_token_is_not_accepted_as_a_grant() -> None:
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload())
-    client = next(_client(app))
+    client = _client(app)
     access = _tokens.issue_access_token(_user.id)
 
     resp = client.get(_url(community, server, f"/{backup}/download?grant={access}"))
@@ -1265,7 +1265,7 @@ def test_grant_loses_to_a_permission_revoked_after_issuance() -> None:
     # The grant proves identity, never authority: authorization is decided afresh.
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=False, download=_FakeDownload())
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.get(_grant_url(community, server, backup, subject=_user))
 
@@ -1275,7 +1275,7 @@ def test_grant_loses_to_a_permission_revoked_after_issuance() -> None:
 def test_grant_loses_to_a_membership_removed_after_issuance() -> None:
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     app = _app(member=False, allow=True, download=_FakeDownload())
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.get(_grant_url(community, server, backup, subject=_user))
 
@@ -1290,7 +1290,7 @@ def test_grant_for_a_deactivated_subject_is_rejected() -> None:
         subject=make_user(active=False),
         download=_FakeDownload(),
     )
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.get(_grant_url(community, server, backup, subject=_user))
 
@@ -1341,7 +1341,7 @@ def _cookie_header(
 def test_grant_redemption_sets_a_path_scoped_httponly_cookie() -> None:
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload(_ARCHIVE))
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.get(_grant_url(community, server, backup, subject=_user))
 
@@ -1364,7 +1364,7 @@ def test_a_bearer_download_sets_no_cookie() -> None:
     # A non-browser client never asked for one (the posture issue #372 set for the
     # refresh cookie), and it already carries a credential that outlives the grant.
     app = _app(member=True, allow=True, download=_FakeDownload(_ARCHIVE))
-    client = next(_client(app))
+    client = _client(app)
 
     resp = _download(client)
 
@@ -1377,7 +1377,7 @@ def test_expired_grant_download_is_retried_with_the_cookie() -> None:
     # given, which has expired by then.
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload(_ARCHIVE))
-    client = next(_client(app))
+    client = _client(app)
     url = _grant_url(community, server, backup, subject=_user)
     cookie = _cookie_header(community, server, backup)
 
@@ -1394,7 +1394,7 @@ def test_expired_grant_ranged_retry_is_served_a_206_with_the_cookie() -> None:
     # cookie has to authenticate exactly like a full one.
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload(_ARCHIVE))
-    client = next(_client(app))
+    client = _client(app)
     url = _grant_url(community, server, backup, subject=_user)
     headers = _cookie_header(community, server, backup) | {"Range": "bytes=5-"}
 
@@ -1411,7 +1411,7 @@ def test_expired_grant_ranged_retry_is_served_a_206_with_the_cookie() -> None:
 def test_cookie_alone_downloads_without_any_grant_in_the_url() -> None:
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload(_ARCHIVE))
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.get(
         _url(community, server, f"/{backup}/download"),
@@ -1425,7 +1425,7 @@ def test_cookie_alone_downloads_without_any_grant_in_the_url() -> None:
 def test_cookie_is_rejected_after_its_own_ttl() -> None:
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload())
-    client = next(_client(app))
+    client = _client(app)
     headers = _cookie_header(community, server, backup)
 
     _clock.set(_NOW + dt.timedelta(seconds=_COOKIE_TTL_SECONDS))
@@ -1439,7 +1439,7 @@ def test_cookie_is_rejected_on_another_backup() -> None:
     # what decides. A cookie replayed onto a sibling resource opens nothing.
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload())
-    client = next(_client(app))
+    client = _client(app)
     headers = _cookie_header(community, server, uuid.uuid4())
 
     resp = client.get(
@@ -1452,7 +1452,7 @@ def test_cookie_is_rejected_on_another_backup() -> None:
 def test_cookie_is_rejected_under_another_server_or_community() -> None:
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload())
-    client = next(_client(app))
+    client = _client(app)
     headers = _cookie_header(community, server, backup)
 
     other_server = client.get(
@@ -1471,7 +1471,7 @@ def test_cookie_is_not_accepted_in_the_query_string() -> None:
     # browser history and any Referer.
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload())
-    client = next(_client(app))
+    client = _client(app)
     value = _tokens.issue_download_cookie(
         _user.id, download_grant_resource(community, server, backup)
     )
@@ -1484,7 +1484,7 @@ def test_cookie_is_not_accepted_in_the_query_string() -> None:
 def test_grant_is_not_accepted_as_the_cookie() -> None:
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload())
-    client = next(_client(app))
+    client = _client(app)
     issued = _tokens.issue_download_grant(
         _user.id, download_grant_resource(community, server, backup)
     )
@@ -1500,7 +1500,7 @@ def test_grant_is_not_accepted_as_the_cookie() -> None:
 def test_cookie_is_not_accepted_as_a_bearer_token() -> None:
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload())
-    client = next(_client(app))
+    client = _client(app)
     value = _tokens.issue_download_cookie(
         _user.id, download_grant_resource(community, server, backup)
     )
@@ -1518,7 +1518,7 @@ def test_cookie_does_not_rescue_a_rejected_bearer_token() -> None:
     # browser, never a way around a session token the server refused.
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload())
-    client = next(_client(app))
+    client = _client(app)
     headers = _cookie_header(community, server, backup) | {
         "Authorization": "Bearer not-a-token"
     }
@@ -1533,7 +1533,7 @@ def test_a_cookie_authenticated_download_does_not_renew_the_cookie() -> None:
     # it, so repeated retries cannot extend it indefinitely.
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload(_ARCHIVE))
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.get(
         _url(community, server, f"/{backup}/download"),
@@ -1552,7 +1552,7 @@ def test_a_cookie_authenticated_download_acts_as_the_cookies_subject() -> None:
     app = _app(
         member=True, allow=True, download=_FakeDownload(_ARCHIVE), recorder=recorder
     )
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.get(
         _url(community, server, f"/{backup}/download"),
@@ -1569,7 +1569,7 @@ def test_a_cookie_naming_an_unknown_user_is_rejected() -> None:
     # a cookie for a user this deployment does not have opens nothing.
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload())
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.get(
         _url(community, server, f"/{backup}/download"),
@@ -1588,7 +1588,7 @@ def test_cookie_loses_to_a_permission_revoked_after_the_mint() -> None:
     # Identity, never authority — the same posture the grant has.
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=False, download=_FakeDownload())
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.get(
         _url(community, server, f"/{backup}/download"),
@@ -1606,7 +1606,7 @@ def test_cookie_for_a_deactivated_subject_is_rejected() -> None:
         subject=make_user(active=False),
         download=_FakeDownload(),
     )
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.get(
         _url(community, server, f"/{backup}/download"),
@@ -1619,7 +1619,7 @@ def test_cookie_for_a_deactivated_subject_is_rejected() -> None:
 def test_a_grant_redemption_that_fails_the_gate_mints_no_cookie() -> None:
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=False, download=_FakeDownload())
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.get(_grant_url(community, server, backup, subject=_user))
 
@@ -1635,7 +1635,7 @@ def test_a_grant_redemption_that_404s_mints_no_cookie() -> None:
         allow=True,
         download=_FakeDownload(error=BackupNotFoundError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.get(_grant_url(community, server, backup, subject=_user))
 
@@ -1671,7 +1671,7 @@ def test_a_download_with_no_credential_at_all_is_401_before_the_path_is_parsed()
     # no-credential 401: composing it parses the path ids, which would turn this
     # into a 422 (issue #630's re-raise) instead of the 401 it has always been.
     app = _app(member=True, allow=True, download=_FakeDownload())
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.get(
         f"/api/communities/notauuid/servers/{uuid.uuid4()}"
@@ -1699,7 +1699,7 @@ def test_cookie_omits_secure_when_configured_for_plain_http() -> None:
         }
     )
     _shared_app.dependency_overrides[get_settings] = lambda: insecure
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.get(_grant_url(community, server, backup, subject=_user))
 
@@ -1720,7 +1720,7 @@ def test_backup_download_declares_no_store_under_every_credential() -> None:
     # caches does not cover it.
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload())
-    client = next(_client(app))
+    client = _client(app)
     url = _url(community, server, f"/{backup}/download")
     cookie = _cookie_header(community, server, backup)
     # Last, because redeeming a grant mints the cookie into the client's jar.
@@ -1762,7 +1762,7 @@ _PROBE_HEADERS = (
 def test_backup_head_answers_the_gets_headers_under_every_credential() -> None:
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload(b"archive-bytes"))
-    client = next(_client(app))
+    client = _client(app)
     url = _url(community, server, f"/{backup}/download")
     cookie = _cookie_header(community, server, backup)
     # Last, because redeeming a grant mints the cookie into the client's jar.
@@ -1795,7 +1795,7 @@ def test_backup_head_neither_opens_the_archive_nor_records_a_download() -> None:
     download = _FakeDownload(b"archive-bytes")
     recorder = RecordingAuditRecorder()
     app = _app(member=True, allow=True, download=download, recorder=recorder)
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.head(
         _url(community, server, f"/{backup}/download"), headers=_bearer()
@@ -1815,7 +1815,7 @@ def test_backup_head_ignores_range_and_reports_the_whole_archive() -> None:
     # a range the GET would answer 416 for.
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload(b"archive-bytes"))
-    client = next(_client(app))
+    client = _client(app)
     url = _url(community, server, f"/{backup}/download")
 
     partial = client.head(url, headers={**_bearer(), "Range": "bytes=0-3"})
@@ -1861,8 +1861,8 @@ def test_backup_head_is_answered_exactly_like_the_get(
     app = _app(member=member, allow=allow, download=_FakeDownload(error=error))
     url, headers = _credential(kind, community, server, backup)
 
-    probed = next(_client(app)).head(url, headers=headers)
-    served = next(_client(app)).get(url, headers=headers)
+    probed = _client(app).head(url, headers=headers)
+    served = _client(app).get(url, headers=headers)
 
     assert probed.status_code == served.status_code == expected
 
@@ -1870,7 +1870,7 @@ def test_backup_head_is_answered_exactly_like_the_get(
 def test_backup_head_without_credentials_is_401() -> None:
     community, server, backup = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload())
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.head(_url(community, server, f"/{backup}/download"))
 
@@ -1886,7 +1886,7 @@ def _multipart() -> dict[str, tuple[str, bytes, str]]:
 
 def test_member_without_permission_gets_403_on_upload() -> None:
     app = _app(member=True, allow=False, upload=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/upload"), files=_multipart())
     assert resp.status_code == 403
 
@@ -1906,7 +1906,7 @@ def test_upload_returns_201_and_passes_actor() -> None:
         )
     )
     app = _app(member=True, allow=True, upload=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), server.value, "/upload"), files=_multipart())
     assert resp.status_code == 201
     assert resp.json()["source"] == "uploaded"
@@ -1918,7 +1918,7 @@ def test_upload_returns_201_and_passes_actor() -> None:
 def test_upload_invalid_archive_is_422() -> None:
     use_case = _FakeUseCase(error=InvalidBackupArchiveError("bad"))
     app = _app(member=True, allow=True, upload=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/upload"), files=_multipart())
     assert resp.status_code == 422
 
@@ -1926,7 +1926,7 @@ def test_upload_invalid_archive_is_422() -> None:
 def test_upload_too_large_is_413() -> None:
     use_case = _FakeUseCase(error=FileTooLargeError("big"))
     app = _app(member=True, allow=True, upload=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/upload"), files=_multipart())
     assert resp.status_code == 413
 
@@ -1936,7 +1936,7 @@ def test_upload_storage_unavailable_is_503_with_reason() -> None:
     # 503 storage_unavailable, so the client knows to retry the upload.
     use_case = _FakeUseCase(error=BackupStorageUnavailableError("x"))
     app = _app(member=True, allow=True, upload=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/upload"), files=_multipart())
     assert resp.status_code == 503
     assert resp.json()["reason"] == "storage_unavailable"
@@ -1945,7 +1945,7 @@ def test_upload_storage_unavailable_is_503_with_reason() -> None:
 def test_upload_unknown_server_is_404() -> None:
     use_case = _FakeUseCase(error=ServerNotFoundError("x"))
     app = _app(member=True, allow=True, upload=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/upload"), files=_multipart())
     assert resp.status_code == 404
 
@@ -1955,7 +1955,7 @@ def test_upload_unknown_server_is_404() -> None:
 
 def test_member_without_permission_gets_403_on_statistics() -> None:
     app = _app(member=True, allow=False, statistics=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), "/statistics"))
     assert resp.status_code == 403
 
@@ -1963,7 +1963,7 @@ def test_member_without_permission_gets_403_on_statistics() -> None:
 def test_statistics_returns_aggregate() -> None:
     use_case = _FakeUseCase(result=_stats())
     app = _app(member=True, allow=True, statistics=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), "/statistics"))
     assert resp.status_code == 200
     body = resp.json()
@@ -1977,7 +1977,7 @@ def test_statistics_returns_aggregate() -> None:
 def test_statistics_unknown_server_is_404() -> None:
     use_case = _FakeUseCase(error=ServerNotFoundError("x"))
     app = _app(member=True, allow=True, statistics=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), "/statistics"))
     assert resp.status_code == 404
 
@@ -1988,7 +1988,7 @@ def test_statistics_storage_unavailable_is_503_with_reason() -> None:
     # store could not size (issue #2405).
     use_case = _FakeUseCase(error=BackupStorageUnavailableError("x"))
     app = _app(member=True, allow=True, statistics=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), "/statistics"))
     assert resp.status_code == 503
     assert resp.json()["reason"] == "storage_unavailable"
@@ -2000,7 +2000,7 @@ def test_statistics_storage_unavailable_is_503_with_reason() -> None:
 def test_global_statistics_requires_platform_admin() -> None:
     use_case = _FakeUseCase(result=_stats())
     app = _app(member=True, allow=True, global_statistics=use_case, is_admin=False)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get("/api/backups/statistics")
     assert resp.status_code == 403
 
@@ -2008,7 +2008,7 @@ def test_global_statistics_requires_platform_admin() -> None:
 def test_global_statistics_admin_returns_aggregate() -> None:
     use_case = _FakeUseCase(result=_stats())
     app = _app(member=True, allow=True, global_statistics=use_case, is_admin=True)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get("/api/backups/statistics")
     assert resp.status_code == 200
     assert resp.json()["count"] == 2
@@ -2019,7 +2019,7 @@ def test_global_statistics_admin_returns_aggregate() -> None:
 
 def test_put_retention_non_member_is_404() -> None:
     app = _app(member=False, allow=True, set_retention=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.put(
         _url(uuid.uuid4(), uuid.uuid4(), "/retention"), json={"keep_last": 3}
     )
@@ -2028,7 +2028,7 @@ def test_put_retention_non_member_is_404() -> None:
 
 def test_put_retention_without_permission_is_403() -> None:
     app = _app(member=True, allow=False, set_retention=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.put(
         _url(uuid.uuid4(), uuid.uuid4(), "/retention"), json={"keep_last": 3}
     )
@@ -2038,7 +2038,7 @@ def test_put_retention_without_permission_is_403() -> None:
 def test_put_retention_returns_the_saved_policy() -> None:
     use_case = _FakeUseCase(result=RetentionPolicy.from_fields(keep_last=3))
     app = _app(member=True, allow=True, set_retention=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.put(
         _url(uuid.uuid4(), uuid.uuid4(), "/retention"), json={"keep_last": 3}
     )
@@ -2055,7 +2055,7 @@ def test_put_retention_tiered_returns_the_saved_policy() -> None:
         result=RetentionPolicy.from_fields(daily=7, weekly=4, monthly=6)
     )
     app = _app(member=True, allow=True, set_retention=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.put(
         _url(uuid.uuid4(), uuid.uuid4(), "/retention"),
         json={"daily": 7, "weekly": 4, "monthly": 6},
@@ -2075,7 +2075,7 @@ def test_put_retention_records_set_retention_audit() -> None:
     use_case = _FakeUseCase(result=RetentionPolicy.from_fields(keep_last=3))
     recorder = RecordingAuditRecorder()
     app = _app(member=True, allow=True, set_retention=use_case, recorder=recorder)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.put(
         _url(community_id, server_id, "/retention"), json={"keep_last": 3}
     )
@@ -2093,7 +2093,7 @@ def test_put_retention_failure_is_not_audited() -> None:
     use_case = _FakeUseCase(error=InvalidRetentionPolicyError("x"))
     recorder = RecordingAuditRecorder()
     app = _app(member=True, allow=True, set_retention=use_case, recorder=recorder)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.put(
         _url(uuid.uuid4(), uuid.uuid4(), "/retention"), json={"keep_last": 0}
     )
@@ -2107,7 +2107,7 @@ def test_delete_retention_records_clear_retention_audit() -> None:
     use_case = _FakeUseCase()
     recorder = RecordingAuditRecorder()
     app = _app(member=True, allow=True, clear_retention=use_case, recorder=recorder)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.delete(_url(community_id, server_id, "/retention"))
     assert resp.status_code == 204
     assert [e.operation for e in recorder.events] == [ops.BACKUP_CLEAR_RETENTION]
@@ -2122,7 +2122,7 @@ def test_delete_retention_records_clear_retention_audit() -> None:
 def test_put_retention_invalid_policy_is_422() -> None:
     use_case = _FakeUseCase(error=InvalidRetentionPolicyError("x"))
     app = _app(member=True, allow=True, set_retention=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.put(
         _url(uuid.uuid4(), uuid.uuid4(), "/retention"), json={"keep_last": 0}
     )
@@ -2133,7 +2133,7 @@ def test_put_retention_invalid_policy_is_422() -> None:
 def test_put_retention_unknown_server_is_404() -> None:
     use_case = _FakeUseCase(error=ServerNotFoundError("x"))
     app = _app(member=True, allow=True, set_retention=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.put(
         _url(uuid.uuid4(), uuid.uuid4(), "/retention"), json={"keep_last": 3}
     )
@@ -2145,7 +2145,7 @@ def test_delete_retention_is_204_and_not_parsed_as_backup_id() -> None:
     # never be captured by the DELETE /backups/{backup_id} UUID parameter.
     use_case = _FakeUseCase()
     app = _app(member=True, allow=True, clear_retention=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.delete(_url(uuid.uuid4(), uuid.uuid4(), "/retention"))
     assert resp.status_code == 204
     assert len(use_case.calls) == 1
@@ -2153,7 +2153,7 @@ def test_delete_retention_is_204_and_not_parsed_as_backup_id() -> None:
 
 def test_delete_retention_without_permission_is_403() -> None:
     app = _app(member=True, allow=False, clear_retention=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.delete(_url(uuid.uuid4(), uuid.uuid4(), "/retention"))
     assert resp.status_code == 403
 
@@ -2161,6 +2161,6 @@ def test_delete_retention_without_permission_is_403() -> None:
 def test_delete_retention_unknown_server_is_404() -> None:
     use_case = _FakeUseCase(error=ServerNotFoundError("x"))
     app = _app(member=True, allow=True, clear_retention=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.delete(_url(uuid.uuid4(), uuid.uuid4(), "/retention"))
     assert resp.status_code == 404

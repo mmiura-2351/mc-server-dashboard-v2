@@ -23,7 +23,7 @@ from __future__ import annotations
 import datetime as dt
 import os
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 
 import pytest
 from fastapi.testclient import TestClient
@@ -63,6 +63,7 @@ from mc_server_dashboard_api.fleet.domain.real_time_events import (
     RealTimeEvent,
 )
 from mc_server_dashboard_api.identity.domain.entities import User
+from tests.client_utils import enter_client
 from tests.identity.fakes import make_user
 from tests.integration.migrate import downgrade_base, upgrade_head
 
@@ -183,9 +184,8 @@ def _app(
     return app
 
 
-def _client(app: object) -> Iterator[TestClient]:
-    with TestClient(app) as client:  # type: ignore[arg-type]
-        yield client
+def _client(app: object) -> TestClient:
+    return enter_client(TestClient(app))  # type: ignore[arg-type]
 
 
 async def test_community_events_real_graph_accepts_and_delivers(
@@ -195,7 +195,7 @@ async def test_community_events_real_graph_accepts_and_delivers(
     community = await _seed_member(_database, user.id.value)
     bus = InProcessRealTimeEvents()
     server = uuid.uuid4()
-    client = next(_client(_app(user, bus, lookup={str(server): community.value})))
+    client = _client(_app(user, bus, lookup={str(server): community.value}))
     url = f"/api/communities/{community.value}/events"
     with client.websocket_connect(url) as ws:
         bus.publish(
@@ -219,7 +219,7 @@ async def test_server_events_real_graph_unknown_server_closes_4404(
     community = await _seed_member(_database, user.id.value)
     bus = InProcessRealTimeEvents()
     server = uuid.uuid4()
-    client = next(_client(_app(user, bus)))
+    client = _client(_app(user, bus))
     url = f"/api/communities/{community.value}/servers/{server}/events"
     with pytest.raises(WebSocketDisconnect) as exc:
         with client.websocket_connect(url):
