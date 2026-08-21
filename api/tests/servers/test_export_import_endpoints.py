@@ -114,6 +114,8 @@ class _FakeChecker(PermissionChecker):
 
 
 class _FakeExport:
+    """Fake :class:`ExportServer`, carrying its exact call signature (#2522)."""
+
     def __init__(
         self,
         *,
@@ -128,7 +130,9 @@ class _FakeExport:
         # export_dir is lazy), so "the stream was opened" is that body running.
         self.stream_started = False
 
-    async def __call__(self, **kwargs: object) -> ServerExport:
+    async def __call__(
+        self, *, community_id: ServersCommunityId, server_id: ServerId
+    ) -> ServerExport:
         if self._error is not None:
             raise self._error
 
@@ -141,17 +145,24 @@ class _FakeExport:
 
 
 class _FakeResolveExport:
-    """Fake :class:`ResolveServerExport` — the grant mint's export pre-flight."""
+    """Fake :class:`ResolveServerExport` — the grant mint's export pre-flight.
+
+    Carries the real use case's exact call signature (#2522).
+    """
 
     def __init__(self, *, error: Exception | None = None) -> None:
         self._error = error
 
-    async def __call__(self, **kwargs: object) -> None:
+    async def __call__(
+        self, *, community_id: ServersCommunityId, server_id: ServerId
+    ) -> None:
         if self._error is not None:
             raise self._error
 
 
 class _FakeImport:
+    """Fake :class:`ImportServer`, carrying its exact call signature (#2522)."""
+
     def __init__(
         self, *, result: Server | None = None, error: Exception | None = None
     ) -> None:
@@ -159,8 +170,12 @@ class _FakeImport:
         self._error = error
         self.calls: list[dict[str, object]] = []
 
-    async def __call__(self, **kwargs: object) -> Server:
-        self.calls.append(kwargs)
+    async def __call__(
+        self, *, community_id: ServersCommunityId, name: str, content: bytes
+    ) -> Server:
+        self.calls.append(
+            {"community_id": community_id, "name": name, "content": content}
+        )
         if self._error is not None:
             raise self._error
         assert self._result is not None

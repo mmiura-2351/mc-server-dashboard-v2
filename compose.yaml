@@ -477,7 +477,17 @@ services:
     # reason as the relay credential, issue #940). The blank-token fail-fast
     # for this service is cloudflared itself, which refuses an empty token at
     # startup. Only runs under the `tunnel` profile.
-    command: tunnel run --token ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    #
+    # `--metrics 127.0.0.1:20241` binds cloudflared's metrics/diagnostics
+    # listener to container-loopback (issue #2601). Left unset it binds
+    # 0.0.0.0:20241 and answers `/metrics`, `/debug/pprof/` and `/diag/*`
+    # unauthenticated to every peer on this network. `--metrics` is a flag of
+    # the `tunnel` command, not of its `run` subcommand
+    # (`cloudflared tunnel [tunnel command options] run [subcommand options]`),
+    # so it must precede `run`. Nothing scrapes or health-checks this port.
+    # This is the control that does not depend on topology; network
+    # segmentation (issue #2590) is the other one.
+    command: tunnel --metrics 127.0.0.1:20241 run --token ${CLOUDFLARE_TUNNEL_TOKEN:-}
     depends_on:
       api:
         condition: service_healthy
