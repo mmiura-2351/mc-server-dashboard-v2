@@ -9,6 +9,7 @@ database is touched.
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 
 import pytest
 
@@ -27,7 +28,27 @@ _EMPTY = SweepSummary(
     backups_dangling=0,
     snapshots_scanned=0,
     snapshots_flagged=0,
+    snapshots_not_examined=0,
 )
+
+
+def test_main_prints_the_not_examined_snapshot_count(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The summary reports snapshots the backend never examined apart from the
+    scanned ones (issue #2377), so "0 flagged" cannot read as a real verdict."""
+
+    summary = replace(_EMPTY, servers_scanned=3, snapshots_not_examined=3)
+
+    async def _fake_run(*, server_id: ServerId | None) -> SweepSummary:
+        return summary
+
+    monkeypatch.setattr(integrity_sweep_cli, "run", _fake_run)
+    assert integrity_sweep_cli.main([]) == 0
+
+    out = capsys.readouterr().out
+    assert "snapshots scanned: 0" in out
+    assert "snapshots not examined (backend does not fsck snapshots at rest): 3" in out
 
 
 def test_main_with_no_args_sweeps_every_server(monkeypatch: pytest.MonkeyPatch) -> None:

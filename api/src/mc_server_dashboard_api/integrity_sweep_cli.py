@@ -119,7 +119,9 @@ def main(argv: list[str]) -> int:
         f"{summary.backups_unreadable}\n"
         f"backups dangling: {summary.backups_dangling}\n"
         f"snapshots scanned: {summary.snapshots_scanned}\n"
-        f"snapshots flagged: {summary.snapshots_flagged}"
+        f"snapshots flagged: {summary.snapshots_flagged}\n"
+        f"snapshots not examined (backend does not fsck snapshots at rest): "
+        f"{summary.snapshots_not_examined}"
     )
     return 0
 

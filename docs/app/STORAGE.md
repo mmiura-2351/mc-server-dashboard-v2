@@ -252,7 +252,7 @@ authoritative-side stream and the atomic-publish handshake.
 | `abort_snapshot(handle)` | Discard an incomplete/failed transfer | Deletes the staging area; `current/` is untouched. Also the cleanup path for crash recovery (Section 4.3). |
 | `current_generation(community_id, server_id) -> int` | Return the current authoritative working-set generation | The counter `commit_snapshot` bumps, read back so the hydrate data plane can stamp the generation it serves (Section 8). Returns 0 when no snapshot has been published. |
 | `current_publisher(community_id, server_id) -> str \| None` | Return the Worker id that published `current` | Read back from the combined `generation` marker (issue #847) so the publish-time generation guard (Section 8) can allow a same-Worker re-publish (lost-response self-heal) while refusing a different-Worker stale publish (A→B→A). `None` when no snapshot has been published, or the last publish declared no id (an older Worker) — in which case the guard cannot prove a foreign publisher and stays permissive. |
-| `check_current_health(community_id, server_id) -> WorkingSetReport` | Structurally fsck the on-disk authoritative snapshot | Walk `current/` for corrupt `.mca` region files (issue #744). Read-only — never mutates `current/`. Raises `NotFoundError` if no snapshot has been published. |
+| `check_current_health(community_id, server_id) -> WorkingSetReport \| None` | Structurally fsck the on-disk authoritative snapshot | Walk `current/` for corrupt `.mca` region files (issue #744). Read-only — never mutates `current/`. Raises `NotFoundError` if no snapshot has been published. `None` means the backend **examined nothing** (issue #2377) — the answer of an adapter with no local working set to walk (object, the #926 limitation, Section 7.3), deliberately not a healthy report, so the sweep can tell "nothing was looked at" from "looked at and clean". A backend answering `None` answers it for every server, published or not, since it reads nothing that would tell the two apart; the `NotFoundError` clause is the contract of an adapter that does examine. |
 | `prune_to_final_snapshot(community_id, server_id)` | Collapse the working set to one retained `final.tar.gz` and drop the tree | The `DeleteServer` reclaim path (Section 2.1, issue #777). Packs `current/` then removes `snapshots/`, `incoming/`, `versions/`, the `current` pointer, and the combined `generation`+publisher marker; leaves `backups/`. The pointer/symlink is invalidated the instant `final.tar.gz` is durable, so a crash-retry is idempotent and never re-packs over a good final. Fail-closed on a pack failure; bypasses the #764 `.mca` gate so a corrupt server stays deletable; no-op if nothing is published. |
 
 The hydrate/snapshot **wire transport** (how `ReadStream`/`WriteStream` bytes
@@ -1015,22 +1015,33 @@ unaffected while a genuinely stalled read is still capped; retries use botocore'
 
 **At-rest integrity sweep limitation (issue #926).** The at-rest **structural**
 fsck (`check_current_health`, Section 3.1; the `.mca` walk behind
-`check_backup_health`) returns a healthy `WorkingSetReport` unconditionally on the
-object backend — it does not inspect the stored regions. The reason is structural:
-the object backend has no local working-set directory to walk; the fsck
-implementation walks a local filesystem tree (the `current/` symlink target on
-fs), and no equivalent materialisation exists on the object side. The
+`check_backup_health`) does not inspect the stored regions on the object backend.
+The reason is structural: the object backend has no local working-set directory to
+walk; the fsck implementation walks a local filesystem tree (the `current/` symlink
+target on fs), and no equivalent materialisation exists on the object side. The
 **publish-time** fsck (`_check_staged_regions`, wired on `commit_snapshot`,
 `restore_backup`, and `create_backup_from_current`) **is** implemented on the
 object adapter and remains the authoritative gate — it downloads and validates
 each `.mca` member during staging, so a corrupt region is refused before it
 becomes authoritative. The gap is limited to the **read-only sweep** that
 re-checks already-published snapshots at rest: on the object backend that sweep
-sees every server's `current` as healthy regardless of actual content. A future
-enhancement could fetch and structurally check the `.mca` objects from the store
-(downloading headers only, mirroring the fs walker), but it is not implemented —
-the publish-time gate is the correctness guarantee today, and the sweep is
-defense-in-depth.
+examines no server's `current` at all. A future enhancement could fetch and
+structurally check the `.mca` objects from the store (downloading headers only,
+mirroring the fs walker), but it is not implemented — the publish-time gate is the
+correctness guarantee today, and the sweep is defense-in-depth.
+
+**Saying so in the sweep summary (issue #2377).** `check_current_health` used to
+return a healthy `WorkingSetReport` unconditionally here, and the sweep counted it
+as a scanned, clean snapshot — a verdict nothing produced, and one an operator
+could not tell apart from a real one now that `check_backup_health` on this backend
+*does* read the bytes (#2371, below). The object adapter returns `None` instead —
+**not examined** — which the servers seam reports as `SnapshotScan.NOT_EXAMINED`
+and the sweep counts as `snapshots_not_examined`, printed on its own
+`integrity_sweep_cli` line and kept out of `snapshots scanned`. A backend that
+examines nothing answers this for **every** server, published or not: it reads
+nothing that would tell the two apart, so unlike fs it cannot skip the
+never-published ones. The limitation above is unchanged — no published snapshot is
+read at rest on this backend; the sweep just no longer claims otherwise.
 
 **Backup readability probe (issue #2371).** `check_backup_health` on the object
 backend is *not* limited that way: it answers the question a `HEAD` never could —

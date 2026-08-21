@@ -944,15 +944,17 @@ class ObjectStorage(Storage):
 
     async def check_current_health(
         self, community_id: CommunityId, server_id: ServerId
-    ) -> WorkingSetReport:
+    ) -> WorkingSetReport | None:
         # The one-shot sweep's snapshot fsck (issue #744) is fs-only: it walks a
         # local working-set directory (issue #738), which the object backend does
         # not materialize. The authoritative-create/restore gates ARE wired on this
-        # adapter (#750), but the read-only sweep fsck stays fs-only for now, so a
-        # healthy report is returned to satisfy the Port. ``del`` the scope to mark
-        # it intentionally unused.
+        # adapter (#750), but the read-only sweep fsck stays fs-only, so nothing
+        # here is examined. Return ``None`` — "not examined" (issue #2377) — rather
+        # than the healthy report this used to return: an unconditional verdict the
+        # sweep counted as a scanned, clean snapshot was indistinguishable from a
+        # real one. ``del`` the scope to mark it intentionally unused.
         del community_id, server_id
-        return WorkingSetReport()
+        return None
 
     async def prune_to_final_snapshot(
         self, community_id: CommunityId, server_id: ServerId

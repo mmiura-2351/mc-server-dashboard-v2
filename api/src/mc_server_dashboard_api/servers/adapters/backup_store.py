@@ -34,7 +34,10 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
-from mc_server_dashboard_api.servers.domain.backup_store import BackupArchiveStore
+from mc_server_dashboard_api.servers.domain.backup_store import (
+    BackupArchiveStore,
+    SnapshotScan,
+)
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
     BackupNotFoundError,
@@ -178,7 +181,7 @@ class StorageBackupStoreAdapter(BackupArchiveStore):
 
     async def check_current_health(
         self, *, community_id: CommunityId, server_id: ServerId
-    ) -> int | None:
+    ) -> int | SnapshotScan:
         community, server = _scope(community_id, server_id)
         try:
             report = await self._storage.check_current_health(community, server)
@@ -186,7 +189,13 @@ class StorageBackupStoreAdapter(BackupArchiveStore):
             # No published snapshot for this server: nothing to fsck. The sweep
             # treats this as "skip" rather than an error (a server may be created
             # but never started/published).
-            return None
+            return SnapshotScan.NOT_PUBLISHED
+        if report is None:
+            # The backend walked nothing (issue #2377): it has no local working set
+            # to examine (the #926 limitation), so there is no corrupt count to
+            # report — not a count of zero, which the sweep would read as a real
+            # clean verdict.
+            return SnapshotScan.NOT_EXAMINED
         return len(report.corrupt)
 
     async def delete(
