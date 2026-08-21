@@ -1346,6 +1346,15 @@ class FakeUnitOfWork(UnitOfWork):
     async def rollback(self) -> None:
         return None
 
+    @asynccontextmanager
+    async def savepoint(self) -> AsyncIterator[None]:
+        # Nothing to scope: this fake keys rows into dicts rather than staging
+        # them in a transaction, so a failure inside the block leaves no
+        # half-written state for a savepoint to discard. The behaviour that
+        # needs a real one is pinned in
+        # tests/integration/test_backup_plugin_reconcile.py.
+        yield
+
 
 class FakeLifecycleLock(LifecycleLock):
     """Recording :class:`LifecycleLock` double for the use-case tests.

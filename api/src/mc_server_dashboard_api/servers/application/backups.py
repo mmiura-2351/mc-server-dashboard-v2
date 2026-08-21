@@ -496,16 +496,23 @@ async def _reconcile_plugins(
                 _LOG.warning("plugin reconcile: could not read %s; skipping", jar_path)
                 continue
             try:
-                await _ingest_ghost(
-                    uow=uow,
-                    cache=cache,
-                    clock=clock,
-                    server=server,
-                    server_id=server_id,
-                    content_dir=content_dir,
-                    jar_path=jar_path,
-                    jar_bytes=jar_bytes,
-                )
+                # In a savepoint, so a refused INSERT (a racing install taking
+                # this path, the server deleted mid-restore) discards only this
+                # jar. Left unscoped, the refusal deactivated the transaction and
+                # every later statement failed with a PendingRollbackError
+                # naming an innocent jar, several statements from the cause
+                # (issue #2612).
+                async with uow.savepoint():
+                    await _ingest_ghost(
+                        uow=uow,
+                        cache=cache,
+                        clock=clock,
+                        server=server,
+                        server_id=server_id,
+                        content_dir=content_dir,
+                        jar_path=jar_path,
+                        jar_bytes=jar_bytes,
+                    )
             except Exception:  # noqa: BLE001
                 _LOG.warning(
                     "plugin reconcile: failed to ingest %s; skipping", jar_path

@@ -11,6 +11,7 @@ transaction this unit of work owns.
 from __future__ import annotations
 
 import abc
+import contextlib
 from types import TracebackType
 
 from mc_server_dashboard_api.servers.domain.backup_repository import (
@@ -67,3 +68,14 @@ class UnitOfWork(abc.ABC):
     @abc.abstractmethod
     async def rollback(self) -> None:
         """Discard the staged changes."""
+
+    @abc.abstractmethod
+    def savepoint(self) -> contextlib.AbstractAsyncContextManager[None]:
+        """Scope one write so that only *it* is discarded when it fails.
+
+        A refused write deactivates the whole transaction, so a loop that
+        catches the refusal and moves to the next item poisons every statement
+        after it: the failure resurfaces later, attributed to innocent work
+        (issue #2612). Running the write inside this context keeps the refusal
+        local -- the surrounding work stands and the caller may go on.
+        """
