@@ -694,6 +694,57 @@ func TestSnapshotPropagatesServerError(t *testing.T) {
 	}
 }
 
+// closedDataPlane starts an httptest server, takes its client and a data-plane URL
+// under it, then shuts it down — so a transfer against that URL fails the way an
+// unreachable data plane does (nothing listens: connection refused).
+func closedDataPlane(t *testing.T) (*http.Client, string) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	client, transferURL := srv.Client(), srv.URL+"/api/data-plane/communities/c1/servers/s1/working-set"
+	srv.Close()
+	return client, transferURL
+}
+
+// TestHydrateErrorNamesTheDataPlaneURL pins that a hydrate against an unreachable
+// data plane names the URL the Worker was handed (issue #2595). An operator who
+// keeps the shipped compose default (MCD_API_SERVER__DATA_PLANE_BASE_URL pinned to
+// the compose-internal http://api:8000) and then adds a Worker on a second host
+// gets no boot-time signal at all — the variable is set, so the API's startup
+// warning stays quiet (DEPLOYMENT.md Section 8). The first failed transfer is the
+// only signal, so the URL has to be readable off it rather than inferred.
+//
+// The property comes from net/http wrapping transport failures in *url.Error, which
+// formats the URL. That is incidental today; pinned here so a later rewrite of these
+// error paths (a sanitized message, a sentinel error, a wrap that drops %w) cannot
+// silently take the diagnosis away. Asserts on the URL only — the dial error text
+// under it is resolver- and platform-dependent.
+func TestHydrateErrorNamesTheDataPlaneURL(t *testing.T) {
+	client, transferURL := closedDataPlane(t)
+
+	_, err := New(client).Hydrate(context.Background(), transferURL, "tok", filepath.Join(t.TempDir(), "dest"))
+	if err == nil {
+		t.Fatal("expected an error hydrating from an unreachable data plane")
+	}
+	if !strings.Contains(err.Error(), transferURL) {
+		t.Fatalf("hydrate error must name the data-plane URL %q, got: %v", transferURL, err)
+	}
+}
+
+// TestSnapshotErrorNamesTheDataPlaneURL is TestHydrateErrorNamesTheDataPlaneURL for
+// the push direction: the snapshot upload is the other half of the transfer pair the
+// misconfiguration breaks, and it fails on its own error path.
+func TestSnapshotErrorNamesTheDataPlaneURL(t *testing.T) {
+	client, transferURL := closedDataPlane(t)
+
+	_, err := New(client).Snapshot(context.Background(), transferURL, "tok", t.TempDir(), 0, "worker-1")
+	if err == nil {
+		t.Fatal("expected an error snapshotting to an unreachable data plane")
+	}
+	if !strings.Contains(err.Error(), transferURL) {
+		t.Fatalf("snapshot error must name the data-plane URL %q, got: %v", transferURL, err)
+	}
+}
+
 // fakeInfo wraps a real os.FileInfo but overrides Size() so we can simulate a
 // file that grew or shrank between the ReadDir stat and the actual copy.
 type fakeInfo struct {
