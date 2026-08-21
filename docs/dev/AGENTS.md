@@ -115,8 +115,13 @@ Each one succeeds, or appears to; the damage surfaces later.
   identified only by `readlink /proc/<pid>/cwd`. Kill by process group rather
   than by pid — `pgid=$(ps -o pgid= -p <pid> | tr -d ' '); kill -- -"$pgid"` —
   because the script's own TERM trap reaches its subshells but not their
-  sub-makes. Preventing the orphan (one gate at a time per host, via `flock`)
-  is decided on #2513, not here.
+  sub-makes. The orphan can still happen, but it no longer produces the red:
+  the gate takes a host-global `flock` (`/tmp/mcsd-check.lock`, #2513) before it
+  does any work and every process it spawns inherits the descriptor, so a
+  survivor holds the lock until it finishes and the next run in that worktree
+  waits instead of racing it. That wait prints `held by: <worktree> (pid N,
+  since ...)` — when the worktree it names is your own, the holder *is* the
+  survivor, and the `pgrep` above turns the message into a pid.
 - **`uv run --active` in a worktree re-points the primary checkout's
   `api/.venv`.** Worktree shells inherit `VIRTUAL_ENV` from the repo root;
   plain `uv run` ignores it and uses the worktree's own `.venv`, but `--active`
@@ -156,8 +161,10 @@ Each one succeeds, or appears to; the damage surfaces later.
 - **Don't run the full `make check` by hand before pushing.** The pre-push
   hook runs exactly it, so a manual run pays the whole gate twice on an
   unchanged tree — 10-40 min each on a contended host, and two chances at the
-  #2228 / #2513 timeout flakes instead of one (issue #2574). Iterate with the
-  targeted subset instead: `make <module>-lint` / `make <module>-test` for the
+  #2228 / #2513 timeout flakes instead of one (issue #2574). Gates are now
+  serialised host-wide (Section 3), so a stray manual run also makes every
+  other worktree's push wait for it. Iterate with the targeted subset
+  instead: `make <module>-lint` / `make <module>-test` for the
   touched module (`api`, `worker`, `relay`, `webui`), `make proto-lint` for
   `proto/`, `make docs-check` for docs, `make migrations-check` for
   `api/migrations/` (~0.1 s, and a late failure there costs a rebase renumber).

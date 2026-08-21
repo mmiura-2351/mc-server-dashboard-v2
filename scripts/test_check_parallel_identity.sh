@@ -40,6 +40,11 @@
 #   * The stub lives in a different temp dir from the fake worktree used as the
 #     pgrep pattern. Sharing one dir would put the pattern in the stub's own
 #     command line and the match would prove nothing.
+#   * `MCSD_CHECK_LOCK_FILE` points at a temp path. The script now takes a
+#     host-global lock before it does anything (#2513); run inside a gate the
+#     nested-invocation guard would skip it, but run standalone while another
+#     gate is live this test would block on the real lock for the length of that
+#     gate. Its own lock file makes it hermetic either way.
 #
 # Linux-only, by construction: /proc/<pid>/cmdline is what `pgrep -f` reads, and
 # the diagnostic being pinned is itself a /proc one.
@@ -96,6 +101,7 @@ STUB
 	(
 		cd "$fake_worktree" &&
 			PATH="$stub_dir:$PATH" \
+				MCSD_CHECK_LOCK_FILE="$stub_dir/lock" \
 				IDENTITY_CMDLINE="$cmdline_file" \
 				IDENTITY_PID="$pid_file" \
 				IDENTITY_PGREP="$pgrep_file" \
