@@ -12,8 +12,12 @@ from collections.abc import Iterable
 from typing import cast
 
 from sqlalchemy import delete, distinct, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from mc_server_dashboard_api.servers.adapters.integrity import (
+    translate_integrity_error,
+)
 from mc_server_dashboard_api.servers.adapters.plugin_models import ServerPluginModel
 from mc_server_dashboard_api.servers.domain.plugin import (
     CATALOG_SOURCES,
@@ -187,7 +191,15 @@ class SqlAlchemyPluginRepository(PluginRepository):
                 catalog_dependencies=plugin.catalog_dependencies,
             )
         )
-        await self._session.execute(stmt)
+        # The UPDATE executes -- and violates uq_server_plugin_server_rel --
+        # immediately, so a racer that took the target rel_path between the use
+        # case's collision pre-check and this write surfaces here rather than at
+        # the translating commit (issue #2612).
+        try:
+            await self._session.execute(stmt)
+        except IntegrityError as exc:
+            translate_integrity_error(exc)
+            raise
 
     async def list_catalog_plugins(self, server_id: ServerId) -> list[ServerPlugin]:
         stmt = (

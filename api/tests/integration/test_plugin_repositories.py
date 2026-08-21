@@ -28,7 +28,7 @@ from contextlib import AbstractContextManager
 from dataclasses import replace as dc_replace
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
 from mc_server_dashboard_api.community.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as CommunityUnitOfWork,
@@ -39,10 +39,15 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 )
 from mc_server_dashboard_api.community.domain.value_objects import CommunityName
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
+from mc_server_dashboard_api.servers.adapters.plugin_repository import (
+    SqlAlchemyPluginRepository,
+)
 from mc_server_dashboard_api.servers.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as ServersUnitOfWork,
 )
 from mc_server_dashboard_api.servers.application.manage_server import CreateServer
+from mc_server_dashboard_api.servers.application.plugins import TogglePlugin
+from mc_server_dashboard_api.servers.domain.errors import PluginAlreadyExistsError
 from mc_server_dashboard_api.servers.domain.plugin import (
     LoaderType,
     PluginId,
@@ -55,6 +60,7 @@ from tests.integration.migrate import downgrade_base, upgrade_head
 from tests.servers.fakes import (
     FakeClock,
     FakeFileStore,
+    FakePluginCacheStore,
     FakeVersionValidator,
 )
 
@@ -517,3 +523,113 @@ async def test_find_catalog_provenance_by_sha512_ignores_local_and_misses(
         by_miss = await uow.plugins.find_catalog_provenance_by_sha512("nomatch")
     assert by_local is None
     assert by_miss is None
+
+
+# --- concurrent take of the target rel_path during an update (issue #2612) ----
+
+
+class _TakeOnLookupRepository(SqlAlchemyPluginRepository):
+    """A plugin repository that occupies the target path right after clearing it.
+
+    Reproduces the production interleave deterministically, with no sleeps:
+    ``TogglePlugin``'s ``get_by_rel_path`` collision pre-check sees the target
+    path free, another request's install commits it on its own connection, and
+    only then does ``update`` move this row onto it.
+    """
+
+    def __init__(self, session: AsyncSession, engine: AsyncEngine) -> None:
+        super().__init__(session)
+        self._engine = engine
+
+    async def get_by_rel_path(
+        self, server_id: ServerId, rel_path: str
+    ) -> ServerPlugin | None:
+        found = await super().get_by_rel_path(server_id, rel_path)
+        async with ServersUnitOfWork(create_session_factory(self._engine)) as racer:
+            await racer.plugins.add(
+                _plugin(server_id, rel_path=rel_path, filename="bar.jar")
+            )
+            await racer.commit()
+        return found
+
+
+class _RacingUnitOfWork(ServersUnitOfWork):
+    """A servers UnitOfWork wired with :class:`_TakeOnLookupRepository`."""
+
+    def __init__(self, engine: AsyncEngine) -> None:
+        super().__init__(create_session_factory(engine))
+        self._engine = engine
+
+    async def __aenter__(self) -> "_RacingUnitOfWork":
+        await super().__aenter__()
+        assert self._session is not None
+        self.plugins = _TakeOnLookupRepository(self._session, self._engine)
+        return self
+
+
+async def test_update_onto_a_concurrently_taken_rel_path_reports_already_exists(
+    engine: AsyncEngine,
+) -> None:
+    # The UPDATE executes -- and violates uq_server_plugin_server_rel -- inside
+    # update(), not at the unit of work's commit, so the translation has to sit
+    # on that execute; unwrapped it is a raw IntegrityError (500).
+    server_id = await _seed_server(engine)
+    factory = create_session_factory(engine)
+    moving = _plugin(server_id, rel_path="mods/foo.jar", filename="foo.jar")
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.plugins.add(moving)
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        loaded = await uow.plugins.get_by_id(server_id, moving.id)
+        assert loaded is not None
+        # A racer takes the path the toggle is heading for.
+        async with ServersUnitOfWork(factory) as racer:
+            await racer.plugins.add(
+                _plugin(server_id, rel_path="mods/foo.jar.disabled", filename="bar.jar")
+            )
+            await racer.commit()
+        loaded.rel_path = "mods/foo.jar.disabled"
+        loaded.enabled = False
+        with pytest.raises(PluginAlreadyExistsError):
+            await uow.plugins.update(loaded)
+
+
+async def test_toggle_plugin_reports_a_concurrently_taken_path_as_already_exists(
+    engine: AsyncEngine,
+) -> None:
+    # The reachable path: TogglePlugin's own collision pre-check passes, the racer
+    # installs at the .disabled path, and the rename UPDATE lands on the live
+    # UNIQUE. The typed error is the same one the pre-check raises.
+    server_id = await _seed_server(engine)
+    factory = create_session_factory(engine)
+    plugin = _plugin(server_id, rel_path="mods/foo.jar", filename="foo.jar")
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.plugins.add(plugin)
+        await uow.commit()
+        server = await uow.servers.get_by_id(server_id)
+        assert server is not None
+        community_id = server.community_id
+
+    use_case = TogglePlugin(
+        uow=_RacingUnitOfWork(engine),
+        file_store=FakeFileStore(),
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+    )
+    with pytest.raises(PluginAlreadyExistsError):
+        await use_case(
+            community_id=community_id,
+            server_id=server_id,
+            plugin_id=plugin.id,
+            enable=False,
+        )
+
+    # The row keeps its original path: nothing moved behind the typed error.
+    async with ServersUnitOfWork(factory) as uow:
+        still = await uow.plugins.get_by_id(server_id, plugin.id)
+    assert still is not None
+    assert still.rel_path == "mods/foo.jar"
+    assert still.enabled is True

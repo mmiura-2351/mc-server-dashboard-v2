@@ -13,7 +13,11 @@ per-server schedule name backstop; ``uq_player_group_community_kind_name``
 ``fk_srv_rp_assignments_resource_pack_id_resource_packs`` (migration 0018) is
 the resource-pack-in-use FK backstop (issue #1962);
 ``fk_group_player_group_id_player_group`` (migration 0012) is the
-group-deleted-mid-edit backstop (issue #2583).
+group-deleted-mid-edit backstop (issue #2583);
+``uq_server_plugin_server_rel`` (migration 0019) is the per-server plugin path
+backstop, and ``fk_server_group_group_id_player_group`` /
+``fk_server_group_server_id_server`` (migration 0012) are the
+attach-target-vanished backstops (issue #2612).
 
 A *duplicate* racer conflicts (409); a *deleted* racer is gone, so the FK naming
 the vanished parent row translates to that context's not-found error (404) --
@@ -38,7 +42,15 @@ flushes explicitly (the parent row must exist before child rows) and ``save``
 flushes its replacement player rows rather than leave them for whichever
 autoflush the caller happens to trigger next, so the violation surfaces at those
 ``flush()`` calls, not at commit -- the repository wraps both with the same
-try/translate.
+try/translate. ``attach`` executes its INSERT for the same reason.
+
+A DELETE is the third shape, and the one a map entry alone does not cover
+(issue #2612): ``fk_srv_rp_assignments_resource_pack_id_resource_packs`` is the
+schema's only non-``ON DELETE CASCADE`` FK and is not ``DEFERRABLE``, so
+PostgreSQL refuses ``SqlAlchemyResourcePackRepository.delete`` at *statement*
+end -- before the translating ``commit`` ever runs. Being in the map below is
+therefore not evidence that a constraint is handled; the wrap has to sit on the
+statement that raises.
 """
 
 from __future__ import annotations
@@ -48,10 +60,12 @@ from sqlalchemy.exc import IntegrityError
 from mc_server_dashboard_api.servers.domain.errors import (
     GroupNameAlreadyExistsError,
     GroupNotFoundError,
+    PluginAlreadyExistsError,
     PortAlreadyTakenError,
     ResourcePackInUseError,
     ScheduleNameAlreadyExistsError,
     ServerNameAlreadyExistsError,
+    ServerNotFoundError,
     SlugAlreadyTakenError,
 )
 
@@ -60,7 +74,14 @@ _PORT_CONSTRAINTS = frozenset({"uq_server_game_port", "uq_server_bedrock_port"})
 _SLUG_CONSTRAINTS = frozenset({"uq_server_slug"})
 _SCHEDULE_NAME_CONSTRAINTS = frozenset({"uq_schedule_server_id_name"})
 _GROUP_NAME_CONSTRAINTS = frozenset({"uq_player_group_community_kind_name"})
-_GROUP_MISSING_CONSTRAINTS = frozenset({"fk_group_player_group_id_player_group"})
+_GROUP_MISSING_CONSTRAINTS = frozenset(
+    {
+        "fk_group_player_group_id_player_group",
+        "fk_server_group_group_id_player_group",
+    }
+)
+_SERVER_MISSING_CONSTRAINTS = frozenset({"fk_server_group_server_id_server"})
+_PLUGIN_PATH_CONSTRAINTS = frozenset({"uq_server_plugin_server_rel"})
 _RESOURCE_PACK_FK_CONSTRAINTS = frozenset(
     {"fk_srv_rp_assignments_resource_pack_id_resource_packs"}
 )
@@ -82,6 +103,10 @@ def translate_integrity_error(exc: IntegrityError) -> None:
         raise GroupNameAlreadyExistsError(str(constraint)) from exc
     if constraint in _GROUP_MISSING_CONSTRAINTS:
         raise GroupNotFoundError(str(constraint)) from exc
+    if constraint in _SERVER_MISSING_CONSTRAINTS:
+        raise ServerNotFoundError(str(constraint)) from exc
+    if constraint in _PLUGIN_PATH_CONSTRAINTS:
+        raise PluginAlreadyExistsError(str(constraint)) from exc
     if constraint in _RESOURCE_PACK_FK_CONSTRAINTS:
         raise ResourcePackInUseError(str(constraint)) from exc
 

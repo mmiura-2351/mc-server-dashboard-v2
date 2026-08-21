@@ -16,7 +16,9 @@ servers *domain* imports no other context (ARCHITECTURE.md Section 2.1).
 
 from __future__ import annotations
 
+import contextlib
 import uuid
+from collections.abc import AsyncIterator
 from types import TracebackType
 
 from sqlalchemy.exc import IntegrityError
@@ -118,3 +120,14 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
     async def rollback(self) -> None:
         assert self._session is not None
         await self._session.rollback()
+
+    @contextlib.asynccontextmanager
+    async def savepoint(self) -> AsyncIterator[None]:
+        # A SAVEPOINT, so a refused write rolls back to it instead of
+        # deactivating the whole transaction (issue #2612). Leaving the block
+        # normally releases it -- flushing what the body staged, which is also
+        # what puts the refusal on the statement the body owns rather than on
+        # whichever later autoflush would otherwise have run it.
+        assert self._session is not None
+        async with self._session.begin_nested():
+            yield

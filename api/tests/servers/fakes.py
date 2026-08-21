@@ -55,7 +55,9 @@ from mc_server_dashboard_api.servers.domain.errors import (
     BackupStorageUnavailableError,
     BackupUnreadableError,
     GroupNotFoundError,
+    PluginAlreadyExistsError,
     PluginCacheBlobNotFoundError,
+    ResourcePackInUseError,
     ResourcePackNotFoundError,
     ServerFileNotFoundError,
 )
@@ -1030,8 +1032,20 @@ class FakePluginRepository(PluginRepository):
         # missing id matches no row, so nothing is written and no row appears --
         # keying the entity in regardless made this an insert the adapter cannot
         # perform (#2557).
-        if plugin.id in self.by_id:
-            self.by_id[plugin.id] = self._copy(plugin)
+        if plugin.id not in self.by_id:
+            return
+        # A different row on the same server already at this rel_path violates
+        # uq_server_plugin_server_rel, which the adapter now translates to
+        # PluginAlreadyExistsError (#2612). Model it, or the fake stays more
+        # forgiving than production in exactly the direction that hides the bug.
+        if any(
+            other.id != plugin.id
+            and other.server_id == plugin.server_id
+            and other.rel_path == plugin.rel_path
+            for other in self.by_id.values()
+        ):
+            raise PluginAlreadyExistsError(plugin.rel_path)
+        self.by_id[plugin.id] = self._copy(plugin)
 
     async def list_catalog_plugins(self, server_id: ServerId) -> list[ServerPlugin]:
         return sorted(
@@ -1114,6 +1128,12 @@ class FakeResourcePackRepository(ResourcePackRepository):
         )
 
     async def delete(self, pack_id: ResourcePackId) -> None:
+        # fk_srv_rp_assignments_resource_pack_id_resource_packs is the schema's
+        # only non-``ON DELETE CASCADE`` FK and is not DEFERRABLE, so the
+        # adapter's DELETE is refused while an assignment still references the
+        # pack, translated to ResourcePackInUseError (#2612).
+        if any(a.resource_pack_id == pack_id for a in self.assignments.values()):
+            raise ResourcePackInUseError(str(pack_id.value))
         self.packs.pop(pack_id, None)
 
     async def add_assignment(self, assignment: ResourcePackAssignment) -> None:
@@ -1325,6 +1345,15 @@ class FakeUnitOfWork(UnitOfWork):
 
     async def rollback(self) -> None:
         return None
+
+    @asynccontextmanager
+    async def savepoint(self) -> AsyncIterator[None]:
+        # Nothing to scope: this fake keys rows into dicts rather than staging
+        # them in a transaction, so a failure inside the block leaves no
+        # half-written state for a savepoint to discard. The behaviour that
+        # needs a real one is pinned in
+        # tests/integration/test_backup_plugin_reconcile.py.
+        yield
 
 
 class FakeLifecycleLock(LifecycleLock):
