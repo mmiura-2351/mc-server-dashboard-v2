@@ -134,12 +134,13 @@ services:
     # re-probe from an `mcsd` peer after the next deploy (issue #2626 stays open
     # until then).
     #
-    # THE OTHER EIGHT STAY UNAUTHENTICATED, and that is an ACCEPTED RESIDUAL, not
-    # a pending fix (decided on #2626, 2026-08-20). The peers left on `mcsd` are
-    # api, db, worker, relay and cloudflared; the filer, master, volume and gRPC
-    # listeners answer all five with no credential, and 18333 also serves the S3
-    # IAM RPCs (PutIdentity, RemoveIdentity, PutPolicy, …), so any of the five can
-    # mint itself an S3 identity. Two of them, relay and cloudflared, terminate
+    # THE OTHER EIGHT ARE UNCHANGED, and that is an ACCEPTED RESIDUAL, not a
+    # pending fix (decided on #2626, 2026-08-20). The peers left on `mcsd` are
+    # api, db, worker, relay and cloudflared; of the eight, only 8333 asks for a
+    # credential — the filer, master, volume and gRPC listeners answer all five
+    # peers with none, and 18333 also serves the S3 IAM RPCs (PutIdentity,
+    # RemoveIdentity, PutPolicy, …), so any of the five can mint itself an
+    # identity 8333 then accepts. Two of them, relay and cloudflared, terminate
     # internet traffic. Accepted because each is a first-party control-plane
     # service and the only control that closes the surface is cluster-wide mTLS —
     # `weed server` has no -jwt.* flags (JWT lives in security.toml), and

@@ -525,8 +525,9 @@ security model, and the following remain true:
   available without that escalation was taken instead: `-s3.port.iceberg=0`,
   above. So read "first-party" in the table above as a statement about *who is
   attached*, never about what an attached process would have to prove — a
-  compromise of `relay` or `cloudflared` lands on a network where eight storage
-  listeners answer with no credential.
+  compromise of `relay` or `cloudflared` lands on a network where every storage
+  listener but the S3 gateway answers with no credential, and `18333`'s IAM RPCs
+  mint an identity the gateway itself then accepts.
 - **Two members of `mcsd` terminate internet traffic.** `relay` accepts arbitrary
   inbound connections — players on `25565` and `19132-19231/udp`, Worker
   dial-back tunnels on `25665` and `25675/udp` — and `cloudflared` terminates a
