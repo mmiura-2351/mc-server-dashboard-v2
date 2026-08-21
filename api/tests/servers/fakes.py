@@ -27,7 +27,10 @@ from mc_server_dashboard_api.servers.domain.backup import (
 from mc_server_dashboard_api.servers.domain.backup_repository import (
     BackupRepository,
 )
-from mc_server_dashboard_api.servers.domain.backup_store import BackupArchiveStore
+from mc_server_dashboard_api.servers.domain.backup_store import (
+    BackupArchiveStore,
+    SnapshotScan,
+)
 from mc_server_dashboard_api.servers.domain.bedrock_tunnel import BedrockTunnelSync
 from mc_server_dashboard_api.servers.domain.catalog_provider import (
     CatalogProject,
@@ -1578,8 +1581,12 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         self.unavailable_refs: set[str] = set()
         # The sweep (#744) snapshot fsck: corrupt-region count of each server's
         # published ``current``; a server absent here has no published snapshot, so
-        # ``check_current_health`` returns None (nothing to fsck).
+        # ``check_current_health`` reports NOT_PUBLISHED (nothing to fsck).
         self.current_corrupt: dict[ServerId, int] = {}
+        # Cleared to model a backend that examines no snapshot at rest (#2377): the
+        # object adapter has no local working set to walk, so every server reports
+        # NOT_EXAMINED regardless of ``current_corrupt``.
+        self.examines_snapshots = True
         self.deleted: list[tuple[ServerId, str]] = []
         # Ordered log of the archive deletions, in the same shape
         # FakeLifecycleLock records: aliasing this onto a lock's ``events``
@@ -1642,8 +1649,11 @@ class FakeBackupArchiveStore(BackupArchiveStore):
 
     async def check_current_health(
         self, *, community_id: CommunityId, server_id: ServerId
-    ) -> int | None:
-        return self.current_corrupt.get(server_id)
+    ) -> int | SnapshotScan:
+        if not self.examines_snapshots:
+            return SnapshotScan.NOT_EXAMINED
+        corrupt = self.current_corrupt.get(server_id)
+        return SnapshotScan.NOT_PUBLISHED if corrupt is None else corrupt
 
     async def delete(
         self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
