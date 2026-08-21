@@ -90,6 +90,10 @@ SGEOF
 	cat > "$bin/docker" << 'DOCKEREOF'
 #!/bin/sh
 log() { [ -n "${MOCK_LOG:-}" ] && echo "$*" >> "$MOCK_LOG"; return 0; }
+# MOCK_LOG's records join argv with spaces, which cannot tell a value a shell
+# split on the way here from one that arrived whole. MOCK_ARGV_LOG records one
+# ARGUMENT per line, which can (#2308).
+[ -n "${MOCK_ARGV_LOG:-}" ] && printf '%s\n' "$@" >> "$MOCK_ARGV_LOG"
 
 case "$1 $2" in
 	"compose config" | "compose -f")
@@ -100,15 +104,15 @@ case "$1 $2" in
 		fi
 		image="$(printf '%s\n' "$yaml" | sed -n 's/^[[:space:]]*image:[[:space:]]*//p' | head -1)"
 		log "compose config $image"
-		printf '{"services": {"db": {"image": "%s", "environment": {"POSTGRES_USER": "%s", "POSTGRES_DB": "%s"}}}, "volumes": {"db-data": {"name": "testproj_db-data"}}}\n' \
-			"$image" "${MOCK_PG_USER-mcsd}" "${MOCK_PG_DB-mcsd}"
+		printf '{"services": {"db": {"image": "%s", "environment": {"POSTGRES_USER": "%s", "POSTGRES_DB": "%s"}}}, "volumes": {"db-data": {"name": "%s"}}}\n' \
+			"$image" "${MOCK_PG_USER-mcsd}" "${MOCK_PG_DB-mcsd}" "${MOCK_VOLUME_NAME-testproj_db-data}"
 		;;
 	"volume ls")
 		# Listing rather than inspecting is what makes "no such volume"
 		# distinguishable from "the daemon did not answer" (#2301).
 		[ "${MOCK_VOLUME_LS_FAILS:-0}" = "1" ] && exit 1
-		echo "testproj_db-data-old"
-		[ "${MOCK_VOLUME_EXISTS:-1}" = "1" ] && echo "testproj_db-data"
+		echo "${MOCK_VOLUME_NAME-testproj_db-data}-old"
+		[ "${MOCK_VOLUME_EXISTS:-1}" = "1" ] && echo "${MOCK_VOLUME_NAME-testproj_db-data}"
 		exit 0
 		;;
 	"volume rm")
@@ -137,7 +141,12 @@ case "$1 $2" in
 				;;
 			*/out/*)
 				log "archive $*"
-				name="$(printf '%s' "$*" | sed -n 's|.*/out/\([^ ]*\).*|\1|p')"
+				# The archive name is the LAST argument: the script hands it to
+				# the container's `sh -c` as a positional parameter instead of
+				# interpolating it into the script text (#2308), so reading it
+				# back has to be argument-wise too -- a whitespace-delimited read
+				# of "$*" would cut a name with a space in it in half.
+				for arg in "$@"; do name="$arg"; done
 				stage="$(mktemp -d)"
 				echo "17" > "$stage/PG_VERSION"
 				case "${MOCK_TAR_MODE:-ok}" in
@@ -1294,6 +1303,61 @@ ADVANCEEOF
 		*"<that revision>"*) ok "no old revision: no SHA is offered in its place" ;;
 		*) fail_test "no old revision: the block still names a revision -- $recovery_line" ;;
 	esac
+	rm -rf "$base"
+}
+
+# --- 15. A volume name the shell would rewrite crosses both boundaries -------
+# `sg` has only a `-c <string>` interface, so every docker command this script
+# runs is a string exactly once and is re-parsed by a shell on the way to the
+# daemon; the archive step adds a second shell, the container's own `sh -c`. A
+# volume name is what crosses both, and a space, an apostrophe or a `$` in it
+# comes from a typo in the operator's .env, not from an attack. Interpolated
+# into either string (#2308) this one splits into three words and leaves an
+# unbalanced quote behind -- inside the destructive phase, where the failure the
+# operator would see is a syntax error in a command they never typed.
+#
+# The `$` is what makes this pin the QUOTING and not just the splitting: a
+# wrapper that put DOUBLE quotes around each argument would keep the name in one
+# word and pass every assertion below, while still handing the shell a value to
+# expand.
+#
+# The whole run is exercised rather than one call, because "every docker
+# invocation goes through the wrapper" is the property, and a call site left
+# behind would fail here and nowhere else.
+{
+	odd_volume="odd 'na\$me"
+	base="$(make_fixture)"
+	run_upgrade "$base" MOCK_PG_VERSION=17 MOCK_VOLUME_NAME="$odd_volume" \
+		MOCK_ARGV_LOG="$base/argv.log"
+	if [ "$exit_code" -eq 0 ]; then
+		ok "quoted volume name: the upgrade completes"
+	else
+		fail_test "quoted volume name: expected exit 0, got $exit_code -- $output"
+	fi
+	# Three sites, one per shape the name is used in: a mount argument, an
+	# argument of its own, and a value the container's shell receives as a
+	# positional parameter. Whole-line matches, so a name that was split or
+	# re-quoted anywhere on the way cannot satisfy them.
+	if grep -qxF -- "${odd_volume}:/src:ro" "$base/argv.log" 2> /dev/null; then
+		ok "quoted volume name: the archive mounts it as a single argument"
+	else
+		fail_test "quoted volume name: the archive's -v argument was mangled -- $(cat "$base/argv.log" 2> /dev/null)"
+	fi
+	if grep -qxF -- "$odd_volume" "$base/argv.log" 2> /dev/null; then
+		ok "quoted volume name: 'docker volume rm' receives it as a single argument"
+	else
+		fail_test "quoted volume name: the volume rm argument was mangled -- $(cat "$base/argv.log" 2> /dev/null)"
+	fi
+	if grep -qxF -- "pg17-${odd_volume}.tar.gz" "$base/argv.log" 2> /dev/null; then
+		ok "quoted volume name: the archive name reaches the container's shell whole"
+	else
+		fail_test "quoted volume name: the archive name was mangled -- $(cat "$base/argv.log" 2> /dev/null)"
+	fi
+	if [ -f "$base/out/pg17-${odd_volume}.tar.gz" ]; then
+		ok "quoted volume name: the archive is written under the name the script reports"
+	else
+		fail_test "quoted volume name: no archive at '$base/out/pg17-${odd_volume}.tar.gz' -- $(ls "$base/out")"
+	fi
 	rm -rf "$base"
 }
 
