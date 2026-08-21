@@ -20,7 +20,7 @@ import datetime as dt
 import io
 import uuid
 import zipfile
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 
 import httpx2
 import pytest
@@ -85,6 +85,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerType,
 )
 from tests.audit.fakes import RecordingAuditRecorder
+from tests.client_utils import enter_client
 from tests.identity.fakes import FakeClock, FakeUnitOfWork, make_user
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
@@ -201,9 +202,8 @@ def _server_entity(*, community_id: uuid.UUID, name: str = "imported") -> Server
     )
 
 
-def _client(app: object) -> Iterator[TestClient]:
-    with TestClient(app) as client:  # type: ignore[arg-type]
-        yield client
+def _client(app: object) -> TestClient:
+    return enter_client(TestClient(app))  # type: ignore[arg-type]
 
 
 _shared_app: FastAPI
@@ -296,14 +296,14 @@ def _export_url(community: uuid.UUID, server: uuid.UUID) -> str:
 
 def test_non_member_gets_404_on_export() -> None:
     app = _app(member=False, allow=True, export=_FakeExport())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_export_url(uuid.uuid4(), uuid.uuid4()), headers=_bearer())
     assert resp.status_code == 404
 
 
 def test_member_without_permission_gets_403_on_export() -> None:
     app = _app(member=True, allow=False, export=_FakeExport())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_export_url(uuid.uuid4(), uuid.uuid4()), headers=_bearer())
     assert resp.status_code == 403
 
@@ -316,7 +316,7 @@ def test_export_streams_zip_and_audits() -> None:
         export=_FakeExport(chunks=[b"zip", b"-bytes"]),
         recorder=recorder,
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_export_url(uuid.uuid4(), uuid.uuid4()), headers=_bearer())
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "application/zip"
@@ -330,7 +330,7 @@ def test_export_names_the_zip_after_the_server() -> None:
     # A client that navigates the URL rather than being told the filename (a pasted
     # grant link, a CLI fetch) would otherwise save the last path segment, "export".
     app = _app(member=True, allow=True, export=_FakeExport(server_name="survival"))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_export_url(uuid.uuid4(), uuid.uuid4()), headers=_bearer())
     assert resp.status_code == 200
     assert (
@@ -343,7 +343,7 @@ def test_export_non_ascii_server_name_uses_the_rfc5987_form() -> None:
     # A server name is free-form, so it can be non-ASCII; the raw name would 500 on
     # the latin-1 header encode, so it rides percent-encoded in filename*.
     app = _app(member=True, allow=True, export=_FakeExport(server_name="サバイバル"))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_export_url(uuid.uuid4(), uuid.uuid4()), headers=_bearer())
     assert resp.status_code == 200
     cd = resp.headers["content-disposition"]
@@ -355,7 +355,7 @@ def test_export_server_name_with_path_separators_cannot_traverse() -> None:
     # Only whitespace is trimmed off a server name, so it can hold separators; the
     # saved file must not escape the client's download directory.
     app = _app(member=True, allow=True, export=_FakeExport(server_name="../../etc/pw"))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_export_url(uuid.uuid4(), uuid.uuid4()), headers=_bearer())
     assert resp.status_code == 200
     assert (
@@ -372,7 +372,7 @@ def test_export_running_is_409_and_audits_denied() -> None:
         export=_FakeExport(error=ServerFilesUnsettledError("x")),
         recorder=recorder,
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_export_url(uuid.uuid4(), uuid.uuid4()), headers=_bearer())
     assert resp.status_code == 409
     assert resp.json()["reason"] == "server_unsettled"
@@ -382,7 +382,7 @@ def test_export_running_is_409_and_audits_denied() -> None:
 
 def test_export_without_any_credential_is_401() -> None:
     app = _app(member=True, allow=True, export=_FakeExport())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_export_url(uuid.uuid4(), uuid.uuid4()))
     assert resp.status_code == 401
 
@@ -400,13 +400,13 @@ def _mint(
 
 def test_non_member_gets_404_on_export_download_grant() -> None:
     app = _app(member=False, allow=True, resolve_export=_FakeResolveExport())
-    client = next(_client(app))
+    client = _client(app)
     assert _mint(client, uuid.uuid4(), uuid.uuid4()).status_code == 404
 
 
 def test_member_without_permission_gets_403_on_export_download_grant() -> None:
     app = _app(member=True, allow=False, resolve_export=_FakeResolveExport())
-    client = next(_client(app))
+    client = _client(app)
     assert _mint(client, uuid.uuid4(), uuid.uuid4()).status_code == 403
 
 
@@ -416,7 +416,7 @@ def test_export_download_grant_for_unknown_server_is_404() -> None:
         allow=True,
         resolve_export=_FakeResolveExport(error=ServerNotFoundError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     assert _mint(client, uuid.uuid4(), uuid.uuid4()).status_code == 404
 
 
@@ -430,7 +430,7 @@ def test_export_download_grant_for_a_running_server_is_409_and_audits_denied() -
         resolve_export=_FakeResolveExport(error=ServerFilesUnsettledError("x")),
         recorder=recorder,
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = _mint(client, uuid.uuid4(), uuid.uuid4())
     assert resp.status_code == 409
     assert resp.json()["reason"] == "server_unsettled"
@@ -443,7 +443,7 @@ def test_export_download_grant_for_a_running_server_is_409_and_audits_denied() -
 def test_export_download_grant_response_is_not_cached_and_reports_expiry() -> None:
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, resolve_export=_FakeResolveExport())
-    client = next(_client(app))
+    client = _client(app)
     resp = _mint(client, community, server)
     assert resp.status_code == 200
     # A URL that carries a credential must never sit in a shared cache.
@@ -461,7 +461,7 @@ def test_minting_an_export_grant_records_no_audit_event() -> None:
     app = _app(
         member=True, allow=True, resolve_export=_FakeResolveExport(), recorder=recorder
     )
-    client = next(_client(app))
+    client = _client(app)
     assert _mint(client, uuid.uuid4(), uuid.uuid4()).status_code == 200
     assert recorder.events == []
 
@@ -476,7 +476,7 @@ def test_minted_export_url_downloads_without_an_authorization_header() -> None:
         resolve_export=_FakeResolveExport(),
         recorder=recorder,
     )
-    client = next(_client(app))
+    client = _client(app)
     url = _mint(client, community, server).json()["download_url"]
 
     resp = client.get(url)
@@ -499,7 +499,7 @@ def _export_grant_url(community: uuid.UUID, server: uuid.UUID, *, subject: User)
 def test_export_grant_redeemed_download_matches_the_bearer_response() -> None:
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, export=_FakeExport(chunks=[b"zip-bytes"]))
-    client = next(_client(app))
+    client = _client(app)
 
     with_bearer = client.get(_export_url(community, server), headers=_bearer())
     with_grant = client.get(_export_grant_url(community, server, subject=_user))
@@ -512,7 +512,7 @@ def test_export_grant_redeemed_download_matches_the_bearer_response() -> None:
 def test_export_grant_is_rejected_after_its_ttl() -> None:
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, export=_FakeExport())
-    client = next(_client(app))
+    client = _client(app)
     url = _export_grant_url(community, server, subject=_user)
 
     _clock.set(_NOW + dt.timedelta(seconds=_GRANT_TTL_SECONDS))
@@ -523,7 +523,7 @@ def test_export_grant_is_rejected_after_its_ttl() -> None:
 def test_export_grant_is_rejected_under_another_server_or_community() -> None:
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, export=_FakeExport())
-    client = next(_client(app))
+    client = _client(app)
     issued = _tokens.issue_download_grant(
         _user.id, export_download_grant_resource(community, server)
     )
@@ -542,7 +542,7 @@ def test_export_grant_is_rejected_under_another_server_or_community() -> None:
 def test_export_grant_is_not_accepted_as_a_bearer_token() -> None:
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, export=_FakeExport())
-    client = next(_client(app))
+    client = _client(app)
     issued = _tokens.issue_download_grant(
         _user.id, export_download_grant_resource(community, server)
     )
@@ -558,7 +558,7 @@ def test_export_grant_is_not_accepted_as_a_bearer_token() -> None:
 def test_access_token_is_not_accepted_as_an_export_grant() -> None:
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, export=_FakeExport())
-    client = next(_client(app))
+    client = _client(app)
     access = _tokens.issue_access_token(_user.id)
 
     resp = client.get(f"{_export_url(community, server)}?grant={access}")
@@ -570,7 +570,7 @@ def test_export_grant_loses_to_a_permission_revoked_after_issuance() -> None:
     # The grant proves identity, never authority: authorization is decided afresh.
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=False, export=_FakeExport())
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.get(_export_grant_url(community, server, subject=_user))
 
@@ -580,7 +580,7 @@ def test_export_grant_loses_to_a_permission_revoked_after_issuance() -> None:
 def test_export_grant_loses_to_a_membership_removed_after_issuance() -> None:
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(member=False, allow=True, export=_FakeExport())
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.get(_export_grant_url(community, server, subject=_user))
 
@@ -592,7 +592,7 @@ def test_export_grant_for_a_deactivated_subject_is_rejected() -> None:
     app = _app(
         member=True, allow=True, subject=make_user(active=False), export=_FakeExport()
     )
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.get(_export_grant_url(community, server, subject=_user))
 
@@ -617,7 +617,7 @@ def _export_cookie_header(community: uuid.UUID, server: uuid.UUID) -> dict[str, 
 def test_export_grant_redemption_sets_a_path_scoped_cookie() -> None:
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, export=_FakeExport(chunks=[b"zip-bytes"]))
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.get(_export_grant_url(community, server, subject=_user))
 
@@ -639,7 +639,7 @@ def test_export_grant_redemption_sets_a_path_scoped_cookie() -> None:
 def test_expired_export_grant_is_retried_with_the_cookie() -> None:
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, export=_FakeExport(chunks=[b"zip-bytes"]))
-    client = next(_client(app))
+    client = _client(app)
     url = _export_grant_url(community, server, subject=_user)
 
     _clock.set(_NOW + dt.timedelta(seconds=_GRANT_TTL_SECONDS))
@@ -653,7 +653,7 @@ def test_expired_export_grant_is_retried_with_the_cookie() -> None:
 def test_export_cookie_is_rejected_under_another_server_or_community() -> None:
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, export=_FakeExport())
-    client = next(_client(app))
+    client = _client(app)
     headers = _export_cookie_header(community, server)
 
     other_server = client.get(_export_url(community, uuid.uuid4()), headers=headers)
@@ -672,7 +672,7 @@ def test_an_unsettled_export_mints_no_cookie() -> None:
         allow=True,
         export=_FakeExport(error=ServerFilesUnsettledError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.get(_export_grant_url(community, server, subject=_user))
 
@@ -693,7 +693,7 @@ def test_export_download_declares_no_store_under_every_credential() -> None:
     # shared caches does not cover it.
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, export=_FakeExport(chunks=[b"zip-bytes"]))
-    client = next(_client(app))
+    client = _client(app)
 
     with_bearer = client.get(_export_url(community, server), headers=_bearer())
     with_cookie = client.get(
@@ -718,7 +718,7 @@ def test_export_download_declares_no_store_under_every_credential() -> None:
 def test_export_head_answers_the_gets_headers_under_every_credential() -> None:
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, export=_FakeExport(chunks=[b"zip-bytes"]))
-    client = next(_client(app))
+    client = _client(app)
     url = _export_url(community, server)
     cookie = _export_cookie_header(community, server)
     # Last, because redeeming a grant mints the cookie into the client's jar.
@@ -750,7 +750,7 @@ def test_export_head_neither_builds_the_zip_nor_records_an_export() -> None:
     export = _FakeExport(chunks=[b"zip-bytes"])
     recorder = RecordingAuditRecorder()
     app = _app(member=True, allow=True, export=export, recorder=recorder)
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.head(_export_url(community, server), headers=_bearer())
 
@@ -770,7 +770,7 @@ def test_export_head_of_a_running_server_is_409_and_records_nothing() -> None:
         export=_FakeExport(error=ServerFilesUnsettledError("x")),
         recorder=recorder,
     )
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.head(_export_url(community, server), headers=_bearer())
 
@@ -811,15 +811,15 @@ def test_export_head_is_answered_exactly_like_the_get(
     app = _app(member=member, allow=allow, export=_FakeExport(error=error))
     url, headers = _export_credential(kind, community, server)
 
-    probed = next(_client(app)).head(url, headers=headers)
-    served = next(_client(app)).get(url, headers=headers)
+    probed = _client(app).head(url, headers=headers)
+    served = _client(app).get(url, headers=headers)
 
     assert probed.status_code == served.status_code == expected
 
 
 def test_export_head_without_credentials_is_401() -> None:
     app = _app(member=True, allow=True, export=_FakeExport())
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.head(_export_url(uuid.uuid4(), uuid.uuid4()))
 
@@ -831,7 +831,7 @@ def test_export_head_without_credentials_is_401() -> None:
 
 def test_non_member_gets_404_on_import() -> None:
     app = _app(member=False, allow=True, import_=_FakeImport())
-    client = next(_client(app))
+    client = _client(app)
     files, data = _zip_upload()
     resp = client.post(
         f"/api/communities/{uuid.uuid4()}/servers/import",
@@ -843,7 +843,7 @@ def test_non_member_gets_404_on_import() -> None:
 
 def test_member_without_permission_gets_403_on_import() -> None:
     app = _app(member=True, allow=False, import_=_FakeImport())
-    client = next(_client(app))
+    client = _client(app)
     files, data = _zip_upload()
     resp = client.post(
         f"/api/communities/{uuid.uuid4()}/servers/import",
@@ -858,7 +858,7 @@ def test_import_creates_server_and_audits() -> None:
     recorder = RecordingAuditRecorder()
     use_case = _FakeImport(result=_server_entity(community_id=community))
     app = _app(member=True, allow=True, import_=use_case, recorder=recorder)
-    client = next(_client(app))
+    client = _client(app)
     files, data = _zip_upload()
     resp = client.post(
         f"/api/communities/{community}/servers/import",
@@ -882,7 +882,7 @@ def test_import_invalid_metadata_is_422() -> None:
         allow=True,
         import_=_FakeImport(error=InvalidExportMetadataError("bad")),
     )
-    client = next(_client(app))
+    client = _client(app)
     files, data = _zip_upload()
     resp = client.post(
         f"/api/communities/{uuid.uuid4()}/servers/import",
@@ -899,7 +899,7 @@ def test_import_name_conflict_is_409() -> None:
         allow=True,
         import_=_FakeImport(error=ServerNameAlreadyExistsError("imported")),
     )
-    client = next(_client(app))
+    client = _client(app)
     files, data = _zip_upload()
     resp = client.post(
         f"/api/communities/{uuid.uuid4()}/servers/import",
@@ -916,7 +916,7 @@ def test_import_oversized_is_413() -> None:
         allow=True,
         import_=_FakeImport(error=FileTooLargeError("9999")),
     )
-    client = next(_client(app))
+    client = _client(app)
     files, data = _zip_upload()
     resp = client.post(
         f"/api/communities/{uuid.uuid4()}/servers/import",
@@ -932,7 +932,7 @@ def test_import_seed_failure_is_503() -> None:
         allow=True,
         import_=_FakeImport(error=WorkingSetSeedFailedError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     files, data = _zip_upload()
     resp = client.post(
         f"/api/communities/{uuid.uuid4()}/servers/import",

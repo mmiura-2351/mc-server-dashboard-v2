@@ -10,12 +10,11 @@ open until per-test teardown.
 
 The pattern was actively re-proliferating (598 -> 758 call sites between the
 issue's filing and its investigation), so this fast grep fails the gate if it
-reappears in an already-converted directory, keeping the fix from eroding.
+reappears, keeping the fix from eroding.
 
-Scope: the directories converted in PR 1 (identity, audit, fleet, core). PR 2
-converts ``servers/``, ``community/``, and ``integration/``; until it lands those
-still hold the old pattern, so they are deliberately NOT scanned yet.
-TODO(#1980 PR 2): drop ``SCANNED_DIRS`` and scan all of ``api/tests``.
+Scope: all of ``api/tests``. PR 1 converted identity/audit/fleet/core and scanned
+only those; PR 2 converted servers/, community/ and integration/ and dropped the
+allow-list, so no directory is exempt any more.
 
 Pure standard library; runs under any Python 3.8+ (the api/ venv or a system
 python). Exit status is non-zero when the pattern is found.
@@ -33,31 +32,17 @@ from pathlib import Path
 # it in ``next(...)`` is the finalize-immediately bug this guards against.
 PATTERN = "next(_client("
 
-# Directories converted in PR 1. Scoped so the guard passes now while PR 2's
-# not-yet-converted trees (servers/, community/, integration/) still carry the
-# pattern. See the module docstring.
-SCANNED_DIRS = (
-    "identity",
-    "audit",
-    "fleet",
-    "core",
-)
 
-
-def find_violations(tests_root: Path, scanned_dirs: tuple[str, ...]) -> list[str]:
+def find_violations(tests_root: Path) -> list[str]:
     """Return ``path:line`` messages for every ``PATTERN`` occurrence (sorted)."""
     violations: list[str] = []
-    for name in scanned_dirs:
-        directory = tests_root / name
-        if not directory.is_dir():
-            continue
-        for path in sorted(directory.rglob("*.py")):
-            for lineno, line in enumerate(
-                path.read_text(encoding="utf-8").splitlines(), start=1
-            ):
-                if PATTERN in line:
-                    rel = path.relative_to(tests_root.parent.parent)
-                    violations.append(f"{rel}:{lineno}")
+    for path in sorted(tests_root.rglob("*.py")):
+        for lineno, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), start=1
+        ):
+            if PATTERN in line:
+                rel = path.relative_to(tests_root.parent.parent)
+                violations.append(f"{rel}:{lineno}")
     return violations
 
 
@@ -68,7 +53,7 @@ def main() -> int:
         print(f"api tests dir not found at {tests_root}", file=sys.stderr)
         return 2
 
-    violations = find_violations(tests_root, SCANNED_DIRS)
+    violations = find_violations(tests_root)
     if violations:
         print(
             "check-test-client-pattern found the banned `next(_client(...))` "
@@ -84,8 +69,7 @@ def main() -> int:
         )
         return 1
 
-    scanned = ", ".join(SCANNED_DIRS)
-    print(f"check-test-client-pattern: OK (scanned api/tests/{{{scanned}}})")
+    print("check-test-client-pattern: OK (scanned api/tests)")
     return 0
 
 
@@ -100,27 +84,27 @@ def _self_test() -> int:
         (tests_root / "identity").mkdir(parents=True)
         (tests_root / "servers").mkdir(parents=True)
 
-        # A converted file in a scanned dir: uses the helper, no violation.
+        # A converted file: uses the helper, no violation.
         (tests_root / "identity" / "test_clean.py").write_text(
             "client = _client(login=fake)\n", encoding="utf-8"
         )
-        # An offending file in a scanned dir: flagged.
+        # Offending files anywhere under api/tests are flagged.
         (tests_root / "identity" / "test_bad.py").write_text(
             "x = 1\nclient = next(_client(login=fake))\n", encoding="utf-8"
         )
-        # An out-of-scope dir still on the old pattern: NOT flagged (PR 2).
-        (tests_root / "servers" / "test_later.py").write_text(
+        (tests_root / "servers" / "test_bad.py").write_text(
             "client = next(_client(app))\n", encoding="utf-8"
         )
 
-        got = find_violations(tests_root, SCANNED_DIRS)
-        want = ["api/tests/identity/test_bad.py:2"]
+        got = find_violations(tests_root)
+        want = ["api/tests/identity/test_bad.py:2", "api/tests/servers/test_bad.py:1"]
         if got != want:
-            failures.append(f"scanned-dir detection: expected {want!r}, got {got!r}")
+            failures.append(f"detection: expected {want!r}, got {got!r}")
 
         # A clean tree reports nothing.
         (tests_root / "identity" / "test_bad.py").unlink()
-        if find_violations(tests_root, SCANNED_DIRS):
+        (tests_root / "servers" / "test_bad.py").unlink()
+        if find_violations(tests_root):
             failures.append("clean tree: expected no violations")
 
     if failures:

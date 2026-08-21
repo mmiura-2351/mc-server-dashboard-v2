@@ -10,7 +10,6 @@ name 409, cross-community/missing 404), and that a mutation is audited.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterator
 
 import pytest
 from fastapi import FastAPI
@@ -52,6 +51,7 @@ from mc_server_dashboard_api.servers.domain.groups import (
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId as ServersCommunityId,
 )
+from tests.client_utils import enter_client
 from tests.identity.fakes import make_user
 
 
@@ -94,9 +94,8 @@ class _RecordingRecorder:
         self.events.append(event)
 
 
-def _client(app: object) -> Iterator[TestClient]:
-    with TestClient(app) as client:  # type: ignore[arg-type]
-        yield client
+def _client(app: object) -> TestClient:
+    return enter_client(TestClient(app))  # type: ignore[arg-type]
 
 
 def _group(community: uuid.UUID, *, kind: GroupKind = GroupKind.OP) -> PlayerGroup:
@@ -153,7 +152,7 @@ def _app(
 
 def test_non_member_gets_404_on_create() -> None:
     app = _app(member=False, allow=True, create=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         f"/api/communities/{uuid.uuid4()}/groups", json={"name": "ops", "kind": "op"}
     )
@@ -162,7 +161,7 @@ def test_non_member_gets_404_on_create() -> None:
 
 def test_member_without_permission_gets_403_on_create() -> None:
     app = _app(member=True, allow=False, create=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         f"/api/communities/{uuid.uuid4()}/groups", json={"name": "ops", "kind": "op"}
     )
@@ -179,7 +178,7 @@ def test_authorized_member_creates_group_and_audits() -> None:
         create=_FakeUseCase(result=group),
         recorder=recorder,
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         f"/api/communities/{community}/groups", json={"name": "admins", "kind": "op"}
     )
@@ -197,7 +196,7 @@ def test_create_unknown_kind_is_422() -> None:
         allow=True,
         create=_FakeUseCase(error=InvalidGroupKindError("banned")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         f"/api/communities/{uuid.uuid4()}/groups", json={"name": "x", "kind": "banned"}
     )
@@ -211,7 +210,7 @@ def test_create_duplicate_name_is_409() -> None:
         allow=True,
         create=_FakeUseCase(error=GroupNameAlreadyExistsError("admins")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         f"/api/communities/{uuid.uuid4()}/groups", json={"name": "admins", "kind": "op"}
     )
@@ -225,7 +224,7 @@ def test_read_missing_group_is_404() -> None:
         allow=True,
         read=_FakeUseCase(error=GroupNotFoundError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(f"/api/communities/{uuid.uuid4()}/groups/{uuid.uuid4()}")
     assert resp.status_code == 404
 
@@ -237,7 +236,7 @@ def test_attach_missing_server_is_404() -> None:
         attach=_FakeUseCase(error=ServerNotFoundError("x")),
         recorder=_RecordingRecorder(),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.put(
         f"/api/communities/{uuid.uuid4()}/groups/{uuid.uuid4()}/servers/{uuid.uuid4()}"
     )
@@ -251,6 +250,6 @@ def test_delete_group_returns_204() -> None:
         delete=_FakeUseCase(),
         recorder=_RecordingRecorder(),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.delete(f"/api/communities/{uuid.uuid4()}/groups/{uuid.uuid4()}")
     assert resp.status_code == 204

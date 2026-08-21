@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from collections.abc import Iterator
 
 import pytest
 from fastapi import FastAPI
@@ -58,6 +57,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerName,
     ServerType,
 )
+from tests.client_utils import enter_client
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 
@@ -95,9 +95,8 @@ class _FakeUseCase:
         return self._result
 
 
-def _client(app: object) -> Iterator[TestClient]:
-    with TestClient(app) as client:  # type: ignore[arg-type]
-        yield client
+def _client(app: object) -> TestClient:
+    return enter_client(TestClient(app))  # type: ignore[arg-type]
 
 
 def _server(community_id: uuid.UUID) -> Server:
@@ -165,21 +164,21 @@ def _url(community: uuid.UUID, server: uuid.UUID, action: str) -> str:
 
 def test_non_member_gets_404_on_start() -> None:
     app = _app(member=False, allow=True, start=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "start"))
     assert resp.status_code == 404
 
 
 def test_member_without_permission_gets_403_on_stop() -> None:
     app = _app(member=True, allow=False, stop=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "stop"))
     assert resp.status_code == 403
 
 
 def test_member_without_permission_gets_403_on_command() -> None:
     app = _app(member=True, allow=False, command=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "command"), json={"line": "list"}
     )
@@ -192,7 +191,7 @@ def test_member_without_permission_gets_403_on_command() -> None:
 def test_start_success_returns_server() -> None:
     community = uuid.uuid4()
     app = _app(member=True, allow=True, start=_FakeUseCase(result=_server(community)))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(community, uuid.uuid4(), "start"))
     assert resp.status_code == 200
     assert resp.json()["desired_state"] == "running"
@@ -200,7 +199,7 @@ def test_start_success_returns_server() -> None:
 
 def test_command_success_returns_output() -> None:
     app = _app(member=True, allow=True, command=_FakeUseCase(result="players: 3"))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "command"), json={"line": "list"}
     )
@@ -217,7 +216,7 @@ def test_start_invalid_transition_is_409() -> None:
         allow=True,
         start=_FakeUseCase(error=InvalidLifecycleTransitionError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "start"))
     assert resp.status_code == 409
     assert resp.json()["reason"] == "invalid_transition"
@@ -229,7 +228,7 @@ def test_start_transition_conflict_is_409() -> None:
         allow=True,
         start=_FakeUseCase(error=LifecycleTransitionConflictError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "start"))
     assert resp.status_code == 409
     assert resp.json()["reason"] == "transition_conflict"
@@ -239,7 +238,7 @@ def test_start_no_eligible_worker_is_503() -> None:
     app = _app(
         member=True, allow=True, start=_FakeUseCase(error=NoEligibleWorkerError("x"))
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "start"))
     assert resp.status_code == 503
     assert resp.json()["reason"] == "no_eligible_worker"
@@ -249,7 +248,7 @@ def test_start_worker_unavailable_is_503() -> None:
     app = _app(
         member=True, allow=True, start=_FakeUseCase(error=WorkerUnavailableError("x"))
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "start"))
     assert resp.status_code == 503
     assert resp.json()["reason"] == "worker_unavailable"
@@ -259,7 +258,7 @@ def test_start_command_failure_is_409() -> None:
     app = _app(
         member=True, allow=True, start=_FakeUseCase(error=CommandDispatchError("x"))
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "start"))
     assert resp.status_code == 409
     assert resp.json()["reason"] == "command_failed"
@@ -273,7 +272,7 @@ def test_start_port_conflict_is_409_with_reason() -> None:
         allow=True,
         start=_FakeUseCase(error=CommandDispatchError("x", reason="port_conflict")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "start"))
     assert resp.status_code == 409
     assert resp.json()["reason"] == "port_conflict"
@@ -285,7 +284,7 @@ def test_start_image_missing_is_409_with_reason() -> None:
         allow=True,
         start=_FakeUseCase(error=CommandDispatchError("x", reason="image_missing")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "start"))
     assert resp.status_code == 409
     assert resp.json()["reason"] == "image_missing"
@@ -300,7 +299,7 @@ def test_start_worker_busy_is_409_with_reason() -> None:
         allow=True,
         start=_FakeUseCase(error=CommandDispatchError("x", reason="worker_busy")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "start"))
     assert resp.status_code == 409
     assert resp.json()["reason"] == "worker_busy"
@@ -312,7 +311,7 @@ def test_start_eula_not_accepted_is_409() -> None:
         allow=True,
         start=_FakeUseCase(error=EulaNotAcceptedError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "start"))
     assert resp.status_code == 409
     assert resp.json()["reason"] == "eula_not_accepted"
@@ -322,7 +321,7 @@ def test_start_accept_eula_forwards_to_use_case() -> None:
     community = uuid.uuid4()
     start = _FakeUseCase(result=_server(community))
     app = _app(member=True, allow=True, start=start)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(community, uuid.uuid4(), "start"), params={"accept_eula": "true"}
     )
@@ -334,7 +333,7 @@ def test_start_defaults_accept_eula_false() -> None:
     community = uuid.uuid4()
     start = _FakeUseCase(result=_server(community))
     app = _app(member=True, allow=True, start=start)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(community, uuid.uuid4(), "start"))
     assert resp.status_code == 200
     assert start.kwargs["accept_eula"] is False
@@ -344,7 +343,7 @@ def test_stop_missing_server_is_404() -> None:
     app = _app(
         member=True, allow=True, stop=_FakeUseCase(error=ServerNotFoundError("x"))
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "stop"))
     assert resp.status_code == 404
 
@@ -354,7 +353,7 @@ def test_stop_defaults_to_graceful_force_false() -> None:
     community = uuid.uuid4()
     stop = _FakeUseCase(result=_server(community))
     app = _app(member=True, allow=True, stop=stop)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(community, uuid.uuid4(), "stop"))
     assert resp.status_code == 200
     assert stop.kwargs["force"] is False
@@ -365,7 +364,7 @@ def test_stop_force_true_forwards_to_use_case() -> None:
     community = uuid.uuid4()
     stop = _FakeUseCase(result=_server(community))
     app = _app(member=True, allow=True, stop=stop)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(community, uuid.uuid4(), "stop"), params={"force": "true"})
     assert resp.status_code == 200
     assert stop.kwargs["force"] is True
@@ -379,7 +378,7 @@ def test_restart_not_running_is_409_with_reason() -> None:
         allow=True,
         restart=_FakeUseCase(error=ServerNotRunningError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "restart"))
     assert resp.status_code == 409
     assert resp.json()["reason"] == "server_not_running"
@@ -391,7 +390,7 @@ def test_command_not_running_is_409() -> None:
         allow=True,
         command=_FakeUseCase(error=ServerNotRunningError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "command"), json={"line": "list"}
     )

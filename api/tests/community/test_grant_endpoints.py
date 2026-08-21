@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from collections.abc import Iterator
 
 import pytest
 from fastapi import FastAPI
@@ -48,6 +47,7 @@ from mc_server_dashboard_api.dependencies import (
     get_permission_checker,
     get_revoke_grant,
 )
+from tests.client_utils import enter_client
 from tests.identity.fakes import make_user
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
@@ -93,9 +93,8 @@ def _bind_shared_app(shared_app: FastAPI) -> None:
     _shared_app = shared_app
 
 
-def _client(app: object) -> Iterator[TestClient]:
-    with TestClient(app) as client:  # type: ignore[arg-type]
-        yield client
+def _client(app: object) -> TestClient:
+    return enter_client(TestClient(app))  # type: ignore[arg-type]
 
 
 def _app(
@@ -155,7 +154,7 @@ def test_list_grants_authorized_returns_200() -> None:
     app = _app(
         member=True, allow=True, list_uc=_FakeUseCase(result=[_grant(community, user)])
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(f"/api/communities/{community.value}/grants")
     assert resp.status_code == 200
     assert len(resp.json()) == 1
@@ -166,7 +165,7 @@ def test_list_grants_passes_user_filter() -> None:
     user = UserId(uuid.uuid4())
     use_case = _FakeUseCase(result=[])
     app = _app(member=True, allow=True, list_uc=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(
         f"/api/communities/{community.value}/grants",
         params={"user_id": str(user.value)},
@@ -177,14 +176,14 @@ def test_list_grants_passes_user_filter() -> None:
 
 def test_list_grants_non_member_gets_404() -> None:
     app = _app(member=False, allow=True, list_uc=_FakeUseCase(result=[]))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(f"/api/communities/{uuid.uuid4()}/grants")
     assert resp.status_code == 404
 
 
 def test_list_grants_without_permission_gets_403() -> None:
     app = _app(member=True, allow=False, list_uc=_FakeUseCase(result=[]))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(f"/api/communities/{uuid.uuid4()}/grants")
     assert resp.status_code == 403
 
@@ -198,7 +197,7 @@ def test_create_grant_authorized_returns_201() -> None:
     app = _app(
         member=True, allow=True, create_uc=_FakeUseCase(result=_grant(community, user))
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         f"/api/communities/{community.value}/grants", json=_create_body(user)
     )
@@ -208,7 +207,7 @@ def test_create_grant_authorized_returns_201() -> None:
 
 def test_create_grant_without_permission_gets_403() -> None:
     app = _app(member=True, allow=False, create_uc=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         f"/api/communities/{uuid.uuid4()}/grants",
         json=_create_body(UserId(uuid.uuid4())),
@@ -222,7 +221,7 @@ def test_create_grant_non_member_target_gets_404() -> None:
         allow=True,
         create_uc=_FakeUseCase(error=GrantTargetNotMemberError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         f"/api/communities/{uuid.uuid4()}/grants",
         json=_create_body(UserId(uuid.uuid4())),
@@ -236,7 +235,7 @@ def test_create_grant_nonexistent_resource_gets_404() -> None:
         allow=True,
         create_uc=_FakeUseCase(error=GrantResourceNotFoundError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         f"/api/communities/{uuid.uuid4()}/grants",
         json=_create_body(UserId(uuid.uuid4())),
@@ -250,7 +249,7 @@ def test_create_grant_unknown_resource_type_returns_422() -> None:
         allow=True,
         create_uc=_FakeUseCase(error=InvalidGrantResourceTypeError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         f"/api/communities/{uuid.uuid4()}/grants",
         json=_create_body(UserId(uuid.uuid4())),
@@ -265,7 +264,7 @@ def test_create_grant_invalid_permission_returns_422() -> None:
         allow=True,
         create_uc=_FakeUseCase(error=UnknownPermissionError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         f"/api/communities/{uuid.uuid4()}/grants",
         json=_create_body(UserId(uuid.uuid4())),
@@ -280,7 +279,7 @@ def test_create_grant_duplicate_returns_409() -> None:
         allow=True,
         create_uc=_FakeUseCase(error=ResourceGrantAlreadyExistsError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         f"/api/communities/{uuid.uuid4()}/grants",
         json=_create_body(UserId(uuid.uuid4())),
@@ -295,7 +294,7 @@ def test_create_grant_ceiling_exceeded_returns_403() -> None:
         allow=True,
         create_uc=_FakeUseCase(error=PermissionCeilingExceededError(["server:start"])),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         f"/api/communities/{uuid.uuid4()}/grants",
         json=_create_body(UserId(uuid.uuid4())),
@@ -311,7 +310,7 @@ def test_create_grant_ceiling_exceeded_returns_403() -> None:
 
 def test_revoke_grant_authorized_returns_204() -> None:
     app = _app(member=True, allow=True, revoke_uc=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.delete(f"/api/communities/{uuid.uuid4()}/grants/{uuid.uuid4()}")
     assert resp.status_code == 204
 
@@ -322,13 +321,13 @@ def test_revoke_grant_cross_community_gets_404() -> None:
         allow=True,
         revoke_uc=_FakeUseCase(error=ResourceGrantNotFoundError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.delete(f"/api/communities/{uuid.uuid4()}/grants/{uuid.uuid4()}")
     assert resp.status_code == 404
 
 
 def test_revoke_grant_without_permission_gets_403() -> None:
     app = _app(member=True, allow=False, revoke_uc=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.delete(f"/api/communities/{uuid.uuid4()}/grants/{uuid.uuid4()}")
     assert resp.status_code == 403

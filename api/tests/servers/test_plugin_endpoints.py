@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from collections.abc import Iterator
 
 import pytest
 from fastapi import FastAPI
@@ -90,6 +89,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 )
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 from tests.audit.fakes import RecordingAuditRecorder
+from tests.client_utils import enter_client
 from tests.identity.fakes import make_user
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
@@ -188,9 +188,8 @@ class _FakeInstall:
         return self._result
 
 
-def _client(app: object) -> Iterator[TestClient]:
-    with TestClient(app) as client:  # type: ignore[arg-type]
-        yield client
+def _client(app: object) -> TestClient:
+    return enter_client(TestClient(app))  # type: ignore[arg-type]
 
 
 _shared_app: FastAPI
@@ -271,14 +270,14 @@ def _url(community: uuid.UUID, server: uuid.UUID, suffix: str = "") -> str:
 
 def test_non_member_gets_404_on_list() -> None:
     app = _app(member=False, allow=True, list_=_FakeUseCase(result=[]))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4()))
     assert resp.status_code == 404
 
 
 def test_member_without_permission_gets_403_on_install() -> None:
     app = _app(member=True, allow=False, install=_FakeInstall())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4()),
         data={"display_name": "Test"},
@@ -289,7 +288,7 @@ def test_member_without_permission_gets_403_on_install() -> None:
 
 def test_member_without_permission_gets_403_on_remove() -> None:
     app = _app(member=True, allow=False, remove=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.delete(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}"))
     assert resp.status_code == 403
 
@@ -300,7 +299,7 @@ def test_member_without_permission_gets_403_on_remove() -> None:
 def test_list_plugins_returns_200() -> None:
     p = _plugin()
     app = _app(member=True, allow=True, list_=_FakeUseCase(result=[p]))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4()))
     assert resp.status_code == 200
     body = resp.json()
@@ -314,7 +313,7 @@ def test_list_plugins_server_not_found_is_404() -> None:
         allow=True,
         list_=_FakeUseCase(error=ServerNotFoundError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4()))
     assert resp.status_code == 404
 
@@ -325,7 +324,7 @@ def test_list_plugins_server_not_found_is_404() -> None:
 def test_get_plugin_returns_200() -> None:
     p = _plugin()
     app = _app(member=True, allow=True, get=_FakeUseCase(result=p))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), f"/{p.id.value}"))
     assert resp.status_code == 200
     assert resp.json()["filename"] == "test.jar"
@@ -337,7 +336,7 @@ def test_get_plugin_not_found_is_404() -> None:
         allow=True,
         get=_FakeUseCase(error=PluginNotFoundError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}"))
     assert resp.status_code == 404
 
@@ -348,7 +347,7 @@ def test_get_plugin_not_found_is_404() -> None:
 def test_install_plugin_returns_201() -> None:
     p = _plugin()
     app = _app(member=True, allow=True, install=_FakeInstall(result=p))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4()),
         data={"display_name": "Test Plugin"},
@@ -364,7 +363,7 @@ def test_install_plugin_unsettled_is_409() -> None:
         allow=True,
         install=_FakeInstall(error=ServerFilesUnsettledError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4()),
         data={"display_name": "Test"},
@@ -380,7 +379,7 @@ def test_install_plugin_too_large_is_413() -> None:
         allow=True,
         install=_FakeInstall(error=FileTooLargeError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4()),
         data={"display_name": "Test"},
@@ -396,7 +395,7 @@ def test_install_plugin_already_exists_is_409() -> None:
         allow=True,
         install=_FakeInstall(error=PluginAlreadyExistsError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4()),
         data={"display_name": "Test"},
@@ -413,7 +412,7 @@ def test_install_plugin_bedrock_window_exhausted_is_503() -> None:
         allow=True,
         install=_FakeInstall(error=PortRangeExhaustedError("19132-19231")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4()),
         data={"display_name": "Geyser"},
@@ -431,7 +430,7 @@ def test_install_plugin_bedrock_port_race_is_409() -> None:
         allow=True,
         install=_FakeInstall(error=PortAlreadyTakenError("uq_server_bedrock_port")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4()),
         data={"display_name": "Geyser"},
@@ -443,7 +442,7 @@ def test_install_plugin_bedrock_port_race_is_409() -> None:
 
 def test_install_plugin_empty_display_name_is_422() -> None:
     app = _app(member=True, allow=True, install=_FakeInstall())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4()),
         data={"display_name": "   "},
@@ -455,7 +454,7 @@ def test_install_plugin_empty_display_name_is_422() -> None:
 
 def test_install_plugin_too_long_display_name_is_422() -> None:
     app = _app(member=True, allow=True, install=_FakeInstall())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4()),
         data={"display_name": "x" * 201},
@@ -470,7 +469,7 @@ def test_install_plugin_too_long_display_name_is_422() -> None:
 
 def test_remove_plugin_returns_204() -> None:
     app = _app(member=True, allow=True, remove=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.delete(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}"))
     assert resp.status_code == 204
 
@@ -481,7 +480,7 @@ def test_remove_plugin_not_found_is_404() -> None:
         allow=True,
         remove=_FakeUseCase(error=PluginNotFoundError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.delete(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}"))
     assert resp.status_code == 404
 
@@ -492,7 +491,7 @@ def test_remove_plugin_not_found_is_404() -> None:
 def test_enable_plugin_returns_200() -> None:
     p = _plugin()
     app = _app(member=True, allow=True, toggle=_FakeUseCase(result=p))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), f"/{p.id.value}/enable"))
     assert resp.status_code == 200
     assert resp.json()["enabled"] is True
@@ -504,7 +503,7 @@ def test_enable_plugin_unsettled_is_409() -> None:
         allow=True,
         toggle=_FakeUseCase(error=ServerFilesUnsettledError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/enable"))
     assert resp.status_code == 409
     assert resp.json()["reason"] == "server_unsettled"
@@ -517,7 +516,7 @@ def test_disable_plugin_returns_200() -> None:
     p = _plugin(plugin_id=uuid.uuid4())
     p.enabled = False
     app = _app(member=True, allow=True, toggle=_FakeUseCase(result=p))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), f"/{p.id.value}/disable"))
     assert resp.status_code == 200
     assert resp.json()["enabled"] is False
@@ -529,7 +528,7 @@ def test_disable_plugin_unsettled_is_409() -> None:
         allow=True,
         toggle=_FakeUseCase(error=ServerFilesUnsettledError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/disable"))
     assert resp.status_code == 409
     assert resp.json()["reason"] == "server_unsettled"
@@ -542,7 +541,7 @@ def test_check_updates_returns_200() -> None:
     p = _plugin()
     info = PluginUpdateInfo(plugin=p, latest_version=None)
     app = _app(member=True, allow=True, check_updates=_FakeUseCase(result=[info]))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), "/updates"))
     assert resp.status_code == 200
     assert len(resp.json()["updates"]) == 1
@@ -555,7 +554,7 @@ def test_check_plugin_update_returns_200() -> None:
     p = _plugin()
     info = PluginUpdateInfo(plugin=p, latest_version=None)
     app = _app(member=True, allow=True, check_plugin_update=_FakeUseCase(result=info))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), f"/{p.id.value}/updates"))
     assert resp.status_code == 200
     assert resp.json()["latest_version"] is None
@@ -567,7 +566,7 @@ def test_check_plugin_update_returns_200() -> None:
 def test_update_plugin_returns_200() -> None:
     p = _plugin()
     app = _app(member=True, allow=True, update=_FakeUseCase(result=p))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), f"/{p.id.value}/update"),
         json={"version_id": "v1"},
@@ -582,7 +581,7 @@ def test_update_plugin_unsettled_is_409() -> None:
         allow=True,
         update=_FakeUseCase(error=ServerFilesUnsettledError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/update"),
         json={"version_id": "v1"},
@@ -597,7 +596,7 @@ def test_update_plugin_checksum_mismatch_is_502() -> None:
         allow=True,
         update=_FakeUseCase(error=CatalogChecksumMismatchError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/update"),
         json={"version_id": "v1"},
@@ -619,7 +618,7 @@ def test_list_dependencies_returns_200() -> None:
         installed=True,
     )
     app = _app(member=True, allow=True, list_deps=_FakeUseCase(result=[dep]))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/dependencies"))
     assert resp.status_code == 200
     body = resp.json()
@@ -646,7 +645,7 @@ def test_validate_plugins_returns_200_with_findings() -> None:
         ],
     )
     app = _app(member=True, allow=True, validate=_FakeUseCase(result=validation))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), "/validate"))
     assert resp.status_code == 200
     body = resp.json()
@@ -668,7 +667,7 @@ def test_validate_plugins_surfaces_missing_catalog_deps() -> None:
         ],
     )
     app = _app(member=True, allow=True, validate=_FakeUseCase(result=validation))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), "/validate"))
     assert resp.status_code == 200
     body = resp.json()
@@ -684,7 +683,7 @@ def test_validate_plugins_empty_is_200() -> None:
     app = _app(
         member=True, allow=True, validate=_FakeUseCase(result=PluginValidation())
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), "/validate"))
     assert resp.status_code == 200
     assert resp.json()["missing_deps"] == []
@@ -694,7 +693,7 @@ def test_validate_plugins_non_member_is_404() -> None:
     app = _app(
         member=False, allow=True, validate=_FakeUseCase(result=PluginValidation())
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), "/validate"))
     assert resp.status_code == 404
 
@@ -705,7 +704,7 @@ def test_validate_plugins_unsupported_server_type_is_422() -> None:
         allow=True,
         validate=_FakeUseCase(error=UnsupportedPluginServerTypeError("vanilla")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), "/validate"))
     assert resp.status_code == 422
 
@@ -717,7 +716,7 @@ def test_set_side_authorized_returns_plugin() -> None:
     pid = uuid.uuid4()
     p = _plugin(plugin_id=pid, side="both")
     app = _app(member=True, allow=True, set_side=_FakeUseCase(result=p))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), f"/{pid}/side"), json={"side": "both"}
     )
@@ -732,7 +731,7 @@ def test_set_side_invalid_value_is_422() -> None:
         allow=True,
         set_side=_FakeUseCase(error=InvalidPluginSideError("bogus")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), f"/{pid}/side"), json={"side": "bogus"}
     )
@@ -746,7 +745,7 @@ def test_set_side_unsettled_is_409() -> None:
         allow=True,
         set_side=_FakeUseCase(error=ServerFilesUnsettledError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), f"/{pid}/side"), json={"side": "client"}
     )
@@ -756,7 +755,7 @@ def test_set_side_unsettled_is_409() -> None:
 def test_set_side_non_member_is_404() -> None:
     pid = uuid.uuid4()
     app = _app(member=False, allow=True, set_side=_FakeUseCase(result=_plugin()))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), f"/{pid}/side"), json={"side": "both"}
     )
@@ -766,7 +765,7 @@ def test_set_side_non_member_is_404() -> None:
 def test_set_side_member_without_permission_is_403() -> None:
     pid = uuid.uuid4()
     app = _app(member=True, allow=False, set_side=_FakeUseCase(result=_plugin()))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), f"/{pid}/side"), json={"side": "both"}
     )
@@ -783,7 +782,7 @@ def _client_url(community: uuid.UUID, server: uuid.UUID, suffix: str = "") -> st
 def test_list_client_mods_returns_plugins() -> None:
     p = _plugin(side="client")
     app = _app(member=True, allow=True, list_client=_FakeUseCase(result=[p]))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_client_url(uuid.uuid4(), uuid.uuid4()))
     assert resp.status_code == 200
     body = resp.json()
@@ -793,7 +792,7 @@ def test_list_client_mods_returns_plugins() -> None:
 
 def test_list_client_mods_non_member_is_404() -> None:
     app = _app(member=False, allow=True, list_client=_FakeUseCase(result=[]))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_client_url(uuid.uuid4(), uuid.uuid4()))
     assert resp.status_code == 404
 
@@ -807,7 +806,7 @@ def test_download_client_modpack_streams_zip() -> None:
         allow=True,
         download_modpack=_FakeUseCase(result=_stream()),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_client_url(uuid.uuid4(), uuid.uuid4(), "/download"))
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "application/zip"
@@ -826,7 +825,7 @@ def test_download_client_modpack_declares_no_store() -> None:
         allow=True,
         download_modpack=_FakeUseCase(result=_stream()),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_client_url(uuid.uuid4(), uuid.uuid4(), "/download"))
     assert resp.status_code == 200
     assert resp.headers["cache-control"] == "no-store"
@@ -841,7 +840,7 @@ def test_download_client_modpack_member_without_permission_is_403() -> None:
         allow=False,
         download_modpack=_FakeUseCase(result=_stream()),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_client_url(uuid.uuid4(), uuid.uuid4(), "/download"))
     assert resp.status_code == 403
 
@@ -867,26 +866,22 @@ def test_download_client_modpack_head_answers_the_gets_headers() -> None:
     async def _served_stream() -> object:
         yield b"PK\x03\x04fake-zip"
 
-    served = next(
-        _client(
-            _app(
-                member=True,
-                allow=True,
-                download_modpack=_FakeUseCase(result=_served_stream()),
-            )
+    served = _client(
+        _app(
+            member=True,
+            allow=True,
+            download_modpack=_FakeUseCase(result=_served_stream()),
         )
     ).get(url)
 
     async def _probe_stream() -> object:
         yield b"PK\x03\x04fake-zip"
 
-    probed = next(
-        _client(
-            _app(
-                member=True,
-                allow=True,
-                download_modpack=_FakeUseCase(result=_probe_stream()),
-            )
+    probed = _client(
+        _app(
+            member=True,
+            allow=True,
+            download_modpack=_FakeUseCase(result=_probe_stream()),
         )
     ).head(url)
 
@@ -918,7 +913,7 @@ def test_download_client_modpack_head_does_not_open_the_stream() -> None:
 
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download_modpack=_FakeUseCase(result=_stream()))
-    resp = next(_client(app)).head(_client_url(community, server, "/download"))
+    resp = _client(app).head(_client_url(community, server, "/download"))
 
     assert resp.status_code == 200
     assert resp.content == b""
@@ -952,12 +947,12 @@ def test_download_client_modpack_head_is_answered_exactly_like_the_get(
 
         return _FakeUseCase(result=_stream())
 
-    probed = next(
-        _client(_app(member=member, allow=allow, download_modpack=_make()))
-    ).head(url)
-    served = next(
-        _client(_app(member=member, allow=allow, download_modpack=_make()))
-    ).get(url)
+    probed = _client(_app(member=member, allow=allow, download_modpack=_make())).head(
+        url
+    )
+    served = _client(_app(member=member, allow=allow, download_modpack=_make())).get(
+        url
+    )
 
     assert probed.status_code == served.status_code == expected
 
@@ -971,7 +966,7 @@ def test_install_success_audit_targets_plugin() -> None:
     app = _app(
         member=True, allow=True, install=_FakeInstall(result=p), recorder=recorder
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4()),
         data={"display_name": "Test Plugin"},
@@ -991,7 +986,7 @@ def test_install_unsettled_audit_targets_server() -> None:
         install=_FakeInstall(error=ServerFilesUnsettledError("x")),
         recorder=recorder,
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4()),
         data={"display_name": "Test"},
@@ -1011,7 +1006,7 @@ def test_install_busy_audit_targets_server() -> None:
         install=_FakeInstall(error=ServerBusyError("x")),
         recorder=recorder,
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4()),
         data={"display_name": "Test"},
@@ -1032,7 +1027,7 @@ def test_resolve_apply_success_audit_targets_server() -> None:
         resolve_apply=_FakeUseCase(result=(plan, [], [])),
         recorder=recorder,
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/resolve/apply"))
     assert resp.status_code == 200
     assert [e.operation for e in recorder.events] == [ops.PLUGIN_RESOLVE]
@@ -1048,7 +1043,7 @@ def test_resolve_apply_unsettled_audit_targets_server() -> None:
         resolve_apply=_FakeUseCase(error=ServerFilesUnsettledError("x")),
         recorder=recorder,
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/resolve/apply"))
     assert resp.status_code == 409
     assert [e.operation for e in recorder.events] == [ops.PLUGIN_RESOLVE]
@@ -1064,7 +1059,7 @@ def test_resolve_apply_busy_audit_targets_server() -> None:
         resolve_apply=_FakeUseCase(error=ServerBusyError("x")),
         recorder=recorder,
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/resolve/apply"))
     assert resp.status_code == 409
     assert [e.operation for e in recorder.events] == [ops.PLUGIN_RESOLVE]

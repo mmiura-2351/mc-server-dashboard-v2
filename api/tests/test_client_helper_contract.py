@@ -1,8 +1,8 @@
 """Contract for the endpoint-test client helper (issue #1980).
 
 ``enter_client(TestClient(app))`` must keep the app's lifespan OPEN while the
-test body runs its requests. The pattern it replaces -- ``next(_client(...))``
-over a ``with TestClient(app): yield`` generator -- finalized the generator the
+test body runs its requests. The pattern it replaces -- calling ``next()`` on a
+``with TestClient(app): yield`` generator helper -- finalized the generator the
 instant ``next()`` returned, running lifespan *shutdown* before the first
 request. An instrumented lifespan therefore records ``["startup"]`` (not
 ``["startup", "shutdown"]``) at request time under the new helper.

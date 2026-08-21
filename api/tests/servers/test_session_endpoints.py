@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from collections.abc import Iterator
 
 import pytest
 from fastapi import FastAPI
@@ -43,6 +42,7 @@ from mc_server_dashboard_api.servers.domain.game_session import (
     GameSessionSource,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
+from tests.client_utils import enter_client
 from tests.identity.fakes import make_user
 
 _NOW = dt.datetime(2026, 6, 12, 12, 0, tzinfo=dt.timezone.utc)
@@ -98,9 +98,8 @@ def _session(
     )
 
 
-def _client(app: object) -> Iterator[TestClient]:
-    with TestClient(app) as client:  # type: ignore[arg-type]
-        yield client
+def _client(app: object) -> TestClient:
+    return enter_client(TestClient(app))  # type: ignore[arg-type]
 
 
 _shared_app: FastAPI
@@ -131,14 +130,14 @@ def _url(community: uuid.UUID, server: uuid.UUID, suffix: str = "") -> str:
 
 def test_non_member_gets_404() -> None:
     app = _app(member=False, allow=True, list_=_FakeUseCase(result=[]))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4()))
     assert resp.status_code == 404
 
 
 def test_member_without_session_read_gets_403() -> None:
     app = _app(member=True, allow=False, list_=_FakeUseCase(result=[]))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4()))
     assert resp.status_code == 403
 
@@ -147,7 +146,7 @@ def test_authorized_member_gets_session_list() -> None:
     server = ServerId(uuid.uuid4())
     use_case = _FakeUseCase(result=[_session(server)])
     app = _app(member=True, allow=True, list_=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), server.value))
     assert resp.status_code == 200
     body = resp.json()
@@ -167,7 +166,7 @@ def test_bedrock_session_reports_source() -> None:
     server = ServerId(uuid.uuid4())
     use_case = _FakeUseCase(result=[_session(server, source=GameSessionSource.BEDROCK)])
     app = _app(member=True, allow=True, list_=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), server.value))
     assert resp.status_code == 200
     assert resp.json()["sessions"][0]["source"] == "bedrock"
@@ -177,7 +176,7 @@ def test_pagination_params_are_forwarded() -> None:
     server = ServerId(uuid.uuid4())
     use_case = _FakeUseCase(result=[])
     app = _app(member=True, allow=True, list_=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), server.value, "?limit=10&offset=20"))
     assert resp.status_code == 200
     assert use_case.calls[0]["limit"] == 10
@@ -188,7 +187,7 @@ def test_default_pagination_window() -> None:
     server = ServerId(uuid.uuid4())
     use_case = _FakeUseCase(result=[])
     app = _app(member=True, allow=True, list_=use_case)
-    client = next(_client(app))
+    client = _client(app)
     client.get(_url(uuid.uuid4(), server.value))
     assert use_case.calls[0]["limit"] == 50
     assert use_case.calls[0]["offset"] == 0
@@ -197,7 +196,7 @@ def test_default_pagination_window() -> None:
 def test_out_of_range_limit_is_rejected() -> None:
     server = ServerId(uuid.uuid4())
     app = _app(member=True, allow=True, list_=_FakeUseCase(result=[]))
-    client = next(_client(app))
+    client = _client(app)
     assert client.get(_url(uuid.uuid4(), server.value, "?limit=0")).status_code == 422
     assert client.get(_url(uuid.uuid4(), server.value, "?limit=999")).status_code == 422
 
@@ -206,6 +205,6 @@ def test_missing_server_gives_404() -> None:
     server = ServerId(uuid.uuid4())
     use_case = _FakeUseCase(error=ServerNotFoundError(str(server.value)))
     app = _app(member=True, allow=True, list_=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), server.value))
     assert resp.status_code == 404
