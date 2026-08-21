@@ -242,7 +242,7 @@ layers = [
 
 # Adapters must not be imported by domain or application (ARCHITECTURE.md 2.1).
 [[tool.importlinter.contracts]]
-name = "domain and application do not import adapters"
+name = "core domain and application do not import adapters"
 type = "forbidden"
 source_modules = [
     "mc_server_dashboard_api.core.domain",
@@ -252,9 +252,12 @@ forbidden_modules = ["mc_server_dashboard_api.core.adapters"]
 
 # Domain imports nothing internal (ARCHITECTURE.md 2.1: standard library only):
 # the own-quadrant half is the two contracts above, this one states the
-# cross-context half. core is a bounded context like the rest, not a shared
-# kernel the others may reach into — every sibling contract already forbids
-# importing `core`, so the ban is now mutual and stated from both ends (#2552).
+# cross-context half. At the domain/application layer core is a bounded context
+# like the rest, not a shared kernel the others may reach into — every sibling
+# contract already forbids importing `core`, so the ban is now mutual and stated
+# from both ends (#2552). It says nothing about the adapter layer, where
+# `core/adapters/database.py`'s `Base` and `core/adapters/metrics.py` are a
+# de-facto shared kernel across contexts (#2579).
 [[tool.importlinter.contracts]]
 name = "core domain and application import no other context"
 type = "forbidden"
@@ -487,13 +490,19 @@ type = "forbidden"
 source_modules = ["mc_server_dashboard_api.storage.domain"]
 forbidden_modules = ["mc_server_dashboard_api.storage.adapters"]
 
-# Source is `domain` only — NOT for lack of coverage: storage has no
-# `application` package to name (see above), so `domain` is its whole inward
-# side. This contract widens to domain + application the moment one lands.
+# Source is `domain` + `integrity` — NOT for lack of coverage: storage has no
+# `application` package to name (see above). `integrity` is the one subpackage
+# in the codebase outside the four quadrants; it holds the pure archive/region
+# probes that `storage/domain/{port,errors}.py` depend on, which puts it on the
+# inward side alongside `domain` rather than beside it (#2579). This contract
+# widens to include `application` the moment one lands.
 [[tool.importlinter.contracts]]
 name = "storage domain imports no other context"
 type = "forbidden"
-source_modules = ["mc_server_dashboard_api.storage.domain"]
+source_modules = [
+    "mc_server_dashboard_api.storage.domain",
+    "mc_server_dashboard_api.storage.integrity",
+]
 forbidden_modules = [
     "mc_server_dashboard_api.community",
     "mc_server_dashboard_api.identity",
@@ -594,3 +603,70 @@ forbidden_modules = [
     "mc_server_dashboard_api.dataplane",
     "mc_server_dashboard_api.core",
 ]
+
+# --- root-level modules (the third axis) -----------------------------------
+# The two axes above are layer ordering within a context and cross-context
+# bans. Neither says anything about the root-level modules sitting beside the
+# contexts, so an inward layer could reach `middleware` or any `http_*` edge
+# helper and no contract would fail (issue #2579). This contract is the third
+# axis, and the only one that is not per-context: no context's domain or
+# application imports a root-level module.
+#
+# `forbidden_modules` enumerates every module in
+# `ls src/mc_server_dashboard_api/*.py` except `rfc3339` — a pure RFC 3339
+# formatter with no HTTP, config or wiring dependency, which the inward layers
+# are deliberately free to import (the export manifest's `exported_at` stamp is
+# a file format, not an HTTP header). Keep the list in step with that `ls`: a
+# new root-level module belongs here unless it is neutral in the same way.
+[[tool.importlinter.contracts]]
+name = "no context's domain or application imports a root-level module"
+type = "forbidden"
+# Every context's inward layers. `storage` has no `application` package (see
+# above) and `dataplane` has no inward layer at all (see the note below), so
+# neither contributes one here.
+source_modules = [
+    "mc_server_dashboard_api.core.domain",
+    "mc_server_dashboard_api.core.application",
+    "mc_server_dashboard_api.identity.domain",
+    "mc_server_dashboard_api.identity.application",
+    "mc_server_dashboard_api.community.domain",
+    "mc_server_dashboard_api.community.application",
+    "mc_server_dashboard_api.fleet.domain",
+    "mc_server_dashboard_api.fleet.application",
+    "mc_server_dashboard_api.servers.domain",
+    "mc_server_dashboard_api.servers.application",
+    "mc_server_dashboard_api.storage.domain",
+    "mc_server_dashboard_api.versions.domain",
+    "mc_server_dashboard_api.versions.application",
+    "mc_server_dashboard_api.audit.domain",
+    "mc_server_dashboard_api.audit.application",
+]
+forbidden_modules = [
+    "mc_server_dashboard_api.app",
+    "mc_server_dashboard_api.config",
+    "mc_server_dashboard_api.dependencies",
+    "mc_server_dashboard_api.docs",
+    "mc_server_dashboard_api.download_cookie",
+    "mc_server_dashboard_api.export_openapi",
+    "mc_server_dashboard_api.http_content_disposition",
+    "mc_server_dashboard_api.http_datetime",
+    "mc_server_dashboard_api.http_head",
+    "mc_server_dashboard_api.http_problem",
+    "mc_server_dashboard_api.http_range",
+    "mc_server_dashboard_api.http_streaming",
+    "mc_server_dashboard_api.integrity_sweep_cli",
+    "mc_server_dashboard_api.logging",
+    "mc_server_dashboard_api.middleware",
+    "mc_server_dashboard_api.observability",
+    "mc_server_dashboard_api.webui",
+]
+
+# --- dataplane -------------------------------------------------------------
+# `dataplane` carries no contract of its own, and that is not an oversight: it
+# is api-only by design (`dataplane/api/` is its whole content), so a layered
+# contract over it would name layers that do not exist — asserting nothing
+# while reading as coverage (issue #2579). It is already enumerated as a
+# forbidden sibling in every other context's cross-context contract. The moment
+# it gains a `domain/` or `application/` package it gets the same three
+# contracts as its siblings plus a source entry in the contract above; this
+# note is the record of when that is due.
