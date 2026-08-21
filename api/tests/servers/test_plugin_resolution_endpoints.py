@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from collections.abc import Iterator
 
 import pytest
 from fastapi import FastAPI
@@ -50,6 +49,7 @@ from mc_server_dashboard_api.servers.domain.plugin import (
     ServerPlugin,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
+from tests.client_utils import enter_client
 from tests.identity.fakes import make_user
 
 _NOW = dt.datetime(2026, 6, 20, 12, 0, tzinfo=dt.timezone.utc)
@@ -84,9 +84,8 @@ class _FakeUseCase:
         return self._result
 
 
-def _client(app: object) -> Iterator[TestClient]:
-    with TestClient(app) as client:  # type: ignore[arg-type]
-        yield client
+def _client(app: object) -> TestClient:
+    return enter_client(TestClient(app))  # type: ignore[arg-type]
 
 
 _shared_app: FastAPI
@@ -170,14 +169,14 @@ def _plugin() -> ServerPlugin:
 
 def test_non_member_gets_404_on_plan() -> None:
     app = _app(member=False, allow=True, resolve=_FakeUseCase(result=_plan()))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/resolve"))
     assert resp.status_code == 404
 
 
 def test_member_without_permission_gets_403_on_apply() -> None:
     app = _app(member=True, allow=False, apply=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/resolve/apply"))
     assert resp.status_code == 403
 
@@ -187,7 +186,7 @@ def test_member_without_permission_gets_403_on_apply() -> None:
 
 def test_plan_returns_200() -> None:
     app = _app(member=True, allow=True, resolve=_FakeUseCase(result=_plan()))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/resolve"))
     assert resp.status_code == 200
     body = resp.json()
@@ -203,7 +202,7 @@ def test_plan_catalog_upstream_failure_is_502() -> None:
         allow=True,
         resolve=_FakeUseCase(error=CatalogUpstreamFailedError("down")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/resolve"))
     assert resp.status_code == 502
     assert resp.json()["reason"] == "catalog_upstream_failed"
@@ -218,7 +217,7 @@ def test_apply_returns_200() -> None:
         allow=True,
         apply=_FakeUseCase(result=(_plan(), [_plugin()], ["broken-lib"])),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/resolve/apply"))
     assert resp.status_code == 200
     body = resp.json()
@@ -234,7 +233,7 @@ def test_apply_server_unsettled_is_409() -> None:
         allow=True,
         apply=_FakeUseCase(error=ServerFilesUnsettledError("sid")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/resolve/apply"))
     assert resp.status_code == 409
     assert resp.json()["reason"] == "server_unsettled"

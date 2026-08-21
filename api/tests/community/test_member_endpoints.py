@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from collections.abc import Iterator
 
 import pytest
 from fastapi import FastAPI
@@ -51,6 +50,7 @@ from mc_server_dashboard_api.dependencies import (
     get_remove_member,
     get_unassign_role,
 )
+from tests.client_utils import enter_client
 from tests.identity.fakes import make_user
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
@@ -96,9 +96,8 @@ def _bind_shared_app(shared_app: FastAPI) -> None:
     _shared_app = shared_app
 
 
-def _client(app: object) -> Iterator[TestClient]:
-    with TestClient(app) as client:  # type: ignore[arg-type]
-        yield client
+def _client(app: object) -> TestClient:
+    return enter_client(TestClient(app))  # type: ignore[arg-type]
 
 
 def _app(
@@ -150,7 +149,7 @@ def test_add_member_authorized_returns_201() -> None:
     user = UserId(uuid.uuid4())
     use_case = _FakeUseCase(result=_membership(community, user))
     app = _app(member=True, allow=True, add_uc=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         f"/api/communities/{community.value}/members",
         json={"user_id": str(user.value)},
@@ -161,7 +160,7 @@ def test_add_member_authorized_returns_201() -> None:
 
 def test_add_member_non_member_gets_404() -> None:
     app = _app(member=False, allow=True, add_uc=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         f"/api/communities/{uuid.uuid4()}/members", json={"user_id": str(uuid.uuid4())}
     )
@@ -170,7 +169,7 @@ def test_add_member_non_member_gets_404() -> None:
 
 def test_add_member_without_permission_gets_403() -> None:
     app = _app(member=True, allow=False, add_uc=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         f"/api/communities/{uuid.uuid4()}/members", json={"user_id": str(uuid.uuid4())}
     )
@@ -181,7 +180,7 @@ def test_add_member_unknown_user_returns_422() -> None:
     app = _app(
         member=True, allow=True, add_uc=_FakeUseCase(error=MemberUserNotFoundError("x"))
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         f"/api/communities/{uuid.uuid4()}/members", json={"user_id": str(uuid.uuid4())}
     )
@@ -195,7 +194,7 @@ def test_add_member_duplicate_returns_409() -> None:
         allow=True,
         add_uc=_FakeUseCase(error=MembershipAlreadyExistsError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         f"/api/communities/{uuid.uuid4()}/members", json={"user_id": str(uuid.uuid4())}
     )
@@ -205,7 +204,7 @@ def test_add_member_duplicate_returns_409() -> None:
 
 def test_add_member_invalid_user_id_returns_422() -> None:
     app = _app(member=True, allow=True, add_uc=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         f"/api/communities/{uuid.uuid4()}/members", json={"user_id": "not-a-uuid"}
     )
@@ -217,7 +216,7 @@ def test_add_member_by_username_passes_username_to_use_case() -> None:
     user = UserId(uuid.uuid4())
     use_case = _FakeUseCase(result=_membership(community, user))
     app = _app(member=True, allow=True, add_uc=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         f"/api/communities/{community.value}/members",
         json={"username": "alice"},
@@ -232,7 +231,7 @@ def test_add_member_unknown_username_returns_422_same_shape_as_unknown_id() -> N
     app = _app(
         member=True, allow=True, add_uc=_FakeUseCase(error=MemberUserNotFoundError("x"))
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         f"/api/communities/{uuid.uuid4()}/members", json={"username": "ghost"}
     )
@@ -242,7 +241,7 @@ def test_add_member_unknown_username_returns_422_same_shape_as_unknown_id() -> N
 
 def test_add_member_both_identifiers_returns_422() -> None:
     app = _app(member=True, allow=True, add_uc=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         f"/api/communities/{uuid.uuid4()}/members",
         json={"user_id": str(uuid.uuid4()), "username": "alice"},
@@ -252,7 +251,7 @@ def test_add_member_both_identifiers_returns_422() -> None:
 
 def test_add_member_neither_identifier_returns_422() -> None:
     app = _app(member=True, allow=True, add_uc=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(f"/api/communities/{uuid.uuid4()}/members", json={})
     assert resp.status_code == 422
 
@@ -270,7 +269,7 @@ def test_list_members_authorized_returns_200() -> None:
         username="alice",
     )
     app = _app(member=True, allow=True, list_uc=_FakeUseCase(result=[view]))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(f"/api/communities/{community.value}/members")
     assert resp.status_code == 200
     assert resp.json()[0]["role_names"] == ["Owner"]
@@ -290,7 +289,7 @@ def test_list_members_unresolved_username_is_null_in_response() -> None:
         username=None,
     )
     app = _app(member=True, allow=True, list_uc=_FakeUseCase(result=[view]))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(f"/api/communities/{community.value}/members")
     assert resp.status_code == 200
     assert resp.json()[0]["username"] is None
@@ -298,14 +297,14 @@ def test_list_members_unresolved_username_is_null_in_response() -> None:
 
 def test_list_members_non_member_gets_404() -> None:
     app = _app(member=False, allow=True, list_uc=_FakeUseCase(result=[]))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(f"/api/communities/{uuid.uuid4()}/members")
     assert resp.status_code == 404
 
 
 def test_list_members_without_permission_gets_403() -> None:
     app = _app(member=True, allow=False, list_uc=_FakeUseCase(result=[]))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(f"/api/communities/{uuid.uuid4()}/members")
     assert resp.status_code == 403
 
@@ -315,21 +314,21 @@ def test_list_members_without_permission_gets_403() -> None:
 
 def test_remove_member_authorized_returns_204() -> None:
     app = _app(member=True, allow=True, remove_uc=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.delete(f"/api/communities/{uuid.uuid4()}/members/{uuid.uuid4()}")
     assert resp.status_code == 204
 
 
 def test_remove_member_non_member_gets_404() -> None:
     app = _app(member=False, allow=True, remove_uc=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.delete(f"/api/communities/{uuid.uuid4()}/members/{uuid.uuid4()}")
     assert resp.status_code == 404
 
 
 def test_remove_member_without_permission_gets_403() -> None:
     app = _app(member=True, allow=False, remove_uc=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.delete(f"/api/communities/{uuid.uuid4()}/members/{uuid.uuid4()}")
     assert resp.status_code == 403
 
@@ -340,7 +339,7 @@ def test_remove_missing_member_returns_404() -> None:
         allow=True,
         remove_uc=_FakeUseCase(error=MembershipNotFoundError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.delete(f"/api/communities/{uuid.uuid4()}/members/{uuid.uuid4()}")
     assert resp.status_code == 404
 
@@ -351,7 +350,7 @@ def test_remove_last_owner_returns_409() -> None:
         allow=True,
         remove_uc=_FakeUseCase(error=LastOwnerRemovalError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.delete(f"/api/communities/{uuid.uuid4()}/members/{uuid.uuid4()}")
     assert resp.status_code == 409
     assert resp.json()["reason"] == "last_owner"
@@ -362,7 +361,7 @@ def test_remove_last_owner_returns_409() -> None:
 
 def test_assign_role_authorized_returns_204() -> None:
     app = _app(member=True, allow=True, assign_uc=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         f"/api/communities/{uuid.uuid4()}/members/{uuid.uuid4()}/roles",
         json={"role_id": str(uuid.uuid4())},
@@ -372,7 +371,7 @@ def test_assign_role_authorized_returns_204() -> None:
 
 def test_assign_role_without_permission_gets_403() -> None:
     app = _app(member=True, allow=False, assign_uc=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         f"/api/communities/{uuid.uuid4()}/members/{uuid.uuid4()}/roles",
         json={"role_id": str(uuid.uuid4())},
@@ -384,7 +383,7 @@ def test_assign_role_cross_community_returns_404() -> None:
     app = _app(
         member=True, allow=True, assign_uc=_FakeUseCase(error=RoleNotFoundError("x"))
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         f"/api/communities/{uuid.uuid4()}/members/{uuid.uuid4()}/roles",
         json={"role_id": str(uuid.uuid4())},
@@ -394,7 +393,7 @@ def test_assign_role_cross_community_returns_404() -> None:
 
 def test_assign_role_invalid_role_id_returns_422() -> None:
     app = _app(member=True, allow=True, assign_uc=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         f"/api/communities/{uuid.uuid4()}/members/{uuid.uuid4()}/roles",
         json={"role_id": "not-a-uuid"},
@@ -410,7 +409,7 @@ def test_assign_role_ceiling_exceeded_returns_403() -> None:
             error=PermissionCeilingExceededError(["community:delete"])
         ),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         f"/api/communities/{uuid.uuid4()}/members/{uuid.uuid4()}/roles",
         json={"role_id": str(uuid.uuid4())},
@@ -423,7 +422,7 @@ def test_assign_role_ceiling_exceeded_returns_403() -> None:
 
 def test_unassign_role_authorized_returns_204() -> None:
     app = _app(member=True, allow=True, unassign_uc=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.delete(
         f"/api/communities/{uuid.uuid4()}/members/{uuid.uuid4()}/roles/{uuid.uuid4()}"
     )
@@ -436,7 +435,7 @@ def test_unassign_last_owner_returns_409() -> None:
         allow=True,
         unassign_uc=_FakeUseCase(error=LastOwnerRemovalError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.delete(
         f"/api/communities/{uuid.uuid4()}/members/{uuid.uuid4()}/roles/{uuid.uuid4()}"
     )
@@ -446,7 +445,7 @@ def test_unassign_last_owner_returns_409() -> None:
 
 def test_unassign_role_non_member_gets_404() -> None:
     app = _app(member=False, allow=True, unassign_uc=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.delete(
         f"/api/communities/{uuid.uuid4()}/members/{uuid.uuid4()}/roles/{uuid.uuid4()}"
     )

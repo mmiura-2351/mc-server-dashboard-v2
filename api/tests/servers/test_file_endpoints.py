@@ -20,7 +20,7 @@ from __future__ import annotations
 import base64
 import datetime as dt
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 from urllib.parse import quote
 
 import httpx2
@@ -113,6 +113,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 )
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from tests.audit.fakes import RecordingAuditRecorder
+from tests.client_utils import enter_client
 from tests.community.fakes import FakeAuthzUnitOfWork
 from tests.identity.fakes import FakeClock, make_user
 from tests.identity.fakes import FakeUnitOfWork as IdentityFakeUnitOfWork
@@ -169,9 +170,8 @@ class _FakeUseCase:
         return self._result
 
 
-def _client(app: object) -> Iterator[TestClient]:
-    with TestClient(app) as client:  # type: ignore[arg-type]
-        yield client
+def _client(app: object) -> TestClient:
+    return enter_client(TestClient(app))  # type: ignore[arg-type]
 
 
 class _FakeUpload:
@@ -401,14 +401,14 @@ def _bearer() -> dict[str, str]:
 
 def test_non_member_gets_404_on_read() -> None:
     app = _app(member=False, allow=True, read=_FakeUseCase(result=b""))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4()), params={"path": "f"})
     assert resp.status_code == 404
 
 
 def test_member_without_permission_gets_403_on_write() -> None:
     app = _app(member=True, allow=False, write=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.put(
         _url(uuid.uuid4(), uuid.uuid4()),
         params={"path": "f"},
@@ -423,7 +423,7 @@ def test_member_without_permission_gets_403_on_write() -> None:
 def test_read_returns_base64_content() -> None:
     raw = bytes(range(256))  # non-UTF-8 bytes prove no encoding mangling
     app = _app(member=True, allow=True, read=_FakeUseCase(result=raw))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4()), params={"path": "level.dat"})
     assert resp.status_code == 200
     body = resp.json()
@@ -436,7 +436,7 @@ def test_list_returns_entries() -> None:
         result=DirListing(entries=[FileEntry(name="world", is_dir=True, size=0)])
     )
     app = _app(member=True, allow=True, list_=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(
         _url(uuid.uuid4(), uuid.uuid4()), params={"path": ".", "list": "true"}
     )
@@ -453,7 +453,7 @@ def test_list_surfaces_truncated_flag() -> None:
         )
     )
     app = _app(member=True, allow=True, list_=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(
         _url(uuid.uuid4(), uuid.uuid4()), params={"path": ".", "list": "true"}
     )
@@ -465,7 +465,7 @@ def test_list_disconnected_worker_is_503() -> None:
     app = _app(
         member=True, allow=True, list_=_FakeUseCase(error=WorkerUnavailableError("x"))
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(
         _url(uuid.uuid4(), uuid.uuid4()), params={"path": ".", "list": "true"}
     )
@@ -479,7 +479,7 @@ def test_list_transitional_server_is_409() -> None:
         allow=True,
         list_=_FakeUseCase(error=ServerFilesUnsettledError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(
         _url(uuid.uuid4(), uuid.uuid4()), params={"path": ".", "list": "true"}
     )
@@ -493,7 +493,7 @@ def test_write_server_busy_is_409() -> None:
         allow=True,
         write=_FakeUseCase(error=ServerBusyError("s")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.put(
         _url(uuid.uuid4(), uuid.uuid4()),
         params={"path": "level.dat"},
@@ -507,7 +507,7 @@ def test_write_decodes_base64_and_passes_bytes() -> None:
     raw = bytes(range(256))
     use_case = _FakeUseCase()
     app = _app(member=True, allow=True, write=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.put(
         _url(uuid.uuid4(), uuid.uuid4()),
         params={"path": "level.dat"},
@@ -519,7 +519,7 @@ def test_write_decodes_base64_and_passes_bytes() -> None:
 
 def test_write_invalid_base64_is_422() -> None:
     app = _app(member=True, allow=True, write=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.put(
         _url(uuid.uuid4(), uuid.uuid4()),
         params={"path": "f"},
@@ -538,7 +538,7 @@ def test_read_missing_file_is_404() -> None:
         allow=True,
         read=_FakeUseCase(error=ServerFileNotFoundError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4()), params={"path": "f"})
     assert resp.status_code == 404
 
@@ -547,7 +547,7 @@ def test_read_missing_server_is_404() -> None:
     app = _app(
         member=True, allow=True, read=_FakeUseCase(error=ServerNotFoundError("x"))
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4()), params={"path": "f"})
     assert resp.status_code == 404
 
@@ -556,7 +556,7 @@ def test_read_traversal_is_422() -> None:
     app = _app(
         member=True, allow=True, read=_FakeUseCase(error=InvalidFilePathError("x"))
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4()), params={"path": "../escape"})
     assert resp.status_code == 422
     assert resp.json()["reason"] == "invalid_path"
@@ -570,7 +570,7 @@ def test_read_is_a_directory_surfaces_reason() -> None:
         allow=True,
         read=_FakeUseCase(error=InvalidFilePathError("x", reason="is_a_directory")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4()), params={"path": "config"})
     assert resp.status_code == 422
     assert resp.json()["reason"] == "is_a_directory"
@@ -587,7 +587,7 @@ def test_read_symlink_refused_surfaces_reason() -> None:
         allow=True,
         read=_FakeUseCase(error=InvalidFilePathError("x", reason="symlink_refused")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(
         _url(uuid.uuid4(), uuid.uuid4()), params={"path": "alias/inner.txt"}
     )
@@ -598,7 +598,7 @@ def test_read_symlink_refused_surfaces_reason() -> None:
 def test_read_payload_too_large_is_413() -> None:
     # A running-server read past the control-plane cap (issue #548) -> 413.
     app = _app(member=True, allow=True, read=_FakeUseCase(error=FileTooLargeError("x")))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4()), params={"path": "big.bin"})
     assert resp.status_code == 413
     assert resp.json()["reason"] == "file_too_large"
@@ -610,7 +610,7 @@ def test_list_not_a_directory_surfaces_reason() -> None:
         allow=True,
         list_=_FakeUseCase(error=InvalidFilePathError("x", reason="not_a_directory")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(
         _url(uuid.uuid4(), uuid.uuid4()),
         params={"path": "server.properties", "list": "true"},
@@ -625,7 +625,7 @@ def test_read_transitional_is_409() -> None:
         allow=True,
         read=_FakeUseCase(error=ServerFilesUnsettledError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4()), params={"path": "f"})
     assert resp.status_code == 409
     assert resp.json()["reason"] == "server_unsettled"
@@ -635,7 +635,7 @@ def test_read_disconnected_worker_is_503() -> None:
     app = _app(
         member=True, allow=True, read=_FakeUseCase(error=WorkerUnavailableError("x"))
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4()), params={"path": "f"})
     assert resp.status_code == 503
     assert resp.json()["reason"] == "worker_unavailable"
@@ -645,7 +645,7 @@ def test_write_oversized_is_413() -> None:
     app = _app(
         member=True, allow=True, write=_FakeUseCase(error=FileTooLargeError("x"))
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.put(
         _url(uuid.uuid4(), uuid.uuid4()),
         params={"path": "f"},
@@ -659,7 +659,7 @@ def test_write_traversal_is_422() -> None:
     app = _app(
         member=True, allow=True, write=_FakeUseCase(error=InvalidFilePathError("x"))
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.put(
         _url(uuid.uuid4(), uuid.uuid4()),
         params={"path": "../escape"},
@@ -677,7 +677,7 @@ def test_write_symlink_refused_surfaces_reason() -> None:
         allow=True,
         write=_FakeUseCase(error=InvalidFilePathError("x", reason="symlink_refused")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.put(
         _url(uuid.uuid4(), uuid.uuid4()),
         params={"path": "link"},
@@ -695,7 +695,7 @@ def test_write_name_too_long_surfaces_reason() -> None:
         allow=True,
         write=_FakeUseCase(error=InvalidFilePathError("x", reason="name_too_long")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.put(
         _url(uuid.uuid4(), uuid.uuid4()),
         params={"path": "x" * 300},
@@ -712,7 +712,7 @@ def test_write_under_a_file_parent_is_409() -> None:
         allow=True,
         write=_FakeUseCase(error=FileAlreadyExistsError("file/child")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.put(
         _url(uuid.uuid4(), uuid.uuid4()),
         params={"path": "file/child"},
@@ -727,7 +727,7 @@ def test_write_under_a_file_parent_is_409() -> None:
 
 def test_history_lists_versions() -> None:
     app = _app(member=True, allow=True, history=_FakeUseCase(result=["v2", "v1"]))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(
         _url(uuid.uuid4(), uuid.uuid4(), "/history"), params={"path": "f"}
     )
@@ -738,7 +738,7 @@ def test_history_lists_versions() -> None:
 def test_version_returns_base64_content() -> None:
     raw = bytes(range(256))  # non-UTF-8 bytes prove no encoding mangling
     app = _app(member=True, allow=True, version=_FakeUseCase(result=raw))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(
         _url(uuid.uuid4(), uuid.uuid4(), "/version"),
         params={"path": "f", "version_id": "v1"},
@@ -752,7 +752,7 @@ def test_version_returns_base64_content() -> None:
 def test_version_passes_path_and_version_id() -> None:
     use_case = _FakeUseCase(result=b"old")
     app = _app(member=True, allow=True, version=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(
         _url(uuid.uuid4(), uuid.uuid4(), "/version"),
         params={"path": "server.properties", "version_id": "v2"},
@@ -770,7 +770,7 @@ def test_version_allowed_with_file_read() -> None:
         permissions={"file:read"},
         version=_FakeUseCase(result=b"old"),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(
         _url(uuid.uuid4(), uuid.uuid4(), "/version"),
         params={"path": "f", "version_id": "v1"},
@@ -787,7 +787,7 @@ def test_version_forbidden_with_file_history_only() -> None:
         permissions={"file:history"},
         version=_FakeUseCase(result=b"old"),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(
         _url(uuid.uuid4(), uuid.uuid4(), "/version"),
         params={"path": "f", "version_id": "v1"},
@@ -801,7 +801,7 @@ def test_version_unknown_is_404() -> None:
         allow=True,
         version=_FakeUseCase(error=ServerFileNotFoundError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(
         _url(uuid.uuid4(), uuid.uuid4(), "/version"),
         params={"path": "f", "version_id": "missing"},
@@ -813,7 +813,7 @@ def test_version_traversal_is_422() -> None:
     app = _app(
         member=True, allow=True, version=_FakeUseCase(error=InvalidFilePathError("x"))
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(
         _url(uuid.uuid4(), uuid.uuid4(), "/version"),
         params={"path": "../escape", "version_id": "v1"},
@@ -830,7 +830,7 @@ def test_version_malformed_version_id_is_422() -> None:
         allow=True,
         version=_FakeUseCase(error=InvalidVersionIdError("bad.id")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(
         _url(uuid.uuid4(), uuid.uuid4(), "/version"),
         params={"path": "f", "version_id": "bad.id"},
@@ -842,7 +842,7 @@ def test_version_malformed_version_id_is_422() -> None:
 def test_rollback_success_is_204() -> None:
     use_case = _FakeUseCase()
     app = _app(member=True, allow=True, rollback=use_case)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/rollback"),
         params={"path": "f"},
@@ -858,7 +858,7 @@ def test_rollback_while_running_is_409() -> None:
         allow=True,
         rollback=_FakeUseCase(error=ServerNotStoppedError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/rollback"),
         params={"path": "f"},
@@ -876,7 +876,7 @@ def test_rollback_malformed_version_id_is_422() -> None:
         allow=True,
         rollback=_FakeUseCase(error=InvalidVersionIdError("bad.id")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/rollback"),
         params={"path": "f"},
@@ -892,7 +892,7 @@ def test_rollback_malformed_version_id_is_422() -> None:
 def test_upload_single_file_is_204() -> None:
     upload = _FakeUpload()
     app = _app(member=True, allow=True, upload=upload)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/upload"),
         params={"path": "plugins"},
@@ -908,7 +908,7 @@ def test_upload_single_file_is_204() -> None:
 def test_upload_extract_flag_passed() -> None:
     upload = _FakeUpload()
     app = _app(member=True, allow=True, upload=upload)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/upload"),
         params={"path": ".", "extract": "true"},
@@ -920,7 +920,7 @@ def test_upload_extract_flag_passed() -> None:
 
 def test_upload_requires_file_edit_permission() -> None:
     app = _app(member=True, allow=False, upload=_FakeUpload())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/upload"),
         files={"file": ("f", b"x", "application/octet-stream")},
@@ -934,7 +934,7 @@ def test_upload_traversal_filename_is_422() -> None:
         allow=True,
         upload=_FakeUpload(error=InvalidFilePathError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/upload"),
         files={"file": ("f", b"x", "application/octet-stream")},
@@ -949,7 +949,7 @@ def test_upload_running_is_409() -> None:
         allow=True,
         upload=_FakeUpload(error=ServerFilesUnsettledError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/upload"),
         files={"file": ("f", b"x", "application/octet-stream")},
@@ -962,7 +962,7 @@ def test_upload_over_cap_is_413() -> None:
     app = _app(
         member=True, allow=True, upload=_FakeUpload(error=FileTooLargeError("x"))
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/upload"),
         files={"file": ("f", b"x", "application/octet-stream")},
@@ -979,7 +979,7 @@ def test_download_file_returns_bytes() -> None:
     app = _app(
         member=True, allow=True, download=_FakeDownload(is_dir=False, file_content=raw)
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(
         _url(uuid.uuid4(), uuid.uuid4(), "/download"),
         params={"path": "level.dat"},
@@ -1002,7 +1002,7 @@ def test_download_dir_returns_zip_stream() -> None:
         allow=True,
         download=_FakeDownload(is_dir=True, zip_chunks=[b"PK", b"zip-tail"]),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(
         _url(uuid.uuid4(), uuid.uuid4(), "/download"),
         params={"path": "world"},
@@ -1018,7 +1018,7 @@ def test_download_dir_returns_zip_stream() -> None:
 
 def test_download_requires_file_read_permission() -> None:
     app = _app(member=True, allow=False, download=_FakeDownload())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(
         _url(uuid.uuid4(), uuid.uuid4(), "/download"),
         params={"path": "f"},
@@ -1033,7 +1033,7 @@ def test_download_missing_is_404() -> None:
         allow=True,
         download=_FakeDownload(error=ServerFileNotFoundError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(
         _url(uuid.uuid4(), uuid.uuid4(), "/download"),
         params={"path": "f"},
@@ -1048,7 +1048,7 @@ def test_download_running_is_409() -> None:
         allow=True,
         download=_FakeDownload(error=ServerFilesUnsettledError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(
         _url(uuid.uuid4(), uuid.uuid4(), "/download"),
         params={"path": "f"},
@@ -1066,7 +1066,7 @@ def test_download_filename_with_quote_is_sanitized() -> None:
     # extra Content-Disposition parameters; the quote is replaced in the ASCII
     # fallback and the real name is carried percent-encoded in filename*.
     app = _app(member=True, allow=True, download=_FakeDownload(is_dir=False))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(
         _url(uuid.uuid4(), uuid.uuid4(), "/download"),
         params={"path": 'evil".zip'},
@@ -1083,7 +1083,7 @@ def test_download_unicode_filename_does_not_500() -> None:
     # A legitimate Unicode name (ワールド.zip) used to 500 when Starlette latin-1
     # encoded the header; it now succeeds with an ASCII fallback + UTF-8 filename*.
     app = _app(member=True, allow=True, download=_FakeDownload(is_dir=False))
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(
         _url(uuid.uuid4(), uuid.uuid4(), "/download"),
         params={"path": "ワールド.zip"},
@@ -1110,7 +1110,7 @@ def test_upload_over_cap_body_is_413_before_use_case(
     monkeypatch.setattr(files_module, "MAX_UPLOAD_BYTES", 16)
     upload = _FakeUpload()
     app = _app(member=True, allow=True, upload=upload)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/upload"),
         files={"file": ("big.bin", b"x" * 1024, "application/octet-stream")},
@@ -1126,7 +1126,7 @@ def test_upload_over_cap_body_is_413_before_use_case(
 def test_write_success_records_file_write_audit() -> None:
     recorder = RecordingAuditRecorder()
     app = _app(member=True, allow=True, write=_FakeUseCase(), recorder=recorder)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.put(
         _url(uuid.uuid4(), uuid.uuid4()),
         params={"path": "level.dat"},
@@ -1146,7 +1146,7 @@ def test_write_unsettled_records_denied_audit() -> None:
         write=_FakeUseCase(error=ServerFilesUnsettledError("x")),
         recorder=recorder,
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.put(
         _url(uuid.uuid4(), uuid.uuid4()),
         params={"path": "f"},
@@ -1167,7 +1167,7 @@ def test_write_validation_failure_is_not_audited() -> None:
         write=_FakeUseCase(error=InvalidFilePathError("x")),
         recorder=recorder,
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.put(
         _url(uuid.uuid4(), uuid.uuid4()),
         params={"path": "../escape"},
@@ -1180,7 +1180,7 @@ def test_write_validation_failure_is_not_audited() -> None:
 def test_rollback_success_records_file_rollback_audit() -> None:
     recorder = RecordingAuditRecorder()
     app = _app(member=True, allow=True, rollback=_FakeUseCase(), recorder=recorder)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/rollback"),
         params={"path": "f"},
@@ -1200,7 +1200,7 @@ def test_rollback_while_running_records_denied_audit() -> None:
         rollback=_FakeUseCase(error=ServerNotStoppedError("x")),
         recorder=recorder,
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/rollback"),
         params={"path": "f"},
@@ -1214,7 +1214,7 @@ def test_rollback_while_running_records_denied_audit() -> None:
 def test_upload_success_records_file_upload_audit() -> None:
     recorder = RecordingAuditRecorder()
     app = _app(member=True, allow=True, upload=_FakeUpload(), recorder=recorder)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/upload"),
         files={"file": ("mod.jar", b"jar", "application/octet-stream")},
@@ -1233,7 +1233,7 @@ def test_upload_unsettled_records_denied_audit() -> None:
         upload=_FakeUpload(error=ServerFilesUnsettledError("x")),
         recorder=recorder,
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/upload"),
         files={"file": ("f", b"x", "application/octet-stream")},
@@ -1251,7 +1251,7 @@ def test_download_success_records_file_download_audit() -> None:
         download=_FakeDownload(is_dir=False, file_content=b"x"),
         recorder=recorder,
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(
         _url(uuid.uuid4(), uuid.uuid4(), "/download"),
         params={"path": "f"},
@@ -1270,7 +1270,7 @@ def test_download_unsettled_records_denied_audit() -> None:
         download=_FakeDownload(error=ServerFilesUnsettledError("x")),
         recorder=recorder,
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(
         _url(uuid.uuid4(), uuid.uuid4(), "/download"),
         params={"path": "f"},
@@ -1291,7 +1291,7 @@ def test_download_validation_failure_is_not_audited() -> None:
         download=_FakeDownload(error=InvalidFilePathError("x")),
         recorder=recorder,
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(
         _url(uuid.uuid4(), uuid.uuid4(), "/download"),
         params={"path": "../escape"},
@@ -1307,7 +1307,7 @@ def test_download_validation_failure_is_not_audited() -> None:
 def test_rename_is_204_and_passes_paths() -> None:
     rename = _FakeUseCase()
     app = _app(member=True, allow=True, rename=rename)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/rename"),
         json={"from": "old.txt", "to": "new.txt"},
@@ -1319,7 +1319,7 @@ def test_rename_is_204_and_passes_paths() -> None:
 
 def test_rename_requires_file_edit_permission() -> None:
     app = _app(member=True, allow=False, rename=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/rename"),
         json={"from": "a", "to": "b"},
@@ -1331,7 +1331,7 @@ def test_rename_missing_source_is_404() -> None:
     app = _app(
         member=True, allow=True, rename=_FakeUseCase(error=ServerFileNotFoundError("x"))
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/rename"), json={"from": "a", "to": "b"}
     )
@@ -1342,7 +1342,7 @@ def test_rename_existing_destination_is_409() -> None:
     app = _app(
         member=True, allow=True, rename=_FakeUseCase(error=FileAlreadyExistsError("b"))
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/rename"), json={"from": "a", "to": "b"}
     )
@@ -1354,7 +1354,7 @@ def test_rename_traversal_is_422() -> None:
     app = _app(
         member=True, allow=True, rename=_FakeUseCase(error=InvalidFilePathError("x"))
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/rename"),
         json={"from": "a", "to": "../escape"},
@@ -1371,7 +1371,7 @@ def test_rename_to_over_long_destination_surfaces_name_too_long() -> None:
         allow=True,
         rename=_FakeUseCase(error=InvalidFilePathError("x", reason="name_too_long")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/rename"),
         json={"from": "a", "to": "x" * 300},
@@ -1386,7 +1386,7 @@ def test_rename_running_is_409() -> None:
         allow=True,
         rename=_FakeUseCase(error=ServerFilesUnsettledError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/rename"), json={"from": "a", "to": "b"}
     )
@@ -1397,7 +1397,7 @@ def test_rename_running_is_409() -> None:
 def test_rename_success_records_audit() -> None:
     recorder = RecordingAuditRecorder()
     app = _app(member=True, allow=True, rename=_FakeUseCase(), recorder=recorder)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/rename"), json={"from": "a", "to": "b"}
     )
@@ -1414,7 +1414,7 @@ def test_rename_unsettled_records_denied_audit() -> None:
         rename=_FakeUseCase(error=ServerFilesUnsettledError("x")),
         recorder=recorder,
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/rename"), json={"from": "a", "to": "b"}
     )
@@ -1429,7 +1429,7 @@ def test_rename_unsettled_records_denied_audit() -> None:
 def test_delete_is_204_and_passes_path() -> None:
     delete = _FakeUseCase()
     app = _app(member=True, allow=True, delete=delete)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.delete(_url(uuid.uuid4(), uuid.uuid4()), params={"path": "old.txt"})
     assert resp.status_code == 204
     assert delete.calls[0]["rel_path"] == "old.txt"
@@ -1437,7 +1437,7 @@ def test_delete_is_204_and_passes_path() -> None:
 
 def test_delete_requires_file_edit_permission() -> None:
     app = _app(member=True, allow=False, delete=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.delete(_url(uuid.uuid4(), uuid.uuid4()), params={"path": "f"})
     assert resp.status_code == 403
 
@@ -1446,7 +1446,7 @@ def test_delete_missing_is_404() -> None:
     app = _app(
         member=True, allow=True, delete=_FakeUseCase(error=ServerFileNotFoundError("x"))
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.delete(_url(uuid.uuid4(), uuid.uuid4()), params={"path": "f"})
     assert resp.status_code == 404
 
@@ -1457,7 +1457,7 @@ def test_delete_running_is_409() -> None:
         allow=True,
         delete=_FakeUseCase(error=ServerFilesUnsettledError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.delete(_url(uuid.uuid4(), uuid.uuid4()), params={"path": "f"})
     assert resp.status_code == 409
     assert resp.json()["reason"] == "server_unsettled"
@@ -1466,7 +1466,7 @@ def test_delete_running_is_409() -> None:
 def test_delete_success_records_audit() -> None:
     recorder = RecordingAuditRecorder()
     app = _app(member=True, allow=True, delete=_FakeUseCase(), recorder=recorder)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.delete(_url(uuid.uuid4(), uuid.uuid4()), params={"path": "f"})
     assert resp.status_code == 204
     assert [e.operation for e in recorder.events] == [ops.FILE_DELETE]
@@ -1479,7 +1479,7 @@ def test_delete_success_records_audit() -> None:
 def test_mkdir_is_204_and_passes_path() -> None:
     mkdir = _FakeUseCase()
     app = _app(member=True, allow=True, mkdir=mkdir)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/directories"), params={"path": "plugins"}
     )
@@ -1489,7 +1489,7 @@ def test_mkdir_is_204_and_passes_path() -> None:
 
 def test_mkdir_requires_file_edit_permission() -> None:
     app = _app(member=True, allow=False, mkdir=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/directories"), params={"path": "p"}
     )
@@ -1500,7 +1500,7 @@ def test_mkdir_traversal_is_422() -> None:
     app = _app(
         member=True, allow=True, mkdir=_FakeUseCase(error=InvalidFilePathError("x"))
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/directories"), params={"path": "../escape"}
     )
@@ -1515,7 +1515,7 @@ def test_mkdir_over_long_name_surfaces_name_too_long() -> None:
         allow=True,
         mkdir=_FakeUseCase(error=InvalidFilePathError("x", reason="name_too_long")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/directories"), params={"path": "x" * 300}
     )
@@ -1531,7 +1531,7 @@ def test_mkdir_onto_a_file_is_409() -> None:
         allow=True,
         mkdir=_FakeUseCase(error=FileAlreadyExistsError("occupied")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/directories"), params={"path": "occupied"}
     )
@@ -1545,7 +1545,7 @@ def test_mkdir_running_is_409() -> None:
         allow=True,
         mkdir=_FakeUseCase(error=ServerFilesUnsettledError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/directories"), params={"path": "p"}
     )
@@ -1556,7 +1556,7 @@ def test_mkdir_running_is_409() -> None:
 def test_mkdir_success_records_audit() -> None:
     recorder = RecordingAuditRecorder()
     app = _app(member=True, allow=True, mkdir=_FakeUseCase(), recorder=recorder)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/directories"), params={"path": "p"}
     )
@@ -1571,7 +1571,7 @@ def test_search_returns_paths_and_truncated() -> None:
     result = SearchResult(paths=["config/ops.json"], truncated=True)
     search = _FakeUseCase(result=result)
     app = _app(member=True, allow=True, search=search)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/search"),
         json={"query": "ops", "by": "name", "max_results": 50},
@@ -1587,7 +1587,7 @@ def test_search_returns_paths_and_truncated() -> None:
 
 def test_search_requires_file_read_permission() -> None:
     app = _app(member=True, allow=False, search=_FakeUseCase())
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/search"), json={"query": "x"})
     assert resp.status_code == 403
 
@@ -1596,7 +1596,7 @@ def test_search_invalid_by_is_422() -> None:
     app = _app(
         member=True, allow=True, search=_FakeUseCase(error=InvalidFilePathError("x"))
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(
         _url(uuid.uuid4(), uuid.uuid4(), "/search"),
         json={"query": "x", "by": "regex"},
@@ -1610,7 +1610,7 @@ def test_search_running_is_409() -> None:
         allow=True,
         search=_FakeUseCase(error=ServerFilesUnsettledError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/search"), json={"query": "x"})
     assert resp.status_code == 409
     assert resp.json()["reason"] == "server_unsettled"
@@ -1624,7 +1624,7 @@ def test_search_success_records_audit() -> None:
         search=_FakeUseCase(result=SearchResult(paths=[], truncated=False)),
         recorder=recorder,
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/search"), json={"query": "x"})
     assert resp.status_code == 200
     assert [e.operation for e in recorder.events] == [ops.FILE_SEARCH]
@@ -1659,7 +1659,7 @@ def test_file_read_grant_on_one_server_opens_exactly_that_server() -> None:
         RoleGrantPermissionChecker(authz_uow)
     )
     app.dependency_overrides[get_read_file] = lambda: _FakeUseCase(result=b"ok")
-    client = next(_client(app))
+    client = _client(app)
 
     opened = client.get(_url(community, server_x), params={"path": "f"})
     assert opened.status_code == 200
@@ -1722,7 +1722,7 @@ def _real_write_app(
 def test_write_control_char_path_is_422(tmp_path: object, bad: str) -> None:
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _real_write_app(tmp_path, community, server)
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.put(
         _url(community, server),
@@ -1736,7 +1736,7 @@ def test_write_control_char_path_is_422(tmp_path: object, bad: str) -> None:
 def test_write_unicode_path_is_accepted(tmp_path: object) -> None:
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _real_write_app(tmp_path, community, server)
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.put(
         _url(community, server),
@@ -1775,13 +1775,13 @@ def _file_grant_url(
 
 def test_non_member_gets_404_on_file_download_grant() -> None:
     app = _app(member=False, allow=True, download=_FakeDownload())
-    client = next(_client(app))
+    client = _client(app)
     assert _mint(client, uuid.uuid4(), uuid.uuid4(), "world").status_code == 404
 
 
 def test_member_without_permission_gets_403_on_file_download_grant() -> None:
     app = _app(member=True, allow=False, download=_FakeDownload())
-    client = next(_client(app))
+    client = _client(app)
     assert _mint(client, uuid.uuid4(), uuid.uuid4(), "world").status_code == 403
 
 
@@ -1791,7 +1791,7 @@ def test_file_download_grant_for_a_missing_path_is_404() -> None:
         allow=True,
         download=_FakeDownload(error=ServerFileNotFoundError("x")),
     )
-    client = next(_client(app))
+    client = _client(app)
     assert _mint(client, uuid.uuid4(), uuid.uuid4(), "gone").status_code == 404
 
 
@@ -1799,7 +1799,7 @@ def test_file_download_grant_for_a_traversal_path_is_422() -> None:
     app = _app(
         member=True, allow=True, download=_FakeDownload(error=InvalidFilePathError("x"))
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = _mint(client, uuid.uuid4(), uuid.uuid4(), "../escape")
     assert resp.status_code == 422
     assert resp.json()["reason"] == "invalid_path"
@@ -1819,7 +1819,7 @@ def test_file_download_grant_for_a_symlink_path_surfaces_the_symlink_reason() ->
             error=InvalidFilePathError("x", reason="symlink_refused")
         ),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = _mint(client, uuid.uuid4(), uuid.uuid4(), "alias/inner.txt")
     assert resp.status_code == 422
     assert resp.json()["reason"] == "symlink_refused"
@@ -1836,7 +1836,7 @@ def test_download_of_a_symlink_path_surfaces_the_symlink_reason() -> None:
             error=InvalidFilePathError("x", reason="symlink_refused")
         ),
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(
         _url(uuid.uuid4(), uuid.uuid4(), "/download"),
         params={"path": "alias/inner.txt"},
@@ -1854,7 +1854,7 @@ def test_file_download_grant_for_a_running_server_is_409_and_audits_denied() -> 
         download=_FakeDownload(error=ServerFilesUnsettledError("x")),
         recorder=recorder,
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = _mint(client, uuid.uuid4(), uuid.uuid4(), "world")
     assert resp.status_code == 409
     assert resp.json()["reason"] == "server_unsettled"
@@ -1867,7 +1867,7 @@ def test_file_download_grant_for_a_running_server_is_409_and_audits_denied() -> 
 def test_file_download_grant_response_is_not_cached_and_reports_expiry() -> None:
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload(is_dir=True))
-    client = next(_client(app))
+    client = _client(app)
     resp = _mint(client, community, server, "world/nether")
     assert resp.status_code == 200
     # A URL that carries a credential must never sit in a shared cache.
@@ -1887,7 +1887,7 @@ def test_minting_a_file_grant_records_no_audit_event() -> None:
     app = _app(
         member=True, allow=True, download=_FakeDownload(is_dir=True), recorder=recorder
     )
-    client = next(_client(app))
+    client = _client(app)
     assert _mint(client, uuid.uuid4(), uuid.uuid4(), "world").status_code == 200
     assert recorder.events == []
 
@@ -1901,7 +1901,7 @@ def test_minted_file_url_downloads_a_directory_zip_without_a_header() -> None:
         download=_FakeDownload(is_dir=True, zip_chunks=[b"PK", b"zip-tail"]),
         recorder=recorder,
     )
-    client = next(_client(app))
+    client = _client(app)
     url = _mint(client, community, server, "world").json()["download_url"]
 
     resp = client.get(url)
@@ -1924,7 +1924,7 @@ def test_minted_file_url_downloads_a_single_file_without_a_header() -> None:
         download=_FakeDownload(is_dir=False, file_content=b"level-bytes"),
         recorder=recorder,
     )
-    client = next(_client(app))
+    client = _client(app)
     url = _mint(client, community, server, "level.dat").json()["download_url"]
 
     resp = client.get(url)
@@ -1941,7 +1941,7 @@ def test_file_grant_redeemed_download_matches_the_bearer_response() -> None:
     app = _app(
         member=True, allow=True, download=_FakeDownload(is_dir=True, zip_chunks=[b"PK"])
     )
-    client = next(_client(app))
+    client = _client(app)
 
     with_bearer = client.get(
         _url(community, server, "/download"),
@@ -1961,7 +1961,7 @@ def test_file_grant_is_rejected_on_another_path() -> None:
     # redeems `world` and nothing else, not even another spelling of it.
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload(is_dir=True))
-    client = next(_client(app))
+    client = _client(app)
     issued = _tokens.issue_download_grant(
         _user.id, file_download_grant_resource(community, server, "world")
     )
@@ -1982,7 +1982,7 @@ def test_file_grant_is_rejected_on_another_path() -> None:
 def test_file_grant_is_rejected_under_another_server_or_community() -> None:
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload(is_dir=True))
-    client = next(_client(app))
+    client = _client(app)
     issued = _tokens.issue_download_grant(
         _user.id, file_download_grant_resource(community, server, "world")
     )
@@ -2004,7 +2004,7 @@ def test_export_grant_is_rejected_at_the_file_download() -> None:
     # The resource prefixes separate the two surfaces (issue #2352).
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload(is_dir=True))
-    client = next(_client(app))
+    client = _client(app)
     issued = _tokens.issue_download_grant(
         _user.id, export_download_grant_resource(community, server)
     )
@@ -2020,7 +2020,7 @@ def test_export_grant_is_rejected_at_the_file_download() -> None:
 def test_file_grant_is_rejected_at_the_export_download() -> None:
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload(is_dir=True))
-    client = next(_client(app))
+    client = _client(app)
     issued = _tokens.issue_download_grant(
         _user.id, file_download_grant_resource(community, server, "world")
     )
@@ -2036,7 +2036,7 @@ def test_file_grant_is_rejected_at_the_export_download() -> None:
 def test_file_grant_is_rejected_after_its_ttl() -> None:
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload(is_dir=True))
-    client = next(_client(app))
+    client = _client(app)
     url = _file_grant_url(community, server, "world", subject=_user)
 
     _clock.set(_NOW + dt.timedelta(seconds=_GRANT_TTL_SECONDS))
@@ -2047,7 +2047,7 @@ def test_file_grant_is_rejected_after_its_ttl() -> None:
 def test_file_grant_is_not_accepted_as_a_bearer_token() -> None:
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload(is_dir=True))
-    client = next(_client(app))
+    client = _client(app)
     issued = _tokens.issue_download_grant(
         _user.id, file_download_grant_resource(community, server, "world")
     )
@@ -2064,7 +2064,7 @@ def test_file_grant_is_not_accepted_as_a_bearer_token() -> None:
 def test_access_token_is_not_accepted_as_a_file_grant() -> None:
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload(is_dir=True))
-    client = next(_client(app))
+    client = _client(app)
     access = _tokens.issue_access_token(_user.id)
 
     resp = client.get(
@@ -2079,7 +2079,7 @@ def test_file_grant_loses_to_a_permission_revoked_after_issuance() -> None:
     # The grant proves identity, never authority: authorization is decided afresh.
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=False, download=_FakeDownload(is_dir=True))
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.get(_file_grant_url(community, server, "world", subject=_user))
 
@@ -2089,7 +2089,7 @@ def test_file_grant_loses_to_a_permission_revoked_after_issuance() -> None:
 def test_file_grant_loses_to_a_membership_removed_after_issuance() -> None:
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(member=False, allow=True, download=_FakeDownload(is_dir=True))
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.get(_file_grant_url(community, server, "world", subject=_user))
 
@@ -2104,7 +2104,7 @@ def test_file_grant_for_a_deactivated_subject_is_rejected() -> None:
         subject=make_user(active=False),
         download=_FakeDownload(is_dir=True),
     )
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.get(_file_grant_url(community, server, "world", subject=_user))
 
@@ -2114,7 +2114,7 @@ def test_file_grant_for_a_deactivated_subject_is_rejected() -> None:
 def test_file_download_without_any_credential_is_401() -> None:
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload(is_dir=True))
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.get(_url(community, server, "/download"), params={"path": "world"})
 
@@ -2142,7 +2142,7 @@ def _file_cookie_header(
 def test_file_grant_redemption_sets_a_path_scoped_cookie() -> None:
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload(is_dir=True))
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.get(_file_grant_url(community, server, "world", subject=_user))
 
@@ -2165,7 +2165,7 @@ def test_file_grant_redemption_sets_a_path_scoped_cookie() -> None:
 def test_expired_file_grant_is_retried_with_the_cookie() -> None:
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload(is_dir=True))
-    client = next(_client(app))
+    client = _client(app)
     url = _file_grant_url(community, server, "world", subject=_user)
 
     _clock.set(_NOW + dt.timedelta(seconds=_GRANT_TTL_SECONDS))
@@ -2181,7 +2181,7 @@ def test_file_cookie_is_rejected_on_another_path() -> None:
     # ``world`` opens nothing else, even at the identical URL path.
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload(is_dir=True))
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.get(
         _url(community, server, "/download"),
@@ -2195,7 +2195,7 @@ def test_file_cookie_is_rejected_on_another_path() -> None:
 def test_file_cookie_is_rejected_under_another_server_or_community() -> None:
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload(is_dir=True))
-    client = next(_client(app))
+    client = _client(app)
     headers = _file_cookie_header(community, server, "world")
 
     other_server = client.get(
@@ -2233,7 +2233,7 @@ def test_file_download_declares_no_store_under_every_credential(
             is_dir=is_dir, zip_chunks=[b"PK"], file_content=b"level-bytes"
         ),
     )
-    client = next(_client(app))
+    client = _client(app)
     url = _url(community, server, "/download")
 
     with_bearer = client.get(url, params={"path": path}, headers=_bearer())
@@ -2267,7 +2267,7 @@ def test_file_head_answers_the_gets_headers_under_every_credential(
             is_dir=is_dir, zip_chunks=[b"PK"], file_content=b"level-bytes"
         ),
     )
-    client = next(_client(app))
+    client = _client(app)
     url = _url(community, server, "/download")
     cookie = _file_cookie_header(community, server, path)
     # Last, because redeeming a grant mints the cookie into the client's jar.
@@ -2310,7 +2310,7 @@ def test_file_head_neither_opens_the_download_nor_records_one(
     )
     recorder = RecordingAuditRecorder()
     app = _app(member=True, allow=True, download=download, recorder=recorder)
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.head(
         _url(community, server, "/download"), params={"path": path}, headers=_bearer()
@@ -2333,7 +2333,7 @@ def test_file_head_of_a_running_server_is_409_and_records_nothing() -> None:
         download=_FakeDownload(error=ServerFilesUnsettledError("x")),
         recorder=recorder,
     )
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.head(
         _url(community, server, "/download"),
@@ -2387,8 +2387,8 @@ def test_file_head_is_answered_exactly_like_the_get(
     )
     url, params, headers = _download_credential(kind, community, server, "world")
 
-    probed = next(_client(app)).head(url, params=params, headers=headers)
-    served = next(_client(app)).get(url, params=params, headers=headers)
+    probed = _client(app).head(url, params=params, headers=headers)
+    served = _client(app).get(url, params=params, headers=headers)
 
     assert probed.status_code == served.status_code == expected
 
@@ -2396,7 +2396,7 @@ def test_file_head_is_answered_exactly_like_the_get(
 def test_file_head_without_credentials_is_401() -> None:
     community, server = uuid.uuid4(), uuid.uuid4()
     app = _app(member=True, allow=True, download=_FakeDownload(is_dir=True))
-    client = next(_client(app))
+    client = _client(app)
 
     resp = client.head(_url(community, server, "/download"), params={"path": "world"})
 

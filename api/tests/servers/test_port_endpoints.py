@@ -8,8 +8,6 @@ count).
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -19,6 +17,7 @@ from mc_server_dashboard_api.dependencies import (
     get_current_user,
     get_list_available_ports,
 )
+from tests.client_utils import enter_client
 from tests.identity.fakes import make_user
 
 
@@ -32,9 +31,8 @@ class _FakeUseCase:
         return self._result
 
 
-def _client(app: object) -> Iterator[TestClient]:
-    with TestClient(app) as client:  # type: ignore[arg-type]
-        yield client
+def _client(app: object) -> TestClient:
+    return enter_client(TestClient(app))  # type: ignore[arg-type]
 
 
 _shared_app: FastAPI
@@ -65,7 +63,7 @@ def _app(
 
 def test_check_requires_authentication() -> None:
     app = _app(authenticated=False)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get("/api/ports/check/25565")
     assert resp.status_code == 401
 
@@ -73,7 +71,7 @@ def test_check_requires_authentication() -> None:
 def test_check_returns_availability() -> None:
     check = _FakeUseCase(result={"port": 25565, "in_range": True, "available": False})
     app = _app(check=check)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get("/api/ports/check/25565")
     assert resp.status_code == 200
     assert resp.json() == {"port": 25565, "in_range": True, "available": False}
@@ -82,7 +80,7 @@ def test_check_returns_availability() -> None:
 
 def test_available_requires_authentication() -> None:
     app = _app(authenticated=False)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get("/api/ports/available")
     assert resp.status_code == 401
 
@@ -90,7 +88,7 @@ def test_available_requires_authentication() -> None:
 def test_available_defaults_count_to_one() -> None:
     available = _FakeUseCase(result=[25565])
     app = _app(available=available)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get("/api/ports/available")
     assert resp.status_code == 200
     assert resp.json() == {"ports": [25565]}
@@ -100,7 +98,7 @@ def test_available_defaults_count_to_one() -> None:
 def test_available_honors_count() -> None:
     available = _FakeUseCase(result=[25565, 25566, 25567])
     app = _app(available=available)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get("/api/ports/available?count=3")
     assert resp.status_code == 200
     assert resp.json() == {"ports": [25565, 25566, 25567]}
@@ -110,7 +108,7 @@ def test_available_honors_count() -> None:
 def test_available_rejects_zero_count() -> None:
     available = _FakeUseCase(result=[])
     app = _app(available=available)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get("/api/ports/available?count=0")
     assert resp.status_code == 422
     assert available.calls == []
@@ -119,7 +117,7 @@ def test_available_rejects_zero_count() -> None:
 def test_available_rejects_over_cap_count() -> None:
     available = _FakeUseCase(result=[])
     app = _app(available=available)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get("/api/ports/available?count=101")
     assert resp.status_code == 422
     assert available.calls == []

@@ -1,6 +1,6 @@
 """Per-test lifespan management for endpoint ``TestClient`` s (issue #1980).
 
-Endpoint tests used to acquire their client via ``next(_client(...))`` over a
+Endpoint tests used to acquire their client by calling ``next()`` on a
 ``def _client(...) -> Iterator[TestClient]: with TestClient(app): yield`` helper.
 ``next()`` returns the client but drops the only reference to the generator, so
 CPython finalizes it immediately: ``GeneratorExit`` fires at the ``yield``, the

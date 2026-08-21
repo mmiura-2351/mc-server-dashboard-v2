@@ -134,10 +134,10 @@ migrations-check:
 	python3 scripts/check_migrations.py
 
 # Anti-reproliferation guard for the finalize-immediately client bug (#1980):
-# fail if `next(_client(...))` reappears in an already-converted api test dir.
-# Pure file grep -- no api/ venv -- so it costs ~0.01s and belongs in the
-# pre-push gate. Same shape as docs-check/migrations-check: self-test then the
-# real run it guards. Scoped to PR 1's dirs; PR 2 widens it (see the script).
+# fail if `next(_client(...))` reappears anywhere under api/tests. Pure file
+# grep -- no api/ venv -- so it costs ~0.01s and belongs in the pre-push gate.
+# Same shape as docs-check/migrations-check: self-test then the real run it
+# guards.
 test-client-check:
 	python3 scripts/check_test_client_pattern.py --self-test
 	python3 scripts/check_test_client_pattern.py

@@ -10,7 +10,6 @@ authorized -> 200; plus the platform-admin requirement.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterator
 
 import pytest
 from fastapi import Depends, FastAPI
@@ -37,6 +36,7 @@ from mc_server_dashboard_api.dependencies import (
     require_platform_admin,
 )
 from mc_server_dashboard_api.http_problem import install_problem_handlers
+from tests.client_utils import enter_client
 from tests.identity.fakes import make_user
 
 
@@ -107,21 +107,20 @@ def _app(
     return app, checker
 
 
-def _client(app: FastAPI) -> Iterator[TestClient]:
-    with TestClient(app) as client:
-        yield client
+def _client(app: FastAPI) -> TestClient:
+    return enter_client(TestClient(app))
 
 
 def test_non_member_gets_404() -> None:
     app, _ = _app(member=False, allow=True)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(f"/api/communities/{uuid.uuid4()}/ping")
     assert resp.status_code == 404
 
 
 def test_member_without_permission_gets_403() -> None:
     app, _ = _app(member=True, allow=False)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(f"/api/communities/{uuid.uuid4()}/ping")
     assert resp.status_code == 403
 
@@ -131,7 +130,7 @@ def test_403_body_names_the_required_permission() -> None:
     # extension member so the Web UI can name it in the denial toast (#425),
     # while ``reason`` stays the stable ``"forbidden"`` code.
     app, _ = _app(member=True, allow=False)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(f"/api/communities/{uuid.uuid4()}/ping")
     assert resp.status_code == 403
     body = resp.json()
@@ -141,7 +140,7 @@ def test_403_body_names_the_required_permission() -> None:
 
 def test_authorized_member_gets_200() -> None:
     app, checker = _app(member=True, allow=True)
-    client = next(_client(app))
+    client = _client(app)
     community_id = uuid.uuid4()
     resp = client.get(f"/api/communities/{community_id}/ping")
     assert resp.status_code == 200
@@ -175,7 +174,7 @@ def test_malformed_community_id_reported_once() -> None:
     )
     app.dependency_overrides[get_permission_checker] = lambda: checker
 
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get("/api/communities/notauuid/ping")
     assert resp.status_code == 422
     errors = resp.json()["errors"]
@@ -220,7 +219,7 @@ def test_two_malformed_path_ids_have_no_duplicate_community_id() -> None:
     # parsed at the edge to scope the membership check, before the per-resource
     # ``role_id``); the key contract is that ``community_id`` is never duplicated
     # in the 422 errors array (#631), which the pre-fix dependency violated.
-    client = next(_client(_roles_app()))
+    client = _client(_roles_app())
     resp = client.get("/api/communities/badc/roles/badr")
     assert resp.status_code == 422
     errors = resp.json()["errors"]
@@ -231,7 +230,7 @@ def test_two_malformed_path_ids_have_no_duplicate_community_id() -> None:
 def test_malformed_role_id_reported_once() -> None:
     # A valid community but malformed ``role_id`` still yields the per-resource
     # 422 exactly once (#630 behavior preserved, #631 no duplication).
-    client = next(_client(_roles_app()))
+    client = _client(_roles_app())
     resp = client.get(f"/api/communities/{uuid.uuid4()}/roles/badr")
     assert resp.status_code == 422
     errors = resp.json()["errors"]
@@ -242,7 +241,7 @@ def test_malformed_role_id_reported_once() -> None:
 
 def test_platform_admin_required_allows_admin() -> None:
     app, _ = _app(member=False, allow=False, platform_admin=True)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get("/api/admin/ping")
     assert resp.status_code == 200
     assert resp.json() == {"ok": "admin"}
@@ -250,7 +249,7 @@ def test_platform_admin_required_allows_admin() -> None:
 
 def test_platform_admin_required_rejects_non_admin() -> None:
     app, _ = _app(member=False, allow=False, platform_admin=False)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get("/api/admin/ping")
     assert resp.status_code == 403
 
@@ -259,7 +258,7 @@ def test_allow_platform_admin_bypasses_isolation_for_admin() -> None:
     # A platform admin who is NOT a member passes an allow_platform_admin gate
     # (community deletion / orphan cleanup, #489), without the two-layer check.
     app, checker = _app(member=False, allow=False, platform_admin=True)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.delete(f"/api/communities/{uuid.uuid4()}/thing")
     assert resp.status_code == 200
     assert resp.json() == {"ok": "deleted"}
@@ -270,7 +269,7 @@ def test_allow_platform_admin_bypasses_isolation_for_admin() -> None:
 def test_allow_platform_admin_does_not_help_non_admin() -> None:
     # The bypass is admin-only: a non-admin non-member still gets the 404.
     app, _ = _app(member=False, allow=True, platform_admin=False)
-    client = next(_client(app))
+    client = _client(app)
     resp = client.delete(f"/api/communities/{uuid.uuid4()}/thing")
     assert resp.status_code == 404
 
@@ -349,7 +348,7 @@ def test_malformed_resource_id_param_returns_422() -> None:
     )
     app.dependency_overrides[get_permission_checker] = lambda: checker
 
-    client = next(_client(app))
+    client = _client(app)
     resp = client.get(f"/api/communities/{uuid.uuid4()}/servers/badsrv")
     assert resp.status_code == 422
     body = resp.json()
@@ -396,7 +395,7 @@ def test_server_update_authz_non_member_gets_404() -> None:
     app.dependency_overrides[get_membership_visibility] = lambda: _FakeVisibility(
         member=False
     )
-    client = next(_client(app))
+    client = _client(app)
     resp = client.patch(
         f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}", json={}
     )
@@ -405,7 +404,7 @@ def test_server_update_authz_non_member_gets_404() -> None:
 
 def test_server_update_authz_binds_callable_to_resource() -> None:
     app, checker = _authz_app()
-    client = next(_client(app))
+    client = _client(app)
     community_id = uuid.uuid4()
     server_id = uuid.uuid4()
     resp = client.patch(f"/api/communities/{community_id}/servers/{server_id}", json={})
@@ -424,7 +423,7 @@ def test_server_update_authz_malformed_server_id_returns_422() -> None:
     # The PATCH gate shares ``_resource_id_from_path``; a non-UUID {server_id}
     # must likewise yield a 422, not a 500 (#630).
     app, _ = _authz_app()
-    client = next(_client(app))
+    client = _client(app)
     resp = client.patch(f"/api/communities/{uuid.uuid4()}/servers/badsrv", json={})
     assert resp.status_code == 422
     body = resp.json()
