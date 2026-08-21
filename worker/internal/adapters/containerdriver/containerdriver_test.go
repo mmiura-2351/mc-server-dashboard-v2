@@ -53,6 +53,12 @@ type fakeDocker struct {
 
 	stopCalled bool
 	stopNoExit bool
+	// stopBudgetLeft records how much of its context deadline the driver's Stop
+	// call still had when it arrived (stopBudgetSeen marks it recorded). It is the
+	// measurement the stop-deadline pin reads: the escalation budget must not have
+	// been spent by the pre-stop flush (issue #2622).
+	stopBudgetLeft time.Duration
+	stopBudgetSeen bool
 	// stopBlocksUntilCancel models a wedged daemon: Stop ignores the timeout and
 	// blocks until its context is cancelled, returning the context error. It drives
 	// the bounded-Sweep test (issue #338); without a per-call deadline on Sweep's
@@ -196,8 +202,13 @@ func (f *fakeDocker) Start(_ context.Context, _ string) error {
 }
 
 func (f *fakeDocker) Stop(ctx context.Context, id string, _ time.Duration) error {
+	deadline, hasDeadline := ctx.Deadline()
 	f.mu.Lock()
 	f.stopCalled = true
+	if hasDeadline {
+		f.stopBudgetLeft = time.Until(deadline)
+		f.stopBudgetSeen = true
+	}
 	f.stopped = append(f.stopped, id)
 	noExit := f.stopNoExit
 	stopErr := f.stopErr
@@ -297,6 +308,14 @@ func (f *fakeDocker) stopWasCalled() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.stopCalled
+}
+
+// stopBudget reports how much of its deadline the driver's Stop call had left on
+// arrival, and whether a Stop with a deadline was seen at all (issue #2622).
+func (f *fakeDocker) stopBudget() (time.Duration, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.stopBudgetLeft, f.stopBudgetSeen
 }
 
 func (f *fakeDocker) killWasCalled() bool {
@@ -1463,6 +1482,64 @@ func TestGracefulStopFlushFalseFallsBackToRCON(t *testing.T) {
 	if docker.stopWasCalled() {
 		t.Fatal("docker stop should not be called when RCON stop succeeds")
 	}
+}
+
+// The stop escalation's deadline starts AFTER the pre-stop flush, so a flush that
+// burns its entire budget does not shorten the SIGTERM grace `docker stop` gets
+// (issue #2622). The flush here hangs until the driver cancels it at its own
+// flush budget — the worst case, a wedged RCON — and the assertion measures the
+// budget the docker Stop call actually arrived with: it must still be the full
+// stop deadline, not the deadline minus the flush. This reddens if stopCtx is
+// created before the flush again.
+func TestStopDeadlineStartsAfterFlush(t *testing.T) {
+	const (
+		stopTimeout  = 50 * time.Millisecond
+		flushTimeout = time.Second
+		// Slack for scheduling noise on a contended host. It is well under
+		// flushTimeout, so charging the flush to the stop budget still fails.
+		slack = 500 * time.Millisecond
+	)
+	docker := newFakeDocker()
+	// No RCON: tryRCONStop fails immediately, so the only wall clock between the
+	// stop deadline starting and the docker Stop call is the flush.
+	d := New(docker, images(), func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
+		return nil, errors.New("no rcon")
+	}, Options{
+		WorkerID:         "w1",
+		StopTimeout:      stopTimeout,
+		FlushTimeout:     flushTimeout,
+		GameBindIP:       "0.0.0.0",
+		ReadinessTimeout: 20 * time.Millisecond,
+	})
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+
+	flushStart := time.Now()
+	flush := func(ctx context.Context) bool {
+		<-ctx.Done()
+		return false
+	}
+	if err := inst.Stop(context.Background(), true, flush); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	flushSpent := time.Since(flushStart)
+	drainTo(t, inst.Events(), execution.StateStopped)
+
+	budget, ok := docker.stopBudget()
+	if !ok {
+		t.Fatal("docker stop was never called with a deadline")
+	}
+	full := 3*stopTimeout + stopDeadlineGrace
+	if budget < full-slack {
+		t.Fatalf("docker stop arrived with %v of its %v budget after a %v flush; "+
+			"the flush was charged to the stop deadline", budget, full, flushTimeout)
+	}
+	t.Logf("flush spent %v; docker stop arrived with %v of the %v stop budget",
+		flushSpent, budget, full)
 }
 
 // A container that exits mid-graceful-stop releases the Stop wait via

@@ -203,6 +203,9 @@ type Instance interface {
 	// skips RCON "stop" and SIGTERM (both trigger MC's own shutdown save, which
 	// can overwrite the flushed data if killed mid-write) and terminates the
 	// process with SIGKILL so the flushed region files stay intact.
+	// The callback gets its own budget, which runs before the stop deadline
+	// starts rather than out of it, so a slow flush never shortens the shutdown
+	// grace; the two are additive in the worst case (issue #2622).
 	Stop(ctx context.Context, graceful bool, preFallback ...func(context.Context) bool) error
 	// Status reports the last observed state.
 	Status() ServerState

@@ -56,6 +56,15 @@ const (
 // daemon escalates to SIGKILL.
 const defaultStopTimeout = 30 * time.Second
 
+// defaultFlushTimeout bounds the pre-stop flush (#1007): the RCON save-off /
+// save-all plus the settle-wait that drives the live world's dirty chunks to
+// disk before the container is terminated. It is generous enough for the
+// manager's 60 s settle budget plus the RCON round trips, and it is the whole
+// bound when the flush's RCON hangs. The flush runs to completion before the
+// stop escalation's own deadline starts (Stop), so this budget is additive to
+// stopDeadline rather than carved out of it (issue #2622). Tests shrink it.
+const defaultFlushTimeout = 90 * time.Second
+
 // defaultSweepCallMargin is the slack added on top of each Sweep daemon call's
 // expected duration to bound it against a wedged daemon (issue #338). The startup
 // Sweep runs with context.Background() (cmd/worker), so without a per-call
@@ -136,6 +145,9 @@ type Options struct {
 	// StopTimeout bounds the `docker stop` grace period. Zero uses
 	// defaultStopTimeout.
 	StopTimeout time.Duration
+	// FlushTimeout bounds the pre-stop flush the caller supplies to Stop. Zero uses
+	// defaultFlushTimeout; tests set a short value to keep the suite fast.
+	FlushTimeout time.Duration
 	// GameBindIP is the host interface the game port is published on. Empty uses
 	// defaultGameBindIP (loopback), preserving the historical behavior.
 	GameBindIP string
@@ -176,9 +188,11 @@ type Driver struct {
 	openControl controlFunc
 	workerID    string
 	stopTimeout time.Duration
-	gameBindIP  string
-	network     string
-	scratchDir  string
+	// flushTimeout bounds the pre-stop flush (issue #2622).
+	flushTimeout time.Duration
+	gameBindIP   string
+	network      string
+	scratchDir   string
 	// conflictPoll and conflictDeadline bound the wait-for-name-free loop (#233).
 	conflictPoll     time.Duration
 	conflictDeadline time.Duration
@@ -199,6 +213,10 @@ func New(docker dockerAPI, images *ImageSelector, openControl controlFunc, opts 
 	timeout := opts.StopTimeout
 	if timeout <= 0 {
 		timeout = defaultStopTimeout
+	}
+	flushTimeout := opts.FlushTimeout
+	if flushTimeout <= 0 {
+		flushTimeout = defaultFlushTimeout
 	}
 	gameBindIP := opts.GameBindIP
 	if gameBindIP == "" {
@@ -230,6 +248,7 @@ func New(docker dockerAPI, images *ImageSelector, openControl controlFunc, opts 
 		openControl:      openControl,
 		workerID:         opts.WorkerID,
 		stopTimeout:      timeout,
+		flushTimeout:     flushTimeout,
 		gameBindIP:       gameBindIP,
 		network:          opts.Network,
 		scratchDir:       opts.ScratchDir,
@@ -305,6 +324,7 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 		openControl:      d.openControl,
 		rconHost:         d.RconHost(spec.ServerID),
 		stopTimeout:      d.stopTimeout,
+		flushTimeout:     d.flushTimeout,
 		readinessTimeout: d.readinessTimeout,
 		logger:           d.logger,
 		events:           make(chan execution.StatusEvent, 8),
@@ -800,6 +820,8 @@ type instance struct {
 	// host loopback, the container name when a user-defined network is configured.
 	rconHost    string
 	stopTimeout time.Duration
+	// flushTimeout bounds the pre-stop flush preFallback (issue #2622).
+	flushTimeout time.Duration
 	// readinessTimeout bounds the hold-on-starting wait before falling back to
 	// running (issue #345).
 	readinessTimeout time.Duration
@@ -1449,6 +1471,39 @@ func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(
 	i.mu.Unlock()
 	i.emit(execution.StateStopping, "")
 
+	// Always flush before stop on the graceful path (#1007/#1008): MC's own
+	// shutdown save (via RCON "stop") does NOT reliably flush dirty region
+	// chunks when a player was connected — observed on MC 26.1.2 with
+	// relay/tunnel connections. The flush (RCON save-all + settleWorkingSet)
+	// ensures chunks are on disk BEFORE the process terminates.
+	//
+	// It runs on a context detached from the caller's (same reason the
+	// escalation below is detached: a dropped session stream must not abort a
+	// stop already under way, #770) and bounded by its own flushTimeout — and it
+	// runs BEFORE the escalation deadline starts. The two budgets are therefore
+	// additive, not shared: however long the flush takes, up to flushTimeout, the
+	// escalation still gets the whole stopDeadline for the RCON wait, the SIGTERM
+	// grace and the post-Stop wait. Charging the flush to the escalation instead
+	// left a wedged-RCON flush ~10 s of a 100 s budget for a 30 s SIGTERM grace,
+	// which is the killed-instead-of-stopped failure this whole path exists to
+	// prevent (issue #2622). The worst case for a graceful stop is thus
+	// flushTimeout + stopDeadline (90 s + 100 s by default), well inside the
+	// API's stop dispatch budget (control.stop_timeout_seconds=600).
+	//
+	// When the flush succeeds (returns true), RCON "stop" and docker stop
+	// (SIGTERM) are SKIPPED: both trigger MC's own shutdown save, which
+	// re-writes ALL loaded region files. If that save is interrupted by a kill
+	// (the MC 26.1.2 shutdown-hang observed with relay/tunnel connections), the
+	// half-written regions overwrite the safely-flushed data and corrupt the
+	// post-stop snapshot — the root cause of the world-rollback bug. SIGKILL
+	// cannot be intercepted, so the flushed files stay intact.
+	flushed := false
+	if graceful && len(preFallback) > 0 && preFallback[0] != nil {
+		flushCtx, flushCancel := context.WithTimeout(context.WithoutCancel(ctx), i.flushTimeout)
+		flushed = preFallback[0](flushCtx)
+		flushCancel()
+	}
+
 	// Once a stop has begun, detach the escalation from the caller's context. The
 	// graceful stop usually runs on a per-server lane whose ctx is the gRPC
 	// session stream's serveCtx; if the stream drops mid-stop, a cancelled ctx
@@ -1460,29 +1515,11 @@ func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(
 	// grace period regardless of the caller, while the bound still caps a hung
 	// daemon call. The post-Kill confirm (waitExitDone) already ignores caller
 	// cancellation, so it stays as is.
+	//
+	// The deadline starts here, after the flush, so it bounds only the escalation
+	// it was sized for (issue #2622).
 	stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), i.stopDeadline())
 	defer cancel()
-
-	// Always flush before stop on the graceful path (#1007/#1008): MC's own
-	// shutdown save (via RCON "stop") does NOT reliably flush dirty region
-	// chunks when a player was connected — observed on MC 26.1.2 with
-	// relay/tunnel connections. The flush (RCON save-all + settleWorkingSet)
-	// ensures chunks are on disk BEFORE the process terminates.
-	// Run on a detached context so it does not consume the stopDeadline.
-	//
-	// When the flush succeeds (returns true), RCON "stop" and docker stop
-	// (SIGTERM) are SKIPPED: both trigger MC's own shutdown save, which
-	// re-writes ALL loaded region files. If that save is interrupted by a kill
-	// (the MC 26.1.2 shutdown-hang observed with relay/tunnel connections), the
-	// half-written regions overwrite the safely-flushed data and corrupt the
-	// post-stop snapshot — the root cause of the world-rollback bug. SIGKILL
-	// cannot be intercepted, so the flushed files stay intact.
-	flushed := false
-	if graceful && len(preFallback) > 0 && preFallback[0] != nil {
-		flushCtx, flushCancel := context.WithTimeout(context.WithoutCancel(stopCtx), 90*time.Second)
-		flushed = preFallback[0](flushCtx)
-		flushCancel()
-	}
 
 	if !flushed {
 		if graceful && i.tryRCONStop(stopCtx) && i.waitExit(stopCtx, i.stopTimeout) {
@@ -1597,6 +1634,10 @@ const stopDeadlineGrace = 10 * time.Second
 // SIGTERM grace is itself stopTimeout, a post-Stop wait (stopTimeout), then a
 // docker Kill — so 3*stopTimeout plus a grace covers the whole sequence without
 // cutting an in-progress stop short, while still capping a hung daemon call.
+//
+// The pre-stop flush is deliberately NOT part of this budget: Stop starts the
+// deadline after the flush has returned or its own flushTimeout has expired, so
+// this value is sized for the escalation alone (issue #2622).
 func (i *instance) stopDeadline() time.Duration {
 	return 3*i.stopTimeout + stopDeadlineGrace
 }
