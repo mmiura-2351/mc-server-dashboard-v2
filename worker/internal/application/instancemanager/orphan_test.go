@@ -1008,15 +1008,25 @@ func TestRecordOrphanAfterCloseSpawnsNoConverger(t *testing.T) {
 // actually produces. gatedProbeInstance cannot stand in for it: that one ignores
 // its context and answers `alive`, which sends the converger down the retry path
 // instead.
+//
+// What ends the probe is the test's release channel, never a clock. An earlier
+// version blocked on the context and leaned on an interval long enough for the
+// test to call Close first — which made the assertion a race the test had to win,
+// in the package whose whole issue is latent timing surfaces. Here the test
+// releases the probe only after the shutdown is observably cancelled, so the
+// converger is guaranteed to be inspecting the answer with the manager already
+// closed.
 type cancelledProbeInstance struct {
 	*fakeInstance
 	probeEntered chan struct{}
+	release      chan struct{}
 }
 
 func newCancelledProbeInstance(id string) *cancelledProbeInstance {
 	return &cancelledProbeInstance{
 		fakeInstance: newFakeInstance(id),
 		probeEntered: make(chan struct{}, 1),
+		release:      make(chan struct{}),
 	}
 }
 
@@ -1025,7 +1035,7 @@ func (i *cancelledProbeInstance) ProbeAlive(ctx context.Context) (bool, error) {
 	case i.probeEntered <- struct{}{}:
 	default:
 	}
-	<-ctx.Done()
+	<-i.release
 	return false, ctx.Err()
 }
 
@@ -1035,20 +1045,33 @@ func (i *cancelledProbeInstance) ProbeAlive(ctx context.Context) (bool, error) {
 // about the id be a state it never observed (issue #2493). The converger leaves
 // silently instead, and leaves the record alone: a cancelled probe resolves
 // nothing, and the id stays guarded.
+//
+// The ordering below is all happens-before, no wall clock: the probe is entered,
+// Close cancels the shutdown, the test observes that cancellation, and only then
+// releases the probe — so the answer the converger inspects is always one that
+// arrived at a closed manager.
 func TestConvergerLeavesQuietlyWhenTheShutdownCancelsItsProbe(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	// NOT shrinkOrphanConverger: the interval is also the probe's own budget, so
-	// the millisecond cadence would expire the probe on its deadline before Close
-	// could cancel it — and a deadline IS a daemon that did not answer. This is
-	// long enough that the cancellation below is what ends the probe, short enough
-	// that the first round starts immediately.
-	m.orphanProbeInterval = 200 * time.Millisecond
+	shrinkOrphanConverger(m)
 	inst := newCancelledProbeInstance("s1")
 	m.recordOrphan("s1", inst, "container")
 	awaitEnter(t, inst.probeEntered)
 
-	// Close joins the converger, so everything it did lands before this returns.
-	m.Close()
+	closed := make(chan struct{})
+	go func() { m.Close(); close(closed) }()
+
+	select {
+	case <-m.shutdown.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not cancel the shutdown context")
+	}
+	close(inst.release)
+
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return once the cancelled probe finished")
+	}
 
 drain:
 	for {
