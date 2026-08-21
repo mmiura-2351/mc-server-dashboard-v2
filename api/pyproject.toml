@@ -385,20 +385,24 @@ source_modules = [
 ]
 forbidden_modules = ["mc_server_dashboard_api.fleet.adapters"]
 
-# Source is `domain` only, and this is the ONE context whose application layer
-# is left unchecked (issue #2552). `SetWorkerDrain` reaches straight into the
-# servers context — `fleet/application/set_worker_drain.py:55-60` imports
-# `servers.domain.{clock,unit_of_work,value_objects}` — because draining a
-# Worker must also mark its assigned servers `desired=stopped` (FR-WRK-5). That
-# is direct reach-across, not the adapter-layer Port composition the servers and
-# versions contracts describe, so widening this contract is blocked on deciding
-# whether the import or the pattern is wrong. Reported rather than exempted: an
-# `ignore_imports` entry here would assert the coupling is intended, which is
-# exactly the open question.
+# Source is `domain` + `application`, like every sibling context, with no
+# `ignore_imports` (issue #2578 settled the question issue #2552 left open). The
+# one import that had kept this contract `domain`-scoped — `SetWorkerDrain`
+# reaching into `servers.domain.{clock,unit_of_work,value_objects}` to mark a
+# drained Worker's servers `desired=stopped` (FR-WRK-5) — was drift, not design:
+# it was the servers stop procedure living in `fleet/application`, while fleet
+# has had its own `Clock` all along. The procedure moved to
+# `servers/application/lifecycle.py` beside `StopServer` (they now share one
+# compare-and-set), and fleet reaches it through its own `AssignedServerStopper`
+# Port, bound at the adapter layer — the composition the servers and versions
+# comments describe.
 [[tool.importlinter.contracts]]
-name = "fleet domain imports no other context and no grpcio"
+name = "fleet domain and application import no other context and no grpcio"
 type = "forbidden"
-source_modules = ["mc_server_dashboard_api.fleet.domain"]
+source_modules = [
+    "mc_server_dashboard_api.fleet.domain",
+    "mc_server_dashboard_api.fleet.application",
+]
 forbidden_modules = [
     "mc_server_dashboard_api.community",
     "mc_server_dashboard_api.identity",
@@ -487,7 +491,12 @@ forbidden_modules = [
 [[tool.importlinter.contracts]]
 name = "storage domain does not import adapters"
 type = "forbidden"
-source_modules = ["mc_server_dashboard_api.storage.domain"]
+# `integrity` is on the inward side alongside `domain` (see the note below), so
+# the adapter ban covers it too (#2579).
+source_modules = [
+    "mc_server_dashboard_api.storage.domain",
+    "mc_server_dashboard_api.storage.integrity",
+]
 forbidden_modules = ["mc_server_dashboard_api.storage.adapters"]
 
 # Source is `domain` + `integrity` — NOT for lack of coverage: storage has no
@@ -622,8 +631,9 @@ forbidden_modules = [
 name = "no context's domain or application imports a root-level module"
 type = "forbidden"
 # Every context's inward layers. `storage` has no `application` package (see
-# above) and `dataplane` has no inward layer at all (see the note below), so
-# neither contributes one here.
+# above) — its inward side is `domain` + `integrity` (#2579) — and `dataplane`
+# has no inward layer at all (see the note below), so neither contributes one
+# here.
 source_modules = [
     "mc_server_dashboard_api.core.domain",
     "mc_server_dashboard_api.core.application",
@@ -636,6 +646,7 @@ source_modules = [
     "mc_server_dashboard_api.servers.domain",
     "mc_server_dashboard_api.servers.application",
     "mc_server_dashboard_api.storage.domain",
+    "mc_server_dashboard_api.storage.integrity",
     "mc_server_dashboard_api.versions.domain",
     "mc_server_dashboard_api.versions.application",
     "mc_server_dashboard_api.audit.domain",

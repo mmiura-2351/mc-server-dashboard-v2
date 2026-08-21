@@ -86,6 +86,7 @@ not converge. Nothing else reaches ``INVALID_STATE`` on a start or a hydrate.
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import logging
 from dataclasses import dataclass, field
 
@@ -197,6 +198,24 @@ class _Dispatch:
     """
 
     attempted: bool = False
+
+
+async def _mark_stopped(uow: UnitOfWork, server: Server, *, at: dt.datetime) -> bool:
+    """Compare-and-set one server's desired state ``running -> stopped``.
+
+    The single flip both stop paths share (issue #2578): :class:`StopServer` for one
+    server, :class:`StopServersAssignedToWorker` for every server a drained Worker
+    holds. Returns whether the compare-and-set applied; ``False`` means a concurrent
+    transition already moved the row out of running, which the two callers answer
+    differently — a single stop raises a conflict, a drain skips that server. The
+    ``updated_at`` stamp lives here with the flip so the two cannot drift apart.
+    """
+
+    server.desired_state = DesiredState.STOPPED
+    server.updated_at = at
+    return await uow.servers.update_lifecycle(
+        server, expected_from=DesiredState.RUNNING
+    )
 
 
 async def _load(
@@ -1059,11 +1078,7 @@ class StopServer:
                 # is nothing to command. Treat as a transition conflict.
                 raise InvalidLifecycleTransitionError(str(server_id.value))
             worker_id = server.assigned_worker_id
-            server.desired_state = DesiredState.STOPPED
-            server.updated_at = self.clock.now()
-            applied = await self.uow.servers.update_lifecycle(
-                server, expected_from=DesiredState.RUNNING
-            )
+            applied = await _mark_stopped(self.uow, server, at=self.clock.now())
             if not applied:
                 # A concurrent transition already moved the row out of running.
                 # Abort before dispatch or the placement-load decrement so the
@@ -1883,6 +1898,45 @@ class StopServer:
                 worker_id.value,
                 server_id.value,
             )
+
+
+@dataclass(frozen=True)
+class StopServersAssignedToWorker:
+    """Mark every server a drained Worker holds ``desired=stopped`` (FR-WRK-5).
+
+    The stop half of draining a Worker. It lives here, beside :class:`StopServer`,
+    because it IS the stop procedure — the same per-server compare-and-set through
+    the same :func:`_mark_stopped` helper — applied to the set of servers a Worker
+    holds rather than to one (issue #2578). The fleet context reaches it through its
+    own ``AssignedServerStopper`` Port, bound to this use case at the adapter layer,
+    so the drain flow composes across the boundary instead of reaching into this
+    context's domain.
+
+    Returns the ids whose compare-and-set APPLIED, in the order they were flipped:
+    a server a concurrent stop already moved out of running is skipped (not an
+    error) and NOT reported, so the caller sheds placement load only for flips this
+    call actually made. The assignment is left intact — the reconciler's
+    ``redispatch_stop`` clears it on the confirmed stop, which is also what drives
+    the actual graceful stop and its final snapshot; this use case only records the
+    intent (see the ``SetWorkerDrain`` module docstring for the convergence model).
+    """
+
+    uow: UnitOfWork
+    clock: Clock
+
+    async def __call__(self, *, worker_id: WorkerId) -> list[ServerId]:
+        stopped: list[ServerId] = []
+        async with self.uow:
+            assigned = [
+                server
+                for server in await self.uow.servers.list_desired_running_assigned()
+                if server.assigned_worker_id == worker_id
+            ]
+            for server in assigned:
+                if await _mark_stopped(self.uow, server, at=self.clock.now()):
+                    stopped.append(server.id)
+            await self.uow.commit()
+        return stopped
 
 
 @dataclass(frozen=True)
