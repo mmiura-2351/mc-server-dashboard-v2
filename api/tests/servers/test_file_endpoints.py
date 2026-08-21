@@ -20,7 +20,7 @@ from __future__ import annotations
 import base64
 import datetime as dt
 import uuid
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from urllib.parse import quote
 
 import httpx2
@@ -175,18 +175,43 @@ def _client(app: object) -> Iterator[TestClient]:
 
 
 class _FakeUpload:
+    """Fake :class:`UploadFile`, carrying its exact call signature (#2522)."""
+
     def __init__(self, *, error: Exception | None = None) -> None:
         self._error = error
         self.calls: list[dict[str, object]] = []
 
-    async def __call__(self, **kwargs: object) -> None:
-        self.calls.append(kwargs)
+    async def __call__(
+        self,
+        *,
+        community_id: ServerCommunityId,
+        server_id: ServerScopeId,
+        dir_path: str,
+        filename: str,
+        content: bytes,
+        extract: bool,
+    ) -> None:
+        self.calls.append(
+            {
+                "community_id": community_id,
+                "server_id": server_id,
+                "dir_path": dir_path,
+                "filename": filename,
+                "content": content,
+                "extract": extract,
+            }
+        )
         if self._error is not None:
             raise self._error
 
 
 class _FakeDownload:
-    """Fake :class:`DownloadFile` with its file/dir method surface."""
+    """Fake :class:`DownloadFile` with its file/dir method surface.
+
+    The four methods mirror the real class's signatures exactly, down to the ids
+    this double never reads (#2522); ``_app``'s ``download`` parameter names this
+    class, so a shapeless stand-in cannot be substituted for it.
+    """
 
     def __init__(
         self,
@@ -202,17 +227,29 @@ class _FakeDownload:
         self._error = error
         self.calls: list[str] = []
 
-    async def is_dir(self, **kwargs: object) -> bool:
+    async def is_dir(
+        self,
+        *,
+        community_id: ServerCommunityId,
+        server_id: ServerScopeId,
+        rel_path: str,
+    ) -> bool:
         self.calls.append("is_dir")
         if self._error is not None:
             raise self._error
         return self._is_dir
 
-    async def file_stream(self, **kwargs: object) -> object:
+    async def file_stream(
+        self,
+        *,
+        community_id: ServerCommunityId,
+        server_id: ServerScopeId,
+        rel_path: str,
+    ) -> AsyncIterator[bytes]:
         self.calls.append("file_stream")
         content = self._file_content
 
-        async def _gen() -> object:
+        async def _gen() -> AsyncIterator[bytes]:
             # Yield in two chunks (when non-empty) so the route's StreamingResponse
             # is exercised as a real stream, not a single buffered blob (#265).
             half = len(content) // 2
@@ -224,14 +261,26 @@ class _FakeDownload:
 
         return _gen()
 
-    async def file_size(self, **kwargs: object) -> int | None:
+    async def file_size(
+        self,
+        *,
+        community_id: ServerCommunityId,
+        server_id: ServerScopeId,
+        rel_path: str,
+    ) -> int | None:
         self.calls.append("file_size")
         return len(self._file_content)
 
-    async def dir_zip(self, **kwargs: object) -> object:
+    async def dir_zip(
+        self,
+        *,
+        community_id: ServerCommunityId,
+        server_id: ServerScopeId,
+        rel_path: str,
+    ) -> AsyncIterator[bytes]:
         self.calls.append("dir_zip")
 
-        async def _gen() -> object:
+        async def _gen() -> AsyncIterator[bytes]:
             for chunk in self._zip_chunks:
                 yield chunk
 

@@ -85,6 +85,9 @@ from mc_server_dashboard_api.servers.domain.plugin import (
     PluginSource,
     ServerPlugin,
 )
+from mc_server_dashboard_api.servers.domain.value_objects import (
+    CommunityId as ServersCommunityId,
+)
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 from tests.audit.fakes import RecordingAuditRecorder
 from tests.identity.fakes import make_user
@@ -153,15 +156,33 @@ class _FakeUseCase:
 
 
 class _FakeInstall:
-    """Fake for :class:`InstallPlugin` which accepts multipart-style kwargs."""
+    """Fake :class:`InstallPlugin`, carrying its exact call signature (#2522)."""
 
     def __init__(self, *, result: object = None, error: Exception | None = None):
         self._result = result
         self._error = error
         self.calls: list[dict[str, object]] = []
 
-    async def __call__(self, **kwargs: object) -> object:
-        self.calls.append(kwargs)
+    async def __call__(
+        self,
+        *,
+        community_id: ServersCommunityId,
+        server_id: ServerId,
+        filename: str,
+        display_name: str,
+        content: bytes,
+        installed_by: uuid.UUID | None = None,
+    ) -> object:
+        self.calls.append(
+            {
+                "community_id": community_id,
+                "server_id": server_id,
+                "filename": filename,
+                "display_name": display_name,
+                "content": content,
+                "installed_by": installed_by,
+            }
+        )
         if self._error is not None:
             raise self._error
         return self._result

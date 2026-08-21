@@ -98,6 +98,8 @@ class _FakeUseCase:
 class _FakeDownloadUseCase:
     """Fake that returns a (stream, pack, size) tuple like DownloadResourcePack.
 
+    Carries the real use case's exact call signature (#2522).
+
     ``error`` fails the call itself, modelling the size probe's outcome — the pack
     row or its blob already gone when the length is read. ``stream_error`` fails
     after the first chunk, once the headers are committed.
@@ -126,7 +128,10 @@ class _FakeDownloadUseCase:
         self._stream_error = stream_error
 
     async def __call__(
-        self, **kwargs: object
+        self,
+        *,
+        resource_pack_id: ResourcePackId,
+        expected_filename: str | None = None,
     ) -> tuple[AsyncIterator[bytes], ResourcePack, int]:
         if self._error is not None:
             raise self._error
