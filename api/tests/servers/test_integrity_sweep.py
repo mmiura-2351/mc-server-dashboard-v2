@@ -176,12 +176,34 @@ async def test_healthy_snapshot_is_not_flagged() -> None:
 async def test_unpublished_server_snapshot_is_skipped() -> None:
     sid = ServerId.new()
     sweep, _uow, _store, _audit = _wire(servers=[_server(sid)], backups=[])
-    # No entry in current_corrupt -> the seam returns None (no published snapshot).
+    # No entry in current_corrupt -> NOT_PUBLISHED (nothing has been published).
 
     summary = await sweep()
 
     assert summary.snapshots_scanned == 0
     assert summary.snapshots_flagged == 0
+    assert summary.snapshots_not_examined == 0
+
+
+async def test_snapshot_on_an_unexamining_backend_is_not_counted_as_scanned() -> None:
+    """A backend that examines no snapshot at rest must not inflate the scanned
+    count (issue #2377).
+
+    On the object backend nothing about a published snapshot is read, so "scanned:
+    1, flagged: 0" would be a vacuous verdict an operator cannot distinguish from a
+    real one. It is counted as *not examined* instead, and nothing is flagged.
+    """
+
+    sid = ServerId.new()
+    sweep, _uow, store, audit = _wire(servers=[_server(sid)], backups=[])
+    store.examines_snapshots = False
+
+    summary = await sweep()
+
+    assert summary.snapshots_scanned == 0
+    assert summary.snapshots_flagged == 0
+    assert summary.snapshots_not_examined == 1
+    assert not [e for e in audit.events if e.operation == SNAPSHOT_QUARANTINE]
 
 
 async def test_dangling_backup_row_is_quarantined_and_counted() -> None:

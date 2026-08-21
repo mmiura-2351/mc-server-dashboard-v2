@@ -355,7 +355,7 @@ class WorkingSetStore(abc.ABC):
     @abc.abstractmethod
     async def check_current_health(
         self, community_id: CommunityId, server_id: ServerId
-    ) -> WorkingSetReport:
+    ) -> WorkingSetReport | None:
         """Structurally fsck the on-disk authoritative snapshot (issue #744).
 
         The one-shot sweep's per-snapshot probe: walk ``current/`` for corrupt
@@ -363,6 +363,14 @@ class WorkingSetStore(abc.ABC):
         for the duration of the walk so a concurrent publish cannot reclaim the
         snapshot mid-scan (issue #1702). Read-only — it never mutates ``current``.
         Raises :class:`~.errors.NotFoundError` if no snapshot has been published.
+
+        ``None`` means the backend **examined nothing** (issue #2377): it is the
+        answer of an adapter that has no local working set to walk (the object
+        backend, the #926 limitation), and is deliberately NOT a healthy report —
+        the sweep must be able to tell "nothing was looked at" from "looked at and
+        clean". A backend answering ``None`` answers it for every server, published
+        or not, since it reads nothing to tell the two apart; the NotFoundError
+        clause above is therefore the contract of an adapter that does examine.
         """
 
     @abc.abstractmethod

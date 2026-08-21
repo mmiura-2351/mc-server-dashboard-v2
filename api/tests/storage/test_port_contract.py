@@ -583,7 +583,37 @@ async def test_sweep_does_not_quarantine_a_live_format_snapshot(
     )
 
     report = await harness.storage.check_current_health(community, server)
-    assert report.healthy is True
+    # ``None`` is the object backend's "not examined" (#2377): it walks no published
+    # snapshot at rest, so it has no at-rest verdict to get wrong. On fs the walk does
+    # run, and it must report the unpadded set healthy.
+    assert report is None or report.healthy is True
+
+
+async def test_snapshot_fsck_is_examined_only_where_the_backend_examines_it(
+    harness: StorageHarness, backend: str
+) -> None:
+    """``check_current_health`` says whether the snapshot was examined at all (#2377).
+
+    The fs adapter walks ``current/`` and returns a report. The object adapter stores
+    the snapshot per-object with no local working set to walk and examines nothing, so
+    it returns ``None`` — "not examined" — instead of the unconditional healthy report
+    the sweep used to count as scanned (the #926 limitation).
+    """
+
+    community, server = new_scope()
+    await harness.publish(
+        community,
+        server,
+        {"world/region/r.0.0.mca": healthy_region_bytes()},
+    )
+
+    report = await harness.storage.check_current_health(community, server)
+
+    if backend == "object":
+        assert report is None
+    else:
+        assert report is not None
+        assert report.scanned == 1
 
 
 async def test_restore_of_a_live_format_archive_succeeds(
