@@ -98,8 +98,9 @@ services:
     # so no init job is needed.
     #
     # WHAT THIS BINDS, and who can reach it. `netstat -lntp` inside this container
-    # with the entrypoint flags below (4.40, enumerated 2026-08-02; the surface
-    # was first reported in #2599 / #2616) shows NINE TCP listeners, not one:
+    # with the entrypoint flags as they stood on 2026-08-02, before
+    # -s3.port.iceberg=0 was added below (4.40; the surface was first reported in
+    # #2599 / #2616), shows NINE TCP listeners, not one:
     #
     #   8333   S3 gateway (access/secret keys from .env)
     #   8888   filer HTTP        9333   master HTTP     8080   volume HTTP
@@ -136,9 +137,11 @@ services:
     #
     # THE OTHER EIGHT ARE UNCHANGED, and that is an ACCEPTED RESIDUAL, not a
     # pending fix (decided on #2626, 2026-08-20). The peers left on `mcsd` are
-    # api, db, worker, relay and cloudflared; of the eight, only 8333 asks for a
-    # credential — the filer, master, volume and gRPC listeners answer all five
-    # peers with none, and 18333 also serves the S3 IAM RPCs (PutIdentity,
+    # api, db, worker, relay and cloudflared (the networks block below names three
+    # more: seaweedfs itself, and the one-shots migrate and seaweedfs-lifecycle,
+    # which run to completion and exit). Of the eight listeners, only 8333 asks
+    # for a credential — the filer, master, volume and gRPC listeners answer all
+    # five peers with none, and 18333 also serves the S3 IAM RPCs (PutIdentity,
     # RemoveIdentity, PutPolicy, …), so any of the five can mint itself an
     # identity 8333 then accepts. Two of them, relay and cloudflared, terminate
     # internet traffic. Accepted because each is a first-party control-plane

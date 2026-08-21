@@ -510,10 +510,12 @@ security model, and the following remain true:
   data-path call (its `/status` probe answers 200 uncredentialed, which is what
   the compose healthcheck uses). The ninth listener, the Iceberg REST port
   (`8181`), no longer binds — see the (‡) footnote above. Who reaches the
-  remaining eight: after segmentation the members of `mcsd` are `api`, `db`,
-  `worker`, `relay` and `cloudflared`, so membership of `mcsd` is equivalent to
-  object-store admin for those five — two of which, `relay` and `cloudflared`,
-  terminate internet traffic.
+  remaining eight: after segmentation the long-running members of `mcsd` are
+  `api`, `db`, `worker`, `relay` and `cloudflared` (the table above names three
+  more — `seaweedfs` itself, and the one-shots `migrate` and
+  `seaweedfs-lifecycle`, which run to completion and exit). Membership of `mcsd`
+  is therefore equivalent to object-store admin for those five, two of which,
+  `relay` and `cloudflared`, terminate internet traffic.
 
   **That is accepted, not scheduled (issue #2626, decided 2026-08-20).** Each of
   the five is a first-party control-plane service, and the only control that
@@ -521,7 +523,7 @@ security model, and the following remain true:
   `-jwt.*` flags (SeaweedFS carries JWT in `security.toml`), and
   `security.toml`'s `grpc.s3` mTLS cannot be scoped to the S3 gRPC port —
   turning it on escalates to mTLS across the whole cluster, all-or-nothing
-  (established on issue #2608, closed without a change). The one reduction
+  (established on PR #2608, closed without a change). The one reduction
   available without that escalation was taken instead: `-s3.port.iceberg=0`,
   above. So read "first-party" in the table above as a statement about *who is
   attached*, never about what an attached process would have to prove — a
