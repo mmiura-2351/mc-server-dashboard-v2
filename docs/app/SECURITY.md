@@ -402,7 +402,7 @@ positive control from a container on `mcsd` confirming each target was live:
 
 | Target | From `mcsd` (control) | From `mcsd-servers` |
 |---|---|---|
-| `seaweedfs` `8333` S3, `8888` filer, `9333` master, `8080` volume, `8181` Iceberg REST, `18333` S3 gRPC, `18080` volume gRPC, `18888` filer gRPC, `19333` master gRPC | all open | all blocked |
+| `seaweedfs` `8333` S3, `8888` filer, `9333` master, `8080` volume, `8181` Iceberg REST (‡), `18333` S3 gRPC, `18080` volume gRPC, `18888` filer gRPC, `19333` master gRPC | all open | all blocked |
 | `api` `8000`, `api` `50051` | open | blocked |
 | `db` `5432` | open | blocked |
 | `cloudflared` `20241` | open (†) | blocked |
@@ -428,6 +428,23 @@ next deploy — `docker compose exec api python -c "import urllib.request;
 urllib.request.urlopen('http://cloudflared:20241/metrics', timeout=3)"`,
 expecting a connection refusal — and record the result here; issue #2601 stays
 open until then.
+
+(‡) **`seaweedfs` `8181` — the listener is now disabled by flag; the row reports
+the 2026-08-02 probe, taken before it was (issue #2626).** `compose.yaml`'s
+`weed server` command now passes `-s3.port.iceberg=0`, which `weed server -h` on
+the pinned `chrislusf/seaweedfs:4.41` documents as `Iceberg REST Catalog server
+listen port (0 to disable)`. Verified 2026-08-21 against that image outside
+compose, on a throwaway internal docker network: with the flag, `8181` is absent
+from `netstat -lnt` in the container and a peer container's
+`GET http://<container>:8181/v1/config` is refused; without it, the same request
+answers 200. The other eight listeners are unchanged, and `8333` and `8888` still
+answer from a peer. **The row above still reports the 2026-08-02 probe**, because
+the flag ships in `compose.yaml` but the deployment it describes has not been
+rebuilt on it. Re-probe from an `mcsd` peer after the next deploy —
+`docker compose exec api python -c "import urllib.request;
+urllib.request.urlopen('http://seaweedfs:8181/', timeout=3)"`, expecting a
+connection refusal — and record the result here; issue #2626 stays open until
+then.
 
 **This covers docker-network paths only.** A port **published to the host** on a
 non-loopback interface is reachable from `mcsd-servers` through the bridge
@@ -481,18 +498,38 @@ security model, and the following remain true:
   separately (issue #2600). Neither is a substitute for the other: hardening is a
   checklist where every item must land, segmentation removes the class in one
   topology change.
-- **`mcsd` itself is not hardened — only its membership changed.** Everything on
-  it still has unauthenticated read, write and delete over **every tenant's**
-  worlds, snapshots and JARs: the SeaweedFS filer (`8888`), master (`9333`) and
-  volume (`8080`) ports take no credential, and the S3 gRPC port (`18333`) serves
-  reflection uncredentialed, handing out `SeaweedS3IamCache` and
-  `SeaweedS3LifecycleInternal`. Only the S3 gateway (`8333`) enforces on every
+- **`mcsd` itself is not hardened — only its membership changed, and the rest is
+  an accepted residual.** Everything on it still has unauthenticated read, write
+  and delete over **every tenant's** worlds, snapshots and JARs: the SeaweedFS
+  filer (`8888`), master (`9333`) and volume (`8080`) ports take no credential,
+  and the S3 gRPC port (`18333`) serves reflection uncredentialed, handing out
+  `SeaweedS3IamCache` and `SeaweedS3LifecycleInternal` — and behind that
+  reflection sit the S3 IAM RPCs (`PutIdentity`, `RemoveIdentity`, `PutPolicy`,
+  …), so a caller on `mcsd` can mint itself an S3 identity; `-s3.iam.readOnly`
+  does not guard that path. Only the S3 gateway (`8333`) enforces on every
   data-path call (its `/status` probe answers 200 uncredentialed, which is what
-  the compose healthcheck uses); the Iceberg REST port (`8181`) rejects catalog
-  calls but serves its config endpoint open. Membership of `mcsd` is therefore
-  equivalent to object-store admin. Closing that is issue #2626; until it lands,
-  treat "first-party" in the table above as a statement about *who is attached*,
-  not about what an attached process would have to prove.
+  the compose healthcheck uses). The ninth listener, the Iceberg REST port
+  (`8181`), no longer binds — see the (‡) footnote above. Who reaches the
+  remaining eight: after segmentation the long-running members of `mcsd` are
+  `api`, `db`, `worker`, `relay` and `cloudflared` (the table above names three
+  more — `seaweedfs` itself, and the one-shots `migrate` and
+  `seaweedfs-lifecycle`, which run to completion and exit). Membership of `mcsd`
+  is therefore equivalent to object-store admin for those five, two of which,
+  `relay` and `cloudflared`, terminate internet traffic.
+
+  **That is accepted, not scheduled (issue #2626, decided 2026-08-20).** Each of
+  the five is a first-party control-plane service, and the only control that
+  would close the surface is cluster-wide mTLS: `weed server` exposes no
+  `-jwt.*` flags (SeaweedFS carries JWT in `security.toml`), and
+  `security.toml`'s `grpc.s3` mTLS cannot be scoped to the S3 gRPC port —
+  turning it on escalates to mTLS across the whole cluster, all-or-nothing
+  (established on PR #2608, closed without a change). The one reduction
+  available without that escalation was taken instead: `-s3.port.iceberg=0`,
+  above. So read "first-party" in the table above as a statement about *who is
+  attached*, never about what an attached process would have to prove — a
+  compromise of `relay` or `cloudflared` lands on a network where every storage
+  listener but the S3 gateway answers with no credential, and `18333`'s IAM RPCs
+  mint an identity the gateway itself then accepts.
 - **Two members of `mcsd` terminate internet traffic.** `relay` accepts arbitrary
   inbound connections — players on `25565` and `19132-19231/udp`, Worker
   dial-back tunnels on `25665` and `25675/udp` — and `cloudflared` terminates a
