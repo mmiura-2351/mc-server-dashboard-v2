@@ -51,12 +51,15 @@ func TestRunningSnapshotDeclaresTheGenerationItStamped(t *testing.T) {
 	}
 }
 
-// TestStoppedSnapshotDeclaresNoHeldGeneration is the world-loss case issue #2481
-// exists for. The stopped-id branch publishes and then removeScratch DELETES the
-// working set (#762/#841), so the Worker holds nothing afterwards. Declaring the
-// published generation here would let the API record held == store, take the short
-// grace, and start with skip_hydrate into a freshly MkdirAll'd empty directory —
-// a #696-class world rollback.
+// TestStoppedSnapshotDeclaresNoHeldGeneration is the case issue #2481 exists for.
+// The stopped-id branch publishes and then removeScratch DELETES the working set
+// (#762/#841), so the Worker holds nothing afterwards. Declaring the published
+// generation here would let the API record held == store, take the short grace, and
+// start with skip_hydrate over a working set that is not there. Since issue #2499
+// handleStart refuses that start instead of booting an empty directory, so the
+// declaration would cost a refusal and a corrective hydrate rather than the
+// #696-class world rollback it once did — a floor under the mistake, not a licence
+// to make it.
 func TestStoppedSnapshotDeclaresNoHeldGeneration(t *testing.T) {
 	tr := &fakeTransfer{gen: 12}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)

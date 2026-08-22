@@ -1059,9 +1059,13 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// still held (released by the deferred release on return), so no racing hydrate
 		// or start can recreate the dir between the publish and this removal. Recording
 		// the new generation would be pointless work on a dir we are about to delete —
-		// and declaring one to the API (issue #2481) would be a world-loss path: the API
-		// would record held == store for a scratch that no longer exists, take the short
-		// held-start grace, and start with skip_hydrate into an empty directory.
+		// and declaring one to the API (issue #2481) would be a lie about what this
+		// Worker holds: the API would record held == store for a scratch that no longer
+		// exists, take the short held-start grace, and start with skip_hydrate over
+		// nothing. That start is now REFUSED at launch rather than booted into an empty
+		// directory (handleStart, issue #2499), so the declaration would cost a refusal
+		// and a corrective hydrate instead of a #696-class world rollback — still wrong,
+		// and still not worth making the guard earn its keep on.
 		m.removeScratch(cmd.ServerID)
 	}
 	return session.CommandResult{
