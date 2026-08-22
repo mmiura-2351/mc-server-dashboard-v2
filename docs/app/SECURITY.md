@@ -458,17 +458,76 @@ ports. Two cases, and the second is not hypothetical:
   `API_HTTP_BIND_IP=<lan-ip>` are documented, supported configurations
   ([`../dev/DEPLOYMENT.md`](../dev/DEPLOYMENT.md) Section 8), and either one
   re-opens `api:8000` to every Minecraft container on the host.
-- **The relay publishes on every interface, with no opt-out.** With the `relay`
-  profile active, `compose.yaml` publishes `25565/tcp`, `25665/tcp`,
-  `25675/udp` and `19132-19231/udp` with **no host IP** — there is no
-  `RELAY_BIND_IP` equivalent. So on any relay-enabled deployment a Minecraft
-  container can already reach them via the bridge gateway today — `25565` and
-  `25665` always, the two UDP sets only when `MCD_RELAY_BEDROCK_ENABLED=true`,
-  since the relay publishes those unconditionally but binds them only under that
-  flag (a probe against an unbound one gets a refusal, not a service). That
-  includes **`25665`, the Worker dial-back tunnel**, and it is a live instance of
-  this bypass in the shipped configuration, not a consequence of operator
-  choice.
+- **The relay publishes its player ports on every interface; only the Worker
+  dial-back is bind-scoped (issue #2627).** With the `relay` profile active,
+  `compose.yaml` publishes `25565/tcp`, `25675/udp` and `19132-19231/udp` with
+  **no host IP**, and `25665/tcp` on `${RELAY_CONTROL_BIND_IP:-127.0.0.1}`. So on
+  any relay-enabled deployment a Minecraft container reaches the three
+  no-host-IP publications via the bridge gateway — `25565` always, the two UDP
+  sets only when `MCD_RELAY_BEDROCK_ENABLED=true`, since the relay publishes
+  those unconditionally but binds them only under that flag (a probe against an
+  unbound one gets a refusal, not a service).
+
+  **`25565` and the Bedrock UDP sets reaching a plugin is accepted, not
+  scheduled (decided 2026-08-20).** They are the product: a relay that players
+  cannot reach relays nothing, and Docker's DNAT does not distinguish a packet
+  from a Minecraft container from one off the internet. What a plugin gains
+  there is what any internet client already has — the relay's own player
+  listener, behind its per-IP hygiene caps ([`RELAY.md`](RELAY.md) Section 11) —
+  not a control-plane surface. `25675/udp` is the Bedrock **Worker** dial-back
+  and by that argument would be bind-scoped like `25665`; it is not, because the
+  decision took a single bind variable for the Java control port. It stays a
+  recorded residual: reachable from a Minecraft container whenever the Bedrock
+  gate is on.
+
+  **`25665`, the Worker dial-back, is the one that was closed — by the bind, and
+  not yet re-measured on a rebuilt deployment.** It was published on every
+  interface up to this revision. What established that is a relay-shaped
+  listener (published with no host IP) on a container attached to `mcsd`,
+  TCP-connect probed from the servers network:
+
+  ```text
+  172.20.0.1:<port>      servers-bridge gateway           OPEN
+  172.17.0.1:<port>      docker0                          OPEN
+  192.168.0.254:<port>   host LAN address                 OPEN
+  172.19.0.7:<port>      same container, direct on mcsd   blocked
+  ```
+
+  The last line is the finding: the container is unreachable at its `mcsd`
+  address and reachable at three host addresses at the same time. Segmentation
+  blocks the docker-network path to a service while the host-published path to
+  the *same* service stays open. `RELAY_CONTROL_BIND_IP` now defaults to
+  `127.0.0.1`, which removes all three — Docker's DNAT rule then matches only
+  packets destined to loopback, the same mechanism that makes the API refuse
+  from both networks in the case above. **That is the shipped configuration, not
+  a measurement**: the bind ships in `compose.yaml` but the deployment this
+  section describes has not been rebuilt on it, and no Minecraft server
+  container was running to probe from when it landed. Re-probe from inside a
+  **booted** MC server container after the next deploy, by every host address —
+  gateways from `docker network inspect mcsd-servers` / `mcsd`, the rest from
+  `ip -4 addr` on the host — and record the result here; issue #2627 stays open
+  until then:
+
+  ```sh
+  docker exec <mc-container> sh -c '
+    for a in 172.19.0.1 172.18.0.1 172.17.0.1 192.168.0.254; do
+      for p in 25665 25565; do
+        nc -z -w3 "$a" "$p" && echo "$a:$p OPEN" || echo "$a:$p blocked"
+      done
+    done'
+  # images without nc (most Java server images) — bash has /dev/tcp built in:
+  docker exec <mc-container> bash -c '
+    for a in 172.19.0.1 172.18.0.1 172.17.0.1 192.168.0.254; do
+      for p in 25665 25565; do
+        timeout 3 bash -c "echo > /dev/tcp/$a/$p" 2>/dev/null \
+          && echo "$a:$p OPEN" || echo "$a:$p blocked"
+      done
+    done'
+  ```
+
+  Expected: `25665` blocked at every host address, `25565` still OPEN at every
+  one of them. The second expectation is as load-bearing as the first — it is
+  what distinguishes the bind from a relay that stopped serving.
 
 If you publish anything off loopback, firewall it at the host or accept that
 plugins can reach it.
@@ -536,15 +595,19 @@ security model, and the following remain true:
   public tunnel. Compromising either puts an attacker exactly where the Minecraft
   containers were just removed from, with the unauthenticated storage surface
   above in reach. Segmentation raised the bar for a hostile *plugin*; it did not
-  raise it for a hostile *packet* arriving at the relay. And the relay is
-  reachable from **both** directions: because its ports
-  are published on every interface, a Minecraft container can reach them through
-  the host gateway even though `relay` is not on `mcsd-servers` — so the plugin
-  path to the relay survives segmentation too.
+  raise it for a hostile *packet* arriving at the relay. And the relay is still
+  reachable from **both** directions: its player publications carry no host IP,
+  so a Minecraft container reaches them through the host gateway even though
+  `relay` is not on `mcsd-servers` — the plugin path to the relay's *player*
+  listener survives segmentation. What no longer survives is the plugin path to
+  the **Worker dial-back**: `25665` is published on loopback by default (issue
+  #2627, see "What an MC container can reach" above).
 - **Host-published ports bypass the split entirely.** See the note at the end of
   "What an MC container can reach": publishing the API off loopback, and the
-  relay's own always-published ports, are both reachable from every Minecraft
-  container on the host.
+  relay's `25565` / `25675/udp` / `19132-19231/udp`, are reachable from every
+  Minecraft container on the host. The bind default on the relay's `25665`
+  removes that one port from the list; it does not change the mechanism for the
+  rest.
 - **The split applies at a server's next start, not at upgrade.** A Minecraft
   container that was already running when the operator upgraded stays attached to
   `mcsd` and keeps its full pre-upgrade reach until it is restarted — measured

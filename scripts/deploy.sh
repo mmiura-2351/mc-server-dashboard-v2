@@ -98,7 +98,7 @@ if [ ! -f .env ]; then
 			exit 1
 		fi
 
-		read -rp "MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT (e.g. host:25665): " MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT
+		read -rp "MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT (e.g. relay:25665 for the in-compose worker): " MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT
 		if [ -z "$MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT" ]; then
 			echo "deploy: ERROR -- relay tunnel public endpoint is required when relay is enabled." >&2
 			exit 1
