@@ -385,13 +385,17 @@ real endpoint. `api/tests/servers/test_resource_pack_store_contract.py` runs its
 green without an S3 instance. CI runs them in the api workflow's separate
 `live-s3` job, which starts a SeaweedFS container and supplies the endpoint
 (#2331); that job fails if either module skips. To run them locally against a
-throwaway SeaweedFS — the image tag below must track `compose.yaml`'s
-`seaweedfs` pin, so a local run exercises the deployed version:
+throwaway SeaweedFS, run this from the repository root — the first line reads
+the image out of `compose.yaml`'s `seaweedfs` pin instead of restating it, so a
+local run exercises the deployed version and there is no second copy of the tag
+to keep in sync (issue #2614):
 
 ```sh
+SWFS_IMAGE=$(sed -n 's/^ *image: \(chrislusf\/seaweedfs:.*\)$/\1/p' compose.yaml)
+
 docker run -d --name swfs-test -p 8333:8333 \
-  -e AK=testak -e SK=testsk --entrypoint sh chrislusf/seaweedfs:4.39 -c \
-  'mkdir -p /etc/seaweedfs && printf "{\"identities\":[{\"name\":\"t\",\"credentials\":[{\"accessKey\":\"%s\",\"secretKey\":\"%s\"}],\"actions\":[\"Admin\",\"Read\",\"Write\",\"List\",\"Tagging\"]}]}" "$AK" "$SK" > /etc/seaweedfs/s3.json && exec weed server -dir=/data -s3 -s3.config=/etc/seaweedfs/s3.json'
+  -e AK=testak -e SK=testsk --entrypoint sh "$SWFS_IMAGE" -c \
+  'mkdir -p /etc/seaweedfs && printf "{\"identities\":[{\"name\":\"t\",\"credentials\":[{\"accessKey\":\"%s\",\"secretKey\":\"%s\"}],\"actions\":[\"Admin\",\"Read\",\"Write\",\"List\",\"Tagging\"]}]}" "$AK" "$SK" > /etc/seaweedfs/s3.json && exec weed server -dir=/data -s3 -s3.config=/etc/seaweedfs/s3.json -volume.max=24'
 
 cd api && MCD_TEST_S3_ENDPOINT=http://localhost:8333 \
   MCD_TEST_S3_ACCESS_KEY=testak MCD_TEST_S3_SECRET_KEY=testsk \
@@ -400,6 +404,20 @@ cd api && MCD_TEST_S3_ENDPOINT=http://localhost:8333 \
 
 docker rm -f swfs-test
 ```
+
+One `swfs-test` serves as many pytest runs as you like — the suite drops the
+bucket it creates, and `-volume.max=24` gives the store room for the buckets it
+creates while it runs. Both halves are needed, and neither is optional (issue
+#2614). SeaweedFS backs every S3 bucket with a *collection* and grows a batch of
+up to seven volumes into it out of the `-volume.max` budget, which it does not
+reclaim while the collection lives; three collections are in play here (the
+`mcsd` bucket, the bucketless-store test's own bucket, and the filer's internal
+metadata log), so the stock budget of 8 cannot hold them. Measured on 4.41 at
+the stock budget: runs 1-4 pass, the filer's metadata log then claims the last
+free volume, and every run from the fifth on fails with `No writable volumes and
+no free volumes left`. At 24 the same ten runs pass with the volume count flat
+at 14. The deployment itself is unaffected and keeps the stock budget — it only
+ever has the one bucket.
 
 ### Vacuum tuning and manual recovery
 

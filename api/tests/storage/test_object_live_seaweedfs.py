@@ -35,7 +35,9 @@ import os
 import uuid
 from collections.abc import AsyncIterator
 
+import aioboto3
 import pytest
+from botocore.exceptions import ClientError
 
 from mc_server_dashboard_api.storage.adapters.object_client import (
     make_s3_client_factory,
@@ -257,34 +259,87 @@ async def test_startup_sweep_reclaims_old_orphan_multipart_upload(
                 await client.abort_multipart_upload(key, upload_id)
 
 
+async def _drop_bucket(bucket: str) -> None:
+    """Delete ``bucket`` from the endpoint, tolerating its absence.
+
+    Deleting a bucket is outside the object-store Port, which is bucket-scoped by
+    construction, so this talks to the endpoint directly rather than through
+    ``_factory``. SeaweedFS's ``DeleteBucket`` drops the bucket's *collection*
+    along with it, which is what returns the volumes it held (below). The bucket
+    is legitimately absent both before the first run and after a run that failed
+    before its first write, so ``NoSuchBucket`` is swallowed — a teardown that
+    raised would mask the failure that caused it.
+    """
+    assert _ENDPOINT is not None
+    session = aioboto3.Session(
+        aws_access_key_id=_ACCESS_KEY, aws_secret_access_key=_SECRET_KEY
+    )
+    async with session.client("s3", endpoint_url=_ENDPOINT) as client:
+        try:
+            await client.delete_bucket(Bucket=bucket)
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] != "NoSuchBucket":
+                raise
+
+
+# The bucketless-store test's bucket. Fixed, not per-run unique, and dropped on
+# both sides of the test — because SeaweedFS cannot be made to give a per-run
+# bucket's storage back (issue #2614). It backs each bucket with a collection and
+# grows a batch of up to 7 volumes into it out of the server's ``-volume.max``
+# budget (8 by default), asynchronously: the first write returns as soon as ONE
+# volume exists while the rest of the batch keeps landing. ``DeleteBucket``
+# deletes the collection, but only reclaims the volumes the master has by then —
+# measured on 4.41, a DeleteBucket at t+1.8s removed one volume and six more
+# landed in the 100ms after it, orphaned under a bucket that no longer exists and
+# unreachable over S3. A unique name per run leaks that batch every run and
+# exhausts the budget within a few runs; a fixed name bounds the leak to one
+# batch, because the next run writes into the volumes the last one left instead
+# of growing new ones, and its own teardown then reclaims them. The name is
+# therefore load-bearing, not cosmetic.
+#
+# The cost is that two runs against ONE store must not overlap on this test —
+# unlike the ``mcsd``-bucket tests above, which stay disjoint via ``new_scope``.
+# A store is one developer's throwaway (DEPLOYMENT.md) or one CI job's container,
+# so nothing shares one today.
+_FRESH_BUCKET = "mcsdfresh"
+
+
 async def test_fresh_bucketless_store_reads_as_empty_then_write_creates_it() -> None:
     # Issue #946: SeaweedFS auto-creates the bucket on first WRITE, not on read. A
     # fresh deployment's FastAPI lifespan runs the startup sweep before any write has
     # created the bucket, so every read raises NoSuchBucket. The full sweep() and the
     # representative reads (list/head/get) must all succeed as EMPTY against such a
     # bucketless store — otherwise the api crash-loops at boot on the shipped default.
-    # A unique never-written bucket per run guarantees the bucketless precondition.
-    bucket = f"mcsdfresh{uuid.uuid4().hex[:16]}"
-    factory = _factory(bucket)
+    # The bucketless precondition is ESTABLISHED rather than assumed: whatever an
+    # earlier run left under this name is dropped first.
+    await _drop_bucket(_FRESH_BUCKET)
+    factory = _factory(_FRESH_BUCKET)
     storage = ObjectStorage(factory)
 
-    # The exact path that crash-looped: the startup sweep over a bucketless store.
-    await storage.sweep()
+    try:
+        # The exact path that crash-looped: the startup sweep over a bucketless store.
+        await storage.sweep()
 
-    async with factory() as client:
-        assert await client.list_objects("communities/") == []
-        assert await client.list_multipart_uploads("communities/") == []
-        assert await client.head_object("communities/missing") is None
-        with pytest.raises(NotFoundError):
-            await _read(client, "communities/missing")
+        async with factory() as client:
+            assert await client.list_objects("communities/") == []
+            assert await client.list_multipart_uploads("communities/") == []
+            assert await client.head_object("communities/missing") is None
+            with pytest.raises(NotFoundError):
+                await _read(client, "communities/missing")
 
-        # A write auto-creates the bucket; the just-written object is then visible.
-        key = "communities/probe.json"
-        await client.put_object(key, b"{}")
-        assert await client.head_object(key) == 2
-        assert await _read(client, key) == b"{}"
-        assert any(obj.key == key for obj in await client.list_objects("communities/"))
-        await client.delete_object(key)
+            # A write auto-creates the bucket; the just-written object is then
+            # visible.
+            key = "communities/probe.json"
+            await client.put_object(key, b"{}")
+            assert await client.head_object(key) == 2
+            assert await _read(client, key) == b"{}"
+            assert any(
+                obj.key == key for obj in await client.list_objects("communities/")
+            )
+            await client.delete_object(key)
+    finally:
+        # Hand the collection's volumes back so the store stays runnable (#2614).
+        await _drop_bucket(_FRESH_BUCKET)
 
 
 async def test_backup_readability_probe_passes_a_sound_archive() -> None:

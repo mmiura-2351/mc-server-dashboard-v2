@@ -175,8 +175,10 @@ ignore_missing_imports = true
 
 # aioboto3 / aiobotocore / botocore ship no type stubs. Treat their imports as
 # untyped so the object client (storage/adapters/object_client.py) — the only
-# module touching them at the transport edge — type-checks without third-party
-# stub packages (the grpcio precedent above).
+# source module touching them at the transport edge — type-checks without
+# third-party stub packages (the grpcio precedent above). The live-endpoint test
+# module also imports them directly, to drop the bucket it created (issue #2614):
+# DeleteBucket is outside the bucket-scoped Port the client implements.
 [[tool.mypy.overrides]]
 module = ["aioboto3.*", "aiobotocore.*", "botocore.*"]
 ignore_missing_imports = true
