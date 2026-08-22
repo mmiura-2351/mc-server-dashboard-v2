@@ -9,24 +9,41 @@ command kind. The #202 incident slipped through because the API matched
 ``SERVER_NOT_FOUND`` -- both suites green because the API test hand-fed the
 fabricated status to a fake control plane.
 
-This test pins every API match site to the shared contract table
-(``proto/contract/command_error_contract.json``), the same artifact the Worker's
-``TestCommandErrorContract`` asserts it actually produces. A match on a
-``(kind, code)`` pair the Worker never emits -- i.e. one absent from the table --
-fails here. The table thus binds both sides to one source of truth: drift on the
-Worker emissions fails the Worker test; an unsafe API match fails this one.
+Since issue #2472 the shared table
+(``proto/contract/command_error_contract.json``) carries the API's handling on
+every row, and this module DERIVES its expectations from that column instead of
+maintaining its own list and count:
 
-``API_MATCH_SITES`` mirrors the matches in ``lifecycle.py`` / ``files.py`` by
-``file:line``. A regression guard (:func:`test_no_undeclared_match_sites`)
-counts the ``CommandStatus`` references in those modules so a new match added in
-source without being declared (and thus checked) here fails loudly.
+* the table names, per row, the sites that match the row's ``(kind, code)`` --
+  ``module.py:qualname`` inside ``servers/application/`` -- or says the outcome is
+  absorbed by the catch-all (``command_failed``) or never read at all
+  (``fire_and_forget``);
+* :func:`test_declared_api_sites_match_the_source` asserts the
+  ``(module, qualname, CommandStatus)`` triples the table declares are EXACTLY the
+  triples an ``ast`` scan finds in the application layer.
+
+That makes both directions consequences of the table rather than thresholds
+somebody can nudge: a new match on a ``(kind, code)`` the Worker never emits has
+no row to be declared on (the #202 class), a declared site deleted from the source
+fails here, and a match added in source without a row fails here too. The Worker's
+``TestCommandErrorContract`` and ``TestContractTableIsExhaustive`` hold the other
+direction -- that every row is what the instancemanager really emits, and that
+every (kind, precondition) cell HAS a row.
+
+Granularity note: a site is ``(module, enclosing qualname, status)``. Two
+references to the same status inside one function are one site; the qualname is
+class-qualified, so ``StartServer.__call__`` and ``StopServer.__call__`` are
+distinct. Only ``servers/application/`` is scanned: ``servers/adapters/
+control_plane.py`` also names every ``CommandStatus``, but that is the wire
+translation building the outcome, not a match on one.
 """
 
 from __future__ import annotations
 
+import ast
 import json
-import re
 from pathlib import Path
+from typing import Any
 
 from mc_server_dashboard_api.servers.domain.control_plane import CommandStatus
 
@@ -35,156 +52,188 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _CONTRACT_PATH = _REPO_ROOT / "proto" / "contract" / "command_error_contract.json"
 
 _SRC = Path(__file__).resolve().parents[2] / "src" / "mc_server_dashboard_api"
-_APP = _SRC / "servers" / "application"
-_LIFECYCLE = _APP / "lifecycle.py"
-_FILES = _APP / "files.py"
-# command_dispatch.py maps a start failure's sanitized status onto the 409 reason
-# (issue #225): another (kind, code) match site, scanned by the regression guard.
-_COMMAND_DISPATCH = _APP / "command_dispatch.py"
+_APPLICATION = _SRC / "servers" / "application"
 
-# Worker command kinds the file use cases dispatch (the table's keys). The API's
-# ``_map_file_status`` is shared across all three running-server file commands.
-# FILE_ACCESS_DENIED is reachable for all three; SERVER_NOT_FOUND only for the
-# read paths -- the Worker's handleEditFile creates missing intermediate dirs, so
-# it never emits SERVER_NOT_FOUND (the shared helper's branch is simply dead for
-# EditFile, never matched against a code the Worker produces).
-_FILE_KINDS = ("ReadFile", "EditFile", "ListFiles")
-_FILE_READ_KINDS = ("ReadFile", "ListFiles")
+# Codes that carry no API handling: a success, and the marker for a cell whose
+# precondition determines no emission for that kind (issue #2472).
+_NO_HANDLING_CODES = frozenset({"ok", "unaffected"})
 
-# Every (worker command kind, CommandStatus) pair the API's convergence /
-# special-case logic matches on, mirroring the source. Each MUST be a code the
-# Worker actually emits for that kind, i.e. present in the contract table.
-API_MATCH_SITES: tuple[tuple[str, CommandStatus], ...] = (
-    # lifecycle.py: redispatch_start AND __call__ (#773/#774) -- INVALID_STATE on a
-    # start means the Worker already runs the server (its start guard rejected a
-    # live instance), so both treat it as convergence rather than a failure. Since
-    # issue #2476 that is the code's ONLY meaning on a start or a hydrate: the
-    # pending failed-stop orphan, the other state ``reserve()`` refuses, moved to
-    # BUSY below. It is what makes the convergence sound -- while both meanings
-    # shared one code, a dead orphan's refusal converged a false observed=running
-    # (issue #2467). The table row backing this entry is now
-    # {StartServer, instance_running} alone.
-    ("StartServer", CommandStatus.INVALID_STATE),
-    # lifecycle.py: redispatch_start AND __call__ (#824/#2476) -- BUSY on a start
-    # means the Worker's id is not free yet: another lifecycle command is in flight
-    # OR a failed-stop orphan is still being converged. Both leave the outcome
-    # unknown and both will accept this same start later, so both API sites keep the
-    # assignment/intent and raise for a retry WITHOUT converging observed=running
-    # (the distinct-from-INVALID_STATE branch). Two table rows now back this entry:
-    # {StartServer, command_in_flight} and {StartServer, orphan_pending}.
-    ("StartServer", CommandStatus.BUSY),
-    # lifecycle.py: stop convergence -- SERVER_NOT_FOUND means no live instance;
-    # converge observed=stopped instead of failing. The graceful-stop path also
-    # special-cases the same status ("not SERVER_NOT_FOUND" raises), and
-    # redispatch_stop special-cases it again to skip the final snapshot (#846).
-    ("StopServer", CommandStatus.SERVER_NOT_FOUND),
-    # lifecycle.py: SendServerCommand -- the server stopped between the
-    # observed-running check and dispatch; the Worker emits SERVER_NOT_FOUND.
-    ("ServerCommand", CommandStatus.SERVER_NOT_FOUND),
-    # lifecycle.py: RestartServer (#2441) -- the Worker holds no live instance to
-    # restart (handleRestart's takeNotFound); surfaced as server_not_running
-    # instead of the unclassified command_failed.
-    ("RestartServer", CommandStatus.SERVER_NOT_FOUND),
-    # lifecycle.py: RestartServer and SendServerCommand (#2466) -- INVALID_STATE
-    # on either kind is the Worker's failed-stop orphan refusal (its running check
-    # found an instance it could not confirm dead), the one settled state those
-    # kinds can report. Surfaced as the failed_stop_orphan 409 reason so neither
-    # says "not running" about a process that may still be alive. These two keep
-    # INVALID_STATE where the start path moved to BUSY (#2476): a restart or a
-    # console command over an orphan is refused for what the state IS and is never
-    # executed once the orphan converges, so BUSY -- a promise of eventual success
-    # -- would be a lie. The asymmetry is deliberate.
-    ("RestartServer", CommandStatus.INVALID_STATE),
-    ("ServerCommand", CommandStatus.INVALID_STATE),
-    # lifecycle.py: _is_working_set_absent_refusal (#1790) -- SERVER_NOT_FOUND on
-    # a final SnapshotTrigger is the Worker's working_set_absent refusal (#1713),
-    # a benign duplicate after a published final snapshot; _final_snapshot logs
-    # it at INFO instead of the data-loss ERROR (narrowed further by the pinned
-    # "working dir absent" message phrase).
-    ("SnapshotTrigger", CommandStatus.SERVER_NOT_FOUND),
-    # files.py: _map_file_status (shared by all file commands).
-    *((kind, CommandStatus.SERVER_NOT_FOUND) for kind in _FILE_READ_KINDS),
-    *((kind, CommandStatus.FILE_ACCESS_DENIED) for kind in _FILE_KINDS),
-    # command_dispatch.py: a sanitized start failure maps its status onto the 409
-    # body reason (port_conflict / image_missing / worker_busy) instead of
-    # command_failed (#225/#867).
-    ("StartServer", CommandStatus.PORT_CONFLICT),
-    ("StartServer", CommandStatus.IMAGE_MISSING),
-    ("StartServer", CommandStatus.BUSY),
-    # command_dispatch.py again, reached by a different kind: the backup-create
-    # route now renders the sanitized reason instead of the catch-all (#2436),
-    # and its only dispatch is the running-path SnapshotTrigger. BUSY is the one
-    # sanitized status that kind can produce (handleSnapshot's stopped-id
-    # reserve), so it is the one reason the backup 409 can now carry. Two table
-    # rows back it since #2476 -- {SnapshotTrigger, command_in_flight} and the newly
-    # pinned {SnapshotTrigger, orphan_pending}, which is the backup taken during the
-    # failed-stop-orphan window (#2471): the row still reads observed=running, so
-    # the create takes the running path and lands on the Worker's orphan refusal.
-    ("SnapshotTrigger", CommandStatus.BUSY),
-)
+# The two non-site handlings a row may declare instead of a list.
+_CATCH_ALL = "command_failed"
+_FIRE_AND_FORGET = "fire_and_forget"
+
+# Prefix marking an api entry that CONSUMES a discriminator declared on the same
+# row rather than matching the status itself (the periodic snapshot scheduler
+# reading ``is_working_set_absent_refusal``, issue #2480). It holds no
+# ``CommandStatus`` reference, so the source scan cannot see it; it is recorded so
+# the row names every place the refusal is acted on, and skipped by the check.
+_VIA = "via "
+
+Triple = tuple[str, str, str]
+Row = dict[str, Any]
 
 
-def _load_table() -> set[tuple[str, str]]:
-    """Return the table as a set of (kind, code) pairs the Worker emits."""
-
-    data = json.loads(_CONTRACT_PATH.read_text())
-    return {(row["kind"], row["code"]) for row in data["rows"]}
-
-
-def test_api_match_sites_are_in_contract_table() -> None:
-    table = _load_table()
-    for kind, status in API_MATCH_SITES:
-        assert (kind, status.value) in table, (
-            f"API matches {kind} outcomes on CommandStatus.{status.name}, but the "
-            f"contract table has no row where the Worker emits {status.value!r} "
-            f"for {kind}. Either the match is wrong (the #202 class of bug) or the "
-            f"table is stale -- reconcile against the Worker's instancemanager."
-        )
+def _rows() -> list[Row]:
+    data: Any = json.loads(_CONTRACT_PATH.read_text())
+    rows: list[Row] = data["rows"]
+    return rows
 
 
-def test_no_undeclared_match_sites() -> None:
-    """Guard against an API match added in source but not declared above.
+def _declared_triples() -> dict[Triple, set[str]]:
+    """The (module, qualname, status name) triples the table's api column names.
 
-    Counts ``CommandStatus.<NAME>`` references in the convergence/special-case
-    modules. If a new match appears in source without a corresponding entry in
-    ``API_MATCH_SITES``, this count diverges and fails, forcing the new pair to be
-    declared (and thus checked against the table).
+    Maps each triple to the command kinds whose rows declare it, so a failure can
+    say which contract row a stale site belongs to.
     """
 
-    pattern = re.compile(r"CommandStatus\.[A-Z_]+")
-    found = sum(
-        len(pattern.findall(path.read_text()))
-        for path in (_LIFECYCLE, _FILES, _COMMAND_DISPATCH)
+    declared: dict[Triple, set[str]] = {}
+    for row in _rows():
+        api = row.get("api")
+        if not isinstance(api, list):
+            continue
+        status = CommandStatus(row["code"]).name
+        for entry in api:
+            if entry.startswith(_VIA):
+                continue
+            module, _, qualname = entry.partition(":")
+            declared.setdefault((module, qualname, status), set()).add(row["kind"])
+    return declared
+
+
+def _status_names(node: ast.AST) -> list[str]:
+    """Every ``CommandStatus.<NAME>`` referenced anywhere under ``node``."""
+
+    return [
+        child.attr
+        for child in ast.walk(node)
+        if isinstance(child, ast.Attribute)
+        and isinstance(child.value, ast.Name)
+        and child.value.id == "CommandStatus"
+    ]
+
+
+def _assigned_name(stmt: ast.stmt) -> str | None:
+    """The target name of a module-level assignment, for attributing its refs."""
+
+    if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+        return stmt.target.id
+    if isinstance(stmt, ast.Assign):
+        for target in stmt.targets:
+            if isinstance(target, ast.Name):
+                return target.id
+    return None
+
+
+def _collect(body: list[ast.stmt], owner: str, module: str, found: set[Triple]) -> None:
+    for stmt in body:
+        if isinstance(stmt, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            qualname = f"{owner}.{stmt.name}" if owner else stmt.name
+            _collect(stmt.body, qualname, module, found)
+            continue
+        name = owner or _assigned_name(stmt) or "<module>"
+        for status in _status_names(stmt):
+            found.add((module, name, status))
+
+
+def _scanned_triples() -> set[Triple]:
+    """Every ``CommandStatus`` match site in the servers application layer."""
+
+    found: set[Triple] = set()
+    for path in sorted(_APPLICATION.glob("*.py")):
+        tree = ast.parse(path.read_text())
+        _collect(tree.body, "", path.name, found)
+    return found
+
+
+def test_declared_api_sites_match_the_source() -> None:
+    """The table's api column and the application layer name the same sites.
+
+    Both directions matter. A ``CommandStatus`` match in source that no row
+    declares is the #202 class of bug -- the API acting on a code for a kind the
+    Worker may never emit -- and it has nowhere to be declared unless the Worker
+    really emits it, because the api column lives ON the row that pins the
+    emission. A declared site the source no longer has is stale self-description,
+    the drift issue #2472 set out to end.
+    """
+
+    declared = _declared_triples()
+    scanned = _scanned_triples()
+
+    undeclared = sorted(scanned - set(declared))
+    assert not undeclared, (
+        "these CommandStatus match sites are in servers/application/ but no "
+        f"contract row declares them: {undeclared}. Add the site to the 'api' "
+        "column of the row for the (kind, code) it matches in "
+        "proto/contract/command_error_contract.json -- and if there is no such "
+        "row, the API is matching a code the Worker never emits for that kind "
+        "(the #202 incident)."
     )
-    # lifecycle.py has 12 CommandStatus.<NAME> references (redispatch_start and
-    # __call__ both read an INVALID_STATE start as already-running (#773/#774) and
-    # both special-case a BUSY start as retry-no-converge (#824), stop convergence,
-    # graceful-stop "not SERVER_NOT_FOUND", redispatch_stop's snapshot-skip
-    # "not SERVER_NOT_FOUND" (#846), RestartServer's not-running refusal (#2441),
-    # SendServerCommand, the failed-stop-orphan INVALID_STATE refusal on
-    # RestartServer and SendServerCommand (#2466), and
-    # _is_working_set_absent_refusal's benign final-snapshot refusal (#1790));
-    # files.py has 2 (_map_file_status); command_dispatch.py has 3 (the sanitized
-    # start-failure reason map: port_conflict, image_missing, worker_busy; issues
-    # #225/#867).
-    # Bump this with intent when a genuinely new convergence/special-case match is
-    # added -- and add it to API_MATCH_SITES so it is checked against the contract
-    # table.
-    #
-    # Issue #2476 deliberately did NOT move it. Reclassifying the orphan refusal
-    # from INVALID_STATE to BUSY changed which Worker preconditions feed the codes
-    # the API already matches on; it added no match site and retired none, because
-    # every arm the reclassified outcome now lands in (the BUSY arms of
-    # ``StartServer.__call__`` and ``redispatch_start``, and the ``worker_busy``
-    # entry of ``_SANITIZED_REASONS``) was already there and already correct. A
-    # count that had moved would have meant the API needed a behavioural change,
-    # which it did not.
-    assert found == 17, (
-        f"found {found} CommandStatus references in lifecycle.py/files.py/"
-        "command_dispatch.py, expected 17. A convergence/special-case match was "
-        "added or removed: update API_MATCH_SITES (so it is checked against the "
-        "contract table) and this count."
+
+    stale = sorted(triple for triple in declared if triple not in scanned)
+    assert not stale, (
+        "the contract table declares these API match sites, but the source has "
+        f"no such CommandStatus reference: {stale}. They were renamed, moved or "
+        "removed -- update the 'api' column of the rows that name them (kinds: "
+        f"{ {t: sorted(declared[t]) for t in stale} })."
     )
+
+
+def test_every_error_row_declares_its_api_handling() -> None:
+    """Each row with a real error code says how the API treats it (issue #2472)."""
+
+    for row in _rows():
+        where = f"({row['kind']}, {row['precondition']})"
+        api = row.get("api")
+        if row["code"] in _NO_HANDLING_CODES:
+            assert api is None, (
+                f"row {where} has code {row['code']!r}, which the API never handles; "
+                "drop its 'api' entry."
+            )
+            continue
+        assert api is not None, (
+            f"row {where} emits {row['code']!r} but does not say how the API treats "
+            "it. Add 'api': a list of the sites that match it, "
+            f"{_CATCH_ALL!r} when it falls through to the generic dispatch failure, "
+            f"or {_FIRE_AND_FORGET!r} when the API awaits no result for the kind."
+        )
+        if isinstance(api, str):
+            assert api in (_CATCH_ALL, _FIRE_AND_FORGET), (
+                f"row {where} declares an unknown api handling {api!r}"
+            )
+            continue
+        assert api, f"row {where} declares an empty api site list"
+        for entry in api:
+            site = entry[len(_VIA) :] if entry.startswith(_VIA) else entry
+            module, sep, qualname = site.partition(":")
+            assert sep and qualname and module.endswith(".py"), (
+                f"row {where} declares the api site {entry!r}; the form is "
+                "'module.py:qualname' (optionally prefixed 'via ')"
+            )
+
+
+def test_rows_sharing_a_kind_and_code_declare_the_same_api() -> None:
+    """One (kind, code) pair is handled one way, however many rows produce it.
+
+    Two preconditions can answer the same code -- ``{StartServer, orphan_pending}``
+    and ``{StartServer, command_in_flight}`` both answer BUSY -- and the API cannot
+    tell them apart: it sees the code. So their rows must not disagree about what
+    happens to it, or one of them is describing the API wrongly.
+    """
+
+    by_pair: dict[tuple[str, str], list[Row]] = {}
+    for row in _rows():
+        if row["code"] in _NO_HANDLING_CODES:
+            continue
+        by_pair.setdefault((row["kind"], row["code"]), []).append(row)
+
+    for (kind, code), rows in by_pair.items():
+        handlings = {json.dumps(row.get("api"), sort_keys=True) for row in rows}
+        assert len(handlings) == 1, (
+            f"rows for ({kind}, {code}) disagree about the API handling: "
+            f"{sorted(handlings)}. The API matches on the code, not on the "
+            "precondition, so every row producing this pair describes the same "
+            "handling."
+        )
 
 
 def test_invalid_state_has_a_single_meaning_on_the_start_and_hydrate_paths() -> None:
@@ -212,7 +261,7 @@ def test_invalid_state_has_a_single_meaning_on_the_start_and_hydrate_paths() -> 
     (the convergence exists for it), so its removal reddens this too.
     """
 
-    rows = json.loads(_CONTRACT_PATH.read_text())["rows"]
+    rows = _rows()
     for kind in ("StartServer", "HydrateTrigger"):
         invalid_state_preconditions = {
             row["precondition"]
