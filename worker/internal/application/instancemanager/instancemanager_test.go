@@ -321,13 +321,21 @@ func TestStartRefusedWhenWorkingDirAbsent(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(m.scratchDir, "s1")); !os.IsNotExist(err) {
 		t.Fatalf("working dir stat err = %v, want it to still be absent", err)
 	}
-	// The reservation is released, so the corrective start (the API's re-launch after
-	// its own hydrate) is not refused BUSY behind this one.
-	if res := m.Handle(context.Background(), session.Command{
-		CommandID: "hydrate", ServerID: "s1", Kind: "HydrateTrigger",
-		TransferURL: "https://api/working-set", TransferToken: "tok",
-	}); res.ErrorCode == session.CommandErrorBusy {
-		t.Fatalf("follow-up hydrate = %+v, want the refusal to have released the reservation", res)
+	// The refusal releases the reservation it took, so the corrective launch — the
+	// API's re-dispatch after its own hydrate — is not refused BUSY behind this one
+	// (the leak shape of issue #1950). Read the map directly rather than inferring it
+	// from a follow-up command's code: a command that fails BEFORE reserve() would
+	// make the inference vacuous.
+	m.mu.Lock()
+	leaked := m.reserved["s1"]
+	m.mu.Unlock()
+	if leaked {
+		t.Fatal("reserved[s1] leaked after the working-set refusal: the corrective start would be refused BUSY")
+	}
+	// And the corrective start itself succeeds once the working set is there.
+	seedScratch(t, m, "s1")
+	if start := m.Handle(context.Background(), startCmd()); !start.Success {
+		t.Fatalf("start after the refusal = %+v, want success once the working set is present", start)
 	}
 }
 

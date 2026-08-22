@@ -873,10 +873,14 @@ class StartServer:
             #
             # ``dispatch`` is deliberately NOT reset. The refused start was definitely
             # not applied, so resetting it would also be honest, but leaving it set is
-            # the conservative half of the #101 tradeoff: should the replay's hydrate
-            # fail or time out, ``__call__`` keeps desired=running and the assignment
-            # and lets the reconciler retry against the SAME Worker, rather than
-            # compensating and allowing a re-placement elsewhere.
+            # the conservative half of the #101 tradeoff — and it matters on exactly one
+            # path: a ``WorkerUnavailableError`` from the replay's hydrate (a timeout or
+            # a lost response) leaves ``__call__`` keeping desired=running and the
+            # assignment for the reconciler to retry against the SAME Worker, instead of
+            # compensating and letting a re-placement land elsewhere. A replay hydrate
+            # that merely returns a FAILED outcome is not covered by it either way:
+            # ``__call__`` reads the status, finds neither INVALID_STATE nor BUSY, and
+            # compensates regardless of ``attempted``.
             #
             # Log it: the condition means a live Worker's scratch was destroyed
             # underneath it, and a self-healing recovery nobody can see is how the next

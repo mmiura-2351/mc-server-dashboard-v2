@@ -508,9 +508,8 @@ func TestSnapshotDeclaresWorkerIDAsPublisher(t *testing.T) {
 func TestGenerationMarkerRemovedAfterFinalSnapshot(t *testing.T) {
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
-	seedScratch(t, m, "s1")
-	_ = m.Handle(context.Background(), startCmd())
 	dir := seedScratch(t, m, "s1")
+	_ = m.Handle(context.Background(), startCmd())
 	if err := writeGeneration(dir, 7); err != nil {
 		t.Fatal(err)
 	}
@@ -660,9 +659,8 @@ func strandedGenerationTemp(t *testing.T, dir string) string {
 func TestGenerationMarkerRetainedOnRestart(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
-	seedScratch(t, m, "s1")
-	_ = m.Handle(context.Background(), startCmd())
 	dir := seedScratch(t, m, "s1")
+	_ = m.Handle(context.Background(), startCmd())
 	if err := writeGeneration(dir, 7); err != nil {
 		t.Fatal(err)
 	}
