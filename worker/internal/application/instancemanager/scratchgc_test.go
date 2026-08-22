@@ -329,31 +329,37 @@ func TestRunningSnapshotGCsDisplacedTree(t *testing.T) {
 	}
 }
 
-// The identity pin that guards the marker stamp (issue #2284) deliberately does NOT
-// guard the sibling sweep in the same post-upload tail. This documents that choice in
-// code: with the working dir replaced mid-upload by a concurrent stream's hydrate, the
-// stamp is skipped but sweepDisplaced still removes the .displaced-<id> recovery tree
-// that hydrate just created — issue #917 item 3, knowingly left open. Only the silent,
-// non-self-healing consumer of the window was fixed here; the sweep's loss is bounded
-// and recoverable by re-hydrating. Change this test only together with that decision.
-func TestRunningSnapshotStillSweepsDisplacedWhenWorkingDirReplaced(t *testing.T) {
+// The sweep in the post-upload tail is gated on the same working-dir identity pin as
+// the marker stamp beside it (issue #2291, closing the window #917 item 3 named). With
+// the working dir replaced mid-upload by a concurrent stream's hydrate, the tree at
+// .displaced-<id> is that hydrate's recovery copy — the world as it stood before the
+// swap, which this snapshot never published — so removing it would spend a copy this
+// success does not supersede. The sweep is skipped instead, and the leaked tree is
+// reclaimed by the next successful snapshot for the id (the #906 GC-on-success
+// contract). The publish itself still succeeds: only the GC is declined.
+func TestRunningSnapshotSkipsDisplacedSweepWhenWorkingDirReplaced(t *testing.T) {
 	tr := &fakeTransfer{gen: 12}
 	ctrl := &fakeControl{reply: "ok"}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
 	_ = m.Handle(context.Background(), startCmd())
-	dir := seedScratch(t, m, "s1")
+	seedScratch(t, m, "s1")
 	tr.duringUpload = func(workingDir string) { replaceWorkingDirLikeHydrate(t, workingDir, 7) }
 
 	if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
-		t.Fatalf("running-id snapshot = %+v, want success", res)
+		t.Fatalf("running-id snapshot = %+v, want success (the publish succeeded; only the sweep is skipped)", res)
 	}
 
-	if got := readGeneration(dir); got != 7 {
-		t.Fatalf("generation = %d, want 7 (the stamp is guarded, issue #2284)", got)
+	// seedScratch wrote this content, and replaceWorkingDirLikeHydrate renamed that very
+	// directory to .displaced-s1 — so reading it back proves the surviving tree is the
+	// racing hydrate's recovery copy and not some other leftover.
+	got, err := os.ReadFile(filepath.Join(m.scratchDir, ".displaced-s1", "level.dat"))
+	if err != nil {
+		t.Fatalf("displaced recovery tree removed by a snapshot of a working dir it no longer "+
+			"packed: the sweep is not gated on the identity pin (issue #2291): %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(m.scratchDir, ".displaced-s1")); !os.IsNotExist(err) {
-		t.Fatalf("displaced tree survived (stat err = %v): the sweep is intentionally NOT gated on "+
-			"the identity pin — issue #917 item 3 stays open", err)
+	if string(got) != "world" {
+		t.Fatalf("displaced tree content = %q, want %q (the interleaving did not happen, "+
+			"so this test proves nothing)", got, "world")
 	}
 }
 

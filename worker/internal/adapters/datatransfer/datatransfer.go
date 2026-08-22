@@ -307,10 +307,13 @@ func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string, baseGe
 //
 // OLDEST-WINS when the slot is already occupied (issue #2278): a hydrate that finds a
 // .displaced-<id> already there KEEPS it and discards the working set it just displaced.
-// The rule rests on one provable fact — every successful snapshot for this id calls
+// The rule rests on one near-provable fact — every successful snapshot for this id calls
 // sweepDisplaced, so a surviving .displaced-<id> means ZERO successful snapshots since it
-// was created. Both trees are therefore unpublished branches, and the discarded one can be
-// strictly NEWER; the swap emits a WARN naming both paths because of that. The rationale
+// was created. The one exception since issue #2291 is a snapshot that DECLINED its sweep
+// because a concurrent hydrate had replaced the tree it packed; the survivor then holds a
+// published prefix rather than being wholly unpublished, which only strengthens the case
+// for retaining it. Otherwise both trees are unpublished branches, and the discarded one
+// can be strictly NEWER; the swap emits a WARN naming both paths because of that. The rationale
 // and the rejected alternatives are in the swap block below and in issue #2278.
 //
 // Crash safety (park-aside-first swap): the temp tree is built fully (including the
@@ -421,7 +424,10 @@ func unpackAndSwap(r io.Reader, destDir string, gen uint64, log *slog.Logger) er
 		//
 		// What that choice rests on, precisely: every snapshot that succeeds ON THIS
 		// WORKER for this id calls sweepDisplaced, so a .displaced-<id> still present at
-		// hydrate time proves the retained tree was never published from here. The scope
+		// hydrate time means the retained tree was not published from here — bar the one
+		// case where a running-id snapshot declined its sweep because the tree it packed
+		// had been replaced meanwhile (issue #2291), which leaves a survivor holding a
+		// published prefix plus the delta since that pack. The scope
 		// matters — sweepDisplaced only ever walks this Worker's scratch, so a snapshot
 		// that succeeded for this id on ANOTHER Worker (an A->B->A re-placement) leaves
 		// this tree in place. The tree can therefore be arbitrarily old even while the id
