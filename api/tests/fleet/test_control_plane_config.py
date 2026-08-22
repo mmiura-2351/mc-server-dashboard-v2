@@ -360,9 +360,17 @@ def _compose_env_default(variable: str) -> str:
         "#1549 data-plane pin is gone, the #2564 warning fires on the shipped path"
     )
     value = match.group("value")
-    # `${VAR:-default}` -> `default`; a bare literal is returned as-is.
-    interpolated = re.fullmatch(r"\$\{[^:}]+:-([^}]*)\}", value)
-    return interpolated.group(1) if interpolated else value
+    # `${VAR:-default}` -> `default`; a bare literal is returned as-is. The
+    # default may itself hold a `${...}` — both base URLs address the API on the
+    # container-side port, which is `${MCD_API_SERVER__HTTP_PORT:-8000}` since
+    # issue #2585 — so resolve repeatedly, innermost first (the `[^{}]` classes
+    # make the inner one match first). A single non-nested pass would leave the
+    # raw `${...}` text here, and this guard would then pass on a string that is
+    # not a URL at all.
+    nested = re.compile(r"\$\{[^:{}]+:-([^{}]*)\}")
+    while (found := nested.search(value)) is not None:
+        value = value[: found.start()] + found.group(1) + value[found.end() :]
+    return value
 
 
 @pytest.mark.parametrize(

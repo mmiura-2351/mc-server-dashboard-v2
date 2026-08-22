@@ -85,10 +85,26 @@ class _Section(BaseModel):
 class ServerSettings(_Section):
     """HTTP + control-plane transport (CONFIGURATION.md Section 5.1)."""
 
+    # Bind address for BOTH listeners this process hosts: the HTTP API
+    # (``serve.py`` hands it to uvicorn) and the control-plane gRPC server
+    # (``app.py``). It is the authoritative bind in the container image too —
+    # the image's ``CMD`` deliberately passes no ``--host``, because flags baked
+    # into one image would silently outrank this key on the only way this
+    # project is deployed (issue #2585). ``compose.yaml`` forwards
+    # ``MCD_API_SERVER__HOST`` and defaults it to this value; under compose that
+    # default is the one to keep, since the bind happens inside the container's
+    # own network namespace and loopback there leaves the published port
+    # unreachable from the host (see MetricsSettings below, same reasoning).
     host: str = "0.0.0.0"
     # 0..65535: 0 is the conventional "bind an OS-assigned ephemeral port" value
     # (used by the gRPC server's ``add_insecure_port`` in tests), so it is allowed;
     # only a negative or above-65535 port is rejected.
+    #
+    # Read by ``serve.py``, the image's entry point, so it takes effect in the
+    # container (issue #2585 — it previously did not: the ``CMD`` hardcoded
+    # ``--port 8000``). Under compose it is the CONTAINER-side port, which the
+    # publish target, the healthcheck and the internal base URLs all interpolate;
+    # the HOST-side port is ``API_HTTP_PORT``.
     http_port: int = Field(default=8000, ge=0, le=65535)
     grpc_port: int = Field(default=50051, ge=0, le=65535)
     # Externally reachable base URL of the API's HTTP data plane, advertised to

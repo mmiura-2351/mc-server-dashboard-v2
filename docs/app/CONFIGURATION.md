@@ -150,8 +150,8 @@ marks keys with no default.
 
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
-| `server.host` | `0.0.0.0` | | Bind address for the HTTP API (REST + data-plane endpoint). |
-| `server.http_port` | `8000` | | Port for the HTTP API. Must be 0..65535; `0` binds an OS-assigned ephemeral port. |
+| `server.host` | `0.0.0.0` | | Bind address for both listeners the API process hosts: the HTTP API (REST + data-plane endpoint) and the control-plane gRPC server. IPv4 or IPv6 literal. **Takes effect in the container image** — see the bind note below. |
+| `server.http_port` | `8000` | | Port for the HTTP API. Must be 0..65535; `0` binds an OS-assigned ephemeral port. **Takes effect in the container image** — see the bind note below. |
 | `server.grpc_port` | `50051` | | Port the control-plane gRPC server listens on for Worker-initiated streams (REQUIREMENTS.md Section 5.1). Must be 0..65535; `0` binds an OS-assigned ephemeral port. |
 | `server.public_base_url` | *required for hydrate/snapshot* | | Externally reachable base URL of the API's data-plane HTTP endpoint, handed to Workers for hydrate/snapshot transfer (REQUIREMENTS.md Section 5.2, STORAGE.md Section 8). Optional in code so a process that never dispatches a transfer need not set it; a lifecycle command that needs it fails fast when it is unset. |
 | `server.data_plane_base_url` | `server.public_base_url` | | Base URL handed to Workers for hydrate/snapshot transfers instead of `server.public_base_url` (issue #1549). Defaults to `server.public_base_url` so a split deployment with no edge proxy sees no change. Set this on a deployment whose public URL routes through a body-size-capped edge (e.g. Cloudflare Tunnel, ~100 MB, see `DEPLOYMENT.md` Section 8) to an internal address instead, so a co-located Worker's working-set upload bypasses the edge rather than hairpinning through it and 413ing. A **cross-host** Worker must always set it explicitly — neither the compose-internal pin nor the public URL is right there (`DEPLOYMENT.md` Section 8). Because that omission otherwise only surfaces at transfer time, the API logs a startup `WARN` when this is unset while `server.public_base_url` is set (issue #2564); setting it explicitly — including to the same value as `server.public_base_url` — records the intent and silences the warning. |
@@ -166,6 +166,35 @@ marks keys with no default.
 | `control.hydrate_timeout_seconds` | `600` | | Separate, longer deadline for the **hydrate** phase of a start (issue #822): pulling a large world's working set routinely outlasts `command_timeout_seconds`, so the hydrate trigger gets its own budget instead of forcing the global command timeout up (which governs every other command and widens the duplicate-start window). Only the start's hydrate dispatch uses it; all other commands stay on `command_timeout_seconds`. Must be positive. See the reconciler grace floor below.³ |
 | `control.snapshot_timeout_seconds` | `600` | | Separate, longer deadline for the **final snapshot** a graceful stop captures (issue #847). The stop holds the server's assignment until this snapshot settles (closing the stop→re-place generation race), so the dispatch must span a full working-set upload (minutes for a large world); under `command_timeout_seconds` it would time out and release the assignment mid-upload, reopening the race. Only the stop's final-snapshot dispatch uses it; all other commands stay on `command_timeout_seconds`. Must be positive. A snapshot **timeout** holds the assignment (not just a cancel), recovered by the stale-stop arm, so it co-bounds the reconciler grace floor below via `grace_seconds > snapshot_timeout_seconds` — at stock values dominated by the duplicate-start term, but binding when raised above `hydrate_timeout_seconds + command_timeout_seconds`.³ |
 | `control.stop_timeout_seconds` | `600` | | Separate, longer deadline for the **stop** command's worker round-trip (issue #930). A graceful stop does an in-container save (RCON `save-all`) and the worker's docker-stop escalation (RCON wait → SIGTERM grace → SIGKILL), which on a slow/CPU-starved host or a large world routinely outlasts `command_timeout_seconds`; under it the dispatch times out and the API returns **503** for a stop the worker actually completes, wedging the row at `(stopped, stopped, assigned)` until the reconciler's stale-stop arm clears it and silently losing the stop-leg final snapshot. Only the stop dispatch uses it; all other commands stay on `command_timeout_seconds`. Must be positive. Kept below `reconciler.grace_seconds` so the reconciler never replays a stop still legitimately in flight — it is the THIRD term of the grace floor below.³ |
+
+**The bind is one mechanism, and it is these two keys** (issue #2585). The
+container image's entry command passes no `--host` / `--port` of its own: it runs
+the API's entry point, which reads `server.host` and `server.http_port` from the
+same loader that builds the app, so both keys take effect on the deployment this
+document is written for. They previously did not — the image hardcoded
+`0.0.0.0:8000`, so setting `MCD_API_SERVER__HTTP_PORT` produced no error, no
+warning and no effect.
+
+Under the bundled compose deployment these are the **container** side, and
+`compose.yaml` forwards both from `.env`:
+
+- `MCD_API_SERVER__HOST` / `MCD_API_SERVER__HTTP_PORT` are what the process
+  binds *inside* the container. Everything container-side follows
+  `MCD_API_SERVER__HTTP_PORT` — the publish target, the compose healthcheck, and
+  the internal `http://api:…` base URLs handed to Workers — so moving it moves
+  them together. The one thing it does not move is the `http://api:8000` target
+  configured in the Cloudflare Zero Trust dashboard (DEPLOYMENT.md Section 8);
+  change that by hand if you change the port.
+- `API_HTTP_BIND_IP` / `API_HTTP_PORT` are the **host** side: which host
+  interface and host port the container port is published on
+  (`DEPLOYMENT.md` Section 3). They are compose `ports:` interpolation and reach
+  the API process not at all.
+- Keep `server.host` at `0.0.0.0` under compose. The bind happens inside the
+  container's own network namespace, so loopback there makes the published port
+  unreachable from the host — while the healthcheck, which probes
+  container-localhost, still reports the service healthy. Outside compose (bare
+  metal, systemd, a direct `docker run` with `--network host`) `server.host` is
+  the real network boundary; scope it there.
 
 ² `control.tls.cert_file` and `control.tls.key_file` are required **together,
 unless** `control.tls.insecure=true`. With neither the cert/key pair nor

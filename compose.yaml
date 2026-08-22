@@ -237,6 +237,15 @@ services:
     image: mcsd-api:dev
     restart: unless-stopped
     environment:
+      # An entry below with a LITERAL value is a pin this deployment owns, not a
+      # default: setting that same MCD_API_* name in .env changes nothing,
+      # because what compose puts in the container wins (issue #2585). Those are
+      # DATABASE__URL (composed from the POSTGRES_* values), WEBUI__DIST_DIR and
+      # STORAGE__FS__ROOT (paths inside the image / the mounted volume),
+      # STORAGE__OBJECT__ENDPOINT (the in-compose gateway) and
+      # CONTROL__TLS__INSECURE (the private-network posture) — each pinned for
+      # the reason given where it appears. Every other entry is a
+      # `${VAR:-default}` knob an operator sets in .env.
       MCD_API_DATABASE__URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       # `:?` rejects unset OR empty so a blank signing key / worker credential
       # fails loudly here rather than slipping past the api's fail-fast (#939).
@@ -248,11 +257,26 @@ services:
       # Plaintext gRPC control listener on the private compose network. Cross-host
       # workers require real TLS instead (see docs/dev/DEPLOYMENT.md).
       MCD_API_CONTROL__TLS__INSECURE: "true"
+      # The container-side HTTP bind (issue #2585). The image no longer hardcodes
+      # `--host/--port`, so these two settings ARE the bind; forwarded with `:-`
+      # defaults so the .env knobs are not silently inert here, the same posture
+      # as the metrics listener below. They are the CONTAINER side of the split:
+      # API_HTTP_BIND_IP / API_HTTP_PORT under `ports:` stay the HOST side.
+      # Under compose the default 0.0.0.0 host is the CORRECT value: the bind
+      # happens inside the container's own network namespace, so loopback there
+      # leaves the published port below unreachable from the host while the
+      # healthcheck (which probes container-localhost) still reports healthy.
+      # Moving HTTP_PORT moves the publish target, the healthcheck and the two
+      # base URLs with it — they all interpolate it. What it does NOT move is
+      # the `http://api:8000` target configured in the Cloudflare Zero Trust
+      # dashboard (docs/dev/DEPLOYMENT.md Section 8); update that by hand.
+      MCD_API_SERVER__HOST: "${MCD_API_SERVER__HOST:-0.0.0.0}"
+      MCD_API_SERVER__HTTP_PORT: "${MCD_API_SERVER__HTTP_PORT:-8000}"
       # MUST be overridden to the externally reachable origin on any real
       # deployment: client-facing URLs (e.g. resource-pack download links)
       # are rendered from this value. Contrast with DATA_PLANE_BASE_URL
       # below, which is intentionally internal-only (worker-facing).
-      MCD_API_SERVER__PUBLIC_BASE_URL: ${MCD_API_SERVER__PUBLIC_BASE_URL:-http://api:8000}
+      MCD_API_SERVER__PUBLIC_BASE_URL: ${MCD_API_SERVER__PUBLIC_BASE_URL:-http://api:${MCD_API_SERVER__HTTP_PORT:-8000}}
       # Worker-facing data-plane base URL, kept pinned to the internal
       # compose-network address regardless of what PUBLIC_BASE_URL above is set
       # to (issue #1549). An operator behind an edge proxy with a body-size cap
@@ -261,7 +285,7 @@ services:
       # separate internal URL the co-located worker's snapshot/hydrate uploads
       # would hairpin through that edge and 413 on every booted server. See
       # docs/dev/DEPLOYMENT.md Section 8.
-      MCD_API_SERVER__DATA_PLANE_BASE_URL: ${MCD_API_SERVER__DATA_PLANE_BASE_URL:-http://api:8000}
+      MCD_API_SERVER__DATA_PLANE_BASE_URL: ${MCD_API_SERVER__DATA_PLANE_BASE_URL:-http://api:${MCD_API_SERVER__HTTP_PORT:-8000}}
       # Storage backend (issue #702): the shipped default is `object` on the
       # seaweedfs service. Set MCD_API_STORAGE__BACKEND=fs in .env to opt back to
       # the local-volume fs backend (the fs root + volume below stay wired so the
@@ -323,7 +347,7 @@ services:
     volumes:
       - api-storage:/data/storage
     ports:
-      - "${API_HTTP_BIND_IP:-127.0.0.1}:${API_HTTP_PORT}:8000"      # HTTP REST + /data-plane
+      - "${API_HTTP_BIND_IP:-127.0.0.1}:${API_HTTP_PORT}:${MCD_API_SERVER__HTTP_PORT:-8000}"   # HTTP REST + /data-plane
       # The gRPC control plane (50051) is intentionally NOT published to the
       # host: the in-compose worker dials api:50051 over the internal network,
       # and the plaintext control listener must never be reachable off-host.
@@ -332,7 +356,7 @@ services:
       # published either: it is scraped from inside this network, and publishing
       # it would undo the fix for issue #2565.
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/healthz')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:${MCD_API_SERVER__HTTP_PORT:-8000}/api/healthz')"]
       interval: 5s
       timeout: 5s
       retries: 10
