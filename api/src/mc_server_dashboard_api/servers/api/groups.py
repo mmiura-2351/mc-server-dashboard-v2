@@ -61,6 +61,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     GroupAttachmentNotFoundError,
     GroupNameAlreadyExistsError,
     GroupNotFoundError,
+    GroupPlayerEditConflictError,
     InvalidGroupKindError,
     InvalidGroupNameError,
     InvalidPlayerError,
@@ -196,6 +197,8 @@ async def rename_group(
         raise _unprocessable("invalid_group_name") from exc
     except GroupNameAlreadyExistsError as exc:
         raise _conflict("group_name_exists") from exc
+    except GroupPlayerEditConflictError as exc:
+        raise _conflict("group_edit_conflict") from exc
     await _record(recorder, ops.GROUP_UPDATE, authorized, community_id, group.id.value)
     return GroupResponse.from_entity(group)
 
@@ -248,6 +251,8 @@ async def add_player(
         raise _not_found() from exc
     except InvalidPlayerError as exc:
         raise _unprocessable("invalid_player") from exc
+    except GroupPlayerEditConflictError as exc:
+        raise _conflict("group_edit_conflict") from exc
     await _record(
         recorder, ops.GROUP_PLAYER_ADD, authorized, community_id, group.id.value
     )
@@ -276,6 +281,8 @@ async def remove_player(
         )
     except GroupNotFoundError as exc:
         raise _not_found() from exc
+    except GroupPlayerEditConflictError as exc:
+        raise _conflict("group_edit_conflict") from exc
     await _record(
         recorder, ops.GROUP_PLAYER_REMOVE, authorized, community_id, group.id.value
     )

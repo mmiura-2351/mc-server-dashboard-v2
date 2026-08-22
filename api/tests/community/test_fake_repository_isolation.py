@@ -34,11 +34,17 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 
+import pytest
+
 from mc_server_dashboard_api.community.domain.entities import (
     Community,
     Membership,
     ResourceGrant,
     Role,
+)
+from mc_server_dashboard_api.community.domain.errors import (
+    CommunityNotFoundError,
+    RoleNotFoundError,
 )
 from mc_server_dashboard_api.community.domain.value_objects import (
     CommunityId,
@@ -113,16 +119,19 @@ async def test_community_update_stores_a_copy_the_caller_cannot_rewrite() -> Non
     assert stored.name == CommunityName("renamed")
 
 
-async def test_community_update_on_a_missing_row_is_a_no_op() -> None:
+async def test_community_update_on_a_missing_row_reports_not_found() -> None:
     # ``SqlAlchemyCommunityRepository.update`` issues
-    # ``UPDATE community SET ... WHERE id = :id`` (adapters/repositories.py:183),
-    # which matches no row on an absent id: nothing is written and none is
-    # conjured. Keying the entity in regardless was an insert the adapter cannot
-    # perform (#2557).
+    # ``UPDATE community SET ... WHERE id = :id``, which matches no row on an
+    # absent id: nothing is written and none is conjured. Keying the entity in
+    # regardless was an insert the adapter cannot perform (#2557). Passing
+    # silently was the other half of the same mistake: a ``DeleteCommunity`` racer
+    # made ``RenameCommunity`` report a success it had not persisted, so the
+    # adapter checks the rowcount and the fake mirrors the raise (#2613).
     repo = FakeCommunityRepository()
     community = _community()
 
-    await repo.update(community)
+    with pytest.raises(CommunityNotFoundError):
+        await repo.update(community)
 
     assert repo.by_id == {}
 
@@ -255,16 +264,19 @@ async def test_role_update_stores_a_copy_the_caller_cannot_rewrite() -> None:
     _assert_role_unchanged(stored)
 
 
-async def test_role_update_on_a_missing_row_is_a_no_op() -> None:
+async def test_role_update_on_a_missing_row_reports_not_found() -> None:
     # ``SqlAlchemyRoleRepository.update`` issues
-    # ``UPDATE role SET ... WHERE id = :id`` (adapters/repositories.py:332),
-    # which matches no row on an absent id: nothing is written and none is
-    # conjured. Keying the entity in regardless was an insert the adapter cannot
-    # perform (#2557).
+    # ``UPDATE role SET ... WHERE id = :id``, which matches no row on an absent
+    # id: nothing is written and none is conjured. Keying the entity in regardless
+    # was an insert the adapter cannot perform (#2557). Passing silently was the
+    # other half of the same mistake: a ``DeleteRole`` racer made ``UpdateRole``
+    # report a success it had not persisted, so the adapter checks the rowcount
+    # and the fake mirrors the raise (#2613).
     repo = FakeRoleRepository()
     role = _role()
 
-    await repo.update(role)
+    with pytest.raises(RoleNotFoundError):
+        await repo.update(role)
 
     assert repo.by_id == {}
 

@@ -20,6 +20,14 @@ own pre-read raises (``fk_group_player_group_id_player_group`` ->
 ``fk_server_group_group_id_player_group`` /
 ``fk_server_group_server_id_server`` -> :class:`GroupNotFoundError` /
 :class:`ServerNotFoundError` on an attach whose target vanished, issue #2612).
+A write with nothing left to insert violates nothing, so ``save`` re-reads the
+group and raises the same not-found itself (issue #2613).
+
+Two player edits on one group that interleave are a third shape: neither caller
+duplicated anything and neither row vanished, but ``save``'s delete-then-insert
+means the loser re-inserts a pair the winner just committed
+(``uq_group_player_group_uuid`` -> :class:`GroupPlayerEditConflictError`, a
+retryable 409, issue #2613).
 
 The call sites share the translation (adapters/integrity.py): the UnitOfWork's
 ``commit`` (an INSERT racer flushes at commit) and the server / schedule /
@@ -42,6 +50,7 @@ import uuid
 import pytest
 from sqlalchemy.exc import IntegrityError
 
+from mc_server_dashboard_api.servers.adapters.group_models import PlayerGroupModel
 from mc_server_dashboard_api.servers.adapters.group_repository import (
     SqlAlchemyGroupRepository,
 )
@@ -62,6 +71,7 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     GroupNameAlreadyExistsError,
     GroupNotFoundError,
+    GroupPlayerEditConflictError,
     PluginAlreadyExistsError,
     PortAlreadyTakenError,
     ResourcePackInUseError,
@@ -334,24 +344,30 @@ async def test_group_add_reraises_unknown_violation_untranslated() -> None:
 class _FakeSaveSession:
     """A session shaped for ``save``: ``flush`` raises, the rest are no-ops.
 
-    ``get`` returns ``None``, which is what production really does here, though
-    not for the obvious reason. The natural guess is that ``_load_group`` leaves
-    the row in the session's identity map, so a concurrent delete would leave
-    ``get`` handing back a *stale* row -- but the identity map is **weak**, and
+    ``get`` hands back a row, because ``save`` re-asserts the group before it
+    writes anything (#2613): a read that comes back empty means a racer deleted
+    the group, and ``save`` reports that as not-found without reaching the flush.
+    So the flush these tests target is only reached for a group that is still
+    there, and ``get`` must model that. It takes ``populate_existing`` because the
+    adapter passes it -- the read has to reach the database rather than the
+    session's identity map for the assertion to mean anything.
+
+    The identity map would not have held the row anyway: it is **weak**, and
     ``get_by_id`` hydrates a framework-free ``PlayerGroup`` and drops the
-    ``PlayerGroupModel``, so nothing holds it. Measured on PostgreSQL 18: after
-    ``get_by_id`` the identity map is empty and ``get`` re-queries to ``None``;
-    pin a strong reference to the row instead and the same call hands back the
-    stale row. Either way the staged ``group_player`` INSERTs are what violate
-    and the flush is where the translation must sit; the live-FK behaviour is
-    pinned in ``tests/integration/test_group_repositories.py``.
+    ``PlayerGroupModel``, so nothing keeps it alive (measured on PostgreSQL 18).
+    That made the guard correct by accident rather than by construction, which is
+    the reason the flag is passed explicitly. The live behaviour is pinned in
+    ``tests/integration/test_group_repositories.py``.
     """
 
-    def __init__(self, error: IntegrityError) -> None:
+    def __init__(self, error: IntegrityError, *, row: object | None = None) -> None:
         self._error = error
+        self._row = row if row is not None else _player_group_row()
 
-    async def get(self, entity: object, ident: object) -> None:
-        return None
+    async def get(
+        self, entity: object, ident: object, *, populate_existing: bool = False
+    ) -> object | None:
+        return self._row
 
     async def execute(self, stmt: object) -> None:
         return None
@@ -361,6 +377,21 @@ class _FakeSaveSession:
 
     async def flush(self) -> None:
         raise self._error
+
+
+class _MissingRowSaveSession(_FakeSaveSession):
+    """A ``_FakeSaveSession`` whose group is gone by the time ``save`` reads it."""
+
+    async def get(
+        self, entity: object, ident: object, *, populate_existing: bool = False
+    ) -> object | None:
+        return None
+
+
+def _player_group_row() -> PlayerGroupModel:
+    return PlayerGroupModel(
+        id=uuid.uuid4(), community_id=uuid.uuid4(), name="admins", kind="op"
+    )
 
 
 def _group_with_player() -> PlayerGroup:
@@ -392,6 +423,28 @@ async def test_group_save_reraises_unknown_violation_untranslated() -> None:
     repo = SqlAlchemyGroupRepository(session)  # type: ignore[arg-type]
     with pytest.raises(IntegrityError):
         await repo.save(_group_with_player())
+
+
+async def test_group_save_translates_interleaved_player_edit_at_flush() -> None:
+    # issue #2613: two player edits on one group interleaved, so the loser's
+    # re-inserted (group_id, player_uuid) pair collides with the winner's
+    # committed row. Neither caller duplicated anything, so it is a retryable
+    # conflict (409) rather than a raw IntegrityError (500).
+    session = _FakeSaveSession(_integrity_error("uq_group_player_group_uuid"))
+    repo = SqlAlchemyGroupRepository(session)  # type: ignore[arg-type]
+    with pytest.raises(GroupPlayerEditConflictError):
+        await repo.save(_group_with_player())
+
+
+async def test_group_save_on_a_vanished_group_reports_not_found() -> None:
+    # issue #2613: with the row gone there may be nothing left to write -- a
+    # rename of a player-less group, or a removal that empties the set -- so no
+    # constraint fires and the flush translation never runs. The re-read is what
+    # asserts the group, and it raises before any write is staged.
+    session = _MissingRowSaveSession(_integrity_error("unused"))
+    repo = SqlAlchemyGroupRepository(session)  # type: ignore[arg-type]
+    with pytest.raises(GroupNotFoundError):
+        await repo.save(_group_entity())
 
 
 async def test_commit_translates_group_player_fk_violation() -> None:

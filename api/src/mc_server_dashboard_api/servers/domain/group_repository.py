@@ -47,6 +47,10 @@ class GroupRepository(abc.ABC):
 
         The player set is replaced wholesale (delete-then-insert) so an upsert /
         remove on the in-memory aggregate is mirrored to the rows in one call.
+
+        Never an insert: a group a concurrent delete removed since the caller's
+        pre-read raises :class:`GroupNotFoundError` rather than writing nothing
+        and reporting success (issue #2613).
         """
 
     @abc.abstractmethod

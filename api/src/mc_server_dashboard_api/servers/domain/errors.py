@@ -461,6 +461,19 @@ class GroupNameAlreadyExistsError(ServerError):
     """
 
 
+class GroupPlayerEditConflictError(ServerError):
+    """Two player edits on one group interleaved and collided (issue #2613).
+
+    The group's player set is written by replacing it wholesale
+    (delete-then-insert). Under READ COMMITTED the losing transaction's DELETE
+    cannot see rows the winner committed after it ran, so the loser re-inserts a
+    ``(group_id, player_uuid)`` pair that already exists and violates
+    ``uq_group_player_group_uuid``. Neither caller did anything wrong: the loser's
+    transaction rolls back, the winner's edit stands, and re-reading the group and
+    reapplying the edit succeeds. The edge maps this to 409.
+    """
+
+
 class GroupAttachmentNotFoundError(ServerError):
     """A detach targeted a group/server pair that is not attached (issue #276).
 

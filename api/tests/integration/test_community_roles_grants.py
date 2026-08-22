@@ -22,9 +22,17 @@ from collections.abc import AsyncIterator
 
 import pytest
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from mc_server_dashboard_api.community.adapters.clock import SystemClock
+from mc_server_dashboard_api.community.adapters.repositories import (
+    SqlAlchemyRoleRepository,
+)
 from mc_server_dashboard_api.community.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork,
 )
@@ -47,6 +55,7 @@ from mc_server_dashboard_api.community.application.manage_role import (
 from mc_server_dashboard_api.community.application.provision_community import (
     ProvisionCommunity,
 )
+from mc_server_dashboard_api.community.domain.entities import Role
 from mc_server_dashboard_api.community.domain.errors import (
     ResourceGrantAlreadyExistsError,
     ResourceGrantNotFoundError,
@@ -56,6 +65,7 @@ from mc_server_dashboard_api.community.domain.errors import (
 from mc_server_dashboard_api.community.domain.value_objects import (
     CommunityId,
     Permission,
+    RoleId,
     UserId,
 )
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
@@ -358,4 +368,75 @@ async def test_cross_community_role_and_grant_ids_are_not_found(
     with pytest.raises(ResourceGrantNotFoundError):
         await RevokeGrant(uow=SqlAlchemyUnitOfWork(factory))(
             community_id=community_b.id, grant_id=grant.id
+        )
+
+
+# --- a write on a role a racer deleted (issue #2613) --------------------------
+
+
+class _DeleteOnLoadRoleRepository(SqlAlchemyRoleRepository):
+    """A role repository that deletes the role right after handing it back.
+
+    Reproduces the production interleave deterministically, with no sleeps: the
+    use case's ``get_by_id`` read succeeds, another request's ``DeleteRole``
+    commits on its own connection, and only then does ``update`` run its UPDATE
+    against a row that is gone.
+    """
+
+    def __init__(self, session: AsyncSession, engine: AsyncEngine) -> None:
+        super().__init__(session)
+        self._engine = engine
+
+    async def get_by_id(self, role_id: RoleId) -> Role | None:
+        role = await super().get_by_id(role_id)
+        async with self._engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM role WHERE id = :id"), {"id": role_id.value}
+            )
+        return role
+
+
+class _RacingRoleUnitOfWork(SqlAlchemyUnitOfWork):
+    """A community UnitOfWork wired with :class:`_DeleteOnLoadRoleRepository`."""
+
+    def __init__(
+        self, session_factory: async_sessionmaker[AsyncSession], engine: AsyncEngine
+    ) -> None:
+        super().__init__(session_factory)
+        self._engine = engine
+
+    async def __aenter__(self) -> _RacingRoleUnitOfWork:
+        await super().__aenter__()
+        assert self._session is not None
+        self.roles = _DeleteOnLoadRoleRepository(self._session, self._engine)
+        return self
+
+
+async def test_update_role_reports_a_concurrent_role_delete_as_not_found(
+    engine: AsyncEngine,
+) -> None:
+    # ``UpdateRole`` losing to ``DeleteRole`` used to return 200 carrying the new
+    # name for a row that no longer existed: the UPDATE matched zero rows and
+    # nothing looked at the count. The rowcount is now the existence assertion, so
+    # the racer gets the same 404 the use case's own pre-read would have raised had
+    # the delete landed a moment earlier.
+    owner_id = uuid.uuid4()
+    await _insert_user(engine, owner_id, "alice")
+    community = await _provision(engine)(name="guild", owner_user_id=UserId(owner_id))
+    factory = create_session_factory(engine)
+    editor = await CreateRole(uow=SqlAlchemyUnitOfWork(factory), clock=SystemClock())(
+        community_id=community.id,
+        actor_id=UserId(owner_id),
+        name="Editor",
+        permissions={Permission("server:read")},
+    )
+
+    with pytest.raises(RoleNotFoundError):
+        await UpdateRole(
+            uow=_RacingRoleUnitOfWork(factory, engine), clock=SystemClock()
+        )(
+            community_id=community.id,
+            role_id=editor.id,
+            actor_id=UserId(owner_id),
+            name="Renamed",
         )

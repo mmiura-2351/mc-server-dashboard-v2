@@ -66,7 +66,12 @@ class CommunityRepository(abc.ABC):
 
     @abc.abstractmethod
     async def update(self, community: Community) -> None:
-        """Persist mutable fields of ``community`` (M1: its name, FR-COMM-1)."""
+        """Persist mutable fields of ``community`` (M1: its name, FR-COMM-1).
+
+        Never an insert: a community a concurrent delete removed since the
+        caller's pre-read raises :class:`CommunityNotFoundError` rather than
+        writing nothing and reporting success (issue #2613).
+        """
 
     @abc.abstractmethod
     async def delete(self, community_id: CommunityId) -> None:
@@ -157,7 +162,12 @@ class RoleRepository(abc.ABC):
 
     @abc.abstractmethod
     async def update(self, role: Role) -> None:
-        """Persist the mutable fields of ``role`` (its name and permission set)."""
+        """Persist the mutable fields of ``role`` (its name and permission set).
+
+        Never an insert: a role a concurrent delete removed since the caller's
+        pre-read raises :class:`RoleNotFoundError` rather than writing nothing and
+        reporting success (issue #2613).
+        """
 
     @abc.abstractmethod
     async def delete(self, role_id: RoleId) -> None:
