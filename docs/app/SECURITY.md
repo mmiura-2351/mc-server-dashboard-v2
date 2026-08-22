@@ -525,9 +525,14 @@ ports. Two cases, and the second is not hypothetical:
     done'
   ```
 
-  Expected: `25665` blocked at every host address, `25565` still OPEN at every
-  one of them. The second expectation is as load-bearing as the first — it is
-  what distinguishes the bind from a relay that stopped serving.
+  Expected: `25665` **refused** at every host address, `25565` still OPEN at
+  every one of them. Refused, not blocked — the loopback bind leaves no DNAT
+  rule to match and no listener to answer, so the connect gets an RST, which is
+  the API's mechanism above and not the inter-bridge packet drop this section
+  calls "blocked"; the probe above prints `blocked` for any failed connect, so
+  read its output with that in mind. The second expectation is as load-bearing
+  as the first — it is what distinguishes the bind from a relay that stopped
+  serving.
 
 If you publish anything off loopback, firewall it at the host or accept that
 plugins can reach it.
