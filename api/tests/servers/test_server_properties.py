@@ -5,7 +5,9 @@ from __future__ import annotations
 from mc_server_dashboard_api.servers.domain.server_properties import (
     PLATFORM_MANAGED_KEYS,
     RCON_PORT,
+    ResourcePackProperties,
     apply_overrides,
+    apply_platform_properties,
     changed_platform_managed_keys,
     clear_resource_pack_properties,
     remove_keys,
@@ -363,3 +365,88 @@ def test_non_utf8_platform_value_change_is_still_detected() -> None:
     current = b"rcon.password=\xff\xfe\n"
     incoming = b"rcon.password=\xfe\xff\n"
     assert changed_platform_managed_keys(current, incoming) == ["rcon.password"]
+
+
+# --- apply_platform_properties (issue #2621) --------------------------------
+
+
+def test_apply_platform_properties_covers_every_managed_key() -> None:
+    # The re-apply is what import and restore lean on, so it must leave no
+    # platform-managed key carrying the republished file's value.
+    content = (
+        b"server-port=25565\nenable-rcon=false\nrcon.port=1234\n"
+        b"rcon.password=old\nresource-pack=https://old/pack.zip\n"
+        b"resource-pack-sha1=old-sha\nrequire-resource-pack=false\n"
+        b"resource-pack-prompt=old prompt\nmotd=hi\n"
+    )
+    result = apply_platform_properties(
+        content,
+        game_port=26590,
+        rcon_password="fresh",
+        resource_pack=ResourcePackProperties(
+            url="https://new/pack.zip", sha1="new-sha", require=True, prompt="new"
+        ),
+    )
+    props = dict(
+        line.split("=", 1) for line in result.decode().splitlines() if "=" in line
+    )
+    assert PLATFORM_MANAGED_KEYS <= props.keys()
+    assert props["server-port"] == "26590"
+    assert props["enable-rcon"] == "true"
+    assert props["rcon.port"] == str(RCON_PORT)
+    assert props["resource-pack"] == "https://new/pack.zip"
+    assert props["resource-pack-sha1"] == "new-sha"
+    assert props["require-resource-pack"] == "true"
+    assert props["resource-pack-prompt"] == "new"
+    assert props["motd"] == "hi"
+
+
+def test_apply_platform_properties_keeps_a_working_rcon_password() -> None:
+    # The file is rcon.password's only source of truth (#335), so a republished
+    # file that carries a working credential keeps it.
+    result = apply_platform_properties(
+        b"rcon.password=known-secret\n",
+        game_port=26590,
+        rcon_password="fresh",
+        resource_pack=None,
+    )
+    assert b"rcon.password=known-secret\n" in result
+
+
+def test_apply_platform_properties_leaves_the_port_alone_without_a_tracked_one() -> (
+    None
+):
+    # A legacy row predating port tracking (game_port NULL) owns no port, so the
+    # file's own value stands rather than being replaced by a guess.
+    result = apply_platform_properties(
+        b"server-port=25565\n",
+        game_port=None,
+        rcon_password="fresh",
+        resource_pack=None,
+    )
+    assert b"server-port=25565\n" in result
+
+
+def test_apply_platform_properties_clears_the_pack_keys_when_unassigned() -> None:
+    content = (
+        b"resource-pack=https://old/pack.zip\nresource-pack-sha1=old-sha\n"
+        b"require-resource-pack=true\nresource-pack-prompt=old\n"
+    )
+    result = apply_platform_properties(
+        content, game_port=26590, rcon_password="fresh", resource_pack=None
+    )
+    assert b"resource-pack" not in result
+
+
+def test_apply_platform_properties_removes_the_prompt_when_the_row_has_none() -> None:
+    # An assignment with no prompt says "no prompt", so the republished file's own
+    # prompt must go -- unlike an assign, which leaves an unspecified prompt alone.
+    result = apply_platform_properties(
+        b"resource-pack-prompt=old prompt\n",
+        game_port=26590,
+        rcon_password="fresh",
+        resource_pack=ResourcePackProperties(
+            url="https://new/pack.zip", sha1="new-sha", require=False, prompt=None
+        ),
+    )
+    assert b"resource-pack-prompt" not in result

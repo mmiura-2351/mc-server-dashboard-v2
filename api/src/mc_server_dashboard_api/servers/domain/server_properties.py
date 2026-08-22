@@ -17,6 +17,7 @@ sufficient (we never need to parse values or escapes).
 from __future__ import annotations
 
 from collections.abc import Set as AbstractSet
+from dataclasses import dataclass
 
 _PORT_KEY = "server-port"
 _ENABLE_RCON_KEY = "enable-rcon"
@@ -270,6 +271,69 @@ def changed_platform_managed_keys(current: bytes, incoming: bytes) -> list[str]:
         for key in PLATFORM_MANAGED_KEYS
         if _raw_values(current, key) != _raw_values(incoming, key)
     )
+
+
+@dataclass(frozen=True)
+class ResourcePackProperties:
+    """The DB-owned resource-pack values for a server (issue #2621).
+
+    Built from the server's assignment row (and the pack it points at) by the
+    caller; ``None`` in place of one of these means the server has no pack
+    assigned, so the keys are cleared instead.
+    """
+
+    url: str
+    sha1: str
+    require: bool
+    prompt: str | None
+
+
+def apply_platform_properties(
+    content: bytes,
+    *,
+    game_port: int | None,
+    rcon_password: str,
+    resource_pack: ResourcePackProperties | None,
+) -> bytes:
+    """Return ``content`` with EVERY :data:`PLATFORM_MANAGED_KEYS` key re-applied.
+
+    The one place that turns "what the DB says about this server" into the
+    platform's half of a ``server.properties``. Import and restore both republish
+    a file that came from somewhere else -- an export archive, a backup taken
+    before a re-port -- so without this the archive's ``server-port`` becomes the
+    server's real bind port while the DB keeps the port the rest of the system
+    trusts, and hydrate copies the disagreement forever (issue #2621).
+
+    Per key:
+
+    - ``server-port`` becomes ``game_port``. A ``None`` ``game_port`` (a legacy row
+      that predates port tracking, DEPLOYMENT.md Section 7) owns nothing, so the
+      file's own value is left alone rather than replaced by a guess.
+    - The RCON triple goes through :func:`set_rcon_properties`: ``enable-rcon`` and
+      ``rcon.port`` are enforced, while a non-empty ``rcon.password`` already in
+      *content* is preserved -- the file is that credential's only source of truth
+      (#335), so a republished file that carries a working one keeps it, and
+      ``rcon_password`` only fills in a missing or empty one.
+    - The resource-pack keys come from the assignment: ``None`` clears all four
+      (the server has no pack), and a ``prompt`` of ``None`` removes just the
+      prompt key, since "no prompt" is what the assignment row then says.
+    """
+
+    if game_port is not None:
+        content = set_server_port(content, game_port)
+    content = set_rcon_properties(content, password=rcon_password)
+    if resource_pack is None:
+        return clear_resource_pack_properties(content)
+    content = set_resource_pack_properties(
+        content,
+        url=resource_pack.url,
+        sha1=resource_pack.sha1,
+        require=resource_pack.require,
+        prompt=resource_pack.prompt,
+    )
+    if resource_pack.prompt is None:
+        content = remove_keys(content, {_RESOURCE_PACK_PROMPT_KEY})
+    return content
 
 
 def clear_resource_pack_properties(content: bytes) -> bytes:
