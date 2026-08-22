@@ -211,6 +211,16 @@ type Manager struct {
 	// the real filesystem.
 	scanRegion func(root string) (regionState, error)
 
+	// snapshotAfterRunningCheck, when non-nil, runs between handleSnapshot's
+	// UNRESERVED running check and the stopped path's reserve() -- the window in
+	// which a start can register an instance and turn that reserve() into the
+	// "already running" INVALID_STATE refusal. Production leaves it nil; the
+	// contract test sets it so the {SnapshotTrigger, snapshot_reserve_race} row of
+	// proto/contract/command_error_contract.json is driven by the real interleaving
+	// instead of asserted by prose (issue #2472). A field, not a package var, so it
+	// belongs to the manager under test -- mirroring scanRegion above.
+	snapshotAfterRunningCheck func(serverID string)
+
 	// orphanProbeInterval / orphanProbeMaxInterval are the failed-stop-orphan
 	// converger's probe cadence and its exponential-backoff cap (issue #2475).
 	// They are fields (not consts) so tests can shrink them to milliseconds,
@@ -745,6 +755,13 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	m.mu.Lock()
 	_, running := m.instances[cmd.ServerID]
 	m.mu.Unlock()
+	// The running flag is read outside any reservation, so a start can register an
+	// instance between here and the stopped path's reserve() below; the contract
+	// table records what that race emits, and this seam is how the test enters it
+	// deterministically (issue #2472).
+	if hook := m.snapshotAfterRunningCheck; hook != nil {
+		hook(cmd.ServerID)
+	}
 	workingDir := filepath.Join(m.scratchDir, cmd.ServerID)
 	// restore re-enables auto-save after the quiesce. Declared here so it is
 	// accessible after the if/else for the explicit restore() call between pack and

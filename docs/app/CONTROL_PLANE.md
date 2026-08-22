@@ -500,16 +500,33 @@ is pinned, as data, by
 [`proto/contract/command_error_contract.json`](../../proto/contract/command_error_contract.json)
 — the single source of truth shared across both languages. The table above
 classifies the codes; the JSON binds the exact `(kind, precondition) -> code`
-rows. Two table-driven tests hold both sides to it (issue #204):
+rows.
+
+The table is **exhaustive over Worker emissions**, not over API match sites
+(issue #2472): it declares every kind `Manager.Handle` dispatches and every
+precondition the rows key on, and carries one row for each cell of that matrix.
+A cell whose precondition determines no emission for that kind carries the code
+`unaffected` plus a `why` saying how we know, so an absent row always means
+*forgotten* — never *not applicable*. Every row with a real error code also
+states how the API treats it: the sites that match it, the catch-all
+`command_failed`, or `fire_and_forget` for a kind whose result the API never
+awaits.
+
+Three table-driven tests hold both sides to it (issues #204, #2472):
 
 - the Worker test
   (`worker/internal/application/instancemanager/contract_test.go`) drives the
   instancemanager into each precondition and asserts the emitted code equals the
   table, so a code change without a table update fails the Worker suite;
-- the API test (`api/tests/servers/test_command_error_contract.py`) asserts every
-  `CommandStatus` the API's convergence / special-case logic matches on is a
-  `(kind, code)` the table says the Worker actually emits, so an API match on a
-  code the Worker never produces (the #202 incident) fails the API suite.
+- the same file checks the table against the *matrix* and against `Handle`'s
+  switch, so a precondition or a command kind with no row fails there too — the
+  gap that let a Worker emission stay unrecorded while both suites were green;
+- the API test (`api/tests/servers/test_command_error_contract.py`) derives its
+  expectations from the rows' API column: the sites the table declares must be
+  exactly the `CommandStatus` matches an `ast` scan finds under
+  `api/src/mc_server_dashboard_api/servers/application/`, so an API match on a
+  code the Worker never produces (the #202 incident) has no row to live on, and
+  a site added or removed in source fails the API suite.
 
 Add a new convergence match or change a Worker emission only together with the
 table; the asymmetry is intentional — drift on either side fails that side's CI.
