@@ -19,7 +19,6 @@ assume an authorized member and only do the data work.
 from __future__ import annotations
 
 import logging
-import secrets
 from collections.abc import Awaitable, Callable, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
@@ -70,6 +69,7 @@ from mc_server_dashboard_api.servers.domain.ports import (
 from mc_server_dashboard_api.servers.domain.server_properties import (
     PLATFORM_MANAGED_KEYS,
     apply_overrides,
+    new_rcon_password,
     remove_keys,
     set_rcon_properties,
     set_server_port,
@@ -112,18 +112,6 @@ _EULA_ACCEPTED_CONTENT = b"eula=true\n"
 # its tracked port AND RCON is on out of the box (the console / graceful-stop path
 # needs it). The trailing newline matches the line format Mojang writes.
 _PROPERTIES_REL_PATH = "server.properties"
-
-# The number of random bytes behind the per-server RCON password (issue #335). The
-# password lives only in server.properties (the worker reads it there); it is never
-# persisted in the DB. ``secrets.token_urlsafe`` returns ~1.3 chars per byte.
-_RCON_PASSWORD_BYTES = 32
-
-
-def _new_rcon_password() -> str:
-    """Generate a fresh per-server RCON secret (the default token generator)."""
-
-    return secrets.token_urlsafe(_RCON_PASSWORD_BYTES)
-
 
 _logger = logging.getLogger(__name__)
 
@@ -279,7 +267,7 @@ class CreateServer:
     version_validator: VersionValidator
     file_store: FileStore
     port_range: PortRange
-    token_generator: Callable[[], str] = field(default=_new_rcon_password)
+    token_generator: Callable[[], str] = field(default=new_rcon_password)
     # Operator-configurable memory-limit knobs (issue #1069). ``None`` preserves
     # the current behavior (no default / 1 TiB ceiling).
     default_memory_limit_mb: int | None = None

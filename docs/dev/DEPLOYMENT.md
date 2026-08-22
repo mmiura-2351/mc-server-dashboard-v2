@@ -635,6 +635,12 @@ the host. Players connect to the host on the server's game port. Because these M
 containers are created at runtime — not declared in `compose.yaml` — the host
 firewall must allow inbound traffic to whichever game ports your servers use.
 
+An **absent** `server.properties` still takes the 25565 default. A file that
+exists but cannot be read to the end — a line longer than 64 KiB, a permission
+problem — fails the start with an error naming the file instead: 25565 is the
+relay's port, so a silent fallback turns a correctly tracked server into a
+host-port collision that never starts.
+
 **Distinct ports are now automatic at create.** The API tracks each server's game
 port (`server.game_port`, DATABASE.md Section 7) and, at create, assigns the
 lowest free in-range port (configurable via `ports.range_start`/`ports.range_end`,
@@ -653,11 +659,34 @@ The server must be at rest (a running server is 409 `server_not_stopped`). This 
 the preferred way to re-port — it keeps the tracked port and the file aligned,
 unlike editing `server.properties` by hand.
 
-The file write and the DB commit are not atomic: if a concurrent
-`UNIQUE(game_port)` race loses at commit (response 409 `port_taken`),
-`server.properties` may already hold the new port while the row keeps the old —
-the only residual drift mode. It is recoverable: retry the PATCH, which rewrites
-both to a consistent state.
+**Import and restore re-apply the tracked port too.** A whole-server import and a
+backup restore both republish a `server.properties` that came from somewhere else
+— an export archive, or the working set as it was when the backup was taken — so
+each re-applies the platform-managed keys (`server-port`, the RCON triple, the
+resource-pack keys) from the DB afterwards. An archive carrying
+`server-port=25565` therefore publishes the importing/restoring server's own
+tracked port, not the archive's. A restore whose backup carries no
+`server.properties` at all gets one holding just those keys, the same file a
+create seeds; if that rewrite fails, the restore answers 503 `seed_failed` (the
+world data is restored, the seed is not — retry the restore).
+
+**Residual drift modes.** Three remain, all recoverable:
+
+- The port `PATCH`'s file write and DB commit are not atomic: if a concurrent
+  `UNIQUE(game_port)` race loses at commit (response 409 `port_taken`),
+  `server.properties` may already hold the new port while the row keeps the old.
+  Retry the PATCH, which rewrites both to a consistent state.
+- The files API refuses a `PUT` that changes a platform-managed key, but its
+  sibling routes (delete, rename, upload, rollback) do not yet consult that guard,
+  so they can still remove or replace the file — tracked in issue #2789. Until
+  then, treat `server.properties` as platform-owned and re-port via the `PATCH`
+  above rather than through the files API.
+- A legacy row with `game_port = NULL` tracks no port, so nothing is re-applied
+  to its file (import and restore leave `server-port` as it found it); backfill it
+  as described below.
+
+A drift you find in the field is fixed by the `PATCH` above, which rewrites the
+row and the file together.
 
 For an **imported or legacy server** whose row predates port tracking
 (`game_port` is `NULL`), nothing is auto-assigned. Prefer the update-port API

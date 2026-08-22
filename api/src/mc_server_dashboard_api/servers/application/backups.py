@@ -45,8 +45,8 @@ import io
 import logging
 import tarfile
 import uuid
-from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass, field
 from typing import IO
 
 from mc_server_dashboard_api.audit.domain.events import AuditEvent, Outcome
@@ -65,6 +65,9 @@ from mc_server_dashboard_api.servers.application.plugin_cache import (
 )
 from mc_server_dashboard_api.servers.application.plugin_manifest import (
     parse_manifest_at_ingest,
+)
+from mc_server_dashboard_api.servers.application.resource_packs import (
+    pack_download_url,
 )
 from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
     SnapshotServer,
@@ -93,9 +96,11 @@ from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     InvalidBackupArchiveError,
     InvalidRetentionPolicyError,
+    ServerFileNotFoundError,
     ServerNotFoundError,
     ServerNotStoppedError,
     UnsupportedPluginServerTypeError,
+    WorkingSetSeedFailedError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileStore
 from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
@@ -111,6 +116,11 @@ from mc_server_dashboard_api.servers.domain.plugin import (
     modrinth_loader_for_server_type,
 )
 from mc_server_dashboard_api.servers.domain.plugin_cache_store import PluginCacheStore
+from mc_server_dashboard_api.servers.domain.server_properties import (
+    ResourcePackProperties,
+    apply_platform_properties,
+    new_rcon_password,
+)
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -124,6 +134,9 @@ _LOG = logging.getLogger(__name__)
 # How much to stream per chunk when handing the uploaded archive to Storage; one
 # bounded block in flight, never the whole archive re-buffered.
 _UPLOAD_STREAM_CHUNK = 1024 * 1024
+
+# The working-set path of the file whose platform-managed keys a restore re-applies.
+_PROPERTIES_REL_PATH = "server.properties"
 
 
 async def _load(
@@ -341,11 +354,22 @@ class RestoreBackup:
     IS known-corrupt), and the returned :class:`RestoreResult` flags the forced
     corrupt restore so the edge audits who forced it.
 
+    A backup carries the working set as it was when the backup was taken, so the
+    republished ``server.properties`` holds the platform-managed values of THAT
+    moment — a ``server-port`` the server may since have been re-ported away from,
+    a resource pack it no longer has assigned. Nothing downstream re-applies the
+    DB's values, so the restore re-applies them itself
+    (:func:`apply_platform_properties`, issue #2621) before anything hydrates the
+    restored copy; a backup that carries no ``server.properties`` at all gets one
+    holding just those keys, exactly as a create seeds it, rather than leaving the
+    worker to fall back to 25565.
+
     After a successful restore, plugin rows are reconciled against the restored
     filesystem (issue #1336): orphan DB rows are dropped, ghost files are ingested,
     and shifted checksums are updated. The reconciliation requires ``file_store``,
     ``cache``, and ``clock``; when not provided (``None``) it is skipped so existing
-    callers without plugin support are unaffected.
+    callers without plugin support are unaffected. ``file_store`` also gates the
+    properties re-apply, for the same reason.
     """
 
     uow: UnitOfWork
@@ -354,6 +378,13 @@ class RestoreBackup:
     file_store: FileStore | None = None
     cache: PluginCacheStore | None = None
     clock: Clock | None = None
+    # The deployment's public base URL, which the restored ``resource-pack`` line
+    # points at (the same value :class:`AssignResourcePack` writes).
+    public_base_url: str = ""
+    # Fills in ``rcon.password`` when the restored file has none; a non-empty one
+    # in the backup is preserved (the file is that credential's only source of
+    # truth). Injected so tests are deterministic.
+    token_generator: Callable[[], str] = field(default=new_rcon_password)
 
     async def __call__(
         self,
@@ -393,9 +424,16 @@ class RestoreBackup:
             if corrupt_count > 0:
                 # Forced restore of a known-corrupt backup: it published, but the
                 # backup IS corrupt, so quarantine it; the edge audits the forced
-                # corrupt restore.
+                # corrupt restore. Quarantine BEFORE the properties re-apply, so a
+                # failure there cannot leave a known-corrupt backup unmarked.
                 await self._quarantine(backup_id)
+                await self._reapply_platform_properties(
+                    community_id=community_id, server_id=server_id, server=server
+                )
                 return RestoreResult(forced_corrupt=True, corrupt_count=corrupt_count)
+            await self._reapply_platform_properties(
+                community_id=community_id, server_id=server_id, server=server
+            )
             # Reconcile plugin rows against the restored filesystem (#1336).
             if self.file_store is not None:
                 await _reconcile_plugins(
@@ -413,6 +451,79 @@ class RestoreBackup:
         async with self.uow:
             await self.uow.backups.update_health(backup_id, BackupHealth.QUARANTINED)
             await self.uow.commit()
+
+    async def _reapply_platform_properties(
+        self, *, community_id: CommunityId, server_id: ServerId, server: Server
+    ) -> None:
+        """Rewrite the restored ``server.properties`` platform keys (issue #2621).
+
+        The restore republished the backup's copy of the file verbatim, so every
+        platform-managed key currently holds the value it had when the backup was
+        taken. Re-apply what the DB says now: the tracked ``game_port``, the RCON
+        keys, and the resource-pack keys from the assignment row (cleared when the
+        server has none). An absent file is written from empty, which yields the
+        same platform-keys-only file a create seeds — the alternative would leave
+        the worker falling back to 25565, the collision this issue is about.
+
+        A storage failure here surfaces as :class:`WorkingSetSeedFailedError` (503),
+        the same posture the port ``PATCH`` and the import publish take: the world
+        data IS restored, but the working set is not fully seeded, and re-running
+        the restore heals it. Failing loudly beats returning success over a file
+        that binds the wrong port.
+        """
+
+        if self.file_store is None:
+            return
+        try:
+            current = await self.file_store.read_file(
+                community_id=community_id,
+                server_id=server_id,
+                rel_path=_PROPERTIES_REL_PATH,
+            )
+        except ServerFileNotFoundError:
+            current = b""
+        except Exception as exc:
+            raise WorkingSetSeedFailedError(str(server_id.value)) from exc
+        try:
+            await self.file_store.write_file(
+                community_id=community_id,
+                server_id=server_id,
+                rel_path=_PROPERTIES_REL_PATH,
+                content=apply_platform_properties(
+                    current,
+                    game_port=server.game_port,
+                    rcon_password=self.token_generator(),
+                    resource_pack=await self._assigned_resource_pack(server_id),
+                ),
+            )
+        except Exception as exc:
+            _LOG.warning(
+                "re-applying the platform-managed server.properties keys after a "
+                "restore failed; the restored file may bind a stale port",
+                extra={"server_id": str(server_id.value)},
+            )
+            raise WorkingSetSeedFailedError(str(server_id.value)) from exc
+
+    async def _assigned_resource_pack(
+        self, server_id: ServerId
+    ) -> ResourcePackProperties | None:
+        """The server's currently assigned pack as properties values, or ``None``."""
+
+        async with self.uow:
+            assignment = await self.uow.resource_packs.get_assignment_by_server(
+                server_id
+            )
+            if assignment is None:
+                return None
+            pack = await self.uow.resource_packs.get_by_id(assignment.resource_pack_id)
+        if pack is None:
+            return None
+        return ResourcePackProperties(
+            url=pack_download_url(self.public_base_url, pack.id, pack.filename),
+            sha1=pack.sha1_hash,
+            require=assignment.require_resource_pack,
+            prompt=assignment.resource_pack_prompt,
+        )
 
 
 async def _reconcile_plugins(

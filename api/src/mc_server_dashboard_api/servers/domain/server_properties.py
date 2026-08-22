@@ -16,6 +16,7 @@ sufficient (we never need to parse values or escapes).
 
 from __future__ import annotations
 
+import secrets
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 
@@ -32,6 +33,18 @@ _RESOURCE_PACK_PROMPT_KEY = "resource-pack-prompt"
 # published to the host (the container driver drops the host RCON publication,
 # #218), so a fixed value is fine across servers.
 RCON_PORT = 25575
+
+# The number of random bytes behind the per-server RCON password (issue #335). The
+# password lives only in server.properties (the worker reads it there); it is never
+# persisted in the DB. ``secrets.token_urlsafe`` returns ~1.3 chars per byte.
+_RCON_PASSWORD_BYTES = 32
+
+
+def new_rcon_password() -> str:
+    """Generate a fresh per-server RCON secret (the default token generator)."""
+
+    return secrets.token_urlsafe(_RCON_PASSWORD_BYTES)
+
 
 # The ``server.properties`` keys the platform owns: their values come from the
 # DB row or from a platform decision, never from the user (issue #2623). Defined
