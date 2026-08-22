@@ -47,7 +47,11 @@ from mc_server_dashboard_api.servers.domain.backup import (
     BackupId,
     BackupSource,
 )
-from mc_server_dashboard_api.servers.domain.errors import GroupNotFoundError
+from mc_server_dashboard_api.servers.domain.errors import (
+    GroupNotFoundError,
+    PluginAlreadyExistsError,
+    ResourcePackInUseError,
+)
 from mc_server_dashboard_api.servers.domain.groups import (
     GroupId,
     GroupKind,
@@ -246,6 +250,25 @@ async def test_plugin_update_on_a_missing_row_is_a_no_op() -> None:
     await repo.update(plugin)
 
     assert repo.by_id == {}
+
+
+async def test_plugin_update_onto_a_taken_rel_path_reports_already_exists() -> None:
+    # ``uq_server_plugin_server_rel`` refuses the adapter's UPDATE when another
+    # row on the same server already holds the target path, and the adapter now
+    # translates that to ``PluginAlreadyExistsError`` (#2612). Pinned against the
+    # live UNIQUE in
+    # ``tests/integration/test_plugin_repositories.py``; modelled here so a
+    # use-case test driving the fake is not more forgiving than production.
+    repo = FakePluginRepository()
+    moving = _plugin()
+    repo.seed(moving)
+    repo.seed(_plugin(rel_path="mods/taken.jar"))
+
+    moving.rel_path = "mods/taken.jar"
+    with pytest.raises(PluginAlreadyExistsError):
+        await repo.update(moving)
+
+    assert repo.by_id[moving.id].rel_path == "mods/a.jar"
 
 
 async def test_plugin_readers_hand_out_copies() -> None:
@@ -474,3 +497,21 @@ async def test_resource_pack_assignment_add_and_readers_are_detached() -> None:
     stored = repo.assignments[_SERVER]
     assert stored.require_resource_pack is True
     assert stored.resource_pack_prompt is None
+
+
+async def test_resource_pack_delete_while_assigned_reports_in_use() -> None:
+    # ``fk_srv_rp_assignments_resource_pack_id_resource_packs`` is not
+    # DEFERRABLE, so the adapter's DELETE is refused at statement end while an
+    # assignment still references the pack, and the adapter now translates that
+    # to ``ResourcePackInUseError`` (#2612). Pinned against the live FK in
+    # ``tests/integration/test_resource_pack_repositories.py``; modelled here so
+    # a use-case test driving the fake sees the same refusal.
+    repo = FakeResourcePackRepository()
+    pack = _pack()
+    await repo.add(pack)
+    await repo.add_assignment(_assignment(pack.id))
+
+    with pytest.raises(ResourcePackInUseError):
+        await repo.delete(pack.id)
+
+    assert pack.id in repo.packs

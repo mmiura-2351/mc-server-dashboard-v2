@@ -45,10 +45,15 @@ from mc_server_dashboard_api.servers.adapters.group_repository import (
 from mc_server_dashboard_api.servers.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as ServersUnitOfWork,
 )
-from mc_server_dashboard_api.servers.application.groups import AddPlayer, RemovePlayer
+from mc_server_dashboard_api.servers.application.groups import (
+    AddPlayer,
+    AttachGroup,
+    RemovePlayer,
+)
 from mc_server_dashboard_api.servers.domain.errors import (
     GroupNameAlreadyExistsError,
     GroupNotFoundError,
+    ServerNotFoundError,
 )
 from mc_server_dashboard_api.servers.domain.groups import (
     GroupId,
@@ -446,4 +451,119 @@ async def test_remove_player_reports_a_concurrent_group_delete_as_not_found(
             community_id=CommunityId(community_id),
             group_id=group.id,
             player_uuid=doomed,
+        )
+
+
+# --- concurrent racers on the attach write (issue #2612) ----------------------
+
+
+async def test_attach_of_an_already_attached_pair_is_a_no_op(
+    engine: AsyncEngine,
+) -> None:
+    # attach used to read is_attached and then stage the row, so two concurrent
+    # attaches of the same pair both passed the read and the loser violated
+    # pk_server_group at an untranslated commit (500). PostgreSQL is now asked
+    # for the no-op directly, which is the same answer the pre-check gave and the
+    # only one that survives the race.
+    #
+    # That losing interleave sits *between* the old SELECT and its INSERT, inside
+    # one method, so no test could enter it from outside -- which is why two
+    # sequential attaches always looked safe. What this pins is the INSERT
+    # itself: with ``on_conflict_do_nothing`` dropped it fails on the live
+    # pk_server_group.
+    community_id = await _seed_community(engine)
+    server_id = await _seed_server(engine, community_id)
+    factory = create_session_factory(engine)
+    group = _group(community_id, [])
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.groups.add(group)
+        await uow.commit()
+
+    # A racer holds the attachment before this session writes it.
+    async with ServersUnitOfWork(factory) as racer:
+        await racer.groups.attach(group.id, ServerId(server_id))
+        await racer.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.groups.attach(group.id, ServerId(server_id))
+        await uow.commit()
+
+    async with engine.connect() as conn:
+        attachments = (
+            await conn.execute(text("SELECT count(*) FROM server_group"))
+        ).scalar_one()
+    assert attachments == 1
+
+
+async def test_attach_after_a_concurrent_group_delete_reports_not_found(
+    engine: AsyncEngine,
+) -> None:
+    # fk_server_group_group_id_player_group names the parent row that vanished,
+    # so the racer gets the not-found the use case's own pre-read would have
+    # raised had the delete landed a moment earlier.
+    community_id = await _seed_community(engine)
+    server_id = await _seed_server(engine, community_id)
+    factory = create_session_factory(engine)
+    group = _group(community_id, [])
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.groups.add(group)
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM player_group WHERE id = :id"), {"id": group.id.value}
+            )
+        with pytest.raises(GroupNotFoundError):
+            await uow.groups.attach(group.id, ServerId(server_id))
+
+
+async def test_attach_after_a_concurrent_server_delete_reports_not_found(
+    engine: AsyncEngine,
+) -> None:
+    # The other end of the same row: fk_server_group_server_id_server names the
+    # server that vanished, which _require_server reports as ServerNotFoundError.
+    community_id = await _seed_community(engine)
+    server_id = await _seed_server(engine, community_id)
+    factory = create_session_factory(engine)
+    group = _group(community_id, [])
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.groups.add(group)
+        await uow.commit()
+
+    async with ServersUnitOfWork(factory) as uow:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM server WHERE id = :id"), {"id": server_id}
+            )
+        with pytest.raises(ServerNotFoundError):
+            await uow.groups.attach(group.id, ServerId(server_id))
+
+
+async def test_attach_group_reports_a_concurrent_group_delete_as_not_found(
+    engine: AsyncEngine,
+) -> None:
+    # The reachable path: AttachGroup's _load_group succeeds, the group is
+    # deleted, and the INSERT lands on the live FK. Both errors the route
+    # already maps to 404, so no new status is introduced.
+    community_id = await _seed_community(engine)
+    server_id = await _seed_server(engine, community_id)
+    factory = create_session_factory(engine)
+    group = _group(community_id, [])
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.groups.add(group)
+        await uow.commit()
+
+    use_case = AttachGroup(
+        uow=_RacingUnitOfWork(factory, engine), file_store=FakeFileStore()
+    )
+    with pytest.raises(GroupNotFoundError):
+        await use_case(
+            community_id=CommunityId(community_id),
+            group_id=group.id,
+            server_id=ServerId(server_id),
         )

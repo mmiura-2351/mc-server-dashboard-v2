@@ -8,8 +8,12 @@ Rows are translated to/from the framework-free domain entity here.
 from __future__ import annotations
 
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from mc_server_dashboard_api.servers.adapters.integrity import (
+    translate_integrity_error,
+)
 from mc_server_dashboard_api.servers.adapters.resource_pack_models import (
     ResourcePackModel,
     ServerResourcePackAssignmentModel,
@@ -92,7 +96,17 @@ class SqlAlchemyResourcePackRepository(ResourcePackRepository):
         stmt = delete(ResourcePackModel).where(
             ResourcePackModel.id == pack_id.value,
         )
-        await self._session.execute(stmt)
+        # fk_srv_rp_assignments_resource_pack_id_resource_packs is the schema's
+        # only non-``ON DELETE CASCADE`` FK and is not DEFERRABLE, so PostgreSQL
+        # refuses this DELETE at *statement* end -- here, never at the unit of
+        # work's commit. The map entry alone therefore never fires and a
+        # concurrent assign 500s (issue #2612); the translation has to sit on the
+        # execute that raises.
+        try:
+            await self._session.execute(stmt)
+        except IntegrityError as exc:
+            translate_integrity_error(exc)
+            raise
 
     async def add_assignment(self, assignment: ResourcePackAssignment) -> None:
         self._session.add(
