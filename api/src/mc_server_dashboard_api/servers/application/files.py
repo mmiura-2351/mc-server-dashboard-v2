@@ -84,6 +84,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ObservedState,
     ServerId,
     ServerType,
+    WorkerId,
 )
 
 _LOG = logging.getLogger(__name__)
@@ -379,14 +380,15 @@ class WriteFile:
                 server = await _load(self.uow, community_id, server_id)
 
             _guard_content_dir(server.server_type, rel_path)
-            await self._guard_platform_managed_keys(
-                community_id=community_id,
-                server_id=server_id,
-                rel_path=rel_path,
-                content=content,
-            )
 
             if server.is_at_rest():
+                await self._guard_platform_managed_keys(
+                    community_id=community_id,
+                    server_id=server_id,
+                    worker_id=None,
+                    rel_path=rel_path,
+                    content=content,
+                )
                 await self.file_store.write_file(
                     community_id=community_id,
                     server_id=server_id,
@@ -396,6 +398,13 @@ class WriteFile:
                 return
             if _is_running(server):
                 self.file_store.validate_rel_path(rel_path)
+                await self._guard_platform_managed_keys(
+                    community_id=community_id,
+                    server_id=server_id,
+                    worker_id=server.assigned_worker_id,
+                    rel_path=rel_path,
+                    content=content,
+                )
                 # Version the authoritative copy before the worker overwrites the
                 # live working set, so a running edit is as recoverable as an
                 # at-rest one (FR-FILE-3, #344). The worker's EditFile mutates only
@@ -426,6 +435,7 @@ class WriteFile:
         *,
         community_id: CommunityId,
         server_id: ServerId,
+        worker_id: WorkerId | None,
         rel_path: str,
         content: bytes,
     ) -> None:
@@ -439,25 +449,43 @@ class WriteFile:
         leaves the platform keys exactly as they are goes through and only the
         user's own keys are editable.
 
-        Runs before the at-rest/running branch, so both doors are covered: a
-        running edit lands in the live working set that the stop-time snapshot
-        publishes as the next authoritative copy, which reaches the same file by a
-        slower route. On the running branch the comparison is against the
-        authoritative copy, which may be stale relative to the live set (Storage's
-        ``current/`` is frozen until the next snapshot); a refusal there names the
-        key, so the operator can see what disagrees.
+        Both doors are covered: a running edit lands in the live working set that
+        the stop-time snapshot publishes as the next authoritative copy, which
+        reaches the same file by a slower route.
+
+        The baseline is always the copy this write actually lands on -- Storage at
+        rest, the worker's live set while running -- because that is also the copy
+        the editor read the text back from. The two legitimately disagree in these
+        very keys: Minecraft's boot rewrite fills in defaults the seeded file
+        omits (the resource-pack keys among them) and escapes ``:`` in values, and
+        Storage's ``current/`` stays frozen until the next snapshot. Comparing a
+        running edit against Storage would therefore refuse an honest motd edit,
+        naming a key the user never touched.
+
+        A server in neither state never reaches here: the branch below raises
+        :class:`ServerFilesUnsettledError` (409) without a baseline read.
         """
 
         if not _is_root_server_properties(rel_path):
             return
         try:
-            current = await self.file_store.read_file(
-                community_id=community_id,
-                server_id=server_id,
-                rel_path=_PROPERTIES_REL_PATH,
-            )
+            if worker_id is None:
+                current = await self.file_store.read_file(
+                    community_id=community_id,
+                    server_id=server_id,
+                    rel_path=_PROPERTIES_REL_PATH,
+                )
+            else:
+                outcome = await self.control_plane.read_file(
+                    worker_id=worker_id,
+                    server_id=server_id,
+                    rel_path=_PROPERTIES_REL_PATH,
+                )
+                if not outcome.success:
+                    _map_file_status(server_id, "WriteFile", outcome)
+                current = outcome.file_content
         except ServerFileNotFoundError:
-            # No authoritative copy yet. Unlike the port rewrite (#2623 item 1),
+            # No copy to compare against. Unlike the port rewrite (#2623 item 1),
             # nothing is republished from this — it only makes every platform key
             # in the incoming text an addition, which is refused below.
             current = b""

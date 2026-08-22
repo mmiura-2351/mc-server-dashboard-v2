@@ -986,7 +986,10 @@ async def update_server(
         # The port rewrite found no server.properties to preserve (issue #2623).
         # Working-set state that is not what the platform expects — the same 409
         # posture as eula_not_accepted, not a 404 (the server itself exists) and
-        # not a 422 (the request shape is fine).
+        # not a 422 (the request shape is fine). Normally raised by the pre-commit
+        # check, so the row still holds its old port; the same 409 also covers the
+        # narrow race where the file vanishes before the deferred write, and there
+        # the committed row already carries the new port.
         raise _conflict("server_properties_missing") from exc
     except ServerNameAlreadyExistsError as exc:
         raise _conflict("server_name_exists") from exc
@@ -997,8 +1000,10 @@ async def update_server(
         # Slug is already held by another server (issue #955).
         raise _conflict("slug_taken") from exc
     except WorkingSetSeedFailedError as exc:
-        # Rewriting server.properties for the port change failed; the row was not
-        # committed (no DB/file drift), surfaced as a mapped 503 (issue #311).
+        # Rewriting server.properties for the port change hit a storage failure,
+        # surfaced as a mapped 503 (issue #311). That write is deferred to after
+        # the commit (#1705), so the row already carries the new port while the
+        # file does not; re-issuing the update rewrites the file.
         raise _service_unavailable("seed_failed") from exc
     await _record(
         recorder, ops.SERVER_UPDATE, authorized, community_id, server.id.value

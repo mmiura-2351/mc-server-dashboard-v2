@@ -347,3 +347,19 @@ def test_non_platform_keys_are_never_reported() -> None:
     current = b"motd=hi\nmax-players=20\n"
     incoming = b"motd=bye\n"
     assert changed_platform_managed_keys(current, incoming) == []
+
+
+def test_non_utf8_bytes_are_compared_without_decoding() -> None:
+    # A server.properties carrying a latin-1 motd is not this guard's business to
+    # reject: comparing must never raise UnicodeDecodeError (issue #2623).
+    current = b"server-port=25565\nmotd=caf\xe9\n"
+    incoming = b"server-port=25565\nmotd=caf\xe9 bar\n"
+    assert changed_platform_managed_keys(current, incoming) == []
+
+
+def test_non_utf8_platform_value_change_is_still_detected() -> None:
+    # Two DIFFERENT invalid byte sequences must not collapse into one another,
+    # which a lossy decode would do.
+    current = b"rcon.password=\xff\xfe\n"
+    incoming = b"rcon.password=\xfe\xff\n"
+    assert changed_platform_managed_keys(current, incoming) == ["rcon.password"]

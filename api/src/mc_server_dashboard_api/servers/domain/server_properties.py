@@ -92,8 +92,13 @@ def _get_property(lines: list[str], key: str) -> str | None:
     return None
 
 
-def _get_values(lines: list[str], key: str) -> list[str]:
-    """Return every live ``key=...`` value, in file order, whitespace-trimmed.
+def _raw_values(content: bytes, key: str) -> list[bytes]:
+    """Return every live ``key=...`` value in *content*, in file order, as bytes.
+
+    Byte-level on purpose: this backs the comparison guard, which must not care
+    whether the file is valid UTF-8. A strict decode would turn a latin-1 ``motd``
+    into a 500, and a lossy one would collapse two DIFFERENT invalid sequences
+    into the same replacement character -- a change slipping past the guard.
 
     Every occurrence matters, not just the first: Java's ``Properties.load`` is
     last-occurrence-wins, so an appended second line for a key is what the server
@@ -101,7 +106,16 @@ def _get_values(lines: list[str], key: str) -> list[str]:
     round-trip through an editor) does not read as a value change.
     """
 
-    return [line.split("=", 1)[1].strip() for line in lines if _is_key_line(line, key)]
+    wanted = key.encode()
+    values: list[bytes] = []
+    for line in content.split(b"\n"):
+        stripped = line.lstrip()
+        if stripped.startswith(b"#"):
+            continue
+        name, sep, value = stripped.partition(b"=")
+        if sep and name.strip() == wanted:
+            values.append(value.strip())
+    return values
 
 
 def _clear_property(lines: list[str], key: str) -> list[str]:
@@ -240,14 +254,21 @@ def changed_platform_managed_keys(current: bytes, incoming: bytes) -> list[str]:
     value, a removed or commented-out line, a line added where the file had none,
     or a second occurrence appended after an untouched first one. Returns the
     offending keys sorted, or an empty list when the write leaves them all alone.
+
+    Compares bytes, never decoded text: a ``server.properties`` is not required to
+    be valid UTF-8 (a latin-1 ``motd`` is ordinary), and a guard that raised on one
+    would turn an otherwise-fine write into a 500.
+
+    *current* must be the copy the write actually lands on -- the authoritative
+    Storage copy at rest, the worker's live working set while running. Those two
+    diverge in these very keys (Minecraft's boot rewrite fills in defaults the
+    seeded file omits), so comparing against the wrong one refuses honest edits.
     """
 
-    current_lines = _split_content_lines(current)
-    incoming_lines = _split_content_lines(incoming)
     return sorted(
         key
         for key in PLATFORM_MANAGED_KEYS
-        if _get_values(current_lines, key) != _get_values(incoming_lines, key)
+        if _raw_values(current, key) != _raw_values(incoming, key)
     )
 
 

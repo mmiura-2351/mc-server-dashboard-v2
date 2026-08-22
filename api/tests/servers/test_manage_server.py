@@ -1945,6 +1945,46 @@ async def test_update_game_port_refuses_when_properties_absent() -> None:
     assert uow.servers.by_id[server.id].game_port == 25565
 
 
+async def test_update_game_port_refuses_when_properties_vanishes_after_the_check() -> (
+    None
+):
+    # The pre-commit check and the deferred write (#1705) read the file twice, so
+    # it can disappear in between. The deferred write must refuse too rather than
+    # fall back to empty and republish a port-only file (issue #2623) — this pins
+    # the raise inside _rewrite_server_port independently of the pre-commit check.
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community, game_port=25565)
+    uow.servers.seed(server)
+
+    class _VanishingFileStore(FakeFileStore):
+        """Serves server.properties once, then reports it gone."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.files["server.properties"] = b"server-port=25565\nrcon.password=tok\n"
+
+        async def read_file(
+            self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+        ) -> bytes:
+            content = await super().read_file(
+                community_id=community_id, server_id=server_id, rel_path=rel_path
+            )
+            if rel_path == "server.properties":
+                del self.files[rel_path]
+            return content
+
+    file_store = _VanishingFileStore()
+    with pytest.raises(ServerPropertiesMissingError):
+        await _updater(uow, file_store=file_store)(
+            community_id=community,
+            server_id=server.id,
+            game_port=25570,
+        )
+    # Nothing was republished from an empty file.
+    assert file_store.writes == []
+
+
 async def test_update_game_port_preserves_rcon_password() -> None:
     # The credential the worker reaches the server with survives a port change
     # (issue #2623): only the server-port line moves.

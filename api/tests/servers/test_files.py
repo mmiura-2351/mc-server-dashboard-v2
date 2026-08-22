@@ -21,6 +21,7 @@ import tarfile
 import uuid
 import zipfile
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from pathlib import PurePosixPath
 
 import pytest
@@ -996,27 +997,120 @@ async def test_write_unrelated_file_is_unaffected_by_the_guard() -> None:
     assert store.writes == [("ops.json", b"[]")]
 
 
+# What Minecraft's boot rewrite leaves in the LIVE working set: the keys the
+# seeded file omits are filled in with defaults, so the live copy legitimately
+# carries platform-managed keys the authoritative copy does not (issue #2623
+# review). The editor reads and writes THIS copy while the server runs.
+_LIVE_PROPS = _CURRENT_PROPS + (
+    b"resource-pack=\nresource-pack-sha1=\nrequire-resource-pack=false\n"
+    b"resource-pack-prompt=\n"
+)
+
+
+def _running_props_writer(
+    *, community: uuid.UUID, server_id: uuid.UUID, authoritative: bytes, live: bytes
+) -> tuple[WriteFile, FakeFileStore, FakeControlPlane]:
+    """A running-server WriteFile whose live set and Storage copy differ."""
+
+    use_case, store, _ = _props_writer(
+        community=community,
+        server_id=server_id,
+        current=authoritative,
+        running_worker=uuid.uuid4(),
+    )
+    cp = FakeControlPlane(
+        outcomes={
+            "read_file": CommandOutcome(status=CommandStatus.OK, file_content=live)
+        }
+    )
+    return replace(use_case, control_plane=cp), store, cp
+
+
+async def test_write_properties_while_running_compares_against_the_live_set() -> None:
+    # The authoritative copy is the CreateServer seed; the live set is what
+    # Minecraft rewrote on boot. A motd-only edit of the text the editor actually
+    # showed must go through — comparing it against the stale authoritative copy
+    # would refuse it, naming a resource-pack key the user never touched.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    use_case, _, cp = _running_props_writer(
+        community=community,
+        server_id=server_id,
+        authoritative=_CURRENT_PROPS,
+        live=_LIVE_PROPS,
+    )
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="server.properties",
+        content=_LIVE_PROPS.replace(b"motd=hi", b"motd=bye"),
+    )
+    assert [d[0] for d in cp.dispatched] == ["read_file", "edit_file"]
+
+
 async def test_write_properties_while_running_is_refused_before_dispatch() -> None:
     # The running branch edits the live working set, which the stop-time snapshot
     # then publishes as the authoritative copy — so an unguarded running edit
-    # reaches the same file by a slower route.
-    community, server_id, worker = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
-    use_case, store, cp = _props_writer(
+    # reaches the same file by a slower route. The baseline is the live set.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    use_case, store, cp = _running_props_writer(
         community=community,
         server_id=server_id,
-        current=_CURRENT_PROPS,
-        running_worker=worker,
+        authoritative=_CURRENT_PROPS,
+        live=_LIVE_PROPS,
     )
     with pytest.raises(PlatformManagedKeyError) as excinfo:
         await use_case(
             community_id=CommunityId(community),
             server_id=ServerId(server_id),
             rel_path="server.properties",
-            content=_CURRENT_PROPS.replace(b"rcon.password=tok", b"rcon.password=evil"),
+            content=_LIVE_PROPS.replace(b"rcon.password=tok", b"rcon.password=evil"),
         )
     assert excinfo.value.key == "rcon.password"
-    assert cp.dispatched == []
+    assert [d[0] for d in cp.dispatched] == ["read_file"]
     assert store.retained == []
+
+
+async def test_write_properties_on_a_crashed_server_stays_unsettled() -> None:
+    # Neither resting target is well-defined on a crashed server, so the 409
+    # answers first — the platform-key guard never runs and no baseline is read.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    uow = FakeUnitOfWork()
+    _seed(
+        uow,
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.CRASHED,
+        ),
+    )
+    store = FakeFileStore()
+    store.files["server.properties"] = _CURRENT_PROPS
+    use_case = WriteFile(uow=uow, control_plane=FakeControlPlane(), file_store=store)
+    with pytest.raises(ServerFilesUnsettledError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="server.properties",
+            content=_CURRENT_PROPS.replace(b"server-port=25565", b"server-port=25999"),
+        )
+
+
+async def test_write_properties_non_utf8_content_is_not_a_server_error() -> None:
+    # A latin-1 motd is ordinary content; the guard must compare it, not 500 on it.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    current = _CURRENT_PROPS + b"motd=caf\xe9\n"
+    use_case, store, _ = _props_writer(
+        community=community, server_id=server_id, current=current
+    )
+    incoming = current.replace(b"motd=caf\xe9", b"motd=caf\xe9 bar")
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="server.properties",
+        content=incoming,
+    )
+    assert store.writes == [("server.properties", incoming)]
 
 
 async def test_write_running_edits_control_plane() -> None:
@@ -1071,27 +1165,27 @@ async def test_write_running_versions_prior_authoritative_content() -> None:
         ),
     )
     store = FakeFileStore()
-    store.files["server.properties"] = b"rcon=old"  # the at-rest seed
+    store.files["ops.json"] = b"rcon=old"  # the at-rest seed
     cp = FakeControlPlane()
 
     await WriteFile(uow=uow, control_plane=cp, file_store=store)(
         community_id=CommunityId(community),
         server_id=ServerId(server_id),
-        rel_path="server.properties",
+        rel_path="ops.json",
         content=b"rcon=new",
     )
 
     # The edit was dispatched to the worker (the live working set), not written to
     # current/ — the authoritative copy stays the pre-edit content for now.
     assert [d[0] for d in cp.dispatched] == ["edit_file"]
-    assert store.files["server.properties"] == b"rcon=old"
+    assert store.files["ops.json"] == b"rcon=old"
 
     # A version of the pre-edit content is now retained (history is non-empty),
     # and rolling back to it once at rest restores the prior bytes.
     versions = await ListFileVersions(uow=uow, file_store=store)(
         community_id=CommunityId(community),
         server_id=ServerId(server_id),
-        rel_path="server.properties",
+        rel_path="ops.json",
     )
     assert versions
     uow.servers.by_id[ServerId(server_id)].desired_state = DesiredState.STOPPED
@@ -1099,10 +1193,10 @@ async def test_write_running_versions_prior_authoritative_content() -> None:
     await RollbackFile(uow=uow, file_store=store)(
         community_id=CommunityId(community),
         server_id=ServerId(server_id),
-        rel_path="server.properties",
+        rel_path="ops.json",
         version_id=versions[0],
     )
-    assert store.files["server.properties"] == b"rcon=old"
+    assert store.files["ops.json"] == b"rcon=old"
 
 
 async def test_write_running_repeated_edits_retain_one_authoritative_version() -> None:
@@ -1123,7 +1217,7 @@ async def test_write_running_repeated_edits_retain_one_authoritative_version() -
         ),
     )
     store = FakeFileStore()
-    store.files["server.properties"] = b"rcon=old"  # the frozen at-rest seed
+    store.files["ops.json"] = b"rcon=old"  # the frozen at-rest seed
     cp = FakeControlPlane()
     use_case = WriteFile(uow=uow, control_plane=cp, file_store=store)
 
@@ -1131,18 +1225,18 @@ async def test_write_running_repeated_edits_retain_one_authoritative_version() -
         await use_case(
             community_id=CommunityId(community),
             server_id=ServerId(server_id),
-            rel_path="server.properties",
+            rel_path="ops.json",
             content=f"rcon=new-{i}".encode(),
         )
 
     # Every edit dispatched to the worker, but only the FIRST snapshot retained a
     # version — the rest were deduped against it.
     assert [d[0] for d in cp.dispatched] == ["edit_file"] * 15
-    assert store.retained == [("server.properties", b"rcon=old")]
+    assert store.retained == [("ops.json", b"rcon=old")]
     versions = await ListFileVersions(uow=uow, file_store=store)(
         community_id=CommunityId(community),
         server_id=ServerId(server_id),
-        rel_path="server.properties",
+        rel_path="ops.json",
     )
     assert len(versions) == 1
 
@@ -1162,13 +1256,13 @@ async def test_write_running_absent_authoritative_file_skips_snapshot() -> None:
             worker=worker,
         ),
     )
-    store = FakeFileStore()  # no seeded server.properties
+    store = FakeFileStore()  # no seeded ops.json
     cp = FakeControlPlane()
 
     await WriteFile(uow=uow, control_plane=cp, file_store=store)(
         community_id=CommunityId(community),
         server_id=ServerId(server_id),
-        rel_path="server.properties",
+        rel_path="ops.json",
         content=b"rcon=new",
     )
 
