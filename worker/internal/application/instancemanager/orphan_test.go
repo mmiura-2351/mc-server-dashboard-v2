@@ -106,6 +106,7 @@ func TestOrphanConvergesWithoutOperatorAction(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1} // stop #1 fails; the converger's retry succeeds
 	m := newManager(t, d, nil)
 	shrinkOrphanConverger(m)
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -135,6 +136,7 @@ func TestOrphanConvergesAcrossAFailedRetry(t *testing.T) {
 	d := &orphanDriver{stopAfter: 2}
 	m := newManager(t, d, nil)
 	shrinkOrphanConverger(m)
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -200,6 +202,7 @@ func TestFailedStopClosesBedrockTunnel(t *testing.T) {
 	bt := &fakeBedrockTunneler{}
 	m := newManager(t, d, nil).WithBedrockTunneler(bt)
 	shrinkOrphanConverger(m)
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -246,6 +249,7 @@ func TestUnknownEmittedWhileDaemonUnreachable(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1000}
 	m := newManager(t, d, nil)
 	shrinkOrphanConverger(m)
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -301,6 +305,7 @@ func TestConvergerAndOperatorStopDoNotDoubleDriveOrphan(t *testing.T) {
 	d := &gatedOrphanDriver{}
 	m := newManager(t, d, nil)
 	shrinkOrphanConverger(m)
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -338,6 +343,7 @@ func TestConvergerSkipsRoundWhileOperatorStopInFlight(t *testing.T) {
 		}).WithMetrics(clk, time.Hour)
 	closeWithTest(t, m)
 
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -377,6 +383,7 @@ func TestConvergerSkipsRoundWhileOperatorStopInFlight(t *testing.T) {
 func TestFailedStopThenRetryTerminatesOrphan(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1} // first Stop fails, second succeeds
 	m := newManager(t, d, nil)
+	seedScratch(t, m, "s1")
 	_ = m.Handle(context.Background(), startCmd())
 
 	first := m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
@@ -402,6 +409,7 @@ func TestFailedStopThenRetryTerminatesOrphan(t *testing.T) {
 func TestRetryStopStillFailingKeepsStopFailure(t *testing.T) {
 	d := &orphanDriver{stopAfter: 2} // both the initial stop and the retry fail
 	m := newManager(t, d, nil)
+	seedScratch(t, m, "s1")
 	_ = m.Handle(context.Background(), startCmd())
 
 	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
@@ -429,6 +437,7 @@ func TestStopUnknownStillServerNotFound(t *testing.T) {
 func TestOrphanClearedAfterSuccessfulRetry(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1}
 	m := newManager(t, d, nil)
+	seedScratch(t, m, "s1")
 	_ = m.Handle(context.Background(), startCmd())
 	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
 	if retry := m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: "s1", Kind: "StopServer"}); !retry.Success {
@@ -453,6 +462,7 @@ func TestOrphanClearedAfterSuccessfulRetry(t *testing.T) {
 func TestStartOverOrphanRejected(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1}
 	m := newManager(t, d, nil)
+	seedScratch(t, m, "s1")
 	_ = m.Handle(context.Background(), startCmd())
 	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
 
@@ -473,6 +483,7 @@ func TestStartOverOrphanRejected(t *testing.T) {
 func TestHydrateOverOrphanRejected(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1}
 	m := newManager(t, d, nil).WithTransfer(&fakeTransfer{})
+	seedScratch(t, m, "s1")
 	_ = m.Handle(context.Background(), startCmd())
 	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
 
@@ -490,6 +501,7 @@ func TestHydrateOverOrphanRejected(t *testing.T) {
 func TestRestartOverOrphanRejected(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1}
 	m := newManager(t, d, nil)
+	seedScratch(t, m, "s1")
 	_ = m.Handle(context.Background(), startCmd())
 	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
 
@@ -513,6 +525,7 @@ func TestRestartOverOrphanRejected(t *testing.T) {
 func TestServerCommandOverOrphanRejected(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1}
 	m := newManager(t, d, &fakeControl{reply: "ok"})
+	seedScratch(t, m, "s1")
 	_ = m.Handle(context.Background(), startCmd())
 	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
 
@@ -530,6 +543,7 @@ func TestServerCommandOverOrphanRejected(t *testing.T) {
 func TestTunnelDialOverOrphanRejected(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1}
 	m := newManager(t, d, nil) // no tunnel dialer: the orphan refusal precedes it
+	seedScratch(t, m, "s1")
 	_ = m.Handle(context.Background(), startCmd())
 	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
 
@@ -552,6 +566,7 @@ func TestTunnelDialOverOrphanRejected(t *testing.T) {
 func TestOpenBedrockTunnelOverOrphanRejected(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1}
 	m := newManager(t, d, nil) // no bedrock tunneler: the orphan refusal precedes it
+	seedScratch(t, m, "s1")
 	_ = m.Handle(context.Background(), startCmd())
 	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
 
@@ -585,6 +600,7 @@ func TestFailedStopLogsOrphanRecord(t *testing.T) {
 	h := &capturingSlogHandler{}
 	d := &orphanDriver{stopAfter: 1}
 	m := newManager(t, d, nil).WithLogger(slog.New(h))
+	seedScratch(t, m, "s1")
 	_ = m.Handle(context.Background(), startCmd())
 	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
 
@@ -612,6 +628,7 @@ func TestOrphanClearedWhenInstanceExitsOnItsOwn(t *testing.T) {
 	// the instance exiting on its own clears the orphan, via the pump.
 	d := &orphanDriver{stopAfter: 1000}
 	m := newManager(t, d, nil)
+	seedScratch(t, m, "s1")
 	_ = m.Handle(context.Background(), startCmd())
 	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: "s1", Kind: "StopServer"})
 
@@ -721,6 +738,7 @@ func TestOrphanRetryStopPassesDriverToFlush(t *testing.T) {
 	m.settlePollInterval = 0
 	closeWithTest(t, m)
 
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -753,6 +771,7 @@ func TestOrphanRetryStopPassesDriverToFlush(t *testing.T) {
 func TestRestartStopFailureLeavesOrphan(t *testing.T) {
 	d := &orphanDriver{stopAfter: 1}
 	m := newManager(t, d, nil)
+	seedScratch(t, m, "s1")
 	_ = m.Handle(context.Background(), startCmd())
 
 	res := m.Handle(context.Background(), session.Command{CommandID: "r", ServerID: "s1", Kind: "RestartServer"})
@@ -786,6 +805,7 @@ func TestFailedStopRestoresSaveOn(t *testing.T) {
 	m.settlePollInterval = 0
 	closeWithTest(t, m)
 
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -830,6 +850,7 @@ func TestFailedStopSaveOnDialFailureStillReturnsStopFailure(t *testing.T) {
 	m.settlePollInterval = 0
 	closeWithTest(t, m)
 
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -859,6 +880,7 @@ func TestForcedFailedStopSkipsSaveOn(t *testing.T) {
 	m.settlePollInterval = 0
 	closeWithTest(t, m)
 
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -885,6 +907,7 @@ func TestRestartStopFailureRestoresSaveOn(t *testing.T) {
 	m.settlePollInterval = 0
 	closeWithTest(t, m)
 
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}

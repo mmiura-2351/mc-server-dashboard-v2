@@ -158,27 +158,36 @@ _LOG = logging.getLogger(__name__)
 # against this relpath once the working set is hydrated (see __call__).
 _DEFAULT_JAR_RELPATH = "server.jar"
 
-# The phrase identifying the Worker's working_set_absent snapshot refusal (issue
-# #1713) inside its SERVER_NOT_FOUND message. The wire result carries only a code
-# and a human-readable message, and the code alone must not discriminate: a
-# hypothetical OTHER SnapshotTrigger SERVER_NOT_FOUND must keep the data-loss
-# ERROR (issue #1790). The phrase is pinned on the Worker side
-# (worker/internal/application/instancemanager/instancemanager.go,
-# handleSnapshot) with a cross-reference to this constant — reword both together.
+# The phrase identifying a Worker refusal whose reason is "I hold no working set
+# for this id" inside its SERVER_NOT_FOUND message. The wire result carries only a
+# code and a human-readable message, and the code alone must not discriminate: a
+# hypothetical OTHER SnapshotTrigger SERVER_NOT_FOUND must keep the data-loss ERROR
+# (issue #1790). The phrase is pinned on the Worker side
+# (worker/internal/application/instancemanager/instancemanager.go — handleSnapshot's
+# stopped-id refusal, issue #1713, and handleStart's launch-time guard, issue #2499)
+# with a cross-reference to this constant — reword all of them together.
 _WORKING_SET_ABSENT_MARKER = "working dir absent"
 
 
 def is_working_set_absent_refusal(outcome: CommandOutcome) -> bool:
-    """Whether a snapshot outcome is the Worker's benign working_set_absent refusal.
+    """Whether an outcome is the Worker's "I hold no working set for this id" refusal.
 
-    True exactly for the issue-#1713 refusal: a stopped-id SnapshotTrigger whose
-    scratch the Worker already GC'd after a PUBLISHED final snapshot — i.e. a
-    duplicate dispatch whose original result was lost, not a data-loss event
-    (issue #1790).
+    True exactly for the two Worker sites that answer SERVER_NOT_FOUND with the
+    pinned phrase, both meaning the id's working dir is not at the scratch root:
+
+    * a stopped-id SnapshotTrigger whose scratch the Worker already GC'd after a
+      PUBLISHED final snapshot (issue #1713) — a duplicate dispatch whose original
+      result was lost, not a data-loss event (issue #1790);
+    * a StartServer the API sent WITHOUT a preceding hydrate, over a working set
+      the Worker turns out not to hold (issue #2499) — the launch-time floor under
+      the held-working-set inventory.
+
+    The two readings do not collide: a caller matches it on the outcome of the kind
+    it dispatched, and neither kind emits the phrase for any other reason.
 
     Public because the periodic snapshot scheduler reads the same refusal to mean
     "nothing left to capture" (issue #2480); the marker constant stays here, where
-    the Worker-side comment cross-references it.
+    the Worker-side comments cross-reference it.
     """
 
     return (
@@ -763,6 +772,12 @@ class StartServer:
         ``place_and_start`` (orphan re-placement) always hydrates — the Worker was
         freshly placed and may have an empty/absent scratch.
 
+        A skipped hydrate the Worker then REFUSES the start over — because the working
+        set it was told to reuse is not on its disk — is replayed here with the full
+        hydrate (issue #2499). That refusal is the only launch-time evidence the held
+        inventory can be wrong, so both skip_hydrate callers recover through this one
+        site rather than each failing their own way.
+
         A hydrate that SUCCEEDS refreshes the held-working-set inventory (issue #2477)
         so the generation-gated check above, and the reconciler's short held-start
         grace (#999), see what the Worker holds now rather than only what it
@@ -828,7 +843,7 @@ class StartServer:
         # carry it as-is on the wire (#723). Unset -> 0, so the Worker driver applies
         # its default weight. No derivation (unlike the memory -> -Xmx path).
         cpu_millis = cpu_allocation_from_config(server.config) or 0
-        return await self.control_plane.start(
+        outcome = await self.control_plane.start(
             worker_id=worker_id,
             server_id=server_id,
             server_type=server.server_type,
@@ -837,6 +852,54 @@ class StartServer:
             memory_limit_bytes=memory_limit_bytes,
             cpu_millis=cpu_millis,
         )
+        if skip_hydrate and is_working_set_absent_refusal(outcome):
+            # The Worker refused the start because the working set this launch was
+            # told to reuse is not on its disk (issue #2499). That refusal is the ONLY
+            # evidence anybody has that the held-working-set inventory is wrong: every
+            # input to it — the register-time scan, #2477's hydrate-side recording,
+            # #2481's publish-side declaration — is honest about the moment it was
+            # taken, and none of them re-checks at launch, so an out-of-band
+            # destruction of a live Worker's scratch has no floor between two
+            # registrations. Replay the launch WITH the hydrate that was skipped: the
+            # hydrate rebuilds the working set from the authoritative store AND
+            # re-records what the Worker now holds, so the stale entry corrects itself
+            # and nothing has to clear it separately.
+            #
+            # Recursing is bounded at one extra attempt: the replay passes
+            # skip_hydrate=False, so its own start cannot meet an absent working set —
+            # a hydrate that reports success has created the dir (200 unpacks the tree,
+            # 204 still stamps the generation marker, whose write MkdirAll's) — and a
+            # refusal on the replay therefore falls through as an ordinary failure.
+            #
+            # ``dispatch`` is deliberately NOT reset. The refused start was definitely
+            # not applied, so resetting it would also be honest, but leaving it set is
+            # the conservative half of the #101 tradeoff: should the replay's hydrate
+            # fail or time out, ``__call__`` keeps desired=running and the assignment
+            # and lets the reconciler retry against the SAME Worker, rather than
+            # compensating and allowing a re-placement elsewhere.
+            #
+            # Log it: the condition means a live Worker's scratch was destroyed
+            # underneath it, and a self-healing recovery nobody can see is how the next
+            # occurrence gets harder to diagnose. This line and the Worker's own WARN
+            # are what tell the operator it happened (issue #2499).
+            _LOG.warning(
+                "worker %s refused the start for server %s: it holds no working set "
+                "for this id, though the held-working-set inventory said it did. The "
+                "scratch was destroyed out of band under a running Worker; "
+                "re-launching WITH a full hydrate (%s)",
+                worker_id.value,
+                server_id.value,
+                outcome.message,
+            )
+            return await self._launch(
+                server,
+                community_id,
+                server_id,
+                worker_id,
+                dispatch,
+                skip_hydrate=False,
+            )
+        return outcome
 
     async def _generation_before_hydrate(
         self, community_id: CommunityId, server_id: ServerId

@@ -38,8 +38,8 @@ func seedScratch(t *testing.T, m *Manager, serverID string) string {
 func TestStopRetainsScratchForFinalSnapshot(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
-	_ = m.Handle(context.Background(), startCmd())
 	dir := seedScratch(t, m, "s1")
+	_ = m.Handle(context.Background(), startCmd())
 
 	res := m.Handle(context.Background(), session.Command{CommandID: "stop", ServerID: "s1", Kind: "StopServer"})
 	if !res.Success {
@@ -59,8 +59,8 @@ func TestStopThenFinalSnapshotPacksWorkingSet(t *testing.T) {
 	tr := &fakeTransfer{}
 	d := &fakeDriver{}
 	m := newManager(t, d, nil).WithTransfer(tr)
-	_ = m.Handle(context.Background(), startCmd())
 	seedScratch(t, m, "s1")
+	_ = m.Handle(context.Background(), startCmd())
 
 	if res := m.Handle(context.Background(), session.Command{CommandID: "stop", ServerID: "s1", Kind: "StopServer"}); !res.Success {
 		t.Fatalf("stop = %+v, want success", res)
@@ -153,8 +153,8 @@ func TestRunningSnapshotRetainsScratch(t *testing.T) {
 	tr := &fakeTransfer{}
 	ctrl := &fakeControl{reply: "ok"}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
-	_ = m.Handle(context.Background(), startCmd())
 	dir := seedScratch(t, m, "s1")
+	_ = m.Handle(context.Background(), startCmd())
 
 	if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
 		t.Fatalf("running-id snapshot = %+v, want success", res)
@@ -244,8 +244,8 @@ func TestSweepHydrateLeftovers(t *testing.T) {
 func TestRestartRetainsScratch(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
-	_ = m.Handle(context.Background(), startCmd())
 	dir := seedScratch(t, m, "s1")
+	_ = m.Handle(context.Background(), startCmd())
 
 	res := m.Handle(context.Background(), session.Command{CommandID: "restart", ServerID: "s1", Kind: "RestartServer"})
 	if !res.Success {
@@ -314,8 +314,8 @@ func TestRunningSnapshotGCsDisplacedTree(t *testing.T) {
 	tr := &fakeTransfer{}
 	ctrl := &fakeControl{reply: "ok"}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
-	_ = m.Handle(context.Background(), startCmd())
 	dir := seedScratch(t, m, "s1")
+	_ = m.Handle(context.Background(), startCmd())
 	displaced := seedDisplaced(t, m, "s1")
 
 	if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
@@ -341,8 +341,8 @@ func TestRunningSnapshotSkipsDisplacedSweepWhenWorkingDirReplaced(t *testing.T) 
 	tr := &fakeTransfer{gen: 12}
 	ctrl := &fakeControl{reply: "ok"}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
-	_ = m.Handle(context.Background(), startCmd())
 	seedScratch(t, m, "s1")
+	_ = m.Handle(context.Background(), startCmd())
 	tr.duringUpload = func(workingDir string) { replaceWorkingDirLikeHydrate(t, workingDir, 7) }
 
 	if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {

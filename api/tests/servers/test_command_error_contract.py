@@ -100,6 +100,22 @@ def _declared_triples() -> dict[Triple, set[str]]:
     return declared
 
 
+def _modules() -> list[tuple[str, ast.Module]]:
+    """Every application-layer module, keyed by its path relative to the layer.
+
+    ``rglob`` rather than ``glob``: a use case moved into a subpackage would
+    otherwise drop out of the scan silently, and a match site nobody scans is a
+    match site nobody checks — the drift this module exists to end. A nested module
+    keys as ``sub/mod.py``, so the key stays unique and an api entry naming it says
+    where it is.
+    """
+
+    return [
+        (path.relative_to(_APPLICATION).as_posix(), ast.parse(path.read_text()))
+        for path in sorted(_APPLICATION.rglob("*.py"))
+    ]
+
+
 def _status_names(node: ast.AST) -> list[str]:
     """Every ``CommandStatus.<NAME>`` referenced anywhere under ``node``."""
 
@@ -139,10 +155,37 @@ def _scanned_triples() -> set[Triple]:
     """Every ``CommandStatus`` match site in the servers application layer."""
 
     found: set[Triple] = set()
-    for path in sorted(_APPLICATION.glob("*.py")):
-        tree = ast.parse(path.read_text())
-        _collect(tree.body, "", path.name, found)
+    for module, tree in _modules():
+        _collect(tree.body, "", module, found)
     return found
+
+
+def _collect_definitions(
+    body: list[ast.stmt], owner: str, module: str, defined: set[tuple[str, str]]
+) -> None:
+    for stmt in body:
+        if isinstance(stmt, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            qualname = f"{owner}.{stmt.name}" if owner else stmt.name
+            defined.add((module, qualname))
+            _collect_definitions(stmt.body, qualname, module, defined)
+        elif not owner:
+            name = _assigned_name(stmt)
+            if name is not None:
+                defined.add((module, name))
+
+
+def _defined_qualnames() -> set[tuple[str, str]]:
+    """Every ``(module, qualname)`` the application layer defines.
+
+    Classes, functions and methods under the same class-qualified naming the match
+    scan uses, plus module-level assignments — the full set of things an api entry
+    can name.
+    """
+
+    defined: set[tuple[str, str]] = set()
+    for module, tree in _modules():
+        _collect_definitions(tree.body, "", module, defined)
+    return defined
 
 
 def test_declared_api_sites_match_the_source() -> None:
@@ -175,6 +218,39 @@ def test_declared_api_sites_match_the_source() -> None:
         f"no such CommandStatus reference: {stale}. They were renamed, moved or "
         "removed -- update the 'api' column of the rows that name them (kinds: "
         f"{ {t: sorted(declared[t]) for t in stale} })."
+    )
+
+
+def test_declared_via_sites_exist_in_the_source() -> None:
+    """A ``via`` entry names a real place too, or it rots unnoticed.
+
+    A ``via`` entry is a consumer of a discriminator declared on the same row — it
+    holds no ``CommandStatus`` reference of its own, so
+    :func:`test_declared_api_sites_match_the_source` cannot see it and, until this
+    test, nothing checked it at all: the entry could name a function that was
+    renamed or deleted and the suite stayed green, which is exactly the stale
+    self-description issue #2472 set out to end. Existence is all this can check
+    (whether that function really consumes the discriminator is not visible to an
+    ``ast`` scan), and it is what catches the rot.
+    """
+
+    defined = _defined_qualnames()
+    missing = []
+    for row in _rows():
+        api = row.get("api")
+        if not isinstance(api, list):
+            continue
+        for entry in api:
+            if not entry.startswith(_VIA):
+                continue
+            module, _, qualname = entry[len(_VIA) :].partition(":")
+            if (module, qualname) not in defined:
+                missing.append((f"({row['kind']}, {row['precondition']})", entry))
+
+    assert not missing, (
+        "these contract rows declare a 'via' consumer the application layer does "
+        f"not define: {missing}. It was renamed, moved or removed -- update the "
+        "'api' column in proto/contract/command_error_contract.json."
     )
 
 

@@ -46,6 +46,10 @@ func tunnelCmd() session.Command {
 // startRunning launches s1 so it is a running instance the tunnel handler resolves.
 func startRunning(t *testing.T, m *Manager) {
 	t.Helper()
+	// A start over an ABSENT working dir is refused since issue #2499, so a fixture
+	// that wants a running server must hold the working set the API's HydrateTrigger
+	// would have put there.
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("StartServer = %+v, want success", res)
 	}

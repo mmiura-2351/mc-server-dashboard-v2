@@ -115,6 +115,7 @@ func TestSnapshotTriggerCorruptRunningServerRefusesAndRestoresSaveOn(t *testing.
 	m.fsckRetryDelay = 0
 	m.settlePollInterval = 0
 
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -148,6 +149,7 @@ func TestSnapshotTriggerRunningServerFsckRetriesPastTransientCorruption(t *testi
 	// fsck retry — not the settle-wait — is what absorbs the transient corruption.
 	m.settlePollInterval = 0
 
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -251,6 +253,7 @@ func TestSnapshotTriggerRunningServerUnalignedTailProceeds(t *testing.T) {
 	m.fsckRetryDelay = 0
 	m.settlePollInterval = 0
 
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -298,6 +301,7 @@ func TestSnapshotTriggerRunningServerRconUnavailableRefusesQuiesceUnavailable(t 
 		func(context.Context, string, string) (execution.ServerControl, error) { return nil, openErr }).
 		WithTransfer(tr)
 
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}

@@ -65,8 +65,8 @@ func TestReclaimDeletedScratchesRetainsDisplacedTree(t *testing.T) {
 func TestReclaimDeletedScratchesSkipsRunningServer(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
-	_ = m.Handle(context.Background(), startCmd())
 	dir := seedScratch(t, m, "s1")
+	_ = m.Handle(context.Background(), startCmd())
 
 	m.reclaimDeletedScratches([]string{"s1"})
 	if _, err := os.Stat(dir); err != nil {

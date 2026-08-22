@@ -106,6 +106,7 @@ func TestConcurrentDuplicateStartStartsDriverOnce(t *testing.T) {
 	m := newManager(t, d, nil)
 
 	firstDone := make(chan session.CommandResult, 1)
+	seedScratch(t, m, "s1")
 	go func() { firstDone <- m.Handle(context.Background(), startCmd()) }()
 
 	// The first start is now blocked inside driver.Start; the reservation is held.
@@ -134,6 +135,7 @@ func TestReservationReleasedAfterStartFailure(t *testing.T) {
 	d.startErr = context.DeadlineExceeded
 	m := newManager(t, d, nil)
 
+	seedScratch(t, m, "s1")
 	go func() { _ = m.Handle(context.Background(), startCmd()) }()
 	awaitEnter(t, d.entered)
 	close(d.release) // first start fails
@@ -203,6 +205,7 @@ func TestResentStopDuringDetachedStopRejectedBusy(t *testing.T) {
 	d := &gatedStopDriver{}
 	m := newManager(t, d, nil).WithTransfer(&fakeTransfer{})
 
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -332,6 +335,7 @@ func TestResentStopDuringOrphanRetryRejectedBusy(t *testing.T) {
 	d := &gatedOrphanDriver{}
 	m := newManager(t, d, nil).WithTransfer(&fakeTransfer{})
 
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -392,6 +396,7 @@ func TestResentStopDuringOrphanRetryRejectedBusy(t *testing.T) {
 func TestRestartUnavailableDriverLeavesInstanceTracked(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, &fakeControl{reply: "ok"}).WithTransfer(&fakeTransfer{})
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -441,6 +446,7 @@ func TestRestartNeverLeaksReservation(t *testing.T) {
 	}
 
 	// The id must not be leaked as reserved: a StartServer must succeed (not BUSY).
+	seedScratch(t, m, "s1")
 	start := m.Handle(context.Background(), startCmd())
 	if !start.Success {
 		t.Fatalf("start after restart of unknown id = %+v, want success (reservation must not leak)", start)
@@ -456,6 +462,7 @@ func TestRestartRacingStartCompletion(t *testing.T) {
 
 	// Start a server but hold it inside driver.Start.
 	startDone := make(chan session.CommandResult, 1)
+	seedScratch(t, m, "s1")
 	go func() { startDone <- m.Handle(context.Background(), startCmd()) }()
 	awaitEnter(t, d.entered)
 
@@ -486,6 +493,7 @@ func TestRestartMidStartStillBusy(t *testing.T) {
 	m := newManager(t, d, nil)
 
 	// Hold a StartServer mid-driver.Start.
+	seedScratch(t, m, "s1")
 	go func() { _ = m.Handle(context.Background(), startCmd()) }()
 	awaitEnter(t, d.entered)
 

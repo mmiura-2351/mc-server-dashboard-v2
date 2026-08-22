@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -263,9 +264,14 @@ func startCmd() session.Command {
 	return session.Command{CommandID: "c1", ServerID: "s1", Kind: "StartServer", Driver: "container", MinecraftVersion: "1.21"}
 }
 
-func TestStartServerCreatesWorkingDirAndStarts(t *testing.T) {
+// A StartServer launches the driver against the id's working dir under scratch —
+// the working set the API's preceding HydrateTrigger put there (control_plane.proto,
+// StartServer). The start no longer conjures that directory when it is missing: see
+// TestStartRefusedWhenWorkingDirAbsent (issue #2499).
+func TestStartServerLaunchesAgainstTheWorkingDir(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
+	wantDir := seedScratch(t, m, "s1")
 
 	res := m.Handle(context.Background(), startCmd())
 	if !res.Success {
@@ -274,7 +280,6 @@ func TestStartServerCreatesWorkingDirAndStarts(t *testing.T) {
 	if d.startCount() != 1 {
 		t.Fatalf("driver started %d times, want 1", d.startCount())
 	}
-	wantDir := filepath.Join(m.scratchDir, "s1")
 	d.mu.Lock()
 	gotDir := d.started[0].WorkingDir
 	d.mu.Unlock()
@@ -282,7 +287,47 @@ func TestStartServerCreatesWorkingDirAndStarts(t *testing.T) {
 		t.Fatalf("working dir = %q, want %q", gotDir, wantDir)
 	}
 	if info, err := os.Stat(wantDir); err != nil || !info.IsDir() {
-		t.Fatalf("working dir not created: %v", err)
+		t.Fatalf("working dir missing: %v", err)
+	}
+}
+
+// A start whose working dir is ABSENT is REFUSED rather than launched into an empty
+// directory (issue #2499). The API issues a HydrateTrigger before every start that
+// needs one, so an absent working dir means the hydrate was skipped over a working
+// set this Worker does not hold — the #696 class, and the direction that loses a
+// world rather than costing an extra transfer. The refusal is SERVER_NOT_FOUND and
+// its message carries the "working dir absent" phrase the API keys on
+// (_WORKING_SET_ABSENT_MARKER, lifecycle.py) to re-launch WITH a full hydrate.
+func TestStartRefusedWhenWorkingDirAbsent(t *testing.T) {
+	d := &fakeDriver{}
+	m := newManager(t, d, nil)
+
+	res := m.Handle(context.Background(), startCmd())
+
+	if res.Success {
+		t.Fatalf("StartServer over an absent working dir = %+v, want a refusal", res)
+	}
+	if res.ErrorCode != session.CommandErrorServerNotFound {
+		t.Fatalf("ErrorCode = %v, want %v", res.ErrorCode, session.CommandErrorServerNotFound)
+	}
+	if !strings.Contains(res.ErrorMessage, "working dir absent") {
+		t.Fatalf("refusal message = %q, want the API-pinned phrase \"working dir absent\"", res.ErrorMessage)
+	}
+	if d.startCount() != 0 {
+		t.Fatalf("driver started %d times, want 0: the refusal must precede driver.Start", d.startCount())
+	}
+	// The refusal must not leave the empty directory behind either: launchReserved's
+	// MkdirAll is exactly what would have made the boot look healthy.
+	if _, err := os.Stat(filepath.Join(m.scratchDir, "s1")); !os.IsNotExist(err) {
+		t.Fatalf("working dir stat err = %v, want it to still be absent", err)
+	}
+	// The reservation is released, so the corrective start (the API's re-launch after
+	// its own hydrate) is not refused BUSY behind this one.
+	if res := m.Handle(context.Background(), session.Command{
+		CommandID: "hydrate", ServerID: "s1", Kind: "HydrateTrigger",
+		TransferURL: "https://api/working-set", TransferToken: "tok",
+	}); res.ErrorCode == session.CommandErrorBusy {
+		t.Fatalf("follow-up hydrate = %+v, want the refusal to have released the reservation", res)
 	}
 }
 
@@ -291,6 +336,7 @@ func TestStartServerCreatesWorkingDirAndStarts(t *testing.T) {
 func TestStartConvertsMemoryLimitBytesToSpecMiB(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
+	seedScratch(t, m, "s1")
 	cmd := startCmd()
 	cmd.MemoryLimitBytes = 2048 * 1024 * 1024
 
@@ -309,6 +355,7 @@ func TestStartDefaultMemoryLimitIsZero(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
 
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("StartServer = %+v, want success", res)
 	}
@@ -325,6 +372,7 @@ func TestStartDefaultMemoryLimitIsZero(t *testing.T) {
 func TestStartCarriesCPUMillisToSpec(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
+	seedScratch(t, m, "s1")
 	cmd := startCmd()
 	cmd.CPUMillis = 2000
 
@@ -343,6 +391,7 @@ func TestStartDefaultCPUMillisIsZero(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
 
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("StartServer = %+v, want success", res)
 	}
@@ -360,6 +409,7 @@ func TestStartDefaultLaunchModeIsJar(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
 
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("StartServer = %+v, want success", res)
 	}
@@ -375,6 +425,7 @@ func TestStartDefaultLaunchModeIsJar(t *testing.T) {
 func TestStartJarLaunchMode(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
+	seedScratch(t, m, "s1")
 	cmd := startCmd()
 	cmd.LaunchMode = "jar"
 
@@ -394,6 +445,7 @@ func TestStartJarLaunchMode(t *testing.T) {
 func TestStartForgeLaunchMode(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
+	seedScratch(t, m, "s1")
 	cmd := startCmd()
 	cmd.LaunchMode = "forge-argsfile"
 
@@ -430,6 +482,7 @@ func TestStartTwiceIsInvalidState(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
 
+	seedScratch(t, m, "s1")
 	_ = m.Handle(context.Background(), startCmd())
 	res := m.Handle(context.Background(), startCmd())
 	if res.Success || res.ErrorCode != session.CommandErrorInvalidState {
@@ -460,6 +513,7 @@ func TestStopUnknownServer(t *testing.T) {
 func TestStopServerGraceful(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
+	seedScratch(t, m, "s1")
 	_ = m.Handle(context.Background(), startCmd())
 
 	res := m.Handle(context.Background(), session.Command{CommandID: "c3", ServerID: "s1", Kind: "StopServer"})
@@ -479,6 +533,7 @@ func TestStopServerGracefulRCONSuccessSkipsFlush(t *testing.T) {
 	d := &fakeDriver{}
 	ctrl := &fakeControl{reply: "ok", seq: &seq}
 	m := newManager(t, d, ctrl)
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -505,6 +560,7 @@ func TestStopServerGracefulRCONFailureFlushesBeforeTerminate(t *testing.T) {
 	d := &rconFailDriver{}
 	ctrl := &fakeControl{reply: "ok", seq: &seq}
 	m := newManager(t, d, ctrl)
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -528,6 +584,7 @@ func TestStopServerForceSkipsFlush(t *testing.T) {
 	d := &fakeDriver{}
 	ctrl := &fakeControl{reply: "ok", seq: &seq}
 	m := newManager(t, d, ctrl)
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -557,6 +614,7 @@ func TestStopServerGracefulProceedsWhenSaveFails(t *testing.T) {
 	d := &rconFailDriver{}
 	ctrl := &fakeControl{reply: "ok", seq: &seq, failLines: map[string]error{"save-all": fmt.Errorf("rcon down")}}
 	m := newManager(t, d, ctrl)
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -579,6 +637,7 @@ func TestStopServerGracefulProceedsWhenSaveOffFails(t *testing.T) {
 	d := &rconFailDriver{}
 	ctrl := &fakeControl{reply: "ok", seq: &seq, failLines: map[string]error{"save-off": fmt.Errorf("rcon down")}}
 	m := newManager(t, d, ctrl)
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -620,6 +679,7 @@ func TestStopServerGracefulRedialsAfterPoisonedSaveOff(t *testing.T) {
 			return freshCtrl, nil
 		})
 	m.settlePollInterval = 0
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -668,6 +728,7 @@ func TestStopServerGracefulCompletesWhenBothRCONCommandsFail(t *testing.T) {
 			return freshCtrl, nil
 		})
 	m.settlePollInterval = 0
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -689,6 +750,7 @@ func TestServerCommandForwardsOutput(t *testing.T) {
 	d := &fakeDriver{}
 	ctrl := &fakeControl{reply: "There are 0 players"}
 	m := newManager(t, d, ctrl)
+	seedScratch(t, m, "s1")
 	_ = m.Handle(context.Background(), startCmd())
 
 	res := m.Handle(context.Background(), session.Command{CommandID: "c4", ServerID: "s1", Kind: "ServerCommand", Line: "list"})
@@ -719,6 +781,7 @@ func TestOpenControlReceivesRunningServerDriver(t *testing.T) {
 	})
 
 	// Start a container server on the mixed-driver worker.
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("StartServer = %+v, want success", res)
 	}
@@ -735,6 +798,7 @@ func TestOpenControlReceivesRunningServerDriver(t *testing.T) {
 func TestStatusEventsAreForwarded(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
+	seedScratch(t, m, "s1")
 	_ = m.Handle(context.Background(), startCmd())
 
 	// The manager forwards the instance's events, mapping to session.StatusEvent.
@@ -751,6 +815,7 @@ func TestStatusEventsAreForwarded(t *testing.T) {
 func TestRestartStopsAndStarts(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
+	seedScratch(t, m, "s1")
 	_ = m.Handle(context.Background(), startCmd())
 	first := d.inst
 
@@ -774,6 +839,7 @@ func TestRestartRCONSuccessSkipsFlush(t *testing.T) {
 	d := &fakeDriver{}
 	ctrl := &fakeControl{reply: "ok", seq: &seq}
 	m := newManager(t, d, ctrl)
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -797,6 +863,7 @@ func TestRestartRCONFailureFlushesBeforeTerminate(t *testing.T) {
 	d := &rconFailDriver{}
 	ctrl := &fakeControl{reply: "ok", seq: &seq}
 	m := newManager(t, d, ctrl)
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -818,6 +885,7 @@ func TestRestartRCONFailureFlushesBeforeTerminate(t *testing.T) {
 func TestRestartResultCarriesOriginalCorrelationID(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
+	seedScratch(t, m, "s1")
 	_ = m.Handle(context.Background(), startCmd())
 
 	res := m.Handle(context.Background(), session.Command{CommandID: "restart-id", ServerID: "s1", Kind: "RestartServer"})
@@ -835,6 +903,7 @@ func TestStartPortConflictSurfacesCode(t *testing.T) {
 	d := &fakeDriver{startErr: fmt.Errorf("containerdriver: start: %w", execution.ErrPortConflict)}
 	m := newManager(t, d, nil)
 
+	seedScratch(t, m, "s1")
 	res := m.Handle(context.Background(), startCmd())
 	if res.Success || res.ErrorCode != session.CommandErrorPortConflict {
 		t.Fatalf("start = %+v, want PORT_CONFLICT failure", res)
@@ -847,6 +916,7 @@ func TestStartImageMissingSurfacesCode(t *testing.T) {
 	d := &fakeDriver{startErr: fmt.Errorf("containerdriver: create: %w", execution.ErrImageMissing)}
 	m := newManager(t, d, nil)
 
+	seedScratch(t, m, "s1")
 	res := m.Handle(context.Background(), startCmd())
 	if res.Success || res.ErrorCode != session.CommandErrorImageMissing {
 		t.Fatalf("start = %+v, want IMAGE_MISSING failure", res)
@@ -858,6 +928,7 @@ func TestStartUnclassifiedFailureIsInternal(t *testing.T) {
 	d := &fakeDriver{startErr: fmt.Errorf("daemon unreachable")}
 	m := newManager(t, d, nil)
 
+	seedScratch(t, m, "s1")
 	res := m.Handle(context.Background(), startCmd())
 	if res.Success || res.ErrorCode != session.CommandErrorInternal {
 		t.Fatalf("start = %+v, want INTERNAL failure", res)

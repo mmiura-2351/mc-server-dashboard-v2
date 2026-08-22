@@ -3685,6 +3685,145 @@ async def test_redispatch_start_skips_hydrate_when_held_generation_is_fresh() ->
     assert [k for k, _, _ in cp.dispatched] == ["start"]
 
 
+class _RefusesFirstStartControlPlane(FakeControlPlane):
+    """A Worker that answers the FIRST start with the working_set_absent refusal.
+
+    The refusal ``handleStart`` emits when the id's working dir is not on disk
+    (issue #2499): the status is read from the contract table, and the message
+    carries the "working dir absent" phrase the API's discriminator keys on.
+    Only the first start is refused, so a test can see what the API does next.
+    """
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self.starts = 0
+
+    async def start(
+        self,
+        *,
+        worker_id: WorkerId,
+        server_id: ServerId,
+        server_type: ServerType,
+        jar_relpath: str,
+        minecraft_version: str,
+        memory_limit_bytes: int,
+        cpu_millis: int,
+    ) -> CommandOutcome:
+        outcome = await super().start(
+            worker_id=worker_id,
+            server_id=server_id,
+            server_type=server_type,
+            jar_relpath=jar_relpath,
+            minecraft_version=minecraft_version,
+            memory_limit_bytes=memory_limit_bytes,
+            cpu_millis=cpu_millis,
+        )
+        self.starts += 1
+        if self.starts > 1:
+            return outcome
+        return CommandOutcome(
+            status=worker_status("StartServer", "working_set_absent"),
+            message=(
+                "instancemanager: start refused: working dir absent "
+                "(/var/lib/mcsd/scratch/s): the hydrate was skipped for a working "
+                "set this Worker does not hold"
+            ),
+        )
+
+
+async def test_redispatch_start_relaunches_with_a_hydrate_when_the_set_is_absent() -> (
+    None
+):
+    # The skip-hydrate gate said the Worker holds generation 5, but the Worker's own
+    # launch-time check found no working dir and REFUSED (issue #2499). The API must
+    # not treat that as a plain dispatch failure and leave the row diverged until the
+    # inventory happens to be rebuilt: the refusal is proof the belief was wrong, so
+    # the launch is replayed WITH the hydrate it skipped.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.STOPPED,
+            worker_id=worker,
+        )
+    )
+    cp = _RefusesFirstStartControlPlane(
+        held={(WorkerId(worker), ServerId(server_id)): 5},
+    )
+
+    await _start_server(uow, cp, store_generation=5).redispatch_start(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    # The skipped start, then the corrective hydrate and the start that follows it.
+    assert [k for k, _, _ in cp.dispatched] == ["start", "hydrate", "start"]
+
+
+async def test_start_relaunch_after_the_refusal_is_taken_at_most_once() -> None:
+    # The corrective launch hydrates, so its start can no longer meet an absent
+    # working set. Pin that the recovery is taken AT MOST ONCE — a Worker answering
+    # the refusal twice must surface as a failure, not spin dispatching hydrates.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.STOPPED,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(
+        held={(WorkerId(worker), ServerId(server_id)): 5},
+        outcomes={
+            "start": CommandOutcome(
+                status=worker_status("StartServer", "working_set_absent"),
+                message="instancemanager: start refused: working dir absent (/s)",
+            )
+        },
+    )
+
+    with pytest.raises(CommandDispatchError):
+        await _start_server(uow, cp, store_generation=5).redispatch_start(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert [k for k, _, _ in cp.dispatched] == ["start", "hydrate", "start"]
+
+
+async def test_start_relaunches_with_a_hydrate_when_the_working_set_is_absent() -> None:
+    # The user-facing start takes the same skip-hydrate decision as the reconciler's
+    # redispatch (#1007), so the same inventory can tell it the same lie. Both
+    # dispatch through ``_launch``, so both recover the same way — without it a user
+    # start would fail, compensate desired=stopped, and fail again identically on
+    # every retry, because nothing clears the stale held entry (issue #2499).
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = _RefusesFirstStartControlPlane(
+        place_to=WorkerId(worker),
+        held={(WorkerId(worker), ServerId(server_id)): 5},
+    )
+
+    result = await StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(generation=5),
+        file_store=FakeFileStore(seed_eula=True),
+    )(community_id=CommunityId(community), server_id=ServerId(server_id))
+
+    assert [k for k, _, _ in cp.dispatched] == ["start", "hydrate", "start"]
+    # The start SUCCEEDED, so the intent stands: no compensation back to stopped.
+    assert result.desired_state is DesiredState.RUNNING
+    assert uow.servers.by_id[ServerId(server_id)].assigned_worker_id == WorkerId(worker)
+
+
 async def test_redispatch_start_hydrates_when_held_generation_is_stale() -> None:
     # Presence at a STALE generation must hydrate (issue #763): an A->B->A leftover
     # scratch is present but older than the store generation B advanced past, so the
