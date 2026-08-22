@@ -55,8 +55,8 @@ type fakeTransfer struct {
 	// preceding PackSnapshot was given — after the pack, before the caller's
 	// post-upload tail (recordGenerationIfUnchanged -> sweepDisplaced). It models a
 	// NEW stream's re-placement hydrate replacing the working dir while this (old,
-	// dropped) stream's snapshot is still finishing that tail, the cross-stream
-	// window issue #2284 closes for the marker stamp.
+	// dropped) stream's snapshot is still finishing that tail — the cross-stream window
+	// issue #2284 closes for the marker stamp and issue #2291 for the displaced sweep.
 	duringUpload func(workingDir string)
 }
 
