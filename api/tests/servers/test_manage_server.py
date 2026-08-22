@@ -51,6 +51,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNameAlreadyExistsError,
     ServerNotFoundError,
     ServerNotStoppedError,
+    ServerPropertiesMissingError,
     UnknownServerTypeError,
     UnsupportedEditionError,
     WorkingSetSeedFailedError,
@@ -1923,21 +1924,86 @@ async def test_update_game_port_updates_row_and_rewrites_properties() -> None:
     assert uow.commits == 1
 
 
-async def test_update_game_port_creates_properties_when_absent() -> None:
-    # A legacy server with no seeded server.properties (#243) gets one created
-    # with just the port line.
+async def test_update_game_port_refuses_when_properties_absent() -> None:
+    # A server with no server.properties is refused, not republished from empty
+    # (issue #2623): writing a port-only file would leave the server without the
+    # RCON keys the control plane needs to quiesce/stop/query it. The refusal is
+    # pre-commit, so the row keeps its old port and a retry sees the same answer.
     uow = FakeUnitOfWork()
     community = CommunityId(uuid.uuid4())
-    server = _server(community_id=community, game_port=None)
+    server = _server(community_id=community, game_port=25565)
     uow.servers.seed(server)
     file_store = FakeFileStore()
-    updated = await _updater(uow, file_store=file_store)(
+    with pytest.raises(ServerPropertiesMissingError):
+        await _updater(uow, file_store=file_store)(
+            community_id=community,
+            server_id=server.id,
+            game_port=25570,
+        )
+    assert file_store.writes == []
+    assert uow.commits == 0
+    assert uow.servers.by_id[server.id].game_port == 25565
+
+
+async def test_update_game_port_refuses_when_properties_vanishes_after_the_check() -> (
+    None
+):
+    # The pre-commit check and the deferred write (#1705) read the file twice, so
+    # it can disappear in between. The deferred write must refuse too rather than
+    # fall back to empty and republish a port-only file (issue #2623) — this pins
+    # the raise inside _rewrite_server_port independently of the pre-commit check.
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community, game_port=25565)
+    uow.servers.seed(server)
+
+    class _VanishingFileStore(FakeFileStore):
+        """Serves server.properties once, then reports it gone."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.files["server.properties"] = b"server-port=25565\nrcon.password=tok\n"
+
+        async def read_file(
+            self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+        ) -> bytes:
+            content = await super().read_file(
+                community_id=community_id, server_id=server_id, rel_path=rel_path
+            )
+            if rel_path == "server.properties":
+                del self.files[rel_path]
+            return content
+
+    file_store = _VanishingFileStore()
+    with pytest.raises(ServerPropertiesMissingError):
+        await _updater(uow, file_store=file_store)(
+            community_id=community,
+            server_id=server.id,
+            game_port=25570,
+        )
+    # Nothing was republished from an empty file.
+    assert file_store.writes == []
+
+
+async def test_update_game_port_preserves_rcon_password() -> None:
+    # The credential the worker reaches the server with survives a port change
+    # (issue #2623): only the server-port line moves.
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community, game_port=25565)
+    uow.servers.seed(server)
+    file_store = FakeFileStore()
+    file_store.files["server.properties"] = (
+        b"server-port=25565\nenable-rcon=true\nrcon.port=25575\nrcon.password=tok\n"
+    )
+    await _updater(uow, file_store=file_store)(
         community_id=community,
         server_id=server.id,
         game_port=25570,
     )
-    assert updated.game_port == 25570
-    assert file_store.files["server.properties"] == b"server-port=25570\n"
+    assert file_store.files["server.properties"] == (
+        b"server-port=25570\nenable-rcon=true\nrcon.port=25575\nrcon.password=tok\n"
+    )
 
 
 async def test_update_game_port_rejects_while_running() -> None:
@@ -2015,8 +2081,12 @@ async def test_update_game_port_file_failure_after_commit() -> None:
     community = CommunityId(uuid.uuid4())
     server = _server(community_id=community, game_port=25565)
     uow.servers.seed(server)
+    # The file exists (an absent one is refused before the commit, #2623); the
+    # failure under test is the write itself.
+    file_store = FakeFileStore(fail_write=True)
+    file_store.files["server.properties"] = b"server-port=25565\n"
     with pytest.raises(WorkingSetSeedFailedError):
-        await _updater(uow, file_store=FakeFileStore(fail_write=True))(
+        await _updater(uow, file_store=file_store)(
             community_id=community,
             server_id=server.id,
             game_port=25570,

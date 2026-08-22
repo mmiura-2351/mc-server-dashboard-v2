@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from mc_server_dashboard_api.servers.domain.server_properties import (
+    PLATFORM_MANAGED_KEYS,
     RCON_PORT,
     apply_overrides,
+    changed_platform_managed_keys,
     clear_resource_pack_properties,
     remove_keys,
     set_rcon_properties,
@@ -258,3 +260,106 @@ def test_remove_keys_empty_set_is_noop() -> None:
     content = b"motd=hi\n"
     out = remove_keys(content, set())
     assert out == b"motd=hi\n"
+
+
+# --- platform-managed keys (issue #2623) --------------------------------------
+
+
+def test_platform_managed_keys_covers_the_port_and_rcon_keys() -> None:
+    # The keys the platform owns: the tracked bind port (#311) and the RCON
+    # triple the worker reaches the server with (#335).
+    assert {
+        "server-port",
+        "enable-rcon",
+        "rcon.port",
+        "rcon.password",
+    } <= PLATFORM_MANAGED_KEYS
+
+
+def test_platform_managed_keys_covers_the_resource_pack_keys() -> None:
+    # Written by set_resource_pack_properties / clear_resource_pack_properties
+    # from the assignment row (#1177, #1253), so they are platform-owned too.
+    assert {
+        "resource-pack",
+        "resource-pack-sha1",
+        "require-resource-pack",
+        "resource-pack-prompt",
+    } <= PLATFORM_MANAGED_KEYS
+
+
+def test_unchanged_platform_keys_report_no_change() -> None:
+    current = b"server-port=25565\nrcon.password=tok\nmotd=hi\n"
+    incoming = b"server-port=25565\nrcon.password=tok\nmotd=bye\n"
+    assert changed_platform_managed_keys(current, incoming) == []
+
+
+def test_changed_platform_key_is_reported() -> None:
+    current = b"server-port=25565\nrcon.password=tok\n"
+    incoming = b"server-port=25999\nrcon.password=tok\n"
+    assert changed_platform_managed_keys(current, incoming) == ["server-port"]
+
+
+def test_removed_platform_key_is_reported() -> None:
+    # Dropping the line is a change: the worker loses the credential (#2623).
+    current = b"server-port=25565\nrcon.password=tok\n"
+    incoming = b"server-port=25565\n"
+    assert changed_platform_managed_keys(current, incoming) == ["rcon.password"]
+
+
+def test_added_platform_key_is_reported() -> None:
+    # A legacy file with no RCON line must not gain one through a user edit.
+    current = b"server-port=25565\n"
+    incoming = b"server-port=25565\nrcon.password=evil\n"
+    assert changed_platform_managed_keys(current, incoming) == ["rcon.password"]
+
+
+def test_appended_duplicate_platform_key_is_reported() -> None:
+    # Java's Properties.load is last-occurrence-wins, so leaving the original
+    # line intact and appending a second one still changes what the server reads.
+    current = b"rcon.password=tok\n"
+    incoming = b"rcon.password=tok\nrcon.password=evil\n"
+    assert changed_platform_managed_keys(current, incoming) == ["rcon.password"]
+
+
+def test_whitespace_only_difference_is_not_a_change() -> None:
+    # A reformatting edit (or a CRLF round-trip) leaves the value itself alone.
+    current = b"server-port=25565\r\n"
+    incoming = b"server-port= 25565 \n"
+    assert changed_platform_managed_keys(current, incoming) == []
+
+
+def test_commented_out_platform_key_counts_as_removal() -> None:
+    current = b"rcon.password=tok\n"
+    incoming = b"#rcon.password=tok\n"
+    assert changed_platform_managed_keys(current, incoming) == ["rcon.password"]
+
+
+def test_changed_platform_keys_are_reported_sorted() -> None:
+    current = b"server-port=25565\nrcon.password=tok\n"
+    incoming = b"server-port=25999\nrcon.password=evil\n"
+    assert changed_platform_managed_keys(current, incoming) == [
+        "rcon.password",
+        "server-port",
+    ]
+
+
+def test_non_platform_keys_are_never_reported() -> None:
+    current = b"motd=hi\nmax-players=20\n"
+    incoming = b"motd=bye\n"
+    assert changed_platform_managed_keys(current, incoming) == []
+
+
+def test_non_utf8_bytes_are_compared_without_decoding() -> None:
+    # A server.properties carrying a latin-1 motd is not this guard's business to
+    # reject: comparing must never raise UnicodeDecodeError (issue #2623).
+    current = b"server-port=25565\nmotd=caf\xe9\n"
+    incoming = b"server-port=25565\nmotd=caf\xe9 bar\n"
+    assert changed_platform_managed_keys(current, incoming) == []
+
+
+def test_non_utf8_platform_value_change_is_still_detected() -> None:
+    # Two DIFFERENT invalid byte sequences must not collapse into one another,
+    # which a lossy decode would do.
+    current = b"rcon.password=\xff\xfe\n"
+    incoming = b"rcon.password=\xfe\xff\n"
+    assert changed_platform_managed_keys(current, incoming) == ["rcon.password"]

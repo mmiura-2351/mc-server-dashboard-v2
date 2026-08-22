@@ -133,6 +133,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNotFoundError,
     ServerNotRunningError,
     ServerNotStoppedError,
+    ServerPropertiesMissingError,
     SlugAlreadyTakenError,
     SlugExhaustedError,
     UnknownServerTypeError,
@@ -920,8 +921,14 @@ async def update_server(
     **Game port (issue #311).** A new ``game_port`` is at rest only, validated
     like create (422 ``port_out_of_range`` / 409 ``port_taken``), and rewrites
     ``server-port`` in the at-rest ``server.properties`` so the DB and bind port
-    stay in sync. A storage failure during that rewrite is 503 ``seed_failed`` and
-    leaves the row unchanged.
+    stay in sync. The rewrite preserves every other key in the file, so a server
+    with no ``server.properties`` at all is refused with 409
+    ``server_properties_missing`` before the commit (issue #2623) — republishing a
+    port-only file would drop ``rcon.password`` and leave the control plane unable
+    to quiesce, stop, query, or send commands to the server. A storage failure
+    during the rewrite itself is 503 ``seed_failed``; that write is deferred to
+    after the commit (#1705), so the row carries the new port while the file does
+    not, and the retry direction is to re-issue the rewrite.
     """
 
     authorized = authz.auth_user
@@ -975,6 +982,15 @@ async def update_server(
     except PortAlreadyTakenError as exc:
         # A new game_port already held by another server (issue #311).
         raise _conflict("port_taken") from exc
+    except ServerPropertiesMissingError as exc:
+        # The port rewrite found no server.properties to preserve (issue #2623).
+        # Working-set state that is not what the platform expects — the same 409
+        # posture as eula_not_accepted, not a 404 (the server itself exists) and
+        # not a 422 (the request shape is fine). Normally raised by the pre-commit
+        # check, so the row still holds its old port; the same 409 also covers the
+        # narrow race where the file vanishes before the deferred write, and there
+        # the committed row already carries the new port.
+        raise _conflict("server_properties_missing") from exc
     except ServerNameAlreadyExistsError as exc:
         raise _conflict("server_name_exists") from exc
     except InvalidSlugError as exc:
@@ -984,8 +1000,10 @@ async def update_server(
         # Slug is already held by another server (issue #955).
         raise _conflict("slug_taken") from exc
     except WorkingSetSeedFailedError as exc:
-        # Rewriting server.properties for the port change failed; the row was not
-        # committed (no DB/file drift), surfaced as a mapped 503 (issue #311).
+        # Rewriting server.properties for the port change hit a storage failure,
+        # surfaced as a mapped 503 (issue #311). That write is deferred to after
+        # the commit (#1705), so the row already carries the new port while the
+        # file does not; re-issuing the update rewrites the file.
         raise _service_unavailable("seed_failed") from exc
     await _record(
         recorder, ops.SERVER_UPDATE, authorized, community_id, server.id.value

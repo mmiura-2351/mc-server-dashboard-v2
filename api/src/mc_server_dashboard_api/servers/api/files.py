@@ -132,6 +132,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     InvalidFilePathError,
     InvalidVersionIdError,
+    PlatformManagedKeyError,
     ServerBusyError,
     ServerFileNotFoundError,
     ServerFilesUnsettledError,
@@ -356,6 +357,16 @@ async def write_file(
     A successful write is audited (``file:write``); a write refused because the
     server is unsettled is recorded DENIED, matching the upload posture (issue
     #263).
+
+    **Platform-managed keys (issue #2623).** A write to the root-level
+    ``server.properties`` may not change the keys the platform owns —
+    ``server-port`` (tracks the DB ``game_port``), the RCON triple the control
+    plane reaches the server with, and the resource-pack keys written from the
+    assignment row. Such a write is 422 ``platform_managed_key`` with the
+    offending key in the ``key`` member. The comparison is against the file's
+    current bytes, so leaving those keys untouched — the ordinary case for editing
+    ``motd`` or ``max-players`` — passes; removing one, or appending a second line
+    for one, counts as changing it.
     """
 
     content = _decode(body.content_base64)
@@ -377,6 +388,15 @@ async def write_file(
         # parent (symlink_refused, issue #2432) or when the name is past NAME_MAX
         # (name_too_long, issue #2433).
         raise _unprocessable(exc.reason) from exc
+    except PlatformManagedKeyError as exc:
+        # The write would change a key the platform owns in server.properties
+        # (issue #2623). 422 with the key named in a ``key`` member, following the
+        # 403 ``permission`` precedent, so the UI can say which one is off limits.
+        raise problem(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "platform_managed_key",
+            extensions={"key": exc.key},
+        ) from exc
     except FileTooLargeError as exc:
         # The edge cap (MAX_EDIT_BYTES) and the Worker's payload_too_large reason
         # (issue #548) both surface here as 413.

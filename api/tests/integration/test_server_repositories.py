@@ -324,11 +324,13 @@ async def _grant_all(_code: str) -> bool:
     return True
 
 
-def _updater(factory: object) -> UpdateServer:
+def _updater(
+    factory: object, *, file_store: FakeFileStore | None = None
+) -> UpdateServer:
     return UpdateServer(
         uow=ServersUnitOfWork(factory),  # type: ignore[arg-type]
         clock=FakeClock(_NOW),
-        file_store=FakeFileStore(),
+        file_store=file_store or FakeFileStore(),
         port_range=PortRange(start=25565, end=25664),
     )
 
@@ -352,7 +354,13 @@ async def test_update_game_port_persists_to_row(engine: AsyncEngine) -> None:
         config={},
     )
 
-    await _updater(factory)(
+    # The port rewrite preserves the file's other keys, so an absent
+    # server.properties is refused before the commit (#2623). The subject here
+    # is the row, so seed the file the update rewrites.
+    file_store = FakeFileStore()
+    file_store.files["server.properties"] = f"server-port={server.game_port}\n".encode()
+
+    await _updater(factory, file_store=file_store)(
         community_id=CommunityId(community_id),
         server_id=server.id,
         game_port=25570,

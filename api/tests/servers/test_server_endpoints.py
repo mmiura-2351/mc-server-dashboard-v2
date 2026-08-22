@@ -76,6 +76,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     RetiredConfigKeyError,
     ServerNotFoundError,
     ServerNotStoppedError,
+    ServerPropertiesMissingError,
     UnknownServerTypeError,
     UnsupportedEditionError,
     WorkingSetSeedFailedError,
@@ -904,6 +905,24 @@ def test_update_game_port_taken_is_409() -> None:
     )
     assert resp.status_code == 409
     assert resp.json()["reason"] == "port_taken"
+
+
+def test_update_game_port_properties_missing_is_409() -> None:
+    # The server has no server.properties to rewrite, so the port change is
+    # refused rather than republishing a file without rcon.password (#2623).
+    # Working-set state, not request shape -> 409, like eula_not_accepted.
+    app = _app(
+        member=True,
+        allow=True,
+        update=_FakeUseCase(error=ServerPropertiesMissingError("server-id")),
+    )
+    client = _client(app)
+    resp = client.patch(
+        f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        json={"game_port": 25570},
+    )
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "server_properties_missing"
 
 
 def test_update_game_port_seed_failure_is_503() -> None:

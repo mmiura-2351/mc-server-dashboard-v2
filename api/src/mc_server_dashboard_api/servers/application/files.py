@@ -61,6 +61,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     FileAlreadyExistsError,
     FileTooLargeError,
     InvalidFilePathError,
+    PlatformManagedKeyError,
     ServerFileNotFoundError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
@@ -73,6 +74,9 @@ from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
     NullLifecycleLock,
 )
 from mc_server_dashboard_api.servers.domain.plugin import content_dir_for_server_type
+from mc_server_dashboard_api.servers.domain.server_properties import (
+    changed_platform_managed_keys,
+)
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -80,6 +84,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ObservedState,
     ServerId,
     ServerType,
+    WorkerId,
 )
 
 _LOG = logging.getLogger(__name__)
@@ -90,6 +95,10 @@ _LOG = logging.getLogger(__name__)
 # keeping a single edit off the latency-sensitive stream's danger zone. A constant
 # is intentional (no config knob requested); document if it ever needs tuning.
 MAX_EDIT_BYTES = 4 * 1024 * 1024
+
+# The one ``server.properties`` Mojang's server reads (issue #2623). A write to
+# this path is checked against the platform-managed key set before it lands.
+_PROPERTIES_REL_PATH = "server.properties"
 
 # The upload-size cap. Unlike an interactive edit (which rides the control plane,
 # hence the small MAX_EDIT_BYTES), an upload is an at-rest Storage-side operation
@@ -190,6 +199,17 @@ def _guard_content_dir(server_type: ServerType, rel_path: str) -> None:
     prefix = f"{content_dir}/"
     if normalized.startswith(prefix) and "/" not in normalized[len(prefix) :]:
         raise ContentDirProtectedError(rel_path)
+
+
+def _is_root_server_properties(rel_path: str) -> bool:
+    """True when *rel_path* is the root-level ``server.properties`` (issue #2623).
+
+    Only that one file is the one Mojang's server reads. A same-named file
+    anywhere else in the tree (a backup copy, a template) is ordinary user data
+    and is not guarded.
+    """
+
+    return str(PurePosixPath(rel_path)) == _PROPERTIES_REL_PATH
 
 
 def _is_running(server: Server) -> bool:
@@ -362,6 +382,13 @@ class WriteFile:
             _guard_content_dir(server.server_type, rel_path)
 
             if server.is_at_rest():
+                await self._guard_platform_managed_keys(
+                    community_id=community_id,
+                    server_id=server_id,
+                    worker_id=None,
+                    rel_path=rel_path,
+                    content=content,
+                )
                 await self.file_store.write_file(
                     community_id=community_id,
                     server_id=server_id,
@@ -371,6 +398,13 @@ class WriteFile:
                 return
             if _is_running(server):
                 self.file_store.validate_rel_path(rel_path)
+                await self._guard_platform_managed_keys(
+                    community_id=community_id,
+                    server_id=server_id,
+                    worker_id=server.assigned_worker_id,
+                    rel_path=rel_path,
+                    content=content,
+                )
                 # Version the authoritative copy before the worker overwrites the
                 # live working set, so a running edit is as recoverable as an
                 # at-rest one (FR-FILE-3, #344). The worker's EditFile mutates only
@@ -395,6 +429,69 @@ class WriteFile:
             # that final snapshot lands before any at-rest edit. (A smarter crashed-edit
             # flow is possible post-M1.)
             raise ServerFilesUnsettledError(str(server_id.value))
+
+    async def _guard_platform_managed_keys(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        worker_id: WorkerId | None,
+        rel_path: str,
+        content: bytes,
+    ) -> None:
+        """Refuse a ``server.properties`` write that changes a platform key (#2623).
+
+        The configuration path already keeps these keys out of user input; without
+        this the files API is the same file's undefended second door — a hand edit
+        through the file browser could move ``server-port`` behind the DB's back or
+        set ``rcon.password`` to a value the worker does not hold. The incoming
+        text is compared against the file's own current bytes, so a write that
+        leaves the platform keys exactly as they are goes through and only the
+        user's own keys are editable.
+
+        Both doors are covered: a running edit lands in the live working set that
+        the stop-time snapshot publishes as the next authoritative copy, which
+        reaches the same file by a slower route.
+
+        The baseline is always the copy this write actually lands on -- Storage at
+        rest, the worker's live set while running -- because that is also the copy
+        the editor read the text back from. The two legitimately disagree in these
+        very keys: Minecraft's boot rewrite fills in defaults the seeded file
+        omits (the resource-pack keys among them) and escapes ``:`` in values, and
+        Storage's ``current/`` stays frozen until the next snapshot. Comparing a
+        running edit against Storage would therefore refuse an honest motd edit,
+        naming a key the user never touched.
+
+        A server in neither state never reaches here: the branch below raises
+        :class:`ServerFilesUnsettledError` (409) without a baseline read.
+        """
+
+        if not _is_root_server_properties(rel_path):
+            return
+        try:
+            if worker_id is None:
+                current = await self.file_store.read_file(
+                    community_id=community_id,
+                    server_id=server_id,
+                    rel_path=_PROPERTIES_REL_PATH,
+                )
+            else:
+                outcome = await self.control_plane.read_file(
+                    worker_id=worker_id,
+                    server_id=server_id,
+                    rel_path=_PROPERTIES_REL_PATH,
+                )
+                if not outcome.success:
+                    _map_file_status(server_id, "WriteFile", outcome)
+                current = outcome.file_content
+        except ServerFileNotFoundError:
+            # No copy to compare against. Unlike the port rewrite (#2623 item 1),
+            # nothing is republished from this — it only makes every platform key
+            # in the incoming text an addition, which is refused below.
+            current = b""
+        changed = changed_platform_managed_keys(current, content)
+        if changed:
+            raise PlatformManagedKeyError(changed[0])
 
     async def _snapshot_authoritative(
         self, community_id: CommunityId, server_id: ServerId, rel_path: str

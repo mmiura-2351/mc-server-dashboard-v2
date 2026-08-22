@@ -187,6 +187,20 @@ class ServerBusyError(ServerError):
     """
 
 
+class ServerPropertiesMissingError(ServerError):
+    """A platform rewrite of ``server.properties`` found no file to rewrite.
+
+    The at-rest working set is expected to carry a ``server.properties`` (create
+    seeds it, #243/#335). When a rewrite that must preserve the file's other keys
+    finds it absent, the platform refuses rather than republishing a file made of
+    only the keys it was rewriting: that would leave the server with no
+    ``rcon.password``, and the control plane could no longer quiesce, stop
+    gracefully, query, or send console commands to it (issue #2623). The edge maps
+    this to 409 ``server_properties_missing`` -- working-set state that is not what
+    the platform expects, the same posture as ``eula_not_accepted``.
+    """
+
+
 class EulaNotAcceptedError(ServerError):
     """The server's eula.txt does not contain ``eula=true``.
 
@@ -267,6 +281,27 @@ class InvalidFilePathError(ServerError):
     def __init__(self, message: str = "", *, reason: str = "invalid_path") -> None:
         super().__init__(message)
         self.reason = reason
+
+
+class PlatformManagedKeyError(ServerError):
+    """A files-API write would change a platform-managed ``server.properties`` key.
+
+    The platform owns a fixed set of keys in that file
+    (:data:`~mc_server_dashboard_api.servers.domain.server_properties.PLATFORM_MANAGED_KEYS`):
+    ``server-port`` tracks the DB ``game_port``, the RCON triple is how the control
+    plane reaches the server, and the resource-pack keys come from the assignment
+    row. The configuration path already refuses to take them from user input; the
+    files API refuses the same values by a different route (issue #2623), so a
+    hand edit through the file browser cannot set ``rcon.password`` or move the
+    bind port behind the DB's back.
+
+    ``key`` names the first offending key so the edge can say which one is off
+    limits; the edge maps this to 422 ``platform_managed_key`` carrying it.
+    """
+
+    def __init__(self, key: str) -> None:
+        super().__init__(key)
+        self.key = key
 
 
 class InvalidVersionIdError(ServerError):
