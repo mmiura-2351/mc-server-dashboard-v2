@@ -1059,9 +1059,13 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// still held (released by the deferred release on return), so no racing hydrate
 		// or start can recreate the dir between the publish and this removal. Recording
 		// the new generation would be pointless work on a dir we are about to delete —
-		// and declaring one to the API (issue #2481) would be a world-loss path: the API
-		// would record held == store for a scratch that no longer exists, take the short
-		// held-start grace, and start with skip_hydrate into an empty directory.
+		// and declaring one to the API (issue #2481) would be a lie about what this
+		// Worker holds: the API would record held == store for a scratch that no longer
+		// exists, take the short held-start grace, and start with skip_hydrate over
+		// nothing. That start is now REFUSED at launch rather than booted into an empty
+		// directory (handleStart, issue #2499), so the declaration would cost a refusal
+		// and a corrective hydrate instead of a #696-class world rollback — still wrong,
+		// and still not worth making the guard earn its keep on.
 		m.removeScratch(cmd.ServerID)
 	}
 	return session.CommandResult{
@@ -1432,6 +1436,55 @@ func (m *Manager) handleStart(ctx context.Context, cmd session.Command) session.
 	// after registration keeps the id continuously claimed across the handoff.
 	if ok, code, msg := m.reserve(cmd.ServerID); !ok {
 		return fail(cmd.CommandID, code, msg)
+	}
+
+	// Refuse a start whose working set is not on disk (issue #2499). The API issues a
+	// HydrateTrigger before every StartServer that needs one (control_plane.proto,
+	// StartServer), so by the time a start arrives the working dir always exists: a 200
+	// hydrate swaps the unpacked tree in, and even a 204 ("nothing published yet")
+	// creates it when the generation marker is stamped (writeGenerationGuarded's
+	// MkdirAll). An ABSENT one therefore means the API skipped the hydrate — its
+	// held-working-set inventory says this Worker holds a generation at least as fresh
+	// as the store (skip_hydrate = held >= store, lifecycle.py) — over a working set
+	// this Worker does not actually hold. Every input to that belief is honest about
+	// the moment it was taken (the register-time scan, issue #2477's hydrate-side
+	// recording, issue #2481's publish-side declaration) and none of them re-checks at
+	// launch, so an out-of-band destruction of a live Worker's scratch has no floor
+	// between two registrations. Without this stat, launchReserved's MkdirAll would
+	// silently manufacture an empty dir and boot the server into it: the world is
+	// replaced by nothing, and the next snapshot publishes that — the #696 class, and
+	// the one residual of the inventory design that fails toward a SKIPPED hydrate
+	// instead of an extra one.
+	//
+	// REFUSE rather than hydrate here (the owner's call on issue #2499). Hydrating
+	// anyway would be self-healing and invisible, which is its weakness: it masks a
+	// host whose disk is being destroyed underneath a running Worker and the operator
+	// learns nothing. The refusal is the loud version of the same recovery — the API
+	// answers it by re-launching WITH a full hydrate (_launch, lifecycle.py), so
+	// nothing is lost, and the WARN below plus the API's own WARN are what tell the
+	// operator it happened.
+	//
+	// The check is race-free: the reservation above already holds off the hydrate or
+	// start that could create the dir concurrently. It sits AFTER reserve() so the
+	// unsettled states keep their own codes — a running instance still answers
+	// INVALID_STATE and an orphan/in-flight command still answers BUSY, which the API
+	// converges and retries on respectively.
+	//
+	// SERVER_NOT_FOUND, with the same "working dir absent" phrase handleSnapshot's
+	// sibling refusal uses (issue #1713): no working set is held for this id and no
+	// retry can succeed without a hydrate. The phrase is load-bearing — the API keys
+	// on it together with the code (_WORKING_SET_ABSENT_MARKER in
+	// api/src/mc_server_dashboard_api/servers/application/lifecycle.py) to tell this
+	// refusal from a plain SERVER_NOT_FOUND. Reword only together with that
+	// discriminator and both sides' tests.
+	workingDir := filepath.Join(m.scratchDir, cmd.ServerID)
+	if _, err := os.Stat(workingDir); os.IsNotExist(err) {
+		m.release(cmd.ServerID)
+		m.logger.Warn("start refused: working dir absent",
+			"server_id", cmd.ServerID, "working_dir", workingDir, "reason", "working_set_absent")
+		return fail(cmd.CommandID, session.CommandErrorServerNotFound,
+			fmt.Sprintf("instancemanager: start refused: working dir absent (%s): the hydrate was "+
+				"skipped for a working set this Worker does not hold", workingDir))
 	}
 	return m.launchReserved(ctx, cmd, driver, launchMode)
 }

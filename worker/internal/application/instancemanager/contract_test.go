@@ -197,6 +197,10 @@ func driveRow(t *testing.T, row contractRow) session.CommandResult {
 		// reservation is held and must be rejected, not treated as SERVER_NOT_FOUND.
 		d := newGatedDriver()
 		m := newContractManager(t, d)
+		// The gated start must get PAST the working-set guard (issue #2499) to reach
+		// driver.Start and hold the reservation there; the row's own command is what
+		// this fixture is about.
+		seedScratch(t, m, serverID)
 		go func() { _ = m.Handle(ctx, startCmd()) }()
 		awaitEnter(t, d.entered)
 		defer close(d.release)
@@ -277,6 +281,10 @@ func driveStartError(t *testing.T, row contractRow, startErr error) session.Comm
 		return m.Handle(ctx, contractCmd(t, row.Kind, serverID))
 	}
 	m := newContractManager(t, &fakeDriver{startErr: startErr})
+	// driver.Start is reachable only once the working set is present: a start over an
+	// absent working dir is refused before it (issue #2499), so the sanitized start
+	// classifications are preconditions ON TOP of a held working set.
+	seedScratch(t, m, serverID)
 	return m.Handle(ctx, contractCmd(t, row.Kind, serverID))
 }
 

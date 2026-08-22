@@ -133,7 +133,12 @@ Worker — so the cross-worker duplicate-live-instance race (#822) is structural
 impossible, its double-start guard rejecting a second live start — and it is
 command-only, so the round trip it must outlast is a start command, not a hydrate.
 ``held_start_grace_seconds`` has its own boot-time floor above
-``command_timeout_seconds`` for exactly that budget. The #847 stale-snapshot floor
+``command_timeout_seconds`` for exactly that budget. The one case that does hydrate
+under this grace is the corrective replay (issue #2499): the Worker answers the
+command-only start by refusing it, which is proof the premise of the short grace —
+that this Worker holds the working set — was false, so the extra round trip is the
+recovery rather than a cost the grace was meant to cover, and the per-server backoff
+below bounds it. The #847 stale-snapshot floor
 belongs to the stop side and to ``place_and_start``, neither of which can take the
 short grace.
 
