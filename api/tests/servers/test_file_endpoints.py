@@ -92,6 +92,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     InvalidFilePathError,
     InvalidVersionIdError,
+    PlatformManagedKeyError,
     ServerBusyError,
     ServerFileNotFoundError,
     ServerFilesUnsettledError,
@@ -703,6 +704,26 @@ def test_write_name_too_long_surfaces_reason() -> None:
     )
     assert resp.status_code == 422
     assert resp.json()["reason"] == "name_too_long"
+
+
+def test_write_platform_managed_key_is_422_naming_the_key() -> None:
+    # A hand edit of server.properties that moves a platform-owned key is refused
+    # and the response says which key is off limits (issue #2623).
+    app = _app(
+        member=True,
+        allow=True,
+        write=_FakeUseCase(error=PlatformManagedKeyError("server-port")),
+    )
+    client = _client(app)
+    resp = client.put(
+        _url(uuid.uuid4(), uuid.uuid4()),
+        params={"path": "server.properties"},
+        json={"content_base64": ""},
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["reason"] == "platform_managed_key"
+    assert body["key"] == "server-port"
 
 
 def test_write_under_a_file_parent_is_409() -> None:

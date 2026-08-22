@@ -629,8 +629,14 @@ export interface paths {
          *     **Game port (issue #311).** A new ``game_port`` is at rest only, validated
          *     like create (422 ``port_out_of_range`` / 409 ``port_taken``), and rewrites
          *     ``server-port`` in the at-rest ``server.properties`` so the DB and bind port
-         *     stay in sync. A storage failure during that rewrite is 503 ``seed_failed`` and
-         *     leaves the row unchanged.
+         *     stay in sync. The rewrite preserves every other key in the file, so a server
+         *     with no ``server.properties`` at all is refused with 409
+         *     ``server_properties_missing`` before the commit (issue #2623) — republishing a
+         *     port-only file would drop ``rcon.password`` and leave the control plane unable
+         *     to quiesce, stop, query, or send commands to the server. A storage failure
+         *     during the rewrite itself is 503 ``seed_failed``; that write is deferred to
+         *     after the commit (#1705), so the row carries the new port while the file does
+         *     not, and the retry direction is to re-issue the rewrite.
          */
         patch: operations["update_server_api_communities__community_id__servers__server_id__patch"];
         trace?: never;
@@ -1167,6 +1173,16 @@ export interface paths {
          *     A successful write is audited (``file:write``); a write refused because the
          *     server is unsettled is recorded DENIED, matching the upload posture (issue
          *     #263).
+         *
+         *     **Platform-managed keys (issue #2623).** A write to the root-level
+         *     ``server.properties`` may not change the keys the platform owns —
+         *     ``server-port`` (tracks the DB ``game_port``), the RCON triple the control
+         *     plane reaches the server with, and the resource-pack keys written from the
+         *     assignment row. Such a write is 422 ``platform_managed_key`` with the
+         *     offending key in the ``key`` member. The comparison is against the file's
+         *     current bytes, so leaving those keys untouched — the ordinary case for editing
+         *     ``motd`` or ``max-players`` — passes; removing one, or appending a second line
+         *     for one, counts as changing it.
          */
         put: operations["write_file_api_communities__community_id__servers__server_id__files_put"];
         post?: never;

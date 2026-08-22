@@ -46,6 +46,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNameAlreadyExistsError,
     ServerNotFoundError,
     ServerNotStoppedError,
+    ServerPropertiesMissingError,
     SlugAlreadyTakenError,
     UnknownServerTypeError,
     UnsupportedEditionError,
@@ -67,6 +68,7 @@ from mc_server_dashboard_api.servers.domain.ports import (
     validate_explicit_port,
 )
 from mc_server_dashboard_api.servers.domain.server_properties import (
+    PLATFORM_MANAGED_KEYS,
     apply_overrides,
     remove_keys,
     set_rcon_properties,
@@ -149,30 +151,24 @@ _RETIRED_CONFIG_KEYS = frozenset({"backup_interval_hours"})
 # that are NOT server.properties overrides (issue #1209). Everything else in the
 # config dict is treated as a server.properties key-value pair and written into
 # the file on create and update.
-_RESERVED_CONFIG_KEYS = frozenset(
-    {
-        MEMORY_LIMIT_CONFIG_KEY,
-        CPU_ALLOCATION_CONFIG_KEY,
-        SNAPSHOT_INTERVAL_CONFIG_KEY,
-        # System-written JAR keys (issues #118, #1676). Written by the start
-        # path; never operator-settable, hidden from the overrides editor.
-        JAR_KEY_CONFIG_FIELD,
-        JAR_SOURCE_CONFIG_FIELD,
-        # Platform-managed server.properties keys (issue #1243). These are set
-        # by _seed_initial_working_set (create) and _rewrite_server_port
-        # (update); user config must not override them via the properties
-        # override path.
-        "server-port",
-        "enable-rcon",
-        "rcon.port",
-        "rcon.password",
-        # Resource-pack keys managed by set_resource_pack_properties /
-        # clear_resource_pack_properties (issue #1253).
-        "resource-pack",
-        "resource-pack-sha1",
-        "require-resource-pack",
-        "resource-pack-prompt",
-    }
+_RESERVED_CONFIG_KEYS = (
+    frozenset(
+        {
+            MEMORY_LIMIT_CONFIG_KEY,
+            CPU_ALLOCATION_CONFIG_KEY,
+            SNAPSHOT_INTERVAL_CONFIG_KEY,
+            # System-written JAR keys (issues #118, #1676). Written by the start
+            # path; never operator-settable, hidden from the overrides editor.
+            JAR_KEY_CONFIG_FIELD,
+            JAR_SOURCE_CONFIG_FIELD,
+        }
+    )
+    # Platform-managed server.properties keys (issues #1243, #1253): set by
+    # _seed_initial_working_set (create), _rewrite_server_port (update), and the
+    # resource-pack path; user config must not override them via the properties
+    # override path. The set itself lives in the domain (issue #2623) so every
+    # write path to the file shares one definition.
+    | PLATFORM_MANAGED_KEYS
 )
 
 # System-managed JAR keys written by the start path (issue #1965). A subset of
@@ -691,6 +687,15 @@ class UpdateServer:
                         taken.discard(server.game_port)
                     if game_port in taken:
                         raise PortAlreadyTakenError(str(game_port))
+                    # The deferred rewrite preserves the file's other keys, so
+                    # it needs a file to preserve. Refuse here -- before the
+                    # commit -- when there is none (issue #2623): refusing after
+                    # the commit would leave the row on the new port with the
+                    # file never written, and the retry would then no-op into a
+                    # 200 because the port already matches.
+                    await self._read_properties(
+                        community_id=community_id, server_id=server_id
+                    )
                     pending_port = game_port
                     server.game_port = game_port
                 if slug is not None and slug != server.slug:
@@ -724,6 +729,26 @@ class UpdateServer:
                 )
             return server
 
+    async def _read_properties(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> bytes:
+        """Read the at-rest ``server.properties``, refusing when it is absent.
+
+        A rewrite that keeps the file's other keys cannot run without the file:
+        treating it as empty republishes only the keys being written and drops
+        the rest, ``rcon.password`` included — the credential the control plane
+        quiesces, stops, queries, and sends console commands with (issue #2623).
+        """
+
+        try:
+            return await self.file_store.read_file(
+                community_id=community_id,
+                server_id=server_id,
+                rel_path=_PROPERTIES_REL_PATH,
+            )
+        except ServerFileNotFoundError as exc:
+            raise ServerPropertiesMissingError(str(server_id.value)) from exc
+
     async def _rewrite_server_port(
         self,
         *,
@@ -734,24 +759,21 @@ class UpdateServer:
         """Set ``server-port=<port>`` in the at-rest ``server.properties`` (#311).
 
         Reads the current file, rewrites its port line (or appends one), and
-        writes it back through the versioned file seam. A legacy server with no
-        properties file is handled by treating the absent file as empty, so a file
-        with just the port line is created. Called after the DB commit (#1705): a
-        storage failure is surfaced as :class:`WorkingSetSeedFailedError` (mapped
-        to 503); the row's ``game_port`` is already committed, but the divergence
-        is the self-healing direction (the file can be re-written on retry).
+        writes it back through the versioned file seam. An absent file raises
+        :class:`ServerPropertiesMissingError` rather than being treated as empty
+        (issue #2623): rewriting from empty would publish a file holding only the
+        port line, dropping ``rcon.password`` and the rest of the server's
+        settings. ``__call__`` checks for the file before it commits, so reaching
+        this raise means the file went away in between. Called after the DB commit
+        (#1705): a storage failure is surfaced as
+        :class:`WorkingSetSeedFailedError` (mapped to 503); the row's
+        ``game_port`` is already committed, but the divergence is the self-healing
+        direction (the file can be re-written on retry).
         """
 
-        try:
-            current = await self.file_store.read_file(
-                community_id=community_id,
-                server_id=server_id,
-                rel_path=_PROPERTIES_REL_PATH,
-            )
-        except ServerFileNotFoundError:
-            # Legacy server with no seeded properties (#243): start from empty so
-            # the rewrite produces a file with just the port line.
-            current = b""
+        current = await self._read_properties(
+            community_id=community_id, server_id=server_id
+        )
         try:
             await self.file_store.write_file(
                 community_id=community_id,

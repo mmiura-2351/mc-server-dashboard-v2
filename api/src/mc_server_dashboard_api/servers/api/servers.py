@@ -133,6 +133,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNotFoundError,
     ServerNotRunningError,
     ServerNotStoppedError,
+    ServerPropertiesMissingError,
     SlugAlreadyTakenError,
     SlugExhaustedError,
     UnknownServerTypeError,
@@ -920,8 +921,14 @@ async def update_server(
     **Game port (issue #311).** A new ``game_port`` is at rest only, validated
     like create (422 ``port_out_of_range`` / 409 ``port_taken``), and rewrites
     ``server-port`` in the at-rest ``server.properties`` so the DB and bind port
-    stay in sync. A storage failure during that rewrite is 503 ``seed_failed`` and
-    leaves the row unchanged.
+    stay in sync. The rewrite preserves every other key in the file, so a server
+    with no ``server.properties`` at all is refused with 409
+    ``server_properties_missing`` before the commit (issue #2623) — republishing a
+    port-only file would drop ``rcon.password`` and leave the control plane unable
+    to quiesce, stop, query, or send commands to the server. A storage failure
+    during the rewrite itself is 503 ``seed_failed``; that write is deferred to
+    after the commit (#1705), so the row carries the new port while the file does
+    not, and the retry direction is to re-issue the rewrite.
     """
 
     authorized = authz.auth_user
@@ -975,6 +982,12 @@ async def update_server(
     except PortAlreadyTakenError as exc:
         # A new game_port already held by another server (issue #311).
         raise _conflict("port_taken") from exc
+    except ServerPropertiesMissingError as exc:
+        # The port rewrite found no server.properties to preserve (issue #2623).
+        # Working-set state that is not what the platform expects — the same 409
+        # posture as eula_not_accepted, not a 404 (the server itself exists) and
+        # not a 422 (the request shape is fine).
+        raise _conflict("server_properties_missing") from exc
     except ServerNameAlreadyExistsError as exc:
         raise _conflict("server_name_exists") from exc
     except InvalidSlugError as exc:

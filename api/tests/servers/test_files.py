@@ -61,6 +61,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     FileAlreadyExistsError,
     FileTooLargeError,
     InvalidFilePathError,
+    PlatformManagedKeyError,
     ServerFileNotFoundError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
@@ -810,6 +811,212 @@ async def test_write_at_rest_writes_storage() -> None:
     )
     assert store.writes == [("ops.json", b"[]")]
     assert cp.dispatched == []
+
+
+# --- write: platform-managed server.properties keys (issue #2623) -----------
+
+
+def _props_writer(
+    *,
+    community: uuid.UUID,
+    server_id: uuid.UUID,
+    current: bytes | None,
+    running_worker: uuid.UUID | None = None,
+) -> tuple[WriteFile, FakeFileStore, FakeControlPlane]:
+    """A WriteFile over a server whose server.properties holds *current*."""
+
+    uow = FakeUnitOfWork()
+    _seed(
+        uow,
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=(DesiredState.RUNNING if running_worker else DesiredState.STOPPED),
+            observed=(
+                ObservedState.RUNNING if running_worker else ObservedState.STOPPED
+            ),
+            worker=running_worker,
+        ),
+    )
+    store = FakeFileStore()
+    if current is not None:
+        store.files["server.properties"] = current
+    cp = FakeControlPlane()
+    return WriteFile(uow=uow, control_plane=cp, file_store=store), store, cp
+
+
+_CURRENT_PROPS = (
+    b"server-port=25565\nenable-rcon=true\nrcon.port=25575\n"
+    b"rcon.password=tok\nmotd=hi\n"
+)
+
+
+async def test_write_properties_changing_platform_key_is_refused() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    use_case, store, _ = _props_writer(
+        community=community, server_id=server_id, current=_CURRENT_PROPS
+    )
+    with pytest.raises(PlatformManagedKeyError) as excinfo:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="server.properties",
+            content=_CURRENT_PROPS.replace(b"server-port=25565", b"server-port=25999"),
+        )
+    assert excinfo.value.key == "server-port"
+    assert store.writes == []
+
+
+async def test_write_properties_leaving_platform_keys_alone_is_allowed() -> None:
+    # Editing a user key in the same file is exactly what the file browser is
+    # for; only the platform-owned values are off limits.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    use_case, store, _ = _props_writer(
+        community=community, server_id=server_id, current=_CURRENT_PROPS
+    )
+    incoming = _CURRENT_PROPS.replace(b"motd=hi", b"motd=bye")
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="server.properties",
+        content=incoming,
+    )
+    assert store.writes == [("server.properties", incoming)]
+
+
+async def test_write_properties_dropping_rcon_password_is_refused() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    use_case, store, _ = _props_writer(
+        community=community, server_id=server_id, current=_CURRENT_PROPS
+    )
+    with pytest.raises(PlatformManagedKeyError) as excinfo:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="server.properties",
+            content=_CURRENT_PROPS.replace(b"rcon.password=tok\n", b""),
+        )
+    assert excinfo.value.key == "rcon.password"
+    assert store.writes == []
+
+
+async def test_write_properties_appending_duplicate_platform_key_is_refused() -> None:
+    # Java's Properties.load is last-occurrence-wins, so an appended second line
+    # changes what the server reads even though the original line is untouched.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    use_case, store, _ = _props_writer(
+        community=community, server_id=server_id, current=_CURRENT_PROPS
+    )
+    with pytest.raises(PlatformManagedKeyError) as excinfo:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="server.properties",
+            content=_CURRENT_PROPS + b"rcon.password=evil\n",
+        )
+    assert excinfo.value.key == "rcon.password"
+    assert store.writes == []
+
+
+async def test_write_properties_adding_platform_key_to_legacy_file_is_refused() -> None:
+    # A file with no rcon line must not gain one through the files API: that is
+    # the platform's key to set, not the user's.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    use_case, store, _ = _props_writer(
+        community=community, server_id=server_id, current=b"motd=hi\n"
+    )
+    with pytest.raises(PlatformManagedKeyError) as excinfo:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="server.properties",
+            content=b"motd=hi\nrcon.password=evil\n",
+        )
+    assert excinfo.value.key == "rcon.password"
+    assert store.writes == []
+
+
+async def test_write_properties_when_absent_refuses_platform_keys() -> None:
+    # No authoritative file yet: an incoming platform key has nothing to match,
+    # so it is an addition and refused.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    use_case, store, _ = _props_writer(
+        community=community, server_id=server_id, current=None
+    )
+    with pytest.raises(PlatformManagedKeyError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="server.properties",
+            content=b"server-port=25565\n",
+        )
+    assert store.writes == []
+
+
+async def test_write_properties_when_absent_allows_user_keys() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    use_case, store, _ = _props_writer(
+        community=community, server_id=server_id, current=None
+    )
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="server.properties",
+        content=b"motd=hi\n",
+    )
+    assert store.writes == [("server.properties", b"motd=hi\n")]
+
+
+async def test_write_properties_guard_is_root_level_only() -> None:
+    # A same-named file elsewhere in the tree is not the file the server reads.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    use_case, store, _ = _props_writer(
+        community=community, server_id=server_id, current=_CURRENT_PROPS
+    )
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="backups/server.properties",
+        content=b"server-port=25999\n",
+    )
+    assert store.writes == [("backups/server.properties", b"server-port=25999\n")]
+
+
+async def test_write_unrelated_file_is_unaffected_by_the_guard() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    use_case, store, _ = _props_writer(
+        community=community, server_id=server_id, current=_CURRENT_PROPS
+    )
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        rel_path="ops.json",
+        content=b"[]",
+    )
+    assert store.writes == [("ops.json", b"[]")]
+
+
+async def test_write_properties_while_running_is_refused_before_dispatch() -> None:
+    # The running branch edits the live working set, which the stop-time snapshot
+    # then publishes as the authoritative copy — so an unguarded running edit
+    # reaches the same file by a slower route.
+    community, server_id, worker = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    use_case, store, cp = _props_writer(
+        community=community,
+        server_id=server_id,
+        current=_CURRENT_PROPS,
+        running_worker=worker,
+    )
+    with pytest.raises(PlatformManagedKeyError) as excinfo:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            rel_path="server.properties",
+            content=_CURRENT_PROPS.replace(b"rcon.password=tok", b"rcon.password=evil"),
+        )
+    assert excinfo.value.key == "rcon.password"
+    assert cp.dispatched == []
+    assert store.retained == []
 
 
 async def test_write_running_edits_control_plane() -> None:

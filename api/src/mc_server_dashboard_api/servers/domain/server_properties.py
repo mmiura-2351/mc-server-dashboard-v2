@@ -32,6 +32,32 @@ _RESOURCE_PACK_PROMPT_KEY = "resource-pack-prompt"
 # #218), so a fixed value is fine across servers.
 RCON_PORT = 25575
 
+# The ``server.properties`` keys the platform owns: their values come from the
+# DB row or from a platform decision, never from the user (issue #2623). Defined
+# here, once, so every write path to the file consults the same set instead of
+# growing its own list -- the configuration path (``manage_server``), the files
+# path (``application/files``), and the import/restore path (``export_import``).
+#
+# - ``server-port`` tracks the DB ``game_port`` (#311, #243).
+# - The RCON triple is the credential the worker reaches the server with (#335);
+#   ``rcon.password`` lives ONLY in this file, so the file is its sole source of
+#   truth.
+# - The resource-pack keys are written from the assignment row by
+#   :func:`set_resource_pack_properties` / :func:`clear_resource_pack_properties`
+#   (#1177, #1253).
+PLATFORM_MANAGED_KEYS: frozenset[str] = frozenset(
+    {
+        _PORT_KEY,
+        _ENABLE_RCON_KEY,
+        _RCON_PORT_KEY,
+        _RCON_PASSWORD_KEY,
+        _RESOURCE_PACK_KEY,
+        _RESOURCE_PACK_SHA1_KEY,
+        _REQUIRE_RESOURCE_PACK_KEY,
+        _RESOURCE_PACK_PROMPT_KEY,
+    }
+)
+
 
 def _split_content_lines(content: bytes) -> list[str]:
     """Decode ``content`` into property lines, dropping the trailing-newline empty.
@@ -64,6 +90,18 @@ def _get_property(lines: list[str], key: str) -> str | None:
         if _is_key_line(line, key):
             return line.split("=", 1)[1]
     return None
+
+
+def _get_values(lines: list[str], key: str) -> list[str]:
+    """Return every live ``key=...`` value, in file order, whitespace-trimmed.
+
+    Every occurrence matters, not just the first: Java's ``Properties.load`` is
+    last-occurrence-wins, so an appended second line for a key is what the server
+    actually reads. Values are trimmed so a reformatting edit (or a CRLF/LF
+    round-trip through an editor) does not read as a value change.
+    """
+
+    return [line.split("=", 1)[1].strip() for line in lines if _is_key_line(line, key)]
 
 
 def _clear_property(lines: list[str], key: str) -> list[str]:
@@ -187,6 +225,30 @@ def remove_keys(content: bytes, keys: AbstractSet[str]) -> bytes:
     for key in keys:
         lines = _clear_property(lines, key)
     return ("\n".join(lines) + "\n").encode()
+
+
+def changed_platform_managed_keys(current: bytes, incoming: bytes) -> list[str]:
+    """Return the platform-managed keys *incoming* changes relative to *current*.
+
+    The comparison is against the file's own current bytes, not against the DB:
+    ``rcon.password`` has no other source of truth (it is never persisted in the
+    DB -- the worker reads it here), and comparing against the DB would refuse a
+    faithful edit of an already-drifted file. So the question this answers is
+    exactly "does this write CHANGE a key the platform owns?" (issue #2623).
+
+    A key counts as changed when its live values differ in any way: an edited
+    value, a removed or commented-out line, a line added where the file had none,
+    or a second occurrence appended after an untouched first one. Returns the
+    offending keys sorted, or an empty list when the write leaves them all alone.
+    """
+
+    current_lines = _split_content_lines(current)
+    incoming_lines = _split_content_lines(incoming)
+    return sorted(
+        key
+        for key in PLATFORM_MANAGED_KEYS
+        if _get_values(current_lines, key) != _get_values(incoming_lines, key)
+    )
 
 
 def clear_resource_pack_properties(content: bytes) -> bytes:
