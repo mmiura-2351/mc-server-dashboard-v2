@@ -244,7 +244,7 @@ class MetricsSettings(_Section):
     ``host`` deliberately defaults to ``0.0.0.0`` and NOT to the relay's
     loopback. The API's canonical deployment is a container, where loopback means
     "reachable only from inside the API container" — no sibling service on the
-    compose network, which is where a scraper runs, could ever reach it. **The
+    ``mcsd`` network, which is where a scraper runs, could ever reach it. **The
     protection is not the bind address**: it is that the port is never published
     to the host (``compose.yaml`` publishes only the HTTP API port) and that
     ``cloudflared`` targets ``:8000`` only. This mirrors ``server.host``, which
