@@ -100,6 +100,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerBusyError,
     ServerNotFoundError,
     ServerNotStoppedError,
+    WorkingSetSeedFailedError,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
 
@@ -607,6 +608,23 @@ async def restore_backup(
             target_type=ops.TARGET_BACKUP,
         )
         raise _service_unavailable("storage_unavailable") from exc
+    except WorkingSetSeedFailedError as exc:
+        # The archive published, but re-applying the platform-managed
+        # server.properties keys to the restored file failed (issue #2621). The
+        # world data IS restored; what is missing is the DB's own port / RCON /
+        # resource-pack values, so the file may bind a stale port. Same posture as
+        # the create and port-PATCH seeding failures: a mapped 503 the caller
+        # retries (re-running the restore heals it), never an unmapped 500.
+        await _record_failure(
+            recorder,
+            ops.BACKUP_RESTORE,
+            Outcome.ERROR,
+            authorized,
+            community_id,
+            backup_id,
+            target_type=ops.TARGET_BACKUP,
+        )
+        raise _service_unavailable("seed_failed") from exc
     if result.forced_corrupt:
         # An operator forced the restore of a known-corrupt backup over the gate
         # (#703): it published. Log and audit the deliberate corrupt restore under a

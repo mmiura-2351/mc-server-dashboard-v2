@@ -236,7 +236,7 @@ async def _load_server_at_rest(
         raise ServerFilesUnsettledError(str(server_id.value))
 
 
-def _pack_download_url(
+def pack_download_url(
     public_base_url: str, pack_id: ResourcePackId, filename: str
 ) -> str:
     return (
@@ -287,7 +287,7 @@ class AssignResourcePack:
             except ServerFileNotFoundError:
                 props = b""
 
-            url = _pack_download_url(public_base_url, pack.id, pack.filename)
+            url = pack_download_url(public_base_url, pack.id, pack.filename)
             new_props = set_resource_pack_properties(
                 props,
                 url=url,

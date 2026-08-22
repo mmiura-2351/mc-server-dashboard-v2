@@ -96,6 +96,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidRetentionPolicyError,
     ServerNotFoundError,
     ServerNotStoppedError,
+    WorkingSetSeedFailedError,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 from tests.audit.fakes import RecordingAuditRecorder
@@ -535,6 +536,24 @@ def test_restore_storage_unavailable_is_503_with_reason() -> None:
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/restore"))
     assert resp.status_code == 503
     assert resp.json()["reason"] == "storage_unavailable"
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_RESTORE]
+    assert recorder.events[0].outcome is Outcome.ERROR
+    assert recorder.events[0].target_type == ops.TARGET_BACKUP
+
+
+def test_restore_seed_failure_is_503_with_reason() -> None:
+    # The archive published but re-applying the platform-managed
+    # server.properties keys afterwards failed (issue #2621): the working set is
+    # restored yet not fully seeded, so 503 seed_failed (the create / port-PATCH
+    # posture) tells the caller to retry rather than reporting a clean restore
+    # over a file that binds a stale port.
+    use_case = _FakeUseCase(error=WorkingSetSeedFailedError("x"))
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, restore=use_case, recorder=recorder)
+    client = _client(app)
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/restore"))
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "seed_failed"
     assert [e.operation for e in recorder.events] == [ops.BACKUP_RESTORE]
     assert recorder.events[0].outcome is Outcome.ERROR
     assert recorder.events[0].target_type == ops.TARGET_BACKUP

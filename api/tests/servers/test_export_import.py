@@ -95,13 +95,17 @@ def _server(*, community_id: uuid.UUID, server_id: uuid.UUID) -> Server:
     )
 
 
-def _create_server(uow: FakeUnitOfWork, store: FakeFileStore) -> CreateServer:
+def _create_server(
+    uow: FakeUnitOfWork,
+    store: FakeFileStore,
+    port_range: PortRange = _PORT_RANGE,
+) -> CreateServer:
     return CreateServer(
         uow=uow,
         clock=FakeClock(_NOW),
         version_validator=FakeVersionValidator(),
         file_store=store,
-        port_range=_PORT_RANGE,
+        port_range=port_range,
     )
 
 
@@ -126,6 +130,14 @@ def _metadata(
     }
     body.update(overrides)
     return json.dumps(body).encode("utf-8")
+
+
+def _parse_properties(content: bytes) -> dict[str, str]:
+    return dict(
+        line.split("=", 1)
+        for line in content.decode().splitlines()
+        if "=" in line and not line.startswith("#")
+    )
 
 
 async def _drain(stream: AsyncIterator[bytes]) -> bytes:
@@ -317,6 +329,87 @@ async def test_import_seeds_rcon_when_archive_has_no_properties() -> None:
     assert props["enable-rcon"] == "true"
     assert props["rcon.port"] == "25575"
     assert props["rcon.password"] != ""
+
+
+# --- import: platform-managed keys (issue #2621) ----------------------------
+
+
+async def test_import_republishes_the_db_game_port_over_the_archives() -> None:
+    # An archive carrying server-port=25565 imported against a server whose
+    # auto-assigned game_port is 26590 must publish the DB's port: nothing else
+    # re-applies it after the archive's file lands, and hydrate then copies the
+    # archive's value forever (issue #2621).
+    community = uuid.uuid4()
+    src_id = uuid.uuid4()
+    src_uow = FakeUnitOfWork()
+    src_uow.servers.seed(_server(community_id=community, server_id=src_id))
+    src_store = FakeFileStore()
+    src_store.files["server.properties"] = b"server-port=25565\nmotd=hi\n"
+    export = ExportServer(uow=src_uow, clock=FakeClock(_NOW), file_store=src_store)
+    archive = await _drain(
+        (
+            await export(
+                community_id=CommunityId(community), server_id=ServerId(src_id)
+            )
+        ).stream
+    )
+
+    dst_uow, dst_store = FakeUnitOfWork(), FakeFileStore()
+    imp = ImportServer(
+        create_server=_create_server(
+            dst_uow, dst_store, port_range=PortRange(start=26590, end=26600)
+        ),
+        file_store=dst_store,
+    )
+    server = await imp(
+        community_id=CommunityId(community), name="imported", content=archive
+    )
+
+    assert server.game_port == 26590
+    props = _parse_properties(dst_store.files["server.properties"])
+    assert props["server-port"] == "26590"
+    # Everything the platform does NOT own survives verbatim.
+    assert props["motd"] == "hi"
+
+
+async def test_import_clears_the_archives_resource_pack_keys() -> None:
+    # The imported server carries no resource-pack assignment, so the DB-owned
+    # value of every resource-pack key is "unset": the archive's pointer at the
+    # source deployment's pack must not survive into the new server's file
+    # (issue #2621).
+    community = uuid.uuid4()
+    src_id = uuid.uuid4()
+    src_uow = FakeUnitOfWork()
+    src_uow.servers.seed(_server(community_id=community, server_id=src_id))
+    src_store = FakeFileStore()
+    src_store.files["server.properties"] = (
+        b"resource-pack=https://source/pack.zip\n"
+        b"resource-pack-sha1=0123456789abcdef\n"
+        b"require-resource-pack=true\n"
+        b"resource-pack-prompt=install it\n"
+        b"motd=hi\n"
+    )
+    export = ExportServer(uow=src_uow, clock=FakeClock(_NOW), file_store=src_store)
+    archive = await _drain(
+        (
+            await export(
+                community_id=CommunityId(community), server_id=ServerId(src_id)
+            )
+        ).stream
+    )
+
+    dst_uow, dst_store = FakeUnitOfWork(), FakeFileStore()
+    imp = ImportServer(
+        create_server=_create_server(dst_uow, dst_store), file_store=dst_store
+    )
+    await imp(community_id=CommunityId(community), name="imported", content=archive)
+
+    props = _parse_properties(dst_store.files["server.properties"])
+    assert "resource-pack" not in props
+    assert "resource-pack-sha1" not in props
+    assert "require-resource-pack" not in props
+    assert "resource-pack-prompt" not in props
+    assert props["motd"] == "hi"
 
 
 # --- import validation -----------------------------------------------------

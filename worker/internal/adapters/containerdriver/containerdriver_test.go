@@ -1,11 +1,14 @@
 package containerdriver
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -1254,6 +1257,60 @@ func TestStartGamePortBindIP(t *testing.T) {
 	}
 	if rcon.HostIP != "127.0.0.1" {
 		t.Errorf("rcon HostIP = %q, want loopback 127.0.0.1", rcon.HostIP)
+	}
+}
+
+// The driver publishes the port server.properties names, not the Minecraft
+// default: the game port is the DB-tracked one the API seeds into the file
+// (issue #2621).
+func TestStartPublishesConfiguredGamePort(t *testing.T) {
+	dir := t.TempDir()
+	writeProperties(t, dir, "motd=hi\nserver-port=26590\n")
+	docker := newFakeDocker()
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+
+	s := spec()
+	s.WorkingDir = dir
+	if _, err := d.Start(context.Background(), s); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	if !hasPort(docker.createSpec.Ports, "26590") {
+		t.Errorf("Ports = %v, want the server.properties game port 26590", docker.createSpec.Ports)
+	}
+	if hasPort(docker.createSpec.Ports, defaultGamePort) {
+		t.Errorf("Ports = %v, want NO fallback to the default game port", docker.createSpec.Ports)
+	}
+}
+
+// A server.properties the scanner cannot read to the end -- a line longer than
+// bufio.Scanner's token cap -- must fail the start naming the file rather than
+// silently truncating the parse and publishing the 25565 default, which is the
+// relay's port and collides on the host (issue #2621).
+func TestStartFailsOnUnreadableProperties(t *testing.T) {
+	dir := t.TempDir()
+	writeProperties(t, dir, "motd="+strings.Repeat("x", bufio.MaxScanTokenSize+1)+"\nserver-port=26590\n")
+	docker := newFakeDocker()
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+
+	s := spec()
+	s.WorkingDir = dir
+	_, err := d.Start(context.Background(), s)
+	if err == nil {
+		t.Fatalf("Start = nil error, want a failure naming server.properties")
+	}
+	if !strings.Contains(err.Error(), "server.properties") {
+		t.Errorf("Start error = %v, want it to name server.properties", err)
+	}
+	if docker.createCalls != 0 {
+		t.Errorf("createCalls = %d, want 0 (no container created on an unreadable file)", docker.createCalls)
+	}
+}
+
+func writeProperties(t *testing.T, dir, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "server.properties"), []byte(content), 0o600); err != nil {
+		t.Fatalf("write server.properties: %v", err)
 	}
 }
 

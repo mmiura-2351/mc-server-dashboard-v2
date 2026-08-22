@@ -16,7 +16,9 @@ sufficient (we never need to parse values or escapes).
 
 from __future__ import annotations
 
+import secrets
 from collections.abc import Set as AbstractSet
+from dataclasses import dataclass
 
 _PORT_KEY = "server-port"
 _ENABLE_RCON_KEY = "enable-rcon"
@@ -31,6 +33,18 @@ _RESOURCE_PACK_PROMPT_KEY = "resource-pack-prompt"
 # published to the host (the container driver drops the host RCON publication,
 # #218), so a fixed value is fine across servers.
 RCON_PORT = 25575
+
+# The number of random bytes behind the per-server RCON password (issue #335). The
+# password lives only in server.properties (the worker reads it there); it is never
+# persisted in the DB. ``secrets.token_urlsafe`` returns ~1.3 chars per byte.
+_RCON_PASSWORD_BYTES = 32
+
+
+def new_rcon_password() -> str:
+    """Generate a fresh per-server RCON secret (the default token generator)."""
+
+    return secrets.token_urlsafe(_RCON_PASSWORD_BYTES)
+
 
 # The ``server.properties`` keys the platform owns: their values come from the
 # DB row or from a platform decision, never from the user (issue #2623). Defined
@@ -64,12 +78,30 @@ def _split_content_lines(content: bytes) -> list[str]:
 
     An empty input becomes no lines, so callers that only append produce a file
     with just their appended lines.
+
+    ``surrogateescape`` because a ``server.properties`` is not required to be valid
+    UTF-8 -- a latin-1 ``motd`` is ordinary, and the comparison guard went
+    byte-level for exactly that reason (#2623). Undecodable bytes become lone
+    surrogates that :func:`_join_lines` turns back into the original bytes, so a
+    rewrite preserves them instead of raising on a file it has no business
+    rejecting (issue #2621).
     """
 
-    lines = content.decode().split("\n")
+    lines = content.decode(errors="surrogateescape").split("\n")
     if lines and lines[-1] == "":
         lines.pop()
     return lines
+
+
+def _join_lines(lines: list[str]) -> bytes:
+    """Encode property ``lines`` back to file bytes, one trailing newline.
+
+    Mojang's convention (and the create-seed format ``server-port=<port>\n``) is a
+    single trailing newline. ``surrogateescape`` restores whatever
+    :func:`_split_content_lines` could not decode.
+    """
+
+    return ("\n".join(lines) + "\n").encode(errors="surrogateescape")
 
 
 def _is_key_line(line: str, key: str) -> bool:
@@ -160,9 +192,7 @@ def set_server_port(content: bytes, port: int) -> bytes:
     """
 
     lines = _set_property(_split_content_lines(content), _PORT_KEY, str(port))
-    # Always end with a single trailing newline (Mojang's convention and the
-    # create-seed format ``server-port=<port>\n``).
-    return ("\n".join(lines) + "\n").encode()
+    return _join_lines(lines)
 
 
 def set_rcon_properties(content: bytes, *, password: str) -> bytes:
@@ -183,7 +213,7 @@ def set_rcon_properties(content: bytes, *, password: str) -> bytes:
     existing = _get_property(lines, _RCON_PASSWORD_KEY)
     if not existing:
         lines = _set_property(lines, _RCON_PASSWORD_KEY, password)
-    return ("\n".join(lines) + "\n").encode()
+    return _join_lines(lines)
 
 
 def set_resource_pack_properties(
@@ -209,7 +239,7 @@ def set_resource_pack_properties(
     )
     if prompt is not None:
         lines = _set_property(lines, _RESOURCE_PACK_PROMPT_KEY, prompt)
-    return ("\n".join(lines) + "\n").encode()
+    return _join_lines(lines)
 
 
 def apply_overrides(content: bytes, overrides: dict[str, str]) -> bytes:
@@ -224,7 +254,7 @@ def apply_overrides(content: bytes, overrides: dict[str, str]) -> bytes:
     lines = _split_content_lines(content)
     for key, value in overrides.items():
         lines = _set_property(lines, key, value)
-    return ("\n".join(lines) + "\n").encode()
+    return _join_lines(lines)
 
 
 def remove_keys(content: bytes, keys: AbstractSet[str]) -> bytes:
@@ -238,7 +268,7 @@ def remove_keys(content: bytes, keys: AbstractSet[str]) -> bytes:
     lines = _split_content_lines(content)
     for key in keys:
         lines = _clear_property(lines, key)
-    return ("\n".join(lines) + "\n").encode()
+    return _join_lines(lines)
 
 
 def changed_platform_managed_keys(current: bytes, incoming: bytes) -> list[str]:
@@ -272,6 +302,69 @@ def changed_platform_managed_keys(current: bytes, incoming: bytes) -> list[str]:
     )
 
 
+@dataclass(frozen=True)
+class ResourcePackProperties:
+    """The DB-owned resource-pack values for a server (issue #2621).
+
+    Built from the server's assignment row (and the pack it points at) by the
+    caller; ``None`` in place of one of these means the server has no pack
+    assigned, so the keys are cleared instead.
+    """
+
+    url: str
+    sha1: str
+    require: bool
+    prompt: str | None
+
+
+def apply_platform_properties(
+    content: bytes,
+    *,
+    game_port: int | None,
+    rcon_password: str,
+    resource_pack: ResourcePackProperties | None,
+) -> bytes:
+    """Return ``content`` with EVERY :data:`PLATFORM_MANAGED_KEYS` key re-applied.
+
+    The one place that turns "what the DB says about this server" into the
+    platform's half of a ``server.properties``. Import and restore both republish
+    a file that came from somewhere else -- an export archive, a backup taken
+    before a re-port -- so without this the archive's ``server-port`` becomes the
+    server's real bind port while the DB keeps the port the rest of the system
+    trusts, and hydrate copies the disagreement forever (issue #2621).
+
+    Per key:
+
+    - ``server-port`` becomes ``game_port``. A ``None`` ``game_port`` (a legacy row
+      that predates port tracking, DEPLOYMENT.md Section 7) owns nothing, so the
+      file's own value is left alone rather than replaced by a guess.
+    - The RCON triple goes through :func:`set_rcon_properties`: ``enable-rcon`` and
+      ``rcon.port`` are enforced, while a non-empty ``rcon.password`` already in
+      *content* is preserved -- the file is that credential's only source of truth
+      (#335), so a republished file that carries a working one keeps it, and
+      ``rcon_password`` only fills in a missing or empty one.
+    - The resource-pack keys come from the assignment: ``None`` clears all four
+      (the server has no pack), and a ``prompt`` of ``None`` removes just the
+      prompt key, since "no prompt" is what the assignment row then says.
+    """
+
+    if game_port is not None:
+        content = set_server_port(content, game_port)
+    content = set_rcon_properties(content, password=rcon_password)
+    if resource_pack is None:
+        return clear_resource_pack_properties(content)
+    content = set_resource_pack_properties(
+        content,
+        url=resource_pack.url,
+        sha1=resource_pack.sha1,
+        require=resource_pack.require,
+        prompt=resource_pack.prompt,
+    )
+    if resource_pack.prompt is None:
+        content = remove_keys(content, {_RESOURCE_PACK_PROMPT_KEY})
+    return content
+
+
 def clear_resource_pack_properties(content: bytes) -> bytes:
     """Return ``content`` with the 4 resource pack keys removed (issue #1177).
 
@@ -285,4 +378,4 @@ def clear_resource_pack_properties(content: bytes) -> bytes:
     lines = _clear_property(lines, _RESOURCE_PACK_SHA1_KEY)
     lines = _clear_property(lines, _REQUIRE_RESOURCE_PACK_KEY)
     lines = _clear_property(lines, _RESOURCE_PACK_PROMPT_KEY)
-    return ("\n".join(lines) + "\n").encode()
+    return _join_lines(lines)

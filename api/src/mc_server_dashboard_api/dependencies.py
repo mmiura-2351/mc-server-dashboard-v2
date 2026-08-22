@@ -2177,7 +2177,12 @@ def get_restore_backup(
     backup_store: Annotated[BackupArchiveStore, Depends(get_servers_backup_store)],
     file_store: Annotated[ServersFileStore, Depends(get_servers_file_store)],
 ) -> RestoreBackup:
-    """Assemble the :class:`RestoreBackup` use case (backup:restore)."""
+    """Assemble the :class:`RestoreBackup` use case (backup:restore).
+
+    ``public_base_url`` is what the re-applied ``resource-pack`` line points at
+    after a restore (issue #2621) — the same value the assign route hands
+    :class:`AssignResourcePack`.
+    """
 
     session_factory = create_session_factory(get_engine(request))
     cache: PluginCacheStore | None = getattr(
@@ -2190,6 +2195,7 @@ def get_restore_backup(
         file_store=file_store,
         cache=cache,
         clock=ServersSystemClock(),
+        public_base_url=get_settings(request).server.public_base_url or "",
     )
 
 
