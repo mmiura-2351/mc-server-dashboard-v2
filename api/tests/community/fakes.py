@@ -13,13 +13,20 @@ and grants accept any parent id. The real schema enforces both
 permissive than the adapter* -- the direction that hides defects rather than
 inventing them.
 
-The cost is that no fast test in this context can express a duplicate-name or a
-concurrent-delete outcome; a green run here says nothing about either. That
-silence hid issue #2611: renaming a role onto a name already used in the same
-community violated ``uq_role_community_name`` and was a deterministic 500 -- an
-ordinary user action, not a race -- while ``community/api/roles.py`` caught a
+The cost is that no fast test in this context can express a duplicate-name
+outcome; a green run here says nothing about it. That silence hid issue #2611:
+renaming a role onto a name already used in the same community violated
+``uq_role_community_name`` and was a deterministic 500 -- an ordinary user
+action, not a race -- while ``community/api/roles.py`` caught a
 ``RoleAlreadyExistsError`` nothing on that path could raise. Every fast test
 agreed with the code, because the fakes agreed with the code.
+
+One concurrent-delete outcome *is* expressible, because it needs no constraint:
+``communities.update`` and ``roles.update`` issue an ``UPDATE ... WHERE id``,
+whose zero-row match on a deleted row is a rowcount rather than a violation, and
+the adapters raise not-found on it (#2613). The fakes mirror that raise, so their
+absent-row branch is a modelled outcome and not a silence. Everything a *foreign
+key* would have caught is still outside them.
 
 Mirroring the schema here was considered and declined (issue #2625): it is a
 second model to keep in sync, and this defect class is caught where it is real.
@@ -45,6 +52,10 @@ from mc_server_dashboard_api.community.domain.entities import (
     Membership,
     ResourceGrant,
     Role,
+)
+from mc_server_dashboard_api.community.domain.errors import (
+    CommunityNotFoundError,
+    RoleNotFoundError,
 )
 from mc_server_dashboard_api.community.domain.repositories import (
     CommunityRepository,
@@ -129,9 +140,11 @@ class FakeCommunityRepository(CommunityRepository):
         # Mirror the adapter's ``UPDATE community ... WHERE id = :id``: a missing
         # id matches no row, so nothing is written and no row appears -- keying
         # the entity in regardless made this an insert the adapter cannot
-        # perform (#2557).
-        if community.id in self.by_id:
-            self.by_id[community.id] = self._copy(community)
+        # perform (#2557). The adapter now checks that rowcount and reports the
+        # zero-row write as not-found rather than as a success (#2613).
+        if community.id not in self.by_id:
+            raise CommunityNotFoundError(str(community.id.value))
+        self.by_id[community.id] = self._copy(community)
 
     async def delete(self, community_id: CommunityId) -> None:
         self.by_id.pop(community_id, None)
@@ -248,9 +261,11 @@ class FakeRoleRepository(RoleRepository):
         # Mirror the adapter's ``UPDATE role ... WHERE id = :id``: a missing id
         # matches no row, so nothing is written and no row appears -- keying the
         # entity in regardless made this an insert the adapter cannot perform
-        # (#2557).
-        if role.id in self.by_id:
-            self.by_id[role.id] = self._copy(role)
+        # (#2557). The adapter now checks that rowcount and reports the zero-row
+        # write as not-found rather than as a success (#2613).
+        if role.id not in self.by_id:
+            raise RoleNotFoundError(str(role.id.value))
+        self.by_id[role.id] = self._copy(role)
 
     async def delete(self, role_id: RoleId) -> None:
         self.by_id.pop(role_id, None)

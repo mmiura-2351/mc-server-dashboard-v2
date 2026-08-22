@@ -12,6 +12,13 @@ group unit tests because they need a **real** flush: the bug is a live FK refusi
 the staged ``group_player`` INSERTs, and an in-memory fake repository has no
 constraints to violate, so it reports success where PostgreSQL raises
 (issues #2557, #2549).
+
+The issue #2613 tests are here for the same reason and one more: the writes they
+cover are the ones with *nothing to insert*, so what has to be pinned is that
+``save`` still refuses them, and that the interleaved player edit really does hit
+``uq_group_player_group_uuid`` on a live index. Both racers are deterministic and
+sleepless -- a repository that deletes the group as it hands it back, and a
+session that lets a racer commit between ``save``'s DELETE and its flush.
 """
 
 from __future__ import annotations
@@ -19,7 +26,7 @@ from __future__ import annotations
 import datetime as dt
 import os
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 
 import pytest
 from sqlalchemy import text
@@ -49,10 +56,12 @@ from mc_server_dashboard_api.servers.application.groups import (
     AddPlayer,
     AttachGroup,
     RemovePlayer,
+    RenameGroup,
 )
 from mc_server_dashboard_api.servers.domain.errors import (
     GroupNameAlreadyExistsError,
     GroupNotFoundError,
+    GroupPlayerEditConflictError,
     ServerNotFoundError,
 )
 from mc_server_dashboard_api.servers.domain.groups import (
@@ -332,20 +341,19 @@ async def test_save_after_concurrent_group_delete_reports_not_found(
             await uow.groups.save(loaded)
 
 
-async def test_save_after_concurrent_group_delete_without_players_is_a_no_op(
+async def test_save_after_concurrent_group_delete_without_players_reports_not_found(
     engine: AsyncEngine,
 ) -> None:
-    # The other half of the branch above, pinned against the live FK for the same
+    # The other half of the branch above, pinned against a real flush for the same
     # reason: a fake asserting its own no-op establishes nothing about the
     # adapter, so both branches modelled by ``FakeGroupRepository.save``
-    # (tests/servers/test_fake_repository_isolation.py) get a real flush here.
-    # With the player set emptied there is no INSERT to violate the FK, the
-    # DELETE matches zero rows, and save passes silently.
+    # (tests/servers/test_fake_repository_isolation.py) get one here.
     #
-    # This is the shape behind #2613: the caller is told the edit succeeded when
-    # the group is gone. Pinned as the behaviour that is, not the behaviour that
-    # should be -- deciding whether ``save`` re-asserts the row's existence is
-    # that issue's question, and it governs every call site rather than this one.
+    # With the player set emptied there is no INSERT, so nothing violates the FK
+    # that carries the not-found for the player-carrying branch (#2583) -- save
+    # used to write nothing and pass silently, which told the caller the edit
+    # succeeded (#2613). The load now re-asserts the row, so both branches report
+    # the same not-found regardless of whether the group happened to have players.
     community_id = await _seed_community(engine)
     factory = create_session_factory(engine)
     only_player = uuid.uuid4()
@@ -363,18 +371,8 @@ async def test_save_after_concurrent_group_delete_without_players_is_a_no_op(
                 text("DELETE FROM player_group WHERE id = :id"), {"id": group.id.value}
             )
         loaded.remove_player(only_player)
-        await uow.groups.save(loaded)
-        await uow.commit()
-
-    async with engine.connect() as conn:
-        groups = (
-            await conn.execute(text("SELECT count(*) FROM player_group"))
-        ).scalar_one()
-        players = (
-            await conn.execute(text("SELECT count(*) FROM group_player"))
-        ).scalar_one()
-    assert groups == 0
-    assert players == 0
+        with pytest.raises(GroupNotFoundError):
+            await uow.groups.save(loaded)
 
 
 async def test_save_after_concurrent_name_take_reports_name_exists(
@@ -432,8 +430,8 @@ async def test_remove_player_reports_a_concurrent_group_delete_as_not_found(
     engine: AsyncEngine,
 ) -> None:
     # Same race on the removal side. The group keeps a second player so save
-    # still stages an INSERT for the surviving one -- with the set emptied there
-    # is nothing left to violate the FK.
+    # still stages an INSERT for the surviving one -- the emptied-set shape,
+    # where there is nothing left to violate the FK, is the test below.
     community_id = await _seed_community(engine)
     factory = create_session_factory(engine)
     doomed = uuid.uuid4()
@@ -452,6 +450,162 @@ async def test_remove_player_reports_a_concurrent_group_delete_as_not_found(
             group_id=group.id,
             player_uuid=doomed,
         )
+
+
+# --- writes on a group a racer deleted, with nothing to insert (issue #2613) --
+
+
+async def test_rename_group_reports_a_concurrent_group_delete_as_not_found(
+    engine: AsyncEngine,
+) -> None:
+    # A group with no players: save stages no INSERT, so the FK that carries the
+    # not-found for the player-carrying rename (#2583) never fires. The rename
+    # used to report 200 having written nothing -- the behaviour differing purely
+    # on whether the group happened to have players, which no caller can see.
+    community_id = await _seed_community(engine)
+    factory = create_session_factory(engine)
+    group = _group(community_id, [])
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.groups.add(group)
+        await uow.commit()
+
+    use_case = RenameGroup(uow=_RacingUnitOfWork(factory, engine))
+    with pytest.raises(GroupNotFoundError):
+        await use_case(
+            community_id=CommunityId(community_id),
+            group_id=group.id,
+            name="moderators",
+        )
+
+
+async def test_remove_last_player_reports_a_concurrent_group_delete_as_not_found(
+    engine: AsyncEngine,
+) -> None:
+    # The same silent success reached the other way: removing the *last* player
+    # empties the set, so save stages no INSERT and the FK never fires. The
+    # request used to return a 0-player group for a group that no longer exists.
+    community_id = await _seed_community(engine)
+    factory = create_session_factory(engine)
+    only_player = uuid.uuid4()
+    group = _group(community_id, [Player(only_player, "alice")])
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.groups.add(group)
+        await uow.commit()
+
+    use_case = RemovePlayer(
+        uow=_RacingUnitOfWork(factory, engine), file_store=FakeFileStore()
+    )
+    with pytest.raises(GroupNotFoundError):
+        await use_case(
+            community_id=CommunityId(community_id),
+            group_id=group.id,
+            player_uuid=only_player,
+        )
+
+
+async def test_remove_last_player_of_a_live_group_deletes_its_row(
+    engine: AsyncEngine,
+) -> None:
+    # The other side of the branch above, and a gap the #2607 review found: with
+    # no racer, emptying the player set must actually delete the group_player row.
+    # Nothing pinned that -- ``save`` mutated to ``if not group.players: return``
+    # survived the suite, because every other emptied-set test asserts a raised
+    # error or a group that is gone anyway.
+    community_id = await _seed_community(engine)
+    factory = create_session_factory(engine)
+    only_player = uuid.uuid4()
+    group = _group(community_id, [Player(only_player, "alice")])
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.groups.add(group)
+        await uow.commit()
+
+    use_case = RemovePlayer(uow=ServersUnitOfWork(factory), file_store=FakeFileStore())
+    result = await use_case(
+        community_id=CommunityId(community_id),
+        group_id=group.id,
+        player_uuid=only_player,
+    )
+
+    assert result.players == []
+    async with engine.connect() as conn:
+        players = (
+            await conn.execute(text("SELECT count(*) FROM group_player"))
+        ).scalar_one()
+    assert players == 0
+
+
+class _RacingSession(AsyncSession):
+    """A session that lets a racer commit between ``save``'s DELETE and its flush.
+
+    ``save`` replaces the player set wholesale (delete-then-insert) and owns the
+    flush that writes the replacement rows. Under READ COMMITTED the DELETE's
+    snapshot is taken when *that statement* runs, so rows a racer commits after it
+    are invisible to the DELETE and still there for the INSERT -- the interleave
+    that violates ``uq_group_player_group_uuid``. Firing the racer from the
+    explicit ``flush`` puts it exactly there with no sleeps: autoflush runs on the
+    sync Session underneath, so ``save``'s own ``await flush()`` is the only one
+    that reaches this override.
+    """
+
+    def __init__(
+        self, *args: object, racer: Callable[[], Awaitable[None]], **kwargs: object
+    ) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        self._racer = racer
+        self._raced = False
+
+    async def flush(self, objects: Sequence[object] | None = None) -> None:
+        if not self._raced:
+            self._raced = True
+            await self._racer()
+        await super().flush(objects)
+
+
+async def test_interleaved_player_edits_report_an_edit_conflict(
+    engine: AsyncEngine,
+) -> None:
+    # Two player edits on one group that genuinely interleave: the loser's
+    # wholesale DELETE runs first and matches nothing, the winner adds the player
+    # and commits, and the loser then re-inserts the same
+    # ``(group_id, player_uuid)`` pair onto the winner's committed row. Neither
+    # caller did anything wrong, so the loser gets the typed conflict its route
+    # maps to 409 rather than the untranslated IntegrityError (500) it used to.
+    community_id = await _seed_community(engine)
+    factory = create_session_factory(engine)
+    group = _group(community_id, [])
+    contested = uuid.uuid4()
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.groups.add(group)
+        await uow.commit()
+
+    async def winner() -> None:
+        async with ServersUnitOfWork(factory) as other:
+            loaded = await other.groups.get_by_id(group.id)
+            assert loaded is not None
+            loaded.upsert_player(Player(contested, "alice"))
+            await other.groups.save(loaded)
+            await other.commit()
+
+    racing_factory = async_sessionmaker(
+        engine, expire_on_commit=False, class_=_RacingSession, racer=winner
+    )
+    async with ServersUnitOfWork(racing_factory) as loser:  # type: ignore[arg-type]
+        loaded = await loser.groups.get_by_id(group.id)
+        assert loaded is not None
+        loaded.upsert_player(Player(contested, "alice"))
+        with pytest.raises(GroupPlayerEditConflictError):
+            await loser.groups.save(loaded)
+
+    # The winner's edit stands; the loser's transaction wrote nothing.
+    async with engine.connect() as conn:
+        players = (
+            await conn.execute(text("SELECT count(*) FROM group_player"))
+        ).scalar_one()
+    assert players == 1
 
 
 # --- concurrent racers on the attach write (issue #2612) ----------------------

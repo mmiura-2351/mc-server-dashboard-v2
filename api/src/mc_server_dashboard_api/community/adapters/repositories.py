@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
+from typing import Any, cast
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import CursorResult, delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
@@ -32,6 +33,10 @@ from mc_server_dashboard_api.community.domain.entities import (
     Membership,
     ResourceGrant,
     Role,
+)
+from mc_server_dashboard_api.community.domain.errors import (
+    CommunityNotFoundError,
+    RoleNotFoundError,
 )
 from mc_server_dashboard_api.community.domain.repositories import (
     CommunityRepository,
@@ -187,7 +192,7 @@ class SqlAlchemyCommunityRepository(CommunityRepository):
             .values(name=community.name.value, updated_at=community.updated_at)
         )
         try:
-            await self._session.execute(stmt)
+            result = await self._session.execute(stmt)
         except IntegrityError as exc:
             # A rename UPDATE violates uq_community_name at execute time, inside
             # the transaction (unlike a staged INSERT, which flushes at commit),
@@ -196,6 +201,14 @@ class SqlAlchemyCommunityRepository(CommunityRepository):
             # rather than as a raw 500. The enclosing UnitOfWork rolls back.
             translate_integrity_error(exc)
             raise
+        # The row is gone if nothing matched: a DeleteCommunity racer committed
+        # between RenameCommunity's pre-read and this write. The UPDATE raises
+        # nothing on a zero-row match, so without this the caller was told the
+        # rename succeeded (issue #2613). The rowcount is the only place this
+        # write's target can be re-asserted, so the not-found the pre-read would
+        # have raised is raised here instead (404).
+        if cast("CursorResult[Any]", result).rowcount == 0:
+            raise CommunityNotFoundError(str(community.id.value))
 
     async def delete(self, community_id: CommunityId) -> None:
         stmt = delete(CommunityModel).where(CommunityModel.id == community_id.value)
@@ -340,7 +353,7 @@ class SqlAlchemyRoleRepository(RoleRepository):
             )
         )
         try:
-            await self._session.execute(stmt)
+            result = await self._session.execute(stmt)
         except IntegrityError as exc:
             # A rename UPDATE violates uq_role_community_name at execute time,
             # inside the transaction (unlike a staged INSERT, which flushes at
@@ -351,6 +364,14 @@ class SqlAlchemyRoleRepository(RoleRepository):
             # The enclosing UnitOfWork rolls back.
             translate_integrity_error(exc)
             raise
+        # The row is gone if nothing matched: a DeleteRole racer committed between
+        # UpdateRole's pre-read and this write. The UPDATE raises nothing on a
+        # zero-row match, so without this the caller was told the edit succeeded
+        # (issue #2613). The rowcount is the only place this write's target can be
+        # re-asserted, so the not-found the pre-read would have raised is raised
+        # here instead (404).
+        if cast("CursorResult[Any]", result).rowcount == 0:
+            raise RoleNotFoundError(str(role.id.value))
 
     async def delete(self, role_id: RoleId) -> None:
         stmt = delete(RoleModel).where(RoleModel.id == role_id.value)

@@ -893,19 +893,14 @@ class FakeGroupRepository(GroupRepository):
         ]
 
     async def save(self, group: PlayerGroup) -> None:
-        # Not an upsert despite the name: the adapter renames the loaded row
-        # only ``if row is not None`` and never constructs a ``PlayerGroupModel``,
-        # so no ``save`` can make a group appear -- ``add`` is the only insert
-        # path (#2557).
+        # Not an upsert despite the name: the adapter re-reads the row and never
+        # constructs a ``PlayerGroupModel``, so no ``save`` can make a group
+        # appear -- ``add`` is the only insert path (#2557). A concurrent delete
+        # took the row, so it raises the not-found its re-read asserts, whether or
+        # not there are players left to write (#2613; before that the emptied-set
+        # branch stayed silent and reported the edit as a success).
         if group.id not in self.by_id:
-            # A concurrent delete took the row. With players to write, the
-            # adapter's replacement ``group_player`` INSERTs hit
-            # ``fk_group_player_group_id_player_group`` at its own flush and it
-            # raises not-found; with an empty set there is nothing to insert and
-            # the whole save is a silent no-op (#2583, measured on PostgreSQL 18).
-            if group.players:
-                raise GroupNotFoundError(str(group.id.value))
-            return
+            raise GroupNotFoundError(str(group.id.value))
         self.by_id[group.id] = self._copy(group)
 
     async def delete(self, group_id: GroupId) -> None:

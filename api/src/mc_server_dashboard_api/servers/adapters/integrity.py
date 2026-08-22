@@ -15,20 +15,32 @@ the resource-pack-in-use FK backstop (issue #1962);
 ``fk_group_player_group_id_player_group`` (migration 0012) is the
 group-deleted-mid-edit backstop (issue #2583);
 ``uq_server_plugin_server_rel`` (migration 0019) is the per-server plugin path
-backstop, and ``fk_server_group_group_id_player_group`` /
+backstop; ``fk_server_group_group_id_player_group`` /
 ``fk_server_group_server_id_server`` (migration 0012) are the
-attach-target-vanished backstops (issue #2612).
+attach-target-vanished backstops (issue #2612); and
+``uq_group_player_group_uuid`` (migration 0012) is the interleaved-player-edit
+backstop (issue #2613).
 
 A *duplicate* racer conflicts (409); a *deleted* racer is gone, so the FK naming
 the vanished parent row translates to that context's not-found error (404) --
 the very error the use case's own pre-read would have raised had the delete
 landed a moment earlier.
 
+``uq_group_player_group_uuid`` is a third shape: neither caller duplicated
+anything a pre-read could have caught, and neither is gone. Two player edits on
+one group interleave, and because ``save`` replaces the player set wholesale the
+loser's DELETE cannot see rows the winner committed after it ran, so the loser
+re-inserts a pair that now exists. The delete-then-insert stays (the owner's
+#2613 ruling: a 409 for a genuinely simultaneous edit of one group is acceptable
+at this scale), so the constraint is translated to a conflict the loser can
+retry -- its transaction rolls back whole, the winner's edit stands, and
+re-reading the group and reapplying the edit succeeds.
+
 The map below is **deliberately partial**. The issue #2583 audit walked every
 named UNIQUE and FOREIGN KEY constraint in ``api/migrations/`` against it and
-found further reachable-but-untranslated ones; each needs its own typed error and
-its own decision, so they are tracked as issues #2611, #2612 and #2613 rather
-than guessed at here. A constraint's absence below is therefore not evidence that
+found further reachable-but-untranslated ones; each needed its own typed error
+and its own decision, tracked as issues #2611, #2612 and #2613 rather than
+guessed at here. A constraint's absence below is therefore not evidence that
 violating it is unreachable.
 
 Shared by two kinds of call site, because *when* a violation surfaces depends on
@@ -60,6 +72,7 @@ from sqlalchemy.exc import IntegrityError
 from mc_server_dashboard_api.servers.domain.errors import (
     GroupNameAlreadyExistsError,
     GroupNotFoundError,
+    GroupPlayerEditConflictError,
     PluginAlreadyExistsError,
     PortAlreadyTakenError,
     ResourcePackInUseError,
@@ -74,6 +87,7 @@ _PORT_CONSTRAINTS = frozenset({"uq_server_game_port", "uq_server_bedrock_port"})
 _SLUG_CONSTRAINTS = frozenset({"uq_server_slug"})
 _SCHEDULE_NAME_CONSTRAINTS = frozenset({"uq_schedule_server_id_name"})
 _GROUP_NAME_CONSTRAINTS = frozenset({"uq_player_group_community_kind_name"})
+_GROUP_PLAYER_EDIT_CONSTRAINTS = frozenset({"uq_group_player_group_uuid"})
 _GROUP_MISSING_CONSTRAINTS = frozenset(
     {
         "fk_group_player_group_id_player_group",
@@ -101,6 +115,8 @@ def translate_integrity_error(exc: IntegrityError) -> None:
         raise ScheduleNameAlreadyExistsError(str(constraint)) from exc
     if constraint in _GROUP_NAME_CONSTRAINTS:
         raise GroupNameAlreadyExistsError(str(constraint)) from exc
+    if constraint in _GROUP_PLAYER_EDIT_CONSTRAINTS:
+        raise GroupPlayerEditConflictError(str(constraint)) from exc
     if constraint in _GROUP_MISSING_CONSTRAINTS:
         raise GroupNotFoundError(str(constraint)) from exc
     if constraint in _SERVER_MISSING_CONSTRAINTS:

@@ -23,6 +23,7 @@ from mc_server_dashboard_api.servers.adapters.group_models import (
 from mc_server_dashboard_api.servers.adapters.integrity import (
     translate_integrity_error,
 )
+from mc_server_dashboard_api.servers.domain.errors import GroupNotFoundError
 from mc_server_dashboard_api.servers.domain.group_repository import GroupRepository
 from mc_server_dashboard_api.servers.domain.groups import (
     GroupId,
@@ -89,10 +90,21 @@ class SqlAlchemyGroupRepository(GroupRepository):
         return [await self._hydrate(row) for row in rows]
 
     async def save(self, group: PlayerGroup) -> None:
-        # Name update.
-        row = await self._session.get(PlayerGroupModel, group.id.value)
-        if row is not None:
-            row.name = group.name.value
+        # Re-assert the group before writing anything to it (issue #2613).
+        # ``populate_existing`` forces the read to the database rather than to the
+        # identity map, so this is an existence check and not an accident of what
+        # the session happens to be holding. A group a racer deleted since the use
+        # case's pre-read used to be reported to the caller as a successful edit
+        # whenever there was nothing left to insert -- a rename of a player-less
+        # group, or a removal that emptied the set -- because the writes that
+        # would have violated the FK (#2583) were never staged. The read is the
+        # one thing every save does, so it carries the assertion for all of them.
+        row = await self._session.get(
+            PlayerGroupModel, group.id.value, populate_existing=True
+        )
+        if row is None:
+            raise GroupNotFoundError(str(group.id.value))
+        row.name = group.name.value
         try:
             # Replace the player set wholesale (delete-then-insert): the in-memory
             # aggregate is the source of truth for the upsert/remove the caller made.

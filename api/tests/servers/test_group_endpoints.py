@@ -27,6 +27,7 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     UserId,
 )
 from mc_server_dashboard_api.dependencies import (
+    get_add_player,
     get_attach_group,
     get_audit_recorder,
     get_create_group,
@@ -35,10 +36,13 @@ from mc_server_dashboard_api.dependencies import (
     get_membership_visibility,
     get_permission_checker,
     get_read_group,
+    get_remove_player,
+    get_rename_group,
 )
 from mc_server_dashboard_api.servers.domain.errors import (
     GroupNameAlreadyExistsError,
     GroupNotFoundError,
+    GroupPlayerEditConflictError,
     InvalidGroupKindError,
     ServerNotFoundError,
 )
@@ -123,7 +127,10 @@ def _app(
     allow: bool,
     create: _FakeUseCase | None = None,
     read: _FakeUseCase | None = None,
+    rename: _FakeUseCase | None = None,
     delete: _FakeUseCase | None = None,
+    add_player: _FakeUseCase | None = None,
+    remove_player: _FakeUseCase | None = None,
     attach: _FakeUseCase | None = None,
     recorder: _RecordingRecorder | None = None,
 ) -> object:
@@ -138,8 +145,14 @@ def _app(
         app.dependency_overrides[get_create_group] = lambda: create
     if read is not None:
         app.dependency_overrides[get_read_group] = lambda: read
+    if rename is not None:
+        app.dependency_overrides[get_rename_group] = lambda: rename
     if delete is not None:
         app.dependency_overrides[get_delete_group] = lambda: delete
+    if add_player is not None:
+        app.dependency_overrides[get_add_player] = lambda: add_player
+    if remove_player is not None:
+        app.dependency_overrides[get_remove_player] = lambda: remove_player
     if attach is not None:
         app.dependency_overrides[get_attach_group] = lambda: attach
     if recorder is not None:
@@ -216,6 +229,60 @@ def test_create_duplicate_name_is_409() -> None:
     )
     assert resp.status_code == 409
     assert resp.json()["reason"] == "group_name_exists"
+
+
+def _edit_conflict() -> GroupPlayerEditConflictError:
+    # ``save`` replaces the player set wholesale, so an interleaved edit on the
+    # same group can collide on uq_group_player_group_uuid from any of the three
+    # routes that reach it -- the rename re-inserts the set too (issue #2613).
+    return GroupPlayerEditConflictError("uq_group_player_group_uuid")
+
+
+def test_rename_losing_an_interleaved_player_edit_is_409() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        rename=_FakeUseCase(error=_edit_conflict()),
+        recorder=_RecordingRecorder(),
+    )
+    client = _client(app)
+    resp = client.patch(
+        f"/api/communities/{uuid.uuid4()}/groups/{uuid.uuid4()}",
+        json={"name": "admins"},
+    )
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "group_edit_conflict"
+
+
+def test_add_player_losing_an_interleaved_player_edit_is_409() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        add_player=_FakeUseCase(error=_edit_conflict()),
+        recorder=_RecordingRecorder(),
+    )
+    client = _client(app)
+    resp = client.post(
+        f"/api/communities/{uuid.uuid4()}/groups/{uuid.uuid4()}/players",
+        json={"uuid": str(uuid.uuid4()), "username": "alice"},
+    )
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "group_edit_conflict"
+
+
+def test_remove_player_losing_an_interleaved_player_edit_is_409() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        remove_player=_FakeUseCase(error=_edit_conflict()),
+        recorder=_RecordingRecorder(),
+    )
+    client = _client(app)
+    resp = client.delete(
+        f"/api/communities/{uuid.uuid4()}/groups/{uuid.uuid4()}/players/{uuid.uuid4()}"
+    )
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "group_edit_conflict"
 
 
 def test_read_missing_group_is_404() -> None:

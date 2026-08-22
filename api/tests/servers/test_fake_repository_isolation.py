@@ -321,11 +321,11 @@ def test_group_seed_stores_a_copy_the_caller_cannot_rewrite() -> None:
 
 async def test_group_save_on_a_missing_row_with_players_reports_not_found() -> None:
     # ``save`` reads as an upsert but is not one: it never constructs a
-    # ``PlayerGroupModel``. It loads the row and renames it only ``if row is not
-    # None``, then replaces the child ``group_player`` set. No ``save`` can
-    # therefore make a group appear -- ``add`` is the only insert path -- and all
-    # three call sites (application/groups.py) ``_load_group`` first, which
-    # raises ``GroupNotFoundError`` on an absent id.
+    # ``PlayerGroupModel``. It re-reads the row, then replaces the child
+    # ``group_player`` set. No ``save`` can therefore make a group appear --
+    # ``add`` is the only insert path -- and all three call sites
+    # (application/groups.py) ``_load_group`` first, which raises
+    # ``GroupNotFoundError`` on an absent id.
     #
     # The absent-row branch is reachable anyway, by a concurrent delete landing
     # between that pre-read and the write. With players to write, the adapter
@@ -344,25 +344,25 @@ async def test_group_save_on_a_missing_row_with_players_reports_not_found() -> N
     assert repo.by_id == {}
 
 
-async def test_group_save_on_a_missing_row_without_players_is_a_no_op() -> None:
-    # The other half of the same branch: an empty player set stages no INSERT,
-    # so nothing can violate the FK. The DELETE is the only *write* the adapter
-    # emits, and it matches zero rows -- with the row gone, ``save``'s ``get``
-    # re-queries and returns ``None`` (the identity map is weak and retains
-    # nothing, #2583), so the ``if row is not None`` guard skips the rename and
-    # no UPDATE is emitted at all. Measured: SELECT then DELETE, no UPDATE and no
-    # INSERT. The save passes silently, leaving no row behind.
+async def test_group_save_on_a_missing_row_without_players_reports_not_found() -> None:
+    # The other half of the same branch, and it used to diverge: an empty player
+    # set stages no INSERT, so nothing violated the FK that carries the not-found
+    # above, and the save passed silently -- telling the caller a rename or a
+    # last-player removal had succeeded on a group that was gone (#2613). The
+    # adapter's re-read now asserts the row before any write, so the branch a
+    # caller cannot see (whether the group happened to have players) no longer
+    # changes the answer.
     #
-    # Like the raising branch above, this one is what the *adapter* does, so the
-    # claim is pinned against a live FK rather than against the fake alone --
+    # Like the branch above, this is what the *adapter* does, so it is pinned
+    # against a real flush rather than against the fake alone --
     # ``tests/integration/test_group_repositories.py::
-    # test_save_after_concurrent_group_delete_without_players_is_a_no_op``.
-    # A fake asserting its own no-op would be true by construction.
+    # test_save_after_concurrent_group_delete_without_players_reports_not_found``.
     repo = FakeGroupRepository()
     group = _group()
     group.players = []
 
-    await repo.save(group)
+    with pytest.raises(GroupNotFoundError):
+        await repo.save(group)
 
     assert repo.by_id == {}
 
