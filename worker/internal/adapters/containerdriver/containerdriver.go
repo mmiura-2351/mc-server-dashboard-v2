@@ -378,7 +378,10 @@ func containerPathResolver(workingDir string) execution.PathResolver {
 // argv in exec form. It heals the deterministic-name conflict via createContainer
 // (the #233 wait-for-name-free loop).
 func (d *Driver) launchContainer(ctx context.Context, spec execution.InstanceSpec, image string, launchArgs []string) (string, error) {
-	gamePort, rconPort := ports(spec.WorkingDir)
+	gamePort, rconPort, err := ports(spec.WorkingDir)
+	if err != nil {
+		return "", err
+	}
 	// The game port binds to the configured host interface (driver.container.
 	// game_bind_ip) so players can reach the server.
 	portMappings := []PortMapping{
@@ -1197,7 +1200,10 @@ func (i *instance) superviseInstall(installID string) {
 // fields. Starting is deferred to the latch-guarded critical section so a Stop can
 // abort the launch before it starts (issue #306).
 func (i *instance) createLaunchContainer(launchArgs []string) (string, error) {
-	gamePort, rconPort := ports(i.spec.WorkingDir)
+	gamePort, rconPort, err := ports(i.spec.WorkingDir)
+	if err != nil {
+		return "", err
+	}
 	portMappings := []PortMapping{
 		{ContainerPort: gamePort, HostIP: i.gameBindIP, HostPort: gamePort},
 	}
@@ -1920,8 +1926,16 @@ var (
 // absent or a key is unset. Start publishes the game port on the configured host
 // interface and RCON on loopback. Keep the game-port resolution in sync with
 // tunnel.gamePort (adapters/tunnel/tunnel.go), which dials the published port.
-func ports(workingDir string) (game, rcon string) {
-	props := readProperties(filepath.Join(workingDir, "server.properties"))
+//
+// An unreadable file fails the start instead of falling back: the fallback is
+// 25565, the relay's port, so a truncated parse turns a correctly tracked server
+// into a host-port collision that never starts (issue #2621). Only an ABSENT file
+// still takes the defaults.
+func ports(workingDir string) (game, rcon string, err error) {
+	props, err := readProperties(filepath.Join(workingDir, "server.properties"))
+	if err != nil {
+		return "", "", err
+	}
 	game = props["server-port"]
 	if game == "" {
 		game = defaultGamePort
@@ -1930,5 +1944,5 @@ func ports(workingDir string) (game, rcon string) {
 	if rcon == "" {
 		rcon = defaultRCONPort
 	}
-	return game, rcon
+	return game, rcon, nil
 }

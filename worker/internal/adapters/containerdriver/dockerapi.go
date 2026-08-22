@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"strings"
 	"time"
@@ -166,14 +168,25 @@ type ContainerInfo struct {
 	Running bool
 }
 
-// readProperties parses a Java .properties file into a map, returning an empty
-// map when the file is absent or unreadable (the caller then uses defaults).
-// Lines that are blank or comments (# or !) are skipped.
-func readProperties(path string) map[string]string {
+// readProperties parses a Java .properties file into a map. Lines that are blank
+// or comments (# or !) are skipped.
+//
+// An ABSENT file is not an error: it returns an empty map so the caller falls back
+// to the Minecraft defaults (a legacy server whose working set was never seeded).
+// Every other failure IS an error, including a scan that stopped early -- a line
+// longer than bufio.Scanner's token cap truncates the parse, and swallowing that
+// would silently drop server-port and publish the 25565 default, which is the
+// relay's port and collides on the host (issue #2621). The RCON adapter's copy of
+// this routine (adapters/rcon/serverproperties.go) has always checked; this one
+// now matches it.
+func readProperties(path string) (map[string]string, error) {
 	out := map[string]string{}
 	f, err := os.Open(path) //nolint:gosec // path is the server's own working dir, not user-controlled.
 	if err != nil {
-		return out
+		if errors.Is(err, fs.ErrNotExist) {
+			return out, nil
+		}
+		return nil, fmt.Errorf("containerdriver: read %s: %w", path, err)
 	}
 	defer func() { _ = f.Close() }()
 
@@ -189,5 +202,8 @@ func readProperties(path string) map[string]string {
 		}
 		out[strings.TrimSpace(key)] = strings.TrimSpace(value)
 	}
-	return out
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("containerdriver: scan %s: %w", path, err)
+	}
+	return out, nil
 }
