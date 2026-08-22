@@ -745,7 +745,10 @@ The **RCON port** is the worker's control channel and is never exposed off-host.
 Its handling depends on `driver.container.network` (env
 `MCD_WORKER_DRIVER_CONTAINER_NETWORK`):
 
-- **Set** (this `compose.yaml`, value `mcsd-servers`): the worker attaches each
+- **Set** (this `compose.yaml`, rendering `mcsd-servers` — the value is
+  `${COMPOSE_PROJECT_NAME:-mcsd}-servers`, the same expression as
+  `networks.servers.name`, so a stack brought up under another project name
+  keeps the two in step, issue #2609): the worker attaches each
   MC container to that user-defined network and dials RCON at the container's
   name over the network. The host RCON publication is **dropped** — RCON never
   leaves the docker network. This is required for the containerized worker, whose
@@ -1205,7 +1208,7 @@ container was replaced, so the existing stamp still describes what is running.
 > direct-access surface: an operator running the Cloudflare Tunnel profile
 > previously had the plaintext API reachable on `http://<host-ip>:8000` even
 > though the tunnel section promised no inbound port. After this change, only
-> `cloudflared` (on the compose-internal network) and same-host processes reach
+> `cloudflared` (on `mcsd`) and same-host processes reach
 > the API by default. **If your deployment relies on the API being reachable
 > from the network** (no tunnel, no same-host reverse proxy, or LAN/dev
 > setups), add to `.env` before rebuilding:
@@ -1411,8 +1414,11 @@ container was replaced, so the existing stamp still describes what is running.
 > prints three `ERROR:` lines where a good run prints two, and nothing marks
 > which is which.
 >
-> (The volume name is `<project>_db-data`; `docker volume ls` shows the exact
-> names for your project directory. Naming `relay`/`cloudflared` is harmless when
+> (The volume name is `<project>_db-data`, and step 0's `git pull` may change
+> what `<project>` is: a deployment that predates the #2609 pin below is named
+> after its checkout directory, and every `docker compose` line here then needs
+> `-p <that directory>` to address it. `docker volume ls` shows the exact names.
+> Naming `relay`/`cloudflared` is harmless when
 > those profiles are inactive. `-T` on the dump matters: without it Compose
 > allocates a TTY and the redirected SQL is line-ending mangled. `mcsd` above is
 > `POSTGRES_USER` / `POSTGRES_DB` from your `.env` — substitute yours in all
@@ -1422,17 +1428,88 @@ container was replaced, so the existing stamp still describes what is running.
 > needs both majors' binaries in one image and is not covered here. Performing
 > this migration on the canonical host is tracked as issue #2293.
 
+> **Breaking change — the compose project is pinned to `mcsd`, so the named
+> volumes move (issue #2609).** `compose.yaml` now carries a top-level
+> `name: mcsd` and derives both network names from it
+> (`${COMPOSE_PROJECT_NAME:-mcsd}` / `${COMPOSE_PROJECT_NAME:-mcsd}-servers`),
+> so a second stack brought up with `-p <name>` gets its own fabric instead of
+> joining this one. **The network names are unchanged** — a deployment that
+> takes the default still renders `mcsd` and `mcsd-servers`, and the worker
+> still attaches MC containers to `mcsd-servers`.
+>
+> **The project name is not unchanged, and compose scopes volumes by project.**
+> Until this revision the project defaulted to the checkout's directory name —
+> on the canonical host, `mc-server-dashboard-v2` — so the live data sits in
+> `mc-server-dashboard-v2_db-data`, `mc-server-dashboard-v2_api-storage` and
+> `mc-server-dashboard-v2_seaweedfs-data`. Project `mcsd` does not see those
+> volumes: a plain `docker compose up -d` after this revision creates **empty**
+> `mcsd_*` volumes beside them and boots an empty database and object store,
+> while the old containers are still running and holding the host ports. Nothing
+> is deleted, and nothing warns you either.
+>
+> Copy the data across once, with the stack down. Stop every Minecraft server
+> from the dashboard first — their containers sit on `mcsd-servers` and hold it
+> open — then, from the repo root:
+>
+> ```sh
+> docker compose -p mc-server-dashboard-v2 down          # the -p is required:
+>                                                        # a bare `down` now
+>                                                        # resolves to `mcsd`
+>                                                        # and stops nothing
+> for v in db-data api-storage seaweedfs-data; do
+>   docker volume create "mcsd_$v"
+>   docker run --rm -v "mc-server-dashboard-v2_$v":/from -v "mcsd_$v":/to \
+>     debian:bookworm-slim sh -c 'cp -a /from/. /to/'
+> done
+> docker compose up -d --build
+> ```
+>
+> Verify before deleting anything: `GET /api/healthz`, the server list in the
+> UI, and one server start (which proves the object store and the scratch dir
+> came across). Only then `docker volume rm mc-server-dashboard-v2_db-data
+> mc-server-dashboard-v2_api-storage mc-server-dashboard-v2_seaweedfs-data`.
+> `MCSD_SCRATCH_DIR` is a host bind mount, not a named volume, so it is not
+> affected.
+>
+> `scripts/deploy_preflight.sh` reads the db volume name out of the rendered
+> compose config, so between the pull and the copy it looks for `mcsd_db-data`,
+> finds nothing, and reports "no db-data volume yet (fresh deployment)" — its
+> PostgreSQL-major guard is inert for that window, which is one more reason not
+> to leave the two steps apart.
+>
+> **A deployment whose project name was already `mcsd`** (an `-p mcsd`
+> invocation, or `COMPOSE_PROJECT_NAME=mcsd` in `.env`) has nothing to do: the
+> pin only writes down what it was already using.
+>
+> **The cheaper alternative, and what it costs.** `COMPOSE_PROJECT_NAME` in
+> `.env` overrides the `name:` key, so pinning your existing project name there
+> keeps the volumes exactly where they are and moves no data:
+>
+> ```sh
+> echo 'COMPOSE_PROJECT_NAME=mc-server-dashboard-v2' >> .env
+> ```
+>
+> The trade is the mirror image: the **networks** are then named after that
+> project (`mc-server-dashboard-v2` / `mc-server-dashboard-v2-servers`), so the
+> next `up` recreates every service container, and Minecraft containers that
+> were already running stay on the old `mcsd-servers` — the worker loses
+> container-name DNS to them and their RCON dials fail until each is restarted
+> (the same cycle-your-servers step the #2590 note above describes). Take this
+> path only if you would rather cycle servers than copy volumes.
+
 Stacks that were first deployed before the `api` image pre-created the storage
 mount point have an `api-storage` volume owned by root, so the non-root app
 (uid 10001) cannot write to it. Fix the ownership once, then bring the stack up:
 
 ```sh
-docker run --rm -v mc-server-dashboard-v2_api-storage:/fix \
+docker run --rm -v mcsd_api-storage:/fix \
   debian:bookworm-slim chown 10001:10001 /fix
 ```
 
-(The volume name is `<project>_api-storage`; `docker volume ls` shows the exact
-names for your project directory.)
+(The volume name is `<project>_api-storage`, where `<project>` is the project
+name `compose.yaml` pins — `mcsd` — unless you override it with
+`COMPOSE_PROJECT_NAME` / `-p`; a deployment that predates that pin is named
+after its checkout directory instead. `docker volume ls` shows the exact names.)
 
 ## 10. Backups
 
@@ -1449,7 +1526,7 @@ default object backend:
 
 ```sh
 docker compose exec -T db pg_dump -U mcsd -d mcsd > backup-db.sql
-docker run --rm -v mc-server-dashboard-v2_seaweedfs-data:/data \
+docker run --rm -v mcsd_seaweedfs-data:/data \
   -v "$PWD":/backup debian:bookworm-slim \
   tar czf /backup/backup-storage.tar.gz -C /data .
 ```
@@ -1457,13 +1534,14 @@ docker run --rm -v mc-server-dashboard-v2_seaweedfs-data:/data \
 For the `fs` backend, archive the `api-storage` volume instead:
 
 ```sh
-docker run --rm -v mc-server-dashboard-v2_api-storage:/data \
+docker run --rm -v mcsd_api-storage:/data \
   -v "$PWD":/backup debian:bookworm-slim \
   tar czf /backup/backup-storage.tar.gz -C /data .
 ```
 
-(The volume name is `<project>_api-storage`; `docker volume ls` shows the exact
-names for your project directory.) The worker scratch dir
+(The volume name is `<project>_api-storage`, where `<project>` is the project
+name `compose.yaml` pins — `mcsd` — unless you override it; `docker volume ls`
+shows the exact names.) The worker scratch dir
 (`MCSD_SCRATCH_DIR`) is a working set rebuilt from the API on demand and does not
 need backing up beyond the persisted `worker-id`.
 

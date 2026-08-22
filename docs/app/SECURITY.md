@@ -296,7 +296,7 @@ Anything mounted on the API's HTTP port is on the internet in this repo's
 recommended topology. The `cloudflared` service (`compose.yaml`, issue #1090)
 forwards the whole public hostname to `api:8000`, path-scoped by nothing, so the
 loopback publish (`127.0.0.1:${API_HTTP_PORT}:8000`) constrains only *host*
-reachability — not the tunnel, which reaches the API over the compose-internal
+reachability — not the tunnel, which reaches the API over the `mcsd`
 network. Any statement of the form "Compose publishes only the API port, so X is
 not exposed" is therefore false for X on that port. (This document made exactly
 that claim about `/api/metrics` from #285 until #2565; the tunnel landed after it
