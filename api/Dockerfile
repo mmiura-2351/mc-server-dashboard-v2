@@ -97,6 +97,14 @@ USER app
 
 EXPOSE 8000 50051
 
-# Default: serve the FastAPI app via the factory. The compose `migrate` service
-# overrides this with `alembic upgrade head`.
-CMD ["uvicorn", "mc_server_dashboard_api.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+# Default: serve the FastAPI app. The compose `migrate` service overrides this
+# with `alembic upgrade head`.
+#
+# No `--host` / `--port` here on purpose (issue #2585): `server.host` and
+# `server.http_port` are the authoritative bind, and flags baked into this image
+# would silently outrank them — an operator setting MCD_API_SERVER__HTTP_PORT
+# would get no error, no warning and no effect. The entry point reads the same
+# settings the app is built from and hands uvicorn the bind (`serve.py`); the
+# EXPOSE above still names the defaults (0.0.0.0:8000, :50051). Exec form, so
+# the python process is PID 1 and receives the container's SIGTERM directly.
+CMD ["python", "-m", "mc_server_dashboard_api.serve"]

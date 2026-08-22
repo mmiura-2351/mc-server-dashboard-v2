@@ -130,6 +130,17 @@ cp .env.example .env
 | `API_HTTP_PORT` | Published host port for the API HTTP surface | default `8000` |
 | `API_HTTP_BIND_IP` | Host interface for the API port; `127.0.0.1` (default) binds loopback only, `0.0.0.0` binds all interfaces | default `127.0.0.1` |
 
+Those two are the **host** side of the API's HTTP port — which host interface
+and host port compose publishes it on. The **container** side is
+`MCD_API_SERVER__HOST` / `MCD_API_SERVER__HTTP_PORT`, the settings the API
+process actually binds (CONFIGURATION.md Section 5.1); `compose.yaml` forwards
+both from `.env` and defaults them to `0.0.0.0` and `8000`, and derives the
+publish target, the healthcheck and the internal `http://api:…` base URLs from
+the port, so moving it moves them together. Leave both at their defaults unless
+you have a reason: `MCD_API_SERVER__HOST=127.0.0.1` in particular makes the
+published port unreachable from the host while the healthcheck still reports the
+service healthy.
+
 `POSTGRES_USER` and `POSTGRES_DB` default to `mcsd`; `MCD_API_CONTROL__WORKER_CREDENTIAL`
 is reused by the worker as its `MCD_WORKER_API_CREDENTIAL` (wired in
 `compose.yaml`), so both sides share the one secret. The two
@@ -788,6 +799,11 @@ To enable:
 
 2. Create a tunnel in the Cloudflare Zero Trust dashboard, add a public
    hostname pointing to `http://api:8000`, and copy the tunnel token.
+
+   That target lives in the Cloudflare dashboard, not in this repository, so it
+   is the one thing `MCD_API_SERVER__HTTP_PORT` (Section 3) does not move: if you
+   change the container-side port, update the public hostname's target to match
+   or the tunnel forwards to a closed port.
 
 3. Set the token in `.env`:
 
