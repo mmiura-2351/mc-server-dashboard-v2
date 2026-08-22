@@ -670,7 +670,12 @@ tracked port, not the archive's. A restore whose backup carries no
 create seeds; if that rewrite fails, the restore answers 503 `seed_failed` (the
 world data is restored, the seed is not — retry the restore).
 
-**Residual drift modes.** Three remain, all recoverable:
+**Residual drift modes.** Four remain, all recoverable:
+
+- A `server.properties` edited outside the API — on the worker host, or inside the
+  running container — is invisible to the platform until the next write path runs.
+  The DB keeps the tracked port and the file keeps the edit; the next port `PATCH`,
+  import, or restore overwrites it.
 
 - The port `PATCH`'s file write and DB commit are not atomic: if a concurrent
   `UNIQUE(game_port)` race loses at commit (response 409 `port_taken`),

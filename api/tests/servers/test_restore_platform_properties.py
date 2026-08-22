@@ -33,6 +33,7 @@ from mc_server_dashboard_api.servers.domain.backup import (
     BackupSource,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
+from mc_server_dashboard_api.servers.domain.errors import WorkingSetSeedFailedError
 from mc_server_dashboard_api.servers.domain.resource_pack import (
     ResourcePack,
     ResourcePackAssignment,
@@ -55,8 +56,10 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     ServerId as StorageServerId,
 )
 from tests.servers.fakes import (
+    FakeBackupArchiveStore,
     FakeBackupRepository,
     FakeClock,
+    FakeFileStore,
     FakePluginCacheStore,
     FakeServerRepository,
     FakeUnitOfWork,
@@ -261,6 +264,72 @@ async def test_restore_rewrites_the_pack_keys_from_the_assignment(
     assert props["require-resource-pack"] == "false"
     # The row carries no prompt, so the backup's prompt must not survive.
     assert "resource-pack-prompt" not in props
+
+
+async def test_restore_preserves_a_non_utf8_line(tmp_path: Path) -> None:
+    # A latin-1 motd is an ordinary server.properties (#2623). Re-applying the
+    # platform keys must round-trip those bytes: a strict decode would turn every
+    # restore of such a backup into a permanent 503, and retrying would not heal it.
+    storage = FsStorage(tmp_path, version_retention=10)
+    backup_store = StorageBackupStoreAdapter(storage=storage)
+    file_store = StorageFileStoreAdapter(storage=storage)
+    community_id, server_id = CommunityId(uuid.uuid4()), ServerId(uuid.uuid4())
+
+    await _publish(
+        storage,
+        community_id,
+        server_id,
+        {"server.properties": b"motd=caf\xe9\nserver-port=25565\n"},
+    )
+    storage_ref = uuid.uuid4().hex
+    await backup_store.create_from_current(
+        community_id=community_id, server_id=server_id, storage_ref=storage_ref
+    )
+    servers = FakeServerRepository()
+    servers.seed(_server(server_id, community_id))
+    backups = FakeBackupRepository()
+    backup = _backup(server_id, storage_ref)
+    backups.seed(backup)
+
+    await RestoreBackup(
+        uow=FakeUnitOfWork(servers=servers, backups=backups),
+        backup_store=backup_store,
+        file_store=file_store,
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+        public_base_url=_BASE_URL,
+        token_generator=lambda: "generated-secret",
+    )(community_id=community_id, server_id=server_id, backup_id=backup.id)
+
+    content = await file_store.read_file(
+        community_id=community_id, server_id=server_id, rel_path="server.properties"
+    )
+    assert b"motd=caf\xe9\n" in content
+    assert b"server-port=26590\n" in content
+
+
+async def test_restore_reports_seed_failure_when_the_rewrite_fails() -> None:
+    # The archive published but the properties rewrite did not: the world data is
+    # restored while the DB's port / RCON / pack values are not, so the use case
+    # raises the seed-failure the edge maps to 503 rather than reporting success
+    # over a file that binds a stale port.
+    community_id, server_id = CommunityId(uuid.uuid4()), ServerId(uuid.uuid4())
+    servers = FakeServerRepository()
+    servers.seed(_server(server_id, community_id))
+    backups = FakeBackupRepository()
+    backup = _backup(server_id, "ref")
+    backups.seed(backup)
+    backup_store = FakeBackupArchiveStore()
+    backup_store.archives.add("ref")
+
+    with pytest.raises(WorkingSetSeedFailedError):
+        await RestoreBackup(
+            uow=FakeUnitOfWork(servers=servers, backups=backups),
+            backup_store=backup_store,
+            file_store=FakeFileStore(fail_write=True),
+            cache=FakePluginCacheStore(),
+            clock=FakeClock(_NOW),
+        )(community_id=community_id, server_id=server_id, backup_id=backup.id)
 
 
 async def test_restore_seeds_properties_when_the_backup_has_none(

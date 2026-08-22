@@ -78,12 +78,30 @@ def _split_content_lines(content: bytes) -> list[str]:
 
     An empty input becomes no lines, so callers that only append produce a file
     with just their appended lines.
+
+    ``surrogateescape`` because a ``server.properties`` is not required to be valid
+    UTF-8 -- a latin-1 ``motd`` is ordinary, and the comparison guard went
+    byte-level for exactly that reason (#2623). Undecodable bytes become lone
+    surrogates that :func:`_join_lines` turns back into the original bytes, so a
+    rewrite preserves them instead of raising on a file it has no business
+    rejecting (issue #2621).
     """
 
-    lines = content.decode().split("\n")
+    lines = content.decode(errors="surrogateescape").split("\n")
     if lines and lines[-1] == "":
         lines.pop()
     return lines
+
+
+def _join_lines(lines: list[str]) -> bytes:
+    """Encode property ``lines`` back to file bytes, one trailing newline.
+
+    Mojang's convention (and the create-seed format ``server-port=<port>\n``) is a
+    single trailing newline. ``surrogateescape`` restores whatever
+    :func:`_split_content_lines` could not decode.
+    """
+
+    return ("\n".join(lines) + "\n").encode(errors="surrogateescape")
 
 
 def _is_key_line(line: str, key: str) -> bool:
@@ -174,9 +192,7 @@ def set_server_port(content: bytes, port: int) -> bytes:
     """
 
     lines = _set_property(_split_content_lines(content), _PORT_KEY, str(port))
-    # Always end with a single trailing newline (Mojang's convention and the
-    # create-seed format ``server-port=<port>\n``).
-    return ("\n".join(lines) + "\n").encode()
+    return _join_lines(lines)
 
 
 def set_rcon_properties(content: bytes, *, password: str) -> bytes:
@@ -197,7 +213,7 @@ def set_rcon_properties(content: bytes, *, password: str) -> bytes:
     existing = _get_property(lines, _RCON_PASSWORD_KEY)
     if not existing:
         lines = _set_property(lines, _RCON_PASSWORD_KEY, password)
-    return ("\n".join(lines) + "\n").encode()
+    return _join_lines(lines)
 
 
 def set_resource_pack_properties(
@@ -223,7 +239,7 @@ def set_resource_pack_properties(
     )
     if prompt is not None:
         lines = _set_property(lines, _RESOURCE_PACK_PROMPT_KEY, prompt)
-    return ("\n".join(lines) + "\n").encode()
+    return _join_lines(lines)
 
 
 def apply_overrides(content: bytes, overrides: dict[str, str]) -> bytes:
@@ -238,7 +254,7 @@ def apply_overrides(content: bytes, overrides: dict[str, str]) -> bytes:
     lines = _split_content_lines(content)
     for key, value in overrides.items():
         lines = _set_property(lines, key, value)
-    return ("\n".join(lines) + "\n").encode()
+    return _join_lines(lines)
 
 
 def remove_keys(content: bytes, keys: AbstractSet[str]) -> bytes:
@@ -252,7 +268,7 @@ def remove_keys(content: bytes, keys: AbstractSet[str]) -> bytes:
     lines = _split_content_lines(content)
     for key in keys:
         lines = _clear_property(lines, key)
-    return ("\n".join(lines) + "\n").encode()
+    return _join_lines(lines)
 
 
 def changed_platform_managed_keys(current: bytes, incoming: bytes) -> list[str]:
@@ -362,4 +378,4 @@ def clear_resource_pack_properties(content: bytes) -> bytes:
     lines = _clear_property(lines, _RESOURCE_PACK_SHA1_KEY)
     lines = _clear_property(lines, _REQUIRE_RESOURCE_PACK_KEY)
     lines = _clear_property(lines, _RESOURCE_PACK_PROMPT_KEY)
-    return ("\n".join(lines) + "\n").encode()
+    return _join_lines(lines)

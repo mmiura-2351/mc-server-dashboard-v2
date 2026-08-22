@@ -450,3 +450,22 @@ def test_apply_platform_properties_removes_the_prompt_when_the_row_has_none() ->
         ),
     )
     assert b"resource-pack-prompt" not in result
+
+
+def test_rewrites_preserve_a_non_utf8_line() -> None:
+    # A latin-1 motd is an ordinary server.properties (issue #2623 made the guard
+    # byte-level for it); the rewrites must round-trip those bytes rather than
+    # raising, or a restore of such a file would 503 forever (issue #2621).
+    content = b"motd=caf\xe9\nserver-port=25565\n"
+    assert set_server_port(content, 26590) == b"motd=caf\xe9\nserver-port=26590\n"
+
+
+def test_apply_platform_properties_preserves_a_non_utf8_line() -> None:
+    result = apply_platform_properties(
+        b"motd=caf\xe9\nserver-port=25565\n",
+        game_port=26590,
+        rcon_password="fresh",
+        resource_pack=None,
+    )
+    assert b"motd=caf\xe9\n" in result
+    assert b"server-port=26590\n" in result
