@@ -415,8 +415,8 @@ nothing else.
 **The bind address is not the control.** `metrics.host` defaults to `0.0.0.0`
 rather than the relay's `127.0.0.1` because the API's canonical deployment is a
 container: loopback there means "reachable only from inside the API container",
-so no sibling service on the compose network — which is where a scraper runs —
-could ever scrape it. What keeps the endpoint private is that `compose.yaml`
+so no sibling service on `mcsd` — the control-plane network, which is where a
+scraper runs — could ever scrape it. What keeps the endpoint private is that `compose.yaml`
 never publishes the port and that the tunnel's public hostname is mapped to
 `api:8000`. This mirrors `server.host`, which binds `0.0.0.0` in the container
 for the same reason. The relay differs because it *is* an edge process with
