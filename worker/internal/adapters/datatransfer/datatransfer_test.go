@@ -1412,8 +1412,9 @@ func TestHydrateSwapChangesDestDirIdentity(t *testing.T) {
 
 // A SECOND hydrate over the same id must KEEP the tree already at .displaced-<id> and
 // discard the working set it just displaced (oldest-wins, issue #2278). A surviving
-// .displaced-<id> proves no snapshot for this id has succeeded since it was created
-// (any success calls sweepDisplaced), so both trees are unpublished branches; the policy
+// .displaced-<id> means no snapshot for this id has succeeded since it was created (any
+// success calls sweepDisplaced, bar one that declined the sweep because the tree it packed
+// had been replaced, issue #2291), so both trees are unpublished branches; the policy
 // retains the FIRST one. At most one displaced tree per server still holds (#906), and
 // the superseded set must leave no .hydrate-* leftover behind.
 func TestHydrateKeepsOldestDisplacedTree(t *testing.T) {

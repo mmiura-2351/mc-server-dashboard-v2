@@ -1058,6 +1058,41 @@ HTTP surface on that interface, not only the data-plane routes (one bind serves
 the whole REST API, `compose.yaml`), so the non-loopback-bind caveats elsewhere
 in this section apply here in full.
 
+### The relay tunnel port for a cross-host worker (issue #2627)
+
+A cross-host worker on a **relay-enabled** deployment needs one more thing: the
+relay's Worker dial-back port, `25665`, published on an address it can reach.
+`compose.yaml` publishes it on `127.0.0.1` by default —
+`${RELAY_CONTROL_BIND_IP:-127.0.0.1}:25665:25665` — because the in-compose
+worker does not use the host port at all. It dials whatever
+`MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT` advertises, and on a single host that is
+`relay:25665`, the relay's address on the `mcsd` network. The loopback default
+is what keeps the dial-back port out of reach of the Minecraft containers, which
+otherwise reach every interface-published port through the bridge gateway
+([`../app/SECURITY.md`](../app/SECURITY.md) Section 6).
+
+For a worker on another host, set **both** — the bind and the advertised
+endpoint — to the same reachable address on the relay host:
+
+```sh
+# in .env on the relay/API host
+RELAY_CONTROL_BIND_IP=10.0.0.5
+MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT=10.0.0.5:25665
+```
+
+Setting only the endpoint leaves the port on loopback and the remote worker's
+dial is refused; setting only the bind leaves the worker still dialling
+`relay:25665`, which does not resolve off the `mcsd` network. The tunnel
+certificate's SAN must match the hostname part of the endpoint you advertise —
+regenerate it when you change that value (see the relay TLS material
+subsection in [Section 12](#12-relay-game-ingress-epic-659)); for a raw-IP
+endpoint the SAN has to be an IP SAN.
+
+This is a real interface, not a private one: `25665` carries the TLS tunnel the
+worker dials, so unlike the gRPC control plane above it is safe to expose on a
+network the worker can reach. It is still an inbound listener on the relay host
+— firewall it to the worker's address rather than to the whole network.
+
 ## 9. Upgrade
 
 Pull the new revision and rebuild; `migrate` re-runs `alembic upgrade head`
@@ -1216,6 +1251,31 @@ container was replaced, so the existing stamp still describes what is running.
 > ```sh
 > API_HTTP_BIND_IP=0.0.0.0
 > ```
+
+> **Upgrade note — the relay's Worker dial-back port now binds to loopback by
+> default (issue #2627).** `compose.yaml` publishes the relay's `25665` on
+> `${RELAY_CONTROL_BIND_IP:-127.0.0.1}` instead of on every interface. The three
+> other relay publications — `25565`, `25675/udp` and `19132-19231/udp` — are
+> unchanged. This closes a path that network segmentation does not: a port
+> published with no host IP is DNATed from every interface, so a plugin in a
+> Minecraft container reached the dial-back tunnel through the bridge gateway
+> even after the MC containers moved off `mcsd`
+> ([`../app/SECURITY.md`](../app/SECURITY.md) Section 6).
+>
+> **A single-host deployment needs `MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT=relay:25665`
+> in `.env`.** The in-compose worker dials whatever that variable advertises; on
+> the internal `mcsd` network the relay answers as `relay:25665` and no host
+> publication is involved. If yours advertises a **host** address instead — the
+> shape earlier revisions of this document suggested — the worker's dial is
+> refused after this upgrade, and the tunnel never comes up. Either switch the
+> endpoint to `relay:25665` and regenerate the tunnel certificate with a
+> matching SAN (`subjectAltName=DNS:relay`, see "TLS material" in
+> [Section 12](#12-relay-game-ingress-epic-659)), or keep the host address and
+> add `RELAY_CONTROL_BIND_IP=<that address>` to `.env` before rebuilding.
+>
+> **A worker on another host** keeps needing the port off loopback: set both
+> `RELAY_CONTROL_BIND_IP` and `MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT` to an address
+> that worker can reach ([Section 8](#8-tls-guidance)).
 
 > **Breaking change — PostgreSQL 17 to 18, and `db-data` now mounts at
 > `/var/lib/postgresql` (issue #2133).** `compose.yaml` runs `postgres:18`, which
@@ -1618,8 +1678,9 @@ directory you own (set `MCD_RELAY_TLS_DIR` in `.env` to this path):
 mkdir -p /etc/mcsd/relay
 chmod 755 /etc/mcsd/relay    # must be traversable by the container user (uid 10001)
 # Replace <tunnel-host> with the hostname part of MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT
-# (e.g. relay.example.com). The SAN must match the host the Worker dials — Go
-# ignores CN and requires a matching DNS or IP SAN.
+# (`relay` for the in-compose worker; e.g. relay.example.com for one on another
+# host). The SAN must match the host the Worker dials — Go ignores CN and
+# requires a matching DNS or IP SAN.
 # For a raw-IP endpoint use: -addext "subjectAltName=IP:<addr>"
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
   -keyout /etc/mcsd/relay/tunnel-key.pem \
@@ -1664,8 +1725,20 @@ relay advertises an empty CA bundle and Workers fall back to their system roots.
    | `MCD_API_RELAY__CREDENTIAL` | `openssl rand -base64 48` |
    | `MCD_API_RELAY__ENABLED` | set to `true` |
    | `MCD_API_RELAY__BASE_DOMAIN` | e.g. `mc.example.com` |
-   | `MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT` | e.g. `<host>:25665` |
+   | `MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT` | `relay:25665` for the in-compose worker; `<reachable-host>:25665` for a worker on another host |
+   | `RELAY_CONTROL_BIND_IP` | leave unset (loopback) for the in-compose worker; the same reachable address for a worker on another host |
    | `MCD_RELAY_TLS_DIR` | host path to `tunnel-cert.pem` / `tunnel-key.pem` |
+
+   The last two go together (issue #2627). `25665` is the Worker dial-back, not
+   a player port, so `compose.yaml` publishes it on `127.0.0.1` by default: the
+   in-compose worker reaches the relay over the `mcsd` network as `relay:25665`
+   and never touches the host port, and the loopback bind is what keeps the
+   dial-back out of reach of the Minecraft containers
+   ([`../app/SECURITY.md`](../app/SECURITY.md) Section 6). Only a worker on
+   another host needs the port off loopback — see
+   [Section 8](#the-relay-tunnel-port-for-a-cross-host-worker-issue-2627). The
+   three player-facing / Bedrock publications (`25565`, `25675/udp`,
+   `19132-19231/udp`) are on every interface either way.
 
 3. Rebuild and bring the stack up:
 
@@ -1761,7 +1834,7 @@ relay control surface is active.
 | Port | Protocol | Direction | Purpose |
 |---|---|---|---|
 | 25565 | TCP | inbound | player game connections |
-| 25665 | TCP | inbound | Worker dial-back (TLS tunnel) |
+| 25665 | TCP | host-local (loopback) by default | Worker dial-back (TLS tunnel). Published on `${RELAY_CONTROL_BIND_IP:-127.0.0.1}`, so the in-compose worker (which dials `relay:25665` over `mcsd`) needs nothing inbound here. Open it — and set both `RELAY_CONTROL_BIND_IP` and `MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT` — only for a worker on another host (issue #2627, Section 8) |
 | 25675 | UDP | inbound | Worker's Bedrock QUIC tunnel dial-back (epic #1540, `bedrock.tunnel_listen`) — only when the Bedrock gate is on |
 | 19132-19231 | UDP | inbound | Bedrock player connections (`ports.bedrock_range_start..end` default window) — only when the Bedrock gate is on |
 | 50051 | TCP | internal (the `mcsd` network only — not `mcsd-servers`) | gRPC control plane (not published) |

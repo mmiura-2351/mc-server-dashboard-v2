@@ -55,8 +55,8 @@ type fakeTransfer struct {
 	// preceding PackSnapshot was given — after the pack, before the caller's
 	// post-upload tail (recordGenerationIfUnchanged -> sweepDisplaced). It models a
 	// NEW stream's re-placement hydrate replacing the working dir while this (old,
-	// dropped) stream's snapshot is still finishing that tail, the cross-stream
-	// window issue #2284 closes for the marker stamp.
+	// dropped) stream's snapshot is still finishing that tail — the cross-stream window
+	// issue #2284 closes for the marker stamp and issue #2291 for the displaced sweep.
 	duringUpload func(workingDir string)
 }
 
@@ -209,6 +209,7 @@ func TestHydrateTriggerOnRunningServerIsInvalidState(t *testing.T) {
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
 
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("start failed: %+v", res)
 	}
@@ -278,6 +279,7 @@ func TestSnapshotTriggerRunningServerBracketsCopyWithSaveOffOn(t *testing.T) {
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
 
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -299,6 +301,7 @@ func TestSnapshotTriggerRunningServerSaveOffBracketsTheTransfer(t *testing.T) {
 	tr := &fakeTransfer{seq: &seq}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
 
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -320,6 +323,7 @@ func TestSnapshotTriggerRunningServerSaveOnRunsOnTransferError(t *testing.T) {
 	tr := &fakeTransfer{seq: &seq, uploadErr: errors.New("boom")}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
 
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -343,6 +347,7 @@ func TestSnapshotTriggerRunningServerSaveOnRunsWhenContextCancelled(t *testing.T
 	ctrl := &fakeControl{reply: "ok", failOnCancelled: true}
 	m := newManager(t, &fakeDriver{}, ctrl)
 
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -375,6 +380,7 @@ func TestSnapshotTriggerRunningServerSaveOffFailureRefusesQuiesceUnavailable(t *
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
 
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -436,6 +442,7 @@ func TestSnapshotTriggerRunningServerSaveAllFailureRefusesButRestoresSaveOnViaRe
 	tr := &fakeTransfer{}
 	m := newManagerWithControls(t, &fakeDriver{}, quiesce, fresh).WithTransfer(tr)
 
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -480,6 +487,7 @@ func TestSnapshotTriggerRunningServerSettleTimeoutRefusesAndRestores(t *testing.
 		return regionState{"r.0.0.mca": {modTime: time.Unix(0, 0), size: int64(calls)}}, nil
 	}
 
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -583,6 +591,7 @@ func TestSnapshotTriggerUploadFailureSaveOnAlreadyRestored(t *testing.T) {
 	tr := &fakeTransfer{seq: &seq, uploadErr: errors.New("upload boom")}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
 
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -619,6 +628,7 @@ func TestSnapshotTriggerPackFailureRestoresSaveOnAndSkipsUpload(t *testing.T) {
 	tr := &fakeTransfer{seq: &seq, packErr: errors.New("pack boom")}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
 
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}

@@ -283,7 +283,7 @@ running-server file access.
 
 | Command | Meaning | Result payload | Req. ref |
 |---|---|---|---|
-| `StartServer` | Launch the server (after a preceding hydrate). Carries the driver, JAR relpath, MC version (Worker picks the Java runtime), launch mode (`jar` is the default JAR launch; `forge-argsfile` launches Forge via its generated args file, running a supervised installer first when the working set is uninstalled), optional `memory_limit_bytes` (per-server memory ceiling; 0/unset = driver default; #706), and optional `cpu_millis` (soft CPU allocation in millicores; 0/unset = driver default; #723). | none | FR-SRV-2, FR-EXE-5, ARCHITECTURE.md Section 7.3 |
+| `StartServer` | Launch the server (after a preceding hydrate). Carries the driver, JAR relpath, MC version (Worker picks the Java runtime), launch mode (`jar` is the default JAR launch; `forge-argsfile` launches Forge via its generated args file, running a supervised installer first when the working set is uninstalled), optional `memory_limit_bytes` (per-server memory ceiling; 0/unset = driver default; #706), and optional `cpu_millis` (soft CPU allocation in millicores; 0/unset = driver default; #723). The "after a preceding hydrate" is enforced, not assumed: a start whose working dir is absent at the scratch root is refused `SERVER_NOT_FOUND` rather than launched into an empty directory the start itself creates (issue #2499, Section 7). | none | FR-SRV-2, FR-EXE-5, ARCHITECTURE.md Section 7.3 |
 | `StopServer` | Stop the server; graceful stop triggers an event-driven snapshot. `force` skips graceful. | none | FR-SRV-2, FR-DATA-7 |
 | `RestartServer` | Stop then start in place. | none | FR-SRV-2 |
 | `ServerCommand` | Forward an RCON/console line. | `command_output` | FR-SRV-5 |
@@ -477,7 +477,7 @@ classes a Worker can hit:
 
 | Code | When |
 |---|---|
-| `SERVER_NOT_FOUND` | The target server is unknown to this Worker (no live instance: stop/restart/command on a not-running server, a missing file target, or a stopped-id snapshot whose working dir is absent — already GC'd after a published final snapshot, or never hydrated; issue #1713). Where a command's precondition is "this server is running", the code means the Worker holds neither an instance nor a **failed-stop orphan** for the id: the orphan answers `INVALID_STATE` or `BUSY` instead, per the split below (issue #2466/#2476). |
+| `SERVER_NOT_FOUND` | The target server is unknown to this Worker (no live instance: stop/restart/command on a not-running server, a missing file target, or a stopped-id snapshot whose working dir is absent — already GC'd after a published final snapshot, or never hydrated; issue #1713). On a `StartServer` it is the same statement about the working set rather than about an instance: the API issues a `HydrateTrigger` before every start that needs one, so an absent working dir at launch means the API skipped the hydrate — its held-working-set inventory said this Worker holds a generation at least as fresh as the store — over a set the Worker does not actually hold. Launching would boot the server into an empty directory and the next snapshot would publish that, so the start is refused instead and the API re-launches WITH a full hydrate (issue #2499). Both cases carry the phrase `working dir absent` in the message, which is how the API tells them from any other `SERVER_NOT_FOUND`. Where a command's precondition is "this server is running", the code means the Worker holds neither an instance nor a **failed-stop orphan** for the id: the orphan answers `INVALID_STATE` or `BUSY` instead, per the split below (issue #2466/#2476). |
 | `INVALID_STATE` | The command is invalid for the current **settled** state: start or hydrate a running server, or a restart, console command, relay tunnel dial or Bedrock tunnel open over a server with a failed-stop orphan pending termination (issue #2466). The orphan is a process this Worker could not confirm dead, so it may still be alive holding its port and writing its world; reporting it as not-running would tell the operator a live server is down. Those four verbs are refused for **what the state is** and are never carried out later, so naming the state is the honest answer — unlike start / hydrate / stopped-id snapshot over the same orphan, which will succeed once it converges and therefore answer `BUSY` (issue #2476). Two commands are deliberately exempt from the orphan refusal entirely: `StopServer` *takes* the orphan and re-attempts the driver Stop (the path that resolves it on demand), and `CloseBedrockTunnel` takes no running check at all, so a tunnel that outlived its server can still be torn down. |
 | `BUSY` | The command was refused without being applied because the server's id is not free yet, and the refusal is **not** a statement about a settled state: either another mutating lifecycle command is already in flight (the reservation race, issue #824) or the Worker holds a failed-stop orphan it is still converging (issue #2476). In both cases the outcome is not yet known and **this same command will be accepted once the Worker settles**, so the API keeps the assignment/intent and retries on a later tick rather than converging an observed state. Answering `INVALID_STATE` for the orphan was issue #2467's wedge: the API reads `INVALID_STATE` on a start as "already running", so a refusal over an orphan whose process was already **dead** manufactured a permanent false `observed=running` — a converged row is settled, so the reconciler never re-selected it and no `StatusChange` was ever coming. As of issue #2475 the Worker converges the orphan itself — it probes the instance's real liveness on a backoff, retries the stop while it is alive, retires the record and reports `stopped` once it is confirmed gone, and reports `SERVER_STATE_UNKNOWN` while the backend cannot answer — which is what makes the `BUSY` promise true. The record also still clears on its own if the process exits, via the instance's status pump. |
 | `DRIVER_UNAVAILABLE` | The requested execution driver is not offered by this Worker. |
@@ -500,16 +500,33 @@ is pinned, as data, by
 [`proto/contract/command_error_contract.json`](../../proto/contract/command_error_contract.json)
 — the single source of truth shared across both languages. The table above
 classifies the codes; the JSON binds the exact `(kind, precondition) -> code`
-rows. Two table-driven tests hold both sides to it (issue #204):
+rows.
+
+The table is **exhaustive over Worker emissions**, not over API match sites
+(issue #2472): it declares every kind `Manager.Handle` dispatches and every
+precondition the rows key on, and carries one row for each cell of that matrix.
+A cell whose precondition determines no emission for that kind carries the code
+`unaffected` plus a `why` saying how we know, so an absent row always means
+*forgotten* — never *not applicable*. Every row with a real error code also
+states how the API treats it: the sites that match it, the catch-all
+`command_failed`, or `fire_and_forget` for a kind whose result the API never
+awaits.
+
+Three table-driven tests hold both sides to it (issues #204, #2472):
 
 - the Worker test
   (`worker/internal/application/instancemanager/contract_test.go`) drives the
   instancemanager into each precondition and asserts the emitted code equals the
   table, so a code change without a table update fails the Worker suite;
-- the API test (`api/tests/servers/test_command_error_contract.py`) asserts every
-  `CommandStatus` the API's convergence / special-case logic matches on is a
-  `(kind, code)` the table says the Worker actually emits, so an API match on a
-  code the Worker never produces (the #202 incident) fails the API suite.
+- the same file checks the table against the *matrix* and against `Handle`'s
+  switch, so a precondition or a command kind with no row fails there too — the
+  gap that let a Worker emission stay unrecorded while both suites were green;
+- the API test (`api/tests/servers/test_command_error_contract.py`) derives its
+  expectations from the rows' API column: the sites the table declares must be
+  exactly the `CommandStatus` matches an `ast` scan finds under
+  `api/src/mc_server_dashboard_api/servers/application/`, so an API match on a
+  code the Worker never produces (the #202 incident) has no row to live on, and
+  a site added or removed in source fails the API suite.
 
 Add a new convergence match or change a Worker emission only together with the
 table; the asymmetry is intentional — drift on either side fails that side's CI.

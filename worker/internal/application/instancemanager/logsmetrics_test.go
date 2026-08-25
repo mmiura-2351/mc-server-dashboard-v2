@@ -141,6 +141,7 @@ func TestManagerForwardsLogs(t *testing.T) {
 	d := &richDriver{}
 	m := newRichManager(t, d, &fakeClock{})
 
+	seedScratch(t, m, "s1")
 	res := m.Handle(context.Background(), startCmd())
 	if !res.Success {
 		t.Fatalf("start = %+v", res)
@@ -166,6 +167,7 @@ func TestManagerEmitsMetricsOnCadence(t *testing.T) {
 	clk := &fakeClock{}
 	m := newRichManager(t, d, clk)
 
+	seedScratch(t, m, "s1")
 	res := m.Handle(context.Background(), startCmd())
 	if !res.Success {
 		t.Fatalf("start = %+v", res)
@@ -201,6 +203,7 @@ func TestManagerEmitsUpOnlyMetricsWithoutStatsSource(t *testing.T) {
 		}).
 		WithMetrics(clk, time.Hour)
 
+	seedScratch(t, m, "s1")
 	res := m.Handle(context.Background(), startCmd())
 	if !res.Success {
 		t.Fatalf("start = %+v", res)
@@ -231,6 +234,7 @@ func TestMetricsPumpStopsAfterInstanceExit(t *testing.T) {
 	clk := &fakeClock{}
 	m := newRichManager(t, d, clk)
 
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("start = %+v", res)
 	}
@@ -317,6 +321,7 @@ func TestMetricsSampleCancelledOnTeardown(t *testing.T) {
 		}).
 		WithMetrics(clk, time.Hour)
 
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("start = %+v", res)
 	}

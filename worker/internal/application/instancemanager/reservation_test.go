@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -106,6 +108,7 @@ func TestConcurrentDuplicateStartStartsDriverOnce(t *testing.T) {
 	m := newManager(t, d, nil)
 
 	firstDone := make(chan session.CommandResult, 1)
+	seedScratch(t, m, "s1")
 	go func() { firstDone <- m.Handle(context.Background(), startCmd()) }()
 
 	// The first start is now blocked inside driver.Start; the reservation is held.
@@ -134,6 +137,7 @@ func TestReservationReleasedAfterStartFailure(t *testing.T) {
 	d.startErr = context.DeadlineExceeded
 	m := newManager(t, d, nil)
 
+	seedScratch(t, m, "s1")
 	go func() { _ = m.Handle(context.Background(), startCmd()) }()
 	awaitEnter(t, d.entered)
 	close(d.release) // first start fails
@@ -203,6 +207,7 @@ func TestResentStopDuringDetachedStopRejectedBusy(t *testing.T) {
 	d := &gatedStopDriver{}
 	m := newManager(t, d, nil).WithTransfer(&fakeTransfer{})
 
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -332,6 +337,7 @@ func TestResentStopDuringOrphanRetryRejectedBusy(t *testing.T) {
 	d := &gatedOrphanDriver{}
 	m := newManager(t, d, nil).WithTransfer(&fakeTransfer{})
 
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -392,6 +398,7 @@ func TestResentStopDuringOrphanRetryRejectedBusy(t *testing.T) {
 func TestRestartUnavailableDriverLeavesInstanceTracked(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, &fakeControl{reply: "ok"}).WithTransfer(&fakeTransfer{})
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("seed running instance: %+v", res)
 	}
@@ -441,6 +448,7 @@ func TestRestartNeverLeaksReservation(t *testing.T) {
 	}
 
 	// The id must not be leaked as reserved: a StartServer must succeed (not BUSY).
+	seedScratch(t, m, "s1")
 	start := m.Handle(context.Background(), startCmd())
 	if !start.Success {
 		t.Fatalf("start after restart of unknown id = %+v, want success (reservation must not leak)", start)
@@ -456,6 +464,7 @@ func TestRestartRacingStartCompletion(t *testing.T) {
 
 	// Start a server but hold it inside driver.Start.
 	startDone := make(chan session.CommandResult, 1)
+	seedScratch(t, m, "s1")
 	go func() { startDone <- m.Handle(context.Background(), startCmd()) }()
 	awaitEnter(t, d.entered)
 
@@ -486,6 +495,7 @@ func TestRestartMidStartStillBusy(t *testing.T) {
 	m := newManager(t, d, nil)
 
 	// Hold a StartServer mid-driver.Start.
+	seedScratch(t, m, "s1")
 	go func() { _ = m.Handle(context.Background(), startCmd()) }()
 	awaitEnter(t, d.entered)
 
@@ -514,6 +524,14 @@ func TestRestartConcurrentStartNeverLeaksReservation(t *testing.T) {
 
 	for i := 0; i < iterations; i++ {
 		id := fmt.Sprintf("srv-%d", i)
+		// The window only exists if the start actually COMMITS an instance, so the id
+		// needs a working set: since issue #2499 a start over an absent working dir is
+		// refused before driver.Start, which would make every iteration a no-op and
+		// neuter this stress test silently. A bare MkdirAll is enough — the race is
+		// about the start committing, not about what the tree contains.
+		if err := os.MkdirAll(filepath.Join(m.scratchDir, id), 0o750); err != nil {
+			t.Fatal(err)
+		}
 		var wg sync.WaitGroup
 		wg.Add(2)
 
@@ -545,5 +563,15 @@ func TestRestartConcurrentStartNeverLeaksReservation(t *testing.T) {
 		if leaked {
 			t.Fatalf("iteration %d: reserved[%s] leaked after concurrent start+restart (issue #1950)", i, id)
 		}
+	}
+
+	// Pin that the loop really drove the window. Everything above asserts the absence
+	// of a leak only a COMMITTED start can produce, so anything that stops the starts
+	// landing turns this stress test green while testing nothing — which is exactly
+	// what happened when issue #2499's launch-time guard arrived and no id had a
+	// working set. Counting the driver's launches makes that failure loud.
+	if starts := d.startCount(); starts < iterations/2 {
+		t.Fatalf("driver started %d times over %d iterations: far too few for the "+
+			"start-vs-restart window to be exercised — this stress test has been neutered", starts, iterations)
 	}
 }

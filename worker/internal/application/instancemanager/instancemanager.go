@@ -211,6 +211,16 @@ type Manager struct {
 	// the real filesystem.
 	scanRegion func(root string) (regionState, error)
 
+	// snapshotAfterRunningCheck, when non-nil, runs between handleSnapshot's
+	// UNRESERVED running check and the stopped path's reserve() -- the window in
+	// which a start can register an instance and turn that reserve() into the
+	// "already running" INVALID_STATE refusal. Production leaves it nil; the
+	// contract test sets it so the {SnapshotTrigger, snapshot_reserve_race} row of
+	// proto/contract/command_error_contract.json is driven by the real interleaving
+	// instead of asserted by prose (issue #2472). A field, not a package var, so it
+	// belongs to the manager under test -- mirroring scanRegion above.
+	snapshotAfterRunningCheck func(serverID string)
+
 	// orphanProbeInterval / orphanProbeMaxInterval are the failed-stop-orphan
 	// converger's probe cadence and its exponential-backoff cap (issue #2475).
 	// They are fields (not consts) so tests can shrink them to milliseconds,
@@ -745,6 +755,13 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	m.mu.Lock()
 	_, running := m.instances[cmd.ServerID]
 	m.mu.Unlock()
+	// The running flag is read outside any reservation, so a start can register an
+	// instance between here and the stopped path's reserve() below; the contract
+	// table records what that race emits, and this seam is how the test enters it
+	// deterministically (issue #2472).
+	if hook := m.snapshotAfterRunningCheck; hook != nil {
+		hook(cmd.ServerID)
+	}
 	workingDir := filepath.Join(m.scratchDir, cmd.ServerID)
 	// restore re-enables auto-save after the quiesce. Declared here so it is
 	// accessible after the if/else for the explicit restore() call between pack and
@@ -810,62 +827,55 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// is intentionally not taken.
 		//
 		// The same no-reservation choice leaves TWO further cross-stream edges in the
-		// post-upload tail, and they are not equally bad. The sharper one (issue #2284)
-		// was the marker stamp: a stale snapshot writing the newly published generation
-		// onto a tree a concurrent hydrate had just swapped in, leaving a marker NEWER
-		// than its tree — which does not merely cost a hydrate, it defeats the #767 gate
-		// that would have corrected the tree, so the server boots the wrong generation
-		// silently. That one is closed WITHOUT a reservation, by pinning the working
-		// dir's identity above and refusing the stamp when it no longer matches, so the
-		// item-4 decision stands. The sweep edge below remains.
+		// post-upload tail, and BOTH are closed by the one mechanism pinned above — the
+		// working dir's identity. Neither needed a reservation, so the item-4 decision
+		// stands for both.
 		//
-		// The second, narrower edge (issue #917 item 3): an old dropped stream's snapshot
-		// can SUCCEED and call
+		// The sharper one (issue #2284) was the marker stamp: a stale snapshot writing the
+		// newly published generation onto a tree a concurrent hydrate had just swapped in,
+		// leaving a marker NEWER than its tree — which does not merely cost a hydrate, it
+		// defeats the #767 gate that would have corrected the tree, so the server boots the
+		// wrong generation silently. The stamp is refused when the identity no longer
+		// matches.
+		//
+		// The second, narrower edge (issue #917 item 3, closed by issue #2291): an old
+		// dropped stream's snapshot can SUCCEED and call
 		// sweepDisplaced(serverID) below while a NEW stream's re-placement hydrate for the
 		// same id has just renamed the live working set aside to .displaced-<id>
-		// (datatransfer.unpackAndSwap step (2)) — the sweep then deletes THAT hydrate's
-		// recovery copy. Same-stream overlap is excluded by the per-server FIFO lanes as
-		// above. Cross-stream is bounded by a ctx asymmetry: the upload runs on
+		// (datatransfer.unpackAndSwap step (2)) — an ungated sweep then deletes THAT
+		// hydrate's recovery copy. Same-stream overlap is excluded by the per-server FIFO
+		// lanes as above. Cross-stream is bounded by a ctx asymmetry: the upload runs on
 		// transferContext, derived from the stream's serveCtx, so a stream drop cancels the
 		// in-flight upload and the snapshot fails before any sweep. Only the post-upload
-		// tail is exposed — and of that tail only the sweep half now, the marker-stamp
-		// half being guarded by the identity pin — and the new stream must
-		// meanwhile reconnect, register, and download+unpack a whole working set to reach
-		// its displace. PackSnapshot ignores ctx, which is why the torn-capture case above
-		// stays wide while this one does not.
+		// tail was exposed — and the new stream must meanwhile reconnect, register, and
+		// download+unpack a whole working set to reach its displace. PackSnapshot ignores
+		// ctx, which is why the torn-capture case above stays wide while this one was
+		// narrow to begin with.
 		//
-		// Accepted, not closed — but note what the snapshot's success does NOT prove. It
-		// publishes the state as of its PACK, not the tree the sweep removes: restore()
-		// re-enables auto-save at the pack/upload split (below), and a GRACEFUL stop on the
-		// racing stream additionally drives a shutdown save into the same dir before the
-		// hydrate displaces it (a forced stop does not, but the resumed auto-save has
-		// already written), so the removed tree is the published prefix PLUS an unpublished
-		// delta. The loss is
-		// bounded to progression since that pack — the store still holds a real generation
-		// of this world, so the server itself is recoverable by re-hydrating — but the bound
-		// is that pack, not the displacement, and if two hydrate cycles fit inside one
-		// upload window the delta can be an entire session. If the concurrent swap-in then
-		// fails, its restore rename can find the displaced tree gone (ENOENT), leaving
-		// destDir absent: recoverable by re-hydrating, at the same bound. Closing THE SWEEP
-		// window means taking a per-id reservation on running-id snapshots, reversing the
-		// item-4 decision above; for THIS edge that buys only the bounded delta just
-		// described. (The marker stamp in the same tail needed no reservation: it is
-		// guarded by the identity pin instead. That guard is deliberately not extended to
-		// the sweep here — mixing a durability fix with a GC-policy change is a separate
-		// decision.) The superseded-set deferral in unpackAndSwap does NOT cover it: that
-		// protects only the live set parked aside across the swap, while the
-		// .displaced-<id> the hydrate writes is exactly what sweepDisplaced removes. The
-		// stated delta bound also assumes that hydrate CREATED the tree; under oldest-wins
-		// (issue #2278) a hydrate finding the slot occupied creates none, so a racing sweep
-		// then destroys the older RETAINED tree instead, whose age this bound does not
-		// describe. In that variant BOTH local branches can go: the hydrate drops the set it
-		// superseded, so any sweep from the slot check onward — during the swap OR after it
-		// has completed — removes the retained tree and leaves only the store's pack
-		// generation. The drop does not bound the window; it only decides whether the
-		// superseded set is already gone when the sweep lands. Not a regression
-		// (newest-wins reached the same place by a different route), and the no-zero-copy
-		// reasoning in unpackAndSwap is a CRASH statement, which this concurrent sweep
-		// is not.
+		// What made it worth closing rather than accepting is what the snapshot's success
+		// does NOT prove. It publishes the state as of its PACK, not the tree the sweep
+		// would remove: restore() re-enables auto-save at the pack/upload split (below),
+		// and a GRACEFUL stop on the racing stream additionally drives a shutdown save into
+		// the same dir before the hydrate displaces it (a forced stop does not, but the
+		// resumed auto-save has already written), so that tree is the published prefix PLUS
+		// an unpublished delta — bounded by the pack, not by the displacement, so if two
+		// hydrate cycles fit inside one upload window it can be an entire session. And the
+		// bound assumes the racing hydrate CREATED the tree: under oldest-wins (issue
+		// #2278) a hydrate finding the slot occupied creates none, so an ungated sweep
+		// destroys the older RETAINED tree instead, whose age no bound here describes, and
+		// since that hydrate also drops the set it superseded the race could leave no local
+		// branch at all — only the store's pack generation. Gating the sweep also removes
+		// the derived failure where the hydrate's own swap-in fails and its restore rename
+		// finds the parked tree gone (ENOENT), leaving destDir absent.
+		//
+		// The cost, stated plainly: the GC will occasionally decline to reclaim disk it
+		// would have reclaimed before. That is the safe direction — a declined sweep leaks
+		// one world-sized tree until the next successful snapshot for the id reclaims it,
+		// which is the #906 GC-on-success contract itself, where the ungated sweep's
+		// failure was an unrecoverable delete. What remains is the microseconds between
+		// the check and the RemoveAll; closing that too would mean taking a per-id
+		// reservation on running-id snapshots, reversing the item-4 decision above, for a
+		// window that much smaller.
 		var quiesced bool
 		var rawRestore func()
 		quiesced, rawRestore = m.quiesceRunning(ctx, cmd.ServerID, workingDir)
@@ -1014,7 +1024,22 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// GC the displaced tree a prior hydrate kept aside (issue #906): a successful
 		// publish proves the store now holds (and supersedes) this server's world, so the
 		// recovery copy is no longer needed. Mirrors the #845 GC-on-success pattern.
-		m.sweepDisplaced(cmd.ServerID)
+		//
+		// Conditional on the same identity pin as the stamp above (issue #2291): what the
+		// success supersedes is the tree this snapshot PACKED, so once a concurrent
+		// hydrate has replaced that tree the proof no longer covers whatever now sits at
+		// .displaced-<id> — which is that hydrate's own recovery copy. Checked against the
+		// pin directly rather than against the stamp's return value: that value is also
+		// false for an ordinary marker-write I/O error, which is no reason to decline the
+		// GC. The tradeoff is stated in STORAGE.md Section 4.6 — the sweep now sometimes
+		// leaks a tree it would have reclaimed, until the next successful snapshot for the
+		// id reclaims it.
+		if ok, why := pin.current(); ok {
+			m.sweepDisplaced(cmd.ServerID)
+		} else {
+			m.logger.Info("skipped sweeping the displaced recovery tree: the working dir is no longer the directory this snapshot packed",
+				"server_id", cmd.ServerID, "reason", why)
+		}
 	} else {
 		// Stopped-id snapshot: the set is at rest, no quiesce bracket needed. Use the
 		// combined Snapshot (pack+upload) — there is no save-off to release between them.
@@ -1034,9 +1059,13 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// still held (released by the deferred release on return), so no racing hydrate
 		// or start can recreate the dir between the publish and this removal. Recording
 		// the new generation would be pointless work on a dir we are about to delete —
-		// and declaring one to the API (issue #2481) would be a world-loss path: the API
-		// would record held == store for a scratch that no longer exists, take the short
-		// held-start grace, and start with skip_hydrate into an empty directory.
+		// and declaring one to the API (issue #2481) would be a lie about what this
+		// Worker holds: the API would record held == store for a scratch that no longer
+		// exists, take the short held-start grace, and start with skip_hydrate over
+		// nothing. That start is now REFUSED at launch rather than booted into an empty
+		// directory (handleStart, issue #2499), so the declaration would cost a refusal
+		// and a corrective hydrate instead of a #696-class world rollback — still wrong,
+		// and still not worth making the guard earn its keep on.
 		m.removeScratch(cmd.ServerID)
 	}
 	return session.CommandResult{
@@ -1408,6 +1437,55 @@ func (m *Manager) handleStart(ctx context.Context, cmd session.Command) session.
 	if ok, code, msg := m.reserve(cmd.ServerID); !ok {
 		return fail(cmd.CommandID, code, msg)
 	}
+
+	// Refuse a start whose working set is not on disk (issue #2499). The API issues a
+	// HydrateTrigger before every StartServer that needs one (control_plane.proto,
+	// StartServer), so by the time a start arrives the working dir always exists: a 200
+	// hydrate swaps the unpacked tree in, and even a 204 ("nothing published yet")
+	// creates it when the generation marker is stamped (writeGenerationGuarded's
+	// MkdirAll). An ABSENT one therefore means the API skipped the hydrate — its
+	// held-working-set inventory says this Worker holds a generation at least as fresh
+	// as the store (skip_hydrate = held >= store, lifecycle.py) — over a working set
+	// this Worker does not actually hold. Every input to that belief is honest about
+	// the moment it was taken (the register-time scan, issue #2477's hydrate-side
+	// recording, issue #2481's publish-side declaration) and none of them re-checks at
+	// launch, so an out-of-band destruction of a live Worker's scratch has no floor
+	// between two registrations. Without this stat, launchReserved's MkdirAll would
+	// silently manufacture an empty dir and boot the server into it: the world is
+	// replaced by nothing, and the next snapshot publishes that — the #696 class, and
+	// the one residual of the inventory design that fails toward a SKIPPED hydrate
+	// instead of an extra one.
+	//
+	// REFUSE rather than hydrate here (the owner's call on issue #2499). Hydrating
+	// anyway would be self-healing and invisible, which is its weakness: it masks a
+	// host whose disk is being destroyed underneath a running Worker and the operator
+	// learns nothing. The refusal is the loud version of the same recovery — the API
+	// answers it by re-launching WITH a full hydrate (_launch, lifecycle.py), so
+	// nothing is lost, and the WARN below plus the API's own WARN are what tell the
+	// operator it happened.
+	//
+	// The check is race-free: the reservation above already holds off the hydrate or
+	// start that could create the dir concurrently. It sits AFTER reserve() so the
+	// unsettled states keep their own codes — a running instance still answers
+	// INVALID_STATE and an orphan/in-flight command still answers BUSY, which the API
+	// converges and retries on respectively.
+	//
+	// SERVER_NOT_FOUND, with the same "working dir absent" phrase handleSnapshot's
+	// sibling refusal uses (issue #1713): no working set is held for this id and no
+	// retry can succeed without a hydrate. The phrase is load-bearing — the API keys
+	// on it together with the code (_WORKING_SET_ABSENT_MARKER in
+	// api/src/mc_server_dashboard_api/servers/application/lifecycle.py) to tell this
+	// refusal from a plain SERVER_NOT_FOUND. Reword only together with that
+	// discriminator and both sides' tests.
+	workingDir := filepath.Join(m.scratchDir, cmd.ServerID)
+	if _, err := os.Stat(workingDir); os.IsNotExist(err) {
+		m.release(cmd.ServerID)
+		m.logger.Warn("start refused: working dir absent",
+			"server_id", cmd.ServerID, "working_dir", workingDir, "reason", "working_set_absent")
+		return fail(cmd.CommandID, session.CommandErrorServerNotFound,
+			fmt.Sprintf("instancemanager: start refused: working dir absent (%s): the hydrate was "+
+				"skipped for a working set this Worker does not hold", workingDir))
+	}
 	return m.launchReserved(ctx, cmd, driver, launchMode)
 }
 
@@ -1560,19 +1638,20 @@ func (m *Manager) removeScratch(serverID string) {
 // removal failure is ignored (the leftover is wasted disk, never a correctness
 // problem). A missing tree is a no-op (os.RemoveAll returns nil).
 //
-// Cross-stream caveat (issue #917 item 3): a running-id snapshot holds no per-id
-// reservation (#829 item 4), so an old dropped stream's success can call this
-// concurrently with a NEW stream's re-placement hydrate and remove the .displaced-<id>
-// that hydrate just created. (The sibling marker stamp in that same tail is guarded
-// against the identical race by the working-dir identity pin, issue #2284; this sweep
-// deliberately is not.) That tree holds the published state plus whatever the world
-// progressed since that snapshot's PACK, so the removal is not loss-free. Accepted, not
-// closed — the bound and the rationale are in handleSnapshot's running branch. Note the
-// bound assumes the racing hydrate CREATED the tree: under oldest-wins (issue #2278) a
-// hydrate that finds the slot occupied creates no new .displaced-<id>, so what a racing
-// sweep destroys is then the older retained tree, which that bound does not describe —
-// and since that hydrate also drops the set it superseded, the race can leave no local
-// branch at all, only the store's pack generation.
+// The function itself is unconditional; the CALLERS establish that the success really
+// does supersede the tree being removed, and they do it differently. The stopped-id
+// caller (removeScratch) holds a per-id reservation, so no hydrate can be racing it.
+// The running-id caller takes no reservation (#829 item 4), so it gates this call on
+// the working-dir identity pin instead (issue #2291, reusing the #2284 pin): an old
+// dropped stream's snapshot can still succeed after a NEW stream re-placed the server
+// here and hydrated it, and the .displaced-<id> it would sweep is then that hydrate's
+// recovery copy — a tree this snapshot never published, holding the published state
+// plus whatever the world progressed since its PACK — rather than a world the success
+// supersedes. That is the window issue #917 item 3 named and left open; the gate closes
+// it down to the microseconds between the caller's check and this RemoveAll, which
+// nothing short of the reservation item 4 declined can close. The residual direction is
+// a LEAK, never a loss: a declined sweep keeps one world-sized tree until the next
+// successful snapshot for the id reclaims it, which is the #906 contract itself.
 func (m *Manager) sweepDisplaced(serverID string) {
 	_ = os.RemoveAll(filepath.Join(m.scratchDir, ".displaced-"+serverID))
 }

@@ -42,6 +42,7 @@ func TestSnapshotRecordsNewGeneration(t *testing.T) {
 	tr := &fakeTransfer{gen: 12}
 	ctrl := &fakeControl{reply: "ok"}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("start = %+v, want success", res)
 	}
@@ -101,6 +102,7 @@ func TestRunningSnapshotSkipsGenerationStampWhenWorkingDirReplaced(t *testing.T)
 	tr := &fakeTransfer{gen: 12}
 	ctrl := &fakeControl{reply: "ok"}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("start = %+v, want success", res)
 	}
@@ -178,6 +180,7 @@ func TestRunningSnapshotSkipsGenerationStampWhenWorkingDirRemoved(t *testing.T) 
 	tr := &fakeTransfer{gen: 12}
 	ctrl := &fakeControl{reply: "ok"}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("start = %+v, want success", res)
 	}
@@ -220,6 +223,7 @@ func TestRunningSnapshotSkipsStampWhenWorkingDirReplacedAfterTheCheck(t *testing
 	ctrl := &fakeControl{reply: "ok"}
 	h := &capturingSlogHandler{}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr).WithLogger(slog.New(h))
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("start = %+v, want success", res)
 	}
@@ -322,6 +326,7 @@ func TestRunningSnapshotStampsWhenWorkingDirUnchanged(t *testing.T) {
 	tr := &fakeTransfer{gen: 12}
 	ctrl := &fakeControl{reply: "ok"}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("start = %+v, want success", res)
 	}
@@ -353,6 +358,7 @@ func TestRunningSnapshotSkipsStampWhenIdentityUnavailable(t *testing.T) {
 	tr := &fakeTransfer{gen: 12}
 	ctrl := &fakeControl{reply: "ok"}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("start = %+v, want success", res)
 	}
@@ -455,6 +461,7 @@ func TestSnapshotDeclaresHeldGenerationAsBase(t *testing.T) {
 	tr := &fakeTransfer{gen: 12}
 	ctrl := &fakeControl{reply: "ok"}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("start = %+v, want success", res)
 	}
@@ -479,6 +486,7 @@ func TestSnapshotDeclaresWorkerIDAsPublisher(t *testing.T) {
 	tr := &fakeTransfer{gen: 12}
 	ctrl := &fakeControl{reply: "ok"}
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr).WithWorkerID("worker-xyz")
+	seedScratch(t, m, "s1")
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("start = %+v, want success", res)
 	}
@@ -500,8 +508,8 @@ func TestSnapshotDeclaresWorkerIDAsPublisher(t *testing.T) {
 func TestGenerationMarkerRemovedAfterFinalSnapshot(t *testing.T) {
 	tr := &fakeTransfer{}
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
-	_ = m.Handle(context.Background(), startCmd())
 	dir := seedScratch(t, m, "s1")
+	_ = m.Handle(context.Background(), startCmd())
 	if err := writeGeneration(dir, 7); err != nil {
 		t.Fatal(err)
 	}
@@ -651,8 +659,8 @@ func strandedGenerationTemp(t *testing.T, dir string) string {
 func TestGenerationMarkerRetainedOnRestart(t *testing.T) {
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
-	_ = m.Handle(context.Background(), startCmd())
 	dir := seedScratch(t, m, "s1")
+	_ = m.Handle(context.Background(), startCmd())
 	if err := writeGeneration(dir, 7); err != nil {
 		t.Fatal(err)
 	}

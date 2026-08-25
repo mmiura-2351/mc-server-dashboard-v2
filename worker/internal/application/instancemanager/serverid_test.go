@@ -64,13 +64,14 @@ func TestHandleRejectsUnsafeServerID(t *testing.T) {
 }
 
 // TestHandleAcceptsUUIDServerID confirms a normal canonical UUID id (what the
-// API sends: str(uuid)) passes the guard and reaches the handler, which creates
-// the working dir under scratch.
+// API sends: str(uuid)) passes the guard and reaches the handler, which launches
+// against that id's working dir under scratch.
 func TestHandleAcceptsUUIDServerID(t *testing.T) {
 	const uuidID = "123e4567-e89b-12d3-a456-426614174000"
 	d := &fakeDriver{}
 	m := newManager(t, d, nil)
 
+	seedScratch(t, m, uuidID)
 	cmd := startCmd()
 	cmd.ServerID = uuidID
 	res := m.Handle(context.Background(), cmd)
