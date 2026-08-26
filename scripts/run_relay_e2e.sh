@@ -34,10 +34,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 # A dedicated compose project so this harness never collides with a developer's
-# running `docker compose` stack (separate volumes and container names). The
-# override file renames BOTH pinned networks (the base compose fixes them to
-# `mcsd` and `mcsd-servers`, which a live stack already owns) so this harness is
-# fully isolated.
+# running `docker compose` stack (separate volumes and container names) — and,
+# since issue #2609, so it never collides on the NETWORKS either: the base
+# compose derives both names from the project name, and `-p` overrides the
+# `name: mcsd` it pins. The override file names them explicitly on top of that.
 PROJECT="mcsd-relay-e2e"
 COMPOSE=(docker compose -p "$PROJECT"
   -f "$REPO_ROOT/compose.yaml"
