@@ -336,7 +336,7 @@ def test_metrics_listener_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     # Opt-in, like the relay's metrics endpoint (issue #2565, RELAY.md 13).
     assert settings.metrics.enabled is False
     # 0.0.0.0, NOT loopback: the API's canonical deployment is a container, and
-    # a sibling scraper on the compose network must be able to reach it. The
+    # a sibling scraper on `mcsd` (the control-plane network) must reach it. The
     # port is simply never published (see CONFIGURATION.md Section 5.10).
     assert settings.metrics.host == "0.0.0.0"
     assert settings.metrics.port == 9090

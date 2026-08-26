@@ -1,13 +1,14 @@
 # Compose override for the relay protocol-level E2E harness (issue #962).
 #
-# The base compose.yaml pins BOTH network names to fixed values — `mcsd` (the
-# control plane) and `mcsd-servers` (where the worker attaches the sibling MC
-# containers it creates, so it reaches their RCON by container name; issue
-# #2590). Those fixed names make a second compose project collide with a
-# developer's or a live deployment's already-running networks. This override
-# renames both to project-scoped names and points the worker's container-network
-# at the renamed servers network, so the E2E stack is fully isolated and can run
-# alongside the live stack.
+# The base compose.yaml has two networks — `mcsd` (the control plane) and
+# `mcsd-servers` (where the worker attaches the sibling MC containers it
+# creates, so it reaches their RCON by container name; issue #2590). Since issue
+# #2609 it derives both names from the project name, so the `-p mcsd-relay-e2e`
+# this harness passes would already isolate them; this override keeps naming
+# them explicitly because the harness's own names predate that and are what its
+# diagnostics refer to. Either way the E2E stack is fully isolated from a live
+# stack, and the worker's container-network must name the same network this file
+# gives `servers`.
 #
 # Image tags: the base compose.yaml declares `image: mcsd-*:dev` alongside its
 # `build:` sections. Docker image tags are daemon-global — `-p` scopes only
