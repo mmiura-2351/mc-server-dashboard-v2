@@ -19,10 +19,10 @@ already takes for its own metrics endpoint (RELAY.md Section 13), so the two
 modules answer this question the same way.
 
 Reachability is otherwise governed by the deployment, not by this module: under
-compose the container port is never published, so only the compose network can
-reach it. See :class:`~mc_server_dashboard_api.config.MetricsSettings` for why
-the bind address is deliberately NOT loopback, and what that obliges an operator
-to do.
+compose the container port is never published, so only `mcsd` — the
+control-plane network — can reach it.
+See :class:`~mc_server_dashboard_api.config.MetricsSettings` for why the bind
+address is deliberately NOT loopback, and what that obliges an operator to do.
 """
 
 from __future__ import annotations

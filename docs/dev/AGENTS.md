@@ -36,6 +36,34 @@ rebuild ships (issue #432).
 - Do not run `docker compose`, stop containers, or rebuild images as a side
   effect of development work — that operates the live stack. Deployment is
   its own task ([`DEPLOYMENT.md`](DEPLOYMENT.md)).
+- **The dangerous command is the safe-looking one, and the worktree does not
+  protect you.** `compose.yaml` pins `name: mcsd`, so an un-overridden
+  `docker compose up` in **any** checkout of this repository — the deploy root
+  or your own worktree — resolves to project `mcsd`, *which is the live
+  deployment*: it recreates the live containers and mounts the live volumes.
+  Nothing in the command or the directory signals that (issue #2609). Before
+  the pin the same command from a worktree got its own project but still landed
+  its containers on the live `mcsd` network, container-name DNS included,
+  because a named network is shared rather than namespaced by project.
+- **A probe stack is a different *project*, and that means all of these, not
+  just the first.** The recipe exists for a sanctioned probe that was
+  explicitly asked for; it does not lift the rule above.
+  - `COMPOSE_PROJECT_NAME=<unique>` (or `-p <unique>`) — this is what makes it
+    a separate stack. Both override the `name:` key, and both flow into the
+    `${COMPOSE_PROJECT_NAME}` interpolations in `compose.yaml`, so the networks
+    render `<unique>` / `<unique>-servers` and the worker attaches the MC
+    containers it creates to `<unique>-servers` (verified on Compose v5.1.4).
+  - `--env-file <your own copy>` — never the deploy root's `.env`.
+  - a unique `MCSD_SCRATCH_DIR`: it is bind-mounted at the same absolute path
+    on the host and in the container, so sharing the live one drops a probe
+    worker into the live servers' working directories.
+  - alternate host ports. `API_HTTP_PORT` (live: 8000) is a variable; the
+    `relay` profile's `25565`, `25665`, `25675/udp` and `19132-19231/udp` are
+    literals in `compose.yaml` and need an override file. MC server game ports
+    are published by the worker at runtime from the API's configured range.
+  - Confirm with `docker compose … config` **before** any `up`: the rendered
+    `name:`, both `networks.*.name` and the worker's
+    `MCD_WORKER_DRIVER_CONTAINER_NETWORK` must all carry `<unique>`.
 - The live API occupies **port 8000** on the host. Anything started for
   testing runs on alternate ports (webui dev server:
   `VITE_API_PROXY_TARGET=http://localhost:<port> npm run dev`).

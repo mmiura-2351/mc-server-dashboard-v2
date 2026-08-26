@@ -33,6 +33,21 @@
 # kept off the control plane (see the `networks:` block at the bottom, issue
 # #2590). See docs/dev/DEPLOYMENT.md.
 
+# The compose project name. Pinned so it no longer defaults to the checkout's
+# directory name, which made the network names below depend on where the repo
+# happened to be cloned (issue #2609). Every name compose derives — networks,
+# volumes, container names — hangs off this value, and the networks and the
+# worker's target network are interpolated from it via ${COMPOSE_PROJECT_NAME}
+# so a second stack gets its own fabric instead of joining this one.
+#
+# WARNING: this pin is global, so `docker compose up` in ANY checkout of this
+# repository — the deploy root or an agent worktree — targets project `mcsd`,
+# i.e. THE LIVE DEPLOYMENT: it recreates the live containers and mounts the live
+# volumes. `-p <name>` / COMPOSE_PROJECT_NAME=<name> is what makes a second
+# stack a second stack; both override this key and flow into the interpolations
+# below (verified on Compose v5.1.4). See docs/dev/AGENTS.md Section 1.
+name: mcsd
+
 services:
   db:
     image: postgres:18
@@ -254,7 +269,7 @@ services:
       # Serve the built SPA from the api origin (no reverse proxy, no CORS): the
       # image builds webui/dist into this path (WEBUI_SPEC 7.7, issue #490).
       MCD_API_WEBUI__DIST_DIR: /app/webui/dist
-      # Plaintext gRPC control listener on the private compose network. Cross-host
+      # Plaintext gRPC control listener on the private `mcsd` network. Cross-host
       # workers require real TLS instead (see docs/dev/DEPLOYMENT.md).
       MCD_API_CONTROL__TLS__INSECURE: "true"
       # The container-side HTTP bind (issue #2585). The image no longer hardcodes
@@ -335,7 +350,7 @@ services:
       # It is NOT served on 8000: cloudflared forwards the whole public hostname
       # to api:8000, so a route there is a route on the internet. Set
       # MCD_API_METRICS__ENABLED=true in .env to bind it, then scrape it from a
-      # service on this compose network at http://api:9090/metrics -- the port is
+      # service on `mcsd` at http://api:9090/metrics -- the port is
       # deliberately absent from `ports:` below, which is what keeps it private.
       # HOST/PORT are forwarded so the .env knobs are not silently inert here,
       # but under compose the default 0.0.0.0 is the CORRECT value: the bind is
@@ -384,7 +399,7 @@ services:
     environment:
       MCD_WORKER_API_GRPC_ENDPOINT: api:50051
       MCD_WORKER_API_CREDENTIAL: ${MCD_API_CONTROL__WORKER_CREDENTIAL}
-      # Plaintext control + data-plane dial on the private compose network.
+      # Plaintext control + data-plane dial on the private `mcsd` network.
       MCD_WORKER_API_TLS_INSECURE: "true"
       MCD_WORKER_WORKER_DRIVERS: container
       MCD_WORKER_WORKER_SCRATCH_DIR: ${MCSD_SCRATCH_DIR}
@@ -402,17 +417,24 @@ services:
       # Set MCD_WORKER_GAME_BIND_IP=127.0.0.1 in .env when the relay is enabled
       # (relay path: Worker dials its own loopback, no inbound game-port range needed).
       MCD_WORKER_DRIVER_CONTAINER_GAME_BIND_IP: "${MCD_WORKER_GAME_BIND_IP:-0.0.0.0}"
-      # Attach the MC containers the worker creates to the dedicated servers
-      # network (pinned to "mcsd-servers" below), NOT to the control-plane "mcsd"
-      # network the api/db/seaweedfs sit on (issue #2590): those containers run
-      # operator- and community-supplied JARs, plugins and mods, so they are
-      # untrusted workloads and must not share a network with the services that
-      # hold every tenant's data. RCON is still reached over the docker network at
-      # the container's name, never the host loopback. Inside this containerized
+      # Attach the MC containers the worker creates to the dedicated `servers`
+      # network, NOT to the control-plane `default` network the api/db/seaweedfs
+      # sit on (issue #2590): those containers run operator- and
+      # community-supplied JARs, plugins and mods, so they are untrusted
+      # workloads and must not share a network with the services that hold every
+      # tenant's data. RCON is still reached over the docker network at the
+      # container's name, never the host loopback. Inside this containerized
       # worker the host loopback is the worker's own namespace, so the historical
       # loopback-published RCON is unreachable (issue #218). With this set the
       # worker also DROPS the host RCON publication: RCON never leaves the network.
-      MCD_WORKER_DRIVER_CONTAINER_NETWORK: mcsd-servers
+      #
+      # This is the worker's ONLY source for that network name (config.go
+      # `DRIVER_CONTAINER_NETWORK` -> main.go containerdriver.Options.Network), so
+      # it MUST render the same string as `networks.servers.name` at the bottom of
+      # this file — hence the identical expression rather than a literal (issue
+      # #2609). A second stack's worker then attaches its MC containers to that
+      # stack's `servers` network, not to this one's.
+      MCD_WORKER_DRIVER_CONTAINER_NETWORK: ${COMPOSE_PROJECT_NAME:-mcsd}-servers
     # The Docker socket is how the container driver creates sibling MC containers.
     # The worker runs as root (worker/Dockerfile), so it reads the socket
     # regardless of group ownership.
@@ -473,7 +495,7 @@ services:
       # `relay` profile, so reaching here with a blank key is a real
       # misconfiguration — the relay exits immediately with a clear error.
       MCD_RELAY_API_CREDENTIAL: "${MCD_API_RELAY__CREDENTIAL:-}"
-      # Plaintext control dial on the private compose network (same posture as
+      # Plaintext control dial on the private `mcsd` network (same posture as
       # the worker; the gRPC port is not published to the host).
       MCD_RELAY_API_TLS_INSECURE: "true"
       MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT: "${MCD_RELAY_TUNNEL_PUBLIC_ENDPOINT:-}"
@@ -566,11 +588,21 @@ volumes:
   seaweedfs-data:
 
 networks:
-  # Two user-defined networks split by trust (issue #2590). Both names are pinned
-  # because the worker attaches the sibling MC containers it creates (via the
-  # Docker socket) to a network by NAME, and only a user-defined network provides
-  # the container-name DNS its RCON dial needs — the default bridge does not
-  # (issue #218).
+  # Two user-defined networks split by trust (issue #2590). Both carry an
+  # explicit name because the worker attaches the sibling MC containers it
+  # creates (via the Docker socket) to a network by NAME, and only a
+  # user-defined network provides the container-name DNS its RCON dial needs —
+  # the default bridge does not (issue #218).
+  #
+  # The names derive from the project name rather than being pinned literals
+  # (issue #2609): a named network is shared, not namespaced by project, so a
+  # literal `mcsd` put every stack brought up from any checkout onto the live
+  # deployment's L2, container-name DNS included. With this form the project
+  # pinned at the top of this file renders `mcsd` / `mcsd-servers` — today's
+  # names, unchanged — and `-p <name>` / COMPOSE_PROJECT_NAME=<name> renders
+  # `<name>` / `<name>-servers` instead, a separate fabric. The `:-mcsd`
+  # fallback only matters on a Compose that does not populate the variable from
+  # the top-level `name:` key; it keeps the shipped names in that case.
   #
   # `default` (mcsd) carries every first-party service: api, db, seaweedfs,
   # migrate, seaweedfs-lifecycle, relay, cloudflared and the worker. First-party
@@ -584,7 +616,7 @@ networks:
   # CAUTION: renaming the default network recreates every service container on the
   # next `docker compose up` (the old default network is replaced).
   default:
-    name: mcsd
+    name: ${COMPOSE_PROJECT_NAME:-mcsd}
   # `servers` (mcsd-servers) holds the Minecraft server containers the worker
   # creates, plus the worker itself. Those containers run operator- and
   # community-supplied JARs, plugins and mods — code the operator did not write
@@ -593,4 +625,4 @@ networks:
   # Mojang online-mode authentication and plugin/mod downloads. What segmentation
   # removes is the lateral reach into the control plane, not egress.
   servers:
-    name: mcsd-servers
+    name: ${COMPOSE_PROJECT_NAME:-mcsd}-servers
